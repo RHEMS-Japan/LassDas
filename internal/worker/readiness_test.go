@@ -12,6 +12,33 @@ func testReadyOutput() ModelReadinessOutput {
 	}
 }
 
+// The assumption cap is sixteen: a well-specified ticket measurably needed
+// more than the old eight, and dying at the cap turned thoroughness into a
+// model_failed terminal (2026-08-17). Both sides of the boundary are pinned
+// so neither the validator nor the prompt schema can drift alone unnoticed.
+func TestReadinessOutputAcceptsSixteenAssumptionsAndRejectsSeventeen(t *testing.T) {
+	build := func(count int) ModelReadinessOutput {
+		output := testReadyOutput()
+		for index := 0; index < count; index++ {
+			output.Assumptions = append(output.Assumptions, ReadinessAssumption{
+				Kind:      "repository_convention",
+				Statement: "settled point " + strings.Repeat("s", index+1),
+				Evidence:  "written in the ticket",
+			})
+		}
+		return output
+	}
+	if err := validateModelReadinessOutput(build(16)); err != nil {
+		t.Fatalf("sixteen assumptions must validate: %v", err)
+	}
+	if err := validateModelReadinessOutput(build(17)); err == nil {
+		t.Fatal("seventeen assumptions must be rejected")
+	}
+	if !strings.Contains(readinessJSONSchema(), `"assumptions":{"type":"array","maxItems":16,`) {
+		t.Fatal("the prompt schema no longer matches the sixteen-assumption cap")
+	}
+}
+
 func testClarificationOutput() ModelReadinessOutput {
 	return ModelReadinessOutput{
 		Decision: ReadinessOutcomeClarification,
