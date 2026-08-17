@@ -189,6 +189,81 @@ func TestCandidateEnforcesDeterministicChangeBudget(t *testing.T) {
 	}
 }
 
+// Two one-line edits at opposite ends of a large file are a four-line
+// change, not a whole-file change. The prefix/suffix reading measurably
+// killed a valid candidate at 5,283 counted lines for exactly this shape:
+// scattered template fixes across two locale dictionaries (2026-08-17).
+func TestChangeBudgetCountsScatteredEditsNotTheSpanBetweenThem(t *testing.T) {
+	lines := make([]string, 1000)
+	for index := range lines {
+		lines[index] = "line " + strings.Repeat("x", index%7)
+	}
+	before := strings.Join(lines, "\n") + "\n"
+	lines[2] = "edited near the top"
+	lines[997] = "edited near the bottom"
+	after := strings.Join(lines, "\n") + "\n"
+	changedLines, changedBytes, fallback := conservativeChangeBudget(before, after)
+	if changedLines != 4 || fallback {
+		t.Fatalf("changedLines = %d (fallback %v), want 4 from the subsequence search", changedLines, fallback)
+	}
+	if changedBytes <= 0 || changedBytes > 100 {
+		t.Fatalf("changedBytes = %d, want the bytes of the four edited lines", changedBytes)
+	}
+	if l, b, _ := conservativeChangeBudget(before, before); l != 0 || b != 0 {
+		t.Fatalf("identical contents budget = %d lines, %d bytes", l, b)
+	}
+	if l, _, _ := conservativeChangeBudget("", after); l != len(lines) {
+		t.Fatalf("creation budget = %d lines, want every line", l)
+	}
+}
+
+// A moved line is charged in both dimensions of the same reading. Optimizing
+// lines and bytes separately let a crafted move of one huge line report two
+// changed lines alongside the bytes of an unrelated, cheaper reading -
+// passing a byte gate no consistent diff of the change could pass (found in
+// adversarial review, 2026-08-17).
+func TestChangeBudgetChargesAMovedLineInBothDimensions(t *testing.T) {
+	huge := strings.Repeat("h", 100_000) + "\n"
+	short := make([]string, 2000)
+	for index := range short {
+		short[index] = "short line " + strings.Repeat("y", index%9) + "\n"
+	}
+	body := strings.Join(short, "")
+	before := huge + body
+	after := body + huge
+	changedLines, changedBytes, fallback := conservativeChangeBudget(before, after)
+	if fallback {
+		t.Fatal("the move fixture must stay inside the subsequence search")
+	}
+	if changedLines != 2 {
+		t.Fatalf("changedLines = %d, want the moved line charged once per side", changedLines)
+	}
+	if changedBytes != 2*len(huge) {
+		t.Fatalf("changedBytes = %d, want %d - the moved line's bytes on both sides", changedBytes, 2*len(huge))
+	}
+}
+
+// Beyond the cell bound the search falls back to counting the whole trimmed
+// middle - the pre-subsequence reading - and says so, so a refusal for a
+// small edit in an enormous file reads as the fallback it is.
+func TestChangeBudgetFallsBackConservativelyPastTheCellBound(t *testing.T) {
+	lines := make([]string, 9001)
+	for index := range lines {
+		lines[index] = "row " + strings.Repeat("z", index%11) + "\n"
+	}
+	before := strings.Join(lines, "")
+	lines[1] = "edited near the top\n"
+	lines[8999] = "edited near the bottom\n"
+	after := strings.Join(lines, "")
+	changedLines, _, fallback := conservativeChangeBudget(before, after)
+	if !fallback {
+		t.Fatalf("a %d-line middle must exceed the cell bound", 8999)
+	}
+	if changedLines != 2*8999 {
+		t.Fatalf("changedLines = %d, want the whole trimmed middle of both sides", changedLines)
+	}
+}
+
 func TestReviewsAndStageDecision(t *testing.T) {
 	config, request, source, candidate := validCandidate(t)
 	reviews := make([]Review, 0, len(config.Models.Reviewers))

@@ -133,7 +133,7 @@ func ComposeTrail(stages []trailStage, clarification *ClarificationContext, vali
 	changedLines := 0
 	for index, file := range final.Candidate.Files {
 		if index < len(final.Source.Files) && file.Content != final.Source.Files[index].Content {
-			lines, _ := conservativeChangeBudget(final.Source.Files[index].Content, file.Content)
+			lines, _, _ := conservativeChangeBudget(final.Source.Files[index].Content, file.Content)
 			changedLines += lines
 			paths = append(paths, file.Path)
 		}

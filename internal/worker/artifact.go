@@ -277,6 +277,9 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 	total := 0
 	changedLines := 0
 	changedBytes := 0
+	heaviestLines := 0
+	heaviestPath := ""
+	anyFallback := false
 	expectedFound := false
 	for index, file := range c.Files {
 		base := source.Files[index]
@@ -286,9 +289,13 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 		}
 		if file.Content != base.Content {
 			changed = true
-			lines, bytes := conservativeChangeBudget(base.Content, file.Content)
+			lines, bytes, fallback := conservativeChangeBudget(base.Content, file.Content)
 			changedLines += lines
 			changedBytes += bytes
+			anyFallback = anyFallback || fallback
+			if lines > heaviestLines {
+				heaviestLines, heaviestPath = lines, file.Path
+			}
 		}
 		if request.HasWordingPromise() {
 			if strings.Contains(file.Content, request.AbsentText) {
@@ -316,11 +323,19 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 	if total > consumer.Mode.MaxTotalBytes {
 		return fmt.Errorf("candidate carries %d bytes of files, over the %d allowed", total, consumer.Mode.MaxTotalBytes)
 	}
+	// A file too large for the subsequence search is counted whole; naming
+	// that here keeps a "10,002-line" refusal for a four-line edit from
+	// reading as a real ten-thousand-line change.
+	countingNote := ""
+	if anyFallback {
+		countingNote = "; a file too large to diff was counted whole"
+	}
 	if changedLines > consumer.Mode.MaxChangedLines {
-		return fmt.Errorf("candidate changes %d lines, over the %d allowed", changedLines, consumer.Mode.MaxChangedLines)
+		return fmt.Errorf("candidate changes %d lines, over the %d allowed (heaviest file: %s at %d lines%s)",
+			changedLines, consumer.Mode.MaxChangedLines, heaviestPath, heaviestLines, countingNote)
 	}
 	if changedBytes > consumer.Mode.MaxChangedBytes {
-		return fmt.Errorf("candidate changes %d bytes, over the %d allowed", changedBytes, consumer.Mode.MaxChangedBytes)
+		return fmt.Errorf("candidate changes %d bytes, over the %d allowed%s", changedBytes, consumer.Mode.MaxChangedBytes, countingNote)
 	}
 	digest, err := candidateDigest(c)
 	if err != nil || digest != c.CandidateSHA256 {
@@ -634,12 +649,41 @@ func findString(values []string, target string) (int, bool) {
 	return index, index < len(values) && values[index] == target
 }
 
-// conservativeChangeBudget counts complete changed logical lines and their
-// bytes after removing only a common prefix and suffix. It intentionally
-// over-counts separated edits so the configured scope budget fails closed.
-func conservativeChangeBudget(before, after string) (int, int) {
+// maxChangeBudgetCells bounds the quadratic diff below - roughly 8,000 by
+// 8,000 trimmed lines, adversarial worst around half a second. Trimmed
+// middles beyond it fall back to counting the whole middle as changed - the
+// old conservative reading - so a pathological file pair costs bounded
+// milliseconds in two rows of memory.
+const maxChangeBudgetCells = 64_000_000
+
+// changeBudgetLineWeight packs one matched line into the subsequence weight:
+// the line term must dominate any possible byte total so that the search is
+// lexicographic - most matched lines first, most matched bytes among those
+// readings. Config validation holds MaxFileBytes to 512 KiB, so every
+// per-file byte total stays below this constant and the packed weight
+// decomposes exactly.
+const changeBudgetLineWeight = int64(1) << 20
+
+// conservativeChangeBudget measures the candidate's change against the base
+// as the lines and bytes outside a longest common subsequence of logical
+// lines, both taken from the same alignment: the one with the fewest changed
+// lines, breaking ties toward the fewest changed bytes. One alignment, not
+// two - lines and bytes each optimized separately produced a pair no single
+// consistent diff could realize, and a crafted move of one huge line could
+// pass the byte gate at a fraction of what any real reading of the change
+// carries (found in adversarial review, 2026-08-17).
+//
+// The subsequence search replaced a prefix/suffix-only reading that counted
+// everything between the first and last edit: two small template fixes at
+// opposite ends of a 1,300-line locale dictionary counted the whole
+// dictionary, and a valid eight-file candidate died at 5,283 counted lines
+// against a 3,000-line budget (measured 2026-08-17). Where the search would
+// exceed maxChangeBudgetCells, the prefix/suffix reading remains as the
+// fallback - conservative, never under-counting - and the third return
+// reports that the numbers are the fallback's, so a refusal can say so.
+func conservativeChangeBudget(before, after string) (lines int, bytes int, fallback bool) {
 	if before == after {
-		return 0, 0
+		return 0, 0, false
 	}
 	beforeLines := splitLogicalLines(before)
 	afterLines := splitLogicalLines(after)
@@ -652,15 +696,51 @@ func conservativeChangeBudget(before, after string) (int, int) {
 		beforeLines[len(beforeLines)-1-suffix] == afterLines[len(afterLines)-1-suffix] {
 		suffix++
 	}
-	changedLines := len(beforeLines) + len(afterLines) - 2*prefix - 2*suffix
-	changedBytes := 0
-	for _, line := range beforeLines[prefix : len(beforeLines)-suffix] {
-		changedBytes += len(line)
+	middleBefore := beforeLines[prefix : len(beforeLines)-suffix]
+	middleAfter := afterLines[prefix : len(afterLines)-suffix]
+	middleBeforeBytes := 0
+	for _, line := range middleBefore {
+		middleBeforeBytes += len(line)
 	}
-	for _, line := range afterLines[prefix : len(afterLines)-suffix] {
-		changedBytes += len(line)
+	middleAfterBytes := 0
+	for _, line := range middleAfter {
+		middleAfterBytes += len(line)
 	}
-	return changedLines, changedBytes
+	if len(middleBefore) > 0 && len(middleAfter) > maxChangeBudgetCells/len(middleBefore) {
+		return len(middleBefore) + len(middleAfter), middleBeforeBytes + middleAfterBytes, true
+	}
+	common := longestCommonSubsequenceWeight(middleBefore, middleAfter)
+	commonLines := int(common / changeBudgetLineWeight)
+	commonBytes := int(common % changeBudgetLineWeight)
+	lines = len(middleBefore) + len(middleAfter) - 2*commonLines
+	bytes = middleBeforeBytes + middleAfterBytes - 2*commonBytes
+	return lines, bytes, false
+}
+
+// longestCommonSubsequenceWeight returns the maximum packed weight of a
+// common subsequence of the two line slices, in two rolling rows of memory.
+// Each matched line contributes changeBudgetLineWeight plus its byte length,
+// so the maximum is the line-count-first, byte-count-second lexicographic
+// best and decomposes into both totals.
+func longestCommonSubsequenceWeight(before, after []string) int64 {
+	if len(before) == 0 || len(after) == 0 {
+		return 0
+	}
+	previous := make([]int64, len(after)+1)
+	current := make([]int64, len(after)+1)
+	for _, beforeLine := range before {
+		for column, afterLine := range after {
+			if beforeLine == afterLine {
+				current[column+1] = previous[column] + changeBudgetLineWeight + int64(len(beforeLine))
+			} else if previous[column+1] >= current[column] {
+				current[column+1] = previous[column+1]
+			} else {
+				current[column+1] = current[column]
+			}
+		}
+		previous, current = current, previous
+	}
+	return previous[len(after)]
 }
 
 func splitLogicalLines(value string) []string {
