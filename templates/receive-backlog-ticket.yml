@@ -1,0 +1,228 @@
+# Instance receive workflow template.
+#
+# Copy this file into your instance repository as
+# .github/workflows/receive-backlog-ticket.yml and replace:
+#   ENGINE_REPOSITORY_PLACEHOLDER  -> the engine repository (owner/name)
+#   ENGINE_PIN_PLACEHOLDER         -> the engine commit SHA you reviewed
+# Both placeholders must always point at the same revision.
+#
+# Repository vars the instance must define:
+#   TICKET_INGRESS_ENABLED, TICKET_INGRESS_CLAIM_URL, TICKET_INGRESS_TICK_URL,
+#   TICKET_INGRESS_REPORT_URL, TICKET_INGRESS_QUESTION_REPORT_URL,
+#   BACKLOG_AUTOMATION_RUN_ID, BACKLOG_SPACE_KEY, BACKLOG_PROJECT_ID,
+#   BACKLOG_PROJECT_KEY, BACKLOG_CREATOR_ID, BACKLOG_ACTIVITY_TYPE
+# Repository secrets: the same names the workflow passes below.
+name: Receive fixed Backlog ticket
+
+on:
+  schedule:
+    - cron: "4-59/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Fixed operation to execute.
+        required: true
+        type: choice
+        options:
+          - model-preflight
+          - pull
+          - tick
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m1-ticket-ingress
+  cancel-in-progress: false
+
+jobs:
+  # The clarification clock normally runs on the schedule, but GitHub's cron
+  # measurably stalls for twenty minutes at a time - a manual tick is how an
+  # operator adopts a posted answer right now instead of waiting out the lag.
+  question-tick:
+    if: >-
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation == 'tick')) &&
+      vars.TICKET_INGRESS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the pinned engine revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ENGINE_REPOSITORY_PLACEHOLDER
+          ref: ENGINE_PIN_PLACEHOLDER
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Wake the clarification clock
+        shell: bash
+        env:
+          QUESTION_TICK_URL: ${{ vars.TICKET_INGRESS_TICK_URL }}
+          AUTOMATION_RUN_ID: ${{ vars.BACKLOG_AUTOMATION_RUN_ID }}
+          TICK_HMAC_KEY: ${{ secrets.TICKET_INGRESS_PULL_HMAC_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file="$RUNNER_TEMP/m1-tick-hmac-key"
+          printf '%s' "$TICK_HMAC_KEY" > "$key_file"
+          TICK_HMAC_KEY_FILE="$key_file" go run ./cmd/ticker
+
+  pull-ticket:
+    # A manual dispatch with operation "pull" claims a waiting ticket now
+    # instead of at the next scheduled poll. Same rail, same checks; only the
+    # trigger differs, and only people with write access can dispatch.
+    if: >-
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation == 'pull')) &&
+      vars.TICKET_INGRESS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      outcome: ${{ steps.pull.outputs.outcome }}
+    env:
+      PULL_CLAIM_URL: ${{ vars.TICKET_INGRESS_CLAIM_URL }}
+      AUTOMATION_RUN_ID: ${{ vars.BACKLOG_AUTOMATION_RUN_ID }}
+      GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_EVENT_NAME: ${{ github.event_name }}
+      GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+      GITHUB_REF: ${{ github.ref }}
+      GITHUB_SHA: ${{ github.sha }}
+      GITHUB_RUN_ID: ${{ github.run_id }}
+      GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+      EXPECTED_SPACE_KEY: ${{ vars.BACKLOG_SPACE_KEY }}
+      EXPECTED_PROJECT_ID: ${{ vars.BACKLOG_PROJECT_ID }}
+      EXPECTED_PROJECT_KEY: ${{ vars.BACKLOG_PROJECT_KEY }}
+      EXPECTED_CREATOR_ID: ${{ vars.BACKLOG_CREATOR_ID }}
+      EXPECTED_ACTIVITY_TYPE: ${{ vars.BACKLOG_ACTIVITY_TYPE }}
+    steps:
+      - name: Checkout the pinned engine revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ENGINE_REPOSITORY_PLACEHOLDER
+          ref: ENGINE_PIN_PLACEHOLDER
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Pull one immutable ticket envelope
+        id: pull
+        shell: bash
+        env:
+          PULL_HMAC_KEY: ${{ secrets.TICKET_INGRESS_PULL_HMAC_KEY }}
+          CLAIM_ENVELOPE_PATH: ${{ runner.temp }}/m1-envelope/ticket-envelope.json
+        run: |
+          set -euo pipefail
+          umask 077
+
+          envelope_dir="${RUNNER_TEMP}/m1-envelope"
+          receipt_dir="${RUNNER_TEMP}/m1-receiver"
+          receipt="${receipt_dir}/receipt.json"
+          envelope="${envelope_dir}/ticket-envelope.json"
+          mkdir -p "$envelope_dir" "$receipt_dir"
+          test ! -e "$receipt"
+          test ! -e "$envelope"
+
+          go run ./cmd/receiver > "$receipt"
+          test -f "$receipt"
+          receipt_bytes=$(wc -c < "$receipt")
+          test "$receipt_bytes" -ge 1
+          test "$receipt_bytes" -le 1024
+
+          if jq -e -s '
+            length == 1 and
+            (.[0] |
+              type == "object" and
+              keys == ["decision", "delivery_id", "input_sha256", "issue_key"] and
+              .decision == "accepted" and
+              (.delivery_id | type == "string") and
+              (.delivery_id | test("^delivery_[a-f0-9]{32}$")) and
+              (.input_sha256 | type == "string") and
+              (.input_sha256 | test("^[a-f0-9]{64}$")) and
+              (.issue_key | type == "string") and
+              (.issue_key | test("^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")))
+          ' "$receipt" > /dev/null; then
+            test -f "$envelope"
+            test -s "$envelope"
+            (
+              cd "$envelope_dir"
+              sha256sum ticket-envelope.json > ticket-envelope.json.sha256
+              sha256sum --check ticket-envelope.json.sha256
+            )
+            outcome=claimed
+          elif jq -e -s '
+            length == 1 and
+            (.[0] | type == "object" and keys == ["decision"] and .decision == "no_work")
+          ' "$receipt" > /dev/null; then
+            test ! -e "$envelope"
+            outcome=no_work
+          else
+            exit 1
+          fi
+
+          printf 'outcome=%s\n' "$outcome" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the claimed ticket
+        if: steps.pull.outputs.outcome == 'claimed'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-envelope-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/m1-envelope/ticket-envelope.json
+            ${{ runner.temp }}/m1-envelope/ticket-envelope.json.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: false
+
+  ticket-worker:
+    if: needs.pull-ticket.outputs.outcome == 'claimed'
+    needs: pull-ticket
+    # contents: write is the ceiling, not the grant: every worker job keeps
+    # its own narrower request, and only the preserve job (which commits
+    # adopted answers back into this repository's knowledge tree) asks for
+    # the write. Without this ceiling that job cannot get it.
+    #
+    # GitHub validates EVERY call site of m1-worker.yml in this file against
+    # EVERY job the called workflow declares, statically at run creation,
+    # ignoring if-conditions (measured 2026-08-13: one call site left at
+    # contents: read makes every run of this workflow a startup_failure).
+    # Both call sites must therefore grant contents: write.
+    permissions:
+      contents: write
+    uses: ENGINE_REPOSITORY_PLACEHOLDER/.github/workflows/m1-worker.yml@ENGINE_PIN_PLACEHOLDER
+    with:
+      operation: ticket
+      report_callback_url: ${{ vars.TICKET_INGRESS_REPORT_URL }}
+      question_callback_url: ${{ vars.TICKET_INGRESS_QUESTION_REPORT_URL }}
+    secrets:
+      TARGET_AUTOMATION_APP_CLIENT_ID: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+      TARGET_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+      TICKET_INGRESS_PULL_HMAC_KEY: ${{ secrets.TICKET_INGRESS_PULL_HMAC_KEY }}
+      MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+      MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+      BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
+
+  model-preflight:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'model-preflight'
+    # Same ceiling as ticket-worker, for the same reason: the static check
+    # covers this call site too, even though a preflight run never reaches
+    # the preserve job (it is gated on operation == 'ticket').
+    permissions:
+      contents: write
+    uses: ENGINE_REPOSITORY_PLACEHOLDER/.github/workflows/m1-worker.yml@ENGINE_PIN_PLACEHOLDER
+    with:
+      operation: model-preflight
+    secrets:
+      MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+      MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}

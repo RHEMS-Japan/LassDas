@@ -1,0 +1,2192 @@
+name: Fixed M1 ticket worker
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        description: Exact fixed operation to execute.
+        required: true
+        type: string
+      # The neutral hook the run reports to. These are the calling instance's
+      # infrastructure, not the engine's: the engine must not know where any
+      # particular deployment lives.
+      report_callback_url:
+        description: Terminal-report endpoint of the calling instance's hook.
+        required: false
+        type: string
+      question_callback_url:
+        description: Question-report endpoint of the calling instance's hook.
+        required: false
+        type: string
+    secrets:
+      TARGET_AUTOMATION_APP_CLIENT_ID:
+        required: false
+      TARGET_AUTOMATION_APP_PRIVATE_KEY:
+        required: false
+      TICKET_INGRESS_PULL_HMAC_KEY:
+        required: false
+      MODEL_API_KEY_IMPLEMENTER:
+        required: false
+      MODEL_API_KEY_REVIEWER:
+        required: false
+      BACKLOG_API_KEY:
+        required: false
+      # Read-only deploy key for the engine repository. A customer instance
+      # calling this workflow cross-repo needs it: the caller's token cannot
+      # read another private repository (measured 2026-08-10). The engine
+      # calling itself leaves it unset and the default token applies.
+      ENGINE_CHECKOUT_SSH_KEY:
+        required: false
+
+permissions: {}
+
+env:
+  REPORT_CALLBACK_URL: ${{ inputs.report_callback_url }}
+  QUESTION_CALLBACK_URL: ${{ inputs.question_callback_url }}
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Validate the fixed invocation
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          case "$OPERATION" in
+            ticket|model-preflight) ;;
+            *) exit 1 ;;
+          esac
+
+  tools:
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the immutable worker revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          ssh-key: ${{ secrets.ENGINE_CHECKOUT_SSH_KEY }}
+          path: trusted-worker
+          persist-credentials: false
+
+      # The engine and the instance are different repositories once a
+      # customer runs this workflow from their own: code comes from the
+      # engine at the pinned revision above, configuration and knowledge come
+      # from the caller. When the engine calls itself the two checkouts hold
+      # the same commit and nothing changes.
+      - name: Checkout the calling instance for its configuration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: instance
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: trusted-worker/go.mod
+          cache: false
+
+      - name: Test and build trusted tools
+        shell: bash
+        working-directory: trusted-worker
+        env:
+          TOOL_SHA: ${{ job.workflow_sha }}
+          TOOL_OUTPUT: ${{ runner.temp }}/m1-tools
+          INSTANCE: ${{ github.workspace }}/instance
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TOOL_SHA"
+          test -z "$(git status --porcelain=v1)"
+          go test ./...
+          mkdir -p "$TOOL_OUTPUT"
+          for command in worker controller browsercheck reporter; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+              -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+              -o "$TOOL_OUTPUT/$command" "./cmd/$command"
+          done
+          cp "$INSTANCE/config/m1-consumer.json" "$TOOL_OUTPUT/m1-consumer.json"
+          # What the agents work under travels with the tools, so it is sealed
+          # by the same digests and cannot drift between jobs.
+          if [[ -d "$INSTANCE/knowledge" ]]; then
+            cp -R "$INSTANCE/knowledge" "$TOOL_OUTPUT/knowledge"
+            find "$TOOL_OUTPUT/knowledge" -type f -exec chmod 0444 {} +
+          fi
+          chmod 0555 "$TOOL_OUTPUT/worker" "$TOOL_OUTPUT/controller" "$TOOL_OUTPUT/browsercheck" "$TOOL_OUTPUT/reporter"
+          chmod 0444 "$TOOL_OUTPUT/m1-consumer.json"
+          cd "$TOOL_OUTPUT"
+          {
+            sha256sum worker controller browsercheck reporter m1-consumer.json
+            find knowledge -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum
+          } > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+
+      - name: Upload immutable tools
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: false
+
+  model-preflight:
+    if: inputs.operation == 'model-preflight'
+    needs: tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker
+
+      - name: Verify the hosted browser runtime
+        shell: bash
+        env:
+          PAGE: ${{ runner.temp }}/m1-browser-preflight.html
+          DOM: ${{ runner.temp }}/m1-browser-preflight.dom
+        run: |
+          set -euo pipefail
+          chrome_path=/opt/google/chrome/chrome
+          test -x "$chrome_path"
+          printf '%s' '<!doctype html><title>m1-preflight</title><p id="ready">ready</p>' > "$PAGE"
+          "$chrome_path" --headless=new --no-sandbox --disable-gpu --dump-dom "file://$PAGE" > "$DOM"
+          grep -Fq '<p id="ready">ready</p>' "$DOM"
+
+      - name: Invoke each frontier path exactly once
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          OUTPUT: ${{ runner.temp }}/m1-preflight
+          TOOL_SHA: ${{ job.workflow_sha }}
+          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/worker" preflight \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --endpoint claude-author \
+            --out "$OUTPUT/claude-author.json"
+          "$TOOLS/worker" preflight \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --endpoint codex-adversarial \
+            --out "$OUTPUT/codex-adversarial.json"
+          "$TOOLS/worker" preflight \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --endpoint claude-readiness-assessor \
+            --out "$OUTPUT/claude-readiness-assessor.json"
+          "$TOOLS/worker" preflight \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --endpoint codex-readiness-checker \
+            --out "$OUTPUT/codex-readiness-checker.json"
+
+      - name: Upload model preflight evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-model-preflight-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-preflight/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  # Reading the contract out of the ticket needs a model but no repository, so
+  # it runs before source. Keeping it separate is what lets the target-read
+  # token and the model credential stay in different jobs.
+  intake:
+    if: inputs.operation == 'ticket'
+    needs: tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    outputs:
+      intake_outcome: ${{ steps.read.outputs.outcome }}
+      resumed: ${{ steps.read.outputs.resumed }}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download the claimed ticket
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-envelope-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-envelope
+
+      - name: Verify the claimed ticket transport
+        shell: bash
+        env:
+          ENVELOPE_DIR: ${{ runner.temp }}/m1-envelope
+        run: |
+          set -euo pipefail
+          cd "$ENVELOPE_DIR"
+          sha256sum --check ticket-envelope.json.sha256
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker
+
+      - name: Seal the ticket as received
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          ENVELOPE: ${{ runner.temp }}/m1-envelope/ticket-envelope.json
+          INTAKE_OUTPUT: ${{ runner.temp }}/m1-intake
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$INTAKE_OUTPUT"
+          "$TOOLS/worker" read-ticket \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --envelope "$ENVELOPE" \
+            --clarification-out "$INTAKE_OUTPUT/clarification.json" \
+            --out "$INTAKE_OUTPUT/raw-ticket.json"
+
+      - name: Read the contract out of the ticket
+        id: read
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INTAKE_OUTPUT: ${{ runner.temp }}/m1-intake
+          TOOL_SHA: ${{ job.workflow_sha }}
+          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+        run: |
+          set -euo pipefail
+          "$TOOLS/worker" read-contract \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --raw "$INTAKE_OUTPUT/raw-ticket.json" \
+            --out "$INTAKE_OUTPUT/intake.json"
+
+          # A ticket that left something unstated is not a malformed ticket.
+          # It carries the questions to ask, so it is reported separately from
+          # an input the automation could not process at all.
+          if [[ "$(jq -r '.gaps | length' "$INTAKE_OUTPUT/intake.json")" == "0" ]]; then
+            outcome=complete
+          else
+            outcome=questions
+          fi
+          printf 'outcome=%s\n' "$outcome" >> "$GITHUB_OUTPUT"
+
+          # A resumed run carries the requester's adopted answers; only such a
+          # run has anything for the preserve job to keep.
+          if [[ -f "$INTAKE_OUTPUT/clarification.json" ]]; then
+            printf 'resumed=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'resumed=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the sealed intake
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-intake-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-intake/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: false
+
+  source:
+    if: inputs.operation == 'ticket' && needs.intake.outputs.intake_outcome == 'complete'
+    needs: [tools, intake]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    outputs:
+      parse_outcome: ${{ steps.parsed.outputs.outcome }}
+      repository: ${{ steps.parsed.outputs.repository }}
+      repo_owner: ${{ steps.parsed.outputs.repo_owner }}
+      repo_name: ${{ steps.parsed.outputs.repo_name }}
+      needs_node: ${{ steps.parsed.outputs.needs_node }}
+      delivery: ${{ steps.parsed.outputs.delivery }}
+      base_sha: ${{ steps.baseline.outputs.sha }}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download the sealed intake
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-intake-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-intake
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker controller
+
+      - name: Complete the contract read at intake
+        id: parsed
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INTAKE: ${{ runner.temp }}/m1-intake
+          SOURCE_OUTPUT: ${{ runner.temp }}/m1-source
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOURCE_OUTPUT"
+
+          # The contract was read out of the prose in the intake job. Nothing
+          # here demands a format of the requester: this step only completes
+          # the draft from what was already read and sealed.
+          if [[ -f "$INTAKE/clarification.json" ]]; then
+            cp "$INTAKE/clarification.json" "$SOURCE_OUTPUT/clarification.json"
+          fi
+
+          set +e
+          "$TOOLS/worker" build-draft \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --raw "$INTAKE/raw-ticket.json" \
+            --intake "$INTAKE/intake.json" \
+            --out "$SOURCE_OUTPUT/ticket-draft.json"
+          draft_status=$?
+          set -e
+          case "$draft_status" in
+            0) outcome=accepted ;;
+            2) outcome=rejected ;;
+            *) outcome=internal ;;
+          esac
+          printf 'outcome=%s\n' "$outcome" >> "$GITHUB_OUTPUT"
+          if [[ "$outcome" == accepted ]]; then
+            repository=$(jq -er '.repository | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))' "$SOURCE_OUTPUT/ticket-draft.json")
+            printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
+            printf 'repo_owner=%s\n' "${repository%%/*}" >> "$GITHUB_OUTPUT"
+            printf 'repo_name=%s\n' "${repository#*/}" >> "$GITHUB_OUTPUT"
+            needs_node=$(jq -er --arg repo "$repository" '
+              [.consumers[] | select(.repository == $repo)][0].mode.toolchain // []
+              | any(.binary == "node") | tostring' "$TOOLS/m1-consumer.json")
+            printf 'needs_node=%s\n' "$needs_node" >> "$GITHUB_OUTPUT"
+            # How far a change travels is a property of the destination this
+            # ticket named, so it is read once the destination is known and
+            # every later gate follows the same sealed value.
+            delivery=$(jq -er --arg repo "$repository" \
+              '[.consumers[] | select(.repository == $repo)][0].delivery' "$TOOLS/m1-consumer.json")
+            case "$delivery" in
+              pull_request|integration|production) ;;
+              *) exit 1 ;;
+            esac
+            printf 'delivery=%s\n' "$delivery" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop before target access when parsing did not succeed
+        if: steps.parsed.outputs.outcome != 'accepted'
+        shell: bash
+        env:
+          PARSE_OUTCOME: ${{ steps.parsed.outputs.outcome }}
+        run: |
+          set -euo pipefail
+          case "$PARSE_OUTCOME" in
+            rejected|internal) exit 1 ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Mint a target-read token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ steps.parsed.outputs.repo_owner }}
+          repositories: ${{ steps.parsed.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: read
+
+      - name: Verify the live release baseline
+        id: baseline
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          SOURCE_OUTPUT: ${{ runner.temp }}/m1-source
+        run: |
+          set -euo pipefail
+          "$TOOLS/controller" baseline \
+            --config "$TOOLS/m1-consumer.json" \
+            --draft "$SOURCE_OUTPUT/ticket-draft.json" \
+            --out "$SOURCE_OUTPUT/baseline.json"
+          base_sha=$(jq -er '.baseline.Integration.SHA | select(test("^[a-f0-9]{40}$"))' "$SOURCE_OUTPUT/baseline.json")
+          printf 'sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the exact target baseline without persisted credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ steps.parsed.outputs.repository }}
+          ref: ${{ steps.baseline.outputs.sha }}
+          token: ${{ steps.target-token.outputs.token }}
+          path: target-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Locate or derive the target of a ticket that did not name files
+        id: located
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          SOURCE_OUTPUT: ${{ runner.temp }}/m1-source
+          TARGET_ROOT: ${{ github.workspace }}/target-source
+          TOOL_SHA: ${{ job.workflow_sha }}
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+        run: |
+          set -euo pipefail
+          if [[ -f "$SOURCE_OUTPUT/readiness-ticket.json" ]]; then
+            printf 'outcome=named\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -f "$SOURCE_OUTPUT/ticket-draft.json"
+          absent=$(jq -r '.absent_text' "$SOURCE_OUTPUT/ticket-draft.json")
+          set +e
+          if [[ -n "$absent" ]]; then
+            # A visible-wording change targets wherever the current wording
+            # lives, so it is found by exact search. No model is involved.
+            "$TOOLS/worker" locate-target \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --draft "$SOURCE_OUTPUT/ticket-draft.json" \
+              --repo-root "$TARGET_ROOT" \
+              --out "$SOURCE_OUTPUT/readiness-ticket.json"
+            locate_status=$?
+          else
+            # A ticket without a wording promise has no text to search for;
+            # the target files are chosen from a deterministic listing of the
+            # writable scope, and only listed paths can be chosen.
+            "$TOOLS/worker" list-candidates \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --draft "$SOURCE_OUTPUT/ticket-draft.json" \
+              --repo-root "$TARGET_ROOT" \
+              --base-sha "$BASE_SHA" \
+              --out "$SOURCE_OUTPUT/candidate-listing.json" &&
+            "$TOOLS/worker" derive-contract \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --draft "$SOURCE_OUTPUT/ticket-draft.json" \
+              --listing "$SOURCE_OUTPUT/candidate-listing.json" \
+              --derivation-out "$SOURCE_OUTPUT/derivation.json" \
+              --out "$SOURCE_OUTPUT/readiness-ticket.json"
+            locate_status=$?
+          fi
+          set -e
+          case "$locate_status" in
+            0) outcome=located ;;
+            2) outcome=rejected ;;
+            *) outcome=internal ;;
+          esac
+          printf 'outcome=%s\n' "$outcome" >> "$GITHUB_OUTPUT"
+          test "$outcome" = located
+
+      - name: Seal source bytes and a credential-free validation archive
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          SOURCE_OUTPUT: ${{ runner.temp }}/m1-source
+          TARGET_ROOT: ${{ github.workspace }}/target-source
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C "$TARGET_ROOT" rev-parse HEAD)" = "$BASE_SHA"
+          "$TOOLS/worker" snapshot \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$SOURCE_OUTPUT/readiness-ticket.json" \
+            --repo-root "$TARGET_ROOT" \
+            --base-sha "$BASE_SHA" \
+            --out "$SOURCE_OUTPUT/readiness-source.json"
+          git -c core.hooksPath=/dev/null -C "$TARGET_ROOT" archive \
+            --format=tar --output "$SOURCE_OUTPUT/target.tar" "$BASE_SHA"
+          cd "$SOURCE_OUTPUT"
+          sha256sum target.tar > target.tar.sha256
+          sha256sum --check target.tar.sha256
+
+      - name: Upload immutable source evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-source-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-source/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: false
+
+  model:
+    if: inputs.operation == 'ticket'
+    needs: source
+    runs-on: ubuntu-24.04
+    # Three stages, each up to one implementing run plus a reviewing run and its fast retries,
+    # plus setup, readiness and the impasse question. The guard test holds
+    # this to the configured agent budgets so neither can drift past the
+    # other unnoticed.
+    timeout-minutes: 290
+    permissions: {}
+    outputs:
+      publish: ${{ steps.stages.outputs.publish }}
+      stage: ${{ steps.stages.outputs.stage }}
+      terminal-code: ${{ steps.stages.outputs.terminal-code }}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download source evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-source-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-source
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker
+
+      - name: Install the configured agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # The reviewing agent confines its own file access with bubblewrap,
+          # which Ubuntu 24.04 blocks until unprivileged user namespaces are
+          # allowed.
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          npm install --global --no-audit --no-fund \
+            @anthropic-ai/claude-code@2.1.220 \
+            @openai/codex@0.146.0
+          claude --version
+          codex --version
+
+      - name: Configure the reviewing agent to reach the configured endpoint
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          # The reviewing agent reads its endpoint from its own file rather
+          # than from the environment, so the configured values are written
+          # there. Nothing secret is written: the credential stays in the
+          # environment variable the configuration names.
+          base_url=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .base_url' "$TOOLS/m1-consumer.json")
+          model=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .model' "$TOOLS/m1-consumer.json")
+          key_env=$(jq -er '.agents.reviewer.secret_env | keys[0]' "$TOOLS/m1-consumer.json")
+          effort=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .effort' "$TOOLS/m1-consumer.json")
+          mkdir -p "$HOME/.codex"
+          {
+            printf 'model_provider = "gateway"\n'
+            printf 'model = "%s"\n' "$model"
+            printf 'model_reasoning_effort = "%s"\n\n' "$effort"
+            printf '[model_providers.gateway]\n'
+            printf 'name = "Consumer gateway"\n'
+            printf 'base_url = "%s"\n' "$base_url"
+            printf 'env_key = "%s"\n' "$key_env"
+            # The responses wire is the only one this CLI still supports
+            # (the chat wire was removed upstream - measured locally before
+            # it shipped as a "fix"). Its encrypted reasoning items break
+            # when the relay lands consecutive turns in different upstream
+            # projects, even under a pinned provider; the worker retries a
+            # fast-dying review up to twice, and the durable cure is an
+            # account-level key that pins the project itself.
+            printf 'wire_api = "responses"\n'
+          } > "$HOME/.codex/config.toml"
+
+      - name: Rebuild the target working copy from the sealed archive
+        id: workspace
+        shell: bash
+        env:
+          SOURCE_INPUT: ${{ runner.temp }}/m1-source
+          WORKSPACE: ${{ runner.temp }}/m1-target
+          BASE_COPY: ${{ runner.temp }}/m1-target-base
+        run: |
+          set -euo pipefail
+          # The agents work on the bytes the source job sealed, so this job
+          # never reaches GitHub and holds no credential for the destination.
+          cd "$SOURCE_INPUT"
+          sha256sum --check target.tar.sha256
+          mkdir -p "$WORKSPACE" "$BASE_COPY"
+          tar --extract --file target.tar --directory "$WORKSPACE" --no-same-owner --no-same-permissions
+          tar --extract --file target.tar --directory "$BASE_COPY" --no-same-owner --no-same-permissions
+          # What a change started from is read from this copy, which no agent
+          # is pointed at, so it cannot be rewritten by the run it bounds.
+          chmod -R a-w "$BASE_COPY"
+          git -C "$WORKSPACE" init -q
+          git -C "$WORKSPACE" add -A
+          git -C "$WORKSPACE" -c user.name=automation -c user.email=automation@invalid commit -qm base
+
+      - name: Name the ticket-tracker tool the implementing agent may use
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/agent-mcp.json" <<'MCP'
+          {
+            "mcpServers": {
+              "backlog": {
+                "command": "npx",
+                "args": ["-y", "backlog-mcp-server@0.15.1"],
+                "env": {
+                  "BACKLOG_DOMAIN": "${BACKLOG_DOMAIN}",
+                  "BACKLOG_API_KEY": "${BACKLOG_API_KEY}"
+                }
+              }
+            }
+          }
+          MCP
+
+      - name: Gate readiness, then run at most three finite model stages
+        id: stages
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          SOURCE_INPUT: ${{ runner.temp }}/m1-source
+          HISTORY: ${{ runner.temp }}/m1-model-history
+          WORKSPACE: ${{ runner.temp }}/m1-target
+          BASE_COPY: ${{ runner.temp }}/m1-target-base
+          BASE_SHA: ${{ needs.source.outputs.base_sha }}
+          TOOL_SHA: ${{ job.workflow_sha }}
+          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+          BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HISTORY"
+          readiness_dir="$HISTORY/readiness"
+          mkdir -p "$readiness_dir"
+          readiness_args=()
+          clarification_args=()
+          if [[ -f "$SOURCE_INPUT/clarification.json" ]]; then
+            clarification_args=(--clarification "$SOURCE_INPUT/clarification.json")
+          fi
+          for attempt in 1 2; do
+            previous_readiness=()
+            if (( attempt > 1 )); then
+              previous_attempt=$((attempt - 1))
+              previous_readiness=(
+                --previous-assessment "$readiness_dir/assessment-$previous_attempt.json"
+                --previous-check "$readiness_dir/check-$previous_attempt.json"
+              )
+            fi
+            "$TOOLS/worker" assess-readiness \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$SOURCE_INPUT/readiness-ticket.json" \
+              --source "$SOURCE_INPUT/readiness-source.json" \
+              --attempt "$attempt" \
+              "${previous_readiness[@]}" \
+              "${clarification_args[@]}" \
+              --out "$readiness_dir/assessment-$attempt.json"
+            "$TOOLS/worker" check-readiness \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$SOURCE_INPUT/readiness-ticket.json" \
+              --source "$SOURCE_INPUT/readiness-source.json" \
+              --assessment "$readiness_dir/assessment-$attempt.json" \
+              "${clarification_args[@]}" \
+              --out "$readiness_dir/check-$attempt.json"
+            readiness_args+=(
+              --assessment "$readiness_dir/assessment-$attempt.json"
+              --check "$readiness_dir/check-$attempt.json"
+            )
+            verdict=$(jq -er '.verdict | select(. == "pass" or . == "fail")' "$readiness_dir/check-$attempt.json")
+            if [[ "$verdict" == pass || "$attempt" == 2 ]]; then
+              break
+            fi
+          done
+          "$TOOLS/worker" decide-readiness \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$SOURCE_INPUT/readiness-ticket.json" \
+            --source "$SOURCE_INPUT/readiness-source.json" \
+            "${readiness_args[@]}" \
+            --out "$readiness_dir/decision.json"
+          readiness_outcome=$(jq -er '.outcome | select(. == "ready" or . == "clarification_required" or . == "reject" or . == "readiness_unresolved")' "$readiness_dir/decision.json")
+          case "$readiness_outcome" in
+            ready)
+              ;;
+            clarification_required)
+              printf 'publish=false\nstage=0\nterminal-code=clarification_required\n' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            reject)
+              printf 'publish=false\nstage=0\nterminal-code=readiness_rejected\n' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            readiness_unresolved)
+              printf 'publish=false\nstage=0\nterminal-code=readiness_unresolved\n' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          for stage in 1 2 3; do
+            stage_dir="$HISTORY/stage-$stage"
+            mkdir -p "$stage_dir"
+            previous=()
+            if (( stage > 1 )); then
+              previous_stage=$((stage - 1))
+              previous=(
+                --previous-findings "$HISTORY/stage-$previous_stage/claude-correctness.json"
+                --previous-findings "$HISTORY/stage-$previous_stage/codex-adversarial.json"
+              )
+            fi
+            # The agent works in the repository and finds the files itself, so
+            # the contract is completed from what it actually changed rather
+            # than from a guess made before anyone looked.
+            "$TOOLS/worker" implement \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --draft "$SOURCE_INPUT/ticket-draft.json" \
+              --repo-root "$WORKSPACE" \
+              --base-root "$BASE_COPY" \
+              --base-sha "$BASE_SHA" \
+              --knowledge-root "$TOOLS" \
+              --stage "$stage" \
+              "${previous[@]}" \
+              "${clarification_args[@]}" \
+              --run-out "$stage_dir/implement-run.json" \
+              --ticket-out "$stage_dir/ticket.json" \
+              --source-out "$stage_dir/source.json" \
+              --out "$stage_dir/candidate.json"
+
+            set +e
+            "$TOOLS/worker" review \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$stage_dir/ticket.json" \
+              --source "$stage_dir/source.json" \
+              --candidate "$stage_dir/candidate.json" \
+              "${clarification_args[@]}" \
+              --reviewer claude-correctness \
+              --out "$stage_dir/claude-correctness.json"
+            claude_status=$?
+            # The adversarial reviewer reads the repository around the change,
+            # which is why it runs as an agent rather than as one question.
+            "$TOOLS/worker" agent-review \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$stage_dir/ticket.json" \
+              --source "$stage_dir/source.json" \
+              --candidate "$stage_dir/candidate.json" \
+              --repo-root "$WORKSPACE" \
+              --base-sha "$BASE_SHA" \
+              --knowledge-root "$TOOLS" \
+              "${clarification_args[@]}" \
+              --reviewer codex-adversarial \
+              --run-out "$stage_dir/review-run.json" \
+              --out "$stage_dir/codex-adversarial.json"
+            codex_status=$?
+            set -e
+            if (( claude_status != 0 || codex_status != 0 )); then
+              exit 1
+            fi
+
+            "$TOOLS/worker" decide \
+              --config "$TOOLS/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$stage_dir/ticket.json" \
+              --source "$stage_dir/source.json" \
+              --candidate "$stage_dir/candidate.json" \
+              --review "$stage_dir/claude-correctness.json" \
+              --review "$stage_dir/codex-adversarial.json" \
+              --out "$stage_dir/decision.json"
+            outcome=$(jq -er '.outcome | select(. == "converged" or . == "revise" or . == "nonconverged")' "$stage_dir/decision.json")
+            case "$outcome" in
+              converged)
+                printf 'publish=true\nstage=%s\nterminal-code=\n' "$stage" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              revise)
+                if (( stage == 3 )); then
+                  exit 1
+                fi
+                ;;
+              nonconverged)
+                if (( stage != 3 )); then
+                  exit 1
+                fi
+                # The reviews and the implementation each held a defensible
+                # behavior. That is the requester's decision, so the run asks
+                # it as a bounded question through the existing answer rail
+                # instead of demanding that future tickets anticipate it.
+                # When the question cannot be produced (rounds spent, model
+                # failure), the run ends as an honest nonconverged terminal.
+                question_dir="$HISTORY/question"
+                mkdir -p "$question_dir"
+                set +e
+                "$TOOLS/worker" impasse-question \
+                  --config "$TOOLS/m1-consumer.json" \
+                  --tool-sha "$TOOL_SHA" \
+                  --ticket "$stage_dir/ticket.json" \
+                  --source "$stage_dir/source.json" \
+                  --candidate "$stage_dir/candidate.json" \
+                  --review "$stage_dir/claude-correctness.json" \
+                  --review "$stage_dir/codex-adversarial.json" \
+                  "${clarification_args[@]}" \
+                  --out "$question_dir/decision.json"
+                impasse_status=$?
+                set -e
+                if (( impasse_status == 0 )) &&
+                   [[ "$(jq -r '.outcome' "$question_dir/decision.json")" == clarification_required ]]; then
+                  printf 'publish=false\nstage=%s\nterminal-code=clarification_required\n' "$stage" >> "$GITHUB_OUTPUT"
+                else
+                  printf 'publish=false\nstage=%s\nterminal-code=nonconverged\n' "$stage" >> "$GITHUB_OUTPUT"
+                fi
+                exit 0
+                ;;
+            esac
+          done
+          exit 1
+
+      - name: Upload complete model history
+        # The history is the evidence of what the agents did; a failed run
+        # needs it more than a successful one (a lost 25-minute implement run
+        # measured 2026-08-07 forced rediagnosis from nothing).
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-model-history-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-model-history/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  validation:
+    if: inputs.operation == 'ticket' && needs.model.outputs.publish == 'true'
+    needs: [source, model]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download source evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-source-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-source
+
+      - name: Download model history
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-model-history-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-model-history
+
+      - name: Set up fixed Node
+        if: needs.source.outputs.needs_node == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Validate in an unprivileged credential-free process
+        shell: bash
+        env:
+          DOWNLOADED_TOOLS: ${{ runner.temp }}/m1-tools
+          DOWNLOADED_SOURCE: ${{ runner.temp }}/m1-source
+          DOWNLOADED_HISTORY: ${{ runner.temp }}/m1-model-history
+          SELECTED_STAGE: ${{ needs.model.outputs.stage }}
+          NEEDS_NODE: ${{ needs.source.outputs.needs_node }}
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          case "$SELECTED_STAGE" in 1|2|3) ;; *) exit 1 ;; esac
+          sandbox=$(mktemp -d /tmp/m1-validation.XXXXXX)
+          trap 'sudo pkill -KILL -u nobody >/dev/null 2>&1 || true; sudo rm -rf -- "$sandbox"' EXIT
+          chmod 0755 "$sandbox"
+          mkdir -p "$sandbox/tools" "$sandbox/source" "$sandbox/model" "$sandbox/target" "$sandbox/output"
+          cp -R "$DOWNLOADED_TOOLS/." "$sandbox/tools/"
+          cp -R "$DOWNLOADED_SOURCE/." "$sandbox/source/"
+          cp -R "$DOWNLOADED_HISTORY/stage-$SELECTED_STAGE/." "$sandbox/model/"
+          cd "$sandbox/tools"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker
+          chmod -R a-w "$sandbox/tools" "$sandbox/source" "$sandbox/model"
+          cd "$sandbox/source"
+          sha256sum --check target.tar.sha256
+          tar --extract --file target.tar --directory "$sandbox/target" --no-same-owner --no-same-permissions
+          if [[ "$NEEDS_NODE" == true ]]; then
+            pnpm_archive="$sandbox/pnpm-9.15.4.tgz"
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              --output "$pnpm_archive" \
+              https://registry.npmjs.org/pnpm/-/pnpm-9.15.4.tgz
+            printf '%s  %s\n' \
+              b2dc20e2fc72b3e18848459b37359a32064663e5627a51e4c74b2c29dd8e8e0491483c3abb40789cfd578bf362fb6ba8261b05f0387d76792ed6e23ea3b1b6a0 \
+              "$pnpm_archive" | sha512sum --check -
+            npm install --global --prefix "$sandbox/runtime" --ignore-scripts --no-audit --no-fund "$pnpm_archive"
+            chmod -R a-w "$sandbox/runtime"
+            export PATH="$sandbox/runtime/bin:$PATH"
+            test "$(pnpm --version)" = "9.15.4"
+          fi
+          # A writable cache home for toolchains that need one (go). Inert for
+          # node destinations.
+          mkdir -p "$sandbox/cache"
+          test "$(id -u nobody)" = "65534"
+          sudo chown -R nobody:nogroup "$sandbox/target" "$sandbox/output" "$sandbox/cache"
+
+          sudo -u nobody env -i PATH="$PATH" \
+            HOME="$sandbox/cache" GOCACHE="$sandbox/cache/go-build" GOMODCACHE="$sandbox/cache/gomod" GOFLAGS=-mod=mod GOTOOLCHAIN=auto \
+            "$sandbox/tools/worker" apply \
+              --config "$sandbox/tools/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$sandbox/model/ticket.json" \
+              --source "$sandbox/model/source.json" \
+              --candidate "$sandbox/model/candidate.json" \
+              --repo-root "$sandbox/target"
+          sudo -u nobody env -i PATH="$PATH" \
+            HOME="$sandbox/cache" GOCACHE="$sandbox/cache/go-build" GOMODCACHE="$sandbox/cache/gomod" GOFLAGS=-mod=mod GOTOOLCHAIN=auto \
+            "$sandbox/tools/worker" run-validation \
+              --config "$sandbox/tools/m1-consumer.json" \
+              --tool-sha "$TOOL_SHA" \
+              --ticket "$sandbox/model/ticket.json" \
+              --source "$sandbox/model/source.json" \
+              --candidate "$sandbox/model/candidate.json" \
+              --repo-root "$sandbox/target" \
+              --out "$sandbox/output/validation.json"
+          sudo pkill -KILL -u nobody >/dev/null 2>&1 || true
+          sudo chown "$(id -u):$(id -g)" "$sandbox/output/validation.json"
+
+          "$sandbox/tools/worker" verify-applied \
+            --config "$sandbox/tools/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$sandbox/model/ticket.json" \
+            --source "$sandbox/model/source.json" \
+            --candidate "$sandbox/model/candidate.json" \
+            --repo-root "$sandbox/target"
+          "$sandbox/tools/worker" verify-publish-gate \
+            --config "$sandbox/tools/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$sandbox/model/ticket.json" \
+            --source "$sandbox/model/source.json" \
+            --candidate "$sandbox/model/candidate.json" \
+            --review "$sandbox/model/claude-correctness.json" \
+            --review "$sandbox/model/codex-adversarial.json" \
+            --decision "$sandbox/model/decision.json" \
+            --validation "$sandbox/output/validation.json"
+
+          release="$RUNNER_TEMP/m1-release-input"
+          mkdir -p "$release"
+          # The contract travels with the change the agent made, because the
+          # files it touched are known only after it worked.
+          cp "$sandbox/model/ticket.json" "$release/ticket.json"
+          cp "$sandbox/model/source.json" "$release/source.json"
+          cp "$sandbox/model/candidate.json" "$release/candidate.json"
+          cp "$sandbox/model/claude-correctness.json" "$release/claude-correctness.json"
+          cp "$sandbox/model/codex-adversarial.json" "$release/codex-adversarial.json"
+          cp "$sandbox/model/decision.json" "$release/decision.json"
+          cp "$sandbox/output/validation.json" "$release/validation.json"
+
+      - name: Upload deterministic validation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-release-input-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-release-input/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  feature-publish:
+    if: inputs.operation == 'ticket'
+    needs: [source, validation]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download source and validation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,model-history}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-publish-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+          chmod 0555 worker
+
+      - name: Mint a feature-publication token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Publish only candidate blobs and open the feature PR
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          TOOL_SHA: ${{ job.workflow_sha }}
+          INPUT: ${{ runner.temp }}/m1-publish-input
+          OUTPUT: ${{ runner.temp }}/m1-feature-published
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" publish-feature \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --baseline "$INPUT/baseline.json" \
+            --out "$OUTPUT/feature.json"
+          # The trail is the requester-facing record on the PR body. Failing
+          # to compose it must never block the delivery itself, so a fallback
+          # line stands in when composition fails.
+          trail_args=()
+          if [[ -f "$INPUT/clarification.json" ]]; then
+            trail_args=(--clarification "$INPUT/clarification.json")
+          fi
+          set +e
+          "$TOOLS/worker" compose-trail \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --history "$INPUT" \
+            --validation "$INPUT/validation.json" \
+            "${trail_args[@]}" \
+            --out "$RUNNER_TEMP/m1-trail.txt"
+          trail_status=$?
+          set -e
+          if (( trail_status != 0 )); then
+            printf '証跡の自動生成に失敗したため、この実行の詳細は実行履歴を参照してください。\n' > "$RUNNER_TEMP/m1-trail.txt"
+          fi
+          "$TOOLS/controller" create-feature-pr \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --feature "$OUTPUT/feature.json" \
+            --trail "$RUNNER_TEMP/m1-trail.txt" \
+            --out "$OUTPUT/feature-pr.json"
+          cp "$RUNNER_TEMP/m1-trail.txt" "$OUTPUT/trail.txt"
+
+      - name: Upload feature publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-feature-published-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-feature-published/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  feature-checks:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery != 'pull_request'
+    needs: [tools, source, feature-publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download source and feature evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,feature-published}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-feature-check-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a feature-check token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Wait for the exact feature checks
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-feature-check-input
+          OUTPUT: ${{ runner.temp }}/m1-feature-checks
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" wait-feature \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --feature-pr "$INPUT/feature-pr.json" \
+            --out "$OUTPUT/checks.json"
+
+      - name: Upload feature check evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-feature-checks-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-feature-checks/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  feature-merge:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery != 'pull_request'
+    needs: [tools, source, feature-checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download checked feature evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,feature-published,feature-checks}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-feature-merge-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a fresh feature-merge token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Revalidate exact feature checks and merge to stg
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-feature-merge-input
+          OUTPUT: ${{ runner.temp }}/m1-feature-merged
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" merge-feature \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --feature-pr "$INPUT/feature-pr.json" \
+            --checks "$INPUT/checks.json" \
+            --out "$OUTPUT/feature-merge.json"
+
+      - name: Upload feature merge evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-feature-merged-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-feature-merged/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  staging:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery != 'pull_request'
+    needs: [tools, source, feature-merge]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download release-chain inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,feature-merged}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-staging-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a staging-evidence token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Await the existing staging deployment and digest commit
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-staging-input
+          OUTPUT: ${{ runner.temp }}/m1-staging
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" await-staging \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --baseline "$INPUT/baseline.json" \
+            --feature-merge "$INPUT/feature-merge.json" \
+            --out "$OUTPUT/staging.json"
+
+      - name: Upload staging release proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-staging-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-staging/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  staging-browser:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery != 'pull_request'
+    needs: [tools, source, staging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download staging proof inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,staging}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-staging-browser-input
+          merge-multiple: true
+
+      - name: Observe the staging AC with no target or cloud credential
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-staging-browser-input
+          OUTPUT: ${{ runner.temp }}/m1-staging-visible
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 browsercheck
+          mkdir -p "$OUTPUT"
+          jq -j -c '.payload' "$INPUT/staging.json" > "$OUTPUT/staging-proof.json"
+          "$TOOLS/browsercheck" \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --staging-proof "$OUTPUT/staging-proof.json" \
+            --environment staging \
+            --evidence-out "$OUTPUT/staging-visible.json" \
+            --screenshot-out "$OUTPUT/staging.png"
+
+      - name: Upload staging user-visible evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-staging-visible-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/m1-staging-visible/staging-visible.json
+            ${{ runner.temp }}/m1-staging-visible/staging.png
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  promotion:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery == 'production'
+    needs: [tools, source, staging-browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download promotion inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,staging,staging-visible}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-promotion-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a production-promotion token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Create the exact stg to prod promotion
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-promotion-input
+          OUTPUT: ${{ runner.temp }}/m1-promotion
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" create-promotion-pr \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --baseline "$INPUT/baseline.json" \
+            --staging "$INPUT/staging.json" \
+            --visible "$INPUT/staging-visible.json" \
+            --screenshot "$INPUT/staging.png" \
+            --out "$OUTPUT/promotion.json"
+
+      - name: Upload promotion pull request proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-promotion-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-promotion/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  promotion-merge:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery == 'production'
+    needs: [tools, source, promotion]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions: {}
+    outputs:
+      production_reflected: ${{ steps.reflection.outputs.production_reflected }}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download exact promotion inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,promotion}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-promotion-merge-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a fresh production-merge token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Revalidate and merge the exact promotion
+        id: merge
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-promotion-merge-input
+          OUTPUT: ${{ runner.temp }}/m1-promotion-merged
+          REFLECTION: ${{ runner.temp }}/m1-production-reflection
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT" "$REFLECTION"
+          "$TOOLS/controller" merge-promotion \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --baseline "$INPUT/baseline.json" \
+            --promotion "$INPUT/promotion.json" \
+            --reflection-out "$REFLECTION/production-reflection.json" \
+            --out "$OUTPUT/promotion-merge.json"
+
+      - name: Preserve whether production already changed
+        id: reflection
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          RECEIPT: ${{ runner.temp }}/m1-production-reflection/production-reflection.json
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ -f "$RECEIPT" ]]; then
+            test -s "$RECEIPT"
+            printf 'production_reflected=true\n' >> "$GITHUB_OUTPUT"
+          elif [[ "$MERGE_OUTCOME" == skipped ]]; then
+            printf 'production_reflected=false\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'production_reflected=unknown\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload production reflection receipt
+        if: ${{ !cancelled() && steps.reflection.outputs.production_reflected == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-production-reflection-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-production-reflection/production-reflection.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+      - name: Upload promotion merge proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-promotion-merged-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-promotion-merged/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  production:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery == 'production'
+    needs: [tools, source, promotion-merge]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download production inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,promotion-merged}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-production-input
+          merge-multiple: true
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 controller
+
+      - name: Mint a production-evidence token
+        id: target-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ secrets.TARGET_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TARGET_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ needs.source.outputs.repo_owner }}
+          repositories: ${{ needs.source.outputs.repo_name }}
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Await both existing production workflows
+        shell: bash
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.target-token.outputs.token }}
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-production-input
+          OUTPUT: ${{ runner.temp }}/m1-production
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT"
+          "$TOOLS/controller" await-production \
+            --config "$TOOLS/m1-consumer.json" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --baseline "$INPUT/baseline.json" \
+            --promotion-merge "$INPUT/promotion-merge.json" \
+            --out "$OUTPUT/production.json"
+
+      - name: Upload production release proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-production-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-production/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  production-browser:
+    if: inputs.operation == 'ticket' && needs.source.outputs.delivery == 'production'
+    needs: [tools, source, production]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download complete browser proof chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{source,release-input,staging-visible,production}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-production-browser-input
+          merge-multiple: true
+
+      - name: Observe the production AC with no target or cloud credential
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INPUT: ${{ runner.temp }}/m1-production-browser-input
+          OUTPUT: ${{ runner.temp }}/m1-production-visible
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 browsercheck
+          mkdir -p "$OUTPUT"
+          jq -j -c '.payload.staging' "$INPUT/production.json" > "$OUTPUT/staging-proof.json"
+          jq -j -c '.payload.production' "$INPUT/production.json" > "$OUTPUT/production-proof.json"
+          "$TOOLS/browsercheck" \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --ticket "$INPUT/ticket.json" \
+            --source "$INPUT/source.json" \
+            --candidate "$INPUT/candidate.json" \
+            --review "$INPUT/claude-correctness.json" \
+            --review "$INPUT/codex-adversarial.json" \
+            --decision "$INPUT/decision.json" \
+            --validation "$INPUT/validation.json" \
+            --staging-proof "$OUTPUT/staging-proof.json" \
+            --production-proof "$OUTPUT/production-proof.json" \
+            --prior-evidence "$INPUT/staging-visible.json" \
+            --prior-screenshot "$INPUT/staging.png" \
+            --environment production \
+            --evidence-out "$OUTPUT/production-visible.json" \
+            --screenshot-out "$OUTPUT/production.png"
+
+      - name: Upload production user-visible evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m1-production-visible-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/m1-production-visible/production-visible.json
+            ${{ runner.temp }}/m1-production-visible/production.png
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: false
+
+  report:
+    if: always() && inputs.operation == 'ticket'
+    needs:
+      - contract
+      - tools
+      - source
+      - model
+      - validation
+      - feature-publish
+      - feature-checks
+      - feature-merge
+      - staging
+      - staging-browser
+      - promotion
+      - promotion-merge
+      - production
+      - production-browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the immutable reporter revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          ssh-key: ${{ secrets.ENGINE_CHECKOUT_SSH_KEY }}
+          path: trusted-reporter
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: trusted-reporter/go.mod
+          cache: false
+
+      - name: Build the isolated reporter
+        shell: bash
+        working-directory: trusted-reporter
+        env:
+          TOOL_SHA: ${{ job.workflow_sha }}
+          REPORTER: ${{ runner.temp }}/m1-reporter
+          QUESTIONER: ${{ runner.temp }}/m1-questioner
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TOOL_SHA"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+            -o "$REPORTER" ./cmd/reporter
+          chmod 0500 "$REPORTER"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+            -o "$QUESTIONER" ./cmd/questioner
+          chmod 0500 "$QUESTIONER"
+
+      - name: Download the immutable envelope
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-envelope-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+
+      - name: Verify the immutable envelope transport
+        shell: bash
+        env:
+          INPUT: ${{ runner.temp }}/m1-report-input
+        run: |
+          set -euo pipefail
+          cd "$INPUT"
+          sha256sum --check ticket-envelope.json.sha256
+
+      - name: Download published feature evidence
+        # A pull-request delivery stops at the published PR, so the feature
+        # evidence is the terminal evidence. The fuller downloads below carry
+        # it for the promotion and reflection paths; without this one the
+        # success report of a PR-stop delivery dies reading feature-pr.json
+        # (observed on the first PR ever published).
+        if: >-
+          needs.feature-publish.result == 'success' &&
+          needs.promotion-merge.result != 'success' &&
+          needs.promotion-merge.outputs.production_reflected != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-feature-published-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+
+      - name: Download completed promotion evidence
+        if: needs.promotion-merge.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{feature-published,staging-visible,promotion-merged}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+          merge-multiple: true
+
+      - name: Download production reflection evidence
+        if: needs.promotion-merge.result != 'success' && needs.promotion-merge.outputs.production_reflected == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: m1-{feature-published,staging-visible,production-reflection}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+          merge-multiple: true
+
+      - name: Download completed production release evidence
+        if: needs.production.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-production-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+
+      - name: Download verified production browser evidence
+        if: needs.production-browser.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-production-visible-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-report-input
+
+      - name: Select the finite terminal result
+        id: terminal
+        shell: bash
+        env:
+          DELIVERY: ${{ needs.source.outputs.delivery }}
+          SOURCE_RESULT: ${{ needs.source.result }}
+          SOURCE_PARSE_OUTCOME: ${{ needs.source.outputs.parse_outcome }}
+          INTAKE_RESULT: ${{ needs.intake.result }}
+          INTAKE_OUTCOME: ${{ needs.intake.outputs.intake_outcome }}
+          MODEL_RESULT: ${{ needs.model.result }}
+          MODEL_PUBLISH: ${{ needs.model.outputs.publish }}
+          MODEL_TERMINAL_CODE: ${{ needs.model.outputs.terminal-code }}
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+          FEATURE_PUBLISH_RESULT: ${{ needs.feature-publish.result }}
+          FEATURE_CHECKS_RESULT: ${{ needs.feature-checks.result }}
+          FEATURE_MERGE_RESULT: ${{ needs.feature-merge.result }}
+          STAGING_RESULT: ${{ needs.staging.result }}
+          STAGING_BROWSER_RESULT: ${{ needs.staging-browser.result }}
+          PROMOTION_RESULT: ${{ needs.promotion.result }}
+          PROMOTION_MERGE_RESULT: ${{ needs.promotion-merge.result }}
+          PRODUCTION_REFLECTED: ${{ needs.promotion-merge.outputs.production_reflected }}
+          PRODUCTION_RESULT: ${{ needs.production.result }}
+          PRODUCTION_BROWSER_RESULT: ${{ needs.production-browser.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PROMOTION_MERGE_RESULT" == failure &&
+                "$PRODUCTION_REFLECTED" != true && "$PRODUCTION_REFLECTED" != false ]]; then
+            exit 1
+          fi
+          if [[ "$PROMOTION_MERGE_RESULT" == cancelled && "$PRODUCTION_REFLECTED" != true ]]; then
+            exit 1
+          fi
+          code=internal_failed
+          question=false
+          # An intake that still has open questions can only be missing the
+          # destination (wording gaps are settled without asking). Until the
+          # ask-and-resume path is wired end to end for it, stop honestly:
+          # the requester hears that a person will follow up, instead of the
+          # run dying unreported.
+          if [[ "$INTAKE_RESULT" == success && "$INTAKE_OUTCOME" == questions ]]; then
+            printf 'code=clarification_required\nquestion=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A run that stopped where the consumer asked it to stop has
+          # succeeded. Reporting a configured stopping point as a failure would
+          # tell the requester the change did not land when it did.
+          if [[ "$DELIVERY" == pull_request && "$FEATURE_PUBLISH_RESULT" == success ]]; then
+            code=success
+          elif [[ "$DELIVERY" == integration && "$STAGING_BROWSER_RESULT" == success ]]; then
+            code=success
+          elif [[ "$PRODUCTION_BROWSER_RESULT" == success ]]; then
+            code=success
+          elif [[ "$PRODUCTION_RESULT" == success ]]; then
+            code=production_verification_failed
+          elif [[ "$PROMOTION_MERGE_RESULT" == success || "$PRODUCTION_REFLECTED" == true ]]; then
+            code=production_deployment_unverified
+          elif [[ "$SOURCE_RESULT" == failure && "$SOURCE_PARSE_OUTCOME" == rejected ]]; then
+            code=input_rejected
+          elif [[ "$MODEL_RESULT" == failure ]]; then
+            code=model_failed
+          elif [[ "$MODEL_RESULT" == success && "$MODEL_PUBLISH" == false ]]; then
+            case "$MODEL_TERMINAL_CODE" in
+              clarification_required)
+                # Questions are not a terminal outcome: the run posts them and
+                # starts waiting for the answer instead of reporting an end.
+                question=true
+                code=clarification_required
+                ;;
+              nonconverged|readiness_rejected|readiness_unresolved)
+                code="$MODEL_TERMINAL_CODE"
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+          elif [[ "$VALIDATION_RESULT" == failure || "$STAGING_BROWSER_RESULT" == failure ]]; then
+            code=validation_failed
+          elif [[ "$FEATURE_PUBLISH_RESULT" == failure || "$FEATURE_CHECKS_RESULT" == failure ||
+                  "$FEATURE_MERGE_RESULT" == failure || "$STAGING_RESULT" == failure ||
+                  "$PROMOTION_RESULT" == failure || "$PROMOTION_MERGE_RESULT" == failure ||
+                  "$PRODUCTION_RESULT" == failure || "$PRODUCTION_BROWSER_RESULT" == failure ]]; then
+            code=release_failed
+          fi
+          printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+          printf 'question=%s\n' "$question" >> "$GITHUB_OUTPUT"
+
+      - name: Compose bounded terminal evidence
+        if: steps.terminal.outputs.question != 'true'
+        shell: bash
+        env:
+          CODE: ${{ steps.terminal.outputs.code }}
+          DELIVERY: ${{ needs.source.outputs.delivery }}
+          REPOSITORY: ${{ needs.source.outputs.repository }}
+          INPUT: ${{ runner.temp }}/m1-report-input
+          EVIDENCE: ${{ runner.temp }}/m1-terminal-evidence.json
+        run: |
+          set -euo pipefail
+          # A run that stopped where the consumer asked it to stop carries only
+          # the evidence that stopping point produced: a proposal has a pull
+          # request and nothing deployed.
+          if [[ "$CODE" == success && "$DELIVERY" == pull_request ]]; then
+            pull_url=$(jq -er '.payload.pull_request.HTMLURL' "$INPUT/feature-pr.json")
+            jq -j -c -n --arg pull "$pull_url" '{pull_request_url:$pull}' > "$EVIDENCE"
+            exit 0
+          fi
+          case "$CODE" in
+            success|production_verification_failed|production_deployment_unverified)
+              pull_url=$(jq -er '.payload.pull_request.HTMLURL' "$INPUT/feature-pr.json")
+              if [[ -f "$INPUT/promotion-merge.json" ]]; then
+                commit_sha=$(jq -er '.payload.merge.MergeSHA | select(test("^[a-f0-9]{40}$"))' "$INPUT/promotion-merge.json")
+              else
+                test "$CODE" = production_deployment_unverified
+                test "$(jq -cS '.binding' "$INPUT/production-reflection.json")" = \
+                  "$(jq -cS '.binding' "$INPUT/feature-pr.json")"
+                test "$(jq -er '.payload.release.proof_sha256' "$INPUT/production-reflection.json")" = \
+                  "$(jq -er '.release_proof_sha256' "$INPUT/staging-visible.json")"
+                commit_sha=$(jq -er '
+                  select(.kind == "m1-production-reflection")
+                  | select(.payload.reflection.BaseBranch == "prod")
+                  | select(.payload.reflection.HeadBranch == "stg")
+                  | select(.payload.reflection.PullRequestNumber == .payload.pull_request.Number)
+                  | select(.payload.reflection.BaseSHA == .payload.pull_request.BaseSHA)
+                  | select(.payload.reflection.HeadSHA == .payload.pull_request.HeadSHA)
+                  | .payload.reflection.MergeSHA
+                  | select(test("^[a-f0-9]{40}$"))
+                ' "$INPUT/production-reflection.json")
+              fi
+              staging_url=$(jq -er '.final_url' "$INPUT/staging-visible.json")
+              if [[ "$CODE" != production_deployment_unverified ]]; then
+                production_commit_sha=$(jq -er '.payload.production.production_deployment.Merge.MergeSHA | select(test("^[a-f0-9]{40}$"))' "$INPUT/production.json")
+                test "$production_commit_sha" = "$commit_sha"
+              fi
+              if [[ "$CODE" == success ]]; then
+                production_url=$(jq -er '.final_url' "$INPUT/production-visible.json")
+                jq -j -c -n \
+                  --arg pull "$pull_url" \
+                  --arg commit "$commit_sha" \
+                  --arg commit_url "https://github.com/$REPOSITORY/commit/$commit_sha" \
+                  --arg staging "$staging_url" \
+                  --arg production "$production_url" \
+                  '{pull_request_url:$pull,commit_sha:$commit,commit_url:$commit_url,staging_evidence_url:$staging,production_evidence_url:$production}' \
+                  > "$EVIDENCE"
+              else
+                jq -j -c -n \
+                  --arg pull "$pull_url" \
+                  --arg commit "$commit_sha" \
+                  --arg commit_url "https://github.com/$REPOSITORY/commit/$commit_sha" \
+                  --arg staging "$staging_url" \
+                  '{pull_request_url:$pull,commit_sha:$commit,commit_url:$commit_url,staging_evidence_url:$staging}' \
+                  > "$EVIDENCE"
+              fi
+              ;;
+            *)
+              printf '{}' > "$EVIDENCE"
+              ;;
+          esac
+
+      - name: Report once to the neutral hook
+        if: steps.terminal.outputs.question != 'true'
+        shell: bash
+        env:
+          REPORTER: ${{ runner.temp }}/m1-reporter
+          ENVELOPE: ${{ runner.temp }}/m1-report-input/ticket-envelope.json
+          EVIDENCE: ${{ runner.temp }}/m1-terminal-evidence.json
+          INPUT: ${{ runner.temp }}/m1-report-input
+          HMAC_KEY: ${{ secrets.TICKET_INGRESS_PULL_HMAC_KEY }}
+          CODE: ${{ steps.terminal.outputs.code }}
+          REPOSITORY: ${{ needs.source.outputs.repository }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file="$RUNNER_TEMP/m1-report-hmac-key"
+          printf '%s' "$HMAC_KEY" > "$key_file"
+          # The trail composed at publication rides along when it exists, so
+          # the ticket keeps the run's record after the run logs expire.
+          trail_args=()
+          if [[ -f "$INPUT/trail.txt" ]]; then
+            trail_args=(--trail-file "$INPUT/trail.txt")
+          fi
+          "$REPORTER" \
+            --envelope-file "$ENVELOPE" \
+            --code "$CODE" \
+            --repository "$REPOSITORY" \
+            --evidence-file "$EVIDENCE" \
+            "${trail_args[@]}" \
+            --callback-url "$REPORT_CALLBACK_URL" \
+            --hmac-key-file "$key_file"
+
+      - name: Download the readiness decision for the question
+        if: steps.terminal.outputs.question == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-model-history-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-question-input
+
+      - name: Post the clarification question once
+        if: steps.terminal.outputs.question == 'true'
+        shell: bash
+        env:
+          QUESTIONER: ${{ runner.temp }}/m1-questioner
+          ENVELOPE: ${{ runner.temp }}/m1-report-input/ticket-envelope.json
+          DECISION: ${{ runner.temp }}/m1-question-input/readiness/decision.json
+          IMPASSE_DECISION: ${{ runner.temp }}/m1-question-input/question/decision.json
+          HMAC_KEY: ${{ secrets.TICKET_INGRESS_PULL_HMAC_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # A readiness gate and a nonconverged final stage both ask through
+          # this rail; whichever wrote a question decision this run is the one
+          # to post. A ready readiness decision carries no questions, so when
+          # the impasse file exists it is the only valid source.
+          if [[ -f "$IMPASSE_DECISION" ]]; then
+            DECISION="$IMPASSE_DECISION"
+          fi
+          test -f "$DECISION"
+          key_file="$RUNNER_TEMP/m1-question-hmac-key"
+          printf '%s' "$HMAC_KEY" > "$key_file"
+          "$QUESTIONER" \
+            --envelope-file "$ENVELOPE" \
+            --decision-file "$DECISION" \
+            --callback-url "$QUESTION_CALLBACK_URL" \
+            --hmac-key-file "$key_file"
+
+  preserve:
+    # Adopted answers are knowledge: the next ticket must not have to ask the
+    # same question again. This job runs after the report so preserving can
+    # never delay or block the ending, and it runs on every ending alike -
+    # what the requester decided stays true even when this delivery failed.
+    # The record is rendered deterministically from the sealed clarification
+    # record, with no model in the loop, and committed into the calling
+    # instance's own tree. An instance that has not configured
+    # answer_knowledge gets nothing written.
+    if: >-
+      always() && inputs.operation == 'ticket' &&
+      needs.intake.outputs.resumed == 'true' &&
+      needs.report.result != 'cancelled'
+    needs:
+      - tools
+      - intake
+      - report
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download trusted tools
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-tools-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-tools
+
+      - name: Download the sealed intake
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m1-intake-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m1-intake
+
+      - name: Verify trusted tools
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+        run: |
+          set -euo pipefail
+          cd "$TOOLS"
+          sha256sum --check SHA256SUMS
+          chmod 0555 worker
+
+      - name: Render the adopted answers
+        id: render
+        shell: bash
+        env:
+          TOOLS: ${{ runner.temp }}/m1-tools
+          INTAKE: ${{ runner.temp }}/m1-intake
+          PRESERVE_OUTPUT: ${{ runner.temp }}/m1-preserve
+          TOOL_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRESERVE_OUTPUT"
+          "$TOOLS/worker" preserve-answers \
+            --config "$TOOLS/m1-consumer.json" \
+            --tool-sha "$TOOL_SHA" \
+            --raw "$INTAKE/raw-ticket.json" \
+            --clarification "$INTAKE/clarification.json" \
+            --meta-out "$PRESERVE_OUTPUT/answers-meta.json" \
+            --content-out "$PRESERVE_OUTPUT/answers.md"
+          enabled=$(jq -r '.enabled == true' "$PRESERVE_OUTPUT/answers-meta.json")
+          printf 'enabled=%s\n' "$enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the calling instance for its knowledge tree
+        if: steps.render.outputs.enabled == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: instance
+
+      - name: Commit the preserved answers
+        if: steps.render.outputs.enabled == 'true'
+        shell: bash
+        working-directory: instance
+        env:
+          PRESERVE_OUTPUT: ${{ runner.temp }}/m1-preserve
+        run: |
+          set -euo pipefail
+          target=$(jq -er '.path' "$PRESERVE_OUTPUT/answers-meta.json")
+          issue=$(jq -er '.issue_key' "$PRESERVE_OUTPUT/answers-meta.json")
+          # The engine validated this path already; refusing absolute paths
+          # and dotted components here keeps the write inside the checkout
+          # even against a broken tool build.
+          case "$target" in
+            /*|*..*|.*) exit 1 ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Another run may push between our fetch and push; rebuilding the
+          # commit on the fresh tip and retrying settles the race. The same
+          # content on the tip already is success, not a conflict.
+          for attempt in 1 2 3; do
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            mkdir -p "$(dirname "$target")"
+            cp "$PRESERVE_OUTPUT/answers.md" "$target"
+            git add -- "$target"
+            if git diff --cached --quiet; then
+              echo "answers already preserved"
+              exit 0
+            fi
+            git commit -m "Preserve the adopted answers for $issue" \
+              -m "Rendered without a model from the sealed clarification record. The next run reads this instead of asking the requester again."
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+          done
+          exit 1

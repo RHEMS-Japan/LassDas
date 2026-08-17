@@ -1,0 +1,711 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"slices"
+	"time"
+
+	"automation.internal/ticket-ingress/internal/githubapi"
+	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/releaseproof"
+	"automation.internal/ticket-ingress/internal/visiblecheck"
+	"automation.internal/ticket-ingress/internal/worker"
+)
+
+func runBaseline(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--draft", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	// The baseline runs before target files are known, so it binds through
+	// the draft: the destination is already sealed there, the files are not.
+	var draft worker.TicketDraft
+	if err := worker.ReadJSONFile(arguments.one("--draft"), worker.MaxTicketJSONBytes, &draft); err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	configSHA, err := config.SHA256()
+	if err != nil || draft.ConfigSHA256 != configSHA {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, draft.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	baseline, err := runtime.controller.VerifyBaseline(ctx)
+	if err != nil {
+		// failFrom prints the invariant name; without it every baseline
+		// refusal reads the same in the run log.
+		return failFrom("baseline_verify_failed", err)
+	}
+	artifact, err := newBaselineArtifact(runtime.config, runtime.consumer, baseline)
+	if err != nil || artifact.validate(runtime.config) != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("baseline_artifact_write_failed")
+	}
+	return nil
+}
+
+func runPublishFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{
+		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--out",
+	}, "--review")
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	var source worker.SourceSnapshot
+	if err := worker.ReadJSONFile(arguments.one("--source"), worker.MaxArtifactJSONBytes, &source); err != nil {
+		return fail("source_artifact_invalid")
+	}
+	var candidate worker.Candidate
+	if err := worker.ReadJSONFile(arguments.one("--candidate"), worker.MaxArtifactJSONBytes, &candidate); err != nil {
+		return fail("candidate_artifact_invalid")
+	}
+	var decision worker.StageDecision
+	if err := worker.ReadJSONFile(arguments.one("--decision"), worker.MaxDecisionJSONBytes, &decision); err != nil {
+		return fail("decision_artifact_invalid")
+	}
+	var validation worker.ValidationEvidence
+	if err := worker.ReadJSONFile(arguments.one("--validation"), worker.MaxValidationJSONBytes, &validation); err != nil {
+		return fail("validation_artifact_invalid")
+	}
+	reviews, err := readReviews(arguments["--review"])
+	if err != nil {
+		return fail("review_artifact_invalid")
+	}
+	baseline, err := readBaselineArtifact(arguments.one("--baseline"), runtime.config)
+	if err != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	if worker.ValidatePublishGate(decision, validation, candidate, reviews, source, request, runtime.config) != nil ||
+		source.BaseSHA != baseline.Baseline.Integration.SHA {
+		return fail("publish_gate_rejected")
+	}
+	binding := newDeliveryBinding(request, source, candidate, decision, validation)
+	if binding.validate(request, runtime.config) != nil {
+		return fail("delivery_binding_invalid")
+	}
+	consumer, err := request.Consumer(runtime.config)
+	if err != nil {
+		return fail("delivery_binding_invalid")
+	}
+	files := make([]githubapi.FileUpdate, len(candidate.Files))
+	for index, file := range candidate.Files {
+		if file.Path != source.Files[index].Path {
+			return fail("candidate_file_set_invalid")
+		}
+		files[index] = githubapi.FileUpdate{
+			Path: file.Path, Content: []byte(file.Content), ExpectedBlobSHA: source.Files[index].GitBlobSHA,
+		}
+	}
+	spec := githubapi.FeatureSpec{
+		Branch: featureBranch(binding), CommitMessage: featureCommitMessage(binding),
+		AllowedPathPrefixes: slices.Clone(consumer.Mode.AllowedFilePrefixes), Files: files,
+	}
+	feature, err := runtime.controller.PublishFeature(ctx, baseline.Baseline, spec)
+	if err != nil {
+		return failFrom("feature_publish_failed", err)
+	}
+	if !validPublishedFeature(feature, binding) {
+		return fail("feature_publish_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindFeature, binding, feature)
+	if err != nil {
+		return fail("feature_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("feature_artifact_write_failed")
+	}
+	return nil
+}
+
+func runCreateFeaturePR(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature", "--trail", "--out"})
+	if err != nil {
+		return err
+	}
+	trail, err := readTrailFile(arguments.one("--trail"))
+	if err != nil {
+		return fail("trail_invalid")
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	feature, err := readDeliveryArtifact[githubapi.PublishedFeature](arguments.one("--feature"), kindFeature, request, runtime.config)
+	if err != nil || !validPublishedFeature(feature.Payload, feature.Binding) {
+		return fail("feature_artifact_invalid")
+	}
+	pull, err := runtime.controller.CreateFeaturePullRequest(ctx, feature.Payload, featurePullRequestSpec(feature.Binding, trail))
+	if err != nil {
+		return failFrom("feature_pr_create_failed", err)
+	}
+	if !validFeaturePullRequest(pull, feature.Binding) || pull.HeadSHA != feature.Payload.HeadSHA || pull.BaseSHA != feature.Payload.Base.SHA {
+		return fail("feature_pr_result_invalid")
+	}
+	payload := featurePRPayload{Feature: feature.Payload, PullRequest: pull}
+	if !validFeaturePRPayload(payload, feature.Binding) {
+		return fail("feature_pr_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindFeaturePR, feature.Binding, payload)
+	if err != nil {
+		return fail("feature_pr_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("feature_pr_artifact_write_failed")
+	}
+	return nil
+}
+
+func runWaitFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	pull, err := readDeliveryArtifact[featurePRPayload](arguments.one("--feature-pr"), kindFeaturePR, request, runtime.config)
+	if err != nil || !validFeaturePRPayload(pull.Payload, pull.Binding) {
+		return fail("feature_pr_artifact_invalid")
+	}
+	checks, err := runtime.controller.WaitForPullRequestChecks(ctx, pull.Payload.PullRequest, featureChecks(), waitOptions())
+	if err != nil {
+		return failFrom("feature_checks_failed", err)
+	}
+	if !validFeatureChecks(checks, pull.Payload.PullRequest, pull.Binding) {
+		return fail("feature_checks_result_invalid")
+	}
+	payload := featureChecksPayload{Feature: pull.Payload.Feature, PullRequest: pull.Payload.PullRequest, Checks: checks}
+	if !validFeatureChecksPayload(payload, pull.Binding) {
+		return fail("feature_checks_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindFeatureChecks, pull.Binding, payload)
+	if err != nil {
+		return fail("feature_checks_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("feature_checks_artifact_write_failed")
+	}
+	return nil
+}
+
+func runMergeFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--checks", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	pull, err := readDeliveryArtifact[featurePRPayload](arguments.one("--feature-pr"), kindFeaturePR, request, runtime.config)
+	if err != nil || !validFeaturePRPayload(pull.Payload, pull.Binding) {
+		return fail("feature_pr_artifact_invalid")
+	}
+	checks, err := readDeliveryArtifact[featureChecksPayload](arguments.one("--checks"), kindFeatureChecks, request, runtime.config)
+	if err != nil || !checks.Binding.equal(pull.Binding) || !validFeatureChecksPayload(checks.Payload, checks.Binding) ||
+		!equalFeaturePRPayload(featurePRPayload{Feature: checks.Payload.Feature, PullRequest: checks.Payload.PullRequest}, pull.Payload) {
+		return fail("feature_checks_artifact_invalid")
+	}
+	merge, err := runtime.controller.MergeFeaturePullRequest(
+		ctx, pull.Payload.PullRequest, checks.Payload.Checks, featureMergeSpec(pull.Binding), waitOptions(),
+	)
+	if err != nil {
+		return failFrom("feature_merge_failed", err)
+	}
+	if !validFeatureMerge(merge, pull.Binding) || merge.PullRequestNumber != pull.Payload.PullRequest.Number ||
+		merge.BaseSHA != pull.Payload.PullRequest.BaseSHA || merge.HeadSHA != pull.Payload.PullRequest.HeadSHA ||
+		merge.TreeSHA != pull.Payload.Feature.TreeSHA {
+		return fail("feature_merge_result_invalid")
+	}
+	payload := featureMergePayload{
+		Feature: pull.Payload.Feature, PullRequest: pull.Payload.PullRequest, Checks: checks.Payload.Checks, Merge: merge,
+	}
+	if !validFeatureMergePayload(payload, pull.Binding) {
+		return fail("feature_merge_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindFeatureMerge, pull.Binding, payload)
+	if err != nil {
+		return fail("feature_merge_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("feature_merge_artifact_write_failed")
+	}
+	return nil
+}
+
+func runAwaitStaging(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{
+		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--feature-merge", "--out",
+	}, "--review")
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	gate, err := readGateArtifacts(arguments, request, runtime.config)
+	if err != nil {
+		return err
+	}
+	baseline, err := readBaselineArtifact(arguments.one("--baseline"), runtime.config)
+	if err != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	merge, err := readDeliveryArtifact[featureMergePayload](arguments.one("--feature-merge"), kindFeatureMerge, request, runtime.config)
+	if err != nil || !validFeatureMergePayload(merge.Payload, merge.Binding) ||
+		gate.decision.DecisionSHA256 != merge.Binding.DecisionSHA256 ||
+		!merge.Binding.matchesArtifacts(gate.source, gate.candidate, gate.validation) ||
+		gate.source.BaseSHA != merge.Payload.Feature.Base.SHA || gate.source.BaseSHA != baseline.Baseline.Integration.SHA {
+		return fail("feature_merge_artifact_invalid")
+	}
+	deployment, err := runtime.controller.AwaitStaging(ctx, merge.Payload.Merge, waitOptions(), stagingDigestPolicyFor(merge.Binding.Repository))
+	if err != nil {
+		return failFrom("staging_deployment_failed", err)
+	}
+	if !validStagingDeployment(deployment, merge.Binding) {
+		return fail("staging_deployment_result_invalid")
+	}
+	proof, err := releaseproof.NewStagingProof(stagingInputsFromChain(
+		request, runtime.config, gate, baseline.Baseline, merge.Payload, deployment,
+	))
+	if err != nil {
+		return fail("release_proof_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindStaging, merge.Binding, proof)
+	if err != nil {
+		return fail("staging_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("staging_artifact_write_failed")
+	}
+	return nil
+}
+
+func runCreatePromotionPR(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{
+		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--staging", "--visible", "--screenshot", "--out",
+	}, "--review")
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	gate, err := readGateArtifacts(arguments, request, runtime.config)
+	if err != nil {
+		return err
+	}
+	baseline, err := readBaselineArtifact(arguments.one("--baseline"), runtime.config)
+	if err != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	staging, err := readDeliveryArtifact[releaseproof.StagingProof](arguments.one("--staging"), kindStaging, request, runtime.config)
+	if err != nil || !stagingProofMatchesBinding(staging.Payload, staging.Binding) {
+		return fail("staging_artifact_invalid")
+	}
+	stagingInputs := stagingInputsFromProof(request, runtime.config, gate, staging.Payload)
+	if staging.Payload.Baseline != baseline.Baseline || staging.Payload.Validate(stagingInputs) != nil {
+		return fail("promotion_binding_invalid")
+	}
+	var visible visiblecheck.Evidence
+	if err := worker.ReadJSONFile(arguments.one("--visible"), worker.MaxArtifactJSONBytes, &visible); err != nil {
+		return fail("visible_evidence_invalid")
+	}
+	screenshot, err := readBoundedRegularArtifact(arguments.one("--screenshot"), int64(visiblecheck.MaxScreenshotBytes))
+	if err != nil {
+		return fail("visible_screenshot_invalid")
+	}
+	if visible.Environment != "staging" || visible.ValidateStaging(staging.Payload, stagingInputs) != nil {
+		return fail("visible_evidence_rejected")
+	}
+	if visible.ValidateScreenshot(screenshot) != nil {
+		return fail("visible_screenshot_rejected")
+	}
+	proof := githubapi.PromotionProof{
+		Baseline: baseline.Baseline, Staging: staging.Payload.StagingDeployment,
+		ProductPaths: slices.Clone(staging.Binding.ProductPaths), AcceptanceEvidenceSHA256: visible.EvidenceSHA256,
+	}
+	pull, err := runtime.controller.CreatePromotionPullRequest(
+		ctx, proof, promotionPullRequestSpec(staging.Binding, visible.EvidenceSHA256),
+	)
+	if err != nil {
+		return failFrom("promotion_pr_create_failed", err)
+	}
+	if !promotionFollowsVisibleEvidence(pull, visible) {
+		return fail("promotion_pr_result_invalid")
+	}
+	payload := promotionPayload{Release: staging.Payload, Proof: proof, PullRequest: pull}
+	if !validPromotionPayload(payload, staging.Binding) {
+		return fail("promotion_pr_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindPromotion, staging.Binding, payload)
+	if err != nil {
+		return fail("promotion_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("promotion_artifact_write_failed")
+	}
+	return nil
+}
+
+func promotionFollowsVisibleEvidence(pull githubapi.PullRequest, visible visiblecheck.Evidence) bool {
+	return !pull.CreatedAt.IsZero() && pull.CreatedAt.Location() == time.UTC &&
+		!visible.ObservedAt.IsZero() && visible.ObservedAt.Location() == time.UTC &&
+		!pull.CreatedAt.Before(visible.ObservedAt.Truncate(time.Second))
+}
+
+func runMergePromotion(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{
+		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--promotion", "--reflection-out", "--out",
+	}, "--review")
+	if err != nil {
+		return err
+	}
+	reflectionOutput := arguments.one("--reflection-out")
+	if validateOutputDestination(reflectionOutput) != nil ||
+		!distinctOutputDestinations(arguments.one("--out"), reflectionOutput) {
+		return fail("production_reflection_path_invalid")
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	gate, err := readGateArtifacts(arguments, request, runtime.config)
+	if err != nil {
+		return err
+	}
+	baseline, err := readBaselineArtifact(arguments.one("--baseline"), runtime.config)
+	if err != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	promotion, err := readDeliveryArtifact[promotionPayload](arguments.one("--promotion"), kindPromotion, request, runtime.config)
+	if err != nil || !validPromotionPayload(promotion.Payload, promotion.Binding) ||
+		promotion.Payload.Release.Baseline != baseline.Baseline ||
+		promotion.Payload.Release.Validate(stagingInputsFromProof(request, runtime.config, gate, promotion.Payload.Release)) != nil {
+		return fail("promotion_artifact_invalid")
+	}
+	var recordedReflection githubapi.MergeReflection
+	var reflectionFailure error
+	recordReflection := func(reflection githubapi.MergeReflection) error {
+		reflectionFailure = writeProductionReflectionArtifact(reflectionOutput, promotion, reflection)
+		if reflectionFailure != nil {
+			return reflectionFailure
+		}
+		recordedReflection = reflection
+		return nil
+	}
+	merge, err := runtime.controller.MergePromotionPullRequest(
+		ctx, promotion.Payload.PullRequest, githubapi.CheckEvidence{}, promotion.Payload.Proof,
+		promotionMergeSpec(promotion.Binding, promotion.Payload.Proof.AcceptanceEvidenceSHA256), waitOptions(), recordReflection,
+	)
+	if reflectionFailure != nil {
+		return reflectionFailure
+	}
+	if err != nil {
+		return failFrom("promotion_merge_failed", err)
+	}
+	if !validPromotionMerge(merge, promotion.Binding) || merge.PullRequestNumber != promotion.Payload.PullRequest.Number ||
+		merge.BaseSHA != promotion.Payload.PullRequest.BaseSHA || merge.HeadSHA != promotion.Payload.PullRequest.HeadSHA ||
+		!reflectionMatchesMerge(recordedReflection, merge) {
+		return fail("promotion_merge_result_invalid")
+	}
+	payload := promotionMergePayload{
+		Release: promotion.Payload.Release, Proof: promotion.Payload.Proof,
+		PullRequest: promotion.Payload.PullRequest, Merge: merge,
+	}
+	if !validPromotionMergePayload(payload, promotion.Binding) {
+		return fail("promotion_merge_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindPromotionMerge, promotion.Binding, payload)
+	if err != nil {
+		return fail("promotion_merge_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("promotion_merge_artifact_write_failed")
+	}
+	return nil
+}
+
+func writeProductionReflectionArtifact(
+	filename string,
+	promotion deliveryArtifact[promotionPayload],
+	reflection githubapi.MergeReflection,
+) error {
+	payload := productionReflectionPayload{
+		Release: promotion.Payload.Release, Proof: promotion.Payload.Proof,
+		PullRequest: promotion.Payload.PullRequest, Reflection: reflection,
+	}
+	if !validProductionReflectionPayload(payload, promotion.Binding) {
+		return fail("production_reflection_result_invalid")
+	}
+	artifact, err := newDeliveryArtifact(kindProductionReflection, promotion.Binding, payload)
+	if err != nil {
+		return fail("production_reflection_artifact_invalid")
+	}
+	if err := writeControllerArtifact(filename, artifact); err != nil {
+		return fail("production_reflection_artifact_write_failed")
+	}
+	return nil
+}
+
+func runAwaitProduction(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{
+		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--promotion-merge", "--out",
+	}, "--review")
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	gate, err := readGateArtifacts(arguments, request, runtime.config)
+	if err != nil {
+		return err
+	}
+	baseline, err := readBaselineArtifact(arguments.one("--baseline"), runtime.config)
+	if err != nil {
+		return fail("baseline_artifact_invalid")
+	}
+	merge, err := readDeliveryArtifact[promotionMergePayload](arguments.one("--promotion-merge"), kindPromotionMerge, request, runtime.config)
+	if err != nil || !validPromotionMergePayload(merge.Payload, merge.Binding) ||
+		merge.Payload.Release.Baseline != baseline.Baseline ||
+		merge.Payload.Release.Validate(stagingInputsFromProof(request, runtime.config, gate, merge.Payload.Release)) != nil {
+		return fail("promotion_merge_artifact_invalid")
+	}
+	deployment, err := runtime.controller.AwaitProduction(ctx, merge.Payload.Merge, waitOptions(), productionDigestPolicy())
+	if err != nil {
+		return failFrom("production_deployment_failed", err)
+	}
+	if !validProductionDeployment(deployment, merge.Binding) {
+		return fail("production_deployment_result_invalid")
+	}
+	production, err := releaseproof.NewProductionProof(
+		merge.Payload.Release, runtime.consumer, merge.Payload.Proof.AcceptanceEvidenceSHA256,
+		merge.Payload.PullRequest, merge.Payload.Merge, deployment,
+	)
+	if err != nil || production.Validate(merge.Payload.Release, runtime.consumer) != nil {
+		return fail("production_proof_invalid")
+	}
+	payload := productionPayload{Staging: merge.Payload.Release, Production: production}
+	artifact, err := newDeliveryArtifact(kindProduction, merge.Binding, payload)
+	if err != nil {
+		return fail("production_artifact_invalid")
+	}
+	if err := writeControllerArtifact(arguments.one("--out"), artifact); err != nil {
+		return fail("production_artifact_write_failed")
+	}
+	return nil
+}
+
+type gateArtifacts struct {
+	source     worker.SourceSnapshot
+	candidate  worker.Candidate
+	reviews    []worker.Review
+	decision   worker.StageDecision
+	validation worker.ValidationEvidence
+}
+
+func readGateArtifacts(arguments commandArguments, request worker.TicketRequest, config worker.Config) (gateArtifacts, error) {
+	var artifacts gateArtifacts
+	if err := worker.ReadJSONFile(arguments.one("--source"), worker.MaxArtifactJSONBytes, &artifacts.source); err != nil {
+		return gateArtifacts{}, fail("source_artifact_invalid")
+	}
+	if err := worker.ReadJSONFile(arguments.one("--candidate"), worker.MaxArtifactJSONBytes, &artifacts.candidate); err != nil {
+		return gateArtifacts{}, fail("candidate_artifact_invalid")
+	}
+	if err := worker.ReadJSONFile(arguments.one("--decision"), worker.MaxDecisionJSONBytes, &artifacts.decision); err != nil {
+		return gateArtifacts{}, fail("decision_artifact_invalid")
+	}
+	if err := worker.ReadJSONFile(arguments.one("--validation"), worker.MaxValidationJSONBytes, &artifacts.validation); err != nil {
+		return gateArtifacts{}, fail("validation_artifact_invalid")
+	}
+	reviews, err := readReviews(arguments["--review"])
+	if err != nil {
+		return gateArtifacts{}, fail("review_artifact_invalid")
+	}
+	artifacts.reviews = reviews
+	if worker.ValidatePublishGate(
+		artifacts.decision, artifacts.validation, artifacts.candidate, artifacts.reviews,
+		artifacts.source, request, config,
+	) != nil {
+		return gateArtifacts{}, fail("publish_gate_rejected")
+	}
+	return artifacts, nil
+}
+
+func stagingInputsFromChain(
+	request worker.TicketRequest,
+	config worker.Config,
+	gate gateArtifacts,
+	baseline githubapi.Baseline,
+	chain featureMergePayload,
+	staging githubapi.DeploymentResult,
+) releaseproof.StagingInputs {
+	return releaseproof.StagingInputs{
+		Request: request, Config: config, Source: gate.source, Candidate: gate.candidate,
+		Reviews: gate.reviews, Decision: gate.decision, Validation: gate.validation,
+		Baseline: baseline, PublishedFeature: chain.Feature, FeaturePullRequest: chain.PullRequest,
+		FeatureChecks: chain.Checks, FeatureMerge: chain.Merge, StagingDeployment: staging,
+	}
+}
+
+func stagingInputsFromProof(
+	request worker.TicketRequest,
+	config worker.Config,
+	gate gateArtifacts,
+	proof releaseproof.StagingProof,
+) releaseproof.StagingInputs {
+	return releaseproof.StagingInputs{
+		Request: request, Config: config, Source: gate.source, Candidate: gate.candidate,
+		Reviews: gate.reviews, Decision: gate.decision, Validation: gate.validation,
+		Baseline: proof.Baseline, PublishedFeature: proof.PublishedFeature,
+		FeaturePullRequest: proof.FeaturePullRequest, FeatureChecks: proof.FeatureChecks,
+		FeatureMerge: proof.FeatureMerge, StagingDeployment: proof.StagingDeployment,
+	}
+}
+
+func readTicket(filename string, config worker.Config) (worker.TicketRequest, error) {
+	var request worker.TicketRequest
+	if err := worker.ReadJSONFile(filename, worker.MaxTicketJSONBytes, &request); err != nil || request.Validate(config) != nil {
+		return worker.TicketRequest{}, fail("ticket_artifact_invalid")
+	}
+	return request, nil
+}
+
+func readReviews(filenames []string) ([]worker.Review, error) {
+	reviews := make([]worker.Review, len(filenames))
+	for index, filename := range filenames {
+		if err := worker.ReadJSONFile(filename, worker.MaxReviewJSONBytes, &reviews[index]); err != nil {
+			return nil, fail("review_artifact_invalid")
+		}
+	}
+	return reviews, nil
+}
+
+func readBaselineArtifact(filename string, config worker.Config) (baselineArtifact, error) {
+	var artifact baselineArtifact
+	if err := worker.ReadJSONFile(filename, controllerArtifactMaxBytes, &artifact); err != nil || artifact.validate(config) != nil {
+		return baselineArtifact{}, fail("baseline_artifact_invalid")
+	}
+	return artifact, nil
+}
+
+func readDeliveryArtifact[T any](filename, kind string, request worker.TicketRequest, config worker.Config) (deliveryArtifact[T], error) {
+	var artifact deliveryArtifact[T]
+	if err := worker.ReadJSONFile(filename, controllerArtifactMaxBytes, &artifact); err != nil || artifact.validateEnvelope(kind, request, config) != nil {
+		return deliveryArtifact[T]{}, fail("delivery_artifact_invalid")
+	}
+	return artifact, nil
+}
+
+func writeControllerArtifact(filename string, value any) error {
+	return worker.WriteJSONFileExclusive(filename, value, controllerArtifactMaxBytes)
+}
+
+func (binding deliveryBinding) matchesArtifacts(
+	source worker.SourceSnapshot,
+	candidate worker.Candidate,
+	validation worker.ValidationEvidence,
+) bool {
+	paths := make([]string, len(candidate.Files))
+	for index, file := range candidate.Files {
+		paths[index] = file.Path
+	}
+	return binding.SourceSHA256 == source.SourceSHA256 && binding.CandidateSHA256 == candidate.CandidateSHA256 &&
+		binding.ValidationSHA256 == validation.ValidationSHA256 && slices.Equal(binding.ProductPaths, paths)
+}
+
+// readTrailFile loads the requester-facing run record composed by the worker.
+// It is held to the same plain-text bounds as the terminal report's copy.
+func readTrailFile(filename string) (string, error) {
+	encoded, err := os.ReadFile(filename)
+	if err != nil || len(encoded) == 0 || len(encoded) > hook.MaxTerminalTrailBytes {
+		return "", errors.New("trail file is invalid")
+	}
+	if hook.ValidateTrailText(string(encoded)) != nil {
+		return "", errors.New("trail file is invalid")
+	}
+	return string(encoded), nil
+}

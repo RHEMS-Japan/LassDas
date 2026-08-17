@@ -1,0 +1,326 @@
+{
+  "schema_version": 4,
+  "consumers": [
+    {
+      "repository": "example/consumer",
+      "repository_id": 101,
+      "description": "Example web console: client UI, API, and deployment manifests.",
+      "delivery_branch": "stg",
+      "delivery": "pull_request",
+      "integration_branch": "stg",
+      "release_branch": "prod",
+      "staging_origin": "https://stg.example.com",
+      "production_origin": "https://example.com",
+      "staging_workflow": "deploy-stg.yml",
+      "production_workflow": "deploy.yml",
+      "mode": {
+        "id": "client-visible-change",
+        "allowed_file_prefixes": [
+          "client/src/"
+        ],
+        "forbidden_candidate_text": [
+          "LassDas"
+        ],
+        "max_files": 8,
+        "max_file_bytes": 393216,
+        "max_total_bytes": 1048576,
+        "max_changed_lines": 3000,
+        "max_changed_bytes": 196608,
+        "toolchain": [
+          {
+            "binary": "node",
+            "version": "22",
+            "strip_v_prefix": true
+          },
+          {
+            "binary": "pnpm",
+            "version": "9.15.4"
+          }
+        ],
+        "verify_working_directory": "client",
+        "install_command": [
+          "pnpm",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "verify_commands": [
+          [
+            "pnpm",
+            "exec",
+            "tsc",
+            "--noEmit"
+          ],
+          [
+            "pnpm",
+            "build"
+          ]
+        ]
+      },
+      "github_contract": {
+        "default_branch": "prod",
+        "merge_settings": {
+          "allow_merge_commit": true,
+          "allow_squash_merge": false,
+          "allow_rebase_merge": false,
+          "allow_auto_merge": true,
+          "allow_update_branch": false,
+          "delete_branch_on_merge": false,
+          "use_squash_pr_title_as_default": false,
+          "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+          "squash_merge_commit_message": "COMMIT_MESSAGES",
+          "merge_commit_title": "MERGE_MESSAGE",
+          "merge_commit_message": "PR_TITLE",
+          "web_commit_signoff_required": false
+        },
+        "feature_workflows": [
+          {
+            "id": 101103,
+            "name": "codex-review",
+            "path": ".github/workflows/codex-review.yml",
+            "required_jobs": [
+              "gate"
+            ]
+          },
+          {
+            "id": 101104,
+            "name": "Quality Gates",
+            "path": ".github/workflows/quality-gates.yml",
+            "required_jobs": [
+              "required-check-a",
+              "advisory-check-b"
+            ]
+          }
+        ],
+        "staging_workflow": {
+          "id": 101101,
+          "name": "Deploy (stg)",
+          "path": ".github/workflows/deploy-stg.yml"
+        },
+        "production_workflows": [
+          {
+            "id": 101102,
+            "name": "Deploy",
+            "path": ".github/workflows/deploy.yml"
+          },
+          {
+            "id": 101105,
+            "name": "release-guard",
+            "path": ".github/workflows/release-guard.yml"
+          }
+        ],
+        "staging_digest_commit": {
+          "require_digest_only": true,
+          "exact_message_prefix": "[skip ci] update stg image digests for deploy ",
+          "exact_paths": [
+            "deploy/prod/kustomization.yaml",
+            "deploy/stg/kustomization.yaml"
+          ],
+          "actor_login": "github-actions[bot]"
+        }
+      }
+    },
+    {
+      "repository": "example/edge",
+      "repository_id": 102,
+      "description": "Example edge service written in Go.",
+      "delivery_branch": "stg",
+      "delivery": "pull_request",
+      "integration_branch": "stg",
+      "release_branch": "prod",
+      "staging_origin": "https://edge-stg.example.com",
+      "production_origin": "https://edge.example.com",
+      "staging_workflow": "deploy-stg.yml",
+      "production_workflow": "deploy-prod.yml",
+      "mode": {
+        "id": "gateway-service-change",
+        "allowed_file_prefixes": [
+          "internal/",
+          "cmd/"
+        ],
+        "forbidden_candidate_text": [
+          "LassDas"
+        ],
+        "max_files": 8,
+        "max_file_bytes": 131072,
+        "max_total_bytes": 1048576,
+        "max_changed_lines": 3000,
+        "max_changed_bytes": 196608,
+        "toolchain": [],
+        "verify_working_directory": ".",
+        "install_command": [
+          "go",
+          "mod",
+          "download"
+        ],
+        "verify_commands": [
+          [
+            "go",
+            "build",
+            "./..."
+          ],
+          [
+            "go",
+            "test",
+            "./..."
+          ]
+        ]
+      },
+      "github_contract": {
+        "default_branch": "stg",
+        "merge_settings": {
+          "allow_merge_commit": true,
+          "allow_squash_merge": true,
+          "allow_rebase_merge": true,
+          "allow_auto_merge": false,
+          "allow_update_branch": false,
+          "delete_branch_on_merge": false,
+          "use_squash_pr_title_as_default": false,
+          "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+          "squash_merge_commit_message": "COMMIT_MESSAGES",
+          "merge_commit_title": "MERGE_MESSAGE",
+          "merge_commit_message": "PR_TITLE",
+          "web_commit_signoff_required": false
+        },
+        "staging_workflow": {
+          "id": 102101,
+          "name": "Deploy edge (stg)",
+          "path": ".github/workflows/deploy-stg.yml"
+        },
+        "production_workflows": [
+          {
+            "id": 102102,
+            "name": "Deploy edge (prod)",
+            "path": ".github/workflows/deploy-prod.yml"
+          }
+        ]
+      }
+    }
+  ],
+  "models": {
+    "implementer": {
+      "id": "claude-author",
+      "vendor": "Anthropic",
+      "model": "anthropic/claude-opus-5",
+      "base_url": "https://gateway.example.com/api/v1",
+      "api_key_env": "MODEL_API_KEY_IMPLEMENTER",
+      "effort": "low",
+      "structured_output": false,
+      "max_output_tokens": 8192
+    },
+    "reviewers": [
+      {
+        "id": "claude-correctness",
+        "vendor": "Anthropic",
+        "model": "anthropic/claude-opus-5",
+        "base_url": "https://gateway.example.com/api/v1",
+        "api_key_env": "MODEL_API_KEY_IMPLEMENTER",
+        "lens": "Acceptance criteria, correctness, regressions, and concrete test gaps.",
+        "effort": "low",
+        "structured_output": false,
+        "max_output_tokens": 4096
+      },
+      {
+        "id": "codex-adversarial",
+        "vendor": "OpenAI",
+        "model": "openai/gpt-5.6-sol-pro",
+        "base_url": "https://gateway.example.com/api/v1",
+        "api_key_env": "MODEL_API_KEY_REVIEWER",
+        "lens": "Adversarial edge cases, unsafe assumptions, scope violations, and production observability.",
+        "effort": "high",
+        "structured_output": true,
+        "max_output_tokens": 4096
+      }
+    ],
+    "readiness": {
+      "assessor": {
+        "id": "claude-readiness-assessor",
+        "vendor": "Anthropic",
+        "model": "anthropic/claude-opus-5",
+        "base_url": "https://gateway.example.com/api/v1",
+        "api_key_env": "MODEL_API_KEY_IMPLEMENTER",
+        "effort": "high",
+        "structured_output": false,
+        "max_output_tokens": 8192
+      },
+      "checker": {
+        "id": "codex-readiness-checker",
+        "vendor": "OpenAI",
+        "model": "openai/gpt-5.6-sol-pro",
+        "base_url": "https://gateway.example.com/api/v1",
+        "api_key_env": "MODEL_API_KEY_REVIEWER",
+        "lens": "Adversarially verify the readiness assessment for false-ready, false-block, invalid questions, and missed scope violations.",
+        "effort": "high",
+        "structured_output": true,
+        "max_output_tokens": 4096
+      }
+    }
+  },
+  "agents": {
+    "implementer": {
+      "id": "claude-author",
+      "command": "claude",
+      "args": [
+        "--print",
+        "--allowedTools",
+        "Read,Edit,Grep,Glob,Bash,mcp__backlog",
+        "--permission-mode",
+        "acceptEdits",
+        "--max-turns",
+        "60",
+        "--mcp-config",
+        "../agent-mcp.json",
+        "--strict-mcp-config"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://gateway.example.com/api",
+        "ANTHROPIC_MODEL": "anthropic/claude-opus-5",
+        "BACKLOG_DOMAIN": "example.backlog.com"
+      },
+      "secret_env": {
+        "ANTHROPIC_AUTH_TOKEN": "MODEL_API_KEY_IMPLEMENTER",
+        "BACKLOG_API_KEY": "BACKLOG_API_KEY"
+      },
+      "timeout_seconds": 1800,
+      "knowledge": {
+        "rules": [
+          {
+            "from": "knowledge/rules.md",
+            "to": ".claude/CLAUDE.md"
+          }
+        ],
+        "library": {
+          "from": "knowledge/library",
+          "to": "automation-knowledge"
+        }
+      }
+    },
+    "reviewer": {
+      "id": "codex-adversary",
+      "command": "codex",
+      "args": [
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only"
+      ],
+      "env": {},
+      "secret_env": {
+        "GATEWAY_API_KEY": "MODEL_API_KEY_REVIEWER"
+      },
+      "timeout_seconds": 1800,
+      "knowledge": {
+        "rules": [
+          {
+            "from": "knowledge/rules.md",
+            "to": ".codex/AGENTS.md"
+          }
+        ],
+        "library": {
+          "from": "knowledge/library",
+          "to": "automation-knowledge"
+        }
+      }
+    }
+  },
+  "max_stages": 3
+}

@@ -1,0 +1,79 @@
+name: ci
+
+# Runs the full Go suite on every push and pull request. This includes
+# internal/enginepurity, the gate that fails the build if a consumer
+# identifier ever lands in the engine's working tree.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      # The identifier list is itself a consumer's identifiers, so it lives in
+      # a repository secret, never in this tree. Without the secret the purity
+      # scan is skipped - said out loud here, because the test runner's quiet
+      # output would otherwise let a skipped gate read as a passing one.
+      - name: State whether the purity scan can run
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+        run: |
+          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
+            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
+          else
+            echo "consumer-identifier scans are armed"
+          fi
+      - run: go test ./...
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+      # Commit messages travel with the tree, so they are held to the same
+      # standard. On a match the failure names the token only by its position
+      # in the list - printing the token or the message here would republish
+      # the identifier this gate exists to keep out.
+      - name: Scan commit messages for consumer identifiers
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+          RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          RANGE_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
+            echo "ENGINE_PURITY_TOKENS is not set; the commit-message scan is skipped"
+            exit 0
+          fi
+          # Without a usable base (first push of a branch, force push), every
+          # reachable message is scanned - histories here are short, and a
+          # single-commit fallback measurably let mid-branch commits through.
+          if [ -z "$RANGE_BASE" ] || ! git cat-file -e "$RANGE_BASE" 2>/dev/null; then
+            messages=$(git log --format=%B "$RANGE_HEAD")
+          else
+            messages=$(git log --format=%B "$RANGE_BASE".."$RANGE_HEAD")
+          fi
+          lowered=$(printf '%s' "$messages" | tr '[:upper:]' '[:lower:]')
+          index=0
+          failed=0
+          IFS=',' read -ra tokens <<< "$(printf '%s' "$ENGINE_PURITY_TOKENS" | tr '\n' ',')"
+          for token in "${tokens[@]}"; do
+            index=$((index + 1))
+            token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | xargs)
+            [ -z "$token" ] && continue
+            if printf '%s' "$lowered" | grep -qF "$token"; then
+              echo "a commit message in the pushed range contains forbidden identifier #$index - reword the commit"
+              failed=1
+            fi
+          done
+          exit "$failed"

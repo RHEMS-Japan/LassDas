@@ -1,0 +1,78 @@
+name: Agent rehearsal
+
+# Runs the configured coding agents against the configured endpoint, on the
+# runner the real work uses, without a ticket and without touching any
+# destination. It answers one question: does the shipped configuration drive
+# the shipped binaries all the way to a sealed result?
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout this revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install the configured agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          npm install --global --no-audit --no-fund \
+            @anthropic-ai/claude-code@2.1.220 \
+            @openai/codex@0.146.0
+          claude --version
+          codex --version
+
+      - name: Configure the reviewing agent to reach the configured endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .base_url' config/m1-consumer.json)
+          model=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .model' config/m1-consumer.json)
+          key_env=$(jq -er '.agents.reviewer.secret_env | keys[0]' config/m1-consumer.json)
+          effort=$(jq -er '.models.reviewers[] | select(.id == "codex-adversarial") | .effort' config/m1-consumer.json)
+          mkdir -p "$HOME/.codex"
+          {
+            printf 'model_provider = "gateway"\n'
+            printf 'model = "%s"\n' "$model"
+            printf 'model_reasoning_effort = "%s"\n\n' "$effort"
+            printf '[model_providers.gateway]\n'
+            printf 'name = "Consumer gateway"\n'
+            printf 'base_url = "%s"\n' "$base_url"
+            printf 'env_key = "%s"\n' "$key_env"
+            # The responses wire is the only one this CLI still supports
+            # (the chat wire was removed upstream - measured locally before
+            # it shipped as a "fix"). Its encrypted reasoning items break
+            # when the upstream flips providers mid-conversation; the worker
+            # retries a dead review once, and the durable cure is a pinned
+            # provider at the gateway.
+            printf 'wire_api = "responses"\n'
+          } > "$HOME/.codex/config.toml"
+
+      - name: Run both agents for real
+        shell: bash
+        env:
+          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
+          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+          BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
+        run: |
+          set -euo pipefail
+          go test -tags=liveagents -count=1 -timeout 25m ./internal/worker/ -run TestLive -v
