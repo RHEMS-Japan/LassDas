@@ -188,6 +188,13 @@ const ReviewAttemptLimit = 3
 // timeout guard test computes its budget from these two constants.
 const ReviewRetryEligible = 10 * time.Minute
 
+// ReviewRetryPause is how long a failed fast attempt waits before its fresh
+// conversation. Three instant retries measurably landed inside the same
+// per-minute rate window and burned the whole attempt budget in four seconds
+// against a 429 (2026-08-17); a pause longer than the window makes the retry
+// a genuinely fresh chance instead of the same collision.
+const ReviewRetryPause = 75 * time.Second
+
 // RetryableReviewFailure reports whether a failed review attempt died fast
 // enough to be the upstream lottery rather than a budget problem.
 func RetryableReviewFailure(outcome AgentOutcome) bool {

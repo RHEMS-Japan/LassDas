@@ -136,6 +136,12 @@ func transcriptTail(outcome worker.AgentOutcome) string {
 	return tail
 }
 
+// reviewRetryPause is worker.ReviewRetryPause behind a seam: the retry tests
+// exercise the loop below with fake agents, and a real 75-second sleep per
+// retry measurably turned a seven-second suite into a five-minute one -
+// inside the per-ticket tool-integrity gate, not just CI.
+var reviewRetryPause = worker.ReviewRetryPause
+
 func runAgentReview(ctx context.Context, args []string) error {
 	flags := commandFlags("agent-review")
 	configPath := flags.String("config", "", "")
@@ -195,7 +201,13 @@ func runAgentReview(ctx context.Context, args []string) error {
 	// final one included, so nothing is masked.
 	outcome, runErr := worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil)
 	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
-		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying; attempt tail:\n%s\n", outcome.ExitCode, attempt, transcriptTail(outcome))
+		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
+		select {
+		case <-ctx.Done():
+			attempt = worker.ReviewAttemptLimit
+			continue
+		case <-time.After(reviewRetryPause):
+		}
 		outcome, runErr = worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil)
 	}
 	if runErr != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -299,6 +300,10 @@ func TestImplementFeedsBothPreviousReviewsToTheAgent(t *testing.T) {
 // answers is sealed like any healthy review, and the loop really ran three
 // times. The counter lives outside the workspace so the reviewer is not
 // mistaken for one that edits the tree.
+// The retry pause is real time in production; at test scale it only needs to
+// exist, not to be felt.
+func init() { reviewRetryPause = 10 * time.Millisecond }
+
 func TestAgentReviewRetriesFastDeathsUntilOneAnswers(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "attempts")
 	fixture := newAgentFixture(t, editTheLabel,

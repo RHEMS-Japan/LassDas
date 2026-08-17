@@ -565,7 +565,7 @@ jobs:
     # plus setup, readiness and the impasse question. The guard test holds
     # this to the configured agent budgets so neither can drift past the
     # other unnoticed.
-    timeout-minutes: 290
+    timeout-minutes: 300
     permissions: {}
     outputs:
       publish: ${{ steps.stages.outputs.publish }}

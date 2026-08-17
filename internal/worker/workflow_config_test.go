@@ -273,7 +273,7 @@ func TestWorkflowGivesTheModelJobTimeForItsAgents(t *testing.T) {
 	// The reviewer's worst case is every fast retry burned plus one full
 	// slow attempt - the retry gate refuses to roll again after a slow
 	// failure, which is what keeps this sum finite.
-	reviewerWorst := (ReviewAttemptLimit-1)*int(ReviewRetryEligible.Seconds()) + config.Agents.Reviewer.TimeoutSeconds
+	reviewerWorst := (ReviewAttemptLimit-1)*int((ReviewRetryEligible+ReviewRetryPause).Seconds()) + config.Agents.Reviewer.TimeoutSeconds
 	perStage := config.Agents.Implementer.TimeoutSeconds + reviewerWorst
 	impasseMinutes := int(ModelInvocationTimeout.Minutes())
 	// Readiness is a model cost like any other: up to MaxReadinessAttempts
