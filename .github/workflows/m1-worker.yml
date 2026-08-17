@@ -709,7 +709,11 @@ jobs:
           if [[ -f "$SOURCE_INPUT/clarification.json" ]]; then
             clarification_args=(--clarification "$SOURCE_INPUT/clarification.json")
           fi
-          for attempt in 1 2; do
+          # Three attempts mirror MaxReadinessAttempts in the worker: attempt 1
+          # may over-ask, attempt 2 may over-commit, and the third turn exists
+          # so a checker-identified requester ambiguity can still become a
+          # question instead of a terminal readiness_unresolved.
+          for attempt in 1 2 3; do
             previous_readiness=()
             if (( attempt > 1 )); then
               previous_attempt=$((attempt - 1))
@@ -740,7 +744,7 @@ jobs:
               --check "$readiness_dir/check-$attempt.json"
             )
             verdict=$(jq -er '.verdict | select(. == "pass" or . == "fail")' "$readiness_dir/check-$attempt.json")
-            if [[ "$verdict" == pass || "$attempt" == 2 ]]; then
+            if [[ "$verdict" == pass || "$attempt" == 3 ]]; then
               break
             fi
           done

@@ -276,7 +276,12 @@ func TestWorkflowGivesTheModelJobTimeForItsAgents(t *testing.T) {
 	reviewerWorst := (ReviewAttemptLimit-1)*int(ReviewRetryEligible.Seconds()) + config.Agents.Reviewer.TimeoutSeconds
 	perStage := config.Agents.Implementer.TimeoutSeconds + reviewerWorst
 	impasseMinutes := int(ModelInvocationTimeout.Minutes())
-	needed := (config.MaxStages*perStage)/60 + 10 + impasseMinutes // stages plus setup, readiness and the impasse question
+	// Readiness is a model cost like any other: up to MaxReadinessAttempts
+	// assessor+checker invocations, each bounded by ModelInvocationTimeout.
+	// A fixed constant here measurably went stale when the attempt limit
+	// grew, which is exactly the drift this test exists to catch.
+	readinessMinutes := MaxReadinessAttempts * 2 * int(ModelInvocationTimeout.Minutes())
+	needed := (config.MaxStages*perStage)/60 + 10 + readinessMinutes + impasseMinutes // stages plus setup, readiness and the impasse question
 	if granted < needed {
 		t.Fatalf("the model job may be killed mid-stage: %d minutes granted, %d needed", granted, needed)
 	}

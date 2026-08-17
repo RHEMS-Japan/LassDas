@@ -192,7 +192,12 @@ func TestDecideReadinessOutcomes(t *testing.T) {
 	}
 
 	secondAssessment, secondCheck := testAssessmentPair(t, 2, testClarificationOutput(), "fail", source, request, config)
-	unresolved, err := DecideReadiness([]ReadinessAssessment{failedOnce, secondAssessment}, []ReadinessCheck{failedCheck, secondCheck}, source, request, config)
+	if _, err := DecideReadiness([]ReadinessAssessment{failedOnce, secondAssessment}, []ReadinessCheck{failedCheck, secondCheck}, source, request, config); err == nil {
+		t.Fatal("DecideReadiness() sealed a decision before the final permitted attempt")
+	}
+
+	thirdAssessment, thirdCheck := testAssessmentPair(t, 3, testClarificationOutput(), "fail", source, request, config)
+	unresolved, err := DecideReadiness([]ReadinessAssessment{failedOnce, secondAssessment, thirdAssessment}, []ReadinessCheck{failedCheck, secondCheck, thirdCheck}, source, request, config)
 	if err != nil || unresolved.Outcome != ReadinessOutcomeUnresolved || len(unresolved.Questions) != 0 {
 		t.Fatalf("decision = %+v, error = %v", unresolved, err)
 	}
