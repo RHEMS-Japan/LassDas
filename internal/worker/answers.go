@@ -1,8 +1,14 @@
 package worker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -135,4 +141,118 @@ func answerInline(value string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// PreservedAnswer is one settled requester decision from an earlier ticket,
+// as preserved in the instance knowledge tree. The readiness pair receives
+// these so a settled point is never asked again - a live ticket measurably
+// received the same settled question three times before this existed.
+type PreservedAnswer struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+// The per-file ceiling equals the writer's (MaxAnswerKnowledgeBytes): the
+// preserve rail can never produce a record the loader refuses, so a reader
+// error here means the tree was edited by hand. The total budget bounds what
+// the prompts carry; past it the newest records win and the older ones are
+// reported dropped - a growing archive must never stall every ticket's
+// readiness (adversarial review measurably reached both cliffs).
+const maxPreservedAnswerTotalBytes = 128 * 1024
+
+// LoadPreservedAnswers reads every Markdown answer under the configured
+// preservation directory inside knowledgeRoot. No configuration or no
+// directory is an empty, valid result; an oversized record is an error,
+// because preserve writes small files and anything else means the tree is
+// not what this loader believes it is.
+func LoadPreservedAnswers(knowledgeRoot string, config Config) ([]PreservedAnswer, int, error) {
+	if knowledgeRoot == "" || config.AnswerKnowledge == nil {
+		return nil, 0, nil
+	}
+	directory := filepath.Join(knowledgeRoot, filepath.FromSlash(config.AnswerKnowledge.To))
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, errors.New("preserved answers could not be listed")
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		names = append(names, name)
+	}
+	// Newest first for the budget below: ticket keys carry ascending
+	// numbers, so the descending natural order puts the records most likely
+	// to matter ahead of the archive.
+	sort.Slice(names, func(i, j int) bool { return answerNameLess(names[j], names[i]) })
+	answers := make([]PreservedAnswer, 0, len(names))
+	total := 0
+	dropped := 0
+	for _, name := range names {
+		content, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil {
+			return nil, 0, errors.New("preserved answer could not be read: " + name)
+		}
+		if len(content) > MaxAnswerKnowledgeBytes {
+			return nil, 0, errors.New("preserved answer is larger than the preserve rail can write: " + name)
+		}
+		if total+len(content) > maxPreservedAnswerTotalBytes {
+			dropped++
+			continue
+		}
+		total += len(content)
+		answers = append(answers, PreservedAnswer{Name: name, Content: string(content)})
+	}
+	// The prompt reads better oldest-to-newest; the budget above already
+	// decided which records survive.
+	sort.Slice(answers, func(i, j int) bool { return answerNameLess(answers[i].Name, answers[j].Name) })
+	return answers, dropped, nil
+}
+
+// answerNameLess orders names with their trailing numbers compared as
+// numbers, so TICKET-9 sorts before TICKET-56.
+func answerNameLess(a, b string) bool {
+	prefixA, numberA, okA := splitTrailingNumber(strings.TrimSuffix(a, ".md"))
+	prefixB, numberB, okB := splitTrailingNumber(strings.TrimSuffix(b, ".md"))
+	if okA && okB && prefixA == prefixB {
+		return numberA < numberB
+	}
+	return a < b
+}
+
+func splitTrailingNumber(value string) (string, int64, bool) {
+	index := len(value)
+	for index > 0 && value[index-1] >= '0' && value[index-1] <= '9' {
+		index--
+	}
+	if index == len(value) {
+		return value, 0, false
+	}
+	number := int64(0)
+	for _, digit := range value[index:] {
+		number = number*10 + int64(digit-'0')
+		if number > 1<<40 {
+			return value, 0, false
+		}
+	}
+	return value[:index], number, true
+}
+
+// answersDigestOf seals the exact preserved answers both readiness roles saw,
+// mirroring clarificationDigestOf: empty input is the empty digest.
+func answersDigestOf(answers []PreservedAnswer) string {
+	if len(answers) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(answers)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }

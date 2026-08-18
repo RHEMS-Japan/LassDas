@@ -33,7 +33,7 @@ func TestReadinessOutputValidationHoldsJapaneseProse(t *testing.T) {
 // live tickets); this pins the reframing that ended that.
 func TestReadinessPromptCarriesTheWholeWritableScope(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
-	prompt, err := readinessPrompt(source, request, config, nil, nil, nil)
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

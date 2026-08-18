@@ -58,7 +58,7 @@ func testAssessmentPair(t *testing.T, attempt int, output ModelReadinessOutput, 
 	t.Helper()
 	assessorInvocation := validTestInvocation(config.Models.Readiness.Assessor)
 	assessorInvocation.RequestID = assessorInvocation.RequestID + "-a" + string(rune('0'+attempt))
-	assessment, err := NewReadinessAssessment(attempt, output, nil, source, request, config, assessorInvocation, testInvocationTime)
+	assessment, err := NewReadinessAssessment(attempt, output, nil, nil, source, request, config, assessorInvocation, testInvocationTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestAssessReadinessSealsAssessment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assessment, usage, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, source, request, config)
+	assessment, usage, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,15 +110,15 @@ func TestAssessReadinessSealsAssessment(t *testing.T) {
 func TestAssessReadinessRejectsInconsistentDecision(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[{"id":"Q1","dimension":"user_visible_behavior","question":"Which one?","why_blocking":"Changes result.","choices":[]}],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
 		t.Fatal("AssessReadiness() accepted ready with questions")
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"clarification_required","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
 		t.Fatal("AssessReadiness() accepted clarification without questions")
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"reject","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
 		t.Fatal("AssessReadiness() accepted reject without a reject code")
 	}
 }
@@ -161,14 +161,14 @@ func TestAssessReadinessRetryRequiresFailedPrior(t *testing.T) {
 	api := &fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[],"assumptions":[],"reject_code":""}`)}
 	invoker, _ := NewModelInvoker(api)
 
-	if _, _, err := invoker.AssessReadiness(context.Background(), 2, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 2, nil, nil, nil, nil, source, request, config); err == nil {
 		t.Fatal("AssessReadiness() accepted a retry without the failed prior attempt")
 	}
 	passedAssessment, passedCheck := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
-	if _, _, err := invoker.AssessReadiness(context.Background(), 2, &passedAssessment, &passedCheck, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 2, &passedAssessment, &passedCheck, nil, nil, source, request, config); err == nil {
 		t.Fatal("AssessReadiness() accepted a retry after a passing check")
 	}
-	retried, _, err := invoker.AssessReadiness(context.Background(), 2, &assessment, &failedCheck, nil, source, request, config)
+	retried, _, err := invoker.AssessReadiness(context.Background(), 2, &assessment, &failedCheck, nil, nil, source, request, config)
 	if err != nil || retried.Attempt != 2 {
 		t.Fatalf("retry = %+v, error = %v", retried, err)
 	}
@@ -179,7 +179,7 @@ func TestCheckReadinessBindsAssessment(t *testing.T) {
 	assessment, _ := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
 	api := &fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[]}`)}
 	invoker, _ := NewModelInvoker(api)
-	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, source, request, config)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestCheckReadinessBindsAssessment(t *testing.T) {
 	}
 	tampered := assessment
 	tampered.Decision = ReadinessOutcomeClarification
-	if _, _, err := invoker.CheckReadiness(context.Background(), tampered, nil, source, request, config); err == nil {
+	if _, _, err := invoker.CheckReadiness(context.Background(), tampered, nil, nil, source, request, config); err == nil {
 		t.Fatal("CheckReadiness() accepted a tampered assessment")
 	}
 }

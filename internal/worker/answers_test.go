@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -170,5 +173,109 @@ func TestAnswerKnowledgeDestinationValidation(t *testing.T) {
 		if err := config.Validate(); err == nil {
 			t.Fatalf("destination %q must be rejected", destination)
 		}
+	}
+}
+
+// Preserved answers reach both readiness prompts and are digest-bound to the
+// pair: a checker judging against different answers than the assessor saw is
+// refused. The repeat it prevents was measured live - the same settled
+// question asked three times across generations.
+func TestPreservedAnswersReachReadinessAndBindThePair(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	answers := []PreservedAnswer{{Name: "T-1.md", Content: "# 回答\n空配列は拒否する。\n"}}
+
+	api := &fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[],"assumptions":[],"reject_code":""}`)}
+	invoker, err := NewModelInvoker(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, answers, source, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(api.request.Messages[len(api.request.Messages)-1].Content, "空配列は拒否する") {
+		t.Fatal("the assessor prompt does not carry the preserved answer")
+	}
+	if assessment.AnswersSHA256 == "" {
+		t.Fatal("the assessment is not bound to the answers it saw")
+	}
+
+	checkerAPI := &fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[]}`)}
+	checker, _ := NewModelInvoker(checkerAPI)
+	if _, _, err := checker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config); err == nil {
+		t.Fatal("a checker without the assessor's answers must be refused")
+	}
+	check, _, err := checker.CheckReadiness(context.Background(), assessment, nil, answers, source, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(checkerAPI.request.Messages[len(checkerAPI.request.Messages)-1].Content, "空配列は拒否する") {
+		t.Fatal("the checker prompt does not carry the preserved answer")
+	}
+	if check.AnswersSHA256 != assessment.AnswersSHA256 {
+		t.Fatal("the check is not bound to the same answers")
+	}
+}
+
+// LoadPreservedAnswers reads the configured directory deterministically and
+// treats absence as the empty, valid state.
+func TestLoadPreservedAnswersReadsTheConfiguredDirectory(t *testing.T) {
+	config := validTestConfig()
+	config.AnswerKnowledge = &AnswerKnowledgeConfig{To: "knowledge/library/answers"}
+	root := t.TempDir()
+	directory := filepath.Join(root, "knowledge", "library", "answers")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "b.md"), []byte("second"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "a.md"), []byte("first"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "ignore.txt"), []byte("not markdown"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	answers, dropped, err := LoadPreservedAnswers(root, config)
+	if err != nil || dropped != 0 {
+		t.Fatalf("error = %v, dropped = %d", err, dropped)
+	}
+	if len(answers) != 2 || answers[0].Name != "a.md" || answers[1].Name != "b.md" {
+		t.Fatalf("answers = %+v", answers)
+	}
+	if got, _, _ := LoadPreservedAnswers(t.TempDir(), config); got != nil {
+		t.Fatal("an absent directory must be the empty state")
+	}
+	if got, _, _ := LoadPreservedAnswers("", config); got != nil {
+		t.Fatal("an empty root must be the empty state")
+	}
+}
+
+// Past the total budget the newest records win and the loader reports what
+// it dropped instead of stalling every ticket - the growth cliff was
+// measurably reachable through ordinary accumulation.
+func TestLoadPreservedAnswersKeepsTheNewestWithinBudget(t *testing.T) {
+	config := validTestConfig()
+	config.AnswerKnowledge = &AnswerKnowledgeConfig{To: "knowledge/library/answers"}
+	root := t.TempDir()
+	directory := filepath.Join(root, "knowledge", "library", "answers")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", 50*1024)
+	for _, name := range []string{"TICKET-9.md", "TICKET-56.md", "TICKET-102.md"} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(big), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	answers, dropped, err := LoadPreservedAnswers(root, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 1 || len(answers) != 2 {
+		t.Fatalf("answers = %d, dropped = %d, want the newest two", len(answers), dropped)
+	}
+	if answers[0].Name != "TICKET-56.md" || answers[1].Name != "TICKET-102.md" {
+		t.Fatalf("kept = %s, %s — trailing numbers must order numerically", answers[0].Name, answers[1].Name)
 	}
 }

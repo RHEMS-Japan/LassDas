@@ -165,11 +165,11 @@ func TestReadinessFixturesAreExecutableAndGateCorrectly(t *testing.T) {
 			if fixture.WithResolvedClarification {
 				clarification = fixtureClarification(t, request)
 			}
-			assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, clarification, source, request, config)
+			assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, clarification, nil, source, request, config)
 			if err != nil {
 				t.Fatalf("AssessReadiness() error = %v", err)
 			}
-			check, _, err := invoker.CheckReadiness(context.Background(), assessment, clarification, source, request, config)
+			check, _, err := invoker.CheckReadiness(context.Background(), assessment, clarification, nil, source, request, config)
 			if err != nil {
 				t.Fatalf("CheckReadiness() error = %v", err)
 			}

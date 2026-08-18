@@ -686,6 +686,7 @@ func runAssessReadiness(ctx context.Context, args []string) error {
 	previousPath := flags.String("previous-assessment", "", "")
 	previousCheckPath := flags.String("previous-check", "", "")
 	clarificationPath := flags.String("clarification", "", "")
+	knowledgeRoot := flags.String("knowledge-root", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) || *attempt < 1 || *attempt > worker.MaxReadinessAttempts ||
@@ -718,7 +719,15 @@ func runAssessReadiness(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	assessment, _, err := invoker.AssessReadiness(ctx, *attempt, previous, previousCheck, clarification, source, request, config)
+	answers, droppedAnswers, err := worker.LoadPreservedAnswers(*knowledgeRoot, config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "preserved answers could not be loaded", err)
+		return errors.New("preserved answers could not be loaded")
+	}
+	if droppedAnswers > 0 {
+		fmt.Fprintf(os.Stderr, "worker: preserved answers over budget: %d oldest records not carried\n", droppedAnswers)
+	}
+	assessment, _, err := invoker.AssessReadiness(ctx, *attempt, previous, previousCheck, clarification, answers, source, request, config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness assessment failed", err)
 		return errors.New("readiness assessment failed")
@@ -737,6 +746,7 @@ func runCheckReadiness(ctx context.Context, args []string) error {
 	sourcePath := flags.String("source", "", "")
 	assessmentPath := flags.String("assessment", "", "")
 	clarificationPath := flags.String("clarification", "", "")
+	knowledgeRoot := flags.String("knowledge-root", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *assessmentPath, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("check-readiness arguments are invalid")
@@ -757,7 +767,15 @@ func runCheckReadiness(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	check, _, err := invoker.CheckReadiness(ctx, assessment, clarification, source, request, config)
+	answers, droppedAnswers, err := worker.LoadPreservedAnswers(*knowledgeRoot, config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "preserved answers could not be loaded", err)
+		return errors.New("preserved answers could not be loaded")
+	}
+	if droppedAnswers > 0 {
+		fmt.Fprintf(os.Stderr, "worker: preserved answers over budget: %d oldest records not carried\n", droppedAnswers)
+	}
+	check, _, err := invoker.CheckReadiness(ctx, assessment, clarification, answers, source, request, config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness check failed", err)
 		return errors.New("readiness check failed")

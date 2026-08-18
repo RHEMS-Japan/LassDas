@@ -322,5 +322,8 @@
       }
     }
   },
-  "max_stages": 3
+  "max_stages": 3,
+  "answer_knowledge": {
+    "to": "knowledge/library/answers"
+  }
 }

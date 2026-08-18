@@ -727,6 +727,7 @@ jobs:
               --tool-sha "$TOOL_SHA" \
               --ticket "$SOURCE_INPUT/readiness-ticket.json" \
               --source "$SOURCE_INPUT/readiness-source.json" \
+              --knowledge-root "$TOOLS" \
               --attempt "$attempt" \
               "${previous_readiness[@]}" \
               "${clarification_args[@]}" \
@@ -736,6 +737,7 @@ jobs:
               --tool-sha "$TOOL_SHA" \
               --ticket "$SOURCE_INPUT/readiness-ticket.json" \
               --source "$SOURCE_INPUT/readiness-source.json" \
+              --knowledge-root "$TOOLS" \
               --assessment "$readiness_dir/assessment-$attempt.json" \
               "${clarification_args[@]}" \
               --out "$readiness_dir/check-$attempt.json"
