@@ -236,4 +236,9 @@ func TestChangedRegionRenderingsSayCreatedFilesPlainly(t *testing.T) {
 	if !strings.Contains(summaries, "+a\n+b\n+c") {
 		t.Fatalf("the full rendering lost the created content: %s", summaries)
 	}
+	for _, view := range reviewFileViews(candidate, source) {
+		if view.Status != "created" {
+			t.Fatalf("the chat reviewer sees %s as %q, want created", view.Path, view.Status)
+		}
+	}
 }

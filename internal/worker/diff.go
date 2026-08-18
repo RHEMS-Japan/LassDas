@@ -213,14 +213,17 @@ func reviewFileViews(candidate Candidate, source SourceSnapshot) []reviewFileVie
 	views := make([]reviewFileView, 0, len(candidate.Files))
 	for index, file := range candidate.Files {
 		base := source.Files[index]
-		if file.Content == base.Content {
-			views = append(views, reviewFileView{Path: file.Path, Status: "unchanged"})
-			continue
-		}
+		// Created wins over the equality skip: an empty created file equals
+		// its (empty) base, and used to reach the chat reviewer as
+		// "unchanged" - the same drop the agent-facing renderings fixed.
 		if base.Created {
 			// The reviewer judges a new file as a whole, told plainly that
 			// nothing existed before it.
 			views = append(views, reviewFileView{Path: file.Path, Status: "created", After: file.Content})
+			continue
+		}
+		if file.Content == base.Content {
+			views = append(views, reviewFileView{Path: file.Path, Status: "unchanged"})
 			continue
 		}
 		if len(base.Content) <= reviewEmbedWholeFileBytes && len(file.Content) <= reviewEmbedWholeFileBytes {
