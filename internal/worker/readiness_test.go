@@ -302,3 +302,189 @@ func TestNormalizeReadinessTaxonomyCoercesOnlyUnknownLabels(t *testing.T) {
 		t.Fatalf("normalized output must validate: %v", err)
 	}
 }
+
+func testTwoQuestionOutput() ModelReadinessOutput {
+	output := testClarificationOutput()
+	output.Questions = append(output.Questions, ReadinessQuestion{
+		ID: "Q2", Dimension: "acceptance_criterion",
+		Question: "What should an empty input produce?", WhyBlocking: "The choice changes the accepted result.",
+		Choices: []ReadinessChoice{
+			{ID: "a", Label: "An empty result", Effect: "The user sees an empty list."},
+			{ID: "b", Label: "An error", Effect: "The user sees a validation message."},
+		},
+	})
+	return output
+}
+
+func testCheckedPair(t *testing.T, attempt int, output ModelReadinessOutput, checkOutput ModelReadinessCheckOutput, source SourceSnapshot, request TicketRequest, config Config) (ReadinessAssessment, ReadinessCheck) {
+	t.Helper()
+	assessorInvocation := validTestInvocation(config.Models.Readiness.Assessor)
+	assessorInvocation.RequestID = assessorInvocation.RequestID + "-a" + string(rune('0'+attempt))
+	assessment, err := NewReadinessAssessment(attempt, output, nil, nil, source, request, config, assessorInvocation, testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkerInvocation := validTestInvocation(config.Models.Readiness.Checker)
+	checkerInvocation.RequestID = checkerInvocation.RequestID + "-c" + string(rune('0'+attempt))
+	check, err := NewReadinessCheck(checkOutput, assessment, source, request, config, checkerInvocation, testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return assessment, check
+}
+
+// The final attempt used to end readiness_unresolved whenever the checker
+// failed it - even when the checker's only objection named one over-asked
+// question and a checker-approved question stood right next to it. Measured
+// live: the valid empty-input question reached the requester only after an
+// operator rewrote the ticket.
+func TestDecideReadinessSurvivingQuestionsOutliveABlamedOne(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	chain := func(finalCheck ModelReadinessCheckOutput) (ReadinessDecision, error) {
+		first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
+		second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
+		third, thirdCheck := testCheckedPair(t, 3, testTwoQuestionOutput(), finalCheck, source, request, config)
+		return DecideReadiness(
+			[]ReadinessAssessment{first, second, third},
+			[]ReadinessCheck{firstCheck, secondCheck, thirdCheck},
+			source, request, config)
+	}
+
+	// Every objection names Q1; Q2 survives, renumbered to Q1.
+	decision, err := chain(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
+		{Code: "false-block", Message: "Q1 is answerable from the provided source.", QuestionID: "Q1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Outcome != ReadinessOutcomeClarification || len(decision.Questions) != 1 {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if decision.Questions[0].ID != "Q1" || !strings.Contains(decision.Questions[0].Question, "empty input") {
+		t.Fatalf("the surviving question was not renumbered from the invariant start: %+v", decision.Questions[0])
+	}
+
+	// A set-level objection (no question_id) keeps the fail-closed outcome.
+	decision, err = chain(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
+		{Code: "false-block", Message: "Q1 is answerable from the provided source.", QuestionID: "Q1"},
+		{Code: "inconsistent-decision", Message: "The assessment contradicts itself."},
+	}})
+	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+		t.Fatalf("decision = %+v, error = %v", decision, err)
+	}
+
+	// Blaming every question leaves nothing to surface.
+	decision, err = chain(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
+		{Code: "false-block", Message: "Q1 is answerable from the provided source.", QuestionID: "Q1"},
+		{Code: "invalid-question", Message: "Q2 duplicates the first question.", QuestionID: "Q2"},
+	}})
+	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+		t.Fatalf("decision = %+v, error = %v", decision, err)
+	}
+
+	// A question-scoped failure on a non-clarification assessment changes nothing.
+	first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
+	second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
+	third, thirdCheck := testAssessmentPair(t, 3, testReadyOutput(), "fail", source, request, config)
+	decision, err = DecideReadiness([]ReadinessAssessment{first, second, third}, []ReadinessCheck{firstCheck, secondCheck, thirdCheck}, source, request, config)
+	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved {
+		t.Fatalf("decision = %+v, error = %v", decision, err)
+	}
+}
+
+// The rescue is sealed and re-derivable: the decision that surfaces surviving
+// questions must round-trip through full validation like any other outcome.
+func TestDecideReadinessRescueRoundTripsThroughValidate(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
+	second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
+	third, thirdCheck := testCheckedPair(t, 3, testTwoQuestionOutput(), ModelReadinessCheckOutput{
+		Verdict: "fail", Reasons: []ReadinessCheckReason{
+			{Code: "false-block", Message: "Q2 is answerable from the provided source.", QuestionID: "Q2"},
+		}}, source, request, config)
+	assessments := []ReadinessAssessment{first, second, third}
+	checks := []ReadinessCheck{firstCheck, secondCheck, thirdCheck}
+	decision, err := DecideReadiness(assessments, checks, source, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Outcome != ReadinessOutcomeClarification || len(decision.Questions) != 1 || decision.Questions[0].ID != "Q1" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if err := decision.Validate(assessments, checks, source, request, config); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	tampered := decision
+	tampered.Outcome = ReadinessOutcomeUnresolved
+	tampered.Questions = []ReadinessQuestion{}
+	if err := tampered.Validate(assessments, checks, source, request, config); err == nil {
+		t.Fatal("Validate() accepted a decision whose rescue was stripped")
+	}
+}
+
+// A checker cannot blame a question the assessment never asked, and a blamed
+// id must look like a question id at all.
+func TestReadinessCheckQuestionBlameIsBound(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	assessorInvocation := validTestInvocation(config.Models.Readiness.Assessor)
+	assessment, err := NewReadinessAssessment(1, testClarificationOutput(), nil, nil, source, request, config, assessorInvocation, testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkerInvocation := validTestInvocation(config.Models.Readiness.Checker)
+	if _, err := NewReadinessCheck(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
+		{Code: "false-block", Message: "Blames a question that does not exist.", QuestionID: "Q7"},
+	}}, assessment, source, request, config, checkerInvocation, testInvocationTime); err == nil {
+		t.Fatal("NewReadinessCheck() accepted blame for an absent question")
+	}
+	if err := validateModelReadinessCheckOutput(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
+		{Code: "false-block", Message: "Malformed id.", QuestionID: "question-one"},
+	}}); err == nil {
+		t.Fatal("validateModelReadinessCheckOutput() accepted a malformed question id")
+	}
+}
+
+// The rescue honors question-scoped codes only. A set-level defect - a scope
+// miss, a wrong decision, a code this engine has never heard of - condemns
+// the whole set even when the checker attributed it to a question: the
+// checker's veto must not be dissolvable by how it fills in a label.
+func TestDecideReadinessRescueIgnoresSetLevelCodes(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	for _, code := range []string{"scope-miss", "false-ready", "inconsistent-decision", "secret-request", "novel-code"} {
+		first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
+		second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
+		third, thirdCheck := testCheckedPair(t, 3, testTwoQuestionOutput(), ModelReadinessCheckOutput{
+			Verdict: "fail", Reasons: []ReadinessCheckReason{
+				{Code: code, Message: "A defect attributed to a question.", QuestionID: "Q1"},
+			}}, source, request, config)
+		decision, err := DecideReadiness(
+			[]ReadinessAssessment{first, second, third},
+			[]ReadinessCheck{firstCheck, secondCheck, thirdCheck},
+			source, request, config)
+		if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+			t.Fatalf("code %s: decision = %+v, error = %v", code, decision, err)
+		}
+	}
+}
+
+// A hallucinated question id must not end the run: it is dropped to
+// set-level before sealing, keeping the reason's full force and the
+// fail-closed outcome. Two live tickets already died to mislabeled
+// enum-ish fields; this is the same class of entry.
+func TestCheckReadinessDropsAHallucinatedQuestionID(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	assessorInvocation := validTestInvocation(config.Models.Readiness.Assessor)
+	assessment, err := NewReadinessAssessment(1, testClarificationOutput(), nil, nil, source, request, config, assessorInvocation, testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeChatAPI{output: chatOutput(`{"verdict":"fail","reasons":[{"code":"false-block","message":"Blames a question that does not exist.","question_id":"Q3"}]}`)}
+	invoker, _ := NewModelInvoker(api)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	if err != nil {
+		t.Fatalf("a hallucinated question id killed the check: %v", err)
+	}
+	if len(check.Reasons) != 1 || check.Reasons[0].QuestionID != "" {
+		t.Fatalf("the hallucinated id was not dropped to set-level: %+v", check.Reasons)
+	}
+}
