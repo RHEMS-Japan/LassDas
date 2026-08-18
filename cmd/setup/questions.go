@@ -51,6 +51,8 @@ type Answers struct {
 
 	AppID      string `json:"app_id"`
 	AppKeyPath string `json:"app_key_path"`
+
+	KnowledgeSourcePath string `json:"knowledge_source_path"`
 }
 
 var (
@@ -195,6 +197,12 @@ func askQuestions(state *State) error {
 		).Title("クラウド (AWS)"),
 
 		huh.NewGroup(
+			huh.NewInput().Title("既存のナレッジフォルダのパス (空 = なしで始める)").
+				Description("この製品の決定事項・方針メモが既にあるなら、そのフォルダの中身 (.md) を新しいリポジトリのナレッジ置き場へ写します").
+				Value(&a.KnowledgeSourcePath),
+		).Title("ナレッジ"),
+
+		huh.NewGroup(
 			huh.NewInput().Title("納品用 GitHub App の App ID (後で設定するなら空)").
 				Description("納品 PR を作る App。未作成なら空のまま進み、最後に作成ガイドを表示します").Value(&a.AppID),
 			huh.NewInput().Title("App の秘密鍵 (.pem) のパス (App ID を入れた場合)").Value(&a.AppKeyPath),
@@ -247,7 +255,8 @@ func normalize(a *Answers) {
 	trim(&a.InstanceRepo, &a.EnginePin, &a.BacklogDomain, &a.ProjectKey, &a.AllowedCreatorID,
 		&a.CategoryName, &a.ConsumerRepo, &a.WritablePrefixes, &a.DeliveryBranch, &a.ReleaseBranch,
 		&a.StagingOrigin, &a.ProductionOrigin, &a.GatewayBaseURL, &a.ImplementerModel,
-		&a.ReviewerModel, &a.Region, &a.Profile, &a.NamePrefix, &a.AppID, &a.AppKeyPath)
+		&a.ReviewerModel, &a.Region, &a.Profile, &a.NamePrefix, &a.AppID, &a.AppKeyPath,
+		&a.KnowledgeSourcePath)
 	a.GatewayBaseURL = strings.TrimRight(a.GatewayBaseURL, "/")
 	a.StagingOrigin = strings.TrimRight(a.StagingOrigin, "/")
 	a.ProductionOrigin = strings.TrimRight(a.ProductionOrigin, "/")

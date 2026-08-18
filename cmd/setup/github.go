@@ -206,8 +206,80 @@ func materializeInstanceTree(root string, a *Answers, engineRepo string) error {
 		"# knowledge/library\n\n自動処理に読ませる、この製品の決定事項・方針・過去回答の置き場。1 ファイル 1 論点で増やす。\n"); err != nil {
 		return err
 	}
+	if a.KnowledgeSourcePath != "" {
+		copied, err := copyKnowledge(a.KnowledgeSourcePath, filepath.Join(root, "knowledge", "library"))
+		if err != nil {
+			return err
+		}
+		stepOK(fmt.Sprintf("既存ナレッジ %d 枚を取り込み", copied))
+	}
 	return writeTree(root, "README.md",
 		"# "+a.InstanceRepo+"\n\nチケット自動処理のインスタンス。エンジン ("+engineRepo+") を版数固定で呼び、この repo が設定・knowledge・実行履歴を持つ。\n\n- 受付の ON/OFF: repository variable `TICKET_INGRESS_ENABLED`\n- チケットの書き方: エンジン側 docs/TICKET_AUTHORING.md\n")
+}
+
+// copyKnowledge mirrors the operator's existing notes into the instance
+// knowledge library: Markdown files only, structure preserved, symlinks and
+// hidden entries skipped. The engine name must not land in a consumer's
+// knowledge (the same rule scripts/sync-knowledge.sh enforces), and a hard
+// size cap keeps an accidentally-pointed-at archive from becoming the
+// repository.
+func copyKnowledge(source, destination string) (int, error) {
+	info, err := os.Stat(source)
+	if err != nil || !info.IsDir() {
+		return 0, errors.New("ナレッジフォルダが見つかりません: " + source)
+	}
+	const maxFileBytes = 1 << 20
+	const maxTotalBytes = 20 << 20
+	copied, total := 0, 0
+	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			if entry.IsDir() && path != source {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(name, ".md") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return errors.New("ナレッジが読めません: " + path)
+		}
+		if len(content) > maxFileBytes {
+			return errors.New("ナレッジ 1 枚が大きすぎます (1MB 超): " + path)
+		}
+		if strings.Contains(strings.ToLower(string(content)), "lassdas") {
+			return errors.New("エンジン名がナレッジに含まれています (顧客側の表面には出さない規約): " + path)
+		}
+		total += len(content)
+		if total > maxTotalBytes {
+			return errors.New("ナレッジの合計が大きすぎます (20MB 超) — フォルダを絞ってください")
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, content, 0o644); err != nil {
+			return err
+		}
+		copied++
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if copied == 0 {
+		return 0, errors.New("指定フォルダに .md がありませんでした: " + source)
+	}
+	return copied, nil
 }
 
 func writeTree(root, path, content string) error {
