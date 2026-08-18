@@ -530,8 +530,11 @@ func pushInstanceTree(a *Answers, engineRepo string) error {
 	}
 	// An existing repository (resume, or operator-created) contributes both
 	// its history and its working content; a brand-new one fails the fetch
-	// and starts at the root.
-	if err := git("fetch", "--quiet", "--depth", "1", "origin", "main"); err == nil {
+	// and starts at the root. The probe's stderr stays silenced: "couldn't
+	// find remote ref" is the normal first-run outcome, not a fault.
+	probe := exec.Command("git", "fetch", "--quiet", "--depth", "1", "origin", "main")
+	probe.Dir = tree
+	if probe.Run() == nil {
 		if err := git("reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
 			return err
 		}

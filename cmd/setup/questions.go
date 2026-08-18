@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -29,6 +30,11 @@ type Answers struct {
 	AllowedCreatorID   string `json:"allowed_creator_id"`
 	CategoryName       string `json:"category_name"`
 	BotAPIKey          string `json:"-"`
+	// TrackerAdminKey exists only for the two provisioning calls Backlog
+	// restricts to project administrators (board columns, webhook). It is
+	// never persisted anywhere: a bot user should not have to be an
+	// administrator, and the administrator's key should not outlive setup.
+	TrackerAdminKey string `json:"-"`
 
 	ConsumerRepo       string `json:"consumer_repo"`
 	WritablePrefixes   string `json:"writable_prefixes"`
@@ -79,11 +85,45 @@ func requireNonEmpty(hint string) func(string) error {
 	}
 }
 
-// askQuestions runs the full interview. Non-secret answers from a resumed
-// session pre-fill the fields, so an interrupted operator only re-enters
-// secrets and confirms.
-func askQuestions(state *State) error {
+// loadHeadlessAnswers is askQuestions without the terminal: the state file
+// must already hold every non-secret answer, and the secrets arrive through
+// the environment. Validation is the same as the interactive path.
+func loadHeadlessAnswers(state *State) error {
 	a := &state.Answers
+	a.BotAPIKey = os.Getenv("LASSDAS_SETUP_BOT_KEY")
+	a.TrackerAdminKey = os.Getenv("LASSDAS_SETUP_TRACKER_ADMIN_KEY")
+	a.ImplementerKey = os.Getenv("LASSDAS_SETUP_IMPLEMENTER_KEY")
+	a.ReviewerKey = os.Getenv("LASSDAS_SETUP_REVIEWER_KEY")
+	// The same defaults the interview would have filled: a state file that
+	// omits them once provisioned AWS resources literally named "-state".
+	fillDefaults(a)
+	normalize(a)
+	required := map[string]string{
+		"instance_repo": a.InstanceRepo, "engine_pin": a.EnginePin,
+		"backlog_domain": a.BacklogDomain, "project_key": a.ProjectKey,
+		"allowed_creator_id": a.AllowedCreatorID, "consumer_repo": a.ConsumerRepo,
+		"writable_prefixes": a.WritablePrefixes, "staging_origin": a.StagingOrigin,
+		"production_origin": a.ProductionOrigin, "gateway_base_url": a.GatewayBaseURL,
+		"LASSDAS_SETUP_BOT_KEY":         a.BotAPIKey,
+		"LASSDAS_SETUP_IMPLEMENTER_KEY": a.ImplementerKey,
+		"LASSDAS_SETUP_REVIEWER_KEY":    a.ReviewerKey,
+	}
+	for name, value := range required {
+		if value == "" {
+			return errors.New("--non-interactive に必要な値がありません: " + name)
+		}
+	}
+	if err := crossValidate(a); err != nil {
+		return err
+	}
+	printSummary(a)
+	return nil
+}
+
+// fillDefaults fills every answer that has a sensible default. Both entry
+// points call it: the interview shows these as pre-filled fields, and the
+// headless path takes them as-is.
+func fillDefaults(a *Answers) {
 	if a.Tracker == "" {
 		a.Tracker = "backlog"
 	}
@@ -122,6 +162,14 @@ func askQuestions(state *State) error {
 	if a.NamePrefix == "" {
 		a.NamePrefix = "ticket-automation"
 	}
+}
+
+// askQuestions runs the full interview. Non-secret answers from a resumed
+// session pre-fill the fields, so an interrupted operator only re-enters
+// secrets and confirms.
+func askQuestions(state *State) error {
+	a := &state.Answers
+	fillDefaults(a)
 
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -156,6 +204,9 @@ func askQuestions(state *State) error {
 				Description("受付コメントや状態変更を投稿する専用ユーザーのキー (画面には表示しません)").
 				EchoMode(huh.EchoModePassword).
 				Validate(requireNonEmpty("API キーを入力してください")).Value(&a.BotAPIKey),
+			huh.NewInput().Title("プロジェクト管理者の API キー (セットアップ限り・任意)").
+				Description("ボード列と webhook の作成にだけ使い、どこにも保存しません。bot 自身をプロジェクト管理者にしてある場合は空欄で可").
+				EchoMode(huh.EchoModePassword).Value(&a.TrackerAdminKey),
 		).Title("トラッカー (Backlog)"),
 
 		huh.NewGroup(

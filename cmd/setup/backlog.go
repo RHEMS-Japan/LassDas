@@ -13,9 +13,27 @@ import (
 
 // backlogCall is the minimal tracker client the wizard needs; the engine's
 // own client stays untouched because the wizard runs outside the sealed rail.
+// It always speaks as the bot user, which doubles as the proof that the bot
+// key actually works before it is sealed away for the runtime.
 func backlogCall(a *Answers, method, path string, form url.Values, out any) error {
+	return backlogCallWithKey(a, a.BotAPIKey, method, path, form, out)
+}
+
+// backlogAdminCall speaks as the project administrator when a key for one was
+// given, for the few provisioning calls Backlog restricts to administrators
+// (board columns, webhooks). Without one it falls back to the bot key - the
+// consumer may have chosen to make the bot an administrator instead.
+func backlogAdminCall(a *Answers, method, path string, form url.Values, out any) error {
+	key := a.TrackerAdminKey
+	if key == "" {
+		key = a.BotAPIKey
+	}
+	return backlogCallWithKey(a, key, method, path, form, out)
+}
+
+func backlogCallWithKey(a *Answers, apiKey, method, path string, form url.Values, out any) error {
 	endpoint := "https://" + a.BacklogDomain + path
-	query := url.Values{"apiKey": {a.BotAPIKey}}
+	query := url.Values{"apiKey": {apiKey}}
 	var body io.Reader
 	if method == http.MethodGet && form != nil {
 		for key, values := range form {
@@ -51,7 +69,26 @@ func backlogCall(a *Answers, method, path string, form url.Values, out any) erro
 	defer response.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return fmt.Errorf("トラッカー API が %d を返しました: %s", response.StatusCode, strings.TrimSpace(string(payload)))
+		message := fmt.Sprintf("トラッカー API が %d を返しました: %s", response.StatusCode, strings.TrimSpace(string(payload)))
+		// Backlog error codes 4 (access denied) and 5 (unauthorized
+		// operation) both mean the key's user lacks a role, and the raw
+		// body does not say which role or where to grant it.
+		var trouble struct {
+			Errors []struct {
+				Code int `json:"code"`
+			} `json:"errors"`
+		}
+		_ = json.Unmarshal(payload, &trouble)
+		for _, item := range trouble.Errors {
+			if item.Code == 4 || item.Code == 5 {
+				message += "\n  → この操作には対象プロジェクトの「プロジェクト管理者」権限が要ります。" +
+					"再実行してセットアップ質問で管理者の API キー (セットアップ限り・保存しません) を入れるか" +
+					" (--non-interactive では環境変数 LASSDAS_SETUP_TRACKER_ADMIN_KEY)、" +
+					"Backlog のプロジェクト設定 → 参加ユーザー でこの API キーのユーザーを管理者にしてください。"
+				break
+			}
+		}
+		return errors.New(message)
 	}
 	if out != nil {
 		return json.Unmarshal(payload, out)
@@ -127,7 +164,7 @@ func provisionTracker(state *State) error {
 			return id, nil
 		}
 		var created namedID
-		if err := backlogCall(a, http.MethodPost, "/api/v2/projects/"+project+"/statuses",
+		if err := backlogAdminCall(a, http.MethodPost, "/api/v2/projects/"+project+"/statuses",
 			url.Values{"name": {name}, "color": {color}}, &created); err != nil {
 			return 0, errors.New("ボード列「" + name + "」の作成に失敗: " + err.Error())
 		}
@@ -170,7 +207,7 @@ func provisionTracker(state *State) error {
 		HookURL string `json:"hookUrl"`
 	}
 	var webhooks []webhook
-	if err := backlogCall(a, http.MethodGet, "/api/v2/projects/"+project+"/webhooks", nil, &webhooks); err != nil {
+	if err := backlogAdminCall(a, http.MethodGet, "/api/v2/projects/"+project+"/webhooks", nil, &webhooks); err != nil {
 		return err
 	}
 	exists := false
@@ -181,7 +218,7 @@ func provisionTracker(state *State) error {
 		}
 	}
 	if !exists {
-		if err := backlogCall(a, http.MethodPost, "/api/v2/projects/"+project+"/webhooks", url.Values{
+		if err := backlogAdminCall(a, http.MethodPost, "/api/v2/projects/"+project+"/webhooks", url.Values{
 			"name":              {"ticket-automation"},
 			"hookUrl":           {hookURL},
 			"description":       {"チケット自動処理の受け口 (課題の追加のみ)"},

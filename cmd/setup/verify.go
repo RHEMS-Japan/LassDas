@@ -69,7 +69,10 @@ func verifyPreflight(state *State) error {
 			time.Sleep(10 * time.Second)
 		}
 	}
-	if err := spinner.New().Title("model-preflight を実行中 (エンジンのビルドとモデル呼び出しの実測・数分かかります)").Action(work).Run(); err != nil {
+	if nonInteractive {
+		fmt.Println(styleFaint.Render("  · model-preflight を実行中 (数分かかります)"))
+		work()
+	} else if err := spinner.New().Title("model-preflight を実行中 (エンジンのビルドとモデル呼び出しの実測・数分かかります)").Action(work).Run(); err != nil {
 		return err
 	}
 	if conclusion != "success" {
@@ -89,12 +92,16 @@ func verifyPreflight(state *State) error {
 	}
 
 	enable := a.AppID != ""
-	prompt := "チケットの受付を今すぐ有効化しますか? (vars TICKET_INGRESS_ENABLED)"
-	if a.AppID == "" {
-		prompt += " — App 未設定のため納品段で止まります"
-	}
-	if err := huh.NewConfirm().Title(prompt).Value(&enable).Run(); err != nil {
-		return err
+	if nonInteractive {
+		enable = false
+	} else {
+		prompt := "チケットの受付を今すぐ有効化しますか? (vars TICKET_INGRESS_ENABLED)"
+		if a.AppID == "" {
+			prompt += " — App 未設定のため納品段で止まります"
+		}
+		if err := huh.NewConfirm().Title(prompt).Value(&enable).Run(); err != nil {
+			return err
+		}
 	}
 	if enable {
 		if out, err := gh("variable", "set", "TICKET_INGRESS_ENABLED", "-R", a.InstanceRepo, "--body", "true"); err != nil {

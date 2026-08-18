@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -98,7 +99,20 @@ func main() {
 	}
 }
 
+// nonInteractive is the headless mode for rehearsals and CI: every answer
+// comes from the state file, secrets come from LASSDAS_SETUP_* environment
+// variables, and nothing prompts - including the final ingestion toggle,
+// which stays off.
+var nonInteractive = slices.Contains(os.Args[1:], "--non-interactive")
+
 func run() error {
+	// A misspelled flag must not fall through to the interview: in CI there
+	// is no terminal and the form would hang or crash far from the typo.
+	for _, argument := range os.Args[1:] {
+		if argument != "--non-interactive" {
+			return errors.New("不明な引数です: " + argument + " (使える引数は --non-interactive のみ)")
+		}
+	}
 	fmt.Println(styleBanner.Render(styleTitle.Render("LassDas setup") + "\n" + styleFaint.Render("チケット自動処理の新しいインスタンスを、対話だけで組み上げます")))
 	fmt.Println()
 
@@ -112,7 +126,11 @@ func run() error {
 		fmt.Println()
 	}
 
-	if err := askQuestions(state); err != nil {
+	if nonInteractive {
+		if err := loadHeadlessAnswers(state); err != nil {
+			return err
+		}
+	} else if err := askQuestions(state); err != nil {
 		return err
 	}
 	saveState(state)
