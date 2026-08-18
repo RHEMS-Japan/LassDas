@@ -282,12 +282,8 @@ func reviewAgentPrompt(
 		"### 変更されたファイル",
 		strings.Join(changed, "\n"),
 	}
-	sections = append(sections,
-		"",
-		"### 変更内容 (機械抽出の差分)",
-		"- 下の差分が今回の変更の全てです。大きなファイルは全文を読み込まず、差分の行番号の周辺だけを必要に応じて部分的に読んでください (全文読み込みは接続を溢れさせます)。",
-	)
-	sections = append(sections, worker.ChangedRegionSummaries(candidate, source)...)
+	head := sections
+	sections = nil
 	if request.AbsentText != "" {
 		sections = append(sections,
 			"",
@@ -319,7 +315,31 @@ func reviewAgentPrompt(
 		"- path は上の「変更されたファイル」に挙がっているものだけです。",
 		worker.ReviewAnswerRulesTail,
 	)
-	prompt := strings.Join(sections, "\n")
+	tail := sections
+	assemble := func(middle []string) string {
+		parts := make([]string, 0, len(head)+len(middle)+len(tail))
+		parts = append(parts, head...)
+		parts = append(parts, middle...)
+		parts = append(parts, tail...)
+		return strings.Join(parts, "\n")
+	}
+	prompt := assemble(append([]string{
+		"",
+		"### 変更内容 (機械抽出の差分)",
+		"- 下の差分が今回の変更の全てです。大きなファイルは全文を読み込まず、差分の行番号の周辺だけを必要に応じて部分的に読んでください (全文読み込みは接続を溢れさせます)。",
+	}, worker.ChangedRegionSummaries(candidate, source)...))
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		// The full patches outgrew the instruction. Fall back to naming the
+		// changed line ranges and let the reviewer open exactly those spans
+		// in the working tree; a review with a map beats no review at all.
+		prompt = assemble(append([]string{
+			"",
+			"### 変更内容 (変更位置の一覧)",
+			"- 変更が大きく、この指示文に差分の中身は収まりませんでした。下に挙がる行範囲が変更された箇所の全てです。",
+			"- 各ファイルは作業ディレクトリに変更適用済みです。「変更後」の行番号で該当範囲とその周辺だけを開いて確認してください (全文読み込みは接続を溢れさせます)。",
+			"- 範囲がファイル全体に及ぶものは、依頼に関係する箇所を探して部分的に読んでください。",
+		}, worker.ChangedRegionOutlines(candidate, source)...))
+	}
 	if len(prompt) > worker.MaxAgentPromptBytes {
 		return "", errors.New("instruction is too large")
 	}
@@ -398,7 +418,7 @@ func implementPrompt(
 		"## 守ること",
 		"- 変更してよいのは "+strings.Join(consumer.Mode.AllowedFilePrefixes, " / ")+" の下だけです。それ以外を変更した実行は破棄されます。",
 		"- 変更するファイルは最大 "+itoa(consumer.Mode.MaxFiles)+" 個までです。",
-		"- 新しいファイルは作らないでください。既にあるファイルを変更してください。",
+		"- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。",
 		"- 依頼に書かれていない改善・整理はしないでください。依頼を満たす最小の変更にしてください。",
 		"- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
 		"- 変更が終わったら、何をどう変えたかを数行で述べて終了してください。コミットはしないでください。",

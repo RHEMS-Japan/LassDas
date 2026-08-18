@@ -296,3 +296,63 @@ func TestRetryableReviewFailureIsDurationBased(t *testing.T) {
 		t.Fatal("a timeout-class death must not be retryable")
 	}
 }
+
+// A created deliverable that the repository ignores never enters the
+// candidate, so it would ship as a silently missing file in the PR. The run
+// must fail loudly instead. Measured live risk: a numbered SQL migration
+// matching a *.generated.* ignore pattern.
+func TestChangedFilesUnderFailsWhenACreatedFileIsIgnored(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	writeAgentFile(t, root, ".gitignore", "*.generated.ts\n")
+	agentGit(t, root, "add", ".gitignore")
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
+	writeAgentFile(t, root, "client/src/messages.generated.ts", "export const x = 1;\n")
+
+	_, err := ChangedFilesUnder(root, []string{"client/src/"})
+	if err == nil {
+		t.Fatal("an ignored created file inside the scope was silently dropped")
+	}
+	if !strings.Contains(err.Error(), "ignores") || !strings.Contains(err.Error(), "client/src/messages.generated.ts") {
+		t.Fatalf("the failure does not name the ignored file: %v", err)
+	}
+}
+
+// Ignored byproducts outside the writable scope, and hidden ones inside it,
+// are the normal residue of a toolchain, not lost deliverables.
+func TestChangedFilesUnderKeepsToleratingIrrelevantIgnoredFiles(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	writeAgentFile(t, root, ".gitignore", "node_modules/\n.DS_Store\n")
+	agentGit(t, root, "add", ".gitignore")
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
+	writeAgentFile(t, root, "node_modules/left/pad.js", "module.exports = 1\n")
+	writeAgentFile(t, root, "client/src/.DS_Store", "junk\n")
+	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
+
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 1 || changed[0] != "client/src/label.ts" {
+		t.Fatalf("changed = %v", changed)
+	}
+}
+
+// The reviewer's runs pass no writable scope. No scope means nothing to
+// protect from ignore rules - and the implementer's legitimate byproducts
+// outside the scope (node_modules, dist) must not kill the review that
+// follows it in the same workspace.
+func TestChangedFilesUnderIgnoreCheckIsScopedToWritablePrefixes(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	writeAgentFile(t, root, ".gitignore", "node_modules/\n")
+	agentGit(t, root, "add", ".gitignore")
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
+	writeAgentFile(t, root, "node_modules/left/pad.js", "module.exports = 1\n")
+
+	changed, err := ChangedFilesUnder(root, nil)
+	if err != nil {
+		t.Fatalf("a run without a writable scope must not police ignore rules: %v", err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("changed = %v, want none", changed)
+	}
+}

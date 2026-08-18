@@ -299,9 +299,16 @@ func (i *ModelInvoker) converse(ctx context.Context, endpoint ModelEndpoint, sys
 		output.Usage.TotalTokens <= 0 || output.Usage.PromptTokens+output.Usage.CompletionTokens != output.Usage.TotalTokens {
 		return "", InvocationUsage{}, errors.New("model response metadata is invalid")
 	}
-	if len(output.Choices) != 1 || output.Choices[0].FinishReason != ChatFinishStop ||
-		output.Choices[0].Message.Role != "assistant" {
+	if len(output.Choices) != 1 || output.Choices[0].Message.Role != "assistant" {
 		return "", InvocationUsage{}, errors.New("model response content is invalid")
+	}
+	if output.Choices[0].FinishReason != ChatFinishStop {
+		// The finish reason is a provider enum, safe to echo, and it is the
+		// difference between "raise max_output_tokens" (length) and every
+		// other remedy — the first oversized live review died as a bare
+		// "content is invalid" with the cutoff hidden inside.
+		return "", InvocationUsage{}, errors.New(
+			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {

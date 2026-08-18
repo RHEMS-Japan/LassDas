@@ -206,7 +206,7 @@ func RetryableReviewFailure(outcome AgentOutcome) bool {
 // error rather than a filtered-out result: the agent was told where it may
 // write, and writing elsewhere is a failure of the run, not noise to discard.
 func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) {
-	output, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+	output, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
 	if err != nil {
 		return nil, errors.New("changed files could not be read")
 	}
@@ -225,6 +225,32 @@ func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) 
 	for index := 0; index < len(entries); index++ {
 		entry := entries[index]
 		if len(entry) < 4 {
+			continue
+		}
+		if entry[0] == '!' && entry[1] == '!' {
+			// An ignored path never enters the candidate, so a deliverable
+			// that the repository ignores would otherwise vanish without a
+			// trace - the run would report success and ship a PR with the
+			// file missing. The check guards the writable scope only: a
+			// caller with no scope (the reviewer's read-only run) has no
+			// deliverables to protect, and the implementer's byproducts
+			// outside the scope are legitimate - flagging them there would
+			// kill a review over something the reviewer never did. Hidden
+			// paths stay exempt: a .DS_Store or an editor cache is a
+			// byproduct, never a deliverable.
+			if len(allowedPrefixes) == 0 {
+				continue
+			}
+			path := strings.TrimSuffix(entry[3:], "/")
+			inScope := allowedPath(path, allowedPrefixes) || allowedPath(path+"/", allowedPrefixes)
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(prefix, path+"/") {
+					inScope = true // the ignored directory contains the scope
+				}
+			}
+			if path != "" && !hasHiddenComponent(path) && inScope {
+				return nil, errors.New("the repository ignores a file inside the writable scope: " + path)
+			}
 			continue
 		}
 		if err := appendPath(entry[3:]); err != nil {

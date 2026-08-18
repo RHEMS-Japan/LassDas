@@ -247,13 +247,71 @@ func reviewFileViews(candidate Candidate, source SourceSnapshot) []reviewFileVie
 func ChangedRegionSummaries(candidate Candidate, source SourceSnapshot) []string {
 	summaries := make([]string, 0, len(candidate.Files))
 	for index, file := range candidate.Files {
-		if index >= len(source.Files) || file.Content == source.Files[index].Content {
+		if index >= len(source.Files) {
 			continue
 		}
 		base := source.Files[index]
+		// A created file is judged as a whole, said plainly: the generic
+		// diff of "" against the content rendered it as an existing one-line
+		// file with an inverted 1-0 range. This branch also keeps an empty
+		// created file visible - it equals its (empty) base and the
+		// unchanged-skip below would drop its section entirely.
+		if base.Created {
+			summaries = append(summaries, createdFileHeader(file),
+				createdFileSpan(file)+"\n+"+strings.ReplaceAll(file.Content, "\n", "\n+"))
+			continue
+		}
+		if file.Content == base.Content {
+			continue
+		}
 		header := fmt.Sprintf("#### %s (変更前 %d 行 / 変更後 %d 行)",
 			file.Path, 1+strings.Count(base.Content, "\n"), 1+strings.Count(file.Content, "\n"))
 		summaries = append(summaries, header, changedRegionPatch(base.Content, file.Content, reviewDiffContextLines))
 	}
 	return summaries
+}
+
+func createdFileHeader(file CandidateFile) string {
+	return fmt.Sprintf("#### %s (新規作成・全 %d 行)", file.Path, 1+strings.Count(file.Content, "\n"))
+}
+
+func createdFileSpan(file CandidateFile) string {
+	return fmt.Sprintf("@@ 新規作成 1-%d 行目 @@", 1+strings.Count(file.Content, "\n"))
+}
+
+// ChangedRegionOutlines lists where each file changed — the hunk headers of
+// the same patches, without their content. It exists for candidates whose
+// full patches do not fit in an instruction: the reviewer still learns which
+// line ranges to open instead of rereading whole files, which is what
+// disconnected the first console review.
+func ChangedRegionOutlines(candidate Candidate, source SourceSnapshot) []string {
+	outlines := make([]string, 0, len(candidate.Files))
+	for index, file := range candidate.Files {
+		if index >= len(source.Files) {
+			continue
+		}
+		base := source.Files[index]
+		if base.Created {
+			outlines = append(outlines, createdFileHeader(file), createdFileSpan(file))
+			continue
+		}
+		if file.Content == base.Content {
+			continue
+		}
+		header := fmt.Sprintf("#### %s (変更前 %d 行 / 変更後 %d 行)",
+			file.Path, 1+strings.Count(base.Content, "\n"), 1+strings.Count(file.Content, "\n"))
+		spans := make([]string, 0, 8)
+		for _, line := range strings.Split(changedRegionPatch(base.Content, file.Content, reviewDiffContextLines), "\n") {
+			// Content lines always carry a ' ', '-' or '+' prefix; only
+			// hunk headers begin with "@@".
+			if strings.HasPrefix(line, "@@") {
+				spans = append(spans, line)
+			}
+		}
+		if len(spans) == 0 {
+			spans = append(spans, "(変更位置を特定できませんでした — このファイルは全体を確認)")
+		}
+		outlines = append(outlines, header, strings.Join(spans, "\n"))
+	}
+	return outlines
 }

@@ -201,3 +201,39 @@ func TestChangedRegionPatchFallsBackOnOversizedMiddles(t *testing.T) {
 		t.Fatalf("fallback lost content:\n%s", patch)
 	}
 }
+
+// A created file used to render as an existing one-line file with an
+// inverted "1-0" range - the generic diff of "" against the content. Both
+// the full and the outline renderings must say plainly that nothing existed
+// before, and an empty created file must stay visible instead of matching
+// its empty base and dropping out.
+func TestChangedRegionRenderingsSayCreatedFilesPlainly(t *testing.T) {
+	candidate := Candidate{Files: []CandidateFile{
+		{Path: "client/src/new.ts", Content: "a\nb\nc"},
+		{Path: "client/src/empty.ts", Content: ""},
+	}}
+	source := SourceSnapshot{Files: []SourceFile{
+		{Path: "client/src/new.ts", Content: "", Created: true},
+		{Path: "client/src/empty.ts", Content: "", Created: true},
+	}}
+
+	for name, rendered := range map[string][]string{
+		"summaries": ChangedRegionSummaries(candidate, source),
+		"outlines":  ChangedRegionOutlines(candidate, source),
+	} {
+		joined := strings.Join(rendered, "\n")
+		if strings.Contains(joined, "変更前 1 行") || strings.Contains(joined, "1-0 行目") {
+			t.Fatalf("%s still describes a created file as an existing one: %s", name, joined)
+		}
+		if !strings.Contains(joined, "client/src/new.ts (新規作成・全 3 行)") {
+			t.Fatalf("%s lost the created marker: %s", name, joined)
+		}
+		if !strings.Contains(joined, "client/src/empty.ts") {
+			t.Fatalf("%s dropped the empty created file: %s", name, joined)
+		}
+	}
+	summaries := strings.Join(ChangedRegionSummaries(candidate, source), "\n")
+	if !strings.Contains(summaries, "+a\n+b\n+c") {
+		t.Fatalf("the full rendering lost the created content: %s", summaries)
+	}
+}
