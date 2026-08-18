@@ -228,27 +228,23 @@ func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) 
 			continue
 		}
 		if entry[0] == '!' && entry[1] == '!' {
-			// An ignored path never enters the candidate, so a deliverable
+			// An ignored file never enters the candidate, so a deliverable
 			// that the repository ignores would otherwise vanish without a
 			// trace - the run would report success and ship a PR with the
-			// file missing. The check guards the writable scope only: a
-			// caller with no scope (the reviewer's read-only run) has no
-			// deliverables to protect, and the implementer's byproducts
-			// outside the scope are legitimate - flagging them there would
-			// kill a review over something the reviewer never did. Hidden
-			// paths stay exempt: a .DS_Store or an editor cache is a
-			// byproduct, never a deliverable.
-			if len(allowedPrefixes) == 0 {
+			// file missing. The check guards writable-scope files only:
+			// - No scope (the reviewer's read-only run): nothing to protect.
+			// - A directory entry (git collapses a matching ignored
+			//   directory to one "dir/" record): that is a toolchain's
+			//   byproduct - a dependency install or build output - not a
+			//   deliverable. The first live run died on api/node_modules
+			//   appearing when the implementer ran the repo's own tests.
+			// - Hidden paths: a .DS_Store or an editor cache, never a
+			//   deliverable.
+			if len(allowedPrefixes) == 0 || strings.HasSuffix(entry, "/") {
 				continue
 			}
-			path := strings.TrimSuffix(entry[3:], "/")
-			inScope := allowedPath(path, allowedPrefixes) || allowedPath(path+"/", allowedPrefixes)
-			for _, prefix := range allowedPrefixes {
-				if strings.HasPrefix(prefix, path+"/") {
-					inScope = true // the ignored directory contains the scope
-				}
-			}
-			if path != "" && !hasHiddenComponent(path) && inScope {
+			path := entry[3:]
+			if !hasHiddenComponent(path) && allowedPath(path, allowedPrefixes) {
 				return nil, errors.New("the repository ignores a file inside the writable scope: " + path)
 			}
 			continue

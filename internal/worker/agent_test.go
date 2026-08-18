@@ -356,3 +356,25 @@ func TestChangedFilesUnderIgnoreCheckIsScopedToWritablePrefixes(t *testing.T) {
 		t.Fatalf("changed = %v, want none", changed)
 	}
 }
+
+// The implementer runs the repository's own tests, and a dependency install
+// drops an ignored directory inside the writable scope (api/node_modules on
+// the first live run). A collapsed ignored directory is a toolchain's
+// byproduct, never a deliverable - only ignored files fail the run.
+func TestChangedFilesUnderToleratesIgnoredDirectoriesInsideTheScope(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	writeAgentFile(t, root, ".gitignore", "client/src/node_modules\nclient/src/generated/\n")
+	agentGit(t, root, "add", ".gitignore")
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
+	writeAgentFile(t, root, "client/src/node_modules/left/pad.js", "module.exports = 1\n")
+	writeAgentFile(t, root, "client/src/generated/out.js", "generated\n")
+	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
+
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	if err != nil {
+		t.Fatalf("an ignored directory inside the scope killed the run: %v", err)
+	}
+	if len(changed) != 1 || changed[0] != "client/src/label.ts" {
+		t.Fatalf("changed = %v", changed)
+	}
+}

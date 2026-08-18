@@ -90,7 +90,10 @@ func runImplement(ctx context.Context, args []string) error {
 		_ = worker.WriteJSONFileExclusive(*runOutPath, run, worker.MaxArtifactJSONBytes)
 	}
 	if runErr != nil {
-		return errors.New("the implementing agent did not finish")
+		// The cause travels: every message on this path is engine-authored
+		// static prose, and "did not finish" alone buried a scope-guard
+		// failure on a live run that had actually implemented everything.
+		return errors.New("the implementing agent did not finish: " + runErr.Error())
 	}
 
 	observed, err := worker.ReadObservedChanges(*repoRoot, *baseRoot, outcome.ChangedFiles, consumer)
