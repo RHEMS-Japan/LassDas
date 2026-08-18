@@ -83,16 +83,20 @@ func (r AgentRun) Validate(config Config) error {
 // The before-bytes come from the sealed base revision and the after-bytes from
 // the working copy, so neither is taken from the agent's word.
 type ObservedChange struct {
-	Path   string
-	Before []byte
-	After  []byte
+	Path    string
+	Before  []byte
+	After   []byte
+	Created bool
 }
 
 // ReadObservedChanges reads both sides of every file the agent changed. The
 // before-bytes come from an untouched copy of the base, which the agent never
 // had access to, so what a change started from is not taken from the agent.
-// A file it created has no before-bytes, which is rejected: this framework
-// changes what is already there.
+// A file the agent created has no before-side: it is carried as Created with
+// empty before-bytes, and every later verifier holds the path to be absent
+// from the base. The first live migration ticket measurably needed this -
+// adding a numbered SQL file is ordinary development, and rejecting creation
+// outright made that ticket impossible.
 func ReadObservedChanges(workspace, base string, changed []string, consumer ConsumerConfig) ([]ObservedChange, error) {
 	if len(changed) == 0 {
 		return nil, errors.New("the agent changed nothing")
@@ -105,12 +109,11 @@ func ReadObservedChanges(workspace, base string, changed []string, consumer Cons
 		if !allowedPath(path, consumer.Mode.AllowedFilePrefixes) {
 			return nil, errors.New("the agent changed a file outside the writable scope")
 		}
-		beforeName, err := regularFileWithin(base, path)
-		if err != nil {
-			return nil, errors.New("the agent added a file rather than changing one")
-		}
-		before, err := readTextFile(beforeName, consumer.Mode.MaxFileBytes)
-		if err != nil {
+		created := false
+		var before []byte
+		if beforeName, err := regularFileWithin(base, path); err != nil {
+			created = true
+		} else if before, err = readTextFile(beforeName, consumer.Mode.MaxFileBytes); err != nil {
 			return nil, errors.New("the file this change started from could not be read")
 		}
 		afterName, err := regularFileWithin(workspace, path)
@@ -121,7 +124,7 @@ func ReadObservedChanges(workspace, base string, changed []string, consumer Cons
 		if err != nil {
 			return nil, errors.New("a changed file could not be read back")
 		}
-		observed = append(observed, ObservedChange{Path: path, Before: before, After: after})
+		observed = append(observed, ObservedChange{Path: path, Before: before, After: after, Created: created})
 	}
 	return observed, nil
 }
@@ -156,6 +159,7 @@ func SourceFromObservedChanges(baseSHA string, observed []ObservedChange, reques
 		files = append(files, SourceFile{
 			Path: change.Path, GitBlobSHA: gitBlobDigest(change.Before),
 			SHA256: digestBytes(change.Before), Content: string(change.Before),
+			Created: change.Created,
 		})
 	}
 	snapshot := SourceSnapshot{

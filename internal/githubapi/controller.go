@@ -383,7 +383,13 @@ func (c *Controller) PublishFeature(ctx context.Context, baseline Baseline, spec
 	treeEntries := make([]map[string]string, 0, len(spec.Files))
 	for _, file := range spec.Files {
 		metadata, exists := baseEntries[file.Path]
-		if !exists || metadata.Type != "blob" || metadata.Mode != "100644" || metadata.SHA != file.ExpectedBlobSHA {
+		if file.Created {
+			// A created file's precondition is the mirror image: the base
+			// must not carry the path.
+			if exists {
+				return PublishedFeature{}, invariant("created_file_already_exists")
+			}
+		} else if !exists || metadata.Type != "blob" || metadata.Mode != "100644" || metadata.SHA != file.ExpectedBlobSHA {
 			return PublishedFeature{}, invariant("source_blob_changed")
 		}
 		var blobResponse struct {

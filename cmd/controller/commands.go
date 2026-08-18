@@ -116,6 +116,7 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 		}
 		files[index] = githubapi.FileUpdate{
 			Path: file.Path, Content: []byte(file.Content), ExpectedBlobSHA: source.Files[index].GitBlobSHA,
+			Created: source.Files[index].Created,
 		}
 	}
 	spec := githubapi.FeatureSpec{

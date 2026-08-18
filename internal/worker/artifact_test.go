@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,6 +385,66 @@ func TestStrictModelResponseRejectsUnknownFieldAndTrailingValue(t *testing.T) {
 // TestSnapshotAndCandidateWithoutAWordingPromise: a ticket that promises
 // behavior rather than wording still snapshots and validates — the wording
 // checks simply do not apply, while the change/limit checks all do.
+// A created file travels the whole sealed chain: observation with an empty
+// before-side, a source entry flagged Created, a candidate that changes it,
+// and an apply that writes the new path exactly once. Adding a numbered
+// migration file is ordinary development, and the first live migration
+// ticket measurably died before this existed.
+func TestCreatedFileFlowsFromObservationToApply(t *testing.T) {
+	config := validTestConfig()
+	created := "client/src/routes/retry.ts"
+	content := "export const retryRoute = true;\n"
+	request := TicketRequest{
+		SchemaVersion: 1, DeliveryID: "delivery_0123456789abcdef0123456789abcdef",
+		InputSHA256: strings.Repeat("1", 64), ToolSHA: strings.Repeat("2", 40),
+		IssueKey: "TICKET-9", RunID: "run_20260806_general",
+		Repository: config.Consumers[0].Repository, Mode: config.Consumers[0].Mode.ID,
+		Summary:     "Add a retry route for notifications",
+		TargetFiles: []string{created},
+		Request:     "Add a retry route so a failed notification is delivered again.",
+	}
+	configSHA, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ConfigSHA256 = configSHA
+	if err := request.Validate(config); err != nil {
+		t.Fatal(err)
+	}
+
+	observed := []ObservedChange{{Path: created, After: []byte(content), Created: true}}
+	source, err := SourceFromObservedChanges(strings.Repeat("b", 40), observed, request, config)
+	if err != nil {
+		t.Fatalf("SourceFromObservedChanges() error = %v", err)
+	}
+	if !source.Files[0].Created || source.Files[0].Content != "" {
+		t.Fatalf("source = %+v, want a created entry with empty content", source.Files[0])
+	}
+
+	candidate, err := NewCandidate(1, ModelCandidateOutput{
+		Files:     []ModelCandidateFile{{Path: created, Content: content}},
+		Rationale: "Add the retry route as a new file.",
+	}, source, request, config, validTestInvocation(config.Models.Implementer), testInvocationTime)
+	if err != nil {
+		t.Fatalf("NewCandidate() error = %v", err)
+	}
+
+	root := t.TempDir()
+	if err := ApplyCandidate(root, candidate, source, request, config); err != nil {
+		t.Fatalf("ApplyCandidate() error = %v", err)
+	}
+	if err := VerifyApplied(root, candidate, source, request, config); err != nil {
+		t.Fatalf("VerifyApplied() error = %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(created)))
+	if err != nil || string(written) != content {
+		t.Fatalf("written = %q, %v", written, err)
+	}
+	if err := ApplyCandidate(root, candidate, source, request, config); err == nil {
+		t.Fatal("a second apply over the now-existing file must be rejected")
+	}
+}
+
 func TestSnapshotAndCandidateWithoutAWordingPromise(t *testing.T) {
 	config := validTestConfig()
 	request := TicketRequest{
@@ -436,5 +497,68 @@ func TestSnapshotAndCandidateWithoutAWordingPromise(t *testing.T) {
 	}, source, request, config, validTestInvocation(config.Models.Implementer), testInvocationTime)
 	if err == nil {
 		t.Fatalf("an unchanged candidate must still be refused, got %+v", unchanged)
+	}
+}
+
+// The Created flag must not disturb the sealed identity of anything that
+// existed before it: a non-created source file marshals byte-identically to
+// the pre-flag encoding, so every digest sealed before the flag stays valid.
+func TestSourceFileEncodingWithoutCreatedIsUnchanged(t *testing.T) {
+	encoded, err := json.Marshal(SourceFile{Path: "a.ts", GitBlobSHA: strings.Repeat("a", 40), SHA256: strings.Repeat("b", 64), Content: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := `{"path":"a.ts","git_blob_sha":"` + strings.Repeat("a", 40) + `","sha256":"` + strings.Repeat("b", 64) + `","content":"hi"}`
+	if string(encoded) != expected {
+		t.Fatalf("encoding drifted: %s", encoded)
+	}
+}
+
+// A committed symlink directory inside the writable scope must not let a
+// created file land outside the apply root - the escape was measurably
+// reproduced before the created-path walk existed.
+func TestApplyCandidateRejectsCreatedFileThroughSymlinkedDirectory(t *testing.T) {
+	config := validTestConfig()
+	created := "client/src/migrations/0001_init.sql"
+	request := TicketRequest{
+		SchemaVersion: 1, DeliveryID: "delivery_0123456789abcdef0123456789abcdef",
+		InputSHA256: strings.Repeat("1", 64), ToolSHA: strings.Repeat("2", 40),
+		IssueKey: "TICKET-9", RunID: "run_20260806_general",
+		Repository: config.Consumers[0].Repository, Mode: config.Consumers[0].Mode.ID,
+		Summary:     "Add a migration",
+		TargetFiles: []string{created},
+		Request:     "Add the initial migration as a new file.",
+	}
+	configSHA, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ConfigSHA256 = configSHA
+	observed := []ObservedChange{{Path: created, After: []byte("-- init\n"), Created: true}}
+	source, err := SourceFromObservedChanges(strings.Repeat("b", 40), observed, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := NewCandidate(1, ModelCandidateOutput{
+		Files:     []ModelCandidateFile{{Path: created, Content: "-- init\n"}},
+		Rationale: "Add the initial migration.",
+	}, source, request, config, validTestInvocation(config.Models.Implementer), testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "client", "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "client", "src", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCandidate(root, candidate, source, request, config); err == nil {
+		t.Fatal("a created file routed through a symlinked directory was applied")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "0001_init.sql")); !os.IsNotExist(err) {
+		t.Fatal("the escape write reached outside the root")
 	}
 }

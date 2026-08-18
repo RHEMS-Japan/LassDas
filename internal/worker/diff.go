@@ -217,6 +217,12 @@ func reviewFileViews(candidate Candidate, source SourceSnapshot) []reviewFileVie
 			views = append(views, reviewFileView{Path: file.Path, Status: "unchanged"})
 			continue
 		}
+		if base.Created {
+			// The reviewer judges a new file as a whole, told plainly that
+			// nothing existed before it.
+			views = append(views, reviewFileView{Path: file.Path, Status: "created", After: file.Content})
+			continue
+		}
 		if len(base.Content) <= reviewEmbedWholeFileBytes && len(file.Content) <= reviewEmbedWholeFileBytes {
 			views = append(views, reviewFileView{
 				Path: file.Path, Status: "replaced", Before: base.Content, After: file.Content,

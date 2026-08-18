@@ -174,13 +174,33 @@ func TestReadObservedChangesTakesBeforeBytesFromTheUntouchedBase(t *testing.T) {
 	}
 }
 
-func TestReadObservedChangesRejectsAFileTheAgentCreated(t *testing.T) {
+// A created file is carried as Created with an empty before-side - adding a
+// numbered migration file is ordinary development, and the first live
+// migration ticket measurably died on the old outright rejection.
+func TestReadObservedChangesCarriesACreatedFile(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	base := copyAgentBase(t, root)
 	writeAgentFile(t, root, "client/src/new.ts", "export const added = true;\n")
 
-	if _, err := ReadObservedChanges(root, base, []string{"client/src/new.ts"}, fixtureConsumerForAgent()); err == nil {
-		t.Fatal("a created file was accepted as a change")
+	observed, err := ReadObservedChanges(root, base, []string{"client/src/new.ts"}, fixtureConsumerForAgent())
+	if err != nil {
+		t.Fatalf("ReadObservedChanges() error = %v", err)
+	}
+	if len(observed) != 1 || !observed[0].Created || len(observed[0].Before) != 0 ||
+		string(observed[0].After) != "export const added = true;\n" {
+		t.Fatalf("observed = %+v, want a created file with empty before-bytes", observed)
+	}
+}
+
+// Creation stays scoped: a new file outside the writable prefixes is still
+// rejected exactly like an edit outside them.
+func TestReadObservedChangesRejectsACreatedFileOutsideTheScope(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	base := copyAgentBase(t, root)
+	writeAgentFile(t, root, "outside/new.ts", "export const added = true;\n")
+
+	if _, err := ReadObservedChanges(root, base, []string{"outside/new.ts"}, fixtureConsumerForAgent()); err == nil {
+		t.Fatal("a created file outside the writable scope was accepted")
 	}
 }
 

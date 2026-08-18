@@ -38,10 +38,28 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 	defer cleanup()
 
 	// Validate the complete set first. A stale or unsafe file must fail before
-	// any target is changed.
+	// any target is changed. A created file's claim is absence: the path must
+	// not exist yet, and its parent directory is prepared here so the
+	// temporary can be staged next to its final place like every other file.
 	for index, file := range candidate.Files {
+		if file.BeforeSHA256 != source.Files[index].SHA256 {
+			return errors.New("apply source no longer matches the snapshot")
+		}
+		if source.Files[index].Created {
+			final, err := createdFileWithin(root, file.Path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
+				return errors.New("created file directory could not be prepared")
+			}
+			replacements = append(replacements, replacement{
+				final: final, mode: 0o644, content: []byte(file.Content),
+			})
+			continue
+		}
 		filename, info, current, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes)
-		if err != nil || digestBytes(current) != source.Files[index].SHA256 || file.BeforeSHA256 != source.Files[index].SHA256 {
+		if err != nil || digestBytes(current) != source.Files[index].SHA256 {
 			return errors.New("apply source no longer matches the snapshot")
 		}
 		replacements = append(replacements, replacement{
@@ -66,6 +84,15 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 	// Narrow the validation-to-rename window. os.Rename replaces a symlink
 	// itself rather than following it, but a changed source is still rejected.
 	for index := range replacements {
+		if source.Files[index].Created {
+			// Re-walked, not just re-stat'd: a symlink swapped into an
+			// ancestor during preparation must fail exactly like one that
+			// was there from the start.
+			if _, err := createdFileWithin(root, candidate.Files[index].Path); err != nil {
+				return errors.New("apply source changed during preparation")
+			}
+			continue
+		}
 		_, _, current, err := currentBoundFile(root, candidate.Files[index].Path, consumer.Mode.MaxFileBytes)
 		if err != nil || digestBytes(current) != source.Files[index].SHA256 {
 			return errors.New("apply source changed during preparation")

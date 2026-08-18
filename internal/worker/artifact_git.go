@@ -56,8 +56,19 @@ func verifyGitCheckout(ctx context.Context, root, baseSHA string, files []Source
 	}
 	for _, file := range files {
 		output, err := runGitSourceCommand(ctx, root, environment, "ls-tree", "-z", baseSHA, "--", file.Path)
+		if err != nil {
+			return errors.New("source Git blob does not match snapshot")
+		}
+		if file.Created {
+			// A created file's claim is the opposite one: the base must not
+			// carry the path at all.
+			if len(output) != 0 {
+				return errors.New("created source file already exists in the base")
+			}
+			continue
+		}
 		expected := fmt.Sprintf("100644 blob %s\t%s%c", file.GitBlobSHA, file.Path, byte(0))
-		if err != nil || string(output) != expected {
+		if string(output) != expected {
 			return errors.New("source Git blob does not match snapshot")
 		}
 	}

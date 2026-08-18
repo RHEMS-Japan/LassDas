@@ -39,8 +39,13 @@ type SourceSnapshot struct {
 type SourceFile struct {
 	Path       string `json:"path"`
 	GitBlobSHA string `json:"git_blob_sha"`
-	SHA256     string `json:"sha256"`
-	Content    string `json:"content"`
+	// Created marks a file the change brings into existence: its before-side
+	// is the empty content, and every verifier expects the path to be absent
+	// from the base instead of matching a blob. The flag rides the sealed
+	// digests (omitempty keeps pre-existing snapshots' digests unchanged).
+	Created bool   `json:"created,omitempty"`
+	SHA256  string `json:"sha256"`
+	Content string `json:"content"`
 }
 
 type ModelCandidateOutput struct {
@@ -191,6 +196,9 @@ func (s SourceSnapshot) Validate(request TicketRequest, config Config) error {
 	total := 0
 	absentFound := false
 	for index, file := range s.Files {
+		if file.Created && file.Content != "" {
+			return errors.New("created source file must start from empty content")
+		}
 		if file.Path != request.TargetFiles[index] || !commitPattern.MatchString(file.GitBlobSHA) || !sha256Pattern.MatchString(file.SHA256) ||
 			!utf8.ValidString(file.Content) || strings.ContainsRune(file.Content, '\x00') || len(file.Content) > consumer.Mode.MaxFileBytes ||
 			digestBytes([]byte(file.Content)) != file.SHA256 || gitBlobDigest([]byte(file.Content)) != file.GitBlobSHA {
@@ -559,6 +567,42 @@ func regularFileWithin(root, relative string) (string, error) {
 	info, err := os.Stat(current)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", errors.New("file is not regular")
+	}
+	rel, err := filepath.Rel(root, current)
+	if err != nil || rel != filepath.FromSlash(relative) {
+		return "", errors.New("file escaped root")
+	}
+	return current, nil
+}
+
+// createdFileWithin is regularFileWithin's mirror for files that do not
+// exist yet: every ancestor component that exists must be a real directory
+// inside root - never a symlink - and the final element must be absent. The
+// created path measurably escaped the root through a committed symlink
+// directory before this walk existed, while the edit path was protected.
+func createdFileWithin(root, relative string) (string, error) {
+	if !validRelativePath(relative) {
+		return "", errors.New("relative path is invalid")
+	}
+	current := root
+	parts := strings.Split(filepath.FromSlash(relative), string(filepath.Separator))
+	for index, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			// Everything below a missing component is new by construction;
+			// the final element in particular must land here.
+			continue
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("path component is invalid")
+		}
+		if index == len(parts)-1 {
+			return "", errors.New("created file already exists in the workspace")
+		}
+		if !info.IsDir() {
+			return "", errors.New("path component is invalid")
+		}
 	}
 	rel, err := filepath.Rel(root, current)
 	if err != nil || rel != filepath.FromSlash(relative) {

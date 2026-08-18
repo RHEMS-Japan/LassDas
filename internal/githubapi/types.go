@@ -214,6 +214,9 @@ type FileUpdate struct {
 	Path            string
 	Content         []byte
 	ExpectedBlobSHA string
+	// Created asserts the path is absent from the base tree; the publish
+	// step then adds it instead of matching an existing blob.
+	Created bool
 }
 
 type FeatureSpec struct {
