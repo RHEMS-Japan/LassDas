@@ -56,6 +56,15 @@
 
 ---
 
+## 導入 (新しいプロジェクトへ)
+
+```
+git clone <この repo> && cd <clone>
+./setup.sh
+```
+
+対話ウィザードが、インスタンス repo・受け口 (クラウド)・トラッカー接続・動作確認までを一気に組み上げる。全段冪等で、中断しても同じコマンドで続きから再開する。詳しい前提と各段の中身は [docs/TICKET_AUTHORING.md](docs/TICKET_AUTHORING.md) と `cmd/setup` を参照。
+
 ## 現在の状態
 
 | 項目 | 状態 |

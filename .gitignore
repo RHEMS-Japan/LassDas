@@ -1,3 +1,9 @@
 .DS_Store
 /controller
 /worker
+
+# setup wizard resumable state (per-operator, never committed)
+lassdas-setup.state.json
+
+# setup wizard local build output
+/setup
