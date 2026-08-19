@@ -75,7 +75,7 @@ func TestRunAgentReportsWhatTheAgentActuallyChanged(t *testing.T) {
 	name, _ := writeFakeAgent(t, "printf \"export const submitLabel = 'Submit';\\n\" > client/src/label.ts; echo done")
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "secret-value")
 
-	outcome, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"})
+	outcome, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestRunAgentRejectsAChangeOutsideTheWritableScope(t *testing.T) {
 	name, _ := writeFakeAgent(t, "printf 'edited\\n' > README.md")
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "secret-value")
 
-	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}); err == nil {
+	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}, nil); err == nil {
 		t.Fatal("a change outside the writable scope was accepted")
 	}
 }
@@ -105,7 +105,7 @@ func TestRunAgentHandsTheAgentOnlyTheConfiguredEnvironment(t *testing.T) {
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "secret-value")
 	t.Setenv("UNRELATED_DEPLOY_TOKEN", "must-not-be-visible")
 
-	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}); err != nil {
+	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	captured, err := os.ReadFile(filepath.Join(root, "client", "src", "label.ts"))
@@ -129,7 +129,7 @@ func TestRunAgentFailsWhenTheCredentialIsMissing(t *testing.T) {
 	name, _ := writeFakeAgent(t, "true")
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "")
 
-	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", nil); err == nil {
+	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", nil, nil); err == nil {
 		t.Fatal("the agent ran without its credential")
 	}
 }
@@ -144,7 +144,7 @@ func TestRunAgentStopsAnAgentThatDoesNotFinish(t *testing.T) {
 	context, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	if _, err := RunAgent(context, config, root, "do the thing", nil); err == nil {
+	if _, err := RunAgent(context, config, root, "do the thing", nil, nil); err == nil {
 		t.Fatal("an unfinished agent run was accepted")
 	}
 	if time.Since(started) > 20*time.Second {
@@ -247,7 +247,7 @@ func TestChangedFilesUnderReadsAStagedRenameAsBothPaths(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	agentGit(t, root, "mv", "client/src/label.ts", "client/src/renamed.ts")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestChangedFilesUnderRejectsARenameLeavingTheScope(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	agentGit(t, root, "mv", "client/src/label.ts", "moved-out.ts")
 
-	if _, err := ChangedFilesUnder(root, []string{"client/src/"}); err == nil {
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil); err == nil {
 		t.Fatal("a rename out of the writable scope was accepted")
 	}
 }
@@ -308,7 +308,7 @@ func TestChangedFilesUnderFailsWhenACreatedFileIsIgnored(t *testing.T) {
 	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
 	writeAgentFile(t, root, "client/src/messages.generated.ts", "export const x = 1;\n")
 
-	_, err := ChangedFilesUnder(root, []string{"client/src/"})
+	_, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
 	if err == nil {
 		t.Fatal("an ignored created file inside the scope was silently dropped")
 	}
@@ -328,7 +328,7 @@ func TestChangedFilesUnderKeepsToleratingIrrelevantIgnoredFiles(t *testing.T) {
 	writeAgentFile(t, root, "client/src/.DS_Store", "junk\n")
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestChangedFilesUnderIgnoreCheckIsScopedToWritablePrefixes(t *testing.T) {
 	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
 	writeAgentFile(t, root, "node_modules/left/pad.js", "module.exports = 1\n")
 
-	changed, err := ChangedFilesUnder(root, nil)
+	changed, err := ChangedFilesUnder(root, nil, nil)
 	if err != nil {
 		t.Fatalf("a run without a writable scope must not police ignore rules: %v", err)
 	}
@@ -370,9 +370,34 @@ func TestChangedFilesUnderToleratesIgnoredDirectoriesInsideTheScope(t *testing.T
 	writeAgentFile(t, root, "client/src/generated/out.js", "generated\n")
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
 	if err != nil {
 		t.Fatalf("an ignored directory inside the scope killed the run: %v", err)
+	}
+	if len(changed) != 1 || changed[0] != "client/src/label.ts" {
+		t.Fatalf("changed = %v", changed)
+	}
+}
+
+// A lockfile from the wrong package manager is toolchain residue the
+// consumer can declare, not a swallowed deliverable: declared names pass,
+// undeclared ignored files still fail the run. Measured live: an
+// implementer ran npm in a pnpm repository and its package-lock.json
+// killed a finished implementation at the tally.
+func TestChangedFilesUnderToleratesDeclaredByproducts(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	writeAgentFile(t, root, ".gitignore", "package-lock.json\n")
+	agentGit(t, root, "add", ".gitignore")
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
+	writeAgentFile(t, root, "client/src/package-lock.json", "{}\n")
+	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
+
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil); err == nil {
+		t.Fatal("an undeclared ignored file inside the scope was tolerated")
+	}
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, []string{"package-lock.json"})
+	if err != nil {
+		t.Fatalf("a declared byproduct killed the run: %v", err)
 	}
 	if len(changed) != 1 || changed[0] != "client/src/label.ts" {
 		t.Fatalf("changed = %v", changed)

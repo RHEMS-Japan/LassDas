@@ -43,7 +43,7 @@ func AgentReviewFromRun(
 // this is what makes that instruction binding, so a reviewer cannot quietly
 // fix what it was asked to judge.
 func ConfirmTreeMatchesCandidate(root string, candidate Candidate, consumer ConsumerConfig) error {
-	changed, err := ChangedFilesUnder(root, consumer.Mode.AllowedFilePrefixes)
+	changed, err := ChangedFilesUnder(root, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts)
 	if err != nil {
 		return errors.New("the tree could not be read after review")
 	}

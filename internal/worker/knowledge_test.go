@@ -56,7 +56,7 @@ func TestPlacedKnowledgeIsInvisibleToChangeDetection(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "automation-knowledge", "past-decision.md")); err != nil {
 		t.Fatalf("the library was not placed: %v", err)
 	}
-	changed, err := ChangedFilesUnder(workspace, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(workspace, []string{"client/src/"}, nil)
 	if err != nil {
 		t.Fatalf("placed knowledge was reported as a change: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPlaceKnowledgeIsRepeatable(t *testing.T) {
 	if strings.Count(string(exclude), "/automation-knowledge/") != 1 {
 		t.Fatalf("the exclusion was written more than once: %q", exclude)
 	}
-	changed, err := ChangedFilesUnder(workspace, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(workspace, []string{"client/src/"}, nil)
 	if err != nil || len(changed) != 0 {
 		t.Fatalf("changed = %v, err = %v", changed, err)
 	}

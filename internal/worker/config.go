@@ -294,6 +294,15 @@ type ModeConfig struct {
 	MaxTotalBytes          int      `json:"max_total_bytes"`
 	MaxChangedLines        int      `json:"max_changed_lines"`
 	MaxChangedBytes        int      `json:"max_changed_bytes"`
+	// IgnoredByproducts are base file names the destination's toolchain is
+	// known to drop inside the writable scope while ignored by git - a
+	// lockfile from the wrong package manager above all. The ignored-file
+	// guard tolerates exactly these names; everything else it still treats
+	// as a deliverable the repository would silently swallow. Measured
+	// live: an implementer ran npm in a pnpm repository, its
+	// package-lock.json landed inside the scope, and a finished
+	// implementation died at the tally.
+	IgnoredByproducts []string `json:"ignored_byproducts,omitempty"`
 	// Toolchain names the binaries whose observed versions are sealed into
 	// the validation evidence before the verification commands run. Which
 	// tools that is — node and pnpm, go, nothing at all — is the consumer's
@@ -466,6 +475,14 @@ func (c ModeConfig) validate() error {
 		c.MaxChangedLines < 1 || c.MaxChangedLines > 4000 ||
 		c.MaxChangedBytes < 1 || c.MaxChangedBytes > c.MaxTotalBytes*2 {
 		return errors.New("mode file limits are invalid")
+	}
+	if len(c.IgnoredByproducts) > 16 {
+		return errors.New("mode ignored byproducts are invalid")
+	}
+	for _, name := range c.IgnoredByproducts {
+		if name == "" || len(name) > 128 || strings.ContainsAny(name, "/\\\r\n\x00") || name != strings.TrimSpace(name) {
+			return errors.New("mode ignored byproduct name is invalid")
+		}
 	}
 	if len(c.AllowedFilePrefixes) == 0 || len(c.AllowedFilePrefixes) > 8 {
 		return errors.New("mode file prefixes are invalid")

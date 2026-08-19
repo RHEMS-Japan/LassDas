@@ -75,7 +75,7 @@ func runImplement(ctx context.Context, args []string) error {
 		return err
 	}
 
-	outcome, runErr := worker.RunAgent(ctx, config.Agents.Implementer, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes)
+	outcome, runErr := worker.RunAgent(ctx, config.Agents.Implementer, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts)
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
 		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
@@ -202,7 +202,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 	// burned real time is not, so the stage's worst case stays inside the
 	// job's budget. Every failed attempt's tail goes to the job log, the
 	// final one included, so nothing is masked.
-	outcome, runErr := worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil)
+	outcome, runErr := worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil, nil)
 	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
 		select {
@@ -211,7 +211,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 			continue
 		case <-time.After(reviewRetryPause):
 		}
-		outcome, runErr = worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil)
+		outcome, runErr = worker.RunAgent(ctx, config.Agents.Reviewer, *repoRoot, prompt, nil, nil)
 	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
@@ -424,6 +424,7 @@ func implementPrompt(
 		"- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。",
 		"- 依頼に書かれていない改善・整理はしないでください。依頼を満たす最小の変更にしてください。",
 		"- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
+		"- テストやビルドで生まれた一時ファイル (別のパッケージ管理ツールの lockfile、ログ、キャッシュ等) は、終了する前に削除して作業ディレクトリを綺麗に戻してください。",
 		"- 変更が終わったら、何をどう変えたかを数行で述べて終了してください。コミットはしないでください。",
 		"",
 		environmentSection(agent),

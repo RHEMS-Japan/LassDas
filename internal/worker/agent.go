@@ -102,7 +102,7 @@ type AgentOutcome struct {
 // RunAgent runs the configured agent inside workspace and reports which files
 // it changed. The credential is read from this process's environment and
 // passed to the child; it is never written to configuration or transcript.
-func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string) (AgentOutcome, error) {
+func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string) (AgentOutcome, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
 		return AgentOutcome{}, errors.New("agent input is invalid")
 	}
@@ -161,7 +161,7 @@ func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string,
 		return outcome, errors.New("agent run failed")
 	}
 
-	changed, err := ChangedFilesUnder(root, allowedPrefixes)
+	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)
 	if err != nil {
 		return outcome, err
 	}
@@ -205,7 +205,7 @@ func RetryableReviewFailure(outcome AgentOutcome) bool {
 // as repository-relative paths. A change outside the allowed prefixes is an
 // error rather than a filtered-out result: the agent was told where it may
 // write, and writing elsewhere is a failure of the run, not noise to discard.
-func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) {
+func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts []string) ([]string, error) {
 	output, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
 	if err != nil {
 		return nil, errors.New("changed files could not be read")
@@ -244,7 +244,7 @@ func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) 
 				continue
 			}
 			path := entry[3:]
-			if !hasHiddenComponent(path) && allowedPath(path, allowedPrefixes) {
+			if !hasHiddenComponent(path) && allowedPath(path, allowedPrefixes) && !isDeclaredByproduct(path, ignoredByproducts) {
 				return nil, errors.New("the repository ignores a file inside the writable scope: " + path)
 			}
 			continue
@@ -268,6 +268,21 @@ func ChangedFilesUnder(root string, allowedPrefixes []string) ([]string, error) 
 	}
 	sort.Strings(changed)
 	return changed, nil
+}
+
+// isDeclaredByproduct reports whether the path's base name is one the
+// consumer declared as toolchain residue.
+func isDeclaredByproduct(path string, names []string) bool {
+	base := path
+	if index := strings.LastIndexByte(path, '/'); index >= 0 {
+		base = path[index+1:]
+	}
+	for _, name := range names {
+		if base == name {
+			return true
+		}
+	}
+	return false
 }
 
 func gitOutput(root string, arguments ...string) (string, error) {

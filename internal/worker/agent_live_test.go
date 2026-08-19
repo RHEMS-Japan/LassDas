@@ -90,7 +90,7 @@ func TestLiveAgentWorksUnderTheConfiguredRules(t *testing.T) {
 		"あなたが今どんな規範の下で作業することになっているかを、"+
 			"実際に読み込まれている内容から具体的に 3 つ、短く挙げてください。"+
 			"何も読み込まれていないならその旨だけ答えてください。ファイルは変更しないでください。",
-		nil)
+		nil, nil)
 	t.Logf("エージェントの答え: %s", tail(outcome.Transcript, 900))
 	if err != nil {
 		t.Fatalf("the agent did not finish: %v", err)
@@ -124,7 +124,7 @@ func TestLiveAgentConsultsTheKnowledgeLibrary(t *testing.T) {
 			"その中から、本番のデータベースについて何が決まっているかを調べて、"+
 			"根拠にしたファイル名と一緒に 2 行で答えてください。"+
 			"見つからなければ「見つからない」と答えてください。ファイルは変更しないでください。",
-		nil)
+		nil, nil)
 	t.Logf("エージェントの答え: %s", tail(outcome.Transcript, 700))
 	if err != nil {
 		t.Fatalf("the agent did not finish: %v", err)
@@ -134,7 +134,7 @@ func TestLiveAgentConsultsTheKnowledgeLibrary(t *testing.T) {
 	}
 	// Placed knowledge must still be invisible as a change, or the run that
 	// used it would be thrown away.
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"})
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
 	if err != nil || len(changed) != 0 {
 		t.Fatalf("the library was seen as a change: %v (%v)", changed, err)
 	}
@@ -151,7 +151,7 @@ func TestLiveImplementerReadsTheTicketTracker(t *testing.T) {
 		"あなたにはチケットトラッカーを読む道具 (mcp__backlog__...) が渡されています。"+
 			"get_myself を呼び、成功したら「TRACKER_OK: <取得したユーザー名>」、"+
 			"呼べなかったら「TRACKER_NG: <理由を一行>」とだけ答えてください。ファイルは変更しないでください。",
-		nil)
+		nil, nil)
 	t.Logf("エージェントの答え: %s", tail(outcome.Transcript, 500))
 	if err != nil {
 		t.Fatalf("the agent did not finish: %v", err)
@@ -189,7 +189,7 @@ func TestLiveReviewerWorksUnderTheConfiguredRules(t *testing.T) {
 	outcome, err := RunAgent(context.Background(), config.Agents.Reviewer, root,
 		"あなたに作業規範が渡されているか確かめてください。渡されているなら、その中の具体的な規則を 1 つ引用して"+
 			"「RULES_OK: <引用>」、何も渡されていないなら「RULES_NG」とだけ答えてください。ファイルは変更しないでください。",
-		nil)
+		nil, nil)
 	t.Logf("エージェントの答え: %s", tail(outcome.Transcript, 500))
 	if err != nil {
 		t.Fatalf("the agent did not finish: %v", err)
@@ -230,7 +230,7 @@ func TestLiveImplementingAgentFindsAndChangesTheFile(t *testing.T) {
 	}, "\n")
 
 	started := time.Now()
-	outcome, err := RunAgent(context.Background(), config.Agents.Implementer, root, prompt, consumer.Mode.AllowedFilePrefixes)
+	outcome, err := RunAgent(context.Background(), config.Agents.Implementer, root, prompt, consumer.Mode.AllowedFilePrefixes, nil)
 	t.Logf("実装 %s: exit=%d 所要=%s 変更=%v", config.Agents.Implementer.Command, outcome.ExitCode, time.Since(started).Round(time.Second), outcome.ChangedFiles)
 	t.Logf("実装が述べたこと: %s", tail(outcome.Transcript, 600))
 	if err != nil {
