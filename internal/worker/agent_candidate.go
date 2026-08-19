@@ -114,15 +114,15 @@ func ReadObservedChanges(workspace, base string, changed []string, consumer Cons
 		if beforeName, err := regularFileWithin(base, path); err != nil {
 			created = true
 		} else if before, err = readTextFile(beforeName, consumer.Mode.MaxFileBytes); err != nil {
-			return nil, errors.New("the file this change started from could not be read")
+			return nil, errors.New("the file this change started from could not be read: " + path)
 		}
 		afterName, err := regularFileWithin(workspace, path)
 		if err != nil {
-			return nil, errors.New("a changed file is not addressable")
+			return nil, errors.New("a changed file is not addressable: " + path)
 		}
 		after, err := readTextFile(afterName, consumer.Mode.MaxFileBytes)
 		if err != nil {
-			return nil, errors.New("a changed file could not be read back")
+			return nil, errors.New("a changed file could not be read back: " + path)
 		}
 		observed = append(observed, ObservedChange{Path: path, Before: before, After: after, Created: created})
 	}
