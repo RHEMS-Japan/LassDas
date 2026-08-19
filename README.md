@@ -56,6 +56,20 @@
 
 ---
 
+## 運用コンソール (読み取り専用)
+
+手元で全チケットの現在地と経緯を一覧する読み取り専用の画面。正本 (状態の台帳・トラッカー・実行基盤) から都度組み立て、書き込み API を持たない。
+
+```
+LASSDAS_CONSOLE_STATE_TABLE=<台帳テーブル名> \
+LASSDAS_CONSOLE_TRACKER_DOMAIN=<your-space.backlog.com> \
+LASSDAS_CONSOLE_TRACKER_KEY=<閲覧に使う API キー> \
+LASSDAS_CONSOLE_INSTANCE_REPO=<owner/instance-repo> \
+go run ./cmd/console
+```
+
+AWS 資格情報は通常の解決順 (環境変数 / プロファイル)。実行基盤の読み取りは `GH_TOKEN` か `gh` のログインを使う。127.0.0.1 以外では起動しない。画面の変更は `cmd/console/web` を編集し `npx vite build` で `dist/` を作り直してから commit する (CI は未検証 — #6 参照)。
+
 ## 導入 (新しいプロジェクトへ)
 
 ```

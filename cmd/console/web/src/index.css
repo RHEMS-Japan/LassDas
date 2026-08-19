@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* デジタル庁デザインシステムのトークン (@digital-go-jp/tailwind-theme-plugin)
+   がフォント・色・余白の語彙を提供する。ここでは本文の既定だけ整える。 */
+body {
+  @apply text-std-16N-170 text-solid-gray-800;
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+}

@@ -7,3 +7,7 @@ lassdas-setup.state.json
 
 # setup wizard local build output
 /setup
+
+# console: the local binary and the frontend toolchain stay out of the tree
+/console
+cmd/console/web/node_modules/
