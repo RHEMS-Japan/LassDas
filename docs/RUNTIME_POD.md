@@ -88,13 +88,15 @@ clarification round of one run would already trip it. The attendant
 therefore unblocks with `--resolve` (a fork addition): it acts strictly
 on new information — a human answered — which is the case the breaker was
 never meant to punish. The breaker still protects every other unblocker.
-A card that lands in `triage` anyway (operator action, other tooling)
-under a queued run is archived and recreated fresh.
+A card that lands in `triage` anyway (operator action, other tooling) is
+a forced human decision and the attendant honors it: the run waits until
+a person releases the card, exactly as with `scheduled`.
 
 ### Cards the attendant leaves alone
 
-- `scheduled` is operator parking (an explicit time-wait); the attendant
-  never unparks it — the run waits with the card.
+- `scheduled` (operator time-wait) and `triage` (the kanban's forced
+  human decision) are human lanes; the attendant never automates through
+  either — the run waits with the card.
 - A runner-reported failure leaves the supervisor's `blocked` card as the
   visible record of that failure. The attendant retires cards only for
   its OWN terminations (`clarification_expired`, `cancelled`) — Complete
