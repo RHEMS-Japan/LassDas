@@ -103,9 +103,14 @@ func run() error {
 		return fmt.Errorf("pull disposition %s: another run owns this ticket", disposition)
 	}
 
+	// The destination credential leaves the process environment before any
+	// stage child can inherit it; only the clone and the controller receive
+	// it, explicitly.
+	targetToken := os.Getenv("TARGET_GITHUB_TOKEN")
+	_ = os.Unsetenv("TARGET_GITHUB_TOKEN")
 	pipeline := &runner.Pipeline{
 		Config: config, Services: services, Envelope: envelope,
-		Workspace: workspace, Logger: logger,
+		Workspace: workspace, TargetToken: targetToken, Logger: logger,
 	}
 	outcome, runErr := pipeline.Run(ctx)
 	if runErr != nil {

@@ -55,10 +55,6 @@ func run() error {
 		return err
 	}
 	defer func() { _ = services.Close() }()
-	cards, err := runtime.LoadCardLedger(config.LedgerPath)
-	if err != nil {
-		return err
-	}
 	hermes := runtime.NewHermes(config)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -76,7 +72,7 @@ func run() error {
 			Protocol: hook.QuestionTickProtocol, AutomationRunID: config.AutomationRunID, IssuedAt: time.Now().UTC(),
 		})
 		logger.Info("tick", "decision", result.Decision, "code", result.Code)
-		if err := runtime.SyncCards(ctx, services, cards, hermes, logger); err != nil {
+		if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())
 		}
 	}

@@ -3,10 +3,12 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -177,7 +179,7 @@ func (p *Pipeline) cloneTargetTo(ctx context.Context, destination string) error 
 		return syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
 	}
 	command.WaitDelay = 20 * time.Second
-	if token := os.Getenv("TARGET_GITHUB_TOKEN"); token != "" {
+	if token := p.TargetToken; token != "" {
 		askpass, cleanup, err := askpassHelper()
 		if err != nil {
 			return err
@@ -341,10 +343,17 @@ func (p *Pipeline) writeAgentConfigs() error {
 	if err := json.Unmarshal(raw, &consumer); err != nil {
 		return err
 	}
-	keyEnv := ""
+	// The workflow's jq 'keys[0]' was deterministic; Go map iteration is
+	// not — sort so a two-entry secret_env cannot flip the provider file
+	// between runs.
+	keyNames := make([]string, 0, len(consumer.Agents.Reviewer.SecretEnv))
 	for name := range consumer.Agents.Reviewer.SecretEnv {
-		keyEnv = name
-		break
+		keyNames = append(keyNames, name)
+	}
+	sort.Strings(keyNames)
+	keyEnv := ""
+	if len(keyNames) > 0 {
+		keyEnv = keyNames[0]
 	}
 	for _, reviewer := range consumer.Models.Reviewers {
 		if reviewer.ID != "codex-adversarial" {
@@ -372,7 +381,10 @@ wire_api = "responses"
 `, reviewer.Model, reviewer.Effort, reviewer.BaseURL, keyEnv)
 		return os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(configTOML), 0o600)
 	}
-	return nil
+	// The workflow's jq -er hard-failed before any model spend; silently
+	// proceeding would leave a previous run's stale provider file in force
+	// (the pod $HOME persists).
+	return errors.New("consumer config defines no codex-adversarial reviewer")
 }
 
 func (p *Pipeline) gitIn(ctx context.Context, dir string, arguments ...string) (int, error) {

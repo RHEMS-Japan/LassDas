@@ -47,9 +47,17 @@ dispatches the runner. The contract the code relies on:
 
 ### Card ↔ run states
 
+The delivery→card mapping is derived from the kanban itself on every
+sync pass (`list --json --archived`, matching on the idempotency key) —
+there is no attendant-side mapping file. A cached map that could be lost
+or trail reality made "no card known" indistinguishable from "no card
+exists", which is exactly the evidence the claim recovery needs. This
+also makes concurrent attendants safe-if-pointless: every ledger
+transition is CAS-guarded and every card verb idempotent.
+
 | Ledger state | Card | Owner of the transition |
 | --- | --- | --- |
-| queued | created (idempotency key = delivery id) or unblocked | attendant |
+| queued | created (idempotency key = delivery id) or unblocked (`--resolve`) | attendant |
 | claimed | running | dispatcher/supervisor |
 | question pending → awaiting answer | blocked (`needs_input`, by the runner; attendant re-blocks escapes) | runner |
 | queued again (answer adopted) | unblocked | attendant |
@@ -74,10 +82,26 @@ questions (`question_pending`) are likewise tick-recovered.
 ### The triage coupling
 
 The kanban's unblock-loop breaker routes a card to `triage` after
-`BLOCK_RECURRENCE_LIMIT` (2) same-kind re-blocks following unblocks.
-`MaxClarificationRounds` is 2, so a run blocks for answers at most twice
-and never trips the breaker. **Raising the round contract past 2 without
-revisiting the breaker strands round-3 cards in triage.**
+`BLOCK_RECURRENCE_LIMIT` (2) same-kind re-blocks; a bare unblock
+deliberately preserves the counter, so the SECOND protocol-legal
+clarification round of one run would already trip it. The attendant
+therefore unblocks with `--resolve` (a fork addition): it acts strictly
+on new information — a human answered — which is the case the breaker was
+never meant to punish. The breaker still protects every other unblocker.
+A card that lands in `triage` anyway (operator action, other tooling)
+under a queued run is archived and recreated fresh.
+
+### Cards the attendant leaves alone
+
+- `scheduled` is operator parking (an explicit time-wait); the attendant
+  never unparks it — the run waits with the card.
+- A runner-reported failure leaves the supervisor's `blocked` card as the
+  visible record of that failure. The attendant retires cards only for
+  its OWN terminations (`clarification_expired`, `cancelled`) — Complete
+  first, Archive as the fallback for states Complete refuses.
+- A `done` card under a queued run cannot be re-dispatched and still
+  holds the delivery's idempotency key (only archiving releases it), so
+  it is archived and a fresh card created.
 
 ## Identity and run references
 
@@ -110,6 +134,14 @@ fabricated workflow link.
   every run; the pod verifies the stage binaries against optional sha256
   pins in `runtime.json` (`worker_sha256` / `controller_sha256`) at
   runner start.
+- **Credentials**: the destination token reaches only the clone (via a
+  one-shot GIT_ASKPASS) and the controller (explicit env), never the
+  model-stage children — the runner strips it from its own environment
+  first. Residual: the runner process's exec image remains readable via
+  /proc by same-UID processes, and an agent holds a same-UID shell. The
+  workflow's job isolation had no equivalent exposure. **Phase-3 gate:
+  the image runs agents under a separate UID (or an equivalent boundary)
+  before real deliveries.**
 - The **model workspace** is shaped exactly as the workflow's sealed-tar
   rebuild: synthetic single-commit git history, no remote, no credential
   (the clone token travels through a one-shot `GIT_ASKPASS` helper and is

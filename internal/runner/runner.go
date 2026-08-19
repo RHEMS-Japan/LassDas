@@ -35,7 +35,14 @@ type Pipeline struct {
 	Services  *runtime.Services
 	Envelope  hook.DispatchEnvelope
 	Workspace string // the Hermes task workspace; every artifact file lives here
-	Logger    interface {
+	// TargetToken is the destination credential, held in memory only: main
+	// strips it from the process environment before any stage child runs,
+	// so os.Environ() passthrough cannot hand it to the model stages (the
+	// workflow's model job held it in no process at all; the remaining
+	// same-UID /proc exposure of the runner's own exec image is recorded in
+	// docs/RUNTIME_POD.md as the Phase-3 UID-separation gate).
+	TargetToken string
+	Logger      interface {
 		Info(string, ...any)
 		Error(string, ...any)
 	}
@@ -127,7 +134,7 @@ func (p *Pipeline) worker(ctx context.Context, name string, arguments []string, 
 
 func (p *Pipeline) controller(ctx context.Context, name string, arguments []string) (int, error) {
 	argv := append([]string{p.Config.ControllerBin}, arguments...)
-	return p.step(ctx, name, argv, "TARGET_GITHUB_TOKEN="+os.Getenv("TARGET_GITHUB_TOKEN"))
+	return p.step(ctx, name, argv, "TARGET_GITHUB_TOKEN="+p.TargetToken)
 }
 
 // readJSONField reads one string field out of a workspace JSON file.
@@ -174,7 +181,7 @@ func (p *Pipeline) Prepare() error {
 		return err
 	}
 	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {
+		if err := forceRemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {
 			return err
 		}
 	}
@@ -278,6 +285,24 @@ func (p *Pipeline) resolveConsumer() error {
 // report ("" when the run failed before the draft named one — the report
 // protocol accepts that explicitly).
 func (p *Pipeline) Repository() string { return p.consumerRepository }
+
+// forceRemoveAll removes a tree that may contain write-protected
+// directories (the previous dispatch's read-only base copy): unlinking
+// inside an a-w directory is refused for a non-root pod, so directories
+// are opened up first. os.RemoveAll alone wedged every re-dispatch of a
+// card whose earlier attempt had shaped its model workspace.
+func forceRemoveAll(path string) error {
+	_ = filepath.WalkDir(path, func(entry string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(entry, 0o755)
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
+}
 
 // nowUTC is indirected for tests.
 var nowUTC = func() time.Time { return time.Now().UTC() }
