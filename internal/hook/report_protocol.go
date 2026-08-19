@@ -31,6 +31,11 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
 	pullURLPattern    = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/pull/([1-9][0-9]{0,18})$`)
 	runURLPattern     = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/actions/runs/([1-9][0-9]{0,18})/attempts/([1-9][0-9]{0,9})$`)
+	// localRunURLPattern is the run reference of a pod-resident engine run
+	// (docs: HERMES_AS_LASSDAS_RUNTIME): no workflow page exists to link,
+	// but the reference still seals the same three identities — repository,
+	// run id, attempt — so a stored record binds to exactly one engine run.
+	localRunURLPattern = regexp.MustCompile(`^local-run://([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/([1-9][0-9]{0,18})/attempts/([1-9][0-9]{0,9})$`)
 )
 
 type TerminalCode string
@@ -458,6 +463,9 @@ func validPullRequestURL(raw, repository string) bool {
 
 func validRunURL(raw, repositoryDigest string, workflowRunID int64, runAttempt int) bool {
 	matches := runURLPattern.FindStringSubmatch(raw)
+	if len(matches) != 5 {
+		matches = localRunURLPattern.FindStringSubmatch(raw)
+	}
 	if len(matches) != 5 || HashIdentity(matches[1]+"/"+matches[2]) != repositoryDigest {
 		return false
 	}
