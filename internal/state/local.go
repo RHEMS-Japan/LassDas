@@ -1639,3 +1639,55 @@ var (
 	_ hook.IngestCursorStore   = (*LocalStore)(nil)
 	_ hook.QuestionTickStore   = (*LocalStore)(nil)
 )
+
+// RunOverview is one live run row, read for the attendant's card sync. A
+// read-only convenience over the same rows the sealed operations manage.
+type RunOverview struct {
+	RunID      string
+	DeliveryID string
+	State      string
+	IssueID    int64
+	IssueKey   string
+	Summary    string
+}
+
+// ScanRuns lists every run row in the ledger. Read-only; the attendant uses
+// it to keep Hermes cards aligned with ledger states.
+func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT pk, attrs FROM ledger WHERE pk LIKE 'run#%'")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	overview := []RunOverview{}
+	for rows.Next() {
+		var pk, encoded string
+		if err := rows.Scan(&pk, &encoded); err != nil {
+			return nil, err
+		}
+		if strings.Contains(pk, "#clarification#") || strings.Contains(pk, "#reply#") ||
+			strings.Contains(pk, "#notify#") || strings.Contains(pk, "#comment#") {
+			continue
+		}
+		row := item{}
+		if err := json.Unmarshal([]byte(encoded), &row); err != nil {
+			continue
+		}
+		if !row.strEquals("record_type", "run") {
+			continue
+		}
+		entry := RunOverview{}
+		entry.RunID, _ = row.str("run_id")
+		entry.DeliveryID, _ = row.str("delivery_id")
+		entry.State, _ = row.str("state")
+		if envelopeJSON, ok := row.str("envelope_json"); ok {
+			if envelope, err := decodeEnvelope([]byte(envelopeJSON)); err == nil {
+				entry.IssueID = envelope.Snapshot.IssueID
+				entry.IssueKey = envelope.Snapshot.IssueKey
+				entry.Summary = envelope.Snapshot.Untrusted.Summary
+			}
+		}
+		overview = append(overview, entry)
+	}
+	return overview, rows.Err()
+}
