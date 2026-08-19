@@ -71,6 +71,14 @@ type Config struct {
 	// HermesProfile is the assignee profile whose worker.command runs the
 	// stage runner.
 	HermesProfile string `json:"hermes_profile"`
+
+	// WorkerSHA256/ControllerSHA256 optionally pin the stage binaries. The
+	// workflow measured its tools before every use (checkout SHA + binary
+	// digests); the pod cannot measure a git checkout, but when these pins
+	// are set the runner refuses to start with binaries whose digests do
+	// not match, so a sealed tool SHA cannot silently name other code.
+	WorkerSHA256     string `json:"worker_sha256,omitempty"`
+	ControllerSHA256 string `json:"controller_sha256,omitempty"`
 }
 
 type TrackerConfig struct {
@@ -95,7 +103,14 @@ type IdentityConfig struct {
 	EngineSHA    string `json:"engine_sha"`
 }
 
-var commit40 = regexp.MustCompile(`^[a-f0-9]{40}$`)
+var (
+	commit40 = regexp.MustCompile(`^[a-f0-9]{40}$`)
+	// ownerNamePattern is the owner/name form the run-reference URL embeds;
+	// any other value would pass config load and then have every report
+	// refused at the route gate — a fail-late brick this check fails early.
+	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
+	sha256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+)
 
 // Load reads and validates the runtime configuration.
 func Load(path string) (Config, error) {
@@ -115,12 +130,24 @@ func Load(path string) (Config, error) {
 	}
 	t := config.Tracker
 	if t.Origin == "" || t.SpaceKey == "" || t.ProjectID <= 0 || t.ProjectKey == "" ||
-		t.AllowedCreatorID <= 0 || t.AllowedActivityType <= 0 {
-		return Config{}, errors.New("runtime config: tracker origin, space_key, project_id, project_key, allowed_creator_id and allowed_activity_type are required")
+		t.AllowedCreatorID <= 0 {
+		return Config{}, errors.New("runtime config: tracker origin, space_key, project_id, project_key and allowed_creator_id are required")
+	}
+	// The Lambda hardcoded activity type 1 (issue created) on every route;
+	// keeping it fixed here preserves exactly which tracker activities can
+	// become runs. Widening it is a protocol change, not a config knob.
+	if t.AllowedActivityType != 1 {
+		return Config{}, errors.New("runtime config: allowed_activity_type must be 1 (issue created)")
 	}
 	i := config.Identity
-	if i.RepositoryID <= 0 || i.Repository == "" || i.WorkflowRef == "" || !commit40.MatchString(i.EngineSHA) {
-		return Config{}, errors.New("runtime config: identity repository_id, repository, workflow_ref and a 40-hex engine_sha are required")
+	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
+		i.WorkflowRef == "" || !commit40.MatchString(i.EngineSHA) {
+		return Config{}, errors.New("runtime config: identity needs repository_id, repository as owner/name, workflow_ref and a 40-hex engine_sha")
+	}
+	for _, pin := range []string{config.WorkerSHA256, config.ControllerSHA256} {
+		if pin != "" && !sha256Pattern.MatchString(pin) {
+			return Config{}, errors.New("runtime config: binary sha256 pins must be 64 hex")
+		}
 	}
 	if !hook.ValidRunID(config.AutomationRunID) {
 		return Config{}, errors.New("runtime config: automation_run_id is required (run_YYYYMMDD_<24 hex>)")

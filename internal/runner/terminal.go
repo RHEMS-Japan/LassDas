@@ -93,22 +93,27 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	})
 }
 
-// loadTrail reads the delivery trail for a success report. cmd/reporter
-// treated an unreadable trail as fatal and so does this: the run stays
-// claimed and the crash path surfaces it, rather than a delivered PR being
-// sealed without the trail that explains it.
-func (t *Terminal) loadTrail(code hook.TerminalCode) (string, error) {
-	if code != hook.TerminalSuccess {
-		return "", nil
-	}
-	encoded, err := os.ReadFile(t.workspace + "/m1-trail.txt")
+// loadTrail reads the delivery trail when the run composed one. The
+// workflow attached the trail whenever the file existed — including
+// post-publish failures like release_failed, whose reports carry the run
+// record of a real repository change. cmd/reporter treated an unreadable
+// trail as fatal and so does this: the run stays claimed and the recovery
+// path surfaces it, rather than a report being sealed without the trail
+// that explains it.
+func (t *Terminal) loadTrail(hook.TerminalCode) (string, error) {
+	path := t.workspace + "/m1-trail.txt"
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(hook.MaxTerminalTrailBytes) {
+		return "", errors.New("trail file invalid")
+	}
+	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("trail unreadable: %w", err)
 	}
-	if len(encoded) > hook.MaxTerminalTrailBytes || hook.ValidateTrailText(string(encoded)) != nil {
+	if hook.ValidateTrailText(string(encoded)) != nil {
 		return "", errors.New("trail text invalid")
 	}
 	return string(encoded), nil
@@ -128,8 +133,12 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 		return err
 	}
 	owner := t.config.Owner(t.hermesRunID)
+	// The schedule is sealed once, exactly as cmd/questioner computed it
+	// once and retried the same record: recomputing per retry could change
+	// the record digest across a day boundary and turn an idempotent
+	// completion into a conflict.
+	notifyAt, deadlineAt := hook.ComputeQuestionSchedule(time.Now().UTC())
 	return t.submit(ctx, "question", func(issuedAt time.Time) (hook.Result, error) {
-		notifyAt, deadlineAt := hook.ComputeQuestionSchedule(issuedAt)
 		record := hook.QuestionRecord{
 			Protocol:   hook.QuestionProtocolVersion,
 			DeliveryID: t.envelope.DeliveryID, InputSHA256: t.envelope.Snapshot.InputSHA256,

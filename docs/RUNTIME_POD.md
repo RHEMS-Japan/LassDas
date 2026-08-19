@@ -1,0 +1,117 @@
+# The single-pod runtime (Hermes kanban constitution)
+
+This engine has two deployment constitutions. The original one runs the
+stage pipeline as a GitHub Actions workflow with an AWS Lambda + DynamoDB
+reception. This document specifies the second: everything — reception,
+ledger, dispatch, stages — inside one host, with the
+[Hermes](https://github.com/NousResearch/hermes-agent) kanban as the
+dispatcher. Code comments across `internal/runtime`, `internal/runner`,
+`internal/state` and the two commands reference this file.
+
+## Processes
+
+| Process | Source | Role |
+| --- | --- | --- |
+| attendant | `cmd/attendant` | Resident. Every interval it runs one question tick (the whole reception protocol: tracker ingest, answer adoption, renotify, shortfall, expiry, half-posted recovery, board projection) and then aligns kanban cards with ledger states (`SyncCards`). It fully replaces the Lambda; no webhook endpoint exists — the attendant reads the tracker, the tracker never calls in. |
+| runner | `cmd/runner` | Per-card. The Hermes profile's `worker.command` points at it. It claims the queued run from the ledger, drives the stage pipeline by shelling out to the unchanged `cmd/worker` / `cmd/controller` binaries, and closes the run in process through the same report/question services the Lambda wired. |
+
+Both read one `runtime.json` (`internal/runtime.Config`), which is what
+keeps them on the same ledger, routes and identities.
+
+## The ledger
+
+`internal/state.LocalStore`: one SQLite file, WAL, a single-writer
+transaction per operation. The semantics are a line-for-line sibling of
+the DynamoDB store — same rows, same attribute names, same conditional
+transitions — verified by an equivalence test that drives both stores
+through the same scenario and diffs the traces. Pure reads use snapshot
+transactions without the write lock.
+
+## The supervisor contract (fork worker.command)
+
+The Hermes fork's profile-level `worker.command` support is what
+dispatches the runner. The contract the code relies on:
+
+- The dispatcher spawns the supervisor with `HERMES_KANBAN_TASK`,
+  `HERMES_KANBAN_WORKSPACE`, `HERMES_KANBAN_RUN_ID` set; the workspace
+  persists across re-dispatches of the same card (the runner clears it in
+  `Prepare`).
+- Exit code 0 → the supervisor completes the card; **the complete
+  translation is a no-op when the card is not `running`** — that is what
+  lets the runner block its own card (`awaiting-answer:<delivery>`) and
+  then exit 0 with the block keeping its word.
+- Non-zero exit → the supervisor blocks the card with the failure reason.
+- The card is the liveness signal: a card stays `running` exactly while a
+  worker process lives; the supervisor's translation happens within
+  seconds of exit.
+
+### Card ↔ run states
+
+| Ledger state | Card | Owner of the transition |
+| --- | --- | --- |
+| queued | created (idempotency key = delivery id) or unblocked | attendant |
+| claimed | running | dispatcher/supervisor |
+| question pending → awaiting answer | blocked (`needs_input`, by the runner; attendant re-blocks escapes) | runner |
+| queued again (answer adopted) | unblocked | attendant |
+| terminal via runner report | completed (rc 0) / blocked (rc ≠ 0) | supervisor |
+| terminal via attendant (expiry, cancel) | completed by `SyncCards` | attendant |
+
+### Crash recovery
+
+A run whose worker died holds `claimed` (or `terminal_report_pending`
+without sealed question evidence — a runner that died between the two
+phases of its own report). The attendant recovers it: card not
+`running`/`review`, claim older than the grace (10 min) →
+`RecoverLostClaim` returns it to `queued` bound to the observed dead
+claim's timestamp, so a live re-claim can never be stomped. Neither store
+expires claims on its own — under the workflow constitution a dead claim
+required operator surgery (measured live 2026-08-19); this transition is
+the structural replacement. `terminal_report_pending` **with** sealed
+question evidence belongs to the tick's expiry pass, which regenerates
+the identical report and reacquires its lease itself; half-posted
+questions (`question_pending`) are likewise tick-recovered.
+
+### The triage coupling
+
+The kanban's unblock-loop breaker routes a card to `triage` after
+`BLOCK_RECURRENCE_LIMIT` (2) same-kind re-blocks following unblocks.
+`MaxClarificationRounds` is 2, so a run blocks for answers at most twice
+and never trips the breaker. **Raising the round contract past 2 without
+revisiting the breaker strands round-3 cards in triage.**
+
+## Identity and run references
+
+The ledger seals an owner into every claim. Under GitHub Actions that was
+the workflow run; here it is the pod engine: fixed repository/workflow-ref
+digests from `runtime.json` plus the numeric `HERMES_KANBAN_RUN_ID` as
+the per-attempt run id. Run references use the `local-run://` scheme —
+`local-run://<owner>/<name>/<run id>/attempts/<n>` — sealing the same
+three identities the GitHub URL carried. Each deployment accepts exactly
+one scheme (`ReportRouteConfig.RunReferenceScheme`): a workflow
+deployment cannot seal an unclickable local URI, a pod cannot seal a
+fabricated workflow link.
+
+## Deliberate drops and divergences from the workflow
+
+- **model-preflight** (operator smoke probe of model endpoints): not
+  carried over; probing is an operator action against the pod.
+- **Intake gaps** end as an honest `clarification_required` terminal, as
+  the workflow's report step decided; they are never posted as a question
+  (their shape is not the readiness question format).
+- **integration / production deliveries** are refused at consumer
+  resolution: their success evidence needs the browser steps this runtime
+  does not carry yet. `pull_request` is the shipped stopping point.
+- **Toolchain provisioning** (pinned Node/pnpm, agent CLIs, bubblewrap):
+  the image ships it; `resolveConsumer` asserts the consumer's toolchain
+  binaries exist on PATH instead of installing them per run. Note the
+  reviewing agent's bubblewrap sandbox needs unprivileged user namespaces
+  — a pod security context decision, made at deployment.
+- **Tool identity**: the workflow measured its checkout and binaries
+  every run; the pod verifies the stage binaries against optional sha256
+  pins in `runtime.json` (`worker_sha256` / `controller_sha256`) at
+  runner start.
+- The **model workspace** is shaped exactly as the workflow's sealed-tar
+  rebuild: synthetic single-commit git history, no remote, no credential
+  (the clone token travels through a one-shot `GIT_ASKPASS` helper and is
+  never stored), and a read-only base copy no agent is pointed at bounds
+  what a change started from.

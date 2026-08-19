@@ -2,25 +2,24 @@ package runner
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
 )
 
 // Run drives the whole ticket path and returns the outcome for the terminal
-// logic. Deliberate divergence from the workflow, called out once here: the
-// YAML's report job could never see intake's "questions" outcome (its needs
-// list omitted intake, so the context read as empty and the branch was
-// dead); this transcription restores the intended behaviour — an intake
-// that finds gaps asks instead of failing.
+// logic.
 func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
-	if err := p.WriteEnvelope(); err != nil {
-		return Outcome{}, err
+	if err := p.Prepare(); err != nil {
+		return Outcome{Code: "internal_failed"}, err
 	}
 	// ---- intake (workflow: read-ticket, read-contract) ----
 	if code, err := p.worker(ctx, "read-ticket", []string{
@@ -42,11 +41,13 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		return Outcome{Code: "internal_failed"}, err
 	}
 	if gaps != "" && gaps != "[]" && gaps != "null" {
-		// Intake found gaps: ask. The readiness decision file doubles as
-		// the question payload exactly as the workflow's question path
-		// consumed readiness/decision.json — here intake.json carries the
-		// gap questions and the questioner path accepts it.
-		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: p.path("intake.json")}, nil
+		// The workflow's words (report step): an intake that still has open
+		// questions can only be missing the destination; until the
+		// ask-and-resume path is wired end to end for it, stop honestly —
+		// the requester hears that a person will follow up, instead of the
+		// run dying unreported. Same honest terminal here; intake gaps are
+		// not the readiness question format and are never posted as one.
+		return Outcome{Code: hook.TerminalClarificationRequired}, nil
 	}
 
 	// ---- source (build-draft, locate/derive, baseline, snapshot) ----
@@ -70,7 +71,7 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 	}
 
 	repoRoot := p.path("target-repo")
-	if err := p.cloneTarget(ctx, repoRoot); err != nil {
+	if err := p.cloneTargetTo(ctx, repoRoot); err != nil {
 		return Outcome{Code: "internal_failed"}, err
 	}
 	if code, err := p.controller(ctx, "baseline", []string{
@@ -107,21 +108,16 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		}); err != nil || code != 0 {
 			return Outcome{Code: "internal_failed"}, err
 		}
-		code, err := p.worker(ctx, "derive-contract", []string{
+		// A derive rejection ended as internal_failed under the workflow
+		// (only build-draft fed the parse outcome its report read); the
+		// same requester-facing code is kept here.
+		if code, err := p.worker(ctx, "derive-contract", []string{
 			"derive-contract", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 			"--draft", p.path("ticket-draft.json"), "--listing", p.path("candidate-listing.json"),
 			"--derivation-out", p.path("derivation.json"),
 			"--out", p.path("readiness-ticket.json"),
-		}, p.modelKeyEnv()...)
-		if err != nil {
+		}, p.modelKeyEnv()...); err != nil || code != 0 {
 			return Outcome{Code: "internal_failed"}, err
-		}
-		switch code {
-		case 0:
-		case 2:
-			return Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
-		default:
-			return Outcome{Code: "internal_failed"}, nil
 		}
 	}
 	if code, err := p.worker(ctx, "snapshot", []string{
@@ -132,8 +128,17 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		return Outcome{Code: "internal_failed"}, err
 	}
 
+	// ---- model workspace shaping (workflow: rebuild from the sealed tar) ----
+	baseRoot := p.path("target-base")
+	if err := p.shapeModelWorkspace(ctx, repoRoot, baseRoot); err != nil {
+		return Outcome{Code: "internal_failed"}, err
+	}
+	if err := p.writeAgentConfigs(); err != nil {
+		return Outcome{Code: "internal_failed"}, err
+	}
+
 	// ---- model: readiness gate, then at most three finite stages ----
-	outcome, err := p.modelStage(ctx, repoRoot, baseSHA)
+	outcome, err := p.modelStage(ctx, repoRoot, baseRoot, baseSHA)
 	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
 		return outcome, err
 	}
@@ -149,38 +154,230 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 	return p.deliveryStage(ctx, outcome.Stage)
 }
 
-// cloneTarget prepares the consumer working copy the way the workflow's
-// source job checked it out.
-func (p *Pipeline) cloneTarget(ctx context.Context, repoRoot string) error {
-	if _, err := os.Stat(repoRoot); err == nil {
-		if err := os.RemoveAll(repoRoot); err != nil {
-			return err
-		}
+// cloneTargetTo clones the consumer repository. The token never appears in
+// the URL, the command line or the stored git config: it travels through a
+// one-shot GIT_ASKPASS helper, so nothing an agent can later read from the
+// workspace (or /proc) carries a destination credential.
+func (p *Pipeline) cloneTargetTo(ctx context.Context, destination string) error {
+	if err := os.RemoveAll(destination); err != nil {
+		return err
 	}
 	repository, err := p.readJSONField("ticket-draft.json", "repository")
 	if err != nil {
 		return err
 	}
-	url := "https://github.com/" + repository + ".git"
-	if token := os.Getenv("TARGET_GITHUB_TOKEN"); token != "" {
-		url = "https://x-access-token:" + token + "@github.com/" + repository + ".git"
-	}
-	command := exec.CommandContext(ctx, "git", "clone", "--quiet", url, repoRoot)
+	command := exec.CommandContext(ctx, "git", "clone", "--quiet",
+		"https://x-access-token@github.com/"+repository+".git", destination)
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+	}
+	command.WaitDelay = 20 * time.Second
+	if token := os.Getenv("TARGET_GITHUB_TOKEN"); token != "" {
+		askpass, cleanup, err := askpassHelper()
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		// The token rides in the git child's environment only — never the
+		// runner's own, so later stage subprocesses cannot inherit it.
+		command.Env = append(os.Environ(),
+			"GIT_ASKPASS="+askpass, "GIT_TERMINAL_PROMPT=0", "LASSDAS_CLONE_TOKEN="+token)
+	}
 	return command.Run()
 }
 
-func (p *Pipeline) gitIn(ctx context.Context, dir string, arguments ...string) (int, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, arguments...)...)
-	command.Stdout, command.Stderr = os.Stdout, os.Stderr
-	if err := command.Run(); err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return exit.ExitCode(), nil
-		}
-		return -1, err
+// askpassHelper writes a private one-shot GIT_ASKPASS script that answers
+// with the token from the git process's own environment. It lives outside
+// the workspace and is removed as soon as the clone returns.
+func askpassHelper() (string, func(), error) {
+	directory, err := os.MkdirTemp("", "askpass-")
+	if err != nil {
+		return "", nil, err
 	}
-	return 0, nil
+	script := filepath.Join(directory, "askpass")
+	body := "#!/bin/sh\nprintf '%s' \"$LASSDAS_CLONE_TOKEN\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		_ = os.RemoveAll(directory)
+		return "", nil, err
+	}
+	return script, func() { _ = os.RemoveAll(directory) }, nil
+}
+
+// shapeModelWorkspace is the workflow's "rebuild the target working copy
+// from the sealed archive": the agents work on a synthetic single-commit
+// history with no remote and no credential, and what a change started from
+// is read from a separate copy no agent is pointed at, so it cannot be
+// rewritten by the run it bounds.
+func (p *Pipeline) shapeModelWorkspace(ctx context.Context, repoRoot, baseRoot string) error {
+	if err := os.RemoveAll(baseRoot); err != nil {
+		return err
+	}
+	if err := copyTree(repoRoot, baseRoot); err != nil {
+		return err
+	}
+	if err := makeReadOnly(baseRoot); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(repoRoot, ".git")); err != nil {
+		return err
+	}
+	for _, arguments := range [][]string{
+		{"init", "-q"},
+		{"add", "-A"},
+		{"-c", "user.name=automation", "-c", "user.email=automation@invalid", "commit", "-qm", "base"},
+	} {
+		if code, err := p.gitIn(ctx, repoRoot, arguments...); err != nil || code != 0 {
+			return fmt.Errorf("workspace git reshape failed at %v (%v)", arguments, err)
+		}
+	}
+	return nil
+}
+
+// copyTree copies the working tree, skipping .git (the workflow's tar never
+// carried one).
+func copyTree(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative == ".git" || strings.HasPrefix(relative, ".git"+string(os.PathSeparator)) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(destination, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(target, 0o755)
+		case info.Mode()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, raw, info.Mode().Perm())
+		}
+	})
+}
+
+func makeReadOnly(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return os.Chmod(path, info.Mode().Perm()&^0o222)
+	})
+}
+
+// writeAgentConfigs is the transcription of the workflow's two agent setup
+// steps: the ticket-tracker MCP file the implementing agent may use
+// (written where the consumer contract's relative --mcp-config path finds
+// it: the parent of the agent's working copy), and the reviewing agent's
+// provider file under $HOME (it reads its endpoint from its own file, not
+// the environment; the credential stays in the env var the file names).
+func (p *Pipeline) writeAgentConfigs() error {
+	mcp := `{
+  "mcpServers": {
+    "backlog": {
+      "command": "npx",
+      "args": ["-y", "backlog-mcp-server@0.15.1"],
+      "env": {
+        "BACKLOG_DOMAIN": "${BACKLOG_DOMAIN}",
+        "BACKLOG_API_KEY": "${BACKLOG_API_KEY}"
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(p.path("agent-mcp.json"), []byte(mcp), 0o600); err != nil {
+		return err
+	}
+
+	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
+	if err != nil {
+		return err
+	}
+	var consumer struct {
+		Models struct {
+			Reviewers []struct {
+				ID      string `json:"id"`
+				BaseURL string `json:"base_url"`
+				Model   string `json:"model"`
+				Effort  string `json:"effort"`
+			} `json:"reviewers"`
+		} `json:"models"`
+		Agents struct {
+			Reviewer struct {
+				SecretEnv map[string]string `json:"secret_env"`
+			} `json:"reviewer"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &consumer); err != nil {
+		return err
+	}
+	keyEnv := ""
+	for name := range consumer.Agents.Reviewer.SecretEnv {
+		keyEnv = name
+		break
+	}
+	for _, reviewer := range consumer.Models.Reviewers {
+		if reviewer.ID != "codex-adversarial" {
+			continue
+		}
+		if reviewer.BaseURL == "" || reviewer.Model == "" || reviewer.Effort == "" || keyEnv == "" {
+			return fmt.Errorf("consumer config names codex-adversarial without base_url/model/effort/secret_env")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+			return err
+		}
+		configTOML := fmt.Sprintf(`model_provider = "gateway"
+model = %q
+model_reasoning_effort = %q
+
+[model_providers.gateway]
+name = "Consumer gateway"
+base_url = %q
+env_key = %q
+wire_api = "responses"
+`, reviewer.Model, reviewer.Effort, reviewer.BaseURL, keyEnv)
+		return os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(configTOML), 0o600)
+	}
+	return nil
+}
+
+func (p *Pipeline) gitIn(ctx context.Context, dir string, arguments ...string) (int, error) {
+	code, err := p.step(ctx, "git "+arguments[0], append([]string{"git", "-C", dir}, arguments...))
+	return code, err
 }
 
 func (p *Pipeline) modelKeyEnv() []string {
@@ -201,11 +398,11 @@ func (p *Pipeline) clarificationArgs() []string {
 
 // modelStage mirrors the workflow's single "Gate readiness, then run at
 // most three finite model stages" step.
-func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseSHA string) (Outcome, error) {
+func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
 	historyDir := p.path("history")
 	readinessDir := historyDir + "/readiness"
 	if err := os.MkdirAll(readinessDir, 0o755); err != nil {
-		return Outcome{}, err
+		return Outcome{Code: hook.TerminalInternalFailed}, err
 	}
 	// Readiness: up to three assess/check attempts (MaxReadinessAttempts).
 	readinessArgs := []string{}
@@ -243,6 +440,12 @@ func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseSHA string) (Ou
 		if err != nil {
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
+		// The workflow's jq -er 'select(pass|fail)' hard-failed the step on
+		// anything else; a malformed verdict is a model failure, not "try
+		// again".
+		if verdict != "pass" && verdict != "fail" {
+			return Outcome{Code: hook.TerminalModelFailed}, nil
+		}
 		if verdict == "pass" || attempt == 3 {
 			break
 		}
@@ -266,20 +469,25 @@ func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseSHA string) (Ou
 		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: decision}, nil
 	case "reject":
 		return Outcome{Code: hook.TerminalReadinessRejected}, nil
-	default:
+	case "unresolved":
 		return Outcome{Code: hook.TerminalReadinessUnresolved}, nil
+	default:
+		// The workflow's jq select() hard-failed on a malformed outcome; a
+		// decision file this pipeline cannot read is a model failure, not a
+		// legitimate readiness stop.
+		return Outcome{Code: hook.TerminalModelFailed}, nil
 	}
 
 	// Implementation: at most three implement/review/decide stages.
 	for stage := 1; stage <= 3; stage++ {
 		stageDir := fmt.Sprintf("%s/stage-%d", historyDir, stage)
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return Outcome{}, err
+			return Outcome{Code: hook.TerminalInternalFailed}, err
 		}
 		implementArgs := []string{
 			"implement", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 			"--draft", p.path("ticket-draft.json"), "--repo-root", repoRoot,
-			"--base-root", repoRoot, "--base-sha", baseSHA,
+			"--base-root", baseRoot, "--base-sha", baseSHA,
 			"--knowledge-root", p.Config.KnowledgeRoot, "--stage", strconv.Itoa(stage),
 		}
 		if stage > 1 {
@@ -359,7 +567,7 @@ func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseSHA string) (Ou
 			questionArgs = append(questionArgs, p.clarificationArgs()...)
 			questionDecision := historyDir + "/question/decision.json"
 			if err := os.MkdirAll(historyDir+"/question", 0o755); err != nil {
-				return Outcome{}, err
+				return Outcome{Code: hook.TerminalInternalFailed}, err
 			}
 			questionArgs = append(questionArgs, "--out", questionDecision)
 			code, err := p.worker(ctx, "impasse-question", questionArgs, p.modelKeyEnv()...)
