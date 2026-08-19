@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { AnswerPanel } from "./AnswerPanel";
 
 type Sources = { state_table: string; tracker: string; workflow: string };
 
@@ -51,6 +52,9 @@ type TicketDetail = {
   current?: Ticket;
   timeline: TimelineEvent[] | null;
   current_jobs?: JobNode[];
+  can_answer?: boolean;
+  answering_reason?: string;
+  question_comment_id?: string;
 };
 
 export function App() {
@@ -104,7 +108,7 @@ export function App() {
             チケット自動処理 運用コンソール
           </h1>
           <span className="text-std-14N-170 text-solid-gray-536">
-            読み取り専用ビュー
+            進行の閲覧と、待機中の質問への回答
           </span>
         </div>
       </header>
@@ -146,7 +150,7 @@ export function App() {
             {!detail && !detailError && (
               <p className="p-5 text-std-16N-170 text-solid-gray-536">読み込み中…</p>
             )}
-            {detail && <TicketDetailView detail={detail} />}
+            {detail && <TicketDetailView detail={detail} onAnswered={() => loadDetail(selected)} />}
           </section>
         )}
       </main>
@@ -297,10 +301,42 @@ function stateLabel(ticket: Ticket): [string, string] {
   return [ticket.state || "不明", "bg-solid-gray-100 text-solid-gray-700"];
 }
 
-function TicketDetailView({ detail }: { detail: TicketDetail }) {
+function TicketDetailView({ detail, onAnswered }: { detail: TicketDetail; onAnswered: () => void }) {
+  // The ledger, not the comment stream, says which comment is the current
+  // question: a question-shaped comment posted by anyone else never gets a
+  // panel, because the server only names the comment the engine is waiting
+  // on. The timeline supplies that comment's body for rendering.
+  const question = detail.question_comment_id
+    ? (detail.timeline ?? []).find(
+        (event) => event.kind === "question" && event.comment_id === detail.question_comment_id,
+      ) ?? null
+    : null;
   return (
     <div className="p-5 flex flex-col gap-6">
       <SourceBanners sources={detail.sources} />
+      {question && question.comment_id && detail.can_answer && (
+        <AnswerPanel
+          issueKey={detail.issue_key}
+          commentID={question.comment_id}
+          body={question.body}
+          onAnswered={onAnswered}
+        />
+      )}
+      {question && !detail.can_answer && (
+        <Banner
+          tone="warning"
+          title={
+            detail.answering_reason === "key_owner_unknown"
+              ? "この画面からの回答は今は使えません"
+              : "この画面の鍵では回答できません"
+          }
+          body={
+            detail.answering_reason === "key_owner_unknown"
+              ? "起動時にトラッカーの鍵の持ち主を確認できませんでした。鍵を確認してコンソールを再起動するか、Backlog のコメントで回答してください。"
+              : "自動処理が回答を受け付けるのは、このチケットの許可回答者だけです。回答は Backlog のコメントとして、許可回答者本人が投稿してください。"
+          }
+        />
+      )}
 
       {detail.current_jobs && detail.current_jobs.length > 0 && (
         <div>
@@ -378,6 +414,8 @@ function timelineLabel(event: TimelineEvent): [string, string] {
       return ["質問", "bg-yellow-100 text-solid-gray-800"];
     case "answer":
       return ["回答", "bg-blue-100 text-blue-1000"];
+    case "cancel":
+      return ["中止", "bg-red-100 text-error-1"];
     case "answer_received":
       return ["回答受領", "bg-blue-50 text-blue-900"];
     case "reception":

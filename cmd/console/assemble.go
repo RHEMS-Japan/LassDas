@@ -15,12 +15,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"automation.internal/ticket-ingress/internal/hook"
 )
 
 type consoleServer struct {
 	config consoleConfig
 	dynamo *dynamodb.Client
 	client *http.Client
+	// The tracker key's owner, read once at startup. Zero means unknown,
+	// and unknown keeps the answering write switched off.
+	keyOwnerID   int64
+	keyOwnerName string
 }
 
 // sourceHealth names each canonical source's outcome for one response. A
@@ -158,6 +164,15 @@ type ticketResponse struct {
 	Current     *overviewTicket `json:"current,omitempty"`
 	Timeline    []ticketEvent   `json:"timeline"`
 	CurrentJobs []jobNode       `json:"current_jobs,omitempty"`
+	// CanAnswer is true when the tracker key's owner is this ticket's
+	// allowed answerer - the identity whose answers the engine adopts.
+	CanAnswer bool `json:"can_answer"`
+	// AnsweringReason explains an absent answer panel: "not_answerer" or
+	// "key_owner_unknown". Empty when CanAnswer is true.
+	AnsweringReason string `json:"answering_reason,omitempty"`
+	// QuestionCommentID is the ledger's current question comment when the
+	// run is awaiting an answer - the only comment the panel may bind to.
+	QuestionCommentID string `json:"question_comment_id,omitempty"`
 }
 
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[0-9]+$`)
@@ -170,6 +185,7 @@ func (s *consoleServer) handleTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	response := ticketResponse{IssueKey: key, GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
 
+	ledger := answerContext{}
 	rows, err := s.scanState(r.Context())
 	if err != nil {
 		response.Sources.StateTable = "unavailable: " + err.Error()
@@ -192,9 +208,21 @@ func (s *consoleServer) handleTicket(w http.ResponseWriter, r *http.Request) {
 				response.Current = &ticket
 			}
 		}
+		ledger = answerContextFromRows(rows, key)
+	}
+	response.CanAnswer = s.keyOwnerID != 0 && ledger.AnswererID != 0 && s.keyOwnerID == ledger.AnswererID
+	if !response.CanAnswer {
+		if s.keyOwnerID == 0 {
+			response.AnsweringReason = "key_owner_unknown"
+		} else {
+			response.AnsweringReason = "not_answerer"
+		}
+	}
+	if ledger.State == "awaiting_answer" && ledger.QuestionCommentID > 0 {
+		response.QuestionCommentID = strconv.FormatInt(ledger.QuestionCommentID, 10)
 	}
 
-	timeline, trackerErr := s.trackerTimeline(r.Context(), key)
+	timeline, trackerErr := s.trackerTimeline(r.Context(), key, ledger.AnswererID)
 	if trackerErr != nil {
 		response.Sources.Tracker = "unavailable: " + trackerErr.Error()
 	} else {
@@ -218,7 +246,7 @@ func (s *consoleServer) handleTicket(w http.ResponseWriter, r *http.Request) {
 // trackerTimeline reads every comment on the ticket and classifies the
 // automation's own posts - reception, question, answer receipt, terminal
 // report - plus the requester's answers, into one chronological story.
-func (s *consoleServer) trackerTimeline(ctx context.Context, key string) ([]ticketEvent, error) {
+func (s *consoleServer) trackerTimeline(ctx context.Context, key string, answererID int64) ([]ticketEvent, error) {
 	events := make([]ticketEvent, 0, 32)
 	minID := int64(0)
 	for {
@@ -237,7 +265,7 @@ func (s *consoleServer) trackerTimeline(ctx context.Context, key string) ([]tick
 			Content string `json:"content"`
 			Created string `json:"created"`
 			User    struct {
-				Name string `json:"name"`
+				ID int64 `json:"id"`
 			} `json:"createdUser"`
 		}
 		decodeErr := json.NewDecoder(httpResponse.Body).Decode(&comments)
@@ -258,7 +286,7 @@ func (s *consoleServer) trackerTimeline(ctx context.Context, key string) ([]tick
 			if comment.Content == "" {
 				continue
 			}
-			event := classifyComment(comment.Content)
+			event := classifyComment(comment.Content, comment.User.ID, answererID)
 			event.CommentID = strconv.FormatInt(comment.ID, 10)
 			event.At = comment.Created
 			event.URL = "https://" + s.config.TrackerDomain + "/view/" + key + "#comment-" + event.CommentID
@@ -272,32 +300,44 @@ func (s *consoleServer) trackerTimeline(ctx context.Context, key string) ([]tick
 }
 
 var runURLPattern = regexp.MustCompile(`/actions/runs/([0-9]+)`)
-var terminalCodePattern = regexp.MustCompile(`自動処理の最終結果: ([a-z_]+)`)
 
-func classifyComment(content string) ticketEvent {
+// classifyComment names each comment for the story. The automation's own
+// posts identify themselves by the marker on their final line - the same
+// anchor the engine trusts - so a marker-shaped or headline-shaped string
+// inside anyone's prose stays prose. A human comment is an answer or cancel
+// only when the ticket's allowed answerer wrote it: the engine ignores
+// everyone else, and so does the story.
+func classifyComment(content string, userID, answererID int64) ticketEvent {
 	first := content
 	if index := strings.IndexByte(first, '\n'); index >= 0 {
 		first = first[:index]
 	}
 	event := ticketEvent{Kind: "note", Body: first}
-	switch {
-	case strings.Contains(content, "自動処理の最終結果"):
+	kind, qualifiers := markerParts(hook.ExtractCommentMarker(content))
+	switch kind {
+	case "terminal":
 		event.Kind = "terminal"
-		if match := terminalCodePattern.FindStringSubmatch(content); match != nil {
-			event.Code = match[1]
+		if len(qualifiers) > 0 {
+			event.Code = qualifiers[0]
 		}
 		if match := runURLPattern.FindStringSubmatch(content); match != nil {
 			event.RunID = match[1]
 		}
-	case strings.Contains(content, "【確認のお願い"):
+	case "question":
 		event.Kind = "question"
 		event.Body = content
-	case strings.Contains(content, "【回答受領"):
+	case "answer-receipt":
 		event.Kind = "answer_received"
-	case strings.HasPrefix(strings.TrimSpace(content), "回答 C"):
-		event.Kind = "answer"
-	case strings.Contains(content, "自動処理を受け付けました") || strings.Contains(content, "受け付け"):
+	case "ack":
 		event.Kind = "reception"
+	case "":
+		if answererID != 0 && userID == answererID && answerOrCancelCandidate(content) {
+			if strings.HasPrefix(firstContentLine(content), "中止") {
+				event.Kind = "cancel"
+			} else {
+				event.Kind = "answer"
+			}
+		}
 	}
 	return event
 }

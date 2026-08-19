@@ -1,8 +1,11 @@
-// Command console serves the read-only operations view: every ticket's
-// current state at a glance, and per ticket the generation history with its
-// evidence. It assembles the view from the canonical sources - the state
-// table, the tracker and the workflow API - at request time, holds no state
-// of its own, and writes nothing anywhere.
+// Command console serves the operations view: every ticket's current state
+// at a glance, and per ticket the generation history with its evidence. It
+// assembles the view from the canonical sources - the state table, the
+// tracker and the workflow API - at request time and holds no state of its
+// own. It has exactly one write: posting an answer to the engine's own
+// clarification question, restricted to lines the question itself printed,
+// and offered only when the tracker key's owner is the ticket's allowed
+// answerer.
 package main
 
 import (
@@ -77,8 +80,9 @@ func run() error {
 	}
 
 	if !strings.HasPrefix(cfg.Listen, "127.0.0.1:") && !strings.HasPrefix(cfg.Listen, "localhost:") {
-		// A read-only view of live operations still names tickets, states
-		// and comments; this tool binds to the loopback and nothing else.
+		// The view names tickets, states and comments, and the answer
+		// endpoint writes as the key's owner; this tool binds to the
+		// loopback and nothing else.
 		return errors.New("--listen must stay on 127.0.0.1 (got " + cfg.Listen + ")")
 	}
 
@@ -100,6 +104,13 @@ func run() error {
 			},
 		},
 	}
+	// Who the key belongs to decides whether answering is offered at all.
+	// A failed lookup disables answering and nothing else - reads must not
+	// die with it.
+	keyOwnerID, keyOwnerName, ownerErr := trackerKeyOwner(server.client, cfg.TrackerDomain, cfg.TrackerKey)
+	if ownerErr == nil {
+		server.keyOwnerID, server.keyOwnerName = keyOwnerID, keyOwnerName
+	}
 
 	static, err := fs.Sub(distFS, "dist")
 	if err != nil {
@@ -108,6 +119,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", server.handleOverview)
 	mux.HandleFunc("GET /api/tickets/{key}", server.handleTicket)
+	mux.HandleFunc("POST /api/tickets/{key}/answer", server.handleAnswer)
 	mux.Handle("GET /", http.FileServerFS(static))
 
 	// A local tool is still reachable from any page the operator's browser
@@ -116,7 +128,11 @@ func run() error {
 	// addresses this server answers as are accepted.
 	guarded := hostGuard(cfg.Listen, mux)
 
-	fmt.Printf("console: http://%s (read-only)\n", cfg.Listen)
+	if server.keyOwnerID != 0 {
+		fmt.Printf("console: http://%s (reads + posting answers as %s)\n", cfg.Listen, server.keyOwnerName)
+	} else {
+		fmt.Printf("console: http://%s (read-only: answer posting disabled - the tracker key's owner could not be read)\n", cfg.Listen)
+	}
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           guarded,
