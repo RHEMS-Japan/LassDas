@@ -1,11 +1,11 @@
 {
   "ledger_path": "/data/ledger.db",
   "tracker": {
-    "origin": "https://metelix.backlog.com",
-    "space_key": "metelix",
-    "project_id": 760057,
-    "project_key": "RFDEV",
-    "allowed_creator_id": 2303853,
+    "origin": "https://<space>.backlog.com",
+    "space_key": "<space>",
+    "project_id": 0,
+    "project_key": "<PROJECT>",
+    "allowed_creator_id": 0,
     "allowed_activity_type": 1,
     "required_category_id": 0,
     "board_statuses": {
@@ -16,12 +16,12 @@
     }
   },
   "identity": {
-    "repository_id": 1049995305,
+    "repository_id": 0,
     "repository": "RHEMS-Japan/LassDas",
     "workflow_ref": "RHEMS-Japan/LassDas/pod-runtime@lassdas",
     "engine_sha": "<40-hex engine commit baked into the image>"
   },
-  "automation_run_id": "run_20260802_f600964325f79fd29568abd4",
+  "automation_run_id": "run_YYYYMMDD_<24 hex>",
   "report_destinations": [],
   "consumer_config_path": "/etc/lassdas/config/m1-consumer.json",
   "knowledge_root": "/etc/lassdas/config/knowledge",
