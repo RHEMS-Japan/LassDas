@@ -2,7 +2,7 @@
 # Build for linux/arm64 (the cluster's node architecture).
 
 # ---- Stage 1: engine binaries -------------------------------------------
-FROM golang:1.23-bookworm AS engine
+FROM golang:1.25-bookworm AS engine
 ARG ENGINE_SHA
 WORKDIR /src
 COPY . .
