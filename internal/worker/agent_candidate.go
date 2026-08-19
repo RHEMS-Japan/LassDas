@@ -262,12 +262,14 @@ func agentRationale(run AgentRun) string {
 	if rationale == "" {
 		rationale = "The agent reported nothing."
 	}
-	if len(rationale) > 4096 {
-		rationale = strings.TrimSpace(rationale[len(rationale)-4096:])
-	}
 	// The transcript is the agent's own words and may carry anything; the
 	// rationale is validated plain text, so control characters are dropped
-	// rather than allowed to fail the seal.
+	// rather than allowed to fail the seal. Cleaning runs before the byte
+	// budget: a tail cut through the middle of a multi-byte character used
+	// to leave broken lead bytes that this cleaning swelled into three-byte
+	// replacement runes, pushing the result past the budget it had just
+	// been cut to - a 4,425-byte Japanese completion report failed its
+	// whole candidate that way on a live run.
 	cleaned := strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
@@ -278,6 +280,13 @@ func agentRationale(run AgentRun) string {
 		return r
 	}, rationale)
 	cleaned = strings.TrimSpace(cleaned)
+	if len(cleaned) > 4096 {
+		cut := cleaned[len(cleaned)-4096:]
+		for len(cut) > 0 && !utf8.RuneStart(cut[0]) {
+			cut = cut[1:]
+		}
+		cleaned = strings.TrimSpace(cut)
+	}
 	if cleaned == "" {
 		return "The agent reported nothing readable."
 	}
