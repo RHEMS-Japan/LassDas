@@ -109,6 +109,9 @@ func (r QuestionRecord) ValidateRoute(config ReportRouteConfig) error {
 		r.WorkflowRefSHA256 != config.WorkflowRefSHA256 || r.AutomationRunID != config.ExpectedRunID {
 		return errors.New("question route is not allowed")
 	}
+	if !runReferenceSchemeAllowed(r.RunURL, config.RunReferenceScheme) {
+		return errors.New("question route is not allowed")
+	}
 	return nil
 }
 

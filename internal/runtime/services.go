@@ -81,6 +81,9 @@ func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
 		SpaceKey: config.Tracker.SpaceKey, ProjectID: config.Tracker.ProjectID, ProjectKey: config.Tracker.ProjectKey,
 		AllowedCreatorID: config.Tracker.AllowedCreatorID, AllowedActivityType: config.Tracker.AllowedActivityType,
 		Target: target,
+		// Pod-resident runs have no workflow page; their run references use
+		// the local scheme, and the route seals only that form.
+		RunReferenceScheme: "local",
 	}
 	reportService, err := hook.NewTerminalReportService(route, store, backlogClient, logger)
 	if err != nil {

@@ -121,6 +121,19 @@ type ReportRouteConfig struct {
 	AllowedCreatorID    int64
 	AllowedActivityType int
 	Target              DeliveryTarget
+	// RunReferenceScheme names the run-reference form this deployment seals:
+	// "" or "github" for workflow runs (the only form before the pod
+	// constitution), "local" for pod-resident runs. The other form is
+	// refused, so a workflow deployment cannot seal an unclickable local
+	// reference and a pod cannot seal a fabricated workflow link.
+	RunReferenceScheme string
+}
+
+func runReferenceSchemeAllowed(raw, scheme string) bool {
+	if scheme == "local" {
+		return localRunURLPattern.MatchString(raw)
+	}
+	return runURLPattern.MatchString(raw)
 }
 
 // DestinationFor resolves the destination a report names. The match is exact;
@@ -256,7 +269,8 @@ func (r TerminalReportRequest) ValidateRoute(config ReportRouteConfig) error {
 		r.WorkflowRefSHA256 != config.WorkflowRefSHA256 || r.AutomationRunID != config.ExpectedRunID {
 		return errors.New("terminal report route is not allowed")
 	}
-	if !validRunURL(r.RunURL, config.RepositorySHA256, r.WorkflowRunID, r.RunAttempt) {
+	if !validRunURL(r.RunURL, config.RepositorySHA256, r.WorkflowRunID, r.RunAttempt) ||
+		!runReferenceSchemeAllowed(r.RunURL, config.RunReferenceScheme) {
 		return errors.New("terminal report run url is invalid")
 	}
 	if r.Repository == "" {

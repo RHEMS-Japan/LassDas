@@ -14,6 +14,10 @@
 //
 // It never touches kanban.db, never talks HTTP to itself, and holds no
 // state outside the ledger and the task workspace.
+//
+// Not carried over from the workflow: the operator-facing model-preflight
+// operation (a smoke probe of the model endpoints). Probing is an operator
+// action against the pod, not a card path.
 package main
 
 import (
@@ -23,7 +27,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -65,7 +71,11 @@ func run() error {
 	}
 	defer func() { _ = services.Close() }()
 
-	ctx := context.Background()
+	// SIGTERM from the supervisor cancels the context; every stage child
+	// runs in its own process group wired to that cancel, so the whole
+	// tree dies with the runner instead of orphaning a model call.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	now := time.Now().UTC()
 	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
 		SpaceKey:            config.Tracker.SpaceKey,
@@ -109,15 +119,28 @@ func run() error {
 		}
 		hermes := runtime.NewHermes(config)
 		if err := hermes.Block(ctx, taskID, "awaiting-answer:"+envelope.DeliveryID); err != nil {
-			// The question is posted and sealed; the attendant's sync pass
-			// re-blocks an escaped card. Log, do not fail the run.
-			logger.Error("card block failed; attendant will recover", "error", err.Error())
+			// The question is sealed but the card is still running. Exiting
+			// 0 here would COMPLETE the card — a completed card is never
+			// re-dispatched, so the adopted answer could never re-run.
+			// Exiting non-zero makes the supervisor block the card itself,
+			// and the attendant's sync normalizes it from there.
+			return fmt.Errorf("question posted but card block failed: %w", err)
 		}
+		// Exit 0 after blocking our own card: the supervisor's complete
+		// translation is a no-op on a card that is not running (fork
+		// worker.command contract), so the block keeps its word.
 		return nil
 	}
 	code := outcome.Code
 	if code == "" {
-		code = hook.TerminalSuccess
+		if runErr != nil {
+			// A pipeline error with no terminal code is infrastructure
+			// breakage, not a delivered success; report it as such rather
+			// than attempting a success report the evidence gate refuses.
+			code = hook.TerminalInternalFailed
+		} else {
+			code = hook.TerminalSuccess
+		}
 	}
 	if err := terminal.Report(ctx, code, outcome, pipeline.Repository()); err != nil {
 		return fmt.Errorf("terminal report failed: %w", err)

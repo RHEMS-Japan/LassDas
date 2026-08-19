@@ -18,13 +18,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -67,6 +65,13 @@ func run() error {
 	defer stop()
 
 	tick := func() {
+		// The attendant is the only reception mechanism (no webhook exists
+		// in this constitution); one poisoned tick must not crash-loop it.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.Error("tick panicked", "panic", fmt.Sprint(recovered))
+			}
+		}()
 		result := services.Tick.ProcessQuestionTick(ctx, hook.QuestionTickRequest{
 			Protocol: hook.QuestionTickProtocol, AutomationRunID: config.AutomationRunID, IssuedAt: time.Now().UTC(),
 		})
@@ -85,11 +90,9 @@ func run() error {
 	for {
 		select {
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) && !strings.Contains(ctx.Err().Error(), "deadline") {
-				logger.Info("attendant stopping")
-				return nil
-			}
-			return ctx.Err()
+			// The context is signal-only, so Done always means a clean stop.
+			logger.Info("attendant stopping")
+			return nil
 		case <-timer.C:
 			tick()
 		}

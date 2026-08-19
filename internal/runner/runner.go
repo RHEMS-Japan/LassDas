@@ -12,13 +12,17 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -36,11 +40,8 @@ type Pipeline struct {
 		Error(string, ...any)
 	}
 
-	// stepEnv carries the model keys and agent secrets exactly as the
-	// workflow exported them; populated from the process environment.
 	consumerRepository string
 	delivery           string
-	needsNode          bool
 }
 
 // Outcome is what the pipeline hands back to the runner's terminal logic.
@@ -67,10 +68,32 @@ func (p *Pipeline) exists(name string) bool {
 	return err == nil
 }
 
+// maxWorkspaceReadBytes bounds every read of a model- or tool-produced
+// workspace file. The stage outputs the pipeline reads back are small JSON
+// decisions; anything larger is not one of them.
+const maxWorkspaceReadBytes = 4 * 1024 * 1024
+
+// readWorkspaceFile reads one workspace artifact with the same guards the
+// question-decision loader always had: a regular file (no symlink out of
+// the workspace), size-capped before the read.
+func readWorkspaceFile(path string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, fmt.Errorf("%s is not a regular file within %d bytes", path, limit)
+	}
+	return os.ReadFile(path)
+}
+
 // step runs one binary with the working directory pinned to the workspace,
 // streaming output to the runner's own stdout/stderr (which the Hermes
 // per-task log captures). Exit codes are returned, not translated: each
-// call site owns its outcome table exactly as the workflow steps did.
+// call site owns its outcome table exactly as the workflow steps did. The
+// child gets its own process group and a context cancel (SIGTERM from the
+// supervisor) tears the whole group down — under GitHub Actions the runner
+// killed the job's process tree; the pod must do that itself.
 func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEnv ...string) (int, error) {
 	p.Logger.Info("step", "name", name, "argv0", argv[0])
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -78,6 +101,14 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	command.Env = append(os.Environ(), extraEnv...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+	}
+	command.WaitDelay = 20 * time.Second
 	err := command.Run()
 	if err == nil {
 		return 0, nil
@@ -101,7 +132,7 @@ func (p *Pipeline) controller(ctx context.Context, name string, arguments []stri
 
 // readJSONField reads one string field out of a workspace JSON file.
 func (p *Pipeline) readJSONField(name string, keys ...string) (string, error) {
-	raw, err := os.ReadFile(p.path(name))
+	raw, err := readWorkspaceFile(p.path(name), maxWorkspaceReadBytes)
 	if err != nil {
 		return "", err
 	}
@@ -132,8 +163,24 @@ func (p *Pipeline) readJSONField(name string, keys ...string) (string, error) {
 	}
 }
 
-// WriteEnvelope materializes the claimed envelope for the worker steps.
-func (p *Pipeline) WriteEnvelope() error {
+// Prepare clears the workspace and materializes the claimed envelope. The
+// workflow got a fresh runner filesystem per attempt; a Hermes task keeps
+// its workspace across re-dispatches, so a retried card must not see the
+// previous attempt's artifacts (a stale clarification.json alone would
+// hand model stages answers this run never adopted).
+func (p *Pipeline) Prepare() error {
+	entries, err := os.ReadDir(p.Workspace)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := p.verifyToolPins(); err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(p.Envelope)
 	if err != nil {
 		return err
@@ -141,10 +188,43 @@ func (p *Pipeline) WriteEnvelope() error {
 	return os.WriteFile(p.path("ticket-envelope.json"), encoded, 0o600)
 }
 
+// verifyToolPins measures the stage binaries against the configured pins.
+// The workflow verified its checkout and binary digests before every use;
+// this is the pod's equivalent when the operator pins them.
+func (p *Pipeline) verifyToolPins() error {
+	for _, pin := range []struct{ path, want, name string }{
+		{p.Config.WorkerBin, p.Config.WorkerSHA256, "worker"},
+		{p.Config.ControllerBin, p.Config.ControllerSHA256, "controller"},
+	} {
+		if pin.want == "" {
+			continue
+		}
+		file, err := os.Open(pin.path)
+		if err != nil {
+			return fmt.Errorf("%s binary unreadable: %w", pin.name, err)
+		}
+		digest := sha256.New()
+		_, err = io.Copy(digest, file)
+		_ = file.Close()
+		if err != nil {
+			return fmt.Errorf("%s binary unreadable: %w", pin.name, err)
+		}
+		if hex.EncodeToString(digest.Sum(nil)) != pin.want {
+			return fmt.Errorf("%s binary does not match its configured sha256 pin", pin.name)
+		}
+	}
+	return nil
+}
+
 // resolveConsumer reads the delivery mode for the single consumer the draft
-// located — the workflow's source-job jq over m1-consumer.json.
+// located — the workflow's source-job jq over m1-consumer.json. The pod
+// runtime ships the pull_request stopping point first; a consumer that
+// stops at integration or production is refused here, before any work,
+// because its success report needs browser evidence steps this runtime
+// does not carry yet (an honest early stop instead of an unsealable
+// terminal after a real merge).
 func (p *Pipeline) resolveConsumer() error {
-	raw, err := os.ReadFile(p.Config.ConsumerConfigPath)
+	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
 	if err != nil {
 		return err
 	}
@@ -171,15 +251,22 @@ func (p *Pipeline) resolveConsumer() error {
 			continue
 		}
 		switch consumer.Delivery {
-		case "pull_request", "integration", "production":
+		case "pull_request":
+		case "integration", "production":
+			return fmt.Errorf("consumer %s stops at %s; the pod runtime ships pull_request delivery only", repository, consumer.Delivery)
 		default:
 			return fmt.Errorf("consumer %s has unknown delivery %q", repository, consumer.Delivery)
 		}
 		p.consumerRepository = repository
 		p.delivery = consumer.Delivery
 		for _, tool := range consumer.Mode.Toolchain {
-			if tool.Binary == "node" {
-				p.needsNode = true
+			// The workflow provisioned this toolchain per run (pinned Node
+			// and pnpm); the pod image ships it. Assert it is really there
+			// rather than letting validation fail obliquely later.
+			if tool.Binary != "" {
+				if _, err := exec.LookPath(tool.Binary); err != nil {
+					return fmt.Errorf("consumer %s needs %q on PATH and the image does not provide it", repository, tool.Binary)
+				}
 			}
 		}
 		return nil

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
 	_ "modernc.org/sqlite"
@@ -113,6 +114,18 @@ func (s *LocalStore) begin(ctx context.Context) (*tx, error) {
 		"INSERT INTO ledger(pk, attrs) VALUES ('#lock', '{}') ON CONFLICT(pk) DO UPDATE SET attrs = attrs",
 	); err != nil {
 		_ = raw.Rollback()
+		return nil, err
+	}
+	return &tx{tx: raw}, nil
+}
+
+// beginRead opens a transaction without taking the write lock. Only for
+// operations that never write: under WAL they read a consistent snapshot
+// without serializing against the single writer (the attendant's per-tick
+// loads were measurably queueing behind a working runner's stages).
+func (s *LocalStore) beginRead(ctx context.Context) (*tx, error) {
+	raw, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &tx{tx: raw}, nil
@@ -207,7 +220,10 @@ func localRunItemMatches(row item, envelope hook.DispatchEnvelope, eventKey, run
 // ---------------------------------------------------------------------------
 
 func localFailure(class hook.FailureClass, code string) error {
-	return hook.NewExternalFailure("local-ledger", class, code)
+	// The service name must satisfy the failure code charset (no hyphen), or
+	// NewExternalFailure collapses every code to unexpected_failure and the
+	// real cause is masked in logs and dispositions.
+	return hook.NewExternalFailure("local_ledger", class, code)
 }
 
 func (s *LocalStore) Enqueue(ctx context.Context, request hook.QueueRequest) (hook.QueueDisposition, error) {
@@ -609,7 +625,7 @@ func localTerminalBindingMatches(binding localTerminalBinding, report hook.Termi
 // ResolveRunRoute is the local sibling of the Dynamo store's route rebinding
 // for routeful-but-recordless callers (the question tick).
 func (s *LocalStore) resolveRunRoute(ctx context.Context, route hook.ReportRouteConfig) (hook.ReportRouteConfig, error) {
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return route, localFailure(hook.FailureRetryable, "run_route_read_failed")
 	}
@@ -939,7 +955,7 @@ func (s *LocalStore) LoadQuestionWait(ctx context.Context, route hook.ReportRout
 		return hook.QuestionWaitSnapshot{}, false, err
 	}
 	route = resolved
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return hook.QuestionWaitSnapshot{}, false, localFailure(hook.FailureRetryable, "terminal_read_failed")
 	}
@@ -1236,7 +1252,7 @@ func (s *LocalStore) ReplyState(ctx context.Context, route hook.ReportRouteConfi
 	if route.Validate() != nil || record.ValidateShape() != nil || !validReplyKind(kind) {
 		return false, localFailure(hook.FailureRejected, "invalid_reply_state")
 	}
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return false, localFailure(hook.FailureRetryable, "notify_read_failed")
 	}
@@ -1517,7 +1533,7 @@ func (s *LocalStore) RunCommentState(ctx context.Context, route hook.ReportRoute
 		return false, err
 	}
 	route = resolved
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return false, localFailure(hook.FailureRetryable, "notify_read_failed")
 	}
@@ -1540,7 +1556,7 @@ func (s *LocalStore) LoadRunNotice(ctx context.Context, route hook.ReportRouteCo
 		return hook.RunNoticeSnapshot{}, err
 	}
 	route = resolved
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return hook.RunNoticeSnapshot{}, localFailure(hook.FailureRetryable, "terminal_read_failed")
 	}
@@ -1573,7 +1589,7 @@ func (s *LocalStore) LoadIngestCursor(ctx context.Context, route hook.ReportRout
 	if route.Validate() != nil {
 		return 0, localFailure(hook.FailureRejected, "invalid_ingest_cursor")
 	}
-	txn, err := s.begin(ctx)
+	txn, err := s.beginRead(ctx)
 	if err != nil {
 		return 0, localFailure(hook.FailureRetryable, "notify_read_failed")
 	}
@@ -1643,9 +1659,15 @@ var (
 // RunOverview is one live run row, read for the attendant's card sync. A
 // read-only convenience over the same rows the sealed operations manage.
 type RunOverview struct {
+	Key        string // the ledger row key, for administrative transitions
 	RunID      string
 	DeliveryID string
 	State      string
+	ClaimedAt  int64 // ms; 0 unless the run holds (or held) a claim
+	// QuestionSealed marks a run carrying sealed question evidence — its
+	// report_pending flavor belongs to the tick's expiry pass, never to
+	// claim recovery.
+	QuestionSealed bool
 	IssueID    int64
 	IssueKey   string
 	Summary    string
@@ -1676,10 +1698,12 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		if !row.strEquals("record_type", "run") {
 			continue
 		}
-		entry := RunOverview{}
+		entry := RunOverview{Key: pk}
 		entry.RunID, _ = row.str("run_id")
 		entry.DeliveryID, _ = row.str("delivery_id")
 		entry.State, _ = row.str("state")
+		entry.ClaimedAt, _ = row.int64At("claimed_at")
+		entry.QuestionSealed = row.has("question_record_sha256")
 		if envelopeJSON, ok := row.str("envelope_json"); ok {
 			if envelope, err := decodeEnvelope([]byte(envelopeJSON)); err == nil {
 				entry.IssueID = envelope.Snapshot.IssueID
@@ -1690,4 +1714,62 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		overview = append(overview, entry)
 	}
 	return overview, rows.Err()
+}
+
+// RecoverLostClaim returns a claimed run whose worker provably died to the
+// queue so a fresh dispatch can claim it. Neither store ever expired a
+// claim on its own — the workflow constitution recovered crashed claims by
+// operator surgery (measured live 2026-08-19 on the retiring instance) —
+// and this administrative transition is the pod constitution's structural
+// replacement: the attendant calls it only after the kanban shows no
+// living worker for the card. The expected claim timestamp binds the
+// transition to the observed dead claim, so a run freshly re-claimed in
+// the meantime cannot be stomped. Everything sealed at enqueue (envelope,
+// event binding, pending slot) is untouched; the stale owner block stays
+// and is overwritten whole by the next claim.
+func (s *LocalStore) RecoverLostClaim(ctx context.Context, key string, expectClaimedAt int64, issuedAt time.Time) error {
+	transaction, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer transaction.rollback()
+	row, err := transaction.getItem(key)
+	if err != nil {
+		return err
+	}
+	if row == nil || !row.strEquals("record_type", "run") {
+		return errors.New("recover: no such run")
+	}
+	switch {
+	case row.strEquals("state", "queued"):
+		// Already recovered (idempotent replay).
+	case row.strEquals("state", "claimed") && row.int64Equals("claimed_at", expectClaimedAt):
+	case row.strEquals("state", stateReportPending) && row.int64Equals("claimed_at", expectClaimedAt) &&
+		!row.has("question_record_sha256"):
+		// report_pending reached from claimed is a runner that died between
+		// the two phases of its own terminal report — the report content
+		// lived only in that process, so the run can only be re-executed.
+		// (report_pending reached from awaiting_answer keeps the sealed
+		// question evidence and is re-driven by the tick's own expiry pass,
+		// which regenerates the identical report; it is refused here.)
+		if lease, ok := row.int64At("terminal_lease_until"); !ok || lease >= issuedAt.UTC().UnixMilli() {
+			return errors.New("recover: terminal lease still live")
+		}
+		delete(row, "terminal_report_sha256")
+		delete(row, "terminal_code")
+		delete(row, "terminal_started_at")
+		delete(row, "terminal_lease_until")
+		delete(row, "terminal_lease_token")
+	default:
+		return errors.New("recover: run is not the observed dead claim")
+	}
+	if !row.strEquals("state", "queued") {
+		row["state"] = "queued"
+		row["queued_at"] = issuedAt.UTC().UnixMilli()
+		delete(row, "claimed_at")
+		if err := transaction.setItem(key, row); err != nil {
+			return err
+		}
+	}
+	return transaction.commit()
 }
