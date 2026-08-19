@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -93,39 +94,64 @@ func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
 	return &GatewayClient{client: client}, nil
 }
 
+// SafeModelError marks an error that carries no URL and no credential -
+// the key travels in a header and only the cause, never the request, is
+// echoed. A malformed upstream response can still surface a stretch of
+// its bytes here (net/http quotes them in its own error), which is
+// acceptable because these messages end in the job log and nowhere else;
+// do not route them into ticket comments or model input. converse
+// flattens every unmarked error to a fixed phrase - an arbitrary
+// ChatCompletionsAPI implementation may echo anything - and lets only
+// the marked error itself travel, because which failure it was (a
+// timeout, a refused connection, an HTTP status) decides the remedy.
+type SafeModelError struct{ message string }
+
+func (e *SafeModelError) Error() string { return e.message }
+
+func safeModelError(message string) error { return &SafeModelError{message: message} }
+
 func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	if g == nil || g.client == nil || ctx == nil {
-		return nil, errors.New("model transport is invalid")
+		return nil, safeModelError("model transport is invalid")
 	}
 	apiKey := os.Getenv(endpoint.APIKeyEnv)
 	if endpoint.APIKeyEnv == "" || apiKey == "" || strings.TrimSpace(apiKey) != apiKey || strings.ContainsAny(apiKey, "\r\n\x00") {
-		return nil, errors.New("model API key is unavailable")
+		return nil, safeModelError("model API key is unavailable")
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		return nil, errors.New("model request could not be encoded")
+		return nil, safeModelError("model request could not be encoded")
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.BaseURL+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, errors.New("model request could not be built")
+		return nil, safeModelError("model request could not be built")
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+apiKey)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpResponse, err := g.client.Do(httpRequest)
 	if err != nil {
-		return nil, errors.New("model invocation failed")
+		// The cause without the URL: a timeout, a refused connection and a
+		// reset each have a different remedy, and the bare message forced a
+		// live failure to be diagnosed from the absence of a gateway log
+		// row. The unwrapped cause carries no URL and no credential - the
+		// key travels in a header, never in the error.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return nil, safeModelError("model invocation failed: " + urlErr.Err.Error())
+		}
+		return nil, safeModelError("model invocation failed")
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
 	if err != nil || len(body) > maxTransportResponseBytes {
-		return nil, errors.New("model response could not be read")
+		return nil, safeModelError("model response could not be read")
 	}
 	if httpResponse.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model invocation failed with status %d", httpResponse.StatusCode)
+		return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", httpResponse.StatusCode))
 	}
 	var response ChatResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, errors.New("model response is not valid JSON")
+		return nil, safeModelError("model response is not valid JSON")
 	}
 	return &response, nil
 }
@@ -292,7 +318,18 @@ func (i *ModelInvoker) converse(ctx context.Context, endpoint ModelEndpoint, sys
 	defer cancel()
 	output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
 	latency := time.Since(started).Milliseconds()
-	if err != nil || output == nil {
+	if err != nil {
+		// The marked error itself travels, never the wrapper around it: a
+		// wrapping implementation could smuggle upstream text around the
+		// mark, and the mark's own message is by definition the
+		// transport's.
+		var safe *SafeModelError
+		if errors.As(err, &safe) {
+			return "", InvocationUsage{}, safe
+		}
+		return "", InvocationUsage{}, errors.New("model invocation failed")
+	}
+	if output == nil {
 		return "", InvocationUsage{}, errors.New("model invocation failed")
 	}
 	if output.Usage == nil || output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||

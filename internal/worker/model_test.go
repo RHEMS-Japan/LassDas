@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -294,5 +295,34 @@ func TestGatewayClientRequiresAPIKey(t *testing.T) {
 	}
 	if _, err := client.ChatCompletions(context.Background(), gatewayTestEndpoint(server.URL, "TEST_MODEL_API_KEY"), ChatRequest{Model: "vendor/model-a"}); err == nil {
 		t.Fatal("ChatCompletions() accepted a missing API key")
+	}
+}
+
+// The transport's own failures carry their cause - a timeout and a refused
+// connection have different remedies - while an arbitrary API
+// implementation's error text stays contained. A live readiness check died
+// as a bare "model invocation failed" that had to be diagnosed from the
+// absence of a gateway log row.
+func TestConverseLetsTheTransportsOwnCauseTravel(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	invoker, _ := NewModelInvoker(&fakeChatAPI{err: safeModelError("model invocation failed: context deadline exceeded")})
+	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("the transport's cause was flattened: %v", err)
+	}
+}
+
+// A wrapper around the mark must not smuggle its own text through: only the
+// marked error itself travels.
+func TestConverseUnwrapsTheMarkBeforeLettingItTravel(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	wrapped := fmt.Errorf("upstream said %q: %w", "SECRET UPSTREAM DETAIL", safeModelError("model invocation failed"))
+	invoker, _ := NewModelInvoker(&fakeChatAPI{err: wrapped})
+	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	if err == nil || strings.Contains(err.Error(), "SECRET UPSTREAM DETAIL") {
+		t.Fatalf("the wrapper's text travelled: %v", err)
+	}
+	if !strings.Contains(err.Error(), "model invocation failed") {
+		t.Fatalf("the mark itself was lost: %v", err)
 	}
 }
