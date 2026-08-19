@@ -1668,6 +1668,9 @@ type RunOverview struct {
 	// report_pending flavor belongs to the tick's expiry pass, never to
 	// claim recovery.
 	QuestionSealed bool
+	// TerminalCode is set for terminal runs; the attendant retires the
+	// card itself only for its own terminations (expiry, cancel).
+	TerminalCode string
 	IssueID    int64
 	IssueKey   string
 	Summary    string
@@ -1704,6 +1707,7 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		entry.State, _ = row.str("state")
 		entry.ClaimedAt, _ = row.int64At("claimed_at")
 		entry.QuestionSealed = row.has("question_record_sha256")
+		entry.TerminalCode, _ = row.str("terminal_code")
 		if envelopeJSON, ok := row.str("envelope_json"); ok {
 			if envelope, err := decodeEnvelope([]byte(envelopeJSON)); err == nil {
 				entry.IssueID = envelope.Snapshot.IssueID
@@ -1746,6 +1750,8 @@ func (s *LocalStore) RecoverLostClaim(ctx context.Context, key string, expectCla
 	case row.strEquals("state", "claimed") && row.int64Equals("claimed_at", expectClaimedAt):
 	case row.strEquals("state", stateReportPending) && row.int64Equals("claimed_at", expectClaimedAt) &&
 		!row.has("question_record_sha256"):
+		// (fall through to the requeue below after clearing the partial
+		// terminal evidence)
 		// report_pending reached from claimed is a runner that died between
 		// the two phases of its own terminal report — the report content
 		// lived only in that process, so the run can only be re-executed.
@@ -1766,7 +1772,14 @@ func (s *LocalStore) RecoverLostClaim(ctx context.Context, key string, expectCla
 	if !row.strEquals("state", "queued") {
 		row["state"] = "queued"
 		row["queued_at"] = issuedAt.UTC().UnixMilli()
-		delete(row, "claimed_at")
+		// The queued shape is the one ResumeWithAnswer restores: no claim
+		// timestamp and no owner block (the next claim writes its own whole).
+		for _, name := range []string{
+			"claimed_at", "repository_id", "repository_sha256", "workflow_ref_sha256",
+			"workflow_sha", "workflow_run_id", "run_attempt",
+		} {
+			delete(row, name)
+		}
 		if err := transaction.setItem(key, row); err != nil {
 			return err
 		}

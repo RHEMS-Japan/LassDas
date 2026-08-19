@@ -7,63 +7,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/hook"
 )
 
-// CardLedger remembers which Hermes card belongs to which delivery. It is
-// attendant-local bookkeeping (a JSON file next to the ledger), not part of
-// the sealed ledger: losing it means a card might be created twice, and the
-// idempotency key on creation is what makes even that harmless.
-type CardLedger struct {
-	path  string
-	Cards map[string]string `json:"cards"` // delivery_id -> task id
-}
-
-func LoadCardLedger(ledgerPath string) (*CardLedger, error) {
-	path := filepath.Join(filepath.Dir(ledgerPath), "cards.json")
-	ledger := &CardLedger{path: path, Cards: map[string]string{}}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return ledger, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(raw, ledger); err != nil {
-		// A corrupt map must not crash-loop the resident: quarantine it and
-		// start empty — creation is idempotent by delivery id, so the worst
-		// outcome is one redundant (deduplicated) create per live run.
-		quarantine := path + ".corrupt"
-		if renameErr := os.Rename(path, quarantine); renameErr != nil {
-			return nil, fmt.Errorf("cards.json is corrupt and could not be quarantined: %w", renameErr)
-		}
-		return &CardLedger{path: path, Cards: map[string]string{}}, nil
-	}
-	if ledger.Cards == nil {
-		ledger.Cards = map[string]string{}
-	}
-	ledger.path = path
-	return ledger, nil
-}
-
-// save writes atomically (temp + rename) so a crash mid-write can never
-// leave a truncated file behind.
-func (l *CardLedger) save() error {
-	encoded, err := json.MarshalIndent(l, "", "  ")
-	if err != nil {
-		return err
-	}
-	temporary := l.path + ".tmp"
-	if err := os.WriteFile(temporary, encoded, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(temporary, l.path)
-}
-
 // Hermes drives the hermes CLI — the canonical channel for every card
-// transition (§3.1 of the runtime design: no direct kanban.db writes, ever).
+// transition and read (docs/RUNTIME_POD.md: no direct kanban.db access,
+// ever).
 type Hermes struct {
 	bin     string
 	board   string
@@ -96,8 +48,32 @@ func (h *Hermes) run(ctx context.Context, arguments ...string) ([]byte, error) {
 	return output, nil
 }
 
-// CreateCard creates (idempotently) the card for one delivery and returns
-// its task id.
+// BoardTask is the slice of one kanban task the attendant reasons about.
+type BoardTask struct {
+	ID             string `json:"id"`
+	Status         string `json:"status"`
+	IdempotencyKey string `json:"idempotency_key"`
+	BlockKind      string `json:"block_kind"`
+}
+
+// ListTasks reads every card assigned to the runner profile, archived ones
+// included. The kanban itself is the only authority on which card holds
+// which delivery — there is deliberately no attendant-side mapping file: a
+// cached map that could be lost or trail reality is exactly what made
+// "no card known" indistinguishable from "no card exists".
+func (h *Hermes) ListTasks(ctx context.Context) ([]BoardTask, error) {
+	output, err := h.run(ctx, "list", "--assignee", h.profile, "--archived", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var tasks []BoardTask
+	if err := json.Unmarshal(output, &tasks); err != nil {
+		return nil, fmt.Errorf("hermes kanban list returned no task array: %s", strings.TrimSpace(string(output)))
+	}
+	return tasks, nil
+}
+
+// CreateCard creates (idempotently, by delivery id) the card for one run.
 func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string) (string, error) {
 	output, err := h.run(ctx, "create", title,
 		"--body", body,
@@ -118,45 +94,37 @@ func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string)
 	return created.ID, nil
 }
 
-// Unblock returns a blocked card to the flow (the answer was adopted).
+// Unblock returns a blocked card to the flow after an adopted answer. The
+// attendant unblocks strictly on new information, so it resolves the block
+// (clearing the same-cause recurrence counter): without --resolve the
+// kanban's unblock-loop breaker routes the card to triage on the second
+// protocol-legal clarification round (fork BLOCK_RECURRENCE_LIMIT=2 vs
+// MaxClarificationRounds=2 — the counter reaches the limit on round two).
 func (h *Hermes) Unblock(ctx context.Context, taskID string) error {
-	_, err := h.run(ctx, "unblock", taskID)
+	_, err := h.run(ctx, "unblock", "--resolve", taskID)
 	return err
 }
 
 // Block parks a card while a question waits. The reason is positional in
-// the canonical CLI, and the kind is needs_input — a human answer is what
-// unparks it. The kanban's unblock-loop breaker routes a card to triage
-// after BLOCK_RECURRENCE_LIMIT (2) same-kind re-blocks after unblock;
-// MaxClarificationRounds is 2, so a run blocks at most twice and the
-// breaker is never reached — raising the round contract past the breaker
-// would strand round-3 cards in triage (docs/RUNTIME_POD.md).
+// the canonical CLI; needs_input is the kind a human answer unparks.
 func (h *Hermes) Block(ctx context.Context, taskID, reason string) error {
 	_, err := h.run(ctx, "block", taskID, reason, "--kind", "needs_input")
 	return err
 }
 
-// Complete retires a card whose run reached a terminal state through the
-// attendant (deadline expiry, cancellation) rather than through a runner
-// exit the supervisor could translate.
+// Complete retires a card whose run the ATTENDANT terminated (deadline
+// expiry, cancellation). Complete only accepts running/ready/blocked/review
+// cards; Archive is the fallback that accepts anything.
 func (h *Hermes) Complete(ctx context.Context, taskID string) error {
 	_, err := h.run(ctx, "complete", taskID)
 	return err
 }
 
-// TaskStatus reads one card's status via the CLI.
-func (h *Hermes) TaskStatus(ctx context.Context, taskID string) (string, error) {
-	output, err := h.run(ctx, "show", taskID, "--json")
-	if err != nil {
-		return "", err
-	}
-	var task struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(output, &task); err != nil {
-		return "", fmt.Errorf("hermes kanban show returned no status: %s", strings.TrimSpace(string(output)))
-	}
-	return task.Status, nil
+// Archive retires a card unconditionally and — unlike done — releases its
+// idempotency key, so a fresh card can be created for the same delivery.
+func (h *Hermes) Archive(ctx context.Context, taskID string) error {
+	_, err := h.run(ctx, "archive", taskID)
+	return err
 }
 
 // recoverClaimGrace is how long a claim may sit with no running card
@@ -165,11 +133,13 @@ func (h *Hermes) TaskStatus(ctx context.Context, taskID string) (string, error) 
 // only has to outlive that translation plus one dispatch hand-off.
 const recoverClaimGrace = 10 * time.Minute
 
-// SyncCards aligns Hermes cards with ledger states. It is deliberately
-// idempotent and conservative: the sealed ledger is the truth about runs,
-// the kanban board is its projection for the dispatcher, and every card
-// transition goes through the canonical CLI.
-func SyncCards(ctx context.Context, services *Services, cards *CardLedger, hermes *Hermes, logger interface {
+// SyncCards aligns kanban cards with ledger states. Each pass derives the
+// delivery→card mapping from the kanban itself (ListTasks), so a run with
+// no card in the listing really has none — the precondition the claim
+// recovery below needs. It is idempotent and conservative: the sealed
+// ledger is the truth about runs, the board is its projection for the
+// dispatcher, and every transition goes through the canonical CLI.
+func SyncCards(ctx context.Context, services *Services, hermes *Hermes, logger interface {
 	Info(string, ...any)
 	Error(string, ...any)
 }) error {
@@ -177,12 +147,35 @@ func SyncCards(ctx context.Context, services *Services, cards *CardLedger, herme
 	if err != nil {
 		return err
 	}
-	changed := false
+	if len(runs) == 0 {
+		return nil
+	}
+	tasks, err := hermes.ListTasks(ctx)
+	if err != nil {
+		return err
+	}
+	cards := map[string]BoardTask{}
+	for _, task := range tasks {
+		if task.IdempotencyKey == "" {
+			continue
+		}
+		// A live card outranks an archived one for the same delivery (the
+		// archived one no longer holds the idempotency key).
+		if existing, ok := cards[task.IdempotencyKey]; !ok ||
+			(existing.Status == "archived" && task.Status != "archived") {
+			cards[task.IdempotencyKey] = task
+		}
+	}
+
 	for _, run := range runs {
-		taskID := cards.Cards[run.DeliveryID]
+		task, hasCard := cards[run.DeliveryID]
+		if task.Status == "archived" {
+			hasCard = false
+		}
 		switch run.State {
 		case "queued":
-			if taskID == "" {
+			switch {
+			case !hasCard:
 				title := run.RunID
 				if run.Summary != "" {
 					title = fmt.Sprintf("%s: %s", run.RunID, run.Summary)
@@ -196,113 +189,84 @@ func SyncCards(ctx context.Context, services *Services, cards *CardLedger, herme
 					logger.Error("card create failed", "run", run.RunID, "error", err.Error())
 					continue
 				}
-				cards.Cards[run.DeliveryID] = created
-				changed = true
 				logger.Info("card created", "run", run.RunID, "task", created)
-				continue
-			}
-			status, err := hermes.TaskStatus(ctx, taskID)
-			if err != nil {
-				logger.Error("card status failed", "task", taskID, "error", err.Error())
-				continue
-			}
-			switch status {
-			case "blocked", "scheduled":
-				// A queued run with a parked card is a resumed run: the
+			case task.Status == "blocked":
+				// A queued run with a blocked card is a resumed run: the
 				// adopted answer returned it to the queue while its card
-				// sits blocked.
-				if err := hermes.Unblock(ctx, taskID); err != nil {
-					logger.Error("card unblock failed", "task", taskID, "error", err.Error())
+				// sits parked for that very answer.
+				if err := hermes.Unblock(ctx, task.ID); err != nil {
+					logger.Error("card unblock failed", "task", task.ID, "error", err.Error())
 					continue
 				}
-				logger.Info("card unblocked", "run", run.RunID, "task", taskID)
-			case "done", "archived":
-				// The card was retired while the ledger still queues the run
-				// (e.g. the runner's own block failed and its exit-0 completed
-				// the card before the fix that turned that into exit-1). A
-				// done card is never re-dispatched, so the run gets a fresh
-				// card; creation is deduplicated by delivery id + kanban
-				// idempotency, and a retired card does not hold the key.
-				delete(cards.Cards, run.DeliveryID)
-				changed = true
-				logger.Error("card was retired under a queued run; recreating", "run", run.RunID, "task", taskID)
+				logger.Info("card unblocked", "run", run.RunID, "task", task.ID)
+			case task.Status == "scheduled":
+				// An operator parked it deliberately (time-wait). Human
+				// parking outranks the attendant; the run waits with it.
+			case task.Status == "done" || task.Status == "triage":
+				// A retired or triaged card cannot be re-dispatched, and a
+				// done card still holds the idempotency key (only archive
+				// releases it) — recreating without archiving first would
+				// loop forever on the fork's dedup returning this card.
+				if err := hermes.Archive(ctx, task.ID); err != nil {
+					logger.Error("card archive failed", "task", task.ID, "error", err.Error())
+					continue
+				}
+				logger.Info("unusable card archived; fresh card next pass", "run", run.RunID, "task", task.ID, "was", task.Status)
 			}
 		case "claimed", "terminal_report_pending":
-			// A run in these states whose card is not running has no living
-			// worker: the supervisor translated the worker's death into
-			// block (crash) or the card escaped entirely. After the grace,
-			// hand the run back to the queue (the store refuses the
-			// report_pending flavors that belong to the tick); the queued
-			// case above then returns the card to the flow on the next pass.
-			if run.ClaimedAt == 0 || time.Since(time.UnixMilli(run.ClaimedAt)) < recoverClaimGrace {
-				continue
-			}
 			if run.State == "terminal_report_pending" && run.QuestionSealed {
 				// The tick's expiry pass owns this one (it regenerates the
 				// identical report and reacquires the lease itself).
 				continue
 			}
-			if taskID != "" {
-				status, err := hermes.TaskStatus(ctx, taskID)
-				if err != nil {
-					logger.Error("card status failed", "task", taskID, "error", err.Error())
-					continue
-				}
-				if status == "running" || status == "review" {
-					continue
-				}
+			if run.ClaimedAt == 0 || time.Since(time.UnixMilli(run.ClaimedAt)) < recoverClaimGrace {
+				continue
 			}
+			if hasCard && (task.Status == "running" || task.Status == "review") {
+				continue
+			}
+			// No living worker: the card either shows the supervisor's
+			// crash translation or — because the mapping above is derived
+			// from the kanban itself, not a cache — provably does not
+			// exist. Hand the run back to the queue; the queued case
+			// returns the card to the flow on the next pass.
 			if err := services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC()); err != nil {
 				logger.Error("claim recovery failed", "run", run.RunID, "error", err.Error())
 				continue
 			}
 			logger.Info("dead claim returned to the queue", "run", run.RunID, "claimed_at", run.ClaimedAt)
 		case "awaiting_answer":
-			// The runner blocks its own card before exiting; this is the
-			// recovery pass for a card that escaped (e.g. the runner died
-			// after posting the question but before blocking).
-			if taskID == "" {
-				continue
-			}
-			status, err := hermes.TaskStatus(ctx, taskID)
-			if err != nil {
-				logger.Error("card status failed", "task", taskID, "error", err.Error())
-				continue
-			}
-			if status != "blocked" && status != "running" {
-				if err := hermes.Block(ctx, taskID, "awaiting-answer:"+run.DeliveryID); err != nil {
-					logger.Error("card block failed", "task", taskID, "error", err.Error())
+			// The runner blocks its own card before exiting; this recovers
+			// a card that escaped back to the dispatchable pool (a dispatch
+			// of it would just die on PullClaimed).
+			if hasCard && (task.Status == "todo" || task.Status == "ready") {
+				if err := hermes.Block(ctx, task.ID, "awaiting-answer:"+run.DeliveryID); err != nil {
+					logger.Error("card block failed", "task", task.ID, "error", err.Error())
 					continue
 				}
-				logger.Info("card re-blocked for waiting answer", "run", run.RunID, "task", taskID)
+				logger.Info("card re-blocked for waiting answer", "run", run.RunID, "task", task.ID)
 			}
 		case "terminal":
-			if taskID == "" {
+			if !hasCard || task.Status == "done" {
 				continue
 			}
-			// A runner that reports its own terminal exits 0/1 and the
-			// supervisor retires the card; this pass retires the card of a
-			// run the ATTENDANT terminated (answer deadline expiry, cancel)
-			// — without it the card stays blocked forever while the ledger
-			// has already closed the run.
-			status, err := hermes.TaskStatus(ctx, taskID)
-			if err != nil {
-				logger.Error("card status failed", "task", taskID, "error", err.Error())
+			// Only the attendant's own terminations retire their card here;
+			// a runner-reported failure leaves the supervisor's blocked card
+			// as the visible record of the failure (docs/RUNTIME_POD.md).
+			if run.TerminalCode != string(hook.TerminalClarificationExpired) &&
+				run.TerminalCode != string(hook.TerminalCancelled) {
 				continue
 			}
-			if status != "done" && status != "archived" {
-				if err := hermes.Complete(ctx, taskID); err != nil {
-					logger.Error("card complete failed", "task", taskID, "error", err.Error())
+			if err := hermes.Complete(ctx, task.ID); err != nil {
+				// Complete refuses some states (todo, triage); Archive
+				// retires anything.
+				if err := hermes.Archive(ctx, task.ID); err != nil {
+					logger.Error("card retire failed", "task", task.ID, "error", err.Error())
 					continue
 				}
-				logger.Info("card completed for terminal run", "run", run.RunID, "task", taskID)
 			}
-			delete(cards.Cards, run.DeliveryID)
-			changed = true
+			logger.Info("card retired for attendant-terminated run", "run", run.RunID, "task", task.ID, "code", run.TerminalCode)
 		}
-	}
-	if changed {
-		return cards.save()
 	}
 	return nil
 }
