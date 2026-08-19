@@ -53,7 +53,6 @@ type BoardTask struct {
 	ID             string `json:"id"`
 	Status         string `json:"status"`
 	IdempotencyKey string `json:"idempotency_key"`
-	BlockKind      string `json:"block_kind"`
 }
 
 // ListTasks reads every card assigned to the runner profile, archived ones
@@ -80,6 +79,11 @@ func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string)
 		"--assignee", h.profile,
 		"--idempotency-key", deliveryID,
 		"--created-by", "lassdas-attendant",
+		// A direct-command worker emits no heartbeats, so this is the ONLY
+		// stall bound (fork worker-command contract). Six hours matches the
+		// workflow's job budget; the retiring instance measured a model
+		// stage hanging silently for four (2026-08-19).
+		"--max-runtime", "21600",
 		"--json",
 	)
 	if err != nil {
@@ -159,8 +163,8 @@ func SyncCards(ctx context.Context, services *Services, hermes *Hermes, logger i
 		if task.IdempotencyKey == "" {
 			continue
 		}
-		// A live card outranks an archived one for the same delivery (the
-		// archived one no longer holds the idempotency key).
+		// A live card outranks an archived one for the same delivery (an
+		// archived row keeps the key bytes, but the dedup ignores it).
 		if existing, ok := cards[task.IdempotencyKey]; !ok ||
 			(existing.Status == "archived" && task.Status != "archived") {
 			cards[task.IdempotencyKey] = task
@@ -199,19 +203,20 @@ func SyncCards(ctx context.Context, services *Services, hermes *Hermes, logger i
 					continue
 				}
 				logger.Info("card unblocked", "run", run.RunID, "task", task.ID)
-			case task.Status == "scheduled":
-				// An operator parked it deliberately (time-wait). Human
-				// parking outranks the attendant; the run waits with it.
-			case task.Status == "done" || task.Status == "triage":
-				// A retired or triaged card cannot be re-dispatched, and a
-				// done card still holds the idempotency key (only archive
-				// releases it) — recreating without archiving first would
-				// loop forever on the fork's dedup returning this card.
+			case task.Status == "scheduled" || task.Status == "triage":
+				// Human lanes. scheduled is an operator's deliberate
+				// time-wait; triage is the kanban's forced human decision.
+				// The attendant never automates through either — the run
+				// waits until a person releases the card.
+			case task.Status == "done":
+				// A retired card cannot be re-dispatched and its dedup
+				// entry blocks a recreate (only archiving is ignored by the
+				// dedup) — archive it, then create fresh next pass.
 				if err := hermes.Archive(ctx, task.ID); err != nil {
 					logger.Error("card archive failed", "task", task.ID, "error", err.Error())
 					continue
 				}
-				logger.Info("unusable card archived; fresh card next pass", "run", run.RunID, "task", task.ID, "was", task.Status)
+				logger.Info("retired card archived; fresh card next pass", "run", run.RunID, "task", task.ID)
 			}
 		case "claimed", "terminal_report_pending":
 			if run.State == "terminal_report_pending" && run.QuestionSealed {
@@ -239,7 +244,9 @@ func SyncCards(ctx context.Context, services *Services, hermes *Hermes, logger i
 			// The runner blocks its own card before exiting; this recovers
 			// a card that escaped back to the dispatchable pool (a dispatch
 			// of it would just die on PullClaimed).
-			if hasCard && (task.Status == "todo" || task.Status == "ready") {
+			// The fork's block accepts running/ready only; an attendant
+			// card is parentless and lands in ready when it escapes.
+			if hasCard && task.Status == "ready" {
 				if err := hermes.Block(ctx, task.ID, "awaiting-answer:"+run.DeliveryID); err != nil {
 					logger.Error("card block failed", "task", task.ID, "error", err.Error())
 					continue
