@@ -1,0 +1,36 @@
+{
+  "ledger_path": "/data/ledger.db",
+  "tracker": {
+    "origin": "https://metelix.backlog.com",
+    "space_key": "metelix",
+    "project_id": 760057,
+    "project_key": "RFDEV",
+    "allowed_creator_id": 2303853,
+    "allowed_activity_type": 1,
+    "required_category_id": 0,
+    "board_statuses": {
+      "running": 0,
+      "awaiting_answer": 0,
+      "delivered": 0,
+      "needs_attention": 0
+    }
+  },
+  "identity": {
+    "repository_id": 1049995305,
+    "repository": "RHEMS-Japan/LassDas",
+    "workflow_ref": "RHEMS-Japan/LassDas/pod-runtime@lassdas",
+    "engine_sha": "<40-hex engine commit baked into the image>"
+  },
+  "automation_run_id": "run_20260802_f600964325f79fd29568abd4",
+  "report_destinations": [],
+  "consumer_config_path": "/etc/lassdas/config/m1-consumer.json",
+  "knowledge_root": "/etc/lassdas/config/knowledge",
+  "worker_bin": "/usr/local/bin/worker",
+  "controller_bin": "/usr/local/bin/controller",
+  "browsercheck_bin": "",
+  "hermes_bin": "/usr/local/bin/hermes",
+  "hermes_board": "lassdas",
+  "hermes_profile": "lassdas-runner",
+  "worker_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
+  "controller_sha256": "<from /etc/lassdas/tool-pins.txt in the image>"
+}
