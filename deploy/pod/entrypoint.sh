@@ -1,8 +1,10 @@
 #!/bin/bash
-# The pod's three residents (docs/RUNTIME_POD.md): the attendant, the
-# kanban dispatch loop, and — per card — the runner the dispatcher spawns.
-# The gateway daemon is deliberately not used: it brings an HTTP surface
-# this constitution does not want.
+# The pod's residents (docs/RUNTIME_POD.md): the attendant, the kanban
+# dispatch loop, the serve backend the Hermes One desktop app connects to,
+# and — per card — the runner the dispatcher spawns. The chat-platform
+# gateway daemon is deliberately not used: it brings an inbound surface
+# this constitution does not want. The serve backend binds loopback only,
+# so the sole way in is kubectl port-forward.
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"
@@ -40,7 +42,20 @@ dispatch_loop() {
 dispatch_loop &
 DISPATCHER=$!
 
-term() { kill "$ATTENDANT" "$DISPATCHER" 2>/dev/null || true; }
+# Board UI backend (Hermes One connects through kubectl port-forward). A UI
+# crash must not take down a card mid-run, so it restarts in place instead
+# of joining the fatal wait below.
+serve_loop() {
+  while true; do
+    hermes serve --host 127.0.0.1 --port "${HERMES_SERVE_PORT:-9119}" \
+      || echo "serve exited rc=$?" >&2
+    sleep 5
+  done
+}
+serve_loop &
+SERVE=$!
+
+term() { kill "$ATTENDANT" "$DISPATCHER" "$SERVE" 2>/dev/null || true; }
 trap term TERM INT
 
 # Either resident dying takes the pod down (restart = clean recovery: the
