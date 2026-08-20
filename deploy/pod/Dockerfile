@@ -33,10 +33,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
        @openai/codex@${CODEX_VERSION}
 
-# The Hermes fork, pinned by commit.
-RUN python3 -m venv /opt/hermes \
-    && /opt/hermes/bin/pip install --no-cache-dir \
-       "git+https://github.com/RHEMS-Japan/hermes-agent@${HERMES_FORK_REF}" \
+# The Hermes fork, pinned by commit. Hermes refuses wheel builds by
+# design; the editable install against a pinned checkout is the supported
+# from-source path.
+RUN git clone --filter=blob:none https://github.com/RHEMS-Japan/hermes-agent /opt/hermes-src \
+    && git -C /opt/hermes-src checkout --quiet "${HERMES_FORK_REF}" \
+    && python3 -m venv /opt/hermes \
+    && /opt/hermes/bin/pip install --no-cache-dir -e /opt/hermes-src \
     && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
 
 COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /usr/local/bin/
