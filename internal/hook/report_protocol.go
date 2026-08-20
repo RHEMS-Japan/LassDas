@@ -31,6 +31,11 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
 	pullURLPattern    = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/pull/([1-9][0-9]{0,18})$`)
 	runURLPattern     = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/actions/runs/([1-9][0-9]{0,18})/attempts/([1-9][0-9]{0,9})$`)
+	// localRunURLPattern is the run reference of a pod-resident engine run
+	// (docs: HERMES_AS_LASSDAS_RUNTIME): no workflow page exists to link,
+	// but the reference still seals the same three identities — repository,
+	// run id, attempt — so a stored record binds to exactly one engine run.
+	localRunURLPattern = regexp.MustCompile(`^local-run://([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/([1-9][0-9]{0,18})/attempts/([1-9][0-9]{0,9})$`)
 )
 
 type TerminalCode string
@@ -116,6 +121,19 @@ type ReportRouteConfig struct {
 	AllowedCreatorID    int64
 	AllowedActivityType int
 	Target              DeliveryTarget
+	// RunReferenceScheme names the run-reference form this deployment seals:
+	// "" or "github" for workflow runs (the only form before the pod
+	// constitution), "local" for pod-resident runs. The other form is
+	// refused, so a workflow deployment cannot seal an unclickable local
+	// reference and a pod cannot seal a fabricated workflow link.
+	RunReferenceScheme string
+}
+
+func runReferenceSchemeAllowed(raw, scheme string) bool {
+	if scheme == "local" {
+		return localRunURLPattern.MatchString(raw)
+	}
+	return runURLPattern.MatchString(raw)
 }
 
 // DestinationFor resolves the destination a report names. The match is exact;
@@ -251,7 +269,8 @@ func (r TerminalReportRequest) ValidateRoute(config ReportRouteConfig) error {
 		r.WorkflowRefSHA256 != config.WorkflowRefSHA256 || r.AutomationRunID != config.ExpectedRunID {
 		return errors.New("terminal report route is not allowed")
 	}
-	if !validRunURL(r.RunURL, config.RepositorySHA256, r.WorkflowRunID, r.RunAttempt) {
+	if !validRunURL(r.RunURL, config.RepositorySHA256, r.WorkflowRunID, r.RunAttempt) ||
+		!runReferenceSchemeAllowed(r.RunURL, config.RunReferenceScheme) {
 		return errors.New("terminal report run url is invalid")
 	}
 	if r.Repository == "" {
@@ -458,6 +477,9 @@ func validPullRequestURL(raw, repository string) bool {
 
 func validRunURL(raw, repositoryDigest string, workflowRunID int64, runAttempt int) bool {
 	matches := runURLPattern.FindStringSubmatch(raw)
+	if len(matches) != 5 {
+		matches = localRunURLPattern.FindStringSubmatch(raw)
+	}
 	if len(matches) != 5 || HashIdentity(matches[1]+"/"+matches[2]) != repositoryDigest {
 		return false
 	}

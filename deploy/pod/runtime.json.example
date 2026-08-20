@@ -1,0 +1,36 @@
+{
+  "ledger_path": "/data/ledger.db",
+  "tracker": {
+    "origin": "https://<space>.backlog.com",
+    "space_key": "<space>",
+    "project_id": 0,
+    "project_key": "<PROJECT>",
+    "allowed_creator_id": 0,
+    "allowed_activity_type": 1,
+    "required_category_id": 0,
+    "board_statuses": {
+      "running": 0,
+      "awaiting_answer": 0,
+      "delivered": 0,
+      "needs_attention": 0
+    }
+  },
+  "identity": {
+    "repository_id": 0,
+    "repository": "RHEMS-Japan/LassDas",
+    "workflow_ref": "RHEMS-Japan/LassDas/pod-runtime@lassdas",
+    "engine_sha": "<40-hex engine commit baked into the image>"
+  },
+  "automation_run_id": "run_YYYYMMDD_<24 hex>",
+  "report_destinations": [],
+  "consumer_config_path": "/etc/lassdas/config/m1-consumer.json",
+  "knowledge_root": "/etc/lassdas/config/knowledge",
+  "worker_bin": "/usr/local/bin/worker",
+  "controller_bin": "/usr/local/bin/controller",
+  "browsercheck_bin": "",
+  "hermes_bin": "/usr/local/bin/hermes",
+  "hermes_board": "lassdas",
+  "hermes_profile": "lassdas-runner",
+  "worker_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
+  "controller_sha256": "<from /etc/lassdas/tool-pins.txt in the image>"
+}

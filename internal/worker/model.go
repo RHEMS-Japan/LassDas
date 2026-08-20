@@ -221,6 +221,12 @@ func (i *ModelInvoker) GenerateCandidate(
 	}
 	output, err := DecodeModelCandidateOutput([]byte(response))
 	if err != nil {
+		// Same prose/fence wrapping tolerance as the review path.
+		if block, blockErr := lastJSONObject(response); blockErr == nil {
+			output, err = DecodeModelCandidateOutput([]byte(block))
+		}
+	}
+	if err != nil {
 		return Candidate{}, usage, err
 	}
 	candidate, err := NewCandidate(stage, output, source, request, config, usage, time.Now().UTC())
@@ -254,6 +260,17 @@ func (i *ModelInvoker) ReviewCandidate(
 		return Review{}, InvocationUsage{}, err
 	}
 	output, err := DecodeModelReviewOutput([]byte(response))
+	if err != nil {
+		// Models occasionally wrap the JSON in prose or a code fence even
+		// under a response schema (measured 2026-08-20: two consecutive
+		// stage-2 reviews, HTTP 200, unparseable as-is — the terminal
+		// failure of the first pod acceptance run). Peel the wrapping with
+		// the same extractor the agent-review path always used; every
+		// schema and verdict check still runs on what is found.
+		if block, blockErr := lastJSONObject(response); blockErr == nil {
+			output, err = DecodeModelReviewOutput([]byte(block))
+		}
+	}
 	if err != nil {
 		return Review{}, usage, err
 	}

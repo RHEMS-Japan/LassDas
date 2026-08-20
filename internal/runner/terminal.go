@@ -1,0 +1,246 @@
+package runner
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"regexp"
+	"strconv"
+	"time"
+
+	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runtime"
+)
+
+// Terminal closes a run the way cmd/reporter and cmd/questioner did over
+// HTTP, but in process: the same request structs, the same shape gates
+// (Marshal* before submission), the same retry-on-contention loop. The
+// identity block is not re-derived from the environment — it is the exact
+// PullOwner this run claimed with, so the sealed run item and the closing
+// report can only agree or the store refuses.
+type Terminal struct {
+	config      runtime.Config
+	services    *runtime.Services
+	envelope    hook.DispatchEnvelope
+	hermesRunID int64
+	workspace   string
+	logger      interface {
+		Info(string, ...any)
+		Error(string, ...any)
+	}
+}
+
+func NewTerminal(config runtime.Config, services *runtime.Services, envelope hook.DispatchEnvelope, hermesRunID int64, workspace string, logger interface {
+	Info(string, ...any)
+	Error(string, ...any)
+}) *Terminal {
+	return &Terminal{config: config, services: services, envelope: envelope,
+		hermesRunID: hermesRunID, workspace: workspace, logger: logger}
+}
+
+// runURL is this run's sealed reference in the pod constitution: the same
+// three identities the GitHub URL carried (repository, run id, attempt),
+// in the local-run scheme validRunURL accepts.
+func (t *Terminal) runURL(owner hook.PullOwner) string {
+	return "local-run://" + t.config.Identity.Repository + "/" +
+		strconv.FormatInt(owner.WorkflowRunID, 10) + "/attempts/" + strconv.Itoa(owner.RunAttempt)
+}
+
+const (
+	terminalSubmitAttempts = 3
+	// The Lambda waited 125s between report attempts because its contention
+	// was another cold-started invocation; here contention is the attendant's
+	// tick holding the single-writer ledger lock, which clears in seconds.
+	terminalRetryDelay = 3 * time.Second
+)
+
+var terminalRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
+
+// Report submits the terminal outcome for this run. repository is the
+// consumer repository the run delivered to ("" when the run failed before
+// any repository work — the protocol accepts that explicitly).
+func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome Outcome, repository string) error {
+	if repository != "" && !terminalRepositoryPattern.MatchString(repository) {
+		return fmt.Errorf("consumer repository %q is not owner/name", repository)
+	}
+	trail, err := t.loadTrail(code)
+	if err != nil {
+		return err
+	}
+	owner := t.config.Owner(t.hermesRunID)
+	evidence := outcome.Evidence
+	report := hook.TerminalReportRequest{
+		Protocol:   hook.TerminalReportProtocolVersion,
+		DeliveryID: t.envelope.DeliveryID, InputSHA256: t.envelope.Snapshot.InputSHA256,
+		RepositoryID: owner.RepositoryID, RepositorySHA256: owner.RepositorySHA256,
+		WorkflowRefSHA256: owner.WorkflowRefSHA256, WorkflowSHA: owner.WorkflowSHA,
+		WorkflowRunID: owner.WorkflowRunID, RunAttempt: owner.RunAttempt,
+		AutomationRunID: t.envelope.Snapshot.RunID, Code: code, Repository: repository,
+		RunURL:         t.runURL(owner),
+		PullRequestURL: evidence["pull_request_url"], CommitSHA: evidence["commit_sha"],
+		CommitURL: evidence["commit_url"], StagingEvidenceURL: evidence["staging_evidence_url"],
+		ProductionEvidenceURL: evidence["production_evidence_url"],
+		TrailText:             trail,
+	}
+	return t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
+		report.IssuedAt = issuedAt
+		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
+			return hook.Result{}, fmt.Errorf("terminal report shape invalid: %w", err)
+		}
+		return t.services.Report.ProcessTerminalReport(ctx, report), nil
+	})
+}
+
+// loadTrail reads the delivery trail when the run composed one. The
+// workflow attached the trail whenever the file existed — including
+// post-publish failures like release_failed, whose reports carry the run
+// record of a real repository change. cmd/reporter treated an unreadable
+// trail as fatal and so does this: the run stays claimed and the recovery
+// path surfaces it, rather than a report being sealed without the trail
+// that explains it.
+func (t *Terminal) loadTrail(hook.TerminalCode) (string, error) {
+	path := t.workspace + "/m1-trail.txt"
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(hook.MaxTerminalTrailBytes) {
+		return "", errors.New("trail file invalid")
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("trail unreadable: %w", err)
+	}
+	if hook.ValidateTrailText(string(encoded)) != nil {
+		return "", errors.New("trail text invalid")
+	}
+	return string(encoded), nil
+}
+
+// AskQuestion posts the clarification decision the model stage produced.
+// The decision file is validated exactly as cmd/questioner validated it,
+// and the record derives its round from the sealed clarification in the
+// envelope — never from a counter the runner keeps.
+func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
+	questionsJSON, decisionDigest, err := loadQuestionDecision(decisionPath)
+	if err != nil {
+		return err
+	}
+	revision, clarificationDigest, err := questionRevision(t.envelope)
+	if err != nil {
+		return err
+	}
+	owner := t.config.Owner(t.hermesRunID)
+	// The schedule is sealed once, exactly as cmd/questioner computed it
+	// once and retried the same record: recomputing per retry could change
+	// the record digest across a day boundary and turn an idempotent
+	// completion into a conflict.
+	notifyAt, deadlineAt := hook.ComputeQuestionSchedule(time.Now().UTC())
+	return t.submit(ctx, "question", func(issuedAt time.Time) (hook.Result, error) {
+		record := hook.QuestionRecord{
+			Protocol:   hook.QuestionProtocolVersion,
+			DeliveryID: t.envelope.DeliveryID, InputSHA256: t.envelope.Snapshot.InputSHA256,
+			RepositoryID: owner.RepositoryID, RepositorySHA256: owner.RepositorySHA256,
+			WorkflowRefSHA256: owner.WorkflowRefSHA256, WorkflowSHA: owner.WorkflowSHA,
+			WorkflowRunID: owner.WorkflowRunID, RunAttempt: owner.RunAttempt,
+			AutomationRunID:     t.envelope.Snapshot.RunID,
+			RunURL:              t.runURL(owner),
+			QuestionRevision:    revision,
+			ClarificationSHA256: clarificationDigest,
+			QuestionsJSON:       questionsJSON,
+			QuestionsSHA256:     hook.TerminalReportDigest([]byte(questionsJSON)),
+			DecisionSHA256:      decisionDigest,
+			AnswerDeadlineAt:    deadlineAt,
+			NotifyAt:            notifyAt,
+		}
+		if _, err := hook.MarshalQuestionRecord(record); err != nil {
+			return hook.Result{}, fmt.Errorf("question record shape invalid: %w", err)
+		}
+		return t.services.Question.ProcessQuestionReport(ctx, hook.QuestionReportRequest{
+			Record: record, IssuedAt: issuedAt,
+		}), nil
+	})
+}
+
+// submit runs one build-and-process closure with the reporter's retry
+// contract: contention retries, everything else is final. "accepted" and
+// "ignored" both close the run — ignored is the idempotent replay of a
+// report the store already sealed.
+func (t *Terminal) submit(ctx context.Context, kind string, attempt func(time.Time) (hook.Result, error)) error {
+	for round := 0; round < terminalSubmitAttempts; round++ {
+		result, err := attempt(time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		switch result.Decision {
+		case hook.DecisionAccepted, hook.DecisionIgnored:
+			t.logger.Info(kind+" sealed", "decision", string(result.Decision), "code", result.Code)
+			return nil
+		case hook.DecisionRetryRequested, hook.DecisionDependencyFailed, hook.DecisionInternal:
+			t.logger.Error(kind+" deferred", "decision", string(result.Decision), "code", result.Code)
+			if round == terminalSubmitAttempts-1 {
+				return fmt.Errorf("%s not sealed after %d attempts: %s (%s)", kind, terminalSubmitAttempts, result.Decision, result.Code)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(terminalRetryDelay):
+			}
+		default:
+			return fmt.Errorf("%s refused: %s (%s)", kind, result.Decision, result.Code)
+		}
+	}
+	return fmt.Errorf("%s not sealed", kind)
+}
+
+// loadQuestionDecision is cmd/questioner's loadDecision: the decision file
+// must be a clarification_required outcome with questions and its own
+// digest, and only the questions array travels into the record.
+func loadQuestionDecision(filePath string) (string, string, error) {
+	info, err := os.Lstat(filePath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 256*1024 {
+		return "", "", errors.New("question decision file invalid")
+	}
+	encoded, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", "", errors.New("question decision file invalid")
+	}
+	var decision struct {
+		Outcome        string           `json:"outcome"`
+		Questions      []map[string]any `json:"questions"`
+		DecisionSHA256 string           `json:"decision_sha256"`
+	}
+	if err := json.Unmarshal(encoded, &decision); err != nil {
+		return "", "", errors.New("question decision file invalid")
+	}
+	if decision.Outcome != "clarification_required" || len(decision.Questions) == 0 ||
+		!questionDigestPattern.MatchString(decision.DecisionSHA256) {
+		return "", "", errors.New("question decision file invalid")
+	}
+	questions, err := json.Marshal(decision.Questions)
+	if err != nil {
+		return "", "", errors.New("question decision file invalid")
+	}
+	return string(questions), decision.DecisionSHA256, nil
+}
+
+var questionDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// questionRevision is cmd/questioner's questionRevisionFromEnvelope: round 1
+// for a never-resumed run, otherwise the round after the sealed adopted
+// answers, chained to them by digest.
+func questionRevision(envelope hook.DispatchEnvelope) (int, string, error) {
+	if envelope.ClarificationJSON == "" {
+		return 1, "", nil
+	}
+	record, err := hook.DecodeClarificationRecord([]byte(envelope.ClarificationJSON))
+	if err != nil {
+		return 0, "", errors.New("sealed clarification invalid")
+	}
+	if record.InputRevision > hook.MaxClarificationRounds {
+		return 0, "", errors.New("question rounds exhausted")
+	}
+	return record.InputRevision, hook.TerminalReportDigest([]byte(envelope.ClarificationJSON)), nil
+}

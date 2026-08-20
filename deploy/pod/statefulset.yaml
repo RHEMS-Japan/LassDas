@@ -1,0 +1,77 @@
+# The single-pod runtime (docs/RUNTIME_POD.md). Namespace: lassdas.
+# Secrets (created by the operator, never in git):
+#   kubectl create secret generic lassdas-engine -n lassdas \
+#     --from-literal=BACKLOG_API_KEY=... \
+#     --from-literal=MODEL_API_KEY_IMPLEMENTER=... \
+#     --from-literal=MODEL_API_KEY_REVIEWER=... \
+#     --from-literal=TARGET_GITHUB_TOKEN=...
+# Config (runtime.json + m1-consumer.json + knowledge/):
+#   kubectl create configmap lassdas-config -n lassdas --from-file=...
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lassdas
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lassdas
+  namespace: lassdas
+spec:
+  serviceName: lassdas
+  replicas: 1
+  selector:
+    matchLabels: { app: lassdas }
+  template:
+    metadata:
+      labels: { app: lassdas }
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      terminationGracePeriodSeconds: 120
+      tolerations:
+        - key: lassdas
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      nodeSelector:
+        lassdas: "true"
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: engine
+          image: <ECR>/lassdas-runtime@sha256:<digest>  # digest 指定 (latest 禁止)
+          envFrom:
+            - secretRef: { name: lassdas-engine }
+          env:
+            - name: LASSDAS_STATE_DIR
+              value: /data
+            - name: LASSDAS_RUNTIME_CONFIG
+              value: /etc/lassdas/runtime.json
+            - name: BACKLOG_DOMAIN
+              value: <space>.backlog.com
+          volumeMounts:
+            - { name: state, mountPath: /data }
+            - { name: config, mountPath: /etc/lassdas/config, readOnly: true }
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'test $(( $(date +%s) - $(stat -c %Y /data/heartbeat) )) -lt 300'
+            initialDelaySeconds: 120
+            periodSeconds: 60
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { memory: 8Gi }
+      volumes:
+        - name: config
+          configMap: { name: lassdas-config }
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests: { storage: 20Gi }
