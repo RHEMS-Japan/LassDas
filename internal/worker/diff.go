@@ -22,8 +22,11 @@ const (
 	reviewDiffContextLines    = 3
 	// MaxReviewPromptBytes bounds the chat review prompt. A change whose
 	// patch view still exceeds it fails honestly instead of overflowing the
-	// reviewer's context mid-flight.
-	MaxReviewPromptBytes = 320 * 1024
+	// reviewer's context mid-flight. 512KiB keeps a measured 13-file console
+	// change (~420KB encoded, run 6 of the pod acceptance) reviewable while
+	// staying under the reviewer model's context with room for the response;
+	// the structural fix is trimming new-file views, not raising this again.
+	MaxReviewPromptBytes = 512 * 1024
 )
 
 // maxDiffAlignmentCells bounds the line-alignment table. Beyond it the change
