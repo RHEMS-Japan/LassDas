@@ -49,13 +49,30 @@ type Config struct {
 	AnswerKnowledge *AnswerKnowledgeConfig `json:"answer_knowledge,omitempty"`
 }
 
-// AgentSet names the coding agents the framework runs: one that implements the
-// change by working in the repository, and one that reviews the result. They
-// are separate programs with separate credentials so the reviewer cannot be
-// the author of what it reviews.
+// AgentSet names the coding agents the framework runs: one that implements
+// the change by working in the repository, and the ones that review the
+// result. The reviewer must not be able to be the author of what it reviews:
+// different programs separate by themselves, and one shared program (the M2
+// shape — both roles are hermes) is admitted only under the separation
+// separatedAgents states.
 type AgentSet struct {
 	Implementer AgentConfig `json:"implementer"`
 	Reviewer    AgentConfig `json:"reviewer"`
+	// ReviewerAgents, when present, gives a reviewer endpoint its own launch
+	// definition — its own profile, its own credential source — instead of
+	// the shared Reviewer one. A reviewer without an entry keeps the shared
+	// definition, which is what keeps existing configurations meaning what
+	// they meant.
+	ReviewerAgents []ReviewerAgent `json:"reviewer_agents,omitempty"`
+}
+
+// ReviewerAgent binds one reviewer endpoint to the launch that runs its
+// review. The binding is part of the sealed configuration, so a review run
+// record (agent id + config digest) pins down which profile and credential
+// source judged the change.
+type ReviewerAgent struct {
+	ReviewerID string      `json:"reviewer_id"`
+	Agent      AgentConfig `json:"agent"`
 }
 
 func (a AgentSet) validate() error {
@@ -65,11 +82,104 @@ func (a AgentSet) validate() error {
 	if err := a.Reviewer.validate(); err != nil {
 		return fmt.Errorf("reviewer agent: %w", err)
 	}
-	if a.Implementer.ID == a.Reviewer.ID {
+	ids := map[string]struct{}{a.Implementer.ID: {}}
+	if _, exists := ids[a.Reviewer.ID]; exists {
 		return errors.New("agent ids must differ")
 	}
-	if a.Implementer.Command == a.Reviewer.Command {
-		return errors.New("the reviewer must not be the same program as the implementer")
+	ids[a.Reviewer.ID] = struct{}{}
+	if len(a.ReviewerAgents) > 4 {
+		return errors.New("reviewer agents are invalid")
+	}
+	reviewers := make(map[string]struct{}, len(a.ReviewerAgents))
+	for _, entry := range a.ReviewerAgents {
+		if !identifierPattern.MatchString(entry.ReviewerID) {
+			return errors.New("reviewer agent reviewer id is invalid")
+		}
+		if _, exists := reviewers[entry.ReviewerID]; exists {
+			return errors.New("reviewer agent reviewer ids contain duplicates")
+		}
+		reviewers[entry.ReviewerID] = struct{}{}
+		if err := entry.Agent.validate(); err != nil {
+			return fmt.Errorf("reviewer agent %s: %w", entry.ReviewerID, err)
+		}
+		if _, exists := ids[entry.Agent.ID]; exists {
+			return errors.New("agent ids must differ")
+		}
+		ids[entry.Agent.ID] = struct{}{}
+	}
+	// Every pair of launch definitions that can actually run must be
+	// separated, not only the implementer against each judge: two judges
+	// sharing one identity would be one veto seat counted twice. With
+	// bindings present the shared reviewer definition is unreachable
+	// (bindings are all or none, checked at the config level) and must not
+	// force a phantom identity into the separation.
+	launchable := []AgentConfig{a.Implementer}
+	if len(a.ReviewerAgents) == 0 {
+		launchable = append(launchable, a.Reviewer)
+	}
+	for _, entry := range a.ReviewerAgents {
+		launchable = append(launchable, entry.Agent)
+	}
+	for i := 0; i < len(launchable); i++ {
+		for j := i + 1; j < len(launchable); j++ {
+			if err := separatedAgents(launchable[i], launchable[j]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// separatedAgents verifies one launch cannot be another launch under a
+// different name. Different programs separate by themselves — the original
+// implementer-versus-reviewer rule this generalizes. The same program is
+// admitted only when the two launches declare distinct profiles carried in
+// their arguments and draw their credentials from distinct sources, so each
+// is a different identity at the gateway even though the binary is shared.
+func separatedAgents(left, right AgentConfig) error {
+	if left.Command != right.Command {
+		return nil
+	}
+	if left.Profile == "" || right.Profile == "" || left.Profile == right.Profile {
+		return errors.New("same-program agents must declare distinct profiles")
+	}
+	// A profile carried in the other launch's arguments would let a
+	// last-wins flag override the declared one — measured by an adversarial
+	// probe appending the implementer's profile after the reviewer's own.
+	if slices.Contains(left.Args, right.Profile) || slices.Contains(right.Args, left.Profile) {
+		return errors.New("same-program agents must not carry each other's profile in their arguments")
+	}
+	if len(left.SecretEnv) == 0 || len(right.SecretEnv) == 0 {
+		return errors.New("same-program agents must each hold a credential source")
+	}
+	sources := make(map[string]struct{}, len(left.SecretEnv))
+	for _, source := range left.SecretEnv {
+		sources[source] = struct{}{}
+	}
+	for _, source := range right.SecretEnv {
+		if _, shared := sources[source]; shared {
+			return errors.New("same-program agents must draw credentials from distinct sources")
+		}
+	}
+	// A plain value under either side's secret variable name would hand a
+	// run a literal credential, and with duplicate names in the child
+	// environment the winner is decided by sort order — refused outright.
+	secretNames := make(map[string]struct{}, len(left.SecretEnv)+len(right.SecretEnv))
+	for name := range left.SecretEnv {
+		secretNames[name] = struct{}{}
+	}
+	for name := range right.SecretEnv {
+		secretNames[name] = struct{}{}
+	}
+	for name := range left.Env {
+		if _, secret := secretNames[name]; secret {
+			return errors.New("same-program agents must not shadow a secret variable")
+		}
+	}
+	for name := range right.Env {
+		if _, secret := secretNames[name]; secret {
+			return errors.New("same-program agents must not shadow a secret variable")
+		}
 	}
 	return nil
 }
@@ -82,9 +192,25 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 		return a.Implementer, nil
 	case a.Reviewer.ID:
 		return a.Reviewer, nil
-	default:
-		return AgentConfig{}, errors.New("agent run names an agent that is not configured")
 	}
+	for _, entry := range a.ReviewerAgents {
+		if entry.Agent.ID == id {
+			return entry.Agent, nil
+		}
+	}
+	return AgentConfig{}, errors.New("agent run names an agent that is not configured")
+}
+
+// ReviewerAgentFor picks the launch definition for one reviewer endpoint:
+// its own entry when the configuration carries one, the shared reviewer
+// agent otherwise.
+func (a AgentSet) ReviewerAgentFor(reviewerID string) AgentConfig {
+	for _, entry := range a.ReviewerAgents {
+		if entry.ReviewerID == reviewerID {
+			return entry.Agent
+		}
+	}
+	return a.Reviewer
 }
 
 // ConsumerFor selects the destination a ticket names. The repository string is
@@ -415,6 +541,26 @@ func (c Config) Validate() error {
 	}
 	if err := c.Agents.validate(); err != nil {
 		return err
+	}
+	// Bindings are all or none: a partial set would silently judge the
+	// unbound reviewers under the shared launch definition, and a forgotten
+	// binding must be a loading failure, not a quiet substitution.
+	if len(c.Agents.ReviewerAgents) > 0 && len(c.Agents.ReviewerAgents) != len(c.Models.Reviewers) {
+		return errors.New("reviewer agents must cover every reviewer or none")
+	}
+	// A reviewer-agent binding must name a reviewer this configuration runs;
+	// the two lists live apart, so the cross-check lives here.
+	for _, entry := range c.Agents.ReviewerAgents {
+		known := false
+		for _, reviewer := range c.Models.Reviewers {
+			if reviewer.ID == entry.ReviewerID {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return errors.New("reviewer agent names a reviewer that is not configured")
+		}
 	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")

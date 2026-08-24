@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -40,6 +41,11 @@ type AgentConfig struct {
 	// never appears in configuration.
 	SecretEnv      map[string]string `json:"secret_env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds"`
+	// Profile names the in-program identity this launch runs under, for
+	// programs that host more than one role behind one binary. A declared
+	// profile must be carried in Args — a name the launch does not actually
+	// pass is a claim, not a separation.
+	Profile string `json:"profile,omitempty"`
 	// Knowledge is what this agent is given to read before it works.
 	Knowledge KnowledgeConfig `json:"knowledge,omitempty"`
 }
@@ -80,9 +86,18 @@ func (a AgentConfig) validate() error {
 		if !agentEnvNamePattern.MatchString(name) || reservedEnvName(name) || !agentEnvNamePattern.MatchString(source) {
 			return errors.New("agent secret environment is invalid")
 		}
+		// The same name in Env would put a literal credential in
+		// configuration and leave the winner between the duplicates to the
+		// child environment's sort order.
+		if _, shadowed := a.Env[name]; shadowed {
+			return errors.New("agent environment must not shadow a secret variable")
+		}
 	}
 	if a.TimeoutSeconds < 60 || time.Duration(a.TimeoutSeconds)*time.Second > MaxAgentRuntime {
 		return errors.New("agent timeout is invalid")
+	}
+	if a.Profile != "" && (!identifierPattern.MatchString(a.Profile) || !slices.Contains(a.Args, a.Profile)) {
+		return errors.New("agent profile is invalid")
 	}
 	return a.Knowledge.validate()
 }

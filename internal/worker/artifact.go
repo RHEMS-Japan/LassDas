@@ -544,6 +544,12 @@ func validateModelReviewOutput(output ModelReviewOutput, request TicketRequest) 
 			validatePlainText(finding.Message, 4000, true) != nil {
 			return errors.New("model review finding is invalid")
 		}
+		// A finding travels into the next round's review instruction ahead
+		// of the answer-rules boundary; a message carrying the boundary line
+		// could shift where the verdict decoder starts reading.
+		if strings.Contains(finding.Message, ReviewAnswerRulesTail) {
+			return errors.New("model review finding is invalid")
+		}
 		if _, expected := findString(request.TargetFiles, finding.Path); !expected {
 			return errors.New("model review finding has an unexpected path")
 		}

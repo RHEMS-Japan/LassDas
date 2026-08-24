@@ -3,7 +3,41 @@ package worker
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+func sealedReviewRun(t *testing.T, agent AgentConfig, request TicketRequest, source SourceSnapshot, changed []string) AgentRun {
+	t.Helper()
+	run, err := SealAgentRun(AgentRun{
+		SchemaVersion: ArtifactSchemaVersion, Stage: 1,
+		DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
+		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA, BaseSHA: source.BaseSHA,
+		AgentID: agent.ID, Command: agent.Command, PromptBytes: 42,
+		ChangedFiles: changed,
+		Transcript:   ReviewAnswerRulesTail + "\n" + `{"verdict":"pass","findings":[]}`,
+		RanAt:        time.Date(2026, 8, 24, 1, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+// A run naming any agent other than the reviewer's own launch is not this
+// reviewer's judgment, whatever its verdict reads — this is where the
+// profile binding is enforced.
+func TestAgentReviewFromRunRejectsAForeignLaunch(t *testing.T) {
+	config, request, source, candidate := validCandidate(t)
+	endpoint := config.Models.Reviewers[1]
+	foreign := sealedReviewRun(t, config.Agents.Implementer, request, source, []string{request.TargetFiles[0]})
+	if _, err := AgentReviewFromRun(endpoint, foreign, candidate, source, request, config, testInvocationTime); err == nil {
+		t.Fatal("AgentReviewFromRun() accepted the implementer's run as a review")
+	}
+	own := sealedReviewRun(t, config.Agents.Reviewer, request, source, nil)
+	if _, err := AgentReviewFromRun(endpoint, own, candidate, source, request, config, testInvocationTime); err != nil {
+		t.Fatalf("AgentReviewFromRun() rejected the reviewer's own launch: %v", err)
+	}
+}
 
 // A CLI agent writes prose and then its answer, so the verdict has to be found
 // in ordinary output rather than in a clean response body.

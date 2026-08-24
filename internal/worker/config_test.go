@@ -184,6 +184,208 @@ func TestConfigRejectsInvalidVendorHostTable(t *testing.T) {
 	}
 }
 
+// sameProgramAgents is the M2 shape: both roles run one binary, separated by
+// declared profile and credential source. The agent-visible variable name is
+// deliberately the same on both sides — one program reads one name — and only
+// the sources differ.
+func sameProgramAgents() AgentSet {
+	return AgentSet{
+		Implementer: AgentConfig{
+			ID: "author-agent", Command: "hermes-stand-in",
+			Args:           []string{"worker", "--profile", "lassdas-implementer"},
+			Profile:        "lassdas-implementer",
+			SecretEnv:      map[string]string{"HERMES_API_KEY": "TEST_MODEL_KEY_A"},
+			TimeoutSeconds: 900,
+		},
+		Reviewer: AgentConfig{
+			ID: "review-agent", Command: "hermes-stand-in",
+			Args:           []string{"worker", "--profile", "lassdas-review-a"},
+			Profile:        "lassdas-review-a",
+			SecretEnv:      map[string]string{"HERMES_API_KEY": "TEST_MODEL_KEY_B"},
+			TimeoutSeconds: 900,
+		},
+	}
+}
+
+func TestConfigAllowsSameProgramAgentsSeparatedByProfileAndCredential(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigRejectsSameProgramAgentsWithoutSeparation(t *testing.T) {
+	cases := map[string]func(*AgentSet){
+		"no declared profiles": func(a *AgentSet) {
+			a.Implementer.Profile = ""
+			a.Reviewer.Profile = ""
+		},
+		"a shared profile": func(a *AgentSet) {
+			a.Reviewer.Profile = "lassdas-implementer"
+			a.Reviewer.Args = []string{"worker", "--profile", "lassdas-implementer"}
+		},
+		"a shared credential source": func(a *AgentSet) {
+			a.Reviewer.SecretEnv = map[string]string{"HERMES_API_KEY": "TEST_MODEL_KEY_A"}
+		},
+		"a reviewer without credentials": func(a *AgentSet) {
+			a.Reviewer.SecretEnv = nil
+		},
+	}
+	for name, mutate := range cases {
+		config := validTestConfig()
+		config.Agents = sameProgramAgents()
+		mutate(&config.Agents)
+		if err := config.Validate(); err == nil {
+			t.Errorf("Validate() accepted same-program agents with %s", name)
+		}
+	}
+}
+
+func TestConfigRejectsAProfileAbsentFromTheArguments(t *testing.T) {
+	config := validTestConfig()
+	config.Agents.Implementer.Profile = "lassdas-implementer"
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted a profile the launch does not pass")
+	}
+}
+
+func perReviewerAgent(id, profile, source string) AgentConfig {
+	return AgentConfig{
+		ID: id, Command: "hermes-stand-in",
+		Args:           []string{"worker", "--profile", profile},
+		Profile:        profile,
+		SecretEnv:      map[string]string{"HERMES_API_KEY": source},
+		TimeoutSeconds: 900,
+	}
+}
+
+func TestConfigAcceptsPerReviewerAgents(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-a", "TEST_MODEL_KEY_B")},
+		{ReviewerID: "review-b", Agent: perReviewerAgent("review-b-agent", "lassdas-review-b", "TEST_MODEL_KEY_C")},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if config.Agents.ReviewerAgentFor("review-b").ID != "review-b-agent" {
+		t.Fatal("ReviewerAgentFor() did not pick the bound launch definition")
+	}
+	if config.Agents.ReviewerAgentFor("review-unmapped").ID != config.Agents.Reviewer.ID {
+		t.Fatal("ReviewerAgentFor() did not fall back to the shared reviewer agent")
+	}
+}
+
+func TestConfigRejectsAReviewerAgentForAnUnknownReviewer(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-a", "TEST_MODEL_KEY_B")},
+		{ReviewerID: "review-zz", Agent: perReviewerAgent("review-zz-agent", "lassdas-review-zz", "TEST_MODEL_KEY_C")},
+	}
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a reviewer agent for an unknown reviewer")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("Validate() error = %v, want the unknown-reviewer refusal", err)
+	}
+}
+
+// A partial binding set would silently judge the unbound reviewers under the
+// shared launch; a forgotten binding must refuse to load instead.
+func TestConfigRejectsAPartialReviewerAgentSet(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-a", "TEST_MODEL_KEY_B")},
+	}
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a partial reviewer agent set")
+	}
+	if !strings.Contains(err.Error(), "every reviewer or none") {
+		t.Fatalf("Validate() error = %v, want the all-or-nothing refusal", err)
+	}
+}
+
+// Two judges must be two identities: a shared profile between bound reviewer
+// agents is one veto seat counted twice.
+func TestConfigRejectsReviewerAgentsSharingAProfile(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-x", "TEST_MODEL_KEY_B")},
+		{ReviewerID: "review-b", Agent: perReviewerAgent("review-b-agent", "lassdas-review-x", "TEST_MODEL_KEY_C")},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted two reviewer agents on one profile")
+	}
+}
+
+// Carrying the other launch's profile among one's own arguments would let a
+// last-wins flag override the declared identity.
+func TestConfigRejectsAgentsCarryingEachOthersProfile(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.Reviewer.Args = append(config.Agents.Reviewer.Args, "lassdas-implementer")
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a reviewer carrying the implementer profile in its arguments")
+	}
+	if !strings.Contains(err.Error(), "each other's profile") {
+		t.Fatalf("Validate() error = %v, want the carried-profile refusal", err)
+	}
+}
+
+// A plain environment value under a secret variable name is a literal
+// credential in configuration, with the winner left to sort order.
+func TestConfigRejectsEnvironmentShadowingASecret(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.Reviewer.SecretEnv = map[string]string{"HERMES_OTHER_KEY": "TEST_MODEL_KEY_B"}
+	config.Agents.Reviewer.Env = map[string]string{"HERMES_API_KEY": "literal-credential"}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted a plain value shadowing the implementer's secret variable")
+	}
+	config = validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.Implementer.Env = map[string]string{"HERMES_API_KEY": "literal-credential"}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted an agent shadowing its own secret variable")
+	}
+}
+
+func TestConfigRejectsDuplicateReviewerAgentBindings(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-a", "TEST_MODEL_KEY_B")},
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-again", "lassdas-review-c", "TEST_MODEL_KEY_C")},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted duplicate reviewer agent bindings")
+	}
+}
+
+func TestConfigRejectsAReviewerAgentReusingTheImplementerCredentialSource(t *testing.T) {
+	config := validTestConfig()
+	config.Agents = sameProgramAgents()
+	config.Agents.ReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: perReviewerAgent("review-a-agent", "lassdas-review-a", "TEST_MODEL_KEY_A")},
+		{ReviewerID: "review-b", Agent: perReviewerAgent("review-b-agent", "lassdas-review-b", "TEST_MODEL_KEY_C")},
+	}
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a reviewer agent on the implementer credential source")
+	}
+	if !strings.Contains(err.Error(), "distinct sources") {
+		t.Fatalf("Validate() error = %v, want the shared-source refusal", err)
+	}
+}
+
 func TestConfigRejectsInvalidModelBaseURL(t *testing.T) {
 	// The port and dot-segment spellings are the measured bypass: a second
 	// spelling of one endpoint defeats the string-compared duplicate rules.

@@ -37,6 +37,14 @@ func writeStandInAgent(t *testing.T, directory, name, body string) {
 
 func newAgentFixture(t *testing.T, implementerBody, reviewerBody string) agentFixture {
 	t.Helper()
+	return newTunedAgentFixture(t, implementerBody, reviewerBody, nil)
+}
+
+// newTunedAgentFixture additionally lets a test adjust the configuration —
+// and drop extra stand-in binaries next to the fixed two — before the draft
+// is bound to it.
+func newTunedAgentFixture(t *testing.T, implementerBody, reviewerBody string, tune func(binaries string, config *worker.Config)) agentFixture {
+	t.Helper()
 	directory := t.TempDir()
 	binaries := filepath.Join(directory, "bin")
 	if err := os.MkdirAll(binaries, 0o700); err != nil {
@@ -51,6 +59,9 @@ func newAgentFixture(t *testing.T, implementerBody, reviewerBody string) agentFi
 	config := cliTestConfig()
 	config.Agents.Implementer.Command = "stand-in-author"
 	config.Agents.Reviewer.Command = "stand-in-reviewer"
+	if tune != nil {
+		tune(binaries, &config)
+	}
 	configPath := filepath.Join(directory, "config.json")
 	writeTestJSON(t, configPath, config)
 
@@ -293,6 +304,75 @@ func TestImplementFeedsBothPreviousReviewsToTheAgent(t *testing.T) {
 	readAgentArtifact(t, fixture.path("run.json"), worker.MaxArtifactJSONBytes, &record)
 	if !strings.Contains(record.Transcript, "from-first-reviewer") || !strings.Contains(record.Transcript, "from-second-reviewer") {
 		t.Fatalf("the agent was not told both objections: %q", record.Transcript)
+	}
+}
+
+// A reviewer with its own launch definition is run by it — the shared
+// reviewer agent must not fire, and the sealed run names the binding.
+func TestAgentReviewUsesTheBoundReviewerAgent(t *testing.T) {
+	fixture := newTunedAgentFixture(t, editTheLabel,
+		`echo "the shared reviewer agent must not run"; exit 1`,
+		func(binaries string, config *worker.Config) {
+			// Bindings are all or none, so both judges get their own launch.
+			writeStandInAgent(t, binaries, "stand-in-review-a", `echo '{"verdict":"pass","findings":[]}'`)
+			writeStandInAgent(t, binaries, "stand-in-review-b", `echo '{"verdict":"pass","findings":[]}'`)
+			config.Agents.ReviewerAgents = []worker.ReviewerAgent{
+				{ReviewerID: "review-a", Agent: worker.AgentConfig{ID: "review-a-agent", Command: "stand-in-review-a", TimeoutSeconds: 900}},
+				{ReviewerID: "review-b", Agent: worker.AgentConfig{ID: "review-b-agent", Command: "stand-in-review-b", TimeoutSeconds: 900}},
+			}
+		})
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t); err != nil {
+		t.Fatal(err)
+	}
+	var record worker.AgentRun
+	readAgentArtifact(t, fixture.path("review-run.json"), worker.MaxArtifactJSONBytes, &record)
+	if record.AgentID != "review-b-agent" || record.Command != "stand-in-review-b" {
+		t.Fatalf("the bound launch definition did not run the review: %+v", record)
+	}
+	var review worker.Review
+	readAgentArtifact(t, fixture.path("review.json"), worker.MaxReviewJSONBytes, &review)
+	if review.Verdict != "pass" {
+		t.Fatalf("the bound reviewer's verdict was not sealed: %q", review.Verdict)
+	}
+}
+
+// The judges of a later round see what the earlier round objected to, so
+// they verify fixes instead of rediscovering them.
+func TestAgentReviewFeedsPreviousFindingsToTheJudge(t *testing.T) {
+	// The stand-in reports whether the objection reached its instruction: a
+	// byte-cut echo of the Japanese prompt would split a multi-byte
+	// character and fail the run record's UTF-8 seal.
+	fixture := newAgentFixture(t, editTheLabel,
+		`case "$*" in *from-first-reviewer*) echo "SAW-PREVIOUS-FINDING";; esac; echo '{"verdict":"pass","findings":[]}'`)
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	previous := fixture.path("review-one.json")
+	writeTestJSON(t, previous, map[string]any{"findings": []map[string]any{
+		{"code": "from-first-reviewer", "path": "client/src/label.ts", "message": "First objection."},
+	}})
+	if err := run(context.Background(), []string{
+		"agent-review", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+		"--ticket", fixture.path("ticket.json"), "--source", fixture.path("source.json"),
+		"--candidate", fixture.path("candidate.json"), "--reviewer", "review-b",
+		"--repo-root", fixture.repoRoot, "--base-sha", fixture.baseSHA,
+		"--previous-findings", previous,
+		"--run-out", fixture.path("review-run.json"), "--out", fixture.path("review.json"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var record worker.AgentRun
+	readAgentArtifact(t, fixture.path("review-run.json"), worker.MaxArtifactJSONBytes, &record)
+	if !strings.Contains(record.Transcript, "SAW-PREVIOUS-FINDING") {
+		t.Fatalf("the judge was not told the earlier objection: %q", record.Transcript)
+	}
+	var review worker.Review
+	readAgentArtifact(t, fixture.path("review.json"), worker.MaxReviewJSONBytes, &review)
+	if review.Verdict != "pass" {
+		t.Fatalf("a verdict past the echoed findings section was not sealed: %q", review.Verdict)
 	}
 }
 

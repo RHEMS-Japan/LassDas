@@ -20,6 +20,13 @@ func AgentReviewFromRun(
 	config Config,
 	reviewedAt time.Time,
 ) (Review, error) {
+	// The record must be this reviewer's own launch, sealed consistently: a
+	// run naming any other configured agent — the implementer's above all —
+	// is not this reviewer's judgment however valid its verdict reads. This
+	// is where the profile binding is enforced, not merely checkable.
+	if run.Validate(config) != nil || run.AgentID != config.Agents.ReviewerAgentFor(endpoint.ID).ID {
+		return Review{}, errors.New("review run is not the reviewer's own launch")
+	}
 	output, err := DecodeAgentReviewOutput(run.Transcript)
 	if err != nil {
 		return Review{}, err

@@ -33,11 +33,46 @@ func promptFixtureRequest() worker.TicketRequest {
 	return worker.TicketRequest{IssueKey: "TEST-1", Summary: "件名", Request: "本文"}
 }
 
+// A full slate of maximum-size objections would eat the whole instruction
+// budget on its own; the tail is dropped and the instruction says so.
+func TestReviewAgentPromptBoundsPreviousFindings(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	long := strings.Repeat("あ", 1300)
+	findings := make([]worker.ModelFinding, 0, 128)
+	for index := 0; index < 128; index++ {
+		findings = append(findings, worker.ModelFinding{Code: "bulk-objection", Path: "client/src/label.ts", Message: long})
+	}
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Fatalf("prompt bytes = %d", len(prompt))
+	}
+	if !strings.Contains(prompt, "省略") || !strings.Contains(prompt, "bulk-objection") {
+		t.Fatal("the bounded findings did not say what was kept and dropped")
+	}
+}
+
+func TestReviewAgentPromptCarriesPreviousFindings(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	findings := []worker.ModelFinding{{Code: "stale-caller", Path: "client/src/label.ts", Message: "A caller still expects the old text."}}
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "前の巡で出た指摘") || !strings.Contains(prompt, "stale-caller") {
+		t.Fatal("the earlier objections were not carried to the judge")
+	}
+}
+
 // A small change travels with its full patches, exactly as before.
 func TestReviewAgentPromptEmbedsThePatchesWhenTheyFit(t *testing.T) {
 	candidate, source := promptFixtureFiles(1, 40)
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +88,7 @@ func TestReviewAgentPromptEmbedsThePatchesWhenTheyFit(t *testing.T) {
 func TestReviewAgentPromptFallsBackToOutlinesWhenPatchesOvergrow(t *testing.T) {
 	candidate, source := promptFixtureFiles(40, 120)
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
