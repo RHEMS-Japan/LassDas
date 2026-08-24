@@ -110,3 +110,30 @@ func TestSealCandidateRejectsWhenNothingChanged(t *testing.T) {
 		t.Fatal("an untouched working copy was sealed")
 	}
 }
+
+// The cards mode's implement card is a native agent whose whole prompt is
+// this rendered file: the kernel authors the instruction even though the
+// kanban launches the agent.
+func TestImplementInstructionRendersTheKernelPrompt(t *testing.T) {
+	fixture := newAgentFixture(t, "true", "true")
+	previous := fixture.path("prior-review.json")
+	writeTestJSON(t, previous, map[string]any{"findings": []map[string]any{
+		{"code": "from-first-reviewer", "path": "client/src/label.ts", "message": "First objection."},
+	}})
+	out := fixture.path("INSTRUCTION.md")
+	if err := run(context.Background(), []string{
+		"implement-instruction", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+		"--draft", fixture.draftPath, "--previous-findings", previous, "--out", out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"## 依頼", "## 守ること", "from-first-reviewer"} {
+		if !strings.Contains(string(content), expected) {
+			t.Fatalf("the rendered instruction lacks %q: %q", expected, content)
+		}
+	}
+}

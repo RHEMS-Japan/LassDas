@@ -155,6 +155,16 @@ func EnsureChain(
 			"Automated ticket run, stage %s of round %d.\nDelivery: %s\nTicket: %s\n\nDispatched by the LassDas attendant; the assignee profile runs this stage in the shared run directory.",
 			stage.Name, round, deliveryID, runID,
 		)
+		if stage.Name == StageImplement {
+			// The implement card runs a native agent whose whole prompt is
+			// the kernel-rendered instruction file the attendant placed in
+			// the shared directory — the card body must not become a second
+			// instruction channel.
+			body = fmt.Sprintf(
+				"Delivery: %s\nTicket: %s (round %d)\n\n作業ディレクトリ直下の INSTRUCTION.md を読み、その指示に従って実装してください。指示は INSTRUCTION.md が全てで、このカード本文に追加の指示はありません。",
+				deliveryID, runID, round,
+			)
+		}
 		created, err := hermes.CreateTask(ctx, CardSpec{
 			Title: title, Body: body, Assignee: stage.Profile,
 			IdempotencyKey: key, Parent: parent, Workspace: workspace,
