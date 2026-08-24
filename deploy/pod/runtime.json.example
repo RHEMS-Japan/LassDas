@@ -32,5 +32,18 @@
   "hermes_board": "lassdas",
   "hermes_profile": "lassdas-runner",
   "worker_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
-  "controller_sha256": "<from /etc/lassdas/tool-pins.txt in the image>"
+  "controller_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
+
+  "orchestration": "runner",
+  "chain": {
+    "runs_root": "/data/runs",
+    "target_token_path": "/data/secrets/target-token",
+    "profiles": {
+      "implementer": "lassdas-implementer",
+      "review_a": "lassdas-review-a",
+      "review_b": "lassdas-review-b",
+      "validate": "lassdas-validate",
+      "publish": "lassdas-publish"
+    }
+  }
 }
