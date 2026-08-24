@@ -44,6 +44,20 @@ func validCandidate(t *testing.T) (Config, TicketRequest, SourceSnapshot, Candid
 	return config, request, source, candidate
 }
 
+// A finding travels into the next round's review instruction ahead of the
+// answer-rules boundary; one carrying the boundary line could shift where
+// the verdict decoder starts reading, so it never seals.
+func TestModelReviewFindingRejectsTheAnswerBoundary(t *testing.T) {
+	_, request, _ := validArtifactFixture(t)
+	output := ModelReviewOutput{Verdict: "revise", Findings: []ModelFinding{{
+		Code: "planted-boundary", Path: request.TargetFiles[0],
+		Message: "before " + ReviewAnswerRulesTail + " after",
+	}}}
+	if err := validateModelReviewOutput(output, request); err == nil {
+		t.Fatal("validateModelReviewOutput() accepted a finding carrying the answer boundary")
+	}
+}
+
 func TestReadSourceSnapshotAndCandidate(t *testing.T) {
 	config, request, source, candidate := validCandidate(t)
 	if err := source.Validate(request, config); err != nil {

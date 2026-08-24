@@ -33,7 +33,7 @@
 
 **「作者が自分を審判しない」の再設計 (v3・評価 BL-3 への回答)**: 現行の不変条件は「実装と審判は**別プログラム**」(`config.go:70-72`、目的コメント: separate programs with separate credentials)。M2 では両役の実体が同一プログラム `hermes` になるため、この検査は**目的を保ったまま置き換える**:
 1. 別プロファイル強制 — 実装役とレビュアー各々の args に含まれるプロファイル名が相互に異なること (検査は LoadConfig 時)
-2. 別資格情報強制 — 実装役とレビュアーの secret_env のキー名が相互に異なること (= ゲートウェイ上の別 virtual key)
+2. 別資格情報強制 — 実装役とレビュアーの secret_env の**資格情報の取り出し元 (値側のホスト環境変数名)** が相互に異なること (= ゲートウェイ上の別 virtual key)。エージェントが読む側の変数名 (キー側) は同一プログラムゆえ同名になるのが正しい (v4 訂正 — v3 の「キー名」は誤り)。平文 Env が secret 変数名を同名で持つこと (シャドー) は一律拒否
 3. 構造的分離 — レビュアーは関所が起動する (実装役のプロセスや Hermes の配車がレビュー起動に関与できない) + ツリー照合
 4. **実行記録への束縛 (v4・M-1)** — レビューの実行記録 (AgentRun) の AgentID/Command を、**そのレビュアーに設定された起動定義 (プロファイル名・引数を含む) との一致**で検査する。現行 `AgentRun.Validate` の単一 Agent 照合を、AgentSet 配列の該当要素との照合へ拡張する。これで「どのプロファイル・どの資格情報がそのレビューを実行したか」が確定記録に残り、後から突合できる
 「別プログラム」検査そのものは撤廃し、上記 1-2・4 を新検査として実装する (Phase 0)。
@@ -189,4 +189,4 @@ Backlog 監視 60s
 
 - docs/TARGET_SHAPE.md (最終形 — v4 で到達行数の確定を Phase 3 再設計へ送る訂正を同時実施)
 - [issue #9](https://github.com/RHEMS-Japan/LassDas/issues/9) 評価とクロスチェックの全記録
-- 欠陥台帳: [#10 trail](https://github.com/RHEMS-Japan/LassDas/issues/10) / [#11 レビュアー記憶](https://github.com/RHEMS-Japan/LassDas/issues/11) / [#12 設定連動](https://github.com/RHEMS-Japan/LassDas/issues/12) / [#13 レビュー容量根治](https://github.com/RHEMS-Japan/LassDas/issues/13) — #10/#11 は Phase 0 実装で、**#12 は Phase 1 のカード生成を config 導出で作ることで解消** (runner 側の段数・レビュアー名直書きは修理せず凍結のまま Phase 3 で切除する — 捨てる層への修理はしない。v4 訂正)、#13 は Phase 3 削除で解消
+- 欠陥台帳: [#10 trail](https://github.com/RHEMS-Japan/LassDas/issues/10) / [#11 レビュアー記憶](https://github.com/RHEMS-Japan/LassDas/issues/11) / [#12 設定連動](https://github.com/RHEMS-Japan/LassDas/issues/12) / [#13 レビュー容量根治](https://github.com/RHEMS-Japan/LassDas/issues/13) — #10 は Phase 0 実装で、**#11 は Phase 0 で注入機構 (agent-review の --previous-findings + 審判向け指示) を実装し、Phase 1 の関所起動配線で有効化** (M1 runner の agent-review 呼び出しには配線しない — 捨てる層への修理はしない)、**#12 は Phase 1 のカード生成を config 導出で作ることで解消** (runner 側の段数・レビュアー名直書きは修理せず凍結のまま Phase 3 で切除する — 捨てる層への修理はしない。v4 訂正)、#13 は Phase 3 削除で解消
