@@ -28,7 +28,11 @@ YAML
 # The cards orchestration's stage profiles: one per chain stage, each a
 # fixed host-side command — the task-creation surface can never choose what
 # executes. Written unconditionally (idempotent; unused in runner mode).
-for CHAIN_STAGE in review-a review-b validate publish; do
+# The review profiles double as the judges' own agent identity: the same
+# profile the card dispatches under is what `hermes --profile <name> -z`
+# runs the review with, so each judge carries its own provider block and
+# its own credential variable (two judges, two gateway identities).
+for CHAIN_STAGE in validate publish; do
   STAGE_HOME="$HOME/.hermes/profiles/lassdas-${CHAIN_STAGE}"
   mkdir -p "$STAGE_HOME"
   cat > "$STAGE_HOME/config.yaml" <<YAML
@@ -40,6 +44,38 @@ worker:
     - ${CHAIN_STAGE}
 YAML
 done
+
+REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
+mkdir -p "$REVIEW_A_HOME"
+cat > "$REVIEW_A_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - review-a
+providers:
+  lassdas-gateway:
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    api_key_env: LASSDAS_REVIEW_A_KEY
+    model: ${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}
+YAML
+
+REVIEW_B_HOME="$HOME/.hermes/profiles/lassdas-review-b"
+mkdir -p "$REVIEW_B_HOME"
+cat > "$REVIEW_B_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - review-b
+providers:
+  lassdas-gateway:
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    api_key_env: LASSDAS_REVIEW_B_KEY
+    model: ${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
+YAML
 
 # The implementer profile runs the native Hermes agent through the gateway
 # under its own virtual key. The provider block uses the fork's documented
