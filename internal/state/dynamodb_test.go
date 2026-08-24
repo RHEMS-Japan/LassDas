@@ -563,7 +563,12 @@ func testPullRequest(t *testing.T) hook.PullClaimRequest {
 			RepositorySHA256:  hook.HashIdentity("example/automation-receiver"),
 			WorkflowRefSHA256: testWorkflowRefDigest,
 			WorkflowSHA:       strings.Repeat("d", 40),
-			WorkflowRunID:     30737595526,
+			// Above 2^53 on purpose: the chain claim identity is a 63-bit
+			// hash, and a float64 detour in either store corrupts it (the
+			// RFDEV-618 run had every terminal report refused over 314 lost
+			// units). Keeping the fixture pathological makes every scenario
+			// a precision regression test.
+			WorkflowRunID:     7663335643410923834,
 			RunAttempt:        1,
 		},
 		IssuedAt:  testQueuedAt.Add(time.Second),
@@ -1205,7 +1210,8 @@ func testTerminalReport(t *testing.T, envelope hook.DispatchEnvelope, code hook.
 		AutomationRunID:   pull.RunID,
 		Code:              code,
 		Repository:        "example/target",
-		RunURL:            "https://github.com/example/automation-receiver/actions/runs/30737595526/attempts/1",
+		RunURL: "https://github.com/example/automation-receiver/actions/runs/" +
+			strconv.FormatInt(pull.Owner.WorkflowRunID, 10) + "/attempts/" + strconv.Itoa(pull.Owner.RunAttempt),
 		IssuedAt:          testQueuedAt.Add(3 * time.Second),
 	}
 }

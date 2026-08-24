@@ -62,8 +62,22 @@ func NewLocalStore(path string) (*LocalStore, error) {
 func (s *LocalStore) Close() error { return s.db.Close() }
 
 // item is one ledger row's attributes. Values are strings and int64s only —
-// the exact value kinds the Dynamo items use (S and N).
+// the exact value kinds the Dynamo items use (S and N). Rows read back from
+// the database carry their numbers as json.Number: a float64 detour would
+// corrupt any integer above 2^53, and the chain claim identity is a 63-bit
+// value (workflow_run_id 7663335643410923834 came back 314 short and the
+// store refused every terminal report for the run).
 type item map[string]any
+
+func decodeItem(encoded string) (item, error) {
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.UseNumber()
+	decoded := item{}
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
 
 func (m item) str(name string) (string, bool) {
 	value, ok := m[name].(string)
@@ -74,10 +88,12 @@ func (m item) int64At(name string) (int64, bool) {
 	switch v := m[name].(type) {
 	case int64:
 		return v, true
-	case float64:
-		// json.Unmarshal's default numeric type; the encoder below never
-		// produces fractions, so this is an integer in float clothing.
-		return int64(v), true
+	case json.Number:
+		parsed, err := strconv.ParseInt(v.String(), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
 	}
 	return 0, false
 }
@@ -145,11 +161,7 @@ func (t *tx) getItem(pk string) (item, error) {
 	if err != nil {
 		return nil, err
 	}
-	decoded := item{}
-	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
-		return nil, err
-	}
-	return decoded, nil
+	return decodeItem(encoded)
 }
 
 // putNew inserts a row that must not exist (attribute_not_exists(pk)).
@@ -1051,7 +1063,7 @@ func (s *LocalStore) ResumeWithAnswer(ctx context.Context, request hook.ResumeRe
 	archiveKey := clarificationArchiveKey(binding.runKey, request.Record.InputRevision)
 	archive := item{
 		"pk": archiveKey, "record_type": "clarification_revision", "run_key": binding.runKey,
-		"input_revision": request.Record.InputRevision, "record_sha256": request.RecordSHA256,
+		"input_revision": int64(request.Record.InputRevision), "record_sha256": request.RecordSHA256,
 		"record_json": request.RecordJSON, "resumed_at": request.ResumedAt.UnixMilli(),
 	}
 	if startedAt, ok := binding.runRow.int64At("question_started_at"); ok {
@@ -1068,7 +1080,7 @@ func (s *LocalStore) ResumeWithAnswer(ctx context.Context, request hook.ResumeRe
 	binding.runRow["queued_at"] = request.ResumedAt.UnixMilli()
 	binding.runRow["clarification_sha256"] = request.RecordSHA256
 	binding.runRow["clarification_json"] = request.RecordJSON
-	binding.runRow["input_revision"] = request.Record.InputRevision
+	binding.runRow["input_revision"] = int64(request.Record.InputRevision)
 	binding.runRow["resumed_at"] = request.ResumedAt.UnixMilli()
 	for _, name := range []string{
 		"question_record_sha256", "question_record_json", "question_started_at",
@@ -1328,8 +1340,8 @@ func (s *LocalStore) BeginNotify(ctx context.Context, request hook.NotifyBeginRe
 	created, err := txn.putNew(markerKey, item{
 		"pk": markerKey, "record_type": "question_notify", "run_key": binding.runKey,
 		"question_record_sha256": request.RecordSHA256,
-		"question_revision":      request.Record.QuestionRevision,
-		"notify_index":           request.Index,
+		"question_revision":      int64(request.Record.QuestionRevision),
+		"notify_index":           int64(request.Index),
 		"notify_at":              request.Record.NotifyAt[request.Index-1],
 		"notify_started_at":      request.StartedAt.UnixMilli(),
 		"notify_lease_until":     request.LeaseUntil.UnixMilli(),
@@ -1694,8 +1706,8 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 			strings.Contains(pk, "#notify#") || strings.Contains(pk, "#comment#") {
 			continue
 		}
-		row := item{}
-		if err := json.Unmarshal([]byte(encoded), &row); err != nil {
+		row, err := decodeItem(encoded)
+		if err != nil {
 			continue
 		}
 		if !row.strEquals("record_type", "run") {
