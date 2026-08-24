@@ -114,6 +114,16 @@ func scanJSONValue(decoder *json.Decoder) error {
 	return nil
 }
 
+// ReadBoundedRegularFile is the defended read for a file an untrusted party
+// may have placed: regular files only (no symlink, no FIFO — a FIFO would
+// block the caller forever instead of failing honestly), bounded, and checked
+// against replacement while open. The seal-candidate report is the measured
+// need: it is the one input whose inode the external implementer itself
+// creates.
+func ReadBoundedRegularFile(filename string, maxBytes int64) ([]byte, error) {
+	return readBoundedRegularFile(filename, maxBytes)
+}
+
 func readBoundedRegularFile(filename string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("file input contract is invalid")

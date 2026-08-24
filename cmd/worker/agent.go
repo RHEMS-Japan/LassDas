@@ -96,32 +96,7 @@ func runImplement(ctx context.Context, args []string) error {
 		return errors.New("the implementing agent did not finish: " + runErr.Error())
 	}
 
-	observed, err := worker.ReadObservedChanges(*repoRoot, *baseRoot, outcome.ChangedFiles, consumer)
-	if err != nil {
-		return err
-	}
-	request, err := worker.TicketWithObservedTargets(draft, observed, config)
-	if err != nil {
-		return errors.New("the files the agent changed do not form a valid contract")
-	}
-	source, err := worker.SourceFromObservedChanges(*baseSHA, observed, request, config)
-	if err != nil {
-		return err
-	}
-	candidate, err := worker.CandidateFromObservedChanges(*stage, observed, source, request, config, run, time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	if err := worker.WriteJSONFileExclusive(*ticketOutPath, request, worker.MaxTicketJSONBytes); err != nil {
-		return errors.New("ticket artifact could not be written")
-	}
-	if err := worker.WriteJSONFileExclusive(*sourceOutPath, source, worker.MaxArtifactJSONBytes); err != nil {
-		return errors.New("source artifact could not be written")
-	}
-	if err := worker.WriteJSONFileExclusive(*outputPath, candidate, worker.MaxArtifactJSONBytes); err != nil {
-		return errors.New("candidate artifact could not be written")
-	}
-	return nil
+	return sealObservedChain(outcome.ChangedFiles, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath)
 }
 
 // runAgentReview hands the finished change to the reviewing agent, in the same

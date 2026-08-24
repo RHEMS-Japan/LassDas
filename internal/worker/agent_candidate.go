@@ -8,26 +8,38 @@ import (
 	"unicode/utf8"
 )
 
+// AgentRunKindExternal marks a run the kernel did not start. The M2
+// orchestration launches the implementing agent itself (a Hermes-native
+// worker); the kernel only observes what that run left in the working copy.
+// An external record therefore carries the observation and pins every launch
+// fact the kernel could not witness to a fixed sentinel, so nothing
+// unobserved can be smuggled in looking like evidence. Review runs are never
+// external: the kernel launches every judge itself.
+const AgentRunKindExternal = "external"
+
 // AgentRun is the sealed record of one implementing agent run: what it was
 // asked, what it changed, and what it said it did. It is bound to the ticket
 // and the exact base revision, so a replay can be checked against it.
 type AgentRun struct {
-	SchemaVersion int       `json:"schema_version"`
-	Stage         int       `json:"stage"`
-	DeliveryID    string    `json:"delivery_id"`
-	InputSHA256   string    `json:"input_sha256"`
-	ConfigSHA256  string    `json:"config_sha256"`
-	ToolSHA       string    `json:"tool_sha"`
-	BaseSHA       string    `json:"base_sha"`
-	AgentID       string    `json:"agent_id"`
-	Command       string    `json:"command"`
-	PromptBytes   int       `json:"prompt_bytes"`
-	ExitCode      int       `json:"exit_code"`
-	DurationMs    int64     `json:"duration_ms"`
-	ChangedFiles  []string  `json:"changed_files"`
-	Transcript    string    `json:"transcript"`
-	RanAt         time.Time `json:"ran_at"`
-	RunSHA256     string    `json:"run_sha256"`
+	SchemaVersion int    `json:"schema_version"`
+	Stage         int    `json:"stage"`
+	DeliveryID    string `json:"delivery_id"`
+	InputSHA256   string `json:"input_sha256"`
+	ConfigSHA256  string `json:"config_sha256"`
+	ToolSHA       string `json:"tool_sha"`
+	BaseSHA       string `json:"base_sha"`
+	// Kind is empty for a run this program started and observed end to end,
+	// AgentRunKindExternal for one it only sealed the results of.
+	Kind         string    `json:"kind,omitempty"`
+	AgentID      string    `json:"agent_id"`
+	Command      string    `json:"command"`
+	PromptBytes  int       `json:"prompt_bytes"`
+	ExitCode     int       `json:"exit_code"`
+	DurationMs   int64     `json:"duration_ms"`
+	ChangedFiles []string  `json:"changed_files"`
+	Transcript   string    `json:"transcript"`
+	RanAt        time.Time `json:"ran_at"`
+	RunSHA256    string    `json:"run_sha256"`
 }
 
 // SealAgentRun computes the digest that binds a run record to its contents.
@@ -46,23 +58,41 @@ func (r AgentRun) Validate(config Config) error {
 	if err != nil {
 		return errors.New("worker configuration is invalid")
 	}
-	agent, err := config.Agents.byID(r.AgentID)
-	if err != nil {
-		return err
-	}
 	if r.SchemaVersion != ArtifactSchemaVersion || r.Stage < 1 || r.Stage > config.MaxStages ||
 		!deliveryPattern.MatchString(r.DeliveryID) || !sha256Pattern.MatchString(r.InputSHA256) ||
 		r.ConfigSHA256 != configSHA || !ValidToolSHA(r.ToolSHA) || !commitPattern.MatchString(r.BaseSHA) ||
-		r.Command != agent.Command ||
-		r.PromptBytes < 1 || r.PromptBytes > MaxAgentPromptBytes ||
+		r.PromptBytes > MaxAgentPromptBytes ||
 		r.DurationMs < 0 || r.RanAt.IsZero() || r.RanAt.Location() != time.UTC ||
 		!sha256Pattern.MatchString(r.RunSHA256) {
 		return errors.New("agent run identity is invalid")
 	}
-	// Only the implementing run is required to have changed something. The
-	// reviewing run reads and reports; it is expected to leave the tree alone.
-	if r.AgentID == config.Agents.Implementer.ID && len(r.ChangedFiles) == 0 {
-		return errors.New("agent run changed no files")
+	switch r.Kind {
+	case "":
+		agent, err := config.Agents.byID(r.AgentID)
+		if err != nil {
+			return err
+		}
+		if r.Command != agent.Command || r.PromptBytes < 1 {
+			return errors.New("agent run identity is invalid")
+		}
+		// Only the implementing run is required to have changed something. The
+		// reviewing run reads and reports; it is expected to leave the tree alone.
+		if r.AgentID == config.Agents.Implementer.ID && len(r.ChangedFiles) == 0 {
+			return errors.New("agent run changed no files")
+		}
+	case AgentRunKindExternal:
+		// The launch was not observed here, so the launch fields must hold
+		// their sentinels — a value in any of them would be a claim nobody
+		// checked. The observation itself is mandatory: an external record
+		// exists only to seal a change, and a change means changed files.
+		if r.AgentID != AgentRunKindExternal || r.Command != "" || r.PromptBytes != 0 || r.ExitCode != 0 || r.DurationMs != 0 {
+			return errors.New("agent run identity is invalid")
+		}
+		if len(r.ChangedFiles) == 0 {
+			return errors.New("agent run changed no files")
+		}
+	default:
+		return errors.New("agent run identity is invalid")
 	}
 	if !sort.StringsAreSorted(r.ChangedFiles) {
 		return errors.New("agent run changed files are not ordered")
@@ -248,6 +278,11 @@ func agentInvocation(config Config, run AgentRun) InvocationUsage {
 		output = 1
 	}
 	prompt := int32(run.PromptBytes) // #nosec G115 -- bounded by MaxAgentPromptBytes.
+	// An external run pins its unobserved prompt size to zero; the floor keeps
+	// the usage record valid, matching the output floor above.
+	if prompt < 1 {
+		prompt = 1
+	}
 	return InvocationUsage{
 		RequestedModel: config.Models.Implementer.Model,
 		RequestID:      run.RunSHA256,
