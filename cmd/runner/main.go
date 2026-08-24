@@ -38,6 +38,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "chain-stage" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := runChainStage(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "runner:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "runner:", err)
 		os.Exit(1)

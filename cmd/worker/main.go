@@ -73,6 +73,8 @@ func run(ctx context.Context, args []string) error {
 		return runImplement(ctx, args[1:])
 	case "seal-candidate":
 		return runSealCandidate(args[1:])
+	case "implement-instruction":
+		return runImplementInstruction(args[1:])
 	case "review":
 		return runReview(ctx, args[1:])
 	case "agent-review":
