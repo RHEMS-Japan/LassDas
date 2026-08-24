@@ -20,8 +20,69 @@ import (
 // Run drives the whole ticket path and returns the outcome for the terminal
 // logic.
 func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
-	if err := p.Prepare(); err != nil {
+	prep, outcome, err := p.pretrip(ctx)
+	if err != nil || outcome.Code != "" {
+		return outcome, err
+	}
+	repoRoot, baseRoot, baseSHA := prep.repoRoot, prep.baseRoot, prep.baseSHA
+
+	// ---- model: readiness gate, then at most three finite stages ----
+	outcome, err = p.modelStage(ctx, repoRoot, baseRoot, baseSHA)
+	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
+		return outcome, err
+	}
+
+	// ---- validation ----
+	if failed, err := p.validationStage(ctx, outcome.Stage, runnerReviewFiles()); err != nil {
 		return Outcome{Code: "internal_failed"}, err
+	} else if failed {
+		return Outcome{Code: hook.TerminalValidationFailed}, nil
+	}
+
+	// ---- delivery ----
+	return p.deliveryStage(ctx, outcome.Stage, runnerReviewFiles())
+}
+
+// ChainPrep is what the cards orchestration needs from a prepared run.
+type ChainPrep struct {
+	RepoRoot string
+	BaseRoot string
+	BaseSHA  string
+}
+
+// PrepareChainRun readies a delivery for the cards orchestration: the whole
+// pre-implementation half of a run — workspace preparation, intake, source
+// binding, the readiness gate — exactly as the runner mode executes it,
+// stopping where the implement stage would start. A non-empty outcome code
+// (or a question decision path) means the run must not reach a chain.
+func (p *Pipeline) PrepareChainRun(ctx context.Context) (ChainPrep, Outcome, error) {
+	prep, outcome, err := p.pretrip(ctx)
+	if err != nil || outcome.Code != "" {
+		return ChainPrep{}, outcome, err
+	}
+	outcome, err = p.readinessGate(ctx)
+	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
+		return ChainPrep{}, outcome, err
+	}
+	return ChainPrep{RepoRoot: prep.repoRoot, BaseRoot: prep.baseRoot, BaseSHA: prep.baseSHA}, Outcome{}, nil
+}
+
+// pretripResult is what the pre-model half of a run leaves behind: the
+// prepared workspace paths and the sealed base revision every later stage
+// binds to.
+type pretripResult struct {
+	repoRoot string
+	baseRoot string
+	baseSHA  string
+}
+
+// pretrip is the pre-model half of a run — workspace preparation, intake,
+// source binding, workspace shaping — shared verbatim by the runner mode
+// (Run) and the cards orchestration (PrepareChainRun). A non-empty outcome
+// code means the run stops here.
+func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) {
+	if err := p.Prepare(); err != nil {
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	// ---- intake (workflow: read-ticket, read-contract) ----
 	if code, err := p.worker(ctx, "read-ticket", []string{
@@ -30,17 +91,17 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		"--clarification-out", p.path("clarification.json"),
 		"--out", p.path("raw-ticket.json"),
 	}); err != nil || code != 0 {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if code, err := p.worker(ctx, "read-contract", []string{
 		"read-contract", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 		"--raw", p.path("raw-ticket.json"), "--out", p.path("intake.json"),
 	}); err != nil || code != 0 {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	gaps, err := p.readJSONField("intake.json", "gaps")
 	if err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if gaps != "" && gaps != "[]" && gaps != "null" {
 		// The workflow's words (report step): an intake that still has open
@@ -49,7 +110,7 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		// the requester hears that a person will follow up, instead of the
 		// run dying unreported. Same honest terminal here; intake gaps are
 		// not the readiness question format and are never posted as one.
-		return Outcome{Code: hook.TerminalClarificationRequired}, nil
+		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
 	}
 
 	// ---- source (build-draft, locate/derive, baseline, snapshot) ----
@@ -59,40 +120,40 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		"--out", p.path("ticket-draft.json"),
 	})
 	if err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	switch code {
 	case 0:
 	case 2:
-		return Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
+		return pretripResult{}, Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
 	default:
-		return Outcome{Code: "internal_failed"}, nil
+		return pretripResult{}, Outcome{Code: "internal_failed"}, nil
 	}
 	if err := p.resolveConsumer(); err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 
 	repoRoot := p.path("target-repo")
 	if err := p.cloneTargetTo(ctx, repoRoot); err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if code, err := p.controller(ctx, "baseline", []string{
 		"baseline", "--config", p.Config.ConsumerConfigPath,
 		"--draft", p.path("ticket-draft.json"), "--out", p.path("baseline.json"),
 	}); err != nil || code != 0 {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	baseSHA, err := p.readJSONField("baseline.json", "baseline", "Integration", "SHA")
 	if err != nil || len(baseSHA) != 40 {
-		return Outcome{Code: "internal_failed"}, fmt.Errorf("baseline sha invalid: %q (%v)", baseSHA, err)
+		return pretripResult{}, Outcome{Code: "internal_failed"}, fmt.Errorf("baseline sha invalid: %q (%v)", baseSHA, err)
 	}
 	if code, err := p.gitIn(ctx, repoRoot, "checkout", "--detach", baseSHA); err != nil || code != 0 {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 
 	absent, err := p.readJSONField("ticket-draft.json", "absent_text")
 	if err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if absent != "" {
 		if code, err := p.worker(ctx, "locate-target", []string{
@@ -100,7 +161,7 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 			"--draft", p.path("ticket-draft.json"), "--repo-root", repoRoot,
 			"--out", p.path("readiness-ticket.json"),
 		}); err != nil || code != 0 {
-			return Outcome{Code: "internal_failed"}, err
+			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	} else {
 		if code, err := p.worker(ctx, "list-candidates", []string{
@@ -108,7 +169,7 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 			"--draft", p.path("ticket-draft.json"), "--repo-root", repoRoot, "--base-sha", baseSHA,
 			"--out", p.path("candidate-listing.json"),
 		}); err != nil || code != 0 {
-			return Outcome{Code: "internal_failed"}, err
+			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 		// A derive rejection ended as internal_failed under the workflow
 		// (only build-draft fed the parse outcome its report read); the
@@ -119,7 +180,7 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 			"--derivation-out", p.path("derivation.json"),
 			"--out", p.path("readiness-ticket.json"),
 		}, p.modelKeyEnv()...); err != nil || code != 0 {
-			return Outcome{Code: "internal_failed"}, err
+			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	}
 	if code, err := p.worker(ctx, "snapshot", []string{
@@ -127,33 +188,19 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		"--ticket", p.path("readiness-ticket.json"), "--repo-root", repoRoot, "--base-sha", baseSHA,
 		"--out", p.path("readiness-source.json"),
 	}); err != nil || code != 0 {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 
 	// ---- model workspace shaping (workflow: rebuild from the sealed tar) ----
 	baseRoot := p.path("target-base")
 	if err := p.shapeModelWorkspace(ctx, repoRoot, baseRoot); err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if err := p.writeAgentConfigs(); err != nil {
-		return Outcome{Code: "internal_failed"}, err
+		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 
-	// ---- model: readiness gate, then at most three finite stages ----
-	outcome, err := p.modelStage(ctx, repoRoot, baseRoot, baseSHA)
-	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
-		return outcome, err
-	}
-
-	// ---- validation ----
-	if failed, err := p.validationStage(ctx, outcome.Stage); err != nil {
-		return Outcome{Code: "internal_failed"}, err
-	} else if failed {
-		return Outcome{Code: hook.TerminalValidationFailed}, nil
-	}
-
-	// ---- delivery ----
-	return p.deliveryStage(ctx, outcome.Stage)
+	return pretripResult{repoRoot: repoRoot, baseRoot: baseRoot, baseSHA: baseSHA}, Outcome{}, nil
 }
 
 // cloneTargetTo clones the consumer repository. The token never appears in
@@ -381,9 +428,21 @@ wire_api = "responses"
 `, reviewer.Model, reviewer.Effort, reviewer.BaseURL, keyEnv)
 		return os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(configTOML), 0o600)
 	}
-	// The workflow's jq -er hard-failed before any model spend; silently
-	// proceeding would leave a previous run's stale provider file in force
-	// (the pod $HOME persists).
+	// The runner mode hardwires this reviewer, so a configuration without
+	// it must fail before any model spend (the workflow's jq -er did). The
+	// cards mode derives every judge from configuration and has no provider
+	// file to write — but a previous run's stale one must not stay in force
+	// on the persistent pod $HOME, so it is removed instead of left behind.
+	if p.Config.OrchestrationCards() {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(home, ".codex", "config.toml")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
 	return errors.New("consumer config defines no codex-adversarial reviewer")
 }
 
@@ -411,6 +470,17 @@ func (p *Pipeline) clarificationArgs() []string {
 // modelStage mirrors the workflow's single "Gate readiness, then run at
 // most three finite model stages" step.
 func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
+	if outcome, err := p.readinessGate(ctx); err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
+		return outcome, err
+	}
+	return p.implementRounds(ctx, repoRoot, baseRoot, baseSHA)
+}
+
+// readinessGate is the pre-generation gate — up to three assess/check
+// attempts and the decision — shared verbatim by the runner mode and the
+// cards orchestration. An empty outcome means ready: implementation may
+// start.
+func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	historyDir := p.path("history")
 	readinessDir := historyDir + "/readiness"
 	if err := os.MkdirAll(readinessDir, 0o755); err != nil {
@@ -477,6 +547,7 @@ func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA s
 	}
 	switch readinessOutcome {
 	case "ready":
+		return Outcome{}, nil
 	case "clarification_required":
 		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: decision}, nil
 	case "reject":
@@ -489,7 +560,13 @@ func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA s
 		// legitimate readiness stop.
 		return Outcome{Code: hook.TerminalModelFailed}, nil
 	}
+}
 
+// implementRounds is the runner mode's in-process sequencing of the finite
+// implement/review/decide rounds. The cards orchestration replaces exactly
+// this function with the stage-card chain.
+func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
+	historyDir := p.path("history")
 	// Implementation: at most three implement/review/decide stages.
 	for stage := 1; stage <= 3; stage++ {
 		stageDir := fmt.Sprintf("%s/stage-%d", historyDir, stage)

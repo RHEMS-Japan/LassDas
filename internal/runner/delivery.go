@@ -9,6 +9,22 @@ import (
 	"automation.internal/ticket-ingress/internal/hook"
 )
 
+// runnerReviewFiles are the runner mode's fixed review artifact names,
+// frozen with that rail (issue #12 resolves in the cards mode, which
+// derives the names from configuration and passes them in).
+func runnerReviewFiles() []string {
+	return []string{"claude-correctness.json", "codex-adversarial.json"}
+}
+
+// reviewFileArgs renders --review flags for the named artifacts of a stage.
+func reviewFileArgs(stageDir string, names []string) []string {
+	arguments := make([]string, 0, 2*len(names))
+	for _, name := range names {
+		arguments = append(arguments, "--review", stageDir+"/"+name)
+	}
+	return arguments
+}
+
 // validationStage mirrors the workflow's validation job: apply the adopted
 // candidate to a fresh copy, run the consumer's own checks, verify the
 // applied tree and the publish gate. The GitHub job dropped privileges to
@@ -16,7 +32,7 @@ import (
 // same steps in the task workspace — the pod itself is the sandbox (its own
 // namespace, its own filesystem, egress-limited; see the runtime design's
 // network section). Returns validationFailed=true for a gate refusal.
-func (p *Pipeline) validationStage(ctx context.Context, stage int) (bool, error) {
+func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles []string) (bool, error) {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), stage)
 	sandbox := p.path("validation-target")
 	if err := os.RemoveAll(sandbox); err != nil {
@@ -48,9 +64,9 @@ func (p *Pipeline) validationStage(ctx context.Context, stage int) (bool, error)
 		append(common, "--repo-root", sandbox)...)); err != nil || code != 0 {
 		return true, err
 	}
+	gateArgs := append(common, reviewFileArgs(stageDir, reviewFiles)...)
 	if code, err := p.worker(ctx, "verify-publish-gate", append([]string{"verify-publish-gate"},
-		append(common,
-			"--review", stageDir+"/claude-correctness.json", "--review", stageDir+"/codex-adversarial.json",
+		append(gateArgs,
 			"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"))...)); err != nil || code != 0 {
 		return true, err
 	}
@@ -115,7 +131,7 @@ func (p *Pipeline) AttemptedImplementation() bool {
 // (the PoC exit). The integration and production continuations call the
 // same controller subcommands the workflow did; their polling lives inside
 // the controller, unchanged.
-func (p *Pipeline) deliveryStage(ctx context.Context, stage int) (Outcome, error) {
+func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []string) (Outcome, error) {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), stage)
 	evidence := map[string]string{}
 
@@ -128,10 +144,10 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int) (Outcome, error
 		"--ticket", stageDir + "/ticket.json",
 	}
 	publishArgs := append([]string{"publish-feature"}, append(common,
-		"--source", stageDir+"/source.json", "--candidate", stageDir+"/candidate.json",
-		"--review", stageDir+"/claude-correctness.json", "--review", stageDir+"/codex-adversarial.json",
-		"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"),
-		"--baseline", p.path("baseline.json"), "--out", p.path("feature.json"))...)
+		append([]string{"--source", stageDir + "/source.json", "--candidate", stageDir + "/candidate.json"},
+			append(reviewFileArgs(stageDir, reviewFiles),
+				"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"),
+				"--baseline", p.path("baseline.json"), "--out", p.path("feature.json"))...)...)...)
 	if code, err := p.controller(ctx, "publish-feature", publishArgs); err != nil || code != 0 {
 		return Outcome{Code: hook.TerminalReleaseFailed}, err
 	}
