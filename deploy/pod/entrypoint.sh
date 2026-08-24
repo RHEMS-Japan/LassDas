@@ -25,6 +25,53 @@ worker:
     - /usr/local/bin/runner
 YAML
 
+# The cards orchestration's stage profiles: one per chain stage, each a
+# fixed host-side command — the task-creation surface can never choose what
+# executes. Written unconditionally (idempotent; unused in runner mode).
+for CHAIN_STAGE in review-a review-b validate publish; do
+  STAGE_HOME="$HOME/.hermes/profiles/lassdas-${CHAIN_STAGE}"
+  mkdir -p "$STAGE_HOME"
+  cat > "$STAGE_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - ${CHAIN_STAGE}
+YAML
+done
+
+# The implementer profile runs the native Hermes agent through the gateway
+# under its own virtual key. The provider block uses the fork's documented
+# keys (providers.<name>: base_url / api_key_env / model); its live shape
+# is verified on the pod before the first cards-mode run — a wrong key here
+# fails the implement card, never the seal.
+IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
+mkdir -p "$IMPLEMENTER_HOME"
+if [ ! -f "$IMPLEMENTER_HOME/config.yaml" ]; then
+  cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
+providers:
+  lassdas-gateway:
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    api_key_env: LASSDAS_IMPLEMENTER_KEY
+    model: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
+YAML
+fi
+
+# Cards orchestration: the destination credential moves from the process
+# environment into an operator-file before any resident starts, because the
+# dispatcher spawns every stage — the untrusted implementer included — from
+# this environment. Runner mode keeps the environment path unchanged.
+if grep -q '"orchestration"[[:space:]]*:[[:space:]]*"cards"' "$LASSDAS_RUNTIME_CONFIG"; then
+  mkdir -p "$STATE/runs" "$STATE/secrets"
+  if [ -n "${TARGET_GITHUB_TOKEN:-}" ]; then
+    umask 077
+    printf '%s' "$TARGET_GITHUB_TOKEN" > "$STATE/secrets/target-token"
+    umask 022
+    unset TARGET_GITHUB_TOKEN
+  fi
+fi
+
 hermes kanban init
 
 liveness() { touch "$STATE/heartbeat"; }

@@ -63,12 +63,24 @@ Backlog 監視 60s
 - **worker.command はプロファイル単位** (カード単位ではない — `kanban_db.py:10717`)。よって工程ごとに専用プロファイルを用意し assignee で選ぶ。**Phase 1 の成果物 = プロファイル 5 個** (implementer / review-a / review-b / validate / publish) とその config.yaml 定義一式
 - **契約の置き場**: 強制は封緘と納品の二点に集約。封緘が判定対象をバイト列で確定し、publish gate が「2 レビュアーの有効記録 (digest 束縛) + converged + 検証証拠」を再検算する。進行側の逸脱は「納品されない」形で表面化する (fail-safe 方向)
 - **失敗の扱い (v3・評価 BL-5 への回答)**: direct-command カードは**非ゼロ終了で即 blocked・自動再試行なし** (`kanban_db.py:10725-10731` 実機仕様)。一過性障害の吸収は verb 内部の既存再試行 (レビュー最大 3 会話 `ReviewAttemptLimit` / ゲートウェイ再試行) に任せ、**verb の非ゼロ終了 = 本物の失敗**と定義する。attendant は工程カードの blocked (needs_input 以外) を検知したら run 失敗として終端報告を投稿し連鎖をアーカイブする — 人手の unblock を待つ滞留を作らない。よって「人手ゼロ」の意味は「成功時は質問回答以外の人手ゼロ / 失敗時は人手なしで正直な終端報告に到達」
-- **native worker (実装カード) の失敗経路 (v4・M-2)**: 実装カードは direct-command と違い、エージェントの起動失敗・実行中の死で **blocked にならず crash / gave_up 系の状態**になり得る。これらの状態は固定でない (次の配車・操作で書き換わり得る) ため、**盤面の状態表示を失敗の記録として当てにしない** — attendant は crash / gave_up 系も終端化対象に含め、検知した時点で run 失敗の終端報告を Backlog に投稿して連鎖をアーカイブする (記録の正は Backlog 側)。失敗注入の DoD は direct-command の非ゼロ終了と native worker の起動失敗の**両経路を各 1 回**実測する
+- **native worker (実装カード) の失敗経路 (v4・M-2、v4 実装時に fork 実測で訂正)**: 起動失敗・実行中の死・timeout は fork では **status ではなく event / run outcome** であり、いずれも最終的にカードは **blocked に集約**される (crash/gave_up という status は存在しない)。さらに失敗閾値 (2 回) 未満では**一度だけ自動再配車**されるため、全工程は再入に対して冪等に作る (封緘・レビュー・判定は自分の成果物があれば飛ばす / 検証はやり直す)。attendant の検知点は blocked 一種のみで、検知した時点で run 失敗の終端報告を Backlog に投稿して連鎖をアーカイブする (**盤面は失敗の記録ではない** — 記録の正は Backlog 側)。失敗注入の DoD は direct-command の非ゼロ終了と native worker の起動失敗の**両経路を各 1 回**実測する
 - **巡別レンズと過去巡の受け渡し**: 関所がレビュー起動時に注入 ([#11](https://github.com/RHEMS-Japan/LassDas/issues/11) の実装を Phase 0 に内蔵)。差し戻し時は attendant が連鎖を 1 巡分再生成し、巡回数は連鎖 metadata で数える
 - **モデル**: 実装 = anthropic/claude-opus-5、レビュー A = anthropic/claude-opus-5 (レンズ: 差分先読み)、レビュー B = openai/gpt-5.6-sol-pro (レンズ: 検証実行)。ゲートウェイ経由。実装役と同一 (baseURL,model) のレビュアーは 1 人まで — この制限は**新規実装** (現行 `models` 集合は実装役のエンドポイントを種に入れていない `config.go:559-573`)
 - **ベンダー実体の突合**: 検査時点 = LoadConfig。①ベンダー名→許可ホスト対応表に対する各レビュアー baseURL の一致 ②上記「同一 (baseURL,model) は 1 人まで」。不一致 = 起動拒否 (fail-closed)。ゲートウェイの向こう側の実在は関所から検証不能 (既知の限界)
 - **質問**: kernel の質問プロトコル (2 回上限・記録連鎖・期限) は無変更。attendant が実装カードの needs_input と Backlog を橋渡し (`unblock --resolve` 実装済み)。Hermes 側 block 反復上限とは質問 ID 入り理由文字列で別理由化し干渉させない
 - **レビュー容量 (610)**: レビュアーはリポジトリを直接読むため詰め込み上限は構造ごと消滅。chat レビュー経路は Phase 3 で削除 ([#13](https://github.com/RHEMS-Japan/LassDas/issues/13) closed)
+
+### 骨格の実装形 (v4 追記 — Phase 0/1 実装で確定した具体)
+
+- **封緘の位置**: fork の native worker に完了フックが無いため、封緘 (seal-candidate) は**レビュー A カードの前段**として実行する (実行体 = `runner chain-stage --stage review-a`)。関所所有・失敗の帰属 (封緘失敗 = レビュー A カードの失敗として成果物から判別可) は不変
+- **審判集計と検証の位置**: decide は**検証カードの先頭工程**。revise は「収束済み変更を運ぶというこのカードの仕事が成立しない事実」として非ゼロ終了し、attendant が decision 記録を読んで次巡連鎖を再生成する。nonconverged は impasse 質問を封緘してから非ゼロ終了
+- **実装指示の経路**: 実装カード (native) の指示は関所が描画する `INSTRUCTION.md` (worker verb `implement-instruction`、巡ごとに上書き・過去巡指摘込み)。カード本文は誘導文のみで第二の指示チャネルにしない
+- **質問の経路**: needs_input のカードブロックは使わない。受付質問は連鎖作成前 (attendant の準備内)、行き詰まり質問は連鎖をアーカイブして投稿し、回答採用後の再開は新しい試行 (巡 1 から・回答束縛) として開始する — 単一コードパスで、fork のブロック反復上限とも干渉しない (v3 の骨格図の needs_input 記載を置換)
+- **準備の位置**: workspace 準備 (clone・受付ゲート含む) は attendant がインライン実行 (追加カード無し)。宛先トークンを Hermes 配車環境に載せないため — 配車デーモンの環境は非信頼の実装役にも届く
+- **トークンの流路**: cards モードでは entrypoint が起動前にトークンをファイル (`chain.target_token_path`、0600) へ移して環境から消す。読むのは attendant (clone) と検証・納品工程のみ。同一 UID のファイル露出は既知の残余 (UID 分離は Phase 3 関門、docs/RUNTIME_POD.md)
+- **claim の身元**: attendant の claim/報告は deliveryID から決定的に導出した固定 id — プロセス再起動をまたいでも台帳の owner 突合が成立する
+- **工程時間の訂正**: 検証カードは 60 分 (v3 の 30 分は誤り — 検証コマンドは各 10 分上限×最大 5 本が合法なため、設計値でなく上限からの導出に変更)
+- **P2 前フライト (pod 上で最初の cards 実行前に確認)**: ①fork native worker がカード本文を初期プロンプトとして実装役に渡す実効確認 ②implementer プロファイルの providers 設定 (gateway 接続・virtual key) の実効確認 ③旧バイナリ×新 runtime.json は起動不能 (DisallowUnknownFields) — ロールバックは常に「orchestration を "runner" に戻す」で行い、バイナリだけ戻さない
 
 ### seal-candidate の仕様 (v3 追記)
 
@@ -163,9 +175,10 @@ Backlog 監視 60s
 
 ## 運用前提
 
-- 配車間隔 60 秒・カード max_runtime は工程別 (実装 90 分 / レビュー各 30 分 / 検証 30 分 / 納品 15 分)。超過 = timed_out → attendant が終端化
+- 配車間隔 60 秒・カード max_runtime は工程別 (実装 90 分 / レビュー各 30 分 / **検証 60 分 (v4 訂正 — コマンド上限からの導出)** / 納品 15 分)。超過 = timed_out → attendant が終端化
 - direct-command カードの失敗は**即 blocked・自動再試行なし** (実機仕様)。一過性障害は verb 内部の再試行で吸収し、非ゼロ終了 = 本物の失敗として attendant が終端化する (滞留させない)
-- 直列前提: 単一 attendant・単一 Pod・同時 1 チケット (idempotency index 非 UNIQUE の実測制約)。並列化はスコープ外
+- 直列前提: 単一 attendant・単一 Pod・同時 1 チケット (idempotency index 非 UNIQUE の実測制約)。並列化はスコープ外。**準備 (clone + 受付ゲート) は attendant の tick 内同期実行** — その数分間は質問処理を含む受付全体が待つ (直列前提の帰結として許容・v4 明文化)
+- **cards モードのレビュアーは厳密 2 名** (工程カードが 2 枚のため)。3 名以上は受入条件の判定が構造的に成立しないので準備段階で拒否する (v4・レビュー指摘 M-1)。3 人目の審判は将来の連鎖形変更を伴うスコープ外
 - 納品期限 N の計数は「投入チケット数」(再試行は同一件)
 
 ## 依存関係・前提
