@@ -88,7 +88,7 @@ Backlog 監視 60s
 **Phase 1 — Hermes 側の組み立てと attendant 改修**
 - プロファイル 5 個 (implementer / review-a / review-b / validate / publish) の config.yaml 定義 + 実装役手順書 (作業規約・終了規約)
 - カード生成の改修: 実体は **`internal/runtime`** (実測 30.3%・cards.go) — 「親 + 工程連鎖」型へ。**改修と同時にテスト新設し 70% 以上** (v2 の「attendant ≥70%」は対象誤り — cmd/attendant は 96 行の配線のみ)
-- 失敗検知→終端化・差し戻し再生成・質問橋の attendant/runtime 実装
+- 失敗検知→終端化・差し戻し再生成・質問橋の attendant/runtime 実装。**#10 の呼び出し規則もここへ移設する**: 「実装を 1 巡でも開始した失敗終端は compose-trail を試み、生成失敗は固定 fallback 行で報告を止めない」(Phase 0 で runner 側に実装済みのポリシーと同一。合成本体は kernel verb のまま)
 - **新旧切替とロールバック**: runtime config `orchestration: "runner" | "cards"`。M1 runner 経路は Phase 3 まで削除しない。**ロールバック発動 = cards 方式の進行不能 2 回連続**。**切り分けの判定 (v3)**: 工程カードに stage 成果物 (candidate/review artifact) が 1 つも残らず止まった = 設計欠陥 (ロールバック対象) / 成果物が残り revise・nonconverged 系で終わった = 実装品質 (分離条件の管轄)。判定は成果物の有無という機械条件で行い、発動時に発注者へ報告
 
 **Phase 2 — 受入 (最終形の上で初納品)**
@@ -189,4 +189,4 @@ Backlog 監視 60s
 
 - docs/TARGET_SHAPE.md (最終形 — v4 で到達行数の確定を Phase 3 再設計へ送る訂正を同時実施)
 - [issue #9](https://github.com/RHEMS-Japan/LassDas/issues/9) 評価とクロスチェックの全記録
-- 欠陥台帳: [#10 trail](https://github.com/RHEMS-Japan/LassDas/issues/10) / [#11 レビュアー記憶](https://github.com/RHEMS-Japan/LassDas/issues/11) / [#12 設定連動](https://github.com/RHEMS-Japan/LassDas/issues/12) / [#13 レビュー容量根治](https://github.com/RHEMS-Japan/LassDas/issues/13) — #12 は Phase 0 の設定化で、#10/#11 は Phase 0 実装で、#13 は Phase 3 削除で解消
+- 欠陥台帳: [#10 trail](https://github.com/RHEMS-Japan/LassDas/issues/10) / [#11 レビュアー記憶](https://github.com/RHEMS-Japan/LassDas/issues/11) / [#12 設定連動](https://github.com/RHEMS-Japan/LassDas/issues/12) / [#13 レビュー容量根治](https://github.com/RHEMS-Japan/LassDas/issues/13) — #10/#11 は Phase 0 実装で、**#12 は Phase 1 のカード生成を config 導出で作ることで解消** (runner 側の段数・レビュアー名直書きは修理せず凍結のまま Phase 3 で切除する — 捨てる層への修理はしない。v4 訂正)、#13 は Phase 3 削除で解消

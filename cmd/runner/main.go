@@ -147,6 +147,12 @@ func run() error {
 			code = hook.TerminalSuccess
 		}
 	}
+	if code != hook.TerminalSuccess && pipeline.AttemptedImplementation() {
+		// A failure report carries the same round-by-round record a delivery
+		// would have carried (#10). Best effort only: a trail that cannot be
+		// rendered must never stop the report itself.
+		_ = pipeline.EnsureTrail(ctx)
+	}
 	if err := terminal.Report(ctx, code, outcome, pipeline.Repository()); err != nil {
 		return fmt.Errorf("terminal report failed: %w", err)
 	}

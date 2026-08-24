@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -56,6 +57,59 @@ func (p *Pipeline) validationStage(ctx context.Context, stage int) (bool, error)
 	return false, nil
 }
 
+// EnsureTrail leaves the trail file the terminal report attaches, composing
+// it from the model history when this run has not composed one yet. The
+// delivery path composes before publishing; a failure terminal that ran at
+// least one implementation round carries the same round-by-round record —
+// the 608 and 610 post-mortems had to read the dying workspace by hand
+// because nothing rendered the history onto the ticket (#10). A composition
+// failure writes the fixed fallback line instead: the trail must never stop
+// a report, and the only error out of here is the file being unwritable.
+//
+// Only a trail this run wrote is trusted, tracked in-process — a file that
+// merely exists could have been left by anyone: the model agents run with
+// the workspace parent writable, and ../m1-trail.txt sits outside the
+// observed repository, so a pre-placed file would otherwise ride into the
+// report and the pull request unverified (buddy-review finding). The flag
+// still keeps the legitimate reuse: a post-publish failure report attaches
+// the trail the delivery composed moments earlier in this same process.
+func (p *Pipeline) EnsureTrail(ctx context.Context) error {
+	if p.trailWritten {
+		return nil
+	}
+	trailPath := p.path("m1-trail.txt")
+	// Clear whatever squatted on the path: the composer's write is exclusive,
+	// and a leftover file would turn an honest trail into the fallback line.
+	if err := os.Remove(trailPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	trailArgs := []string{
+		"compose-trail", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+		"--history", p.path("history"), "--validation", p.path("validation.json"),
+	}
+	trailArgs = append(trailArgs, p.clarificationArgs()...)
+	trailArgs = append(trailArgs, "--out", trailPath)
+	if code, err := p.worker(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+		// The workflow wrote this exact fixed line on compose failure, and it
+		// asserts nothing about what was or was not delivered.
+		fallback := "証跡の自動生成に失敗したため、この実行の詳細は実行履歴を参照してください。\n"
+		if err := os.WriteFile(trailPath, []byte(fallback), 0o600); err != nil {
+			return err
+		}
+	}
+	p.trailWritten = true
+	return nil
+}
+
+// AttemptedImplementation reports whether this run sealed at least the start
+// of one implementation round — the condition under which a failure report
+// has a history worth rendering. Prepare must have run: without its
+// workspace clearing, a stage directory could be an earlier dispatch's
+// leftover, and this run must not render someone else's history as its own.
+func (p *Pipeline) AttemptedImplementation() bool {
+	return p.prepared && p.exists("history/stage-1")
+}
+
 // deliveryStage publishes the adopted candidate: compose the trail, push
 // the feature, open the PR — and stop there for the pull_request delivery
 // (the PoC exit). The integration and production continuations call the
@@ -66,20 +120,8 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int) (Outcome, error
 	evidence := map[string]string{}
 
 	trailPath := p.path("m1-trail.txt")
-	trailArgs := []string{
-		"compose-trail", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-		"--history", p.path("history"), "--validation", p.path("validation.json"),
-	}
-	trailArgs = append(trailArgs, p.clarificationArgs()...)
-	trailArgs = append(trailArgs, "--out", trailPath)
-	if code, err := p.worker(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-		// The trail must not stop a delivery; the workflow wrote this exact
-		// fixed line on compose failure, and it asserts nothing about what
-		// was delivered.
-		fallback := "証跡の自動生成に失敗したため、この実行の詳細は実行履歴を参照してください。\n"
-		if writeErr := os.WriteFile(trailPath, []byte(fallback), 0o600); writeErr != nil {
-			return Outcome{Code: hook.TerminalInternalFailed}, writeErr
-		}
+	if err := p.EnsureTrail(ctx); err != nil {
+		return Outcome{Code: hook.TerminalInternalFailed}, err
 	}
 	common := []string{
 		"--config", p.Config.ConsumerConfigPath,
