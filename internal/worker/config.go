@@ -32,6 +32,7 @@ var (
 	modelRequestIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
 	apiKeyEnvPattern        = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 	envNamePattern          = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	vendorHostPattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 )
 
 // Config carries one delivery destination per consumer repository. Which
@@ -325,6 +326,16 @@ type ModelConfig struct {
 	Implementer ModelEndpoint   `json:"implementer"`
 	Reviewers   []ModelEndpoint `json:"reviewers"`
 	Readiness   ReadinessModels `json:"readiness"`
+	// VendorHosts, when present, pins every declared vendor name to the hosts
+	// its endpoints may be reached through. The different-vendor rules below
+	// otherwise trust the vendor string as written: a config could call two
+	// endpoints different vendors while pointing both anywhere. The table
+	// rejects a vendor name it does not list and a base URL host not
+	// registered for that vendor. Behind a shared gateway every vendor
+	// legitimately maps to the same gateway host, and what runs beyond the
+	// gateway stays unverifiable from here — the table's guarantee ends at
+	// the connection target.
+	VendorHosts map[string][]string `json:"vendor_hosts,omitempty"`
 }
 
 // ReadinessModels are the pre-generation gate models: a primary assessor and
@@ -558,6 +569,8 @@ func (c ModelConfig) validate() error {
 	ids := map[string]struct{}{c.Implementer.ID: {}}
 	vendors := make(map[string]struct{}, len(c.Reviewers))
 	models := make(map[string]struct{}, len(c.Reviewers))
+	implementerModelKey := strings.ToLower(c.Implementer.BaseURL + "\x00" + c.Implementer.Model)
+	sharedWithImplementer := 0
 	for _, reviewer := range c.Reviewers {
 		if err := reviewer.validate(true); err != nil {
 			return fmt.Errorf("reviewer: %w", err)
@@ -568,6 +581,17 @@ func (c ModelConfig) validate() error {
 		ids[reviewer.ID] = struct{}{}
 		vendors[strings.ToLower(reviewer.Vendor)] = struct{}{}
 		modelKey := strings.ToLower(reviewer.BaseURL + "\x00" + reviewer.Model)
+		// One reviewer may run the implementer's own endpoint and model under
+		// its own lens; a second would leave no reviewer the implementer's
+		// model family cannot influence. The check is stated on the
+		// implementer pair, not left to the duplicate rule below, so the
+		// refusal names the actual problem.
+		if modelKey == implementerModelKey {
+			sharedWithImplementer++
+			if sharedWithImplementer > 1 {
+				return errors.New("at most one reviewer may share the implementer endpoint and model")
+			}
+		}
 		if _, exists := models[modelKey]; exists {
 			return errors.New("reviewer models contain duplicates")
 		}
@@ -590,6 +614,61 @@ func (c ModelConfig) validate() error {
 	}
 	if strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
 		return errors.New("readiness assessor and checker must use different vendors")
+	}
+	if c.VendorHosts != nil {
+		if err := validateVendorHosts(c.VendorHosts); err != nil {
+			return err
+		}
+		endpoints := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
+		for _, endpoint := range endpoints {
+			if err := vendorHostMatch(c.VendorHosts, endpoint); err != nil {
+				return fmt.Errorf("%s: %w", endpoint.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateVendorHosts(table map[string][]string) error {
+	if len(table) == 0 || len(table) > 16 {
+		return errors.New("vendor host table is invalid")
+	}
+	for vendor, hosts := range table {
+		// Keys are the canonical lowercase form of the vendor names the
+		// endpoints declare, matched case-insensitively like every other
+		// vendor comparison in this file.
+		if vendor == "" || len(vendor) > 64 || vendor != strings.ToLower(vendor) ||
+			strings.TrimSpace(vendor) != vendor || strings.ContainsAny(vendor, "\r\n\x00") {
+			return errors.New("vendor host table vendor name is invalid")
+		}
+		if len(hosts) == 0 || len(hosts) > 8 {
+			return errors.New("vendor host table hosts are invalid")
+		}
+		seen := make(map[string]struct{}, len(hosts))
+		for _, host := range hosts {
+			if !vendorHostPattern.MatchString(host) || strings.Contains(host, "..") {
+				return errors.New("vendor host table host is invalid")
+			}
+			if _, exists := seen[host]; exists {
+				return errors.New("vendor host table hosts contain duplicates")
+			}
+			seen[host] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// vendorHostMatch refuses an endpoint whose declared vendor is absent from
+// the table or whose base URL host is not registered for it. The port is not
+// part of the identity; the hostname is.
+func vendorHostMatch(table map[string][]string, endpoint ModelEndpoint) error {
+	hosts, exists := table[strings.ToLower(endpoint.Vendor)]
+	if !exists {
+		return errors.New("model vendor has no vendor host table entry")
+	}
+	parsed, err := url.Parse(endpoint.BaseURL)
+	if err != nil || !slices.Contains(hosts, parsed.Hostname()) {
+		return errors.New("model base url host is not registered for its vendor")
 	}
 	return nil
 }
@@ -660,14 +739,21 @@ func validRelativePath(value string) bool {
 
 // validateModelBaseURL accepts an https URL with an optional path prefix (for
 // example https://gateway.example.com/api/v1) because OpenAI-compatible
-// gateways commonly mount the API under a path.
+// gateways commonly mount the API under a path. One spelling per endpoint:
+// the duplicate-reviewer and shared-with-implementer rules compare base URLs
+// as strings, so a second spelling of the same endpoint (an explicit :443, a
+// dot-segment in the path) would count as a different one and hollow both
+// rules out — measured live by an adversarial probe. Hence no port at all
+// (the https default is the only spelling) and only already-clean paths.
 func validateModelBaseURL(value string) error {
 	if len(value) > 256 || strings.HasSuffix(value, "/") {
 		return errors.New("model base url is invalid")
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		strings.Contains(parsed.Host, ":") ||
 		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != parsed.EscapedPath() ||
+		(parsed.Path != "" && parsed.Path != path.Clean(parsed.Path)) ||
 		strings.Contains(parsed.Path, "//") || strings.ContainsAny(value, "\r\n\x00 ") {
 		return errors.New("model base url is invalid")
 	}

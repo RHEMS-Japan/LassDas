@@ -3,6 +3,7 @@ package worker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,15 +92,102 @@ func TestConfigRejectsDuplicateImplementerAndReviewerID(t *testing.T) {
 
 func TestConfigRejectsDuplicateReviewerModel(t *testing.T) {
 	config := validTestConfig()
-	config.Models.Reviewers[1].Model = config.Models.Reviewers[0].Model
-	config.Models.Reviewers[1].BaseURL = config.Models.Reviewers[0].BaseURL
-	if err := config.Validate(); err == nil {
+	config.Models.Reviewers[0].Model = config.Models.Reviewers[1].Model
+	config.Models.Reviewers[0].BaseURL = config.Models.Reviewers[1].BaseURL
+	err := config.Validate()
+	if err == nil {
 		t.Fatal("Validate() accepted duplicate reviewer model paths")
+	}
+	if !strings.Contains(err.Error(), "duplicates") {
+		t.Fatalf("Validate() error = %v, want the duplicate refusal", err)
+	}
+}
+
+func TestConfigRejectsSecondReviewerOnImplementerEndpoint(t *testing.T) {
+	config := validTestConfig()
+	config.Models.Reviewers[1].Model = config.Models.Implementer.Model
+	config.Models.Reviewers[1].BaseURL = config.Models.Implementer.BaseURL
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted two reviewers on the implementer endpoint and model")
+	}
+	if !strings.Contains(err.Error(), "share the implementer") {
+		t.Fatalf("Validate() error = %v, want the implementer-sharing refusal", err)
+	}
+}
+
+func TestConfigAcceptsVendorHostTable(t *testing.T) {
+	config := validTestConfig()
+	config.Models.VendorHosts = map[string][]string{
+		"vendor a": {"gateway.example.com"},
+		"vendor b": {"gateway.example.com", "other.example.com"},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestConfigRejectsVendorMissingFromHostTable(t *testing.T) {
+	config := validTestConfig()
+	config.Models.VendorHosts = map[string][]string{"vendor a": {"gateway.example.com"}}
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a vendor absent from the vendor host table")
+	}
+	if !strings.Contains(err.Error(), "no vendor host table entry") {
+		t.Fatalf("Validate() error = %v, want the missing-entry refusal", err)
+	}
+}
+
+func TestConfigRejectsBaseURLOutsideVendorHosts(t *testing.T) {
+	config := validTestConfig()
+	config.Models.VendorHosts = map[string][]string{
+		"vendor a": {"gateway.example.com"},
+		"vendor b": {"elsewhere.example.com"},
+	}
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a base url host not registered for its vendor")
+	}
+	if !strings.Contains(err.Error(), "not registered for its vendor") {
+		t.Fatalf("Validate() error = %v, want the unregistered-host refusal", err)
+	}
+}
+
+func TestConfigRejectsInvalidVendorHostTable(t *testing.T) {
+	oversizedTable := make(map[string][]string, 17)
+	oversizedTable["vendor a"] = []string{"gateway.example.com"}
+	oversizedTable["vendor b"] = []string{"gateway.example.com"}
+	for index := 0; index < 15; index++ {
+		oversizedTable["vendor-"+string(rune('c'+index))] = []string{"gateway.example.com"}
+	}
+	tooManyHosts := make([]string, 9)
+	for index := range tooManyHosts {
+		tooManyHosts[index] = "host-" + string(rune('a'+index)) + ".example.com"
+	}
+	cases := map[string]map[string][]string{
+		"uppercase vendor key": {"Vendor A": {"gateway.example.com"}, "vendor b": {"gateway.example.com"}},
+		"empty host list":      {"vendor a": {}, "vendor b": {"gateway.example.com"}},
+		"duplicate hosts":      {"vendor a": {"gateway.example.com", "gateway.example.com"}, "vendor b": {"gateway.example.com"}},
+		"invalid host":         {"vendor a": {"gateway.example.com/api"}, "vendor b": {"gateway.example.com"}},
+		"dotted host":          {"vendor a": {"gateway..example.com"}, "vendor b": {"gateway.example.com"}},
+		"empty table":          {},
+		"too many vendors":     oversizedTable,
+		"too many hosts":       {"vendor a": tooManyHosts, "vendor b": {"gateway.example.com"}},
+	}
+	for name, table := range cases {
+		config := validTestConfig()
+		config.Models.VendorHosts = table
+		if err := config.Validate(); err == nil {
+			t.Errorf("Validate() accepted vendor host table with %s", name)
+		}
 	}
 }
 
 func TestConfigRejectsInvalidModelBaseURL(t *testing.T) {
-	for _, value := range []string{"", "http://gateway.example.com/api/v1", "https://gateway.example.com/api/v1/", "https://Gateway.example.com", "https://gateway.example.com/api//v1", "https://gateway.example.com/api/v1?x=1"} {
+	// The port and dot-segment spellings are the measured bypass: a second
+	// spelling of one endpoint defeats the string-compared duplicate rules.
+	for _, value := range []string{"", "http://gateway.example.com/api/v1", "https://gateway.example.com/api/v1/", "https://Gateway.example.com", "https://gateway.example.com/api//v1", "https://gateway.example.com/api/v1?x=1", "https://gateway.example.com:443/api/v1", "https://gateway.example.com:/api/v1", "https://gateway.example.com/api/./v1", "https://gateway.example.com/api/../api/v1"} {
 		config := validTestConfig()
 		config.Models.Implementer.BaseURL = value
 		if err := config.Validate(); err == nil {
