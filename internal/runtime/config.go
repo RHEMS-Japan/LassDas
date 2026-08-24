@@ -79,17 +79,57 @@ type Config struct {
 	// not match, so a sealed tool SHA cannot silently name other code.
 	WorkerSHA256     string `json:"worker_sha256,omitempty"`
 	ControllerSHA256 string `json:"controller_sha256,omitempty"`
+
+	// Orchestration selects how a queued run executes: "runner" (the
+	// default, and the rollback target) keeps the single-card pipeline;
+	// "cards" builds the per-stage card chain (docs/M2_MIGRATION.md). The
+	// M1 runner path is not deleted until Phase 3 precisely so this flip
+	// stays possible.
+	Orchestration string `json:"orchestration,omitempty"`
+	// Chain configures the cards orchestration; required when it is on.
+	Chain ChainConfig `json:"chain,omitempty"`
+}
+
+// OrchestrationCards reports whether queued runs execute as card chains.
+func (c Config) OrchestrationCards() bool { return c.Orchestration == "cards" }
+
+// ChainConfig is the cards orchestration's shape: where run directories
+// live and which profile runs each stage.
+type ChainConfig struct {
+	// RunsRoot holds one directory per delivery; every card of a delivery's
+	// chain shares it as an explicit dir: workspace, which is what lets the
+	// implementer's edits be sealed and then judged by later cards.
+	RunsRoot string `json:"runs_root,omitempty"`
+	// TargetTokenPath is the file the destination credential is read from
+	// by the stages that reach the destination (validate's sandbox clone,
+	// publish). A file rather than the environment: the kanban dispatcher
+	// spawns every stage — the untrusted implementer included — from its
+	// own environment, and a token there would ride into the implementing
+	// agent. Same-UID file exposure remains, recorded with the pod's other
+	// UID-separation gates (docs/RUNTIME_POD.md).
+	TargetTokenPath string `json:"target_token_path,omitempty"`
+	// Profiles names the five stage profiles. Their worker.command (or, for
+	// the implementer, the native agent) is host-side Hermes configuration.
+	Profiles ChainProfiles `json:"profiles,omitempty"`
+}
+
+type ChainProfiles struct {
+	Implementer string `json:"implementer,omitempty"`
+	ReviewA     string `json:"review_a,omitempty"`
+	ReviewB     string `json:"review_b,omitempty"`
+	Validate    string `json:"validate,omitempty"`
+	Publish     string `json:"publish,omitempty"`
 }
 
 type TrackerConfig struct {
-	Origin             string `json:"origin"`
-	SpaceKey           string `json:"space_key"`
-	ProjectID          int64  `json:"project_id"`
-	ProjectKey         string `json:"project_key"`
-	AllowedCreatorID   int64  `json:"allowed_creator_id"`
-	AllowedActivityType int   `json:"allowed_activity_type"`
-	RequiredCategoryID int64  `json:"required_category_id"`
-	BoardStatuses      BoardStatuses `json:"board_statuses"`
+	Origin              string        `json:"origin"`
+	SpaceKey            string        `json:"space_key"`
+	ProjectID           int64         `json:"project_id"`
+	ProjectKey          string        `json:"project_key"`
+	AllowedCreatorID    int64         `json:"allowed_creator_id"`
+	AllowedActivityType int           `json:"allowed_activity_type"`
+	RequiredCategoryID  int64         `json:"required_category_id"`
+	BoardStatuses       BoardStatuses `json:"board_statuses"`
 }
 
 // IdentityConfig fixes the owner identity the ledger seals into claims.
@@ -155,7 +195,46 @@ func Load(path string) (Config, error) {
 	if len(config.ReportDestinations) == 0 {
 		return Config{}, errors.New("runtime config: report_destinations is required")
 	}
+	if err := config.validateOrchestration(); err != nil {
+		return Config{}, err
+	}
 	return config, nil
+}
+
+// validateOrchestration checks the execution-mode selection: the runner mode
+// carries no extra requirements, the cards mode refuses to load half-shaped
+// (a missing profile would send a stage to a nonexistent assignee and the
+// chain would sit in dispatch forever).
+func (c Config) validateOrchestration() error {
+	switch c.Orchestration {
+	case "", "runner":
+		return nil
+	case "cards":
+		p := c.Chain.Profiles
+		names := []string{p.Implementer, p.ReviewA, p.ReviewB, p.Validate, p.Publish}
+		seen := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			if name == "" {
+				return errors.New("runtime config: cards orchestration needs all five chain profiles")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return errors.New("runtime config: chain profiles must be distinct")
+			}
+			if name == c.HermesProfile {
+				return errors.New("runtime config: chain profiles must not reuse the runner profile")
+			}
+			seen[name] = struct{}{}
+		}
+		if c.Chain.RunsRoot == "" {
+			return errors.New("runtime config: cards orchestration needs chain.runs_root")
+		}
+		if c.Chain.TargetTokenPath == "" {
+			return errors.New("runtime config: cards orchestration needs chain.target_token_path")
+		}
+		return nil
+	default:
+		return errors.New("runtime config: orchestration must be \"runner\" or \"cards\"")
+	}
 }
 
 // BoardStatuses are the tracker's own status ids for the four phases the
