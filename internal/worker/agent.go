@@ -20,8 +20,14 @@ const (
 	// rather than allowed to grow without limit.
 	MaxAgentTranscriptBytes = 1024 * 1024
 	// MaxAgentRuntime is the ceiling on a single agent run regardless of what
-	// the configuration asks for.
-	MaxAgentRuntime = 60 * time.Minute
+	// the configuration asks for. It sits above the chain cards' kanban wall
+	// on purpose: when the configured budget clears this wall, an overrunning
+	// agent is stopped by the card's max_runtime instead — a timed_out card is
+	// re-spawned by the dispatcher for a second attempt, while an in-process
+	// budget kill ends the whole chain as model_failed. RFDEV-620's second
+	// review burned its full 60 minutes mid-investigation and took the run
+	// with it; the wall would have given it a fresh attempt.
+	MaxAgentRuntime = 120 * time.Minute
 	// agentWaitDelay bounds how long a stopped run may keep its output open.
 	agentWaitDelay = 10 * time.Second
 )
