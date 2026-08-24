@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/attendant"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 )
@@ -72,7 +73,13 @@ func run() error {
 			Protocol: hook.QuestionTickProtocol, AutomationRunID: config.AutomationRunID, IssuedAt: time.Now().UTC(),
 		})
 		logger.Info("tick", "decision", result.Decision, "code", result.Code)
-		if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
+		if config.OrchestrationCards() {
+			// The cards orchestration: the attendant claims, prepares,
+			// aligns chains and owns every report; no runner process exists.
+			if err := attendant.SyncChains(ctx, config, services, hermes, logger); err != nil {
+				logger.Error("chain sync failed", "error", err.Error())
+			}
+		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())
 		}
 	}
