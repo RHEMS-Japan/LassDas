@@ -46,8 +46,13 @@ type ChainStage struct {
 func ChainStages(chain ChainConfig) []ChainStage {
 	return []ChainStage{
 		{Name: StageImplement, Profile: chain.Profiles.Implementer, MaxRuntimeSeconds: 90 * 60},
-		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 30 * 60},
-		{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 30 * 60},
+		// The card wall must outlast the reviewing agent's own budget
+		// (agents.reviewer_agents timeout, 60 minutes) plus sealing
+		// overhead, or the kanban SIGTERM kills a working review from
+		// outside: both live runs of RFDEV-618/619 died at exactly this
+		// wall while their reviewers were mid-judgment.
+		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60},
+		{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60},
 		// The validate card runs the decision plus install and up to four
 		// verify commands, each with its own ten-minute ceiling
 		// (ValidationCommandTimeout) — a legal consumer configuration can
