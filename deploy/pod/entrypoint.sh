@@ -54,11 +54,13 @@ worker:
     - chain-stage
     - --stage
     - review-a
+model:
+  provider: custom:lassdas-gateway
+  name: ${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
     api_key_env: LASSDAS_REVIEW_A_KEY
-    model: ${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}
 YAML
 
 REVIEW_B_HOME="$HOME/.hermes/profiles/lassdas-review-b"
@@ -70,29 +72,32 @@ worker:
     - chain-stage
     - --stage
     - review-b
+model:
+  provider: custom:lassdas-gateway
+  name: ${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
 providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
     api_key_env: LASSDAS_REVIEW_B_KEY
-    model: ${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
 YAML
 
 # The implementer profile runs the native Hermes agent through the gateway
-# under its own virtual key. The provider block uses the fork's documented
-# keys (providers.<name>: base_url / api_key_env / model); its live shape
-# is verified on the pod before the first cards-mode run — a wrong key here
-# fails the implement card, never the seal.
+# under its own virtual key. The shape (a named provider addressed as
+# custom:<name>, the model selected via model.provider/model.name) is the
+# one measured working on the pod (2026-08-24: OK-implementer /
+# OK-review-a / OK-review-b probes through all three identities); written
+# every boot like the other profiles, so a restart heals drift.
 IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
 mkdir -p "$IMPLEMENTER_HOME"
-if [ ! -f "$IMPLEMENTER_HOME/config.yaml" ]; then
-  cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
+cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
+model:
+  provider: custom:lassdas-gateway
+  name: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
     api_key_env: LASSDAS_IMPLEMENTER_KEY
-    model: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
 YAML
-fi
 
 # Cards orchestration: the destination credential moves from the process
 # environment into an operator-file before any resident starts, because the
