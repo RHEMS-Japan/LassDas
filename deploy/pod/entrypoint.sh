@@ -61,6 +61,8 @@ providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
     api_key_env: LASSDAS_REVIEW_A_KEY
+agent:
+  max_turns: 40
 YAML
 
 REVIEW_B_HOME="$HOME/.hermes/profiles/lassdas-review-b"
@@ -79,6 +81,8 @@ providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
     api_key_env: LASSDAS_REVIEW_B_KEY
+agent:
+  max_turns: 40
 YAML
 
 # The implementer profile runs the native Hermes agent through the gateway
