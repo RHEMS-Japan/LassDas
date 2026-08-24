@@ -49,6 +49,13 @@ type Pipeline struct {
 
 	consumerRepository string
 	delivery           string
+	// prepared is set once Prepare has cleared the workspace, so nothing
+	// left by an earlier dispatch can pass for this run's history.
+	prepared bool
+	// trailWritten is set when this run composed (or fell back to) the trail
+	// file itself; only that is trusted — a file that merely exists could
+	// have been left by anyone.
+	trailWritten bool
 }
 
 // Outcome is what the pipeline hands back to the runner's terminal logic.
@@ -192,7 +199,11 @@ func (p *Pipeline) Prepare() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p.path("ticket-envelope.json"), encoded, 0o600)
+	if err := os.WriteFile(p.path("ticket-envelope.json"), encoded, 0o600); err != nil {
+		return err
+	}
+	p.prepared = true
+	return nil
 }
 
 // verifyToolPins measures the stage binaries against the configured pins.
