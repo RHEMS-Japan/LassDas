@@ -45,26 +45,11 @@ func (transport *fakeGitHubTransport) RoundTrip(request *http.Request) (*http.Re
 	}
 	path := request.URL.Path
 	if path == "/repos/example/consumer" {
-		consumer := testPrimaryConsumer()
-		settings := consumer.Contract().MergeSettings
-		return jsonResponse(http.StatusOK, map[string]any{
-			"id": consumer.RepositoryID, "full_name": consumer.Repository, "default_branch": consumer.GitHub.DefaultBranch,
-			"archived": false, "disabled": false,
-			"allow_merge_commit": settings.AllowMergeCommit, "allow_squash_merge": settings.AllowSquashMerge,
-			"allow_rebase_merge": settings.AllowRebaseMerge, "allow_auto_merge": settings.AllowAutoMerge,
-			"allow_update_branch": settings.AllowUpdateBranch, "delete_branch_on_merge": settings.DeleteBranchOnMerge,
-			"use_squash_pr_title_as_default": settings.UseSquashPRTitleAsDefault,
-			"squash_merge_commit_title":      settings.SquashMergeCommitTitle,
-			"squash_merge_commit_message":    settings.SquashMergeCommitMessage,
-			"merge_commit_title":             settings.MergeCommitTitle, "merge_commit_message": settings.MergeCommitMessage,
-			"web_commit_signoff_required": settings.WebCommitSignoffRequired,
-		}), nil
+		return jsonResponse(http.StatusOK, consumerRepositoryPayload()), nil
 	}
 	for _, workflow := range allWorkflowContracts() {
 		if path == "/repos/example/consumer/actions/workflows/"+decimal(workflow.ID) {
-			return jsonResponse(http.StatusOK, map[string]any{
-				"id": workflow.ID, "name": workflow.Name, "path": workflow.Path, "state": workflow.State,
-			}), nil
+			return jsonResponse(http.StatusOK, workflowContractPayload(workflow)), nil
 		}
 	}
 	if transport.baseline {
