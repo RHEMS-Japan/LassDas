@@ -593,7 +593,12 @@ func (c *Controller) verifyChangedPaths(ctx context.Context, baseSHA, headSHA st
 	}
 	actual := make([]string, 0, len(response.Files))
 	for _, file := range response.Files {
-		if file.Status != "modified" {
+		// A candidate carries full file contents, so its commit can modify
+		// an existing file or add a new one — nothing else. "added" was
+		// missing here until RFDEV-622: the first live delivery to create
+		// files (a SQL migration and three new modules) passed both reviews
+		// and the deterministic validation, then died at this line.
+		if file.Status != "modified" && file.Status != "added" {
 			return invariant("candidate_diff_mismatch")
 		}
 		actual = append(actual, file.Filename)
