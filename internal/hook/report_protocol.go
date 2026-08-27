@@ -208,7 +208,11 @@ type TerminalReportRequest struct {
 	StagingEvidenceURL    string       `json:"staging_evidence_url"`
 	ProductionEvidenceURL string       `json:"production_evidence_url"`
 	TrailText             string       `json:"trail_text,omitempty"`
-	IssuedAt              time.Time    `json:"issued_at"`
+	// SpendText is what this run was billed, rendered for the requester.
+	// Empty when no reading was available — the report then simply omits the
+	// cost line rather than printing a zero that reads as "this was free".
+	SpendText string    `json:"spend_text,omitempty"`
+	IssuedAt  time.Time `json:"issued_at"`
 }
 
 // MaxTerminalTrailBytes bounds the requester-facing run record a terminal

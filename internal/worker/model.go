@@ -54,11 +54,14 @@ type ChatRequest struct {
 	ResponseFormat  *ChatResponseFormat `json:"response_format,omitempty"`
 }
 
-// ChatUsage carries the token accounting returned by the endpoint.
+// ChatUsage carries the token accounting returned by the endpoint. Cost is the
+// billed amount in USD when the gateway reports one; endpoints that omit it
+// leave the field at zero and the spend ledger falls back to the key delta.
 type ChatUsage struct {
-	PromptTokens     int32 `json:"prompt_tokens"`
-	CompletionTokens int32 `json:"completion_tokens"`
-	TotalTokens      int32 `json:"total_tokens"`
+	PromptTokens     int32   `json:"prompt_tokens"`
+	CompletionTokens int32   `json:"completion_tokens"`
+	TotalTokens      int32   `json:"total_tokens"`
+	Cost             float64 `json:"cost"`
 }
 
 type ChatChoice struct {
@@ -164,6 +167,11 @@ type InvocationUsage struct {
 	OutputTokens   int32  `json:"output_tokens"`
 	TotalTokens    int32  `json:"total_tokens"`
 	LatencyMillis  int64  `json:"latency_millis"`
+	// CostUSD is what the gateway billed for this call. Zero means the endpoint
+	// reported no cost, not that the call was free — the spend ledger reconciles
+	// against the virtual key delta rather than trusting a zero here. Kept out of
+	// Validate() so a gateway that stops reporting cost cannot fail a run closed.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 func (u InvocationUsage) Validate(endpoint ModelEndpoint) error {
@@ -371,10 +379,14 @@ func (i *ModelInvoker) converse(ctx context.Context, endpoint ModelEndpoint, sys
 	if !modelRequestIDPattern.MatchString(output.ID) {
 		return "", InvocationUsage{}, errors.New("model response metadata is invalid")
 	}
+	cost := output.Usage.Cost
+	if cost < 0 {
+		cost = 0
+	}
 	return response, InvocationUsage{
 		RequestedModel: endpoint.Model, RequestID: output.ID, StopReason: output.Choices[0].FinishReason,
 		InputTokens: output.Usage.PromptTokens, OutputTokens: output.Usage.CompletionTokens, TotalTokens: output.Usage.TotalTokens,
-		LatencyMillis: latency,
+		LatencyMillis: latency, CostUSD: cost,
 	}, nil
 }
 

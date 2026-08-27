@@ -259,6 +259,9 @@ func fixedTerminalComment(report TerminalReportRequest, reportDigest string) str
 	if report.TrailText != "" {
 		lines = append(lines, "", "## 証跡 (自動処理の実行記録)", report.TrailText)
 	}
+	if report.SpendText != "" {
+		lines = append(lines, "", "## この依頼にかかった費用", report.SpendText)
+	}
 	return strings.Join(lines, "\n") + terminalCommentFacts(report, reportDigest).render()
 }
 
