@@ -253,3 +253,55 @@ func TestGatewaySpendReaderRequiresKey(t *testing.T) {
 		t.Error("a missing key must fail rather than call the endpoint unauthenticated")
 	}
 }
+
+// 実運用では 5 つの環境変数が 3 つの鍵を指す (実装役の鍵が受付も兼ねる等)。
+// 変数名で数えると同じ鍵を 2 度読んで合計が倍近くになる。
+// 2026-08-27 の本番走行で $0.92 が $1.85 と報告された欠陥の回帰テスト。
+func TestReadRunSpendCountsSharedKeyOnce(t *testing.T) {
+	config := spendTestConfig()
+	// 受付は実装役/レビュー A と「別の変数名」で「同じ鍵」を使う
+	config.Models.Readiness.Assessor.APIKeyEnv = "READINESS_IMPL_KEY"
+	config.Models.Readiness.Checker.APIKeyEnv = "READINESS_REVIEW_KEY"
+
+	reader := &stubSpendReader{byEnv: map[string]KeySpend{
+		"IMPL_KEY":             {SpendUSD: 0.92, KeyName: "automation-cheap-gemini"},
+		"READINESS_IMPL_KEY":   {SpendUSD: 0.92, KeyName: "automation-cheap-gemini"},
+		"REVIEW_A_KEY":         {SpendUSD: 0.0018, KeyName: "automation-cheap-deepseek"},
+		"READINESS_REVIEW_KEY": {SpendUSD: 0.0018, KeyName: "automation-cheap-deepseek"},
+		"REVIEW_B_KEY":         {SpendUSD: 0, KeyName: "automation-cheap-luna"},
+	}}
+
+	spend := ReadRunSpend(context.Background(), reader, config, time.Now().Add(-time.Hour))
+
+	if got := spend.TotalUSD; got < 0.9217 || got > 0.9219 {
+		t.Errorf("TotalUSD = %v, want 0.9218 (a shared key must be billed once, not twice)", got)
+	}
+	if len(spend.Keys) != 3 {
+		t.Errorf("Keys = %d, want 3 distinct keys behind 5 variables", len(spend.Keys))
+	}
+}
+
+// 兼務している鍵の行には、その鍵が担った役をすべて並べる。
+func TestComposeSpendTextFoldsRolesOfASharedKey(t *testing.T) {
+	config := spendTestConfig()
+	config.Models.Readiness.Assessor.APIKeyEnv = "READINESS_IMPL_KEY"
+	config.Models.Readiness.Checker.APIKeyEnv = "READINESS_REVIEW_KEY"
+
+	spend := RunSpend{Complete: true, TotalUSD: 0.9218, Keys: []KeySpend{
+		{KeyEnv: "IMPL_KEY", KeyName: "automation-cheap-gemini", SpendUSD: 0.92, AlsoKeyEnvs: []string{"READINESS_IMPL_KEY"}},
+		{KeyEnv: "REVIEW_A_KEY", KeyName: "automation-cheap-deepseek", SpendUSD: 0.0018, AlsoKeyEnvs: []string{"READINESS_REVIEW_KEY"}},
+		{KeyEnv: "REVIEW_B_KEY", KeyName: "automation-cheap-luna", SpendUSD: 0},
+	}}
+
+	text := ComposeSpendText(spend, RolesByKeyEnv(config))
+
+	if !strings.Contains(text, "実装 / 受付:") {
+		t.Errorf("a key serving two seats must list both:\n%s", text)
+	}
+	if !strings.Contains(text, "レビュー review-a / 受付:") {
+		t.Errorf("the review key that also does readiness must list both:\n%s", text)
+	}
+	if strings.Count(text, "automation-cheap-gemini") > 0 {
+		t.Errorf("a named role should replace the raw key name:\n%s", text)
+	}
+}

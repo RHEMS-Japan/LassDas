@@ -30,6 +30,9 @@ type KeySpend struct {
 	KeyName  string  `json:"key_name"`
 	SpendUSD float64 `json:"spend_usd"`
 	Unpriced int     `json:"unpriced_requests"`
+	// AlsoKeyEnvs names further variables that resolved to this same key, so
+	// the report can list every role the one figure covers.
+	AlsoKeyEnvs []string `json:"also_key_envs,omitempty"`
 }
 
 // SpendReader reads what one key was billed since a point in time.
@@ -192,6 +195,12 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 		return RunSpend{}
 	}
 	spend := RunSpend{Complete: true}
+	// Two environment variables routinely name the same key: the implementer's
+	// key also drafts readiness, so the gateway bills one key that this loop
+	// would otherwise read - and add up - twice. Distinct variable names are no
+	// evidence of distinct keys; only the name the gateway answers with is. The
+	// first variable to reach a key keeps it, and later ones fold their roles in.
+	seen := map[string]int{}
 	for _, env := range envs {
 		key, err := reader.SpendSince(ctx, baseURL, env, since)
 		if err != nil {
@@ -200,6 +209,13 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 		}
 		if key.Unpriced > 0 {
 			spend.Complete = false
+		}
+		if index, duplicate := seen[key.KeyName]; duplicate && key.KeyName != "" {
+			spend.Keys[index].AlsoKeyEnvs = append(spend.Keys[index].AlsoKeyEnvs, env)
+			continue
+		}
+		if key.KeyName != "" {
+			seen[key.KeyName] = len(spend.Keys)
 		}
 		spend.Keys = append(spend.Keys, key)
 		spend.TotalUSD += key.SpendUSD
@@ -231,8 +247,12 @@ func ComposeSpendText(spend RunSpend, roles map[string][]string) string {
 			") — 一部読み取れなかったため、実際の請求はこれより大きくなることがあります\n")
 	}
 	for _, key := range spend.Keys {
+		var names []string
+		for _, env := range append([]string{key.KeyEnv}, key.AlsoKeyEnvs...) {
+			names = append(names, roles[env]...)
+		}
 		label := key.KeyName
-		if names := roles[key.KeyEnv]; len(names) > 0 {
+		if names = dedupeStrings(names); len(names) > 0 {
 			label = strings.Join(names, " / ")
 		}
 		line := "- " + label + ": " + formatSpendUSD(key.SpendUSD) + " (" + formatSpendJPY(key.SpendUSD) + ")"
