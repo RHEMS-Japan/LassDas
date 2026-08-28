@@ -641,7 +641,13 @@ func (c ModeConfig) validate() error {
 			return errors.New("mode ignored byproduct name is invalid")
 		}
 	}
-	if len(c.AllowedFilePrefixes) == 0 || len(c.AllowedFilePrefixes) > 8 {
+	// The list is not capped: a repository names as many top-level directories
+	// as it has, and an arbitrary ceiling only forces a consumer to leave real
+	// directories out. A change that lands somewhere unlisted is still refused,
+	// so the list's job is to be complete, not short. At least one entry is
+	// still required — an empty list would mean "anywhere", which has to be
+	// stated by naming the directories rather than by omission.
+	if len(c.AllowedFilePrefixes) == 0 {
 		return errors.New("mode file prefixes are invalid")
 	}
 	prefixes := make(map[string]struct{}, len(c.AllowedFilePrefixes))

@@ -256,7 +256,7 @@ func TestGatewaySpendReaderRequiresKey(t *testing.T) {
 
 // 実運用では 5 つの環境変数が 3 つの鍵を指す (実装役の鍵が受付も兼ねる等)。
 // 変数名で数えると同じ鍵を 2 度読んで合計が倍近くになる。
-// 2026-08-27 の本番走行で $0.92 が $1.85 と報告された欠陥の回帰テスト。
+// 実際の走行で合計がおよそ 2 倍に報告された欠陥の回帰テスト。
 func TestReadRunSpendCountsSharedKeyOnce(t *testing.T) {
 	config := spendTestConfig()
 	// 受付は実装役/レビュー A と「別の変数名」で「同じ鍵」を使う
