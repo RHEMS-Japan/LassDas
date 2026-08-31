@@ -195,6 +195,20 @@ func startQueuedRun(
 		logger.Info("queued run not claimable this tick", "run", run.RunID, "disposition", string(disposition))
 		return nil
 	}
+	// A stop request already on the ticket cancels the run before any model
+	// work is spent. The check sits before the intake pipeline on purpose:
+	// when the comment listing fails here, the retried tick has lost nothing,
+	// whereas a failure after the readiness gate would re-run the whole
+	// assessment on every retry. A stop arriving later is honoured at the
+	// next round boundary.
+	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
+	if err != nil {
+		return fmt.Errorf("stop check before intake: %w", err)
+	}
+	if stopped {
+		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, "")
+	}
 	token, err := readTargetToken(config)
 	if err != nil {
 		return err
@@ -216,6 +230,25 @@ func startQueuedRun(
 			outcome.Code = hook.TerminalInternalFailed
 		}
 		return terminal.Report(ctx, outcome.Code, outcome, pipeline.Repository())
+	}
+	// Readiness passed. Post the implementation-plan notice — a notice, not
+	// a gate: a failed post is logged and the run continues.
+	if !services.Tick.PostPlanComment(ctx, envelope.DeliveryID, hook.PlanCommentContent(envelope.Snapshot.RunID, loadPlanFacts(runDir))) {
+		logger.Error("plan notice not posted; run continues", "run", run.RunID)
+	}
+	// One opportunistic re-check before the first cards, for a stop request
+	// that arrived while the gate was running. Best-effort on purpose: a
+	// listing failure here must not send the whole gate into a retry loop,
+	// so it logs and proceeds — the fail-closed checks are the claim-time
+	// one above and every round boundary after this.
+	if stopped, stopErr := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID); stopErr != nil {
+		logger.Error("stop re-check unreadable; proceeding", "run", run.RunID, "error", stopErr.Error())
+	} else if stopped {
+		repository, repositoryErr := readField(runDir, "ticket-draft.json", "repository")
+		if repositoryErr != nil {
+			repository = ""
+		}
+		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
 	if err := pipeline.RenderImplementInstruction(ctx, 1); err != nil {
 		return err
@@ -334,13 +367,23 @@ func handleChainFailure(
 		if limitErr != nil {
 			return limitErr
 		}
-		if view.round < limit {
-			return regenerateRound(ctx, hermes, config, run, view, logger)
+		stopped, stopErr := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
+		if stopErr != nil {
+			return fmt.Errorf("stop check before round %d: %w", view.round+1, stopErr)
 		}
-		// The decide verb converts a final-round revise into nonconverged;
-		// a revise at the limit means the artifacts and the configuration
-		// disagree, and the run ends honestly instead of looping.
-		code = hook.TerminalModelFailed
+		switch {
+		case stopped:
+			// The requester asked the run to stop: finished cards stay
+			// finished, no next round is created, and the run ends honestly.
+			code = hook.TerminalCancelled
+		case view.round < limit:
+			return regenerateRound(ctx, hermes, config, run, view, logger)
+		default:
+			// The decide verb converts a final-round revise into nonconverged;
+			// a revise at the limit means the artifacts and the configuration
+			// disagree, and the run ends honestly instead of looping.
+			code = hook.TerminalModelFailed
+		}
 	case actionAskQuestion:
 		if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
 			return err

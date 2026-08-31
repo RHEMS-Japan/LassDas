@@ -14,6 +14,10 @@ type RunCommentKind string
 const (
 	RunCommentAck     RunCommentKind = "ack"
 	RunCommentReceipt RunCommentKind = "answer-receipt"
+	// RunCommentPlan is the implementation-plan notice posted after the
+	// readiness gate passes and before the first card dispatches: what the
+	// automation understood and how to stop it. A notice, not a gate.
+	RunCommentPlan RunCommentKind = "plan"
 )
 
 type RunCommentBeginRequest struct {

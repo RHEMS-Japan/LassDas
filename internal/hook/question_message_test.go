@@ -121,6 +121,13 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 	cases = append(cases, contractCase{"question", question, CommentMarker("question", runID, "C1")})
 	snapshot := TicketSnapshot{RunID: runID, IssueKey: "TICKET-501"}
 	cases = append(cases, contractCase{"ack", AckCommentContent(snapshot), CommentMarker("ack", runID)})
+	plan := PlanCommentContent(runID, PlanFacts{
+		Request:     "一覧の取得失敗時に再試行の導線を出す",
+		Rationale:   "失敗メッセージの隣に再試行ボタンを描画し、一覧の取得だけをやり直す。",
+		TargetFiles: []string{"client/src/app/example/page.tsx"},
+		Assumptions: []string{"再試行は一覧の取得のみを対象とし、組織やカタログは取り直さない"},
+	})
+	cases = append(cases, contractCase{"plan", plan, CommentMarker("plan", runID)})
 	receipt, err := ReceiptCommentContent(record, 6002)
 	if err != nil {
 		t.Fatalf("ReceiptCommentContent() error = %v", err)
