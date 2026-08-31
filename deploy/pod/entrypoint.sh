@@ -4,7 +4,8 @@
 # and — per card — the runner the dispatcher spawns. The chat-platform
 # gateway daemon is deliberately not used: it brings an inbound surface
 # this constitution does not want. The serve backend binds loopback only,
-# so the sole way in is kubectl port-forward.
+# so the sole way in is kubectl port-forward — unless the operator opts in
+# to the authenticated board UI with LASSDAS_DASHBOARD=1 (see serve_loop).
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"
@@ -137,10 +138,22 @@ DISPATCHER=$!
 # Board UI backend (Hermes One connects through kubectl port-forward). A UI
 # crash must not take down a card mid-run, so it restarts in place instead
 # of joining the fatal wait below.
+#
+# LASSDAS_DASHBOARD=1 swaps the loopback-only backend for `hermes dashboard`
+# on an outward bind: the same server plus the browser UI. Hermes refuses a
+# non-loopback bind without an auth provider (basic-auth env or OIDC), so an
+# unauthenticated exposure cannot be misconfigured into existence; the image
+# ships the pre-built SPA, hence --skip-build.
 serve_loop() {
   while true; do
-    hermes serve --host 127.0.0.1 --port "${HERMES_SERVE_PORT:-9119}" \
-      || echo "serve exited rc=$?" >&2
+    if [ "${LASSDAS_DASHBOARD:-}" = "1" ]; then
+      hermes dashboard --skip-build --no-open \
+        --host "${HERMES_SERVE_HOST:-0.0.0.0}" --port "${HERMES_SERVE_PORT:-9119}" \
+        || echo "serve exited rc=$?" >&2
+    else
+      hermes serve --host 127.0.0.1 --port "${HERMES_SERVE_PORT:-9119}" \
+        || echo "serve exited rc=$?" >&2
+    fi
     sleep 5
   done
 }

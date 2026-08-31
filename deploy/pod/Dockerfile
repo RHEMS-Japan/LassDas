@@ -42,6 +42,16 @@ RUN git clone --filter=blob:none https://github.com/RHEMS-Japan/hermes-agent /op
     && /opt/hermes/bin/pip install --no-cache-dir -e /opt/hermes-src \
     && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
 
+# Pre-build the dashboard SPA (vite writes it to hermes_cli/web_dist) so
+# `hermes dashboard --skip-build` can serve the board UI without a runtime
+# npm build. npm resolves the workspace root's lockfile and installs into
+# the ROOT node_modules (web/ gets none), so the cleanup names both trees
+# by absolute path in the same layer; the editable install only needs the
+# sources plus the built dist.
+RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
+    && npm run build \
+    && rm -rf /opt/hermes-src/node_modules /opt/hermes-src/web/node_modules
+
 COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
 COPY deploy/pod/entrypoint.sh /usr/local/bin/lassdas-entrypoint
