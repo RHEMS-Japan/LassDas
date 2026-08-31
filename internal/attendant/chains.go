@@ -395,6 +395,9 @@ func handleChainFailure(
 	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-1")); err == nil {
 		pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
 		_ = pipeline.EnsureTrail(ctx)
+		// The publish card records why a delivery stopped in its own
+		// process; the recomposed trail would silently drop it otherwise.
+		pipeline.AttachDeliveryStopReason()
 	}
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,6 +34,13 @@ func reviewFileArgs(stageDir string, names []string) []string {
 // namespace, its own filesystem, egress-limited; see the runtime design's
 // network section). Returns validationFailed=true for a gate refusal.
 func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles []string) (bool, error) {
+	return p.validationStageAt(ctx, stage, reviewFiles, "")
+}
+
+// validationStageAt pins the validation checkout to baseSHA when given: the
+// publish retry validates the same candidate on a freshly advanced
+// integration base. An empty baseSHA reads the run's recorded baseline.
+func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles []string, baseSHA string) (bool, error) {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), stage)
 	sandbox := p.path("validation-target")
 	if err := os.RemoveAll(sandbox); err != nil {
@@ -41,9 +49,12 @@ func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles [
 	if err := p.cloneTargetTo(ctx, sandbox); err != nil {
 		return false, err
 	}
-	baseSHA, err := p.readJSONField("baseline.json", "baseline", "Integration", "SHA")
-	if err != nil {
-		return false, err
+	if baseSHA == "" {
+		recorded, err := p.readJSONField("baseline.json", "baseline", "Integration", "SHA")
+		if err != nil {
+			return false, err
+		}
+		baseSHA = recorded
 	}
 	if code, err := p.gitIn(ctx, sandbox, "checkout", "--detach", baseSHA); err != nil || code != 0 {
 		return false, fmt.Errorf("validation checkout failed (%v)", err)
@@ -57,7 +68,8 @@ func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles [
 		return true, err
 	}
 	if code, err := p.worker(ctx, "run-validation", append([]string{"run-validation"},
-		append(common, "--repo-root", sandbox, "--out", p.path("validation.json"))...)); err != nil || code != 0 {
+		append(common, "--repo-root", sandbox, "--checkout-sha", baseSHA,
+			"--out", p.path("validation.json"))...)); err != nil || code != 0 {
 		return true, err
 	}
 	if code, err := p.worker(ctx, "verify-applied", append([]string{"verify-applied"},
@@ -143,13 +155,8 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []s
 		"--config", p.Config.ConsumerConfigPath,
 		"--ticket", stageDir + "/ticket.json",
 	}
-	publishArgs := append([]string{"publish-feature"}, append(common,
-		append([]string{"--source", stageDir + "/source.json", "--candidate", stageDir + "/candidate.json"},
-			append(reviewFileArgs(stageDir, reviewFiles),
-				"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"),
-				"--baseline", p.path("baseline.json"), "--out", p.path("feature.json"))...)...)...)
-	if code, err := p.controller(ctx, "publish-feature", publishArgs); err != nil || code != 0 {
-		return Outcome{Code: hook.TerminalReleaseFailed}, err
+	if outcome, err := p.publishWithBaseAdvance(ctx, stage, reviewFiles, stageDir, common); err != nil || outcome.Code != "" {
+		return outcome, err
 	}
 	if code, err := p.controller(ctx, "create-feature-pr", append([]string{"create-feature-pr"}, append(common,
 		"--feature", p.path("feature.json"), "--trail", trailPath,
@@ -162,6 +169,155 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []s
 	if p.delivery == "pull_request" {
 		return Outcome{Stage: stage, Evidence: evidence}, nil
 	}
+	return p.deliveryUnsupported(stage, evidence)
+}
+
+const (
+	// publishAttempts bounds the base-advance retries: the initial publish
+	// plus two catch-ups. On a repository other work merges into every few
+	// minutes, more attempts would just keep chasing the branch.
+	publishAttempts = 3
+	// publishFailureFile is where the controller leaves the machine-readable
+	// refusal reason; only integration_base_changed is worth a retry.
+	publishFailureFile = "publish-failure.json"
+	// advancedBaselineFile is the freshly snapshotted baseline a retry
+	// publishes against. baseline.json stays untouched: the source snapshot
+	// keeps chaining to the base the candidate was recorded on.
+	advancedBaselineFile = "baseline-advanced.json"
+)
+
+// publishWithBaseAdvance runs the publish-feature step, and when the only
+// refusal is "the integration branch advanced mid-run", it snapshots the new
+// base, re-runs the deterministic validation on it, and publishes once more.
+// A candidate whose touched files also moved upstream still refuses (the
+// controller's per-file blob checks), and every other refusal stays final.
+func (p *Pipeline) publishWithBaseAdvance(ctx context.Context, stage int, reviewFiles []string, stageDir string, common []string) (Outcome, error) {
+	baselinePath := p.path("baseline.json")
+	sourceBase := ""
+	for attempt := 1; ; attempt++ {
+		if err := os.Remove(p.path(publishFailureFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Outcome{Code: hook.TerminalInternalFailed}, err
+		}
+		publishArgs := append([]string{"publish-feature"}, common...)
+		publishArgs = append(publishArgs, "--source", stageDir+"/source.json", "--candidate", stageDir+"/candidate.json")
+		publishArgs = append(publishArgs, reviewFileArgs(stageDir, reviewFiles)...)
+		publishArgs = append(publishArgs,
+			"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"),
+			"--baseline", baselinePath, "--failure-out", p.path(publishFailureFile),
+			"--out", p.path("feature.json"))
+		if sourceBase != "" {
+			publishArgs = append(publishArgs, "--source-base", sourceBase)
+		}
+		code, err := p.controller(ctx, "publish-feature", publishArgs)
+		if err == nil && code == 0 {
+			return Outcome{}, nil
+		}
+		invariantCode := p.readPublishInvariant()
+		if invariantCode != "integration_base_changed" || attempt >= publishAttempts {
+			switch {
+			case sourceBase != "" && invariantCode == "source_blob_changed":
+				p.writeStopReason("公開の中断理由: 実行中に統合先ブランチが進み、変更対象のファイルが統合先でも書き換えられていた（競合）ため、安全のため公開を中止しました。")
+			case invariantCode == "integration_base_changed":
+				p.writeStopReason("公開の中断理由: 実行中に統合先ブランチが進み続け、追随の上限に達したため公開を中止しました。")
+			}
+			return Outcome{Code: hook.TerminalReleaseFailed}, err
+		}
+		// The base advanced mid-run: snapshot it fresh, re-validate the same
+		// candidate on it, and try once more. The original base the source
+		// snapshot chains to is pinned on the first advance and never moves.
+		if sourceBase == "" {
+			original, readErr := p.readJSONField("baseline.json", "baseline", "Integration", "SHA")
+			if readErr != nil {
+				return Outcome{Code: hook.TerminalReleaseFailed}, readErr
+			}
+			sourceBase = original
+		}
+		if err := os.Remove(p.path(advancedBaselineFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Outcome{Code: hook.TerminalReleaseFailed}, err
+		}
+		if code, err := p.controller(ctx, "baseline", []string{
+			"baseline", "--config", p.Config.ConsumerConfigPath,
+			"--draft", p.path("ticket-draft.json"), "--out", p.path(advancedBaselineFile),
+		}); err != nil || code != 0 {
+			return Outcome{Code: hook.TerminalReleaseFailed}, errors.New("advanced baseline snapshot failed")
+		}
+		advancedSHA, err := p.readJSONField(advancedBaselineFile, "baseline", "Integration", "SHA")
+		if err != nil || len(advancedSHA) != 40 {
+			return Outcome{Code: hook.TerminalReleaseFailed}, errors.New("advanced baseline sha invalid")
+		}
+		if err := os.Remove(p.path("validation.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Outcome{Code: hook.TerminalReleaseFailed}, err
+		}
+		if failed, err := p.validationStageAt(ctx, stage, reviewFiles, advancedSHA); err != nil || failed {
+			p.writeStopReason("公開の中断理由: 実行中に統合先ブランチが進み、新しい統合先の上での検証が通らなかったため公開を中止しました。")
+			return Outcome{Code: hook.TerminalReleaseFailed}, errors.New("revalidation on the advanced base failed")
+		}
+		baselinePath = p.path(advancedBaselineFile)
+	}
+}
+
+// readPublishInvariant reads the controller's machine-readable refusal
+// reason; anything unreadable is "no reason", which the caller treats as
+// final.
+func (p *Pipeline) readPublishInvariant() string {
+	encoded, err := os.ReadFile(p.path(publishFailureFile))
+	if err != nil || len(encoded) > 4096 {
+		return ""
+	}
+	var failure struct {
+		Invariant string `json:"invariant"`
+	}
+	if json.Unmarshal(encoded, &failure) != nil {
+		return ""
+	}
+	return failure.Invariant
+}
+
+// deliveryStopReasonFile carries the requester-facing reason a delivery
+// stopped, across processes: the publish card's runner writes it, and the
+// attendant — which recomposes the trail in its own process before the
+// failure report — folds it in with AttachDeliveryStopReason.
+const deliveryStopReasonFile = "delivery-stop-reason.txt"
+
+// writeStopReason records why the delivery stopped. Best-effort by design:
+// a missing reason only makes the report less specific, never blocks it.
+func (p *Pipeline) writeStopReason(reason string) {
+	_ = os.WriteFile(p.path(deliveryStopReasonFile), []byte(reason), 0o600)
+}
+
+// AttachDeliveryStopReason appends the recorded stop reason (if any) to the
+// trail this pipeline composed. Call it after EnsureTrail: the attendant's
+// trail recomposition would otherwise discard a note the publish card's own
+// process had appended.
+func (p *Pipeline) AttachDeliveryStopReason() {
+	encoded, err := os.ReadFile(p.path(deliveryStopReasonFile))
+	if err != nil || len(encoded) == 0 || len(encoded) > 1024 {
+		return
+	}
+	p.appendTrailNote(string(encoded))
+}
+
+// appendTrailNote adds one requester-facing line to the composed trail so a
+// failure report says why the delivery stopped. Best-effort by design — the
+// trail must never block the report that carries it — and it never grows the
+// trail past the report's size bound.
+func (p *Pipeline) appendTrailNote(note string) {
+	if !p.trailWritten {
+		return
+	}
+	info, err := os.Stat(p.path("m1-trail.txt"))
+	if err != nil || info.Size()+int64(len(note))+2 > int64(hook.MaxTerminalTrailBytes) {
+		return
+	}
+	file, err := os.OpenFile(p.path("m1-trail.txt"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.WriteString("\n" + note + "\n")
+}
+
+func (p *Pipeline) deliveryUnsupported(stage int, evidence map[string]string) (Outcome, error) {
 	// resolveConsumer refuses integration/production consumers before any
 	// work, because their success reports need browser evidence steps this
 	// runtime does not carry yet; reaching here with one is a bug.

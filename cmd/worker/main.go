@@ -113,7 +113,14 @@ func runValidation(ctx context.Context, args []string) error {
 	candidatePath := flags.String("candidate", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	outputPath := flags.String("out", "", "")
+	// The base the caller actually checked out. Optional for compatibility;
+	// the base-advance retry validates on a base that is NOT the one the
+	// source snapshot chains to, and the sealed evidence must say so.
+	checkoutSHA := flags.String("checkout-sha", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *repoRoot, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
+		return errors.New("run-validation arguments are invalid")
+	}
+	if *checkoutSHA != "" && !worker.ValidToolSHA(*checkoutSHA) {
 		return errors.New("run-validation arguments are invalid")
 	}
 	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
@@ -124,7 +131,7 @@ func runValidation(ctx context.Context, args []string) error {
 	if err := worker.ReadJSONFile(*candidatePath, worker.MaxArtifactJSONBytes, &candidate); err != nil {
 		return errors.New("candidate artifact could not be read")
 	}
-	evidence, err := worker.RunValidationEvidence(ctx, *repoRoot, candidate, source, request, config)
+	evidence, err := worker.RunValidationEvidence(ctx, *repoRoot, candidate, source, request, config, *checkoutSHA)
 	if err != nil {
 		// The command line comes from the fixed consumer configuration; the
 		// tail is untrusted build output and stays in the job log only.

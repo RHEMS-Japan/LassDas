@@ -57,9 +57,12 @@ func ChainStages(chain ChainConfig) []ChainStage {
 		// verify commands, each with its own ten-minute ceiling
 		// (ValidationCommandTimeout) — a legal consumer configuration can
 		// spend fifty minutes before anything hangs, so thirty (the design
-		// sketch's number) would time out honest work.
+		// sketch's number) would time out honest work. The publish card
+		// below carries the same bound for the same reason: its
+		// base-advance retry re-runs this exact validation on the freshly
+		// advanced base before publishing again.
 		{Name: StageValidate, Profile: chain.Profiles.Validate, MaxRuntimeSeconds: 60 * 60},
-		{Name: StagePublish, Profile: chain.Profiles.Publish, MaxRuntimeSeconds: 15 * 60},
+		{Name: StagePublish, Profile: chain.Profiles.Publish, MaxRuntimeSeconds: 60 * 60},
 	}
 }
 

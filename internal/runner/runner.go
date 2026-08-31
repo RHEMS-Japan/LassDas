@@ -49,6 +49,10 @@ type Pipeline struct {
 
 	consumerRepository string
 	delivery           string
+	// cloneTarget lets package tests stand in for the network clone of the
+	// destination repository; nil means the real github.com clone.
+	// Production never sets it.
+	cloneTarget func(ctx context.Context, destination string) error
 	// prepared is set once Prepare has cleared the workspace, so nothing
 	// left by an earlier dispatch can pass for this run's history.
 	prepared bool

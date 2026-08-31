@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"time"
 
@@ -14,6 +16,47 @@ import (
 	"automation.internal/ticket-ingress/internal/visiblecheck"
 	"automation.internal/ticket-ingress/internal/worker"
 )
+
+// extractPublishOption removes one optional name/value pair from a pairwise
+// argument list. The publish command grew host-side-only options after the
+// shared parser froze its required/repeated contract; stripping them first
+// keeps every other verb's argument contract byte-identical.
+func extractPublishOption(args []string, name string) ([]string, string) {
+	for index := 0; index+1 < len(args); index += 2 {
+		if args[index] == name {
+			trimmed := append(append(make([]string, 0, len(args)-2), args[:index]...), args[index+2:]...)
+			return trimmed, args[index+1]
+		}
+	}
+	return args, ""
+}
+
+var publishSourceBasePattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
+
+// writePublishFailure leaves a machine-readable failure reason for the
+// runner, which retries exactly one class of refusal (the integration base
+// advancing mid-run) and treats everything else as final. Best-effort by
+// design: the exit code stays the authoritative failure signal, and the
+// file carries invariant names only — never repository content or tokens.
+func writePublishFailure(path, code string, err error) {
+	if path == "" {
+		return
+	}
+	invariantCode := ""
+	var invariantError *githubapi.InvariantError
+	if errors.As(err, &invariantError) {
+		invariantCode = invariantError.Code
+	}
+	payload, marshalErr := json.Marshal(struct {
+		Code      string `json:"code"`
+		Invariant string `json:"invariant,omitempty"`
+	}{Code: code, Invariant: invariantCode})
+	if marshalErr != nil {
+		return
+	}
+	_ = os.Remove(path)
+	_ = os.WriteFile(path, payload, 0o600)
+}
 
 func runBaseline(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
 	arguments, err := parseCommandArguments(args, []string{"--config", "--draft", "--out"})
@@ -55,6 +98,11 @@ func runBaseline(ctx context.Context, args []string, getenv func(string) string,
 }
 
 func runPublishFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, sourceBase := extractPublishOption(args, "--source-base")
+	args, failureOut := extractPublishOption(args, "--failure-out")
+	if sourceBase != "" && !publishSourceBasePattern.MatchString(sourceBase) {
+		return fail("arguments_invalid")
+	}
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--out",
 	}, "--review")
@@ -97,8 +145,20 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 	if err != nil {
 		return fail("baseline_artifact_invalid")
 	}
+	// The source snapshot chains to the base it was recorded on. Normally
+	// that must be the baseline being published against; on a base-advance
+	// retry the runner supplies the ORIGINAL base via --source-base, has
+	// re-validated the same candidate on the freshly advanced baseline, and
+	// PublishFeature's per-file blob checks below hold every touched path to
+	// the recorded blob against the advanced tree — a touched path that also
+	// moved upstream refuses as source_blob_changed.
+	expectedSourceBase := baseline.Baseline.Integration.SHA
+	if sourceBase != "" {
+		expectedSourceBase = sourceBase
+	}
 	if worker.ValidatePublishGate(decision, validation, candidate, reviews, source, request, runtime.config) != nil ||
-		source.BaseSHA != baseline.Baseline.Integration.SHA {
+		source.BaseSHA != expectedSourceBase {
+		writePublishFailure(failureOut, "publish_gate_rejected", nil)
 		return fail("publish_gate_rejected")
 	}
 	binding := newDeliveryBinding(request, source, candidate, decision, validation)
@@ -125,6 +185,7 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 	}
 	feature, err := runtime.controller.PublishFeature(ctx, baseline.Baseline, spec)
 	if err != nil {
+		writePublishFailure(failureOut, "feature_publish_failed", err)
 		return failFrom("feature_publish_failed", err)
 	}
 	if !validPublishedFeature(feature, binding) {
