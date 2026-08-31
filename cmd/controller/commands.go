@@ -289,6 +289,68 @@ func runWaitFeature(ctx context.Context, args []string, getenv func(string) stri
 	return nil
 }
 
+// runAwaitMergedStaging is the debug role's trigger: wait for a HUMAN to
+// merge the delivered pull request, then for the staging deployment workflow
+// of that merge commit to succeed (the digest commit included). It performs
+// no mutation and writes a plain progress record — not a sealed proof: the
+// pull_request delivery never builds the release-proof chain, and the E2E
+// observation this gates is a courtesy report, not a promotion input.
+func runAwaitMergedStaging(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	pull, err := readDeliveryArtifact[featurePRPayload](arguments.one("--feature-pr"), kindFeaturePR, request, runtime.config)
+	if err != nil || !validFeaturePRPayload(pull.Payload, pull.Binding) {
+		return fail("feature_pr_artifact_invalid")
+	}
+	merge, err := runtime.controller.AwaitFeatureMerge(ctx, pull.Payload.PullRequest, mergedStagingWait())
+	if err != nil {
+		return failFrom("feature_merge_wait_failed", err)
+	}
+	deployment, err := runtime.controller.AwaitStaging(ctx, merge, waitOptions(), runtime.consumer.StagingDigestCommitPolicy())
+	if err != nil {
+		return failFrom("staging_wait_failed", err)
+	}
+	record := struct {
+		SchemaVersion int       `json:"schema_version"`
+		DeliveryID    string    `json:"delivery_id"`
+		MergedSHA     string    `json:"merged_sha"`
+		StagingRunID  int64     `json:"staging_run_id"`
+		BranchHeadSHA string    `json:"branch_head_sha"`
+		ObservedAt    time.Time `json:"observed_at"`
+	}{
+		SchemaVersion: 1, DeliveryID: request.DeliveryID, MergedSHA: merge.MergeSHA,
+		BranchHeadSHA: deployment.BranchHeadSHA, ObservedAt: time.Now().UTC(),
+	}
+	if len(deployment.WorkflowRuns) == 1 {
+		record.StagingRunID = deployment.WorkflowRuns[0].ID
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), record, controllerArtifactMaxBytes); err != nil {
+		return fail("merged_staging_artifact_write_failed")
+	}
+	return nil
+}
+
+// mergedStagingWait bounds the human-merge wait. A merge decision is a
+// human's, not a deployment's: hours are normal, so the poll is slow and
+// the budget wide — the debug card's own wall is the final bound.
+func mergedStagingWait() githubapi.WaitOptions {
+	return githubapi.WaitOptions{PollInterval: time.Minute, Timeout: 72 * time.Hour}
+}
+
 func runMergeFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--checks", "--out"})
 	if err != nil {

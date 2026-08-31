@@ -128,6 +128,11 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 		Assumptions: []string{"再試行は一覧の取得のみを対象とし、組織やカタログは取り直さない"},
 	})
 	cases = append(cases, contractCase{"plan", plan, CommentMarker("plan", runID)})
+	cases = append(cases, contractCase{"e2e", E2ECommentContent(runID, E2EReport{
+		Verdict: "pass", TargetURL: "https://staging.example.invalid/console/x",
+		ExpectedText: "絞り込み", ExpectedSeen: true, AbsentText: "旧表示", AbsentGone: true,
+		ScreenshotAttached: true,
+	}), CommentMarker("e2e", runID)})
 	receipt, err := ReceiptCommentContent(record, 6002)
 	if err != nil {
 		t.Fatalf("ReceiptCommentContent() error = %v", err)

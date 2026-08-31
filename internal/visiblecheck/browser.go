@@ -207,7 +207,11 @@ func fixedChromeExecutable() (string, error) {
 	if err != nil || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
 		return "", errors.New("Chrome path is invalid")
 	}
-	if !strings.HasPrefix(resolved, "/opt/google/chrome/") && !strings.HasPrefix(resolved, "/usr/bin/") {
+	// /usr/lib/chromium/ is where Debian's chromium package keeps the real
+	// ELF (/usr/bin/chromium is a wrapper script that would fail the size
+	// and regular-file checks below).
+	if !strings.HasPrefix(resolved, "/opt/google/chrome/") && !strings.HasPrefix(resolved, "/usr/bin/") &&
+		!strings.HasPrefix(resolved, "/usr/lib/chromium/") {
 		return "", errors.New("Chrome path is not allowlisted")
 	}
 	info, err := os.Stat(resolved)

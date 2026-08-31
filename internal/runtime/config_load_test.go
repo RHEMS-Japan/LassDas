@@ -65,10 +65,8 @@ func TestLoadAcceptsACompleteConfig(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsTheCardsOrchestration(t *testing.T) {
-	raw := validRuntimeConfigMap()
-	raw["orchestration"] = "cards"
-	raw["chain"] = map[string]any{
+func cardsChainMap() map[string]any {
+	return map[string]any{
 		"runs_root":         "/data/runs",
 		"target_token_path": "/data/secrets/target-token",
 		"profiles": map[string]any{
@@ -76,12 +74,37 @@ func TestLoadAcceptsTheCardsOrchestration(t *testing.T) {
 			"review_b": "lassdas-review-b", "validate": "lassdas-validate", "publish": "lassdas-publish",
 		},
 	}
+}
+
+func TestLoadAcceptsTheCardsOrchestration(t *testing.T) {
+	raw := validRuntimeConfigMap()
+	raw["orchestration"] = "cards"
+	raw["chain"] = cardsChainMap()
 	config, err := Load(writeRuntimeConfig(t, raw))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if !config.OrchestrationCards() {
 		t.Fatal("the cards orchestration did not report itself")
+	}
+}
+
+func TestLoadAcceptsTheDebugRole(t *testing.T) {
+	raw := validRuntimeConfigMap()
+	raw["orchestration"] = "cards"
+	chain := cardsChainMap()
+	chain["e2e_profile"] = "lassdas-e2e"
+	chain["e2e_enabled_after"] = "2026-08-30T12:00:00Z"
+	raw["chain"] = chain
+	config, err := Load(writeRuntimeConfig(t, raw))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.Chain.E2EWallSeconds() != 76*60*60 {
+		t.Fatalf("E2EWallSeconds() = %d, want the 76-hour default", config.Chain.E2EWallSeconds())
+	}
+	if _, err := config.Chain.E2EEnabledAfterTime(); err != nil {
+		t.Fatalf("E2EEnabledAfterTime() error = %v", err)
 	}
 }
 
@@ -99,6 +122,19 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 		"cards without chain":   func(m map[string]any) { m["orchestration"] = "cards" },
 		"unknown field":         func(m map[string]any) { m["surprise"] = true },
 		"unknown orchestration": func(m map[string]any) { m["orchestration"] = "swarm" },
+		"e2e profile without cut-off": func(m map[string]any) {
+			m["orchestration"] = "cards"
+			chain := cardsChainMap()
+			chain["e2e_profile"] = "lassdas-e2e"
+			m["chain"] = chain
+		},
+		"e2e profile reusing a stage profile": func(m map[string]any) {
+			m["orchestration"] = "cards"
+			chain := cardsChainMap()
+			chain["e2e_profile"] = "lassdas-validate"
+			chain["e2e_enabled_after"] = "2026-08-30T12:00:00Z"
+			m["chain"] = chain
+		},
 	}
 	for name, mutate := range mutations {
 		raw := validRuntimeConfigMap()

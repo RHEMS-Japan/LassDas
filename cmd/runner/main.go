@@ -47,6 +47,15 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "e2e-check" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := runE2ECheck(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "runner:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "runner:", err)
 		os.Exit(1)

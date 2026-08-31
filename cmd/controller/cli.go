@@ -50,6 +50,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, transpo
 		return runMergeFeature(ctx, args[1:], getenv, transport)
 	case "await-staging":
 		return runAwaitStaging(ctx, args[1:], getenv, transport)
+	case "await-merged-staging":
+		return runAwaitMergedStaging(ctx, args[1:], getenv, transport)
 	case "create-promotion-pr":
 		return runCreatePromotionPR(ctx, args[1:], getenv, transport)
 	case "merge-promotion":

@@ -86,9 +86,15 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			if err := advanceClaimedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain advance failed", "run", run.RunID, "error", err.Error())
 			}
+		case "terminal":
+			// The run itself is closed; what may remain is the debug
+			// role's post-merge observation.
+			if err := syncE2E(ctx, config, services, hermes, run, tasks, logger); err != nil {
+				logger.Error("e2e sync failed", "run", run.RunID, "error", err.Error())
+			}
 		default:
-			// awaiting_answer, terminal and the question-sealed report
-			// flavors belong to the reception tick's own machinery.
+			// awaiting_answer and the question-sealed report flavors
+			// belong to the reception tick's own machinery.
 		}
 	}
 	return nil

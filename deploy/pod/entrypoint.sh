@@ -46,6 +46,17 @@ worker:
 YAML
 done
 
+# The debug role's card: waits for the human merge and the staging deploy,
+# then observes the deployed page. Idempotent like every profile above.
+E2E_HOME="$HOME/.hermes/profiles/lassdas-e2e"
+mkdir -p "$E2E_HOME"
+cat > "$E2E_HOME/config.yaml" <<'YAML'
+worker:
+  command:
+    - /usr/local/bin/runner
+    - e2e-check
+YAML
+
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
 cat > "$REVIEW_A_HOME/config.yaml" <<YAML

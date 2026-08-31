@@ -18,6 +18,10 @@ const (
 	// readiness gate passes and before the first card dispatches: what the
 	// automation understood and how to stop it. A notice, not a gate.
 	RunCommentPlan RunCommentKind = "plan"
+	// RunCommentE2E is the debug role's post-merge staging observation:
+	// what the browser saw on the deployed staging page, sealed once per
+	// run after the human merge and the staging deployment.
+	RunCommentE2E RunCommentKind = "e2e"
 )
 
 type RunCommentBeginRequest struct {

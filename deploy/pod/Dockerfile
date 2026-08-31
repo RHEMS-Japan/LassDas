@@ -24,7 +24,11 @@ ARG PNPM_VERSION=9.15.4
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ca-certificates curl git tmux python3 python3-pip python3-venv \
       bubblewrap jq openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+      chromium fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/google/chrome \
+    && test -x /usr/lib/chromium/chromium \
+    && ln -s /usr/lib/chromium/chromium /opt/google/chrome/chrome
 
 # Node 22 (validation toolchain of node consumers) + pinned pnpm.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

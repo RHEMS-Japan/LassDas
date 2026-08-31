@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
 )
@@ -111,6 +112,37 @@ type ChainConfig struct {
 	// Profiles names the five stage profiles. Their worker.command (or, for
 	// the implementer, the native agent) is host-side Hermes configuration.
 	Profiles ChainProfiles `json:"profiles,omitempty"`
+	// E2EProfile, when set, turns on the debug role: every successful
+	// delivery gets one post-merge staging observation card assigned to
+	// it. Empty (the default) leaves the role off.
+	E2EProfile string `json:"e2e_profile,omitempty"`
+	// E2EEnabledAfter is required whenever E2EProfile is set: an RFC3339
+	// instant, and only runs claimed after it get an observation. The
+	// ledger keeps every past success, so without this cut-off enabling
+	// the role would reach back through all of them and comment on
+	// long-closed tickets.
+	E2EEnabledAfter string `json:"e2e_enabled_after,omitempty"`
+	// E2EMaxRuntimeSeconds bounds the observation card — the human-merge
+	// wait included, which is why the default is generous. Zero means the
+	// 76-hour default.
+	E2EMaxRuntimeSeconds int `json:"e2e_max_runtime_seconds,omitempty"`
+}
+
+// E2EEnabledAfterTime parses the observation cut-off. The cards
+// orchestration validates it at load time whenever the debug role is on.
+func (c ChainConfig) E2EEnabledAfterTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, c.E2EEnabledAfter)
+}
+
+// E2EWallSeconds is the observation card's runtime bound.
+func (c ChainConfig) E2EWallSeconds() int {
+	if c.E2EMaxRuntimeSeconds > 0 {
+		return c.E2EMaxRuntimeSeconds
+	}
+	// The controller waits up to 72h for the human merge (a Friday delivery
+	// must survive the weekend); the card's wall adds headroom on top so the
+	// wait itself is never what kills the card.
+	return 76 * 60 * 60
 }
 
 type ChainProfiles struct {
@@ -230,6 +262,14 @@ func (c Config) validateOrchestration() error {
 		}
 		if c.Chain.TargetTokenPath == "" {
 			return errors.New("runtime config: cards orchestration needs chain.target_token_path")
+		}
+		if c.Chain.E2EProfile != "" {
+			if _, taken := seen[c.Chain.E2EProfile]; taken || c.Chain.E2EProfile == c.HermesProfile {
+				return errors.New("runtime config: chain.e2e_profile must not reuse another profile")
+			}
+			if _, err := c.Chain.E2EEnabledAfterTime(); err != nil {
+				return errors.New("runtime config: chain.e2e_profile needs chain.e2e_enabled_after as an RFC3339 instant (observations never reach back before it)")
+			}
 		}
 		return nil
 	default:
