@@ -202,6 +202,8 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		builder.WriteString("【本番反映済み・画面確認は不合格】本番への反映は完了しましたが、本番画面の自動確認が合格しませんでした。お手数ですが人の目での確認をお願いします。\n\n")
 	case "expired":
 		builder.WriteString("【本番反映は行われませんでした】期限内に「Go」がなかったため、本番への反映は行わず終了しました。ステージングには反映済みのままです。\n\n")
+	case "stopped":
+		builder.WriteString("【本番反映は行いません】ご指示（停止）を受け付けました。本番への反映は行わず終了します。ステージングには反映済みのままです。\n\n")
 	case "merge_unverified":
 		builder.WriteString("【本番反映の成否が不明】昇格マージの結果を確認できませんでした。本番に反映された可能性があります。お手数ですが状態の確認をお願いします。\n\n")
 	default:
@@ -244,6 +246,11 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		facts.State = "期限切れで終了（本番反映なし）"
 		facts.NextActor = "依頼者"
 		facts.Operation = "本番反映が必要になったら再度起票してください"
+		facts.Production = "未変更（ステージングには反映済み）"
+	case "stopped":
+		facts.State = "停止指示で終了（本番反映なし）"
+		facts.NextActor = "なし（停止の確認報告です）"
+		facts.Operation = "対応不要。本番反映が必要になったら再度起票してください"
 		facts.Production = "未変更（ステージングには反映済み）"
 	case "observe_failed":
 		facts.State = "本番反映済み・画面は要確認"

@@ -435,10 +435,49 @@ type actRequest struct {
 	Text    string `json:"text,omitempty"`
 }
 
+// boardRun is the slice of the snapshot the authorization needs.
+type boardRun struct {
+	DeliveryID string `json:"delivery_id"`
+	IssueID    int64  `json:"issue_id"`
+	Step       string `json:"step"`
+	CanGo      bool   `json:"can_go"`
+}
+
+// authorizeAction is the confused-deputy gate: the requester's key posts
+// ONLY to an issue the pipeline currently owns, and only in the one state
+// where the action is guaranteed to be honoured (CanGo = the posted
+// staging report armed the Go anchor; a stop shares the same window —
+// that is where the reception loop consumes it).
+func (s *boardServer) authorizeAction(action string, issueID int64) (boardRun, string) {
+	raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json"))
+	if err != nil {
+		return boardRun{}, "盤面の状態を読めないため、操作を受け付けられません"
+	}
+	var board struct {
+		Runs []boardRun `json:"runs"`
+	}
+	if json.Unmarshal(raw, &board) != nil {
+		return boardRun{}, "盤面の状態を読めないため、操作を受け付けられません"
+	}
+	for _, run := range board.Runs {
+		if run.IssueID != issueID {
+			continue
+		}
+		// Allow-list, never pass-through: an action this gate does not
+		// know is an action it refuses.
+		if (action == "go" || action == "stop") && run.CanGo {
+			return run, ""
+		}
+		return boardRun{}, "この依頼はいま Go / 停止を受け付けられる状態ではありません"
+	}
+	return boardRun{}, "盤面に無いチケットへの操作は受け付けられません"
+}
+
 type actRecord struct {
-	At      time.Time `json:"at"`
-	Action  string    `json:"action"`
-	IssueID int64     `json:"issue_id"`
+	At         time.Time `json:"at"`
+	Action     string    `json:"action"`
+	IssueID    int64     `json:"issue_id"`
+	DeliveryID string    `json:"delivery_id,omitempty"`
 	// Who: the authenticated board user and the client address, because
 	// these actions carry the requester's authority and the audit trail
 	// must show the path they took.
@@ -477,18 +516,12 @@ func (s *boardServer) serveAct(w http.ResponseWriter, r *http.Request) {
 	var content string
 	switch request.Action {
 	case "answer":
-		text := strings.TrimSpace(request.Text)
-		if text == "" {
-			http.Error(w, "回答が空です", http.StatusBadRequest)
-			return
-		}
-		if len(text) > 20000 {
-			http.Error(w, "回答が長すぎます", http.StatusBadRequest)
-			return
-		}
-		// The answer text goes verbatim: the adoption logic reads the whole
-		// comment, so a board notice inside it would pollute the answer.
-		content = text
+		// Phase 2 (issue #14): the intake's answer grammar is not carried
+		// to the board yet — free text would post but never be adopted,
+		// and a button that does nothing is the one thing this board must
+		// never show.
+		http.Error(w, "回答のボード送信は未開放です (チケットで回答してください)", http.StatusForbidden)
+		return
 	case "go":
 		// Only the first non-blank line decides a Go; the second line keeps
 		// the audit trail honest about the path it took.
@@ -497,6 +530,11 @@ func (s *boardServer) serveAct(w http.ResponseWriter, r *http.Request) {
 		content = "停止\n(状態ボードから送信)"
 	default:
 		http.Error(w, "不明な操作です", http.StatusBadRequest)
+		return
+	}
+	run, denied := s.authorizeAction(request.Action, request.IssueID)
+	if denied != "" {
+		http.Error(w, denied, http.StatusForbidden)
 		return
 	}
 	throttleKey := fmt.Sprintf("%s:%d", request.Action, request.IssueID)
@@ -511,7 +549,7 @@ func (s *boardServer) serveAct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	boardUser, _, _ := r.BasicAuth()
-	record := actRecord{At: time.Now().UTC(), Action: request.Action, IssueID: request.IssueID, User: boardUser, ClientIP: clientIP(r)}
+	record := actRecord{At: time.Now().UTC(), Action: request.Action, IssueID: request.IssueID, DeliveryID: run.DeliveryID, User: boardUser, ClientIP: clientIP(r)}
 	s.journalAction(record)
 	s.logger.Info("action posted", "action", request.Action, "issue", request.IssueID, "user", boardUser, "client_ip", record.ClientIP)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

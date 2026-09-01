@@ -302,9 +302,9 @@ let sentActions = new Map(); // "action:issue" -> at
 const localPending = new Map(); // same key -> "sending" | "error:<msg>"
 const knownEvents = new Set();
 const cardStates = new Map(); // delivery_id -> {armed, armTimer, countdown}
-// Answer drafts survive every re-render (the board redraws on each server
-// push): keyed by issue, saved on input, restored into the fresh textarea,
-// dropped only on a successful post.
+// Reserved for the answer phase (issue #14): drafts and the caret
+// restoration below are dormant until the board grows an answer box
+// again — nothing writes them today.
 const drafts = new Map(); // issue_id -> text
 
 /* ---- rendering ---- */
@@ -379,57 +379,32 @@ function decisionState(action, issueID) {
     const value = localPending.get(key);
     return value === "sending" ? { kind: "sending" } : { kind: "error", message: value.slice(6) };
   }
-  if (sentActions.has(key)) return { kind: "sent" };
+  if (sentActions.has(key)) {
+    // The "sent" veil only bridges the gap until the server reacts; past
+    // that, the server state (the card's own step) is the truth — and a
+    // journal line falling out of the tail window must not resurrect a
+    // button either way.
+    const at = Date.parse(sentActions.get(key) || "");
+    if (!Number.isNaN(at) && Date.now() - at < 15 * 60 * 1000) return { kind: "sent" };
+  }
   return { kind: "idle" };
 }
 
 function buildQuestionRow(run) {
+  // Answering from the board stays closed (issue #14 phase 2): the intake
+  // grammar is not carried here yet, and a send that never gets adopted
+  // is worse than no button.
   const row = el("div", "qrow");
-  const state = decisionState("answer", run.issue_id);
-  if (state.kind === "sent") {
-    row.classList.add("state-sent");
-    row.appendChild(el("div", "qtitle", "✓ 回答をチケットへ投稿しました"));
-    row.appendChild(el("div", "via", "LassDas が次の見回り (1 分以内) で読み取り、作業を再開します"));
-    return row;
-  }
   row.appendChild(el("div", "qtitle", "LassDas からの質問がチケットにあります"));
   const link = trackerURL(run.issue_key);
   if (link) {
     const via = el("div", "via");
-    const anchor = el("a", null, "チケットで質問の本文を確認する ↗");
+    const anchor = el("a", null, "チケットを開いて質問を確認・回答する ↗");
     anchor.href = link; anchor.target = "_blank"; anchor.rel = "noopener";
     via.appendChild(anchor);
     row.appendChild(via);
   }
-  const answer = el("div", "answer");
-  const input = document.createElement("textarea");
-  input.placeholder = "ここに回答を入力…";
-  input.setAttribute("aria-label", "質問への回答");
-  input.dataset.draftFor = String(run.issue_id);
-  input.value = drafts.get(run.issue_id) || "";
-  const send = el("button", "btn", "回答を送信");
-  send.disabled = input.value.trim() === "";
-  input.addEventListener("input", () => {
-    drafts.set(run.issue_id, input.value);
-    send.disabled = input.value.trim() === "";
-  });
-  if (state.kind === "sending") { input.disabled = true; send.disabled = true; send.textContent = "送信中…"; }
-  send.addEventListener("click", () => {
-    const text = input.value.trim();
-    if (!text) return;
-    postAction("answer", run.issue_id, text, () => {
-      if (!localPending.has(actKey("answer", run.issue_id))) drafts.delete(run.issue_id);
-    });
-  });
-  answer.appendChild(input);
-  answer.appendChild(send);
-  row.appendChild(answer);
-  if (state.kind === "error") {
-    row.classList.add("state-error");
-    row.appendChild(el("div", "qtitle", "投稿に失敗しました: " + state.message));
-    row.appendChild(el("div", "via", "入力内容は残っています。もう一度「回答を送信」を押してください"));
-  }
-  row.appendChild(el("div", "via", "チケットにあなた本人のコメントとして投稿され、LassDas が自動で再開します"));
+  row.appendChild(el("div", "via", "回答はチケットのコメントで行ってください (ボードからの回答送信は段階解禁: issue #14)"));
   return row;
 }
 
@@ -531,9 +506,12 @@ function buildCard(run) {
   setTrack(track, run.step, run.round || 0);
   card.appendChild(track);
 
-  if (actionsEnabled && run.issue_id) {
-    if (run.step === "question") card.appendChild(buildQuestionRow(run));
-    if (run.step === "confirm") card.appendChild(buildGoRow(run));
+  if (run.step === "question") card.appendChild(buildQuestionRow(run));
+  // The Go/stop controls appear ONLY when the server says a Go would be
+  // honoured right now (can_go) — never on a file-only confirm, never
+  // during the legacy observation step.
+  if (actionsEnabled && run.issue_id && run.step === "confirm" && run.can_go) {
+    card.appendChild(buildGoRow(run));
   }
   return card;
 }

@@ -87,6 +87,11 @@ func TestClassifyRunNamesEveryPipelinePosition(t *testing.T) {
 				"deliver-production-report.json": `{"verdict":"pass"}`,
 			}, wantStep: "done"},
 		"report pending is not intake": {run: state.RunOverview{State: "terminal_report_pending"}, wantStep: "reporting"},
+		"sealed stop during go wait": {run: state.RunOverview{State: "terminal", TerminalCode: "success"},
+			artifact: map[string]string{
+				"deliver-staging-report.json": `{"verdict":"pass"}`,
+				"board-outcome.json":          `{"phase":"release","verdict":"stopped","at":"2026-09-01T00:00:00Z"}`,
+			}, wantStep: "stopped"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -106,6 +111,43 @@ func TestClassifyRunNamesEveryPipelinePosition(t *testing.T) {
 				t.Fatal("classifyRun() left the step title empty")
 			}
 		})
+	}
+}
+
+// CanGo arms the board's Go button, so it must be true EXACTLY when the
+// staging report comment is confirmed posted (sealed outcome): a
+// file-only confirm can precede the post, and a Go written then is
+// permanently ignored by the anchor rule.
+func TestCanGoRequiresThePostedReport(t *testing.T) {
+	root := t.TempDir()
+	config := runtime.Config{}
+	config.Chain.RunsRoot = root
+	const delivery = "RFDEV-901:1"
+	write := func(t *testing.T, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, delivery), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, delivery, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := state.RunOverview{DeliveryID: delivery, State: "terminal", TerminalCode: "success"}
+
+	// File-only confirm: report written, post not yet confirmed.
+	write(t, "deliver-staging-report.json", `{"verdict":"pass"}`)
+	if got := classifyRun(config, run, nil); got.Step != "confirm" || got.CanGo {
+		t.Fatalf("file-only: step=%q can_go=%v, want confirm without can_go", got.Step, got.CanGo)
+	}
+	// Sealed (posted) confirm arms the button.
+	write(t, "board-outcome.json", `{"phase":"staging","verdict":"pass","at":"2026-09-01T00:00:00Z"}`)
+	if got := classifyRun(config, run, nil); got.Step != "confirm" || !got.CanGo {
+		t.Fatalf("sealed: step=%q can_go=%v, want confirm with can_go", got.Step, got.CanGo)
+	}
+	// A held pass never arms it.
+	write(t, "board-outcome.json", `{"phase":"staging","verdict":"pass","note":"滞留","at":"2026-09-01T00:00:00Z"}`)
+	if got := classifyRun(config, run, nil); got.CanGo {
+		t.Fatalf("held: can_go=%v, want false", got.CanGo)
 	}
 }
 

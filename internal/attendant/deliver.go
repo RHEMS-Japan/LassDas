@@ -210,15 +210,28 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 	if err != nil || report.Verdict != "pass" || report.PromotionHold != "" {
 		return nil // failed — or promotion-held — staging reports are terminal
 	}
+	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
+	if err != nil {
+		return nil
+	}
+	// A stop outranks BOTH the Go and the deadline: the requester holds
+	// the veto until the very moment the promote card exists, and a stop
+	// that raced the deadline must still read back as "stopped" — that is
+	// the requester's actual intent. Before this check nothing consumed a
+	// stop during the Go wait — the ticket showed "stopped" nowhere and
+	// the rail kept waiting, which is the lie the creed forbids.
+	if containsStopComment(comments, config.Tracker.AllowedCreatorID) {
+		content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "stopped"})
+		if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
+			sealBoardOutcome(runDir, "release", "stopped", "")
+		}
+		return nil
+	}
 	if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
 		content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
 		if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 			sealBoardOutcome(runDir, "release", "expired", "")
 		}
-		return nil
-	}
-	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
-	if err != nil {
 		return nil
 	}
 	marker := hook.CommentMarker(string(hook.RunCommentStagingReport), run.RunID)

@@ -46,6 +46,11 @@ type RunStatus struct {
 	Round     int    `json:"round,omitempty"`
 	ClaimedAt int64  `json:"claimed_at_ms,omitempty"`
 	Terminal  string `json:"terminal_code,omitempty"`
+	// CanGo marks the one state where a Go is guaranteed to be honoured:
+	// the staging report comment is CONFIRMED posted (sealed outcome, not
+	// merely the local report file) and the promotion is not held. The
+	// board shows its Go button only here.
+	CanGo bool `json:"can_go,omitempty"`
 }
 
 // StepEvent is one appended line of events.jsonl: a delivery moved.
@@ -212,6 +217,9 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 	}
 	if sealed && outcome.Phase == "staging" {
 		placeStagingOutcome(status, outcome.Verdict, outcome.Note)
+		// Only the posted report arms a Go — the detection anchor is the
+		// report COMMENT, so a file-only confirm must not show the button.
+		status.CanGo = status.Step == "confirm"
 		return
 	}
 	if report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile); err == nil {
@@ -257,6 +265,8 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 		status.place("done", "本番反映済み", "本番の画面確認まで合格")
 	case "expired":
 		status.place("done", "ステージング反映済み", "Go の期限切れで本番反映なし")
+	case "stopped":
+		status.place("stopped", "停止済み", "ご指示により本番反映を行わず終了")
 	case "observe_failed":
 		status.place("done", "本番反映済み・画面は要確認", "")
 	case "deploy_failed":
