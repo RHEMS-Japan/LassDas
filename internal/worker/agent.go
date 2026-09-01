@@ -24,7 +24,7 @@ const (
 	// on purpose: when the configured budget clears this wall, an overrunning
 	// agent is stopped by the card's max_runtime instead — a timed_out card is
 	// re-spawned by the dispatcher for a second attempt, while an in-process
-	// budget kill ends the whole chain as model_failed. RFDEV-620's second
+	// budget kill ends the whole chain as model_failed. An affected run's second
 	// review burned its full 60 minutes mid-investigation and took the run
 	// with it; the wall would have given it a fresh attempt.
 	MaxAgentRuntime = 120 * time.Minute
