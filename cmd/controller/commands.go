@@ -497,10 +497,14 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 		return fail("baseline_artifact_invalid")
 	}
 	merge, err := readDeliveryArtifact[featureMergePayload](arguments.one("--feature-merge"), kindFeatureMerge, request, runtime.config)
+	// The published base must be the recorded baseline. The SOURCE base may
+	// legitimately be older — the integration branch advanced mid-run and
+	// the publish gate re-validated on the new base — and source identity
+	// itself is pinned by the binding's artifact digests below.
 	if err != nil || !validFeatureMergePayload(merge.Payload, merge.Binding) ||
 		gate.decision.DecisionSHA256 != merge.Binding.DecisionSHA256 ||
 		!merge.Binding.matchesArtifacts(gate.source, gate.candidate, gate.validation) ||
-		gate.source.BaseSHA != merge.Payload.Feature.Base.SHA || gate.source.BaseSHA != baseline.Baseline.Integration.SHA {
+		merge.Payload.Feature.Base.SHA != baseline.Baseline.Integration.SHA {
 		return fail("feature_merge_artifact_invalid")
 	}
 	deployment, err := runtime.controller.AwaitStaging(ctx, merge.Payload.Merge, waitOptions(), stagingDigestPolicyFor(merge.Binding.Repository))

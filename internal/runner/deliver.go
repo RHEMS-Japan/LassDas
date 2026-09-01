@@ -63,7 +63,13 @@ type DeliverReport struct {
 	MergedSHA      string          `json:"merged_sha,omitempty"`
 	PullRequestURL string          `json:"pull_request_url,omitempty"`
 	Delta          json.RawMessage `json:"delta,omitempty"`
-	ObservedAt     time.Time       `json:"observed_at"`
+	// PromotionHold, when set, is the human-readable reason a promotion
+	// CANNOT pass the gate right now (the promotion moves exactly one
+	// delivery: foreign changes on staging, divergence, or an unreadable
+	// delta all block it). The attendant then reports honestly instead of
+	// asking for a Go that could only fail.
+	PromotionHold string    `json:"promotion_hold,omitempty"`
+	ObservedAt    time.Time `json:"observed_at"`
 }
 
 // RunDeliver advances the delivery to the requested milestone, resuming
@@ -209,10 +215,95 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 	report := DeliverReport{Phase: "staging", Verdict: "pass"}
 	p.fillObservation(&report, stageDir, "staging", DeliverStagingVisibleFile, DeliverStagingShotFile)
 	p.fillDelta(&report)
+	report.PromotionHold = p.promotionHold()
 	if sha, err := p.readJSONField(DeliverMergeFile, "payload", "merge", "MergeSHA"); err == nil {
 		report.MergedSHA = sha
 	}
 	return p.sealDeliverReport(report)
+}
+
+// promotionHold answers "could a promotion pass the gate right now?" — the
+// gate moves exactly one delivery (its product paths plus the CI digest
+// files, verified file-by-file), so anything else on the branch makes a Go
+// unfulfillable and must be said BEFORE asking for one. Empty means a
+// promotion can proceed.
+func (p *Pipeline) promotionHold() string {
+	const consultOperator = "本番へ反映する場合は、運用の昇格手順で反映してください。"
+	var delta struct {
+		Status         string   `json:"status"`
+		Files          []string `json:"files"`
+		FilesTruncated bool     `json:"files_truncated"`
+	}
+	raw, err := readWorkspaceFile(p.path(DeliverDeltaFile), maxWorkspaceReadBytes)
+	if err != nil || json.Unmarshal(raw, &delta) != nil || delta.Status == "" || delta.Status == "unavailable" {
+		return "本番との差分を確認できなかったため、自動の本番反映は行いません。" + consultOperator
+	}
+	switch delta.Status {
+	case "behind", "diverged":
+		return "本番にはステージングに無い変更が入っています（分岐状態）。自動の本番反映は行いません。" + consultOperator
+	case "identical":
+		return "ステージングと本番は既に同じ内容のため、反映するものがありません。"
+	}
+	if delta.FilesTruncated {
+		return "本番との差分が大きすぎて全件を確認できないため、自動の本番反映は行いません。" + consultOperator
+	}
+	allowed := map[string]bool{}
+	var product []string
+	if raw, err := readWorkspaceFile(p.path("feature-pr.json"), maxWorkspaceReadBytes); err == nil {
+		var wrapper struct {
+			Binding struct {
+				ProductPaths []string `json:"product_paths"`
+			} `json:"binding"`
+		}
+		if json.Unmarshal(raw, &wrapper) == nil {
+			product = wrapper.Binding.ProductPaths
+		}
+	}
+	if len(product) == 0 {
+		return "今回の納品の対象ファイル一覧を読めなかったため、自動の本番反映は行いません。" + consultOperator
+	}
+	for _, path := range product {
+		allowed[path] = true
+	}
+	for _, path := range p.consumerDigestPaths() {
+		allowed[path] = true
+	}
+	for _, path := range delta.Files {
+		if !allowed[path] {
+			return "ステージングには今回の納品以外の変更が滞留しています。本番反映は 1 納品ずつのため、自動の本番反映は行いません。" + consultOperator
+		}
+	}
+	return ""
+}
+
+// consumerDigestPaths reads the CI digest-commit paths for this delivery's
+// repository — those files legitimately ride every promotion.
+func (p *Pipeline) consumerDigestPaths() []string {
+	raw, err := os.ReadFile(p.Config.ConsumerConfigPath)
+	if err != nil {
+		return nil
+	}
+	repository, err := p.readJSONField("feature-pr.json", "binding", "repository")
+	if err != nil {
+		return nil
+	}
+	var parsed struct {
+		Consumers []struct {
+			Repository          string `json:"repository"`
+			StagingDigestCommit struct {
+				ExactPaths []string `json:"exact_paths"`
+			} `json:"staging_digest_commit"`
+		} `json:"consumers"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil {
+		return nil
+	}
+	for _, consumer := range parsed.Consumers {
+		if consumer.Repository == repository {
+			return consumer.StagingDigestCommit.ExactPaths
+		}
+	}
+	return nil
 }
 
 // deliverProduction runs only after the attendant saw the requester's Go:
@@ -235,7 +326,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 		if code != 0 {
 			return p.sealDeliverReport(DeliverReport{
 				Phase: "production", Verdict: "promotion_failed",
-				Detail: "本番反映の準備 (昇格 PR の作成) が関所で止まりました。ステージングが確認時点から進んだ場合は再確認が必要です。",
+				Detail: "本番反映の準備 (昇格 PR の作成) が検査で止まりました（確認後にステージングが変わった・ステージングに他の変更が滞留している等）。本番は未変更です。",
 			})
 		}
 	}
@@ -542,4 +633,3 @@ func extractProductionProof(wrapped, plain string) error {
 	}
 	return os.WriteFile(plain, wrapper.Payload.Production, 0o600)
 }
-

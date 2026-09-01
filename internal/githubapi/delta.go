@@ -25,6 +25,13 @@ type PromotionDelta struct {
 	// CommitsTruncated is set when the compare API capped the commit list
 	// (250); AheadBy stays exact.
 	CommitsTruncated bool `json:"commits_truncated,omitempty"`
+	// Files is every path the promotion would change. The promotion gate
+	// (verifyPathSet) enforces that this set is exactly the delivery's own
+	// files plus the CI digest files — one delivery per promotion — so the
+	// attendant reads this to decide whether asking for a Go can succeed at
+	// all. Capped by the compare API at 300; FilesTruncated marks the cap.
+	Files          []string `json:"files,omitempty"`
+	FilesTruncated bool     `json:"files_truncated,omitempty"`
 }
 
 // ReadPromotionDelta compares the release branch to the integration branch.
@@ -51,6 +58,9 @@ func (c *Controller) ReadPromotionDelta(ctx context.Context) (PromotionDelta, er
 				Message string `json:"message"`
 			} `json:"commit"`
 		} `json:"commits"`
+		Files []struct {
+			Filename string `json:"filename"`
+		} `json:"files"`
 	}
 	endpoint := c.client.repositoryPath("/compare/" + release.SHA + "..." + integration.SHA)
 	if err := c.client.get(ctx, endpoint, &response); err != nil {
@@ -72,5 +82,9 @@ func (c *Controller) ReadPromotionDelta(ctx context.Context) (PromotionDelta, er
 		title, _, _ := strings.Cut(commit.Commit.Message, "\n")
 		delta.Commits = append(delta.Commits, PromotionCommit{SHA: commit.SHA, Title: strings.TrimSpace(title)})
 	}
+	for _, file := range response.Files {
+		delta.Files = append(delta.Files, file.Filename)
+	}
+	delta.FilesTruncated = len(response.Files) >= 300
 	return delta, nil
 }

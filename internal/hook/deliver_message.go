@@ -34,6 +34,9 @@ type DeliverStagingReport struct {
 	ScreenshotAttached bool
 	Preview            PromotionPreview
 	GoDeadlineDays     int
+	// PromotionHold, when set, replaces the Go instructions: the promotion
+	// gate could not pass right now, and asking for a Go would only fail.
+	PromotionHold string
 }
 
 // DeliverStagingContent renders the staging report with the Go
@@ -74,7 +77,12 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 	if report.ScreenshotAttached {
 		builder.WriteString("確認時点の画面全体のスクリーンショットをこのコメントに添付しています。\n")
 	}
-	if report.Verdict == "pass" {
+	if report.Verdict == "pass" && report.PromotionHold != "" {
+		builder.WriteString("\n■ 本番反映について\n")
+		builder.WriteString(report.PromotionHold + "\n")
+		builder.WriteString("この状態では「Go」とコメントいただいても自動の本番反映は行われません。\n")
+		builder.WriteString(renderHeldPreview(report.Preview))
+	} else if report.Verdict == "pass" {
 		builder.WriteString("\n■ 本番へ反映するには\n")
 		fmt.Fprintf(&builder, "このチケットに「Go」とだけコメントしてください（依頼者ご本人のコメントのみ有効・%d 日以内）。\n", report.GoDeadlineDays)
 		builder.WriteString(renderPreview(report.Preview))
@@ -83,14 +91,20 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		AutoRetry: "なし（この確認は 1 回のみ実施します）",
 		Marker:    CommentMarker("stg-report", runID),
 	}
-	switch report.Verdict {
-	case "pass":
+	switch {
+	case report.Verdict == "pass" && report.PromotionHold != "":
+		facts.State = "ステージング反映済み・本番反映は自動では行いません"
+		facts.NextActor = "運用担当者"
+		facts.Operation = "本番へ入れる場合は運用の昇格手順で反映します"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更"
+	case report.Verdict == "pass":
 		facts.State = "ステージング反映済み・本番反映の承認待ち"
 		facts.NextActor = "依頼者"
 		facts.Operation = "内容に問題がなければ「Go」とコメント。反映しない場合は何もしないでください"
 		facts.NextEvent = fmt.Sprintf("「Go」で本番反映が始まります（%d 日以内にない場合、本番反映は行わず終了します）", report.GoDeadlineDays)
 		facts.Production = "未変更（Go があるまで本番には反映されません）"
-	case "deploy_failed", "merge_unverified":
+	case report.Verdict == "deploy_failed" || report.Verdict == "merge_unverified":
 		// The staging state itself needs an operator's eyes; the requester
 		// has nothing to fix.
 		facts.State = "ステージング反映の工程で停止"
@@ -106,6 +120,28 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.Production = "未変更（本番反映は行われません）"
 	}
 	return builder.String() + facts.render()
+}
+
+// renderHeldPreview lists what sits on staging when the promotion gate is
+// held. The Go-flavoured wording of renderPreview ("would go to production
+// with this") has no place here — nothing is going to production.
+func renderHeldPreview(preview PromotionPreview) string {
+	if preview.Unavailable {
+		return "※ ステージングに滞留している変更の一覧は取得できませんでした。\n"
+	}
+	if preview.AheadBy == 0 {
+		// identical / behind: the hold reason already describes the state.
+		return ""
+	}
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "ステージングに滞留している変更（全 %d 件）:\n", preview.AheadBy)
+	for _, title := range preview.Titles {
+		fmt.Fprintf(&builder, "- %s\n", title)
+	}
+	if preview.Truncated || len(preview.Titles) < preview.AheadBy {
+		builder.WriteString("- （ほか省略）\n")
+	}
+	return builder.String()
 }
 
 func renderPreview(preview PromotionPreview) string {

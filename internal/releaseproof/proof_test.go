@@ -250,6 +250,14 @@ func fixtureConsumer() worker.ConsumerConfig {
 }
 
 func stagingFixture(t *testing.T) StagingInputs {
+	return stagingFixtureCheckedOut(t, "")
+}
+
+// stagingFixtureCheckedOut threads the re-validation checkout into the
+// evidence BEFORE its digest is taken, so every downstream binding (identity
+// digest, pull body) stays consistent. An empty checkout keeps the exact
+// canonical JSON of the original fixture.
+func stagingFixtureCheckedOut(t *testing.T, checkedOut string) StagingInputs {
 	t.Helper()
 	config := fixtureConfig()
 	if err := config.Validate(); err != nil {
@@ -302,7 +310,7 @@ func stagingFixture(t *testing.T) StagingInputs {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validation := validationEvidence(t, config, request, source, candidate)
+	validation := validationEvidence(t, config, request, source, candidate, checkedOut)
 
 	baselineTree := objectID("4")
 	baseline := githubapi.Baseline{
@@ -372,7 +380,7 @@ func productionFixture(staging StagingProof, visibleSHA string) (githubapi.PullR
 	return pull, merge, githubapi.DeploymentResult{Merge: merge, WorkflowRuns: runs, BranchHeadSHA: merge.MergeSHA}
 }
 
-func validationEvidence(t *testing.T, config worker.Config, request worker.TicketRequest, source worker.SourceSnapshot, candidate worker.Candidate) worker.ValidationEvidence {
+func validationEvidence(t *testing.T, config worker.Config, request worker.TicketRequest, source worker.SourceSnapshot, candidate worker.Candidate, checkedOut string) worker.ValidationEvidence {
 	t.Helper()
 	commands := make([][]string, 0, 1+len(config.Consumers[0].Mode.VerifyCommands))
 	commands = append(commands, slices.Clone(config.Consumers[0].Mode.InstallCommand))
@@ -388,7 +396,7 @@ func validationEvidence(t *testing.T, config worker.Config, request worker.Ticke
 		DeliveryID:    request.DeliveryID, InputSHA256: request.InputSHA256,
 		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA,
 		SourceSHA256: source.SourceSHA256, CandidateSHA256: candidate.CandidateSHA256,
-		BaseSHA: source.BaseSHA, Stage: candidate.Stage,
+		BaseSHA: source.BaseSHA, CheckedOutSHA: checkedOut, Stage: candidate.Stage,
 		Tools: []worker.ObservedTool{{Binary: "node", Version: "22.12.0"}, {Binary: "pnpm", Version: "9.15.4"}}, Commands: commands, Files: files,
 		StartedAt: fixtureTime.Add(90 * time.Second), CompletedAt: fixtureTime.Add(2 * time.Minute),
 	}
@@ -449,4 +457,66 @@ func cloneProductionProof(t *testing.T, proof ProductionProof) ProductionProof {
 		t.Fatal(err)
 	}
 	return cloned
+}
+
+// The integration branch can advance mid-run: the publish gate re-validates
+// on the new base (per-file blob checks) and publishes there, so the SOURCE
+// base is legitimately older than the baseline. The proof must accept that
+// shape — requiring equality is what rejected the first real advanced
+// delivery (RFDEV-668, 2026-09-01).
+func advancedBaseFixture(t *testing.T) StagingInputs {
+	t.Helper()
+	advanced := objectID("b")
+	input := stagingFixtureCheckedOut(t, advanced)
+	input.Baseline.Integration.SHA = advanced
+	input.Baseline.Integration.TreeSHA = objectID("c")
+	input.PublishedFeature.Base = input.Baseline.Integration
+	input.FeaturePullRequest.BaseSHA = advanced
+	input.FeatureMerge.BaseSHA = advanced
+	input.StagingDeployment.Merge.BaseSHA = advanced
+	if input.Source.BaseSHA == advanced {
+		t.Fatal("fixture no longer exercises the advanced-base shape")
+	}
+	return input
+}
+
+func TestStagingProofAcceptsAnAdvancedPublishBase(t *testing.T) {
+	if _, err := NewStagingProof(advancedBaseFixture(t)); err != nil {
+		t.Fatalf("an advanced publish base was rejected: %v", err)
+	}
+}
+
+// The relaxation must not open the door the OTHER way: a published feature
+// that does not sit exactly on the recorded baseline stays rejected, and an
+// advanced proof without the re-validation checkout stays rejected.
+func TestStagingProofStillPinsThePublishBaseAndTheRevalidation(t *testing.T) {
+	offBase := stagingFixture(t)
+	offBase.Baseline.Integration.SHA = objectID("b")
+	if _, err := NewStagingProof(offBase); err == nil {
+		t.Fatal("a published feature off the recorded baseline was accepted")
+	}
+	// The advanced shape WITHOUT the re-validation checkout: built from the
+	// plain fixture so every digest stays self-consistent and the ONLY
+	// refusal left is the missing checkout binding.
+	advanced := objectID("b")
+	unrevalidated := stagingFixture(t)
+	unrevalidated.Baseline.Integration.SHA = advanced
+	unrevalidated.Baseline.Integration.TreeSHA = objectID("c")
+	unrevalidated.PublishedFeature.Base = unrevalidated.Baseline.Integration
+	unrevalidated.FeaturePullRequest.BaseSHA = advanced
+	unrevalidated.FeatureMerge.BaseSHA = advanced
+	unrevalidated.StagingDeployment.Merge.BaseSHA = advanced
+	if _, err := NewStagingProof(unrevalidated); err == nil {
+		t.Fatal("an advanced proof without the re-validation checkout was accepted")
+	}
+}
+
+// The integration branch running ahead of the release branch is the NORMAL
+// state under Go-driven promotion; the baseline must accept it.
+func TestStagingProofAcceptsAStagingBranchAheadOfRelease(t *testing.T) {
+	input := stagingFixture(t)
+	input.Baseline.Release.TreeSHA = objectID("d")
+	if _, err := NewStagingProof(input); err != nil {
+		t.Fatalf("a release branch behind staging was rejected: %v", err)
+	}
 }

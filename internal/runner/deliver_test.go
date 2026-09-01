@@ -215,6 +215,66 @@ func TestRunDeliverProductionNeedsTheSealedStagingObservation(t *testing.T) {
 	}
 }
 
+// The promotion gate moves exactly one delivery, so a Go must only be
+// requested when the release→integration delta is this delivery's own
+// files (plus the CI digest files). Everything else is an honest hold.
+func TestPromotionHoldTracksTheGateReality(t *testing.T) {
+	build := func(t *testing.T, delta string) *Pipeline {
+		pipeline := deliverPipeline(t)
+		if err := os.WriteFile(pipeline.path("feature-pr.json"),
+			[]byte(`{"binding":{"repository":"example/one","product_paths":["internal/gateway/budget.go"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if delta != "" {
+			if err := os.WriteFile(pipeline.path(DeliverDeltaFile), []byte(delta), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return pipeline
+	}
+	cases := map[string]struct {
+		delta    string
+		wantHold string // substring; empty means promotable
+	}{
+		"own files only":         {`{"status":"ahead","files":["internal/gateway/budget.go"]}`, ""},
+		"foreign file on stage":  {`{"status":"ahead","files":["internal/gateway/budget.go","internal/proxy/streaming.go"]}`, "以外の変更が滞留"},
+		"diverged from release":  {`{"status":"diverged","files":["internal/gateway/budget.go"]}`, "分岐状態"},
+		"nothing to promote":     {`{"status":"identical","files":[]}`, "同じ内容"},
+		"delta unavailable":      {`{"status":"unavailable"}`, "確認できなかった"},
+		"delta missing entirely": {"", "確認できなかった"},
+		"file list truncated":    {`{"status":"ahead","files":["internal/gateway/budget.go"],"files_truncated":true}`, "大きすぎて"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			pipeline := build(t, c.delta)
+			hold := pipeline.promotionHold()
+			if c.wantHold == "" && hold != "" {
+				t.Fatalf("promotionHold() = %q, want promotable", hold)
+			}
+			if c.wantHold != "" && !strings.Contains(hold, c.wantHold) {
+				t.Fatalf("promotionHold() = %q, want a hold mentioning %q", hold, c.wantHold)
+			}
+		})
+	}
+	// Digest-commit files ride every promotion and must not trigger a hold.
+	pipeline := deliverPipeline(t)
+	consumer := `{"models":{"reviewers":[{"id":"a"},{"id":"b"}]},"consumers":[{"repository":"example/one","staging_origin":"https://one.example.invalid","staging_digest_commit":{"exact_paths":["k8s/overlays/stg/kustomization.yaml"]}}]}`
+	if err := os.WriteFile(pipeline.Config.ConsumerConfigPath, []byte(consumer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pipeline.path("feature-pr.json"),
+		[]byte(`{"binding":{"repository":"example/one","product_paths":["internal/gateway/budget.go"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pipeline.path(DeliverDeltaFile),
+		[]byte(`{"status":"ahead","files":["internal/gateway/budget.go","k8s/overlays/stg/kustomization.yaml"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hold := pipeline.promotionHold(); hold != "" {
+		t.Fatalf("digest files triggered a hold: %q", hold)
+	}
+}
+
 func readSealedDeliverReport(t *testing.T, pipeline *Pipeline, name string) DeliverReport {
 	t.Helper()
 	raw, err := os.ReadFile(pipeline.path(name))

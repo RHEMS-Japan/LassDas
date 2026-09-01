@@ -890,7 +890,11 @@ func (c *Controller) verifyPathSet(ctx context.Context, baseSHA, baseTreeSHA, he
 	}
 	actual := make([]string, 0, len(comparison.Files))
 	for _, file := range comparison.Files {
-		if file.Status != "modified" {
+		// Same statuses the candidate gate accepts (verifyChangedPaths): a
+		// delivery can modify or add files, never delete. The promotion gate
+		// kept rejecting "added" after RFDEV-622 fixed the candidate gate,
+		// which stranded every file-creating delivery at promotion time.
+		if file.Status != "modified" && file.Status != "added" {
 			return invariant("comparison_path_mismatch")
 		}
 		actual = append(actual, file.Filename)

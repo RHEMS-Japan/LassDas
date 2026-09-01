@@ -203,8 +203,8 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 // issue the promote card.
 func advanceTowardsPromotion(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) error {
 	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
-	if err != nil || report.Verdict != "pass" {
-		return nil // a failed staging report is a terminal state
+	if err != nil || report.Verdict != "pass" || report.PromotionHold != "" {
+		return nil // failed — or promotion-held — staging reports are terminal
 	}
 	if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
 		content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
@@ -299,6 +299,7 @@ func reportDeliverStaging(ctx context.Context, config runtime.Config, services *
 		Detail:         report.Detail,
 		Preview:        deliverPreview(report.Delta),
 		GoDeadlineDays: int(config.Chain.Deliver.GoWait().Hours() / 24),
+		PromotionHold:  report.PromotionHold,
 	}
 	attachments := deliverScreenshotAttachment(ctx, services, run, runDir, runner.DeliverStagingShotFile, "stg-"+run.IssueKey+".png", &rendered.ScreenshotAttached, logger)
 	content := hook.DeliverStagingContent(run.RunID, rendered)
