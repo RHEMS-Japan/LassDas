@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// A candidate's commit may add files, not only modify them: RFDEV-622's
-// delivery (a SQL migration plus three new modules) passed every review and
+// A candidate's commit may add files, not only modify them: a live delivery
+// (a SQL migration plus three new modules) passed every review and
 // the deterministic validation, then died here because the verifier accepted
 // only "modified". Anything else — removals, renames — stays a refusal, since
 // a candidate cannot express those.

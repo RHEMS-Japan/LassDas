@@ -595,7 +595,7 @@ func (c *Controller) verifyChangedPaths(ctx context.Context, baseSHA, headSHA st
 	for _, file := range response.Files {
 		// A candidate carries full file contents, so its commit can modify
 		// an existing file or add a new one — nothing else. "added" was
-		// missing here until RFDEV-622: the first live delivery to create
+		// missing here until the first live delivery to create
 		// files (a SQL migration and three new modules) passed both reviews
 		// and the deterministic validation, then died at this line.
 		if file.Status != "modified" && file.Status != "added" {
