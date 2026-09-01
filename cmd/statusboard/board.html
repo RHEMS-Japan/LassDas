@@ -269,7 +269,7 @@
     </div>
   </div>
 
-  <footer>LASSDAS STATUS BOARD — 表示は本番データに毎秒追従します。操作 (回答 / Go / 停止) はチケットへあなた本人のコメントとして投稿されます。</footer>
+  <footer id="footer">LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。新しい依頼の受付と Go の検知は毎分の見回りです。</footer>
 </div>
 
 <script>
@@ -643,6 +643,9 @@ function applyPayload(payload, firstLoad) {
   }
   try { latestBoard = typeof payload.board === "string" ? JSON.parse(payload.board) : (payload.board || { runs: [] }); }
   catch (_) { latestBoard = { runs: [] }; }
+  document.getElementById("footer").textContent = actionsEnabled
+    ? "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。操作 (回答 / Go / 停止) はチケットへあなた本人のコメントとして投稿されます。"
+    : "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。新しい依頼の受付と Go の検知は毎分の見回りです。このボードは閲覧専用です (操作機能は段階解禁: issue #14)。";
   renderBoard();
   const events = (payload.events || []).map(raw => {
     try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_) { return null; }

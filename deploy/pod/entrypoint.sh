@@ -6,10 +6,15 @@
 # daemon is deliberately not used: it brings an inbound surface this
 # constitution does not want. Inbound surfaces, exhaustively: kubectl
 # port-forward to the loopback serve backend; the authenticated board UI
-# when the operator opts in with LASSDAS_DASHBOARD=1 (see serve_loop); and
+# when the operator opts in with LASSDAS_DASHBOARD=1 (see serve_loop);
 # the status board on :9200 when its credentials secret is mounted —
 # basic-auth-guarded in-process and CIDR/TLS-guarded at its ingress
-# (deploy/pod/statusboard.yaml).
+# (deploy/pod/statusboard.yaml); and the tracker's bell — POST
+# /webhook/<token>, existing only when LASSDAS_BOARD_BELL_TOKEN is set,
+# public by design but token-gated in the path (constant-time check,
+# wrong token = 404): its body is discarded unread, so even a valid ring
+# can only trigger one rate-limited extra look at the tracker, never
+# inject data (deploy/pod/statusboard-hook.yaml).
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"

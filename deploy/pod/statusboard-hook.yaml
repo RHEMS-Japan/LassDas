@@ -1,0 +1,67 @@
+# The tracker-webhook bell's public entry (cmd/statusboard's /webhook/…):
+# a SEPARATE hostname from the board, on the public-facing ALB group, so
+# the board host's CIDR allowlist stays untouched. Only the /webhook path
+# prefix is routed — the board UI, /stream and /api are simply absent from
+# this host (no ALB rule matches; the group default answers 404). The
+# route itself only exists in-process when LASSDAS_BOARD_BELL_TOKEN is
+# set, and a wrong token is a 404, so anonymous callers cannot even ring
+# the rate-limited bell.
+#
+# Secret addition (same lassdas-board secret):
+#   LASSDAS_BOARD_BELL_TOKEN=<32+ random url-safe chars>
+# The tracker-side webhook URL to register is then:
+#   https://<HOOK_HOST>/webhook/<token>
+# Placeholders (<...>) follow statefulset.yaml's convention; fill them
+# from the live cluster at apply time — copy the public-group values from
+# an existing member of that group, never invent them (a mismatched
+# member stalls the whole group's reconcile).
+apiVersion: v1
+kind: Service
+metadata:
+  name: lassdas-hook
+  namespace: lassdas
+  labels: { app: lassdas }
+spec:
+  selector: { app: lassdas }
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lassdas-hook
+  namespace: lassdas
+  labels: { app: lassdas }
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/group.name: <PUBLIC_GROUP>
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: <CERT_ARN>
+    alb.ingress.kubernetes.io/subnets: <SUBNETS>
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    external-dns.alpha.kubernetes.io/access: public
+    external-dns.alpha.kubernetes.io/hostname: <HOOK_HOST>
+spec:
+  rules:
+    - host: <HOOK_HOST>
+      http:
+        paths:
+          - path: /webhook
+            pathType: Prefix
+            backend:
+              service:
+                name: lassdas-hook
+                port: { number: 9200 }
+          # /healthz keeps the ALB target group healthy; it serves the
+          # constant "ok" and nothing else.
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: lassdas-hook
+                port: { number: 9200 }

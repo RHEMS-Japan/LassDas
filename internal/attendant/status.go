@@ -75,13 +75,26 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
-	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC()}
+	// Trim BEFORE classifying: classification does per-run file I/O, and
+	// the ledger only grows. Terminal runs beyond twice the display limit
+	// (newest first) cannot appear on the board — resting ones are capped
+	// at the limit, and a terminal run still moving (delivery continuation)
+	// is claimed recently. Non-terminal runs always classify.
+	sort.SliceStable(runs, func(a, b int) bool { return runs[a].ClaimedAt > runs[b].ClaimedAt })
+	terminalSeen := 0
+	candidates := runs[:0]
 	for _, run := range runs {
+		if run.State == "terminal" {
+			if terminalSeen++; terminalSeen > 2*terminalSnapshotLimit {
+				continue
+			}
+		}
+		candidates = append(candidates, run)
+	}
+	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC()}
+	for _, run := range candidates {
 		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
 	}
-	sort.SliceStable(snapshot.Runs, func(a, b int) bool {
-		return snapshot.Runs[a].ClaimedAt > snapshot.Runs[b].ClaimedAt
-	})
 	kept := snapshot.Runs[:0]
 	resting := 0
 	for _, run := range snapshot.Runs {

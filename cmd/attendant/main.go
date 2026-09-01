@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +51,7 @@ func run() error {
 	flags := flag.NewFlagSet("attendant", flag.ContinueOnError)
 	configPath := flags.String("config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "runtime.json path")
 	interval := flags.Duration("interval", time.Minute, "tick interval")
+	observeInterval := flags.Duration("observe-interval", 5*time.Second, "status-board snapshot interval (0 disables the fast loop)")
 	once := flags.Bool("once", false, "run a single tick and exit (for tests and cron)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
@@ -68,6 +71,26 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// observe writes the status-board snapshot. Observation only; a failed
+	// snapshot must never disturb the tick that feeds it. The mutex
+	// serializes the fast loop against the tick's own call — events.jsonl
+	// appends and the board.json rename must not interleave.
+	var observeMu sync.Mutex
+	observe := func() {
+		observeMu.Lock()
+		defer observeMu.Unlock()
+		// A hung `hermes kanban list` must not hold this mutex forever —
+		// the tick also observes, and a stuck observation would freeze the
+		// whole reception. The timeout kills the CLI via CommandContext.
+		observeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		if snapshot, err := attendant.SnapshotStatus(observeCtx, config, services, hermes); err != nil {
+			logger.Error("status snapshot failed", "error", err.Error())
+		} else if err := attendant.WriteBoardStatus(statusDir(), snapshot); err != nil {
+			logger.Error("status write failed", "error", err.Error())
+		}
+	}
+
 	tick := func() {
 		// The attendant is the only reception mechanism (no webhook exists
 		// in this constitution); one poisoned tick must not crash-loop it.
@@ -86,13 +109,7 @@ func run() error {
 			if err := attendant.SyncChains(ctx, config, services, hermes, logger); err != nil {
 				logger.Error("chain sync failed", "error", err.Error())
 			}
-			// The status board is observation only; a failed snapshot must
-			// never disturb the tick that feeds it.
-			if snapshot, err := attendant.SnapshotStatus(ctx, config, services, hermes); err != nil {
-				logger.Error("status snapshot failed", "error", err.Error())
-			} else if err := attendant.WriteBoardStatus(statusDir(), snapshot); err != nil {
-				logger.Error("status write failed", "error", err.Error())
-			}
+			observe()
 		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())
 		}
@@ -101,6 +118,54 @@ func run() error {
 	tick()
 	if *once {
 		return nil
+	}
+	// The bell: the board server touches this file when the tracker's
+	// webhook rings (body unread — the bell only means "worth looking").
+	// A moved mtime makes the NEXT fast-loop pass run a full tick instead
+	// of a snapshot, so tracker events reach the pipeline within seconds
+	// instead of a minute. Forged rings cost one rate-limited look.
+	bellPath := filepath.Join(statusDir(), "wakeup")
+	lastBell := time.Time{}
+	if info, err := os.Stat(bellPath); err == nil {
+		lastBell = info.ModTime() // rings from before this boot are stale
+	}
+	bellRang := func() bool {
+		info, err := os.Stat(bellPath)
+		if err != nil || !info.ModTime().After(lastBell) {
+			return false
+		}
+		lastBell = info.ModTime()
+		return true
+	}
+	// The fast observation loop: the board's data sources (ledger, cards,
+	// artifacts) change mid-tick as cards execute, and a minute-old picture
+	// reads as a frozen board. This loop re-snapshots every few seconds —
+	// it never touches the tracker unless the bell rang, so the extra rate
+	// costs nothing external. tickMu keeps bell-driven ticks and the timer
+	// loop's ticks serialized; observe() has its own mutex.
+	var tickMu sync.Mutex
+	runTick := func() {
+		tickMu.Lock()
+		defer tickMu.Unlock()
+		tick()
+	}
+	if config.OrchestrationCards() && *observeInterval > 0 {
+		go func() {
+			fast := time.NewTicker(*observeInterval)
+			defer fast.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-fast.C:
+					if bellRang() {
+						runTick()
+					} else {
+						observe()
+					}
+				}
+			}
+		}()
 	}
 	timer := time.NewTicker(*interval)
 	defer timer.Stop()
@@ -111,7 +176,7 @@ func run() error {
 			logger.Info("attendant stopping")
 			return nil
 		case <-timer.C:
-			tick()
+			runTick()
 		}
 	}
 }

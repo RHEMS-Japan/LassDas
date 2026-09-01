@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -86,6 +87,47 @@ func run() error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// The tracker's webhook lands here — as a BELL, nothing more. The body
+	// is discarded unread: a ring can only make the attendant take one
+	// rate-limited extra look at the tracker, never inject data. Tracker
+	// webhooks cannot carry auth headers, but the URL is ours to register
+	// (cmd/setup/backlog.go does exactly that), so the secret rides in the
+	// path: without LASSDAS_BOARD_BELL_TOKEN the route does not exist, and
+	// a wrong token is a 404 — anonymous callers cannot even ring.
+	if bellToken := os.Getenv("LASSDAS_BOARD_BELL_TOKEN"); bellToken != "" {
+		wantToken := sha256.Sum256([]byte(bellToken))
+		var bellMu sync.Mutex
+		var lastBell time.Time
+		mux.HandleFunc("/webhook/", func(w http.ResponseWriter, r *http.Request) {
+			gotToken := sha256.Sum256([]byte(strings.TrimPrefix(r.URL.Path, "/webhook/")))
+			if subtle.ConstantTimeCompare(gotToken[:], wantToken[:]) != 1 {
+				http.NotFound(w, r)
+				return
+			}
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST のみ", http.StatusMethodNotAllowed)
+				return
+			}
+			bellMu.Lock()
+			ring := time.Since(lastBell) >= 5*time.Second
+			if ring {
+				lastBell = time.Now()
+			}
+			bellMu.Unlock()
+			// Inside the rate gate the body is drained (bounded) so the
+			// connection can be reused; outside it nothing is read — a
+			// flood costs this process no more than accept + header parse.
+			if ring {
+				_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<10))
+				if err := os.WriteFile(filepath.Join(statusDir, "wakeup"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644); err != nil {
+					logger.Error("bell write failed", "error", err.Error())
+				}
+			}
+			// Always 200: the tracker disables endpoints that keep failing.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+	}
 	mux.Handle("/", auth.wrap(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -102,7 +144,8 @@ func run() error {
 	mux.Handle("/stream", auth.wrap(board.serveStream))
 
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	logger.Info("statusboard listening", "addr", addr, "status_dir", statusDir, "actions_enabled", poster != nil)
+	logger.Info("statusboard listening", "addr", addr, "status_dir", statusDir,
+		"actions_enabled", poster != nil, "bell_armed", os.Getenv("LASSDAS_BOARD_BELL_TOKEN") != "")
 	return server.ListenAndServe()
 }
 
