@@ -38,6 +38,13 @@ func main() {
 	}
 }
 
+func statusDir() string {
+	if dir := os.Getenv("LASSDAS_STATUS_DIR"); dir != "" {
+		return dir
+	}
+	return "/data/status"
+}
+
 func run() error {
 	flags := flag.NewFlagSet("attendant", flag.ContinueOnError)
 	configPath := flags.String("config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "runtime.json path")
@@ -78,6 +85,13 @@ func run() error {
 			// aligns chains and owns every report; no runner process exists.
 			if err := attendant.SyncChains(ctx, config, services, hermes, logger); err != nil {
 				logger.Error("chain sync failed", "error", err.Error())
+			}
+			// The status board is observation only; a failed snapshot must
+			// never disturb the tick that feeds it.
+			if snapshot, err := attendant.SnapshotStatus(ctx, config, services, hermes); err != nil {
+				logger.Error("status snapshot failed", "error", err.Error())
+			} else if err := attendant.WriteBoardStatus(statusDir(), snapshot); err != nil {
+				logger.Error("status write failed", "error", err.Error())
 			}
 		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())

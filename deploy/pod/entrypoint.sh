@@ -1,11 +1,15 @@
 #!/bin/bash
 # The pod's residents (docs/RUNTIME_POD.md): the attendant, the kanban
 # dispatch loop, the serve backend the Hermes One desktop app connects to,
-# and — per card — the runner the dispatcher spawns. The chat-platform
-# gateway daemon is deliberately not used: it brings an inbound surface
-# this constitution does not want. The serve backend binds loopback only,
-# so the sole way in is kubectl port-forward — unless the operator opts in
-# to the authenticated board UI with LASSDAS_DASHBOARD=1 (see serve_loop).
+# the requester status board (statusboard_loop, opt-in by secret), and —
+# per card — the runner the dispatcher spawns. The chat-platform gateway
+# daemon is deliberately not used: it brings an inbound surface this
+# constitution does not want. Inbound surfaces, exhaustively: kubectl
+# port-forward to the loopback serve backend; the authenticated board UI
+# when the operator opts in with LASSDAS_DASHBOARD=1 (see serve_loop); and
+# the status board on :9200 when its credentials secret is mounted —
+# basic-auth-guarded in-process and CIDR/TLS-guarded at its ingress
+# (deploy/pod/statusboard.yaml).
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"
@@ -146,6 +150,41 @@ if grep -q '"orchestration"[[:space:]]*:[[:space:]]*"cards"' "$LASSDAS_RUNTIME_C
   fi
 fi
 
+# The board's credentials leave the process environment for the same
+# reason as TARGET_GITHUB_TOKEN above: every card stage — the untrusted
+# implementer included — spawns from this environment, and the requester's
+# tracker key carries the requester's full authority.
+mkdir -p "$STATE/secrets"
+if [ -n "${LASSDAS_BOARD_TRACKER_KEY:-}" ]; then
+  umask 077
+  printf '%s' "$LASSDAS_BOARD_TRACKER_KEY" > "$STATE/secrets/board-tracker-key"
+  umask 022
+  unset LASSDAS_BOARD_TRACKER_KEY
+  export LASSDAS_BOARD_TRACKER_KEY_FILE="$STATE/secrets/board-tracker-key"
+fi
+if [ -n "${LASSDAS_BOARD_PASS:-}" ]; then
+  if [ "${#LASSDAS_BOARD_PASS}" -ge 16 ]; then
+    umask 077
+    printf '%s' "$LASSDAS_BOARD_PASS" > "$STATE/secrets/board-pass"
+    umask 022
+    export LASSDAS_BOARD_PASS_FILE="$STATE/secrets/board-pass"
+  else
+    # The binary would refuse it anyway; skipping the file keeps the
+    # start guard honest instead of spawning a permanent crash loop.
+    echo "statusboard: LASSDAS_BOARD_PASS is shorter than 16 chars; board disabled (fail-closed)" >&2
+  fi
+  unset LASSDAS_BOARD_PASS
+fi
+# The tracker trio configures the board's answer/Go/stop actions; a
+# partial set would make the binary refuse to start (fail-closed) and the
+# loop retry forever, so degrade to the watch-only board loudly instead.
+if [ -n "${LASSDAS_BOARD_TRACKER_KEY_FILE:-}" ] || [ -n "${LASSDAS_BOARD_TRACKER_ORIGIN:-}" ] || [ -n "${LASSDAS_BOARD_TRACKER_SPACE:-}" ]; then
+  if [ -z "${LASSDAS_BOARD_TRACKER_KEY_FILE:-}" ] || [ -z "${LASSDAS_BOARD_TRACKER_ORIGIN:-}" ] || [ -z "${LASSDAS_BOARD_TRACKER_SPACE:-}" ]; then
+    echo "statusboard: tracker settings are partial; board actions disabled (watch-only)" >&2
+    unset LASSDAS_BOARD_TRACKER_KEY_FILE LASSDAS_BOARD_TRACKER_ORIGIN LASSDAS_BOARD_TRACKER_SPACE
+  fi
+fi
+
 hermes kanban init
 
 liveness() { touch "$STATE/heartbeat"; }
@@ -188,7 +227,28 @@ serve_loop() {
 serve_loop &
 SERVE=$!
 
-term() { kill "$ATTENDANT" "$DISPATCHER" "$SERVE" 2>/dev/null || true; }
+# The status board: the requester-facing live view (and, when the
+# requester credential is mounted, the answer/Go/stop actions). Restarts
+# in place like the board UI backend — losing the viewer must never take
+# down a card mid-run. It refuses to start without adequate basic-auth
+# credentials (fail-closed), so the loop logs and retries rather than
+# exposing anything.
+statusboard_loop() {
+  while true; do
+    statusboard || echo "statusboard exited rc=$?" >&2
+    sleep 5
+  done
+}
+# Same gate the binary enforces (user + a password source): a partial
+# secret must not become a permanent 5-second crash loop.
+if [ -n "${LASSDAS_BOARD_USER:-}" ] && [ -n "${LASSDAS_BOARD_PASS_FILE:-}" ]; then
+  statusboard_loop &
+  STATUSBOARD=$!
+elif [ -n "${LASSDAS_BOARD_USER:-}" ]; then
+  echo "statusboard NOT started: LASSDAS_BOARD_PASS is missing (fail-closed)" >&2
+fi
+
+term() { kill "$ATTENDANT" "$DISPATCHER" "$SERVE" ${STATUSBOARD:-} 2>/dev/null || true; }
 trap term TERM INT
 
 # Either resident dying takes the pod down (restart = clean recovery: the

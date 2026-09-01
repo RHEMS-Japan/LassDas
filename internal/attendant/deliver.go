@@ -115,6 +115,7 @@ func syncDeliver(
 			if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 				return nil
 			}
+			sealBoardOutcome(runDir, "staging", "card_failed", "")
 			return sweepDeliverCards(ctx, hermes, cards)
 		}
 		return nil
@@ -151,7 +152,9 @@ func issueChecksCard(ctx context.Context, config runtime.Config, services *runti
 	}
 	if stopped {
 		content := hook.DeliverStagingContent(run.RunID, hook.DeliverStagingReport{Verdict: "stopped"})
-		_ = services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil)
+		if services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
+			sealBoardOutcome(runDir, "staging", "stopped", "")
+		}
 		return nil
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{
@@ -181,6 +184,7 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 		if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 			return nil
 		}
+		sealBoardOutcome(runDir, "staging", "stopped", "")
 		return sweepDeliverCards(ctx, hermes, cards)
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{
@@ -208,7 +212,9 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 	}
 	if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
 		content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
-		_ = services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil)
+		if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
+			sealBoardOutcome(runDir, "release", "expired", "")
+		}
 		return nil
 	}
 	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
@@ -307,6 +313,7 @@ func reportDeliverStaging(ctx context.Context, config runtime.Config, services *
 		return nil
 	}
 	logger.Info("deliver staging report posted", "run", run.RunID, "verdict", report.Verdict)
+	sealBoardOutcome(runDir, "staging", report.Verdict, report.PromotionHold)
 	// Cards up to integrate are done either way; the promote card does not
 	// exist yet.
 	return sweepDeliverCards(ctx, hermes, cards)
@@ -328,6 +335,7 @@ func reportDeliverRelease(ctx context.Context, services *runtime.Services, herme
 		return nil
 	}
 	logger.Info("deliver release report posted", "run", run.RunID, "verdict", report.Verdict)
+	sealBoardOutcome(runDir, "release", report.Verdict, "")
 	return sweepDeliverCards(ctx, hermes, cards)
 }
 
@@ -347,6 +355,7 @@ func reportDeadIntegrate(ctx context.Context, services *runtime.Services, hermes
 	if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 		return nil
 	}
+	sealBoardOutcome(runDir, "staging", "card_failed", detail)
 	return sweepDeliverCards(ctx, hermes, cards)
 }
 
@@ -375,6 +384,7 @@ func reportDeadPromote(ctx context.Context, services *runtime.Services, hermes *
 	if !services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 		return nil
 	}
+	sealBoardOutcome(runDir, "release", report.Verdict, report.Detail)
 	return sweepDeliverCards(ctx, hermes, cards)
 }
 

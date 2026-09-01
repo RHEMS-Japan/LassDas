@@ -117,6 +117,7 @@ func syncE2E(
 		if !services.Tick.PostE2EComment(ctx, run.RunID, run.DeliveryID, content, nil) {
 			return nil
 		}
+		sealBoardOutcome(runDir, "e2e", "unknown", "")
 		if card.Status != "archived" {
 			return hermes.Archive(ctx, card.ID)
 		}
@@ -165,6 +166,7 @@ func reportE2EResult(
 	if !services.Tick.PostE2EComment(ctx, run.RunID, run.DeliveryID, content, attachments) {
 		return nil
 	}
+	sealBoardOutcome(runDir, "e2e", result.Verdict, "")
 	logger.Info("e2e result reported", "run", run.RunID, "verdict", result.Verdict)
 	if card != nil && card.Status != "archived" {
 		return hermes.Archive(ctx, card.ID)

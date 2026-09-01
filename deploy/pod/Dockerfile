@@ -12,6 +12,7 @@ RUN test -n "$ENGINE_SHA" && \
     CGO_ENABLED=0 go build -trimpath -o /out/worker ./cmd/worker && \
     CGO_ENABLED=0 go build -trimpath -o /out/controller ./cmd/controller && \
     CGO_ENABLED=0 go build -trimpath -o /out/browsercheck ./cmd/browsercheck && \
+    CGO_ENABLED=0 go build -trimpath -o /out/statusboard ./cmd/statusboard && \
     (cd /out && sha256sum worker controller browsercheck > tool-pins.txt)
 
 # ---- Stage 2: runtime ----------------------------------------------------
@@ -64,7 +65,7 @@ RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
 COPY --from=engine /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
-COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /usr/local/bin/
+COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
 COPY deploy/pod/entrypoint.sh /usr/local/bin/lassdas-entrypoint
 RUN chmod 0755 /usr/local/bin/lassdas-entrypoint
