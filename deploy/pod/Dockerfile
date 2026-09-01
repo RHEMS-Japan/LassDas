@@ -2,7 +2,7 @@
 # Build for linux/arm64 (the cluster's node architecture).
 
 # ---- Stage 1: engine binaries -------------------------------------------
-FROM golang:1.25-bookworm AS engine
+FROM golang:1.26-bookworm AS engine
 ARG ENGINE_SHA
 WORKDIR /src
 COPY . .
@@ -56,6 +56,13 @@ RUN git clone --filter=blob:none https://github.com/RHEMS-Japan/hermes-agent /op
 RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
     && npm run build \
     && rm -rf /opt/hermes-src/node_modules /opt/hermes-src/web/node_modules
+
+# The Go toolchain rides along for consumers whose deterministic validation
+# builds Go (the gateway repo's checks run `go` inside the validation
+# sandbox; a missing toolchain kills validation before it can record
+# anything).
+COPY --from=engine /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
 
 COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
