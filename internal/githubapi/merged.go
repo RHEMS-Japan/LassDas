@@ -90,6 +90,31 @@ func (c *Controller) probeFeatureMerge(ctx context.Context, pull PullRequest) (M
 	}, true, nil
 }
 
+// PullMergedState is one read-only look at whether a pull request merged —
+// the honest-reporting primitive for "the merge verb failed, but did the
+// merge itself land?".
+type PullMergedState struct {
+	State          string `json:"state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
+}
+
+// ReadPullMerged reads the pull request's merged state, nothing else. It
+// never waits and never mutates.
+func (c *Controller) ReadPullMerged(ctx context.Context, number int64) (PullMergedState, error) {
+	if err := c.client.requireVerified(); err != nil {
+		return PullMergedState{}, err
+	}
+	if number <= 0 {
+		return PullMergedState{}, invariant("invalid_pull_request")
+	}
+	response, err := c.readPullByNumber(ctx, number)
+	if err != nil {
+		return PullMergedState{}, err
+	}
+	return PullMergedState{State: response.State, Merged: response.Merged, MergeCommitSHA: response.MergeCommitSHA}, nil
+}
+
 func (c *Controller) readPullByNumber(ctx context.Context, number int64) (pullResponse, error) {
 	var response pullResponse
 	if err := c.client.get(ctx, c.client.repositoryPath("/pulls/"+strconv.FormatInt(number, 10)), &response); err != nil {

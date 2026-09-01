@@ -217,6 +217,7 @@ func (p *Pipeline) verifyToolPins() error {
 	for _, pin := range []struct{ path, want, name string }{
 		{p.Config.WorkerBin, p.Config.WorkerSHA256, "worker"},
 		{p.Config.ControllerBin, p.Config.ControllerSHA256, "controller"},
+		{p.Config.BrowserCheckBin, p.Config.BrowserCheckSHA256, "browsercheck"},
 	} {
 		if pin.want == "" {
 			continue

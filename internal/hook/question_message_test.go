@@ -133,6 +133,15 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 		ExpectedText: "絞り込み", ExpectedSeen: true, AbsentText: "旧表示", AbsentGone: true,
 		ScreenshotAttached: true,
 	}), CommentMarker("e2e", runID)})
+	cases = append(cases, contractCase{"stg-report", DeliverStagingContent(runID, DeliverStagingReport{
+		Verdict: "pass", TargetURL: "https://staging.example.invalid/console/x",
+		ExpectedText: "絞り込み", ScreenshotAttached: true, GoDeadlineDays: 7,
+		Preview: PromotionPreview{AheadBy: 2, Titles: []string{"feat: A", "fix: B"}},
+	}), CommentMarker("stg-report", runID)})
+	cases = append(cases, contractCase{"rel-report", DeliverReleaseContent(runID, DeliverReleaseReport{
+		Verdict: "pass", TargetURL: "https://example.invalid/console/x",
+		PullRequestURL: "https://github.example.invalid/o/r/pull/9", ScreenshotAttached: true,
+	}), CommentMarker("rel-report", runID)})
 	receipt, err := ReceiptCommentContent(record, 6002)
 	if err != nil {
 		t.Fatalf("ReceiptCommentContent() error = %v", err)

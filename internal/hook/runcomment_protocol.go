@@ -22,6 +22,12 @@ const (
 	// what the browser saw on the deployed staging page, sealed once per
 	// run after the human merge and the staging deployment.
 	RunCommentE2E RunCommentKind = "e2e"
+	// RunCommentStagingReport is the v2 delivery's staging summary: the
+	// sealed evidence plus the Go instructions (or the honest failure).
+	RunCommentStagingReport RunCommentKind = "stg-report"
+	// RunCommentReleaseReport is the v2 delivery's final production
+	// summary, posted once after the Go-driven promotion ends either way.
+	RunCommentReleaseReport RunCommentKind = "rel-report"
 )
 
 type RunCommentBeginRequest struct {

@@ -28,20 +28,23 @@ type documentResponse struct {
 	mimeType string
 }
 
-// ObserveAndSealStaging starts a clean, credential-free Chrome profile,
-// navigates to the exact configured staging URL, and seals that in-process
-// observation against the complete staging release proof.
+// ObserveAndSealStaging starts a clean Chrome profile, installs the
+// operator-provisioned session cookies (the consoles render a login page to
+// a credential-free profile), navigates to the exact configured staging URL,
+// and seals that in-process observation against the complete staging release
+// proof. The cookies never enter the sealed evidence.
 func ObserveAndSealStaging(
 	parent context.Context,
 	proof releaseproof.StagingProof,
 	input releaseproof.StagingInputs,
+	cookies []E2ECookie,
 ) (Evidence, []byte, error) {
 	binding, err := stagingBinding(proof, input)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
 	request := input.Request
-	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText)
+	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
@@ -62,6 +65,7 @@ func ObserveAndSealProduction(
 	stagingEvidence Evidence,
 	stagingScreenshot []byte,
 	input releaseproof.StagingInputs,
+	cookies []E2ECookie,
 ) (Evidence, []byte, error) {
 	now := time.Now().UTC()
 	binding, err := productionBinding(proof, staging, stagingEvidence, stagingScreenshot, input, now)
@@ -69,7 +73,7 @@ func ObserveAndSealProduction(
 		return Evidence{}, nil, err
 	}
 	request := input.Request
-	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText)
+	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
@@ -80,9 +84,12 @@ func ObserveAndSealProduction(
 	return evidence, append([]byte(nil), observed.screenshotPNG...), nil
 }
 
-func observe(parent context.Context, targetURL, expectedText, absentText string) (capture, error) {
+func observe(parent context.Context, targetURL, expectedText, absentText string, cookies []E2ECookie) (capture, error) {
 	if parent == nil || !validExactHTTPSURL(targetURL) || expectedText == "" || strings.ContainsAny(expectedText+absentText, "\x00\r\n") {
 		return capture{}, errors.New("browser observation request is invalid")
+	}
+	if err := validSessionCookies(cookies); err != nil {
+		return capture{}, err
 	}
 	executable, err := fixedChromeExecutable()
 	if err != nil {
@@ -133,7 +140,7 @@ func observe(parent context.Context, targetURL, expectedText, absentText string)
 		Height int64 `json:"height"`
 	}
 	var ready bool
-	if err := chromedp.Run(browserContext,
+	actions := []chromedp.Action{
 		network.Enable(),
 		network.SetCacheDisabled(true),
 		chromedp.EmulateViewport(1440, 1000),
@@ -145,8 +152,13 @@ func observe(parent context.Context, targetURL, expectedText, absentText string)
 			browserVersion, err = parseChromeProduct(product)
 			return err
 		}),
+	}
+	actions = append(actions, setCookieActions(cookies)...)
+	actions = append(actions,
 		chromedp.Navigate(targetURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
+	)
+	actions = append(actions,
 		chromedp.PollFunction(
 			`(expected, absent) => {
 				if (document.readyState !== "complete" || !document.body) return false;
@@ -180,7 +192,8 @@ func observe(parent context.Context, targetURL, expectedText, absentText string)
 			return nil
 		}),
 		chromedp.FullScreenshot(&screenshot, 90),
-	); err != nil {
+	)
+	if err := chromedp.Run(browserContext, actions...); err != nil {
 		return capture{}, errors.New("browser observation failed")
 	}
 	if !ready || len([]byte(visibleText)) != int(textBytes) {

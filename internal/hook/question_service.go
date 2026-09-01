@@ -754,17 +754,55 @@ func (s *QuestionTickService) E2ECommentPosted(ctx context.Context, runID string
 // — the same precedent the report and answer services use. A notice, not a
 // gate: the caller reports the boolean and moves on.
 func (s *QuestionTickService) PostE2EComment(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentE2E, "question_tick_e2e_state", runID, deliveryID, content, attachmentIDs)
+}
+
+// StagingReportPosted / ReleaseReportPosted report whether the v2 delivery
+// summaries already landed, so the attendant neither re-uploads screenshots
+// nor re-renders content.
+func (s *QuestionTickService) StagingReportPosted(ctx context.Context, runID string) (bool, error) {
 	route := s.config
 	route.ExpectedRunID = runID
-	posted, err := s.store.RunCommentState(ctx, route, RunCommentE2E, "")
+	return s.store.RunCommentState(ctx, route, RunCommentStagingReport, "")
+}
+
+func (s *QuestionTickService) ReleaseReportPosted(ctx context.Context, runID string) (bool, error) {
+	route := s.config
+	route.ExpectedRunID = runID
+	return s.store.RunCommentState(ctx, route, RunCommentReleaseReport, "")
+}
+
+// PostStagingReport / PostReleaseReport post the v2 delivery summaries
+// exactly once per run, on the same pinned-run route as the E2E comment.
+func (s *QuestionTickService) PostStagingReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentStagingReport, "question_tick_stg_report_state", runID, deliveryID, content, attachmentIDs)
+}
+
+func (s *QuestionTickService) PostReleaseReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentReleaseReport, "question_tick_rel_report_state", runID, deliveryID, content, attachmentIDs)
+}
+
+// postTerminalRunComment is the shared exactly-once posting for comments on
+// terminal runs: no pending row remains, so the run id is pinned on the
+// route explicitly. A notice, not a gate.
+func (s *QuestionTickService) postTerminalRunComment(
+	ctx context.Context,
+	kind RunCommentKind,
+	failureCode string,
+	runID, deliveryID, content string,
+	attachmentIDs []int64,
+) bool {
+	route := s.config
+	route.ExpectedRunID = runID
+	posted, err := s.store.RunCommentState(ctx, route, kind, "")
 	if err != nil {
-		s.failure("question_tick_e2e_state", err, deliveryID)
+		s.failure(failureCode, err, deliveryID)
 		return false
 	}
 	if posted {
 		return true
 	}
-	_, ok := s.postRunCommentRouted(ctx, route, RunCommentE2E, "", content, deliveryID, attachmentIDs)
+	_, ok := s.postRunCommentRouted(ctx, route, kind, "", content, deliveryID, attachmentIDs)
 	return ok
 }
 

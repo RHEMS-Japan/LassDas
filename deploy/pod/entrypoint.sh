@@ -57,6 +57,23 @@ worker:
     - e2e-check
 YAML
 
+# The v2 delivery cards: CI wait, staging merge + sealed observation, and
+# the Go-driven promotion. One state-driven verb, three milestones.
+for DELIVER_STAGE in checks:checks integrate:staging-observed promote:production-observed; do
+  DELIVER_NAME="lassdas-${DELIVER_STAGE%%:*}"
+  DELIVER_UNTIL="${DELIVER_STAGE#*:}"
+  DELIVER_HOME="$HOME/.hermes/profiles/$DELIVER_NAME"
+  mkdir -p "$DELIVER_HOME"
+  cat > "$DELIVER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - deliver
+    - --until
+    - $DELIVER_UNTIL
+YAML
+done
+
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
 cat > "$REVIEW_A_HOME/config.yaml" <<YAML

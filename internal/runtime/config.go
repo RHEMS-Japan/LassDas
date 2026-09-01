@@ -78,8 +78,9 @@ type Config struct {
 	// digests); the pod cannot measure a git checkout, but when these pins
 	// are set the runner refuses to start with binaries whose digests do
 	// not match, so a sealed tool SHA cannot silently name other code.
-	WorkerSHA256     string `json:"worker_sha256,omitempty"`
-	ControllerSHA256 string `json:"controller_sha256,omitempty"`
+	WorkerSHA256       string `json:"worker_sha256,omitempty"`
+	BrowserCheckSHA256 string `json:"browsercheck_sha256,omitempty"`
+	ControllerSHA256   string `json:"controller_sha256,omitempty"`
 
 	// Orchestration selects how a queued run executes: "runner" (the
 	// default, and the rollback target) keeps the single-card pipeline;
@@ -126,12 +127,80 @@ type ChainConfig struct {
 	// wait included, which is why the default is generous. Zero means the
 	// 76-hour default.
 	E2EMaxRuntimeSeconds int `json:"e2e_max_runtime_seconds,omitempty"`
+	// Deliver, when fully set, turns on the v2 delivery continuation. It
+	// replaces the debug role (the two would race on the same merge), so
+	// configuring both refuses to load.
+	Deliver DeliverConfig `json:"deliver,omitempty"`
 }
 
 // E2EEnabledAfterTime parses the observation cut-off. The cards
 // orchestration validates it at load time whenever the debug role is on.
 func (c ChainConfig) E2EEnabledAfterTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, c.E2EEnabledAfter)
+}
+
+// DeliverConfig turns on the v2 delivery: automatic CI-wait, staging merge,
+// sealed staging observation, and the requester's Go driving the promotion
+// to production. All three profiles must be set together; a partial
+// configuration refuses to load.
+type DeliverConfig struct {
+	ChecksProfile    string `json:"checks_profile,omitempty"`
+	IntegrateProfile string `json:"integrate_profile,omitempty"`
+	PromoteProfile   string `json:"promote_profile,omitempty"`
+	// EnabledAfter is required whenever the profiles are set: only runs
+	// claimed after it are delivered. Same rationale as the debug role's
+	// cut-off — enabling the feature must never reach back through the
+	// ledger's past successes.
+	EnabledAfter string `json:"enabled_after,omitempty"`
+	// GoWaitSeconds bounds how long the promotion waits for the requester's
+	// Go after the staging report. Zero means the 7-day default; expiry is
+	// reported honestly, never promoted.
+	GoWaitSeconds              int `json:"go_wait_seconds,omitempty"`
+	ChecksMaxRuntimeSeconds    int `json:"checks_max_runtime_seconds,omitempty"`
+	IntegrateMaxRuntimeSeconds int `json:"integrate_max_runtime_seconds,omitempty"`
+	PromoteMaxRuntimeSeconds   int `json:"promote_max_runtime_seconds,omitempty"`
+}
+
+// Enabled reports whether the v2 delivery is fully configured.
+func (d DeliverConfig) Enabled() bool {
+	return d.ChecksProfile != "" && d.IntegrateProfile != "" && d.PromoteProfile != ""
+}
+
+func (d DeliverConfig) partiallyConfigured() bool {
+	return !d.Enabled() && (d.ChecksProfile != "" || d.IntegrateProfile != "" || d.PromoteProfile != "")
+}
+
+// EnabledAfterTime parses the delivery cut-off.
+func (d DeliverConfig) EnabledAfterTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, d.EnabledAfter)
+}
+
+// GoWait is the requester-decision window after the staging report.
+func (d DeliverConfig) GoWait() time.Duration {
+	if d.GoWaitSeconds > 0 {
+		return time.Duration(d.GoWaitSeconds) * time.Second
+	}
+	return 7 * 24 * time.Hour
+}
+
+func wallOrDefault(configured, fallback int) int {
+	if configured > 0 {
+		return configured
+	}
+	return fallback
+}
+
+// The card walls: generous over the slowest observed CI (checks), the
+// staging deployment plus the sealed observation (integrate) and the
+// production deployment plus its observation (promote).
+func (d DeliverConfig) ChecksWallSeconds() int {
+	return wallOrDefault(d.ChecksMaxRuntimeSeconds, 3*60*60)
+}
+func (d DeliverConfig) IntegrateWallSeconds() int {
+	return wallOrDefault(d.IntegrateMaxRuntimeSeconds, 3*60*60)
+}
+func (d DeliverConfig) PromoteWallSeconds() int {
+	return wallOrDefault(d.PromoteMaxRuntimeSeconds, 3*60*60)
 }
 
 // E2EWallSeconds is the observation card's runtime bound.
@@ -216,7 +285,7 @@ func Load(path string) (Config, error) {
 		i.WorkflowRef == "" || !commit40.MatchString(i.EngineSHA) {
 		return Config{}, errors.New("runtime config: identity needs repository_id, repository as owner/name, workflow_ref and a 40-hex engine_sha")
 	}
-	for _, pin := range []string{config.WorkerSHA256, config.ControllerSHA256} {
+	for _, pin := range []string{config.WorkerSHA256, config.ControllerSHA256, config.BrowserCheckSHA256} {
 		if pin != "" && !sha256Pattern.MatchString(pin) {
 			return Config{}, errors.New("runtime config: binary sha256 pins must be 64 hex")
 		}
@@ -269,6 +338,26 @@ func (c Config) validateOrchestration() error {
 			}
 			if _, err := c.Chain.E2EEnabledAfterTime(); err != nil {
 				return errors.New("runtime config: chain.e2e_profile needs chain.e2e_enabled_after as an RFC3339 instant (observations never reach back before it)")
+			}
+		}
+		if c.Chain.Deliver.partiallyConfigured() {
+			return errors.New("runtime config: chain.deliver needs checks_profile, integrate_profile and promote_profile together")
+		}
+		if c.Chain.Deliver.Enabled() {
+			if c.Chain.E2EProfile != "" {
+				return errors.New("runtime config: chain.deliver replaces chain.e2e_profile — configure one, not both")
+			}
+			for _, profile := range []string{c.Chain.Deliver.ChecksProfile, c.Chain.Deliver.IntegrateProfile, c.Chain.Deliver.PromoteProfile} {
+				if _, taken := seen[profile]; taken || profile == c.HermesProfile {
+					return errors.New("runtime config: chain.deliver profiles must not reuse another profile")
+				}
+				seen[profile] = struct{}{}
+			}
+			if _, err := c.Chain.Deliver.EnabledAfterTime(); err != nil {
+				return errors.New("runtime config: chain.deliver needs enabled_after as an RFC3339 instant (deliveries never reach back before it)")
+			}
+			if c.BrowserCheckBin == "" {
+				return errors.New("runtime config: chain.deliver needs browsercheck_bin (the sealed observation binary)")
 			}
 		}
 		return nil

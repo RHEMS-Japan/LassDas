@@ -48,6 +48,53 @@ type E2EObservation struct {
 // e2ePollInterval matches the sealed observation's cadence.
 const e2ePollInterval = 250 * time.Millisecond
 
+func validSessionCookies(cookies []E2ECookie) error {
+	for _, cookie := range cookies {
+		if cookie.Name == "" || cookie.Domain == "" ||
+			strings.ContainsAny(cookie.Name+cookie.Value+cookie.Domain+cookie.Path, "\x00\r\n") {
+			return errors.New("session cookie is invalid")
+		}
+	}
+	return nil
+}
+
+func setCookieActions(cookies []E2ECookie) []chromedp.Action {
+	actions := make([]chromedp.Action, 0, len(cookies))
+	for _, cookie := range cookies {
+		cookie := cookie
+		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetCookie(cookie.Name, cookie.Value).
+				WithDomain(cookie.Domain).
+				WithPath(cookiePath(cookie.Path)).
+				WithSecure(cookie.Secure).
+				WithHTTPOnly(cookie.HTTPOnly).
+				Do(ctx)
+		}))
+	}
+	return actions
+}
+
+// LoadSessionCookies reads the operator-provisioned session file (Playwright
+// storageState JSON). Every failure degrades to "no cookies" with a
+// human-readable note — the observation itself then reports the login page
+// honestly instead of failing.
+func LoadSessionCookies(path string) ([]E2ECookie, string) {
+	if path == "" {
+		return nil, "確認用セッションが設定されていません。"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) > 1<<20 {
+		return nil, "確認用セッションのファイルを読めませんでした。"
+	}
+	var state struct {
+		Cookies []E2ECookie `json:"cookies"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil || len(state.Cookies) == 0 {
+		return nil, "確認用セッションのファイルの形式が想定と異なります。"
+	}
+	return state.Cookies, ""
+}
+
 // ObserveForE2E opens a clean Chrome profile, installs the given cookies,
 // navigates to the target and reports whether the expected text appeared
 // (and the absent text disappeared) within the page-ready budget — with a
@@ -57,11 +104,8 @@ func ObserveForE2E(parent context.Context, targetURL, expectedText, absentText s
 		strings.ContainsAny(expectedText+absentText, "\x00\r\n") {
 		return E2EObservation{}, errors.New("browser observation request is invalid")
 	}
-	for _, cookie := range cookies {
-		if cookie.Name == "" || cookie.Domain == "" ||
-			strings.ContainsAny(cookie.Name+cookie.Value+cookie.Domain+cookie.Path, "\x00\r\n") {
-			return E2EObservation{}, errors.New("session cookie is invalid")
-		}
+	if err := validSessionCookies(cookies); err != nil {
+		return E2EObservation{}, err
 	}
 	executable, err := fixedChromeExecutable()
 	if err != nil {
@@ -116,17 +160,7 @@ func ObserveForE2E(parent context.Context, targetURL, expectedText, absentText s
 			return err
 		}),
 	}
-	for _, cookie := range cookies {
-		cookie := cookie
-		prepare = append(prepare, chromedp.ActionFunc(func(ctx context.Context) error {
-			return network.SetCookie(cookie.Name, cookie.Value).
-				WithDomain(cookie.Domain).
-				WithPath(cookiePath(cookie.Path)).
-				WithSecure(cookie.Secure).
-				WithHTTPOnly(cookie.HTTPOnly).
-				Do(ctx)
-		}))
-	}
+	prepare = append(prepare, setCookieActions(cookies)...)
 	prepare = append(prepare,
 		chromedp.Navigate(targetURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),

@@ -88,9 +88,13 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			}
 		case "terminal":
 			// The run itself is closed; what may remain is the debug
-			// role's post-merge observation.
+			// role's post-merge observation, or the v2 delivery
+			// continuation (config makes the two mutually exclusive).
 			if err := syncE2E(ctx, config, services, hermes, run, tasks, logger); err != nil {
 				logger.Error("e2e sync failed", "run", run.RunID, "error", err.Error())
+			}
+			if err := syncDeliver(ctx, config, services, hermes, run, tasks, logger); err != nil {
+				logger.Error("deliver sync failed", "run", run.RunID, "error", err.Error())
 			}
 		default:
 			// awaiting_answer and the question-sealed report flavors

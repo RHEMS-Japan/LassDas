@@ -152,49 +152,49 @@ func (p *Pipeline) e2eVerification() (string, string, string, error) {
 }
 
 // consumerStagingOrigin resolves the destination's staging origin from the
-// host-side consumer configuration, the same way chainReviewers resolves
-// the reviewer identities.
+// host-side consumer configuration.
 func consumerStagingOrigin(consumerConfigPath, repository string) (string, error) {
+	return consumerOrigin(consumerConfigPath, repository, "staging")
+}
+
+// consumerOrigin resolves the observation origin for one environment — the
+// staging report must open the staging console and the production report
+// the production console, never each other's.
+func consumerOrigin(consumerConfigPath, repository, environment string) (string, error) {
 	raw, err := os.ReadFile(consumerConfigPath)
 	if err != nil {
 		return "", errors.New("consumer config unreadable")
 	}
 	var parsed struct {
 		Consumers []struct {
-			Repository    string `json:"repository"`
-			StagingOrigin string `json:"staging_origin"`
+			Repository       string `json:"repository"`
+			StagingOrigin    string `json:"staging_origin"`
+			ProductionOrigin string `json:"production_origin"`
 		} `json:"consumers"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", errors.New("consumer config invalid")
 	}
 	for _, consumer := range parsed.Consumers {
-		if consumer.Repository == repository && consumer.StagingOrigin != "" {
-			return consumer.StagingOrigin, nil
+		if consumer.Repository != repository {
+			continue
+		}
+		origin := consumer.StagingOrigin
+		if environment == "production" {
+			origin = consumer.ProductionOrigin
+		}
+		if origin != "" {
+			return origin, nil
 		}
 	}
-	return "", errors.New("consumer staging origin missing")
+	return "", errors.New("consumer observation origin missing")
 }
 
-// loadE2ESessionCookies reads the operator-provisioned session file
-// (Playwright storageState JSON). Every failure degrades to "no cookies"
-// with a human-readable note — the observation itself then reports the
-// login page honestly instead of failing the card.
+// loadE2ESessionCookies reads the operator-provisioned session file; the
+// implementation lives with the browser code so the sealed observations use
+// the identical loader.
 func loadE2ESessionCookies(path string) ([]visiblecheck.E2ECookie, string) {
-	if path == "" {
-		return nil, "確認用セッションが設定されていません。"
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) > 1<<20 {
-		return nil, "確認用セッションのファイルを読めませんでした。"
-	}
-	var state struct {
-		Cookies []visiblecheck.E2ECookie `json:"cookies"`
-	}
-	if err := json.Unmarshal(raw, &state); err != nil || len(state.Cookies) == 0 {
-		return nil, "確認用セッションのファイルの形式が想定と異なります。"
-	}
-	return state.Cookies, ""
+	return visiblecheck.LoadSessionCookies(path)
 }
 
 func looksLikeLogin(finalURL string) bool {

@@ -99,10 +99,15 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("browser staging proof was rejected")
 	}
 
+	// The consoles render a login page to a credential-free profile, so the
+	// sealed observations carry the same operator-provisioned session the
+	// debug role uses. Missing or unreadable sessions degrade to none — the
+	// observation then fails honestly on the login page.
+	cookies, _ := visiblecheck.LoadSessionCookies(os.Getenv("LASSDAS_E2E_SESSION_FILE"))
 	var evidence visiblecheck.Evidence
 	var screenshot []byte
 	if command.environment == "staging" {
-		evidence, screenshot, err = visiblecheck.ObserveAndSealStaging(ctx, staging, input)
+		evidence, screenshot, err = visiblecheck.ObserveAndSealStaging(ctx, staging, input, cookies)
 	} else {
 		var production releaseproof.ProductionProof
 		if err := worker.ReadJSONFile(command.productionProofPath, worker.MaxArtifactJSONBytes, &production); err != nil {
@@ -117,7 +122,7 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("browser prior screenshot is invalid")
 		}
 		evidence, screenshot, err = visiblecheck.ObserveAndSealProduction(
-			ctx, production, staging, prior, priorScreenshot, input,
+			ctx, production, staging, prior, priorScreenshot, input, cookies,
 		)
 	}
 	if err != nil {

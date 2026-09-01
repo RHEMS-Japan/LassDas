@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/githubapi"
@@ -349,6 +350,70 @@ func runAwaitMergedStaging(ctx context.Context, args []string, getenv func(strin
 // the budget wide — the debug card's own wall is the final bound.
 func mergedStagingWait() githubapi.WaitOptions {
 	return githubapi.WaitOptions{PollInterval: time.Minute, Timeout: 72 * time.Hour}
+}
+
+// read-merged reads one pull request's merged state, nothing else. The
+// delivery uses it AFTER a merge verb failed, to report honestly whether
+// the merge itself landed — the merge verbs can fail after the merge did.
+func runReadMerged(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--number", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	number, err := strconv.ParseInt(arguments.one("--number"), 10, 64)
+	if err != nil || number <= 0 {
+		return fail("arguments_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	merged, err := runtime.controller.ReadPullMerged(ctx, number)
+	if err != nil {
+		return failFrom("read_merged_failed", err)
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), merged, controllerArtifactMaxBytes); err != nil {
+		return fail("read_merged_write_failed")
+	}
+	return nil
+}
+
+// promotion-delta reads what a stg→prod promotion would carry RIGHT NOW.
+// The requester sees this list in the staging report before writing Go —
+// the rail moves the whole branch, and Go approves the whole list.
+func runPromotionDelta(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	delta, err := runtime.controller.ReadPromotionDelta(ctx)
+	if err != nil {
+		return failFrom("promotion_delta_failed", err)
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), delta, controllerArtifactMaxBytes); err != nil {
+		return fail("promotion_delta_write_failed")
+	}
+	return nil
 }
 
 func runMergeFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
