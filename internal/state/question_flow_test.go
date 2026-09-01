@@ -403,7 +403,7 @@ func TestQuestionFlowPostsAcceptanceAndReceiptExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestQuestionFlowCompletesALostWebhookOnlyWhenNoRunExists(t *testing.T) {
+func TestQuestionFlowCompletesALostWebhookAndKeepsScanningWithARun(t *testing.T) {
 	api := newMemoryDynamo()
 	harness := newFlowHarness(t, api)
 	harness.backlog.activities = []hook.WebhookHint{
@@ -426,7 +426,9 @@ func TestQuestionFlowCompletesALostWebhookOnlyWhenNoRunExists(t *testing.T) {
 		t.Fatal("the same activity was fed twice")
 	}
 
-	// Once a run exists, the completion scan stops.
+	// A run coming alive must NOT stop the completion scan: runs proceed
+	// in parallel under the cards orchestration, and a new ticket arriving
+	// mid-run still has to be taken in.
 	envelope := claimForTerminal(t, harness.store)
 	harness.backlog.activities = append(harness.backlog.activities, hook.WebhookHint{
 		ActivityID: 43, ActivityType: harness.route.AllowedActivityType, ProjectID: harness.route.ProjectID,
@@ -435,8 +437,8 @@ func TestQuestionFlowCompletesALostWebhookOnlyWhenNoRunExists(t *testing.T) {
 	if result := harness.tick(t); result.Decision != hook.DecisionAccepted {
 		t.Fatalf("tick with active run = %+v", result)
 	}
-	if harness.ingest.calls != 1 {
-		t.Fatal("the completion scan ran while a run was active")
+	if harness.ingest.calls != 2 {
+		t.Fatalf("ingest calls = %d, want the mid-run activity taken in", harness.ingest.calls)
 	}
 }
 
@@ -445,6 +447,31 @@ func TestQuestionFlowCompletesALostWebhookOnlyWhenNoRunExists(t *testing.T) {
 // webhook was lost must not make that ticket invisible to every later scan.
 // Advancing the cursor past it would leave the requester with no
 // acknowledgement, no question and no final report, forever.
+// TestQuestionFlowIngestsNewTicketsWhileARunIsActive pins the parallel-runs
+// contract: an active run must not starve the intake. The old gate ("scan
+// only when no run is active") came from the single-run world and left the
+// second of two simultaneous tickets unread for as long as the first one
+// lived — found live on the board when ticket #2 never appeared.
+func TestQuestionFlowIngestsNewTicketsWhileARunIsActive(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	claimForTerminal(t, harness.store) // an active run: its notice exists
+	harness.backlog.activities = []hook.WebhookHint{
+		{ActivityID: 50, ActivityType: harness.route.AllowedActivityType, ProjectID: harness.route.ProjectID, ProjectKey: harness.route.ProjectKey, CreatorID: harness.route.AllowedCreatorID, IssueID: 9000, IssueKeyID: 600},
+	}
+	result := harness.tick(t)
+	if len(harness.ingest.seen) != 1 || harness.ingest.seen[0] != 50 {
+		t.Fatalf("processed = %v (tick=%+v), want the new ticket ingested while the run is active", harness.ingest.seen, result)
+	}
+	// And the settled state stays quiet — no re-feeding.
+	if result := harness.tick(t); result.Code != "question_tick_idle" {
+		t.Fatalf("settled tick = %+v", result)
+	}
+	if len(harness.ingest.seen) != 1 {
+		t.Fatalf("processed = %v, want no duplicates", harness.ingest.seen)
+	}
+}
+
 func TestQuestionFlowNeverSkipsATicketWhoseIngestFailed(t *testing.T) {
 	api := newMemoryDynamo()
 	harness := newFlowHarness(t, api)

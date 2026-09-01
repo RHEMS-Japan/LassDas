@@ -262,10 +262,15 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if err != nil {
 		return s.failure("question_tick_load", err, "")
 	}
+	// The intake completion runs EVERY tick, active runs or not. The old
+	// gate ("only when no run is active") assumed the single-run Lambda
+	// world; under the cards orchestration many runs proceed in parallel,
+	// and that gate starved every new ticket for as long as any run lived
+	// — found live when the second of two simultaneous tickets was never
+	// ingested while the first was being implemented.
+	ingestResult := s.completeLostIngest(ctx)
 	if !notice.Exists {
-		// No active run: this wake-up may complete a lost webhook instead
-		// (README: 既存 5 分 schedule は active run がない場合に限り照合する).
-		return s.completeLostIngest(ctx)
+		return ingestResult
 	}
 	// A notice that could not be posted must never hold back the answer
 	// adoption or the deadline: a stuck acknowledgement would otherwise mean
@@ -287,7 +292,9 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 		if noticePending {
 			return noticeResult
 		}
-		return s.result(DecisionAccepted, "question_tick_idle", "")
+		// Nothing more decisive happened: the tick's outcome is whatever
+		// the intake completion found (ingested or idle).
+		return ingestResult
 	}
 	deliveryID := snapshot.Record.DeliveryID
 	// A sealed question whose comment was never bound means the poster died
