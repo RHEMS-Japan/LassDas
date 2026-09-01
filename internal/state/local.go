@@ -58,6 +58,24 @@ func NewLocalStore(path string) (*LocalStore, error) {
 	return &LocalStore{db: db}, nil
 }
 
+// OpenLocalStoreReadOnly opens an existing ledger without creating files,
+// tables, WALs, or write-capable transactions. The console uses this path.
+func OpenLocalStoreReadOnly(path string) (*LocalStore, error) {
+	if path == "" {
+		return nil, errors.New("local ledger path must not be empty")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("local ledger could not open read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("SELECT pk FROM ledger LIMIT 1"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("local ledger could not verify read-only: %w", err)
+	}
+	return &LocalStore{db: db}, nil
+}
+
 // Close releases the underlying database handle.
 func (s *LocalStore) Close() error { return s.db.Close() }
 
@@ -1204,7 +1222,7 @@ func (s *LocalStore) BeginReply(ctx context.Context, request hook.ReplyBeginRequ
 		"pk": markerKey, "record_type": "question_reply", "run_key": binding.runKey,
 		"question_record_sha256": request.RecordSHA256, "reply_kind": string(request.Kind),
 		"trigger_comment_id": request.TriggerCommentID, "content_sha256": request.ContentSHA256,
-		"reply_started_at": request.StartedAt.UnixMilli(),
+		"reply_started_at":  request.StartedAt.UnixMilli(),
 		"reply_lease_until": request.LeaseUntil.UnixMilli(), "reply_lease_token": request.LeaseToken,
 	})
 	if err != nil || !created {
@@ -1671,21 +1689,26 @@ var (
 // RunOverview is one live run row, read for the attendant's card sync. A
 // read-only convenience over the same rows the sealed operations manage.
 type RunOverview struct {
-	Key        string // the ledger row key, for administrative transitions
-	RunID      string
-	DeliveryID string
-	State      string
-	ClaimedAt  int64 // ms; 0 unless the run holds (or held) a claim
+	Key         string // the ledger row key, for administrative transitions
+	RunID       string
+	DeliveryID  string
+	State       string
+	ClaimedAt   int64 // ms; 0 unless the run holds (or held) a claim
+	QueuedAt    int64
+	CompletedAt int64
 	// QuestionSealed marks a run carrying sealed question evidence — its
 	// report_pending flavor belongs to the tick's expiry pass, never to
 	// claim recovery.
 	QuestionSealed bool
 	// TerminalCode is set for terminal runs; the attendant retires the
 	// card itself only for its own terminations (expiry, cancel).
-	TerminalCode string
-	IssueID    int64
-	IssueKey   string
-	Summary    string
+	TerminalCode       string
+	EnvelopeJSON       string
+	QuestionRecordJSON string
+	QuestionCommentID  int64
+	IssueID            int64
+	IssueKey           string
+	Summary            string
 }
 
 // ScanRuns lists every run row in the ledger. Read-only; the attendant uses
@@ -1718,8 +1741,13 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		entry.DeliveryID, _ = row.str("delivery_id")
 		entry.State, _ = row.str("state")
 		entry.ClaimedAt, _ = row.int64At("claimed_at")
+		entry.QueuedAt, _ = row.int64At("queued_at")
+		entry.CompletedAt, _ = row.int64At("terminal_completed_at")
 		entry.QuestionSealed = row.has("question_record_sha256")
 		entry.TerminalCode, _ = row.str("terminal_code")
+		entry.EnvelopeJSON, _ = row.str("envelope_json")
+		entry.QuestionRecordJSON, _ = row.str("question_record_json")
+		entry.QuestionCommentID, _ = row.int64At("question_comment_id")
 		if envelopeJSON, ok := row.str("envelope_json"); ok {
 			if envelope, err := decodeEnvelope([]byte(envelopeJSON)); err == nil {
 				entry.IssueID = envelope.Snapshot.IssueID

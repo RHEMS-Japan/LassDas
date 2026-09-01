@@ -23,6 +23,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
+	engineRuntime "automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 //go:embed dist
@@ -52,6 +56,7 @@ func run() error {
 	projectID := flags.String("project-id", os.Getenv("LASSDAS_CONSOLE_PROJECT_ID"), "tracker numeric project id")
 	instanceRepo := flags.String("instance-repo", os.Getenv("LASSDAS_CONSOLE_INSTANCE_REPO"), "instance repository (owner/name)")
 	listen := flags.String("listen", "127.0.0.1:8542", "listen address")
+	runtimeConfigPath := flags.String("runtime-config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "single-pod runtime config (uses its read-only local ledger and sealed runs)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -64,9 +69,25 @@ func run() error {
 		Listen:        *listen,
 		GitHubToken:   githubToken(),
 	}
+	var loadedRuntime *engineRuntime.Config
+	if *runtimeConfigPath != "" {
+		runtimeConfig, err := engineRuntime.Load(*runtimeConfigPath)
+		if err != nil {
+			return err
+		}
+		loadedRuntime = &runtimeConfig
+		if cfg.TrackerDomain == "" {
+			cfg.TrackerDomain = strings.TrimPrefix(strings.TrimPrefix(runtimeConfig.Tracker.Origin, "https://"), "http://")
+		}
+		if cfg.ProjectID == "" {
+			cfg.ProjectID = fmt.Sprint(runtimeConfig.Tracker.ProjectID)
+		}
+		if cfg.InstanceRepo == "" {
+			cfg.InstanceRepo = runtimeConfig.Identity.Repository
+		}
+	}
 	var missing []string
 	for name, value := range map[string]string{
-		"--state-table / LASSDAS_CONSOLE_STATE_TABLE":       cfg.StateTable,
 		"--tracker-domain / LASSDAS_CONSOLE_TRACKER_DOMAIN": cfg.TrackerDomain,
 		"LASSDAS_CONSOLE_TRACKER_KEY":                       cfg.TrackerKey,
 		"--instance-repo / LASSDAS_CONSOLE_INSTANCE_REPO":   cfg.InstanceRepo,
@@ -74,6 +95,9 @@ func run() error {
 		if value == "" {
 			missing = append(missing, name)
 		}
+	}
+	if *runtimeConfigPath == "" && cfg.StateTable == "" {
+		missing = append(missing, "--state-table / LASSDAS_CONSOLE_STATE_TABLE")
 	}
 	if len(missing) > 0 {
 		return errors.New("missing configuration: " + strings.Join(missing, ", "))
@@ -86,13 +110,8 @@ func run() error {
 		return errors.New("--listen must stay on 127.0.0.1 (got " + cfg.Listen + ")")
 	}
 
-	awsConfig, err := config.LoadDefaultConfig(context.Background())
-	if err != nil {
-		return fmt.Errorf("AWS configuration: %w", err)
-	}
 	server := &consoleServer{
 		config: cfg,
-		dynamo: dynamodb.NewFromConfig(awsConfig),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			// The tracker key travels in the query - the only form the
@@ -103,6 +122,26 @@ func run() error {
 				return http.ErrUseLastResponse
 			},
 		},
+	}
+	if *runtimeConfigPath != "" {
+		runtimeConfig := *loadedRuntime
+		local, err := state.OpenLocalStoreReadOnly(runtimeConfig.LedgerPath)
+		if err != nil {
+			return fmt.Errorf("local state: %w", err)
+		}
+		defer func() { _ = local.Close() }()
+		workerConfig, err := worker.LoadConfig(runtimeConfig.ConsumerConfigPath)
+		if err != nil {
+			return fmt.Errorf("consumer config: %w", err)
+		}
+		server.local, server.runtimeConfig, server.workerConfig = local, &runtimeConfig, &workerConfig
+		server.hermes = engineRuntime.NewHermes(runtimeConfig)
+	} else {
+		awsConfig, err := config.LoadDefaultConfig(context.Background())
+		if err != nil {
+			return fmt.Errorf("AWS configuration: %w", err)
+		}
+		server.dynamo = dynamodb.NewFromConfig(awsConfig)
 	}
 	// Who the key belongs to decides whether answering is offered at all.
 	// A failed lookup disables answering and nothing else - reads must not

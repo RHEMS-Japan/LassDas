@@ -55,6 +55,13 @@ type TicketDetail = {
   can_answer?: boolean;
   answering_reason?: string;
   question_comment_id?: string;
+  run_status?: {
+    now: string;
+    so_far: string;
+    next: string;
+    estimate: string;
+    terminal_url?: string;
+  };
 };
 
 export function App() {
@@ -336,6 +343,21 @@ function TicketDetailView({ detail, onAnswered }: { detail: TicketDetail; onAnsw
               : "自動処理が回答を受け付けるのは、このチケットの許可回答者だけです。回答は Backlog のコメントとして、許可回答者本人が投稿してください。"
           }
         />
+      )}
+
+      {detail.run_status && (
+        <div aria-label="実行状況" className="border border-solid-gray-300 rounded-8 p-4">
+          <h3 className="text-std-16B-170 text-solid-gray-900 mb-2">実行状況</h3>
+          <p>今: {detail.run_status.now}</p>
+          <p>ここまで: {detail.run_status.so_far}</p>
+          <p>
+            この後: {detail.run_status.next}
+            {detail.run_status.terminal_url && (
+              <> — <a className="text-blue-900 underline" href={detail.run_status.terminal_url} target="_blank" rel="noreferrer">最終結果を開く</a></>
+            )}
+          </p>
+          <p>見込み: {detail.run_status.estimate}</p>
+        </div>
       )}
 
       {detail.current_jobs && detail.current_jobs.length > 0 && (
