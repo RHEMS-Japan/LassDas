@@ -66,6 +66,31 @@ func TestRecoverLostClaimRequeuesADeadClaim(t *testing.T) {
 	}
 }
 
+func TestReadOnlyLocalStoreScansWithoutAcceptingWrites(t *testing.T) {
+	path := t.TempDir() + "/ledger.db"
+	writer, err := NewLocalStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Enqueue(context.Background(), testQueueRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenLocalStoreReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if runs, err := reader.ScanRuns(context.Background()); err != nil || len(runs) != 1 {
+		t.Fatalf("ScanRuns = %v, %v", runs, err)
+	}
+	if _, err := reader.Enqueue(context.Background(), testQueueRequest(t)); err == nil {
+		t.Fatal("read-only console store accepted a write")
+	}
+}
+
 // A runner that died between the two phases of its own terminal report
 // leaves terminal_report_pending with no question evidence; recovery
 // refuses it while the lease lives, then clears the partial terminal

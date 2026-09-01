@@ -43,6 +43,49 @@ type trailStage struct {
 	Request   TicketRequest
 }
 
+// TrailSummary is the bounded read projection used by the local operations
+// console. It is derived only after LoadTrailStages has revalidated the sealed
+// ticket/source/candidate/review/decision chain.
+type TrailSummary struct {
+	Cycles   []TrailCycle
+	Decision string
+}
+
+type TrailCycle struct {
+	Number         int
+	Reviews        []TrailReview
+	Findings       int
+	DurationMillis int64
+}
+
+type TrailReview struct {
+	Reviewer, Verdict string
+	Findings          int
+	DurationMillis    int64
+}
+
+func LoadTrailSummary(historyDir string, config Config, toolSHA string) (TrailSummary, error) {
+	stages, err := LoadTrailStages(historyDir, config, toolSHA)
+	if err != nil {
+		return TrailSummary{}, err
+	}
+	return summarizeTrailStages(stages), nil
+}
+
+func summarizeTrailStages(stages []trailStage) TrailSummary {
+	summary := TrailSummary{Decision: stages[len(stages)-1].Decision.Outcome}
+	for _, stage := range stages {
+		cycle := TrailCycle{Number: stage.Stage}
+		for _, review := range stage.Reviews {
+			cycle.Reviews = append(cycle.Reviews, TrailReview{Reviewer: review.ReviewerID, Verdict: review.Verdict, Findings: len(review.Findings), DurationMillis: review.Invocation.LatencyMillis})
+			cycle.Findings += len(review.Findings)
+			cycle.DurationMillis += review.Invocation.LatencyMillis
+		}
+		summary.Cycles = append(summary.Cycles, cycle)
+	}
+	return summary
+}
+
 // LoadTrailStages reads stage-1..N from a model history directory, validating
 // every artifact against the sealed chain before it may appear in a trail. A
 // missing stage-1 is an error; the trail of a run that never implemented

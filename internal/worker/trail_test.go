@@ -57,3 +57,21 @@ func TestComposeTrailRendersTheRunRecord(t *testing.T) {
 		t.Fatalf("trail claims validation it did not have:\n%s", unvalidated)
 	}
 }
+
+func TestTrailSummaryUsesTheLatestValidatedCycle(t *testing.T) {
+	config, request, source, candidate, reviews := nonconvergedFixture(t)
+	decision, err := DecideStage(candidate, reviews, source, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := summarizeTrailStages([]trailStage{{
+		Stage: 2, Candidate: candidate, Reviews: reviews, Decision: decision,
+		Source: source, Request: request,
+	}})
+	if len(summary.Cycles) != 1 || summary.Cycles[0].Number != 2 || summary.Decision != decision.Outcome || summary.Cycles[0].Findings != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if len(summary.Cycles[0].Reviews) != len(reviews) || summary.Cycles[0].Reviews[0].Verdict != reviews[0].Verdict {
+		t.Fatalf("reviews = %v", summary.Cycles[0].Reviews)
+	}
+}
