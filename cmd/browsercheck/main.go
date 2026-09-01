@@ -38,7 +38,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "browsercheck: verification failed")
+		// The reason is operational gold: every input here is a sealed
+		// artifact, and "which seal refused" is the whole diagnosis.
+		_, _ = fmt.Fprintln(os.Stderr, "browsercheck: verification failed:", err)
 		os.Exit(1)
 	}
 }

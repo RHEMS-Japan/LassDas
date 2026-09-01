@@ -104,6 +104,21 @@ func ObserveForE2E(parent context.Context, targetURL, expectedText, absentText s
 		strings.ContainsAny(expectedText+absentText, "\x00\r\n") {
 		return E2EObservation{}, errors.New("browser observation request is invalid")
 	}
+	return observeSession(parent, targetURL, expectedText, absentText, cookies)
+}
+
+// ObserveForReference is the no-promise observation: open the page with
+// the session cookies and capture what it shows. No expectation and no
+// verdict — the empty expected text trivially "appears" — so the capture
+// is reference material for a human, never promotion-grade proof.
+func ObserveForReference(parent context.Context, targetURL string, cookies []E2ECookie) (E2EObservation, error) {
+	if parent == nil || !validExactHTTPSURL(targetURL) {
+		return E2EObservation{}, errors.New("browser observation request is invalid")
+	}
+	return observeSession(parent, targetURL, "", "", cookies)
+}
+
+func observeSession(parent context.Context, targetURL, expectedText, absentText string, cookies []E2ECookie) (E2EObservation, error) {
 	if err := validSessionCookies(cookies); err != nil {
 		return E2EObservation{}, err
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/hook"
 )
 
 func deliverPipeline(t *testing.T) *Pipeline {
@@ -218,6 +220,67 @@ func TestRunDeliverProductionNeedsTheSealedStagingObservation(t *testing.T) {
 // The promotion gate moves exactly one delivery, so a Go must only be
 // requested when the release→integration delta is this delivery's own
 // files (plus the CI digest files). Everything else is an honest hold.
+// A ticket without a visible-wording promise cannot pass or fail a screen
+// check, and the promotion gates need the pass evidence this path cannot
+// produce. The report must say exactly that: a deploy-verified pass, no
+// verdict theater, and an honest promotion hold.
+func TestReferenceStagingReportPassesWithAnHonestHold(t *testing.T) {
+	pipeline := deliverPipeline(t)
+	stageDir := "history/stage-1"
+	if err := os.MkdirAll(pipeline.path(stageDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// repository only — no verification_path, no expected_text.
+	if err := os.WriteFile(pipeline.path(stageDir+"/ticket.json"), []byte(`{"repository":"example/one"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-existing delta skips the controller verb entirely.
+	if err := os.WriteFile(pipeline.path(DeliverDeltaFile), []byte(`{"status":"ahead","files":["client/src/page.tsx"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.sealReferenceStagingReport(context.Background(), stageDir); err != nil {
+		t.Fatalf("sealReferenceStagingReport() error = %v", err)
+	}
+	raw, err := os.ReadFile(pipeline.path(DeliverStagingReportFile))
+	if err != nil {
+		t.Fatalf("report unreadable: %v", err)
+	}
+	var report DeliverReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("report is not valid JSON: %v", err)
+	}
+	if report.Verdict != "pass" {
+		t.Fatalf("verdict = %q, want pass", report.Verdict)
+	}
+	if report.ScreenChecked {
+		t.Fatal("screen_checked must stay false: no screen was verified")
+	}
+	if !strings.Contains(report.Detail, "画面の合否確認は行っていません") {
+		t.Fatalf("detail = %q, want the no-verdict explanation", report.Detail)
+	}
+	if !report.Screenshot && strings.Contains(report.Detail, "写真を添付") {
+		t.Fatalf("detail = %q promises a photo that was not captured", report.Detail)
+	}
+	if !strings.Contains(report.PromotionHold, "合格証拠を作れない") {
+		t.Fatalf("promotion hold = %q, want the honest hold", report.PromotionHold)
+	}
+	if report.TargetURL == "" {
+		t.Fatalf("target url should carry the staging origin for the reader")
+	}
+	// The requester-facing headline must not claim a screen check either —
+	// render the real comment, not just the struct.
+	content := hook.DeliverStagingContent("RFDEV-900", hook.DeliverStagingReport{
+		Verdict: report.Verdict, Detail: report.Detail, PromotionHold: report.PromotionHold,
+		ScreenChecked: report.ScreenChecked,
+	})
+	if strings.Contains(content, "画面を自動確認しました") {
+		t.Fatalf("headline claims a screen check that did not happen:\n%s", content)
+	}
+	if !strings.Contains(content, "画面の合否確認は行っていません") {
+		t.Fatalf("headline should state the no-check honestly:\n%s", content)
+	}
+}
+
 func TestPromotionHoldTracksTheGateReality(t *testing.T) {
 	build := func(t *testing.T, delta string) *Pipeline {
 		pipeline := deliverPipeline(t)

@@ -306,6 +306,7 @@ func reportDeliverStaging(ctx context.Context, config runtime.Config, services *
 		Preview:        deliverPreview(report.Delta),
 		GoDeadlineDays: int(config.Chain.Deliver.GoWait().Hours() / 24),
 		PromotionHold:  report.PromotionHold,
+		ScreenChecked:  report.ScreenChecked,
 	}
 	attachments := deliverScreenshotAttachment(ctx, services, run, runDir, runner.DeliverStagingShotFile, "stg-"+run.IssueKey+".png", &rendered.ScreenshotAttached, logger)
 	content := hook.DeliverStagingContent(run.RunID, rendered)

@@ -37,6 +37,10 @@ type DeliverStagingReport struct {
 	// PromotionHold, when set, replaces the Go instructions: the promotion
 	// gate could not pass right now, and asking for a Go would only fail.
 	PromotionHold string
+	// ScreenChecked distinguishes a machine-verified pass from the
+	// reference path's deploy-only pass; the headline must never claim a
+	// screen check that did not happen.
+	ScreenChecked bool
 }
 
 // DeliverStagingContent renders the staging report with the Go
@@ -46,7 +50,11 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 	var builder strings.Builder
 	switch report.Verdict {
 	case "pass":
-		builder.WriteString("【ステージング反映済み】変更をステージングに反映し、画面を自動確認しました。結果: 合格です。\n\n")
+		if report.ScreenChecked {
+			builder.WriteString("【ステージング反映済み】変更をステージングに反映し、画面を自動確認しました。結果: 合格です。\n\n")
+		} else {
+			builder.WriteString("【ステージング反映済み】変更をステージングに反映しました。画面の合否確認は行っていません（チケットに画面表示の約束が無いため）。\n\n")
+		}
 	case "checks_failed":
 		builder.WriteString("【ステージング反映できず】納品した変更の自動検査 (CI) が全部緑になりませんでした。ステージングへの反映は行っていません。\n\n")
 	case "merge_failed":

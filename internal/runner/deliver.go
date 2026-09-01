@@ -68,7 +68,12 @@ type DeliverReport struct {
 	// delivery: foreign changes on staging, divergence, or an unreadable
 	// delta all block it). The attendant then reports honestly instead of
 	// asking for a Go that could only fail.
-	PromotionHold string    `json:"promotion_hold,omitempty"`
+	PromotionHold string `json:"promotion_hold,omitempty"`
+	// ScreenChecked marks a pass whose screen WAS machine-verified. The
+	// reference path (no visible-wording promise on the ticket) passes
+	// without checking any screen, and the report headline must never
+	// claim otherwise.
+	ScreenChecked bool      `json:"screen_checked,omitempty"`
 	ObservedAt    time.Time `json:"observed_at"`
 }
 
@@ -188,6 +193,17 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 	if err := extractArtifactPayload[json.RawMessage](p.path(DeliverStagingProofFile), p.path(DeliverStagingPlainProofFile)); err != nil {
 		return err
 	}
+	// A ticket that promises nothing about visible wording (the intake
+	// contract allows that) has nothing a machine can pass or fail — and
+	// the promotion gates require the sealed pass evidence this path
+	// cannot produce. Verifying nothing would be theater; failing would be
+	// a lie. So: observe for reference (photo, no verdict), report the
+	// deploy-verified pass, and hold the promotion honestly. Only the
+	// explicit no-promise shape takes this path — an unreadable ticket or
+	// a broken consumer config keeps failing loudly downstream.
+	if verificationPath, err := p.readJSONField(stageDir+"/ticket.json", "verification_path"); err == nil && verificationPath == "" {
+		return p.sealReferenceStagingReport(ctx, stageDir)
+	}
 	if !p.exists(DeliverStagingVisibleFile) {
 		code, err := p.browsercheck(ctx, stageDir, reviews, "staging",
 			"--staging-proof", p.path(DeliverStagingPlainProofFile),
@@ -212,7 +228,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 			_ = os.WriteFile(p.path(DeliverDeltaFile), []byte(`{"status":"unavailable"}`), 0o600)
 		}
 	}
-	report := DeliverReport{Phase: "staging", Verdict: "pass"}
+	report := DeliverReport{Phase: "staging", Verdict: "pass", ScreenChecked: true}
 	p.fillObservation(&report, stageDir, "staging", DeliverStagingVisibleFile, DeliverStagingShotFile)
 	p.fillDelta(&report)
 	report.PromotionHold = p.promotionHold()
@@ -402,7 +418,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 				"本番反映は完了しましたが、本番画面の機械確認が合格しませんでした。手動でご確認ください。")
 		}
 	}
-	report := DeliverReport{Phase: "production", Verdict: "pass"}
+	report := DeliverReport{Phase: "production", Verdict: "pass", ScreenChecked: true}
 	p.fillObservation(&report, stageDir, "production", DeliverProductionVisibleFile, DeliverProductionShotFile)
 	if url, err := p.readJSONField(DeliverPromotionFile, "payload", "pull_request", "HTMLURL"); err == nil {
 		report.PullRequestURL = url
@@ -504,6 +520,57 @@ func (p *Pipeline) browsercheck(ctx context.Context, stageDir string, reviews []
 	}
 	argv = append(argv, extra...)
 	return p.step(ctx, "browsercheck-"+environment, argv)
+}
+
+// sealReferenceStagingReport reports a staging delivery whose ticket makes
+// no promise about visible wording: the deploy itself is verified (the
+// sealed proof chain up to here), a reference photo is attached when the
+// browser can take one, and the promotion is held — the gates require
+// pass evidence this path cannot honestly produce.
+func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir string) error {
+	if !p.exists(DeliverDeltaFile) {
+		if code, err := p.controller(ctx, "promotion-delta", append([]string{"promotion-delta"},
+			p.deliverCommon(stageDir, "--out", p.path(DeliverDeltaFile))...)); err != nil {
+			return err
+		} else if code != 0 {
+			_ = os.WriteFile(p.path(DeliverDeltaFile), []byte(`{"status":"unavailable"}`), 0o600)
+		}
+	}
+	report := DeliverReport{
+		Phase: "staging", Verdict: "pass",
+		PromotionHold: "このチケットには画面に表示される内容の約束が無く、本番反映に必要な画面確認の合格証拠を作れないため、自動の本番反映は行いません。" +
+			"ステージングでの動作確認は人の目で行ってください。本番へ反映する場合は、運用の昇格手順で反映してください。",
+	}
+	var cookieNote string
+	if repository, err := p.readJSONField(stageDir+"/ticket.json", "repository"); err == nil && repository != "" {
+		if origin, err := consumerOrigin(p.Config.ConsumerConfigPath, repository, "staging"); err == nil {
+			report.TargetURL = strings.TrimRight(origin, "/") + "/"
+			var cookies []visiblecheck.E2ECookie
+			cookies, cookieNote = loadE2ESessionCookies(os.Getenv(E2ESessionFileEnvironment))
+			if observed, err := visiblecheck.ObserveForReference(ctx, report.TargetURL, cookies); err == nil {
+				report.FinalURL, report.StatusCode = observed.FinalURL, observed.StatusCode
+				if len(observed.ScreenshotPNG) > 0 {
+					if err := os.WriteFile(p.path(DeliverStagingShotFile), observed.ScreenshotPNG, 0o600); err == nil {
+						report.Screenshot = true
+					}
+				}
+			}
+		}
+	}
+	// The detail is composed AFTER the observation so it never promises a
+	// photo the best-effort capture did not produce.
+	report.Detail = "デプロイの完了は照合済みです。チケットに画面へ表示される内容の約束が書かれていないため、画面の合否確認は行っていません。"
+	if report.Screenshot {
+		report.Detail += " 参考として反映後の画面写真を添付します。"
+	}
+	if cookieNote != "" {
+		report.Detail = strings.TrimSpace(report.Detail + " " + cookieNote)
+	}
+	p.fillDelta(&report)
+	if sha, err := p.readJSONField(DeliverMergeFile, "payload", "merge", "MergeSHA"); err == nil {
+		report.MergedSHA = sha
+	}
+	return p.sealDeliverReport(report)
 }
 
 // sealCourtesyObservation is the two-tier fallback: the sealed observation
