@@ -136,6 +136,12 @@ YAML
 # one measured working on the pod (2026-08-24: OK-implementer /
 # OK-review-a / OK-review-b probes through all three identities); written
 # every boot like the other profiles, so a restart heals drift.
+#
+# agent.max_turns is Hermes' cap on tool-calling iterations (its default is
+# 500). An implementer that stops making progress burns the whole budget:
+# measured live 2026-09-02, one run spent 458 iterations — 425 of them the
+# same file search — without changing a file. The cap is an operator
+# setting so the money a run can waste is bounded per deployment.
 IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
 mkdir -p "$IMPLEMENTER_HOME"
 cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
@@ -146,6 +152,8 @@ providers:
   lassdas-gateway:
     base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_IMPLEMENTER_KEY
+agent:
+  max_turns: ${LASSDAS_IMPLEMENTER_MAX_TURNS:-200}
 YAML
 
 # Cards orchestration: the destination credential moves from the process

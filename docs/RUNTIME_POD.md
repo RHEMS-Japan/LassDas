@@ -164,6 +164,16 @@ fabricated workflow link.
   report (the board keeps showing the state afterwards), and a release
   report whose outcome seal was lost falls back to the production report
   file, so a lost seal cannot recreate the dead end.
+- **Model roles**: the three agent roles read their model and credential
+  from the pod environment — `LASSDAS_IMPLEMENTER_MODEL` /
+  `LASSDAS_IMPLEMENTER_KEY`, `LASSDAS_REVIEW_A_MODEL` / `LASSDAS_REVIEW_A_KEY`,
+  `LASSDAS_REVIEW_B_MODEL` / `LASSDAS_REVIEW_B_KEY` — and `entrypoint.sh`
+  rewrites the Hermes profiles from them on every boot. The direct model
+  calls of the reception (`models.*` in the consumer configuration) name
+  their own credential variables, so the implementer's key can change
+  without moving the reception. `LASSDAS_IMPLEMENTER_MAX_TURNS` (default
+  200) caps the implementer's tool-calling iterations; the reviewers are
+  capped at 40 in their profiles.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
@@ -196,6 +206,7 @@ means adding a row here and the test it names.
 | A model answer the contract refuses — unreadable (prose, a code fence, an unknown field) or readable but wrong in meaning (a pass verdict that lists reasons, a question id outside Q1–Q3) — on any of the eight JSON-answering calls | `internal/worker` `TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable`, `TestConverseJSONGivesUpAfterThreeUnreadableAnswers`, `TestConverseJSONDoesNotRetryATransportFailure`, `TestAssessReadinessSurvivesOneUnreadableAnswer`, `TestCheckReadinessSurvivesOneContractViolation` | live, 2026-09-02 |
 | A consumer whose staging deploy pushes no digest commit (its `staging_digest_commit` is unset), at the staging gate and again at the promotion gate | `cmd/controller` `TestStagingDeploymentValidationFollowsTheConsumerDigestPolicy`; `internal/githubapi` `TestCreatePromotionPullRequestAcceptsAConsumerWithoutADigestPolicy`, `TestPromotionProofFollowsTheConsumerDigestPolicy`; `internal/releaseproof` `TestStagingDeploymentAcceptsAConsumerWithoutADigestPolicy` | live, 2026-09-02 (the first gateway delivery to reach staging died at the staging gate; the promotion gate was found by review before a Go reached it) |
 | An attention state nobody could clear (a report told an operator to look; no way to record that they had), and a rail that went dark for it | `internal/attendant` `TestResolveAttentionPostsOnceAndSeals`, `TestResolveAttentionStaysSilentWithoutAValidConfirmation`, `TestOperatorConfirmationFollowsTheStopRules`, `TestAttentionCarriesTheStageItStoppedAtAndAnOperatorCanClearIt`; `internal/hook` `TestDeliverResolvedContentCarriesTheMarkerAndNamesProduction`; `cmd/statusboard` `TestBoardPageLightsTheStageAnAttentionStateStoppedAt` | live, 2026-09-02 (a delivery held open 4.5 hours after its staging deploy had succeeded) |
+| An implementer that stops making progress and spends the whole iteration budget on it | not a test: `LASSDAS_IMPLEMENTER_MAX_TURNS` bounds the iterations per run (`entrypoint.sh`) | live, 2026-09-02 (458 of 500 iterations, 425 of them the same search, no file changed) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
