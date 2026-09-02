@@ -30,6 +30,10 @@
 #   STATEFULSET       (default: lassdas)
 #   CONFIGMAP         (default: lassdas-config)
 #   CONTAINER         container to update (default: the StatefulSet's first)
+#   AWS_PROFILE       the AWS identity that may push to an ECR repository —
+#                     the script refreshes the registry login with it; a
+#                     default profile on another account fails at push time
+#                     (as happened once, ten minutes into a build)
 #
 # Run it from the engine checkout root with a clean, committed tree: the
 # engine sha baked into the image is HEAD, and an uncommitted change would
@@ -107,6 +111,20 @@ fi
 say "build context → $RELEASE_BUILD_DIR"
 mkdir -p "$RELEASE_BUILD_DIR"
 rsync -a --delete --exclude .git --exclude node_modules ./ "$RELEASE_BUILD_DIR/"
+
+# ---- 4b. registry credentials, refreshed before the ten-minute build ------
+# A registry login expires (ECR: 12 hours); discovering that at push time
+# throws the whole build away. For an ECR repository the login is refreshed
+# here from the host name; any other registry must already be logged in,
+# and either way a readable repository is proven before building.
+if [[ "$image_repo" =~ ^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com/ ]]; then
+  say "refreshing ECR login (${BASH_REMATCH[1]})"
+  aws ecr get-login-password --region "${BASH_REMATCH[1]}" \
+    | docker login --username AWS --password-stdin "${image_repo%%/*}" >/dev/null
+fi
+docker manifest inspect "$image_repo:latest" >/dev/null 2>&1 \
+  || docker manifest inspect "$image_repo:$(git rev-parse HEAD~1)" >/dev/null 2>&1 \
+  || echo "note: no previous tag readable in $image_repo (first release, or the registry refuses reads); the push will tell"
 
 # ---- 5. build + push (arm64, no cache: a stale layer ships old code) -------
 tag="$image_repo:$engine_sha"
