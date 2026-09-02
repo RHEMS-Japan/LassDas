@@ -463,7 +463,7 @@ func cloneProductionProof(t *testing.T, proof ProductionProof) ProductionProof {
 // on the new base (per-file blob checks) and publishes there, so the SOURCE
 // base is legitimately older than the baseline. The proof must accept that
 // shape — requiring equality is what rejected the first real advanced
-// delivery (RFDEV-668, 2026-09-01).
+// delivery (2026-09-01).
 func advancedBaseFixture(t *testing.T) StagingInputs {
 	t.Helper()
 	advanced := objectID("b")

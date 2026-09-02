@@ -17,7 +17,7 @@ func validRuntimeConfigMap() map[string]any {
 		"ledger_path": "/data/ledger.db",
 		"tracker": map[string]any{
 			"origin": "https://example.backlog.com", "space_key": "example",
-			"project_id": 100, "project_key": "RFDEV",
+			"project_id": 100, "project_key": "TKT",
 			"allowed_creator_id": 7, "allowed_activity_type": 1,
 			"required_category_id": 0,
 			"board_statuses":       map[string]any{"running": 1, "awaiting_answer": 2, "delivered": 3, "needs_attention": 4},

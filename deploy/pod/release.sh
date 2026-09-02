@@ -5,7 +5,7 @@
 # Every engine change must go through this script: the runner refuses to
 # start when runtime.json's sha256 pins disagree with the stage binaries in
 # the image, and copying the pins by hand is exactly the step that was
-# skipped once (RFDEV-671 died on "worker binary does not match its
+# skipped once (a live ticket died on "worker binary does not match its
 # configured sha256 pin"). Here the pins come from /etc/lassdas/tool-pins.txt
 # inside the freshly built image, so ConfigMap and image can never drift.
 #

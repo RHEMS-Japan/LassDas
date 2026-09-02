@@ -269,7 +269,7 @@ func TestReferenceStagingReportPassesWithAnHonestHold(t *testing.T) {
 	}
 	// The requester-facing headline must not claim a screen check either —
 	// render the real comment, not just the struct.
-	content := hook.DeliverStagingContent("RFDEV-900", hook.DeliverStagingReport{
+	content := hook.DeliverStagingContent("TKT-900", hook.DeliverStagingReport{
 		Verdict: report.Verdict, Detail: report.Detail, PromotionHold: report.PromotionHold,
 		ScreenChecked: report.ScreenChecked,
 	})

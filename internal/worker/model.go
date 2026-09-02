@@ -345,8 +345,8 @@ const modelAnswerAttempts = 3
 // answered in the same conversation with the model's own answer
 // and the objection appended, up to modelAnswerAttempts times. Two live
 // tickets died on their first unreadable readiness answer with nothing
-// recorded (RFDEV-677/678), and the next one died one step later on an
-// answer that decoded but failed the contract's meaning (RFDEV-679); the
+// recorded (two live tickets), and the next one died one step later on an
+// answer that decoded but failed the contract's meaning; the
 // model now gets to correct itself before the run fails, and the final error
 // carries the objection, the request id and the head of the answer so the
 // failure can be read afterwards. The accept function receives the usage

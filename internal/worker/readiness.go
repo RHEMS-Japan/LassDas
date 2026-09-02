@@ -261,7 +261,7 @@ func (i *ModelInvoker) CheckReadiness(
 		sealed, err := NewReadinessCheck(output, assessment, source, request, config, usage, time.Now().UTC())
 		if err != nil {
 			// The reason travels: a pass verdict that still lists reasons is
-			// something the checker can correct when told (RFDEV-679 died on
+			// something the checker can correct when told (a live ticket died on
 			// this step with the reason hidden behind a fixed phrase).
 			return fmt.Errorf("generated readiness check is invalid: %w", err)
 		}

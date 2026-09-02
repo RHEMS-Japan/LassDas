@@ -19,7 +19,7 @@ func TestClassifyRunNamesEveryPipelinePosition(t *testing.T) {
 	root := t.TempDir()
 	config := runtime.Config{}
 	config.Chain.RunsRoot = root
-	const delivery = "RFDEV-900:7"
+	const delivery = "TKT-900:7"
 	writeReport := func(t *testing.T, name, body string) {
 		t.Helper()
 		dir := filepath.Join(root, delivery)
@@ -122,7 +122,7 @@ func TestCanGoRequiresThePostedReport(t *testing.T) {
 	root := t.TempDir()
 	config := runtime.Config{}
 	config.Chain.RunsRoot = root
-	const delivery = "RFDEV-901:1"
+	const delivery = "TKT-901:1"
 	write := func(t *testing.T, name, body string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Join(root, delivery), 0o755); err != nil {
@@ -156,8 +156,8 @@ func TestCanGoRequiresThePostedReport(t *testing.T) {
 func TestWriteBoardStatusAppendsOneEventPerMovedDelivery(t *testing.T) {
 	dir := t.TempDir()
 	first := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Unix(1000, 0).UTC(), Runs: []RunStatus{
-		{DeliveryID: "a", IssueKey: "RFDEV-1", Step: "implement", StepTitle: "実装・検証中"},
-		{DeliveryID: "b", IssueKey: "RFDEV-2", Step: "checks", StepTitle: "自動検査 (CI) 待ち"},
+		{DeliveryID: "a", IssueKey: "TKT-1", Step: "implement", StepTitle: "実装・検証中"},
+		{DeliveryID: "b", IssueKey: "TKT-2", Step: "checks", StepTitle: "自動検査 (CI) 待ち"},
 	}}
 	if err := WriteBoardStatus(dir, first); err != nil {
 		t.Fatal(err)
@@ -165,8 +165,8 @@ func TestWriteBoardStatusAppendsOneEventPerMovedDelivery(t *testing.T) {
 	second := first
 	second.GeneratedAt = time.Unix(2000, 0).UTC()
 	second.Runs = []RunStatus{
-		{DeliveryID: "a", IssueKey: "RFDEV-1", Step: "review", StepTitle: "レビュー中"},
-		{DeliveryID: "b", IssueKey: "RFDEV-2", Step: "checks", StepTitle: "自動検査 (CI) 待ち"},
+		{DeliveryID: "a", IssueKey: "TKT-1", Step: "review", StepTitle: "レビュー中"},
+		{DeliveryID: "b", IssueKey: "TKT-2", Step: "checks", StepTitle: "自動検査 (CI) 待ち"},
 	}
 	if err := WriteBoardStatus(dir, second); err != nil {
 		t.Fatal(err)

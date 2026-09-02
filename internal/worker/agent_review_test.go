@@ -203,7 +203,7 @@ func TestConfirmTreeMatchesCandidateRejectsAReviewerThatEdits(t *testing.T) {
 // A reviewer that runs the repository's own tests leaves untracked and
 // ignored byproducts behind. The published change is built from the sealed
 // candidate, so those files are noise, not tampering — treating them as
-// tampering killed RFDEV-674 after its review had passed.
+// tampering killed a live run after its review had passed.
 func TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	consumer := fixtureConsumerForAgent()

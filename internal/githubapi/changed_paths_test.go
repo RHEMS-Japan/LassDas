@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// A candidate's commit may add files, not only modify them: RFDEV-622's
+// A candidate's commit may add files, not only modify them: a live ticket's
 // delivery (a SQL migration plus three new modules) passed every review and
 // the deterministic validation, then died here because the verifier accepted
 // only "modified". Anything else — removals, renames — stays a refusal, since
@@ -39,7 +39,7 @@ func TestVerifyChangedPathsAcceptsAddedFiles(t *testing.T) {
 }
 
 // The promotion gate must accept the same statuses the candidate gate does:
-// after RFDEV-622 taught verifyChangedPaths to accept "added", verifyPathSet
+// after a live ticket taught verifyChangedPaths to accept "added", verifyPathSet
 // still rejected it, so any file-creating delivery cleared publish and
 // staging only to die at promotion. Deletions stay refusals on both gates.
 func TestVerifyPathSetAcceptsAddedFilesLikeTheCandidateGate(t *testing.T) {

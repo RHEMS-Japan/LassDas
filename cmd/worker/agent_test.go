@@ -266,7 +266,7 @@ func TestAgentReviewRejectsAReviewerThatCommits(t *testing.T) {
 }
 
 // A reviewer that runs the repository's tests leaves byproducts behind. They
-// are not tampering (RFDEV-674 died calling them that), and they must be gone
+// are not tampering (a live ticket died calling them that), and they must be gone
 // afterwards so the next round does not seal them as the implementer's work.
 func TestAgentReviewToleratesAndCleansUpToolingByproducts(t *testing.T) {
 	fixture := newAgentFixture(t, editTheLabel,

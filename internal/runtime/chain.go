@@ -49,7 +49,7 @@ func ChainStages(chain ChainConfig) []ChainStage {
 		// The card wall must outlast the reviewing agent's own budget
 		// (agents.reviewer_agents timeout, 60 minutes) plus sealing
 		// overhead, or the kanban SIGTERM kills a working review from
-		// outside: both live runs of RFDEV-618/619 died at exactly this
+		// outside: both live runs of two tickets died at exactly this
 		// wall while their reviewers were mid-judgment.
 		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60},
 		{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60},

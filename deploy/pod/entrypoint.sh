@@ -97,7 +97,7 @@ model:
   name: ${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_REVIEW_A_KEY
 agent:
   max_turns: 40
@@ -117,7 +117,7 @@ model:
   name: ${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_REVIEW_B_KEY
 agent:
   max_turns: 40
@@ -137,7 +137,7 @@ model:
   name: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:-https://gateway.metelix.ai/api/v1}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_IMPLEMENTER_KEY
 YAML
 

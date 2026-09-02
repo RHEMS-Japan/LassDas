@@ -349,7 +349,7 @@ func (s *sequenceChatAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, re
 
 // A model that answers in prose is asked again in the same conversation,
 // with its own answer and the decoder's objection in front of it. Two live
-// readiness assessments died on their first unreadable answer (RFDEV-677/678).
+// readiness assessments died on their first unreadable answer (two live tickets).
 func TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable(t *testing.T) {
 	config, _, _ := validArtifactFixture(t)
 	api := &sequenceChatAPI{outputs: []*ChatResponse{
@@ -435,7 +435,7 @@ func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
 
 // A checker that answers "pass" but still lists reasons decodes fine and
 // fails the contract's meaning. That objection is now something the checker
-// is told and gets to fix (RFDEV-679 died on it one step past the decoder).
+// is told and gets to fix (a live ticket died on it one step past the decoder).
 func TestCheckReadinessSurvivesOneContractViolation(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	assessment, _ := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)

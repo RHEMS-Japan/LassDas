@@ -595,7 +595,7 @@ func (c *Controller) verifyChangedPaths(ctx context.Context, baseSHA, headSHA st
 	for _, file := range response.Files {
 		// A candidate carries full file contents, so its commit can modify
 		// an existing file or add a new one — nothing else. "added" was
-		// missing here until RFDEV-622: the first live delivery to create
+		// missing here until the first live delivery that did: the first live delivery to create
 		// files (a SQL migration and three new modules) passed both reviews
 		// and the deterministic validation, then died at this line.
 		if file.Status != "modified" && file.Status != "added" {
@@ -892,7 +892,7 @@ func (c *Controller) verifyPathSet(ctx context.Context, baseSHA, baseTreeSHA, he
 	for _, file := range comparison.Files {
 		// Same statuses the candidate gate accepts (verifyChangedPaths): a
 		// delivery can modify or add files, never delete. The promotion gate
-		// kept rejecting "added" after RFDEV-622 fixed the candidate gate,
+		// kept rejecting "added" after a live ticket fixed the candidate gate,
 		// which stranded every file-creating delivery at promotion time.
 		if file.Status != "modified" && file.Status != "added" {
 			return invariant("comparison_path_mismatch")

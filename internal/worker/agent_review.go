@@ -60,7 +60,7 @@ func AgentReviewFromRun(
 // change — it is built from the sealed candidate, not from this tree. The
 // strict scan that refuses ignored files inside the writable scope protects
 // the implementing run's deliverables and stays there; applied after a review
-// it killed a run whose review had passed (RFDEV-674).
+// it killed a live run whose review had passed.
 func ConfirmTreeMatchesCandidate(root string, candidate Candidate, consumer ConsumerConfig) error {
 	inCandidate := make(map[string]bool, len(candidate.Files))
 	for _, file := range candidate.Files {
