@@ -1,0 +1,470 @@
+<title>LassDas 状態ボード — 電脳 HUD 風モック</title>
+<style>
+  /* Cyber-HUD committed theme: deep teal-black, thin cyan lines, corner
+     brackets, wide tracking. Quiet intelligence — no blinking, only
+     slow sweeps. Fixed geometry as ever. */
+  :root {
+    --ground: #020A09;
+    --panel: rgba(10, 26, 24, 0.72);
+    --panel-edge: #16403B;
+    --ink: #C9E9E3;
+    --muted: #567D77;
+    --faint: #123230;
+    --cyan: #41E8D2;
+    --cyan-dim: rgba(65, 232, 210, 0.10);
+    --lime: #9BE87A;
+    --lime-dim: rgba(155, 232, 122, 0.10);
+    --red: #FF5E4D;
+    --white: #EAF7F4;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Hiragino Sans", "Noto Sans JP", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13.5px;
+    line-height: 1.65;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(1100px 600px at 80% -10%, rgba(65,232,210,0.05), transparent 60%),
+      repeating-linear-gradient(0deg, transparent 0 88px, rgba(65,232,210,0.025) 88px 89px),
+      repeating-linear-gradient(90deg, transparent 0 88px, rgba(65,232,210,0.025) 88px 89px);
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 24px 48px; }
+
+  /* ---- HUD header ---- */
+  header {
+    display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap;
+    padding: 8px 2px 12px;
+    border-bottom: 1px solid var(--panel-edge);
+    position: relative;
+  }
+  header::before, header::after {
+    content: ""; position: absolute; width: 14px; height: 14px; bottom: -1px;
+    border-bottom: 1px solid var(--cyan);
+  }
+  header::before { left: 0; border-left: 1px solid var(--cyan); }
+  header::after { right: 0; border-right: 1px solid var(--cyan); }
+  .brand { font-family: var(--mono); font-size: 15px; letter-spacing: 0.46em; font-weight: 400; color: var(--white); }
+  .brand small { color: var(--cyan); letter-spacing: 0.34em; font-weight: 400; font-size: 9.5px; display: block; margin-top: 3px; }
+  .live { display: inline-flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 11.5px; color: var(--cyan); letter-spacing: 0.2em; }
+  .live-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    border: 1px solid var(--cyan); background: transparent; position: relative;
+  }
+  .live-dot::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--cyan); animation: breathe 3s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .clock { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: 0.12em; }
+  .counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.1em; }
+  .counts b { color: var(--cyan); font-weight: 400; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 22px; margin-top: 24px; }
+  @media (max-width: 960px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+
+  .lane-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.4em;
+    color: var(--muted); text-transform: uppercase; margin: 0 0 12px 2px;
+  }
+  .lane-label::before { content: "// "; color: var(--cyan); }
+
+  /* ---- run cards: bracket-framed HUD panes ---- */
+  .runs { display: flex; flex-direction: column; gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    padding: 15px 18px 17px;
+    position: relative;
+    backdrop-filter: blur(2px);
+  }
+  /* corner brackets */
+  .card::before, .card::after {
+    content: ""; position: absolute; width: 16px; height: 16px; pointer-events: none;
+  }
+  .card::before { top: -1px; left: -1px; border-top: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+  .card::after { bottom: -1px; right: -1px; border-bottom: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+  .card.state-confirm::before, .card.state-question::before,
+  .card.state-confirm::after, .card.state-question::after { border-color: var(--lime); }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tkey { font-family: var(--mono); font-size: 12.5px; color: var(--cyan); letter-spacing: 0.14em; }
+  .state-confirm .tkey, .state-question .tkey { color: var(--lime); }
+  .tsum { font-size: 13.5px; font-weight: 600; color: var(--white); }
+  .elapsed { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0.1em; }
+
+  .nowline { display: flex; align-items: baseline; gap: 12px; margin: 9px 0 4px; height: 24px; overflow: hidden; }
+  .now-title { font-size: 14.5px; font-weight: 600; color: var(--cyan); letter-spacing: 0.24em; white-space: nowrap; transition: opacity 0.35s ease; }
+  .state-confirm .now-title, .state-question .now-title { color: var(--lime); }
+  .now-detail { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: opacity 0.35s ease; font-family: var(--mono); }
+  .nowline.swapping .now-title, .nowline.swapping .now-detail { opacity: 0; }
+
+  /* ---- pipeline: thin line + open circles ---- */
+  .track { display: flex; align-items: flex-start; margin-top: 16px; }
+  .node { flex: 1; min-width: 0; position: relative; text-align: center; }
+  .node .rail { position: absolute; top: 6px; left: -50%; width: 100%; height: 1px; background: var(--faint); z-index: 1; }
+  .node:first-child .rail { display: none; }
+  .node .rail .fill { position: absolute; inset: 0; width: 0%; background: var(--cyan); transition: width 1.1s cubic-bezier(0.4,0,0.2,1); box-shadow: 0 0 8px rgba(65,232,210,0.5); }
+  .node.done .rail .fill { width: 100%; }
+  .node.now .rail .fill { width: 100%; }
+  /* the sweep: a light running the now-segment */
+  .node.now .rail::after {
+    content: ""; position: absolute; top: -1px; left: 0; width: 22%; height: 3px;
+    background: linear-gradient(90deg, transparent, var(--white));
+    animation: sweep 1.8s linear infinite;
+  }
+  @keyframes sweep { from { left: -22%; } to { left: 100%; } }
+  .node .tick {
+    width: 13px; height: 13px; border-radius: 50%; margin: 0 auto;
+    background: var(--ground); border: 1px solid var(--faint);
+    position: relative; z-index: 2;
+    transition: border-color 0.5s ease, box-shadow 0.5s ease;
+  }
+  .node .tick::after {
+    content: ""; position: absolute; inset: 3px; border-radius: 50%;
+    background: transparent; transition: background-color 0.5s ease;
+  }
+  .node.done .tick { border-color: var(--cyan); }
+  .node.done .tick::after { background: var(--cyan); }
+  .node.now .tick { border-color: var(--white); box-shadow: 0 0 14px rgba(234,247,244,0.5); }
+  .node.now .tick::after { background: var(--white); }
+  .state-confirm .node.now .tick { border-color: var(--lime); box-shadow: 0 0 14px rgba(155,232,122,0.5); }
+  .state-confirm .node.now .tick::after { background: var(--lime); }
+  .node .nname {
+    font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 9px;
+    letter-spacing: 0.3em; white-space: nowrap;
+    transition: color 0.5s ease;
+  }
+  .node.done .nname { color: var(--cyan); }
+  .node.now .nname { color: var(--white); }
+  .state-confirm .node.now .nname { color: var(--lime); }
+  .node .laps {
+    height: 14px; margin-top: 2px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--muted); letter-spacing: 0.2em;
+    opacity: 0; transition: opacity 0.5s ease, color 0.5s ease;
+  }
+  .node .laps.on { opacity: 1; }
+  .node.now .laps.on { color: var(--white); }
+
+  /* ---- decision rows ---- */
+  .qrow {
+    margin-top: 14px; padding: 11px 13px;
+    background: var(--lime-dim); border: 1px solid rgba(155,232,122,0.3);
+    font-size: 12.5px; transition: background-color 0.6s ease, border-color 0.6s ease;
+  }
+  .qrow b { color: var(--lime); letter-spacing: 0.06em; }
+  .qrow.sent { background: var(--cyan-dim); border-color: rgba(65,232,210,0.3); }
+  .qrow.sent b { color: var(--cyan); }
+  .answer { display: flex; gap: 8px; margin-top: 10px; }
+  .answer input {
+    flex: 1; min-width: 0;
+    background: rgba(2,10,9,0.8); border: 1px solid var(--faint);
+    color: var(--ink); font-family: var(--mono); font-size: 12.5px; padding: 8px 11px;
+    letter-spacing: 0.04em;
+  }
+  .answer input:focus { outline: none; border-color: var(--lime); box-shadow: 0 0 0 1px rgba(155,232,122,0.3); }
+  .btn {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.26em;
+    padding: 9px 17px; cursor: pointer;
+    border: 1px solid var(--lime); background: transparent; color: var(--lime);
+    transition: background-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--lime-dim); box-shadow: 0 0 12px rgba(155,232,122,0.25); }
+  .btn:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+  .btn.go { border-color: var(--cyan); color: var(--cyan); }
+  .btn.go:hover { background: var(--cyan-dim); box-shadow: 0 0 12px rgba(65,232,210,0.3); }
+  .btn.go:focus-visible { outline-color: var(--cyan); }
+  .btn.armed { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 0 16px rgba(255,94,77,0.5); }
+  .btn.ghost { border-color: var(--faint); color: var(--muted); letter-spacing: 0.1em; }
+  .btn.ghost:hover { color: var(--ink); background: transparent; box-shadow: none; }
+  .via { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em; }
+  .approve-row { display: flex; align-items: center; gap: 10px; margin-top: 13px; }
+
+  /* ---- event log ---- */
+  .log { background: rgba(2,10,9,0.85); border: 1px solid var(--panel-edge); padding: 13px 0; max-height: 620px; overflow-y: auto; }
+  .ev {
+    display: grid; grid-template-columns: 50px 1fr; gap: 10px; padding: 6px 15px;
+    border-left: 1px solid transparent;
+    transition: background-color 1.4s ease, border-color 1.4s ease;
+  }
+  .ev.enter { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; overflow: hidden; }
+  .ev.settling {
+    max-height: 80px; padding-top: 6px; padding-bottom: 6px; opacity: 1;
+    transition: max-height 0.5s ease, padding 0.5s ease, opacity 0.7s ease 0.15s,
+      background-color 1.4s ease, border-color 1.4s ease;
+  }
+  .ev.fresh { border-left-color: var(--cyan); background: var(--cyan-dim); }
+  .ev time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; letter-spacing: 0.08em; }
+  .ev .ekey { font-family: var(--mono); font-size: 10.5px; color: var(--cyan); letter-spacing: 0.12em; }
+  .ev .emsg { font-size: 12px; }
+
+  /* ---- finished lane ---- */
+  .finished { margin-top: 28px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11.5px; padding: 6px 12px;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em;
+  }
+  .chip .ckey { color: var(--ink); }
+  .chip .mark { width: 7px; height: 7px; border-radius: 50%; }
+  .chip.ok .mark { background: var(--cyan); }
+  .chip.stop .mark { background: var(--muted); }
+  .chip.bad .mark { background: var(--red); }
+
+  .mock-note { margin-top: 30px; padding: 10px 14px; border: 1px dashed var(--faint); color: var(--muted); font-size: 11.5px; }
+  .mock-note b { color: var(--cyan); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot::after, .node.now .rail::after { animation: none !important; }
+    .ev.enter, .ev.settling { transition: none !important; max-height: none; opacity: 1; padding: 6px 15px; }
+    .node .rail .fill, .node .tick, .node .tick::after, .node .nname, .node .laps { transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="brand">LASSDAS<small>TACTICAL OVERWATCH</small></span>
+    <span class="live"><span class="live-dot"></span>ONLINE</span>
+    <span class="counts">処理中 <b id="c-active">2</b> ・ 回答待ち <b>1</b> ・ 本日完了 <b>3</b></span>
+    <span class="clock">最終更新 <span id="ago">2</span> 秒前 ・ <span id="clock">15:42:07</span></span>
+  </header>
+
+  <div class="cols">
+    <div>
+      <p class="lane-label">進行中の依頼</p>
+      <div class="runs">
+
+        <div class="card" id="demo-card">
+          <div class="card-head">
+            <span class="tkey">RFDEV-701</span>
+            <span class="tsum">利用予算が月替わりで自動リセットされない問題の修正</span>
+            <span class="elapsed">経過 <span id="el1">18:24</span></span>
+          </div>
+          <div class="nowline" id="demo-now">
+            <span class="now-title" id="demo-title">実装・検証中</span>
+            <span class="now-detail" id="demo-detail">2 巡目 — レビュー指摘 2 件を修正しています</span>
+          </div>
+          <div class="track" id="demo-track"></div>
+        </div>
+
+        <div class="card state-confirm" id="go-card">
+          <div class="card-head">
+            <span class="tkey">RFDEV-698</span>
+            <span class="tsum">設定画面の保存ボタンが二重送信になる不具合</span>
+            <span class="elapsed">経過 <span id="el2">1:02:11</span></span>
+          </div>
+          <div class="nowline">
+            <span class="now-title">本番反映の承認待ち</span>
+            <span class="now-detail">ステージング確認済み — あなたの「Go」を待っています (残り 6 日)</span>
+          </div>
+          <div class="track" data-static="5" data-laps="implement:2,review:2"></div>
+          <div class="approve-row" id="go-actions">
+            <button class="btn go" id="go-btn">Go — 本番反映を承認</button>
+            <button class="btn ghost" id="hold-btn">今回は反映しない</button>
+            <span class="via">チケットにあなた本人のコメント「Go」として投稿されます</span>
+          </div>
+        </div>
+
+        <div class="card state-question" id="q-card">
+          <div class="card-head">
+            <span class="tkey">RFDEV-703</span>
+            <span class="tsum">通知メールの文面変更</span>
+            <span class="elapsed">経過 <span id="el3">3:44:50</span></span>
+          </div>
+          <div class="nowline">
+            <span class="now-title">質問への回答待ち</span>
+          </div>
+          <div class="qrow" id="q-row">
+            <div id="q-body"><b>LassDas からの質問:</b> 文面の変更は日本語のみですか？ 英語通知も同じ変更を適用しますか？</div>
+            <div class="answer" id="q-answer">
+              <input type="text" id="q-input" placeholder="ここに回答を入力… (例: 日本語のみでお願いします)" aria-label="質問への回答">
+              <button class="btn" id="q-send">回答を送信</button>
+            </div>
+            <div class="via">チケットにあなた本人のコメントとして投稿され、LassDas が自動で再開します</div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="finished">
+        <p class="lane-label">本日の完了</p>
+        <div class="chips">
+          <span class="chip ok"><span class="mark"></span><span class="ckey">RFDEV-694</span>本番反映済み 11:32</span>
+          <span class="chip ok"><span class="mark"></span><span class="ckey">RFDEV-689</span>本番反映済み 09:15</span>
+          <span class="chip stop"><span class="mark"></span><span class="ckey">RFDEV-696</span>ご指示により停止 10:04</span>
+        </div>
+      </div>
+
+      <p class="mock-note"><b>これはモックです。</b>電脳 HUD 風スキン (深緑黒×シアン細線・コーナーブラケット・走る掃引光・点滅なしの静かな知性)。データと進行は第一弾と同じ自動デモ。</p>
+    </div>
+
+    <div>
+      <p class="lane-label">運行ログ</p>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const STEPS = [
+    ["intake", "受付"], ["implement", "実装"], ["review", "レビュー"], ["checks", "検査"],
+    ["staging", "STG"], ["confirm", "確認"], ["production", "本番"],
+  ];
+
+  /* Build each track ONCE; state changes only toggle classes and lap
+     counters, so the geometry (rails, ticks, labels) never moves. */
+  function buildTrack(el) {
+    el.innerHTML = STEPS.map(([id, name]) =>
+      '<div class="node" data-step="' + id + '"><div class="rail"><div class="fill"></div></div>' +
+      '<div class="tick"></div><div class="nname">' + name + '</div><div class="laps"></div></div>'
+    ).join("");
+  }
+  function setTrack(el, current, laps) {
+    el.querySelectorAll(".node").forEach((node, index) => {
+      node.classList.toggle("done", index < current);
+      node.classList.toggle("now", index === current);
+      const lapEl = node.querySelector(".laps");
+      const count = (laps || {})[node.dataset.step] || 0;
+      lapEl.textContent = count > 1 ? "×" + count : "×1";
+      lapEl.classList.toggle("on", count > 1);
+    });
+  }
+  document.querySelectorAll("[data-static]").forEach(el => {
+    buildTrack(el);
+    const laps = {};
+    (el.dataset.laps || "").split(",").filter(Boolean).forEach(pair => {
+      const [k, v] = pair.split(":"); laps[k] = +v;
+    });
+    setTrack(el, +el.dataset.static, laps);
+  });
+
+  /* demo card cycles through the pipeline; laps count up as it loops */
+  const phases = [
+    ["implement", 1, "実装・検証中", "レビュー指摘 2 件を修正しています"],
+    ["review", 2, "レビュー中", "AI レビュアー 2 名が検査しています"],
+    ["checks", 3, "自動検査 (CI) 待ち", "納品した変更の検査が走っています"],
+    ["staging", 4, "ステージングへ反映中", "マージとデプロイの完了を待っています"],
+    ["confirm", 5, "ステージング画面を確認中", "ブラウザで実画面を検証・スクリーンショット取得中"],
+  ];
+  let phase = 0;
+  const demoLaps = { intake: 1, implement: 2, review: 1 };
+  const track = document.getElementById("demo-track");
+  const nowRow = document.getElementById("demo-now");
+  const title = document.getElementById("demo-title");
+  const detail = document.getElementById("demo-detail");
+  buildTrack(track);
+
+  function applyPhase(animated) {
+    const [stepID, step, t, d] = phases[phase];
+    demoLaps[stepID] = (demoLaps[stepID] || 0) + (animated ? 1 : 0);
+    setTrack(track, step, demoLaps);
+    const lapNow = demoLaps[stepID] > 1 ? demoLaps[stepID] + " 巡目 — " : "";
+    if (!animated) { title.textContent = t; detail.textContent = d; return; }
+    nowRow.classList.add("swapping");
+    setTimeout(() => {
+      title.textContent = t; detail.textContent = lapNow ? lapNow.replace(" — ", "") + "・" + d : d;
+      nowRow.classList.remove("swapping");
+    }, 360);
+  }
+  applyPhase(false);
+
+  /* event log */
+  const log = document.getElementById("log");
+  const seed = [
+    ["15:41", "RFDEV-701", "レビュー 1 巡目で指摘 2 件 — 実装 2 巡目へ差し戻し"],
+    ["15:36", "RFDEV-698", "ステージング確認合格 — スクリーンショットをチケットに添付"],
+    ["15:24", "RFDEV-701", "実装 1 巡目が完了 — レビューへ"],
+    ["15:07", "RFDEV-703", "質問を投稿 — 依頼者の回答待ちに移行"],
+    ["14:58", "RFDEV-698", "ステージングへ反映中"],
+    ["14:41", "RFDEV-701", "受付完了 — 実装を開始"],
+    ["11:32", "RFDEV-694", "本番反映済み — 本番画面の確認まで合格"],
+  ];
+  function stampNow() {
+    const now = new Date();
+    return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+  }
+  function addEvent(time, key, msg, fresh) {
+    const row = document.createElement("div");
+    row.className = "ev" + (fresh ? " enter fresh" : "");
+    row.innerHTML = '<time>' + time + '</time><div><div class="ekey">' + key + '</div><div class="emsg">' + msg + '</div></div>';
+    log.prepend(row);
+    if (fresh) {
+      requestAnimationFrame(() => requestAnimationFrame(() => row.classList.add("settling")));
+      setTimeout(() => row.classList.remove("fresh"), 2600);
+      setTimeout(() => row.classList.remove("enter", "settling"), 1500);
+    }
+  }
+  seed.reverse().forEach(([t, k, m]) => addEvent(t, k, m, false));
+
+  const demoEvents = [
+    ["RFDEV-701", "実装 2 巡目が完了 — レビュー 2 巡目へ"],
+    ["RFDEV-701", "レビュー全通過 — 納品して自動検査 (CI) へ"],
+    ["RFDEV-701", "検査全緑 — ステージングへ自動マージ"],
+    ["RFDEV-701", "デプロイ完了 — 実画面の自動確認を開始"],
+    ["RFDEV-701", "確認合格 — 実装フェーズへ戻る (デモのループ)"],
+  ];
+
+  /* ---- interactive: answer the question from the board ---- */
+  const qRow = document.getElementById("q-row");
+  const qBody = document.getElementById("q-body");
+  const qAnswer = document.getElementById("q-answer");
+  document.getElementById("q-send").addEventListener("click", () => {
+    const text = document.getElementById("q-input").value.trim() || "日本語のみでお願いします";
+    qRow.classList.add("sent");
+    qBody.innerHTML = "<b>✓ 回答を送信しました:</b> 「" + text.replace(/</g, "&lt;") + "」 — チケットにあなたのコメントとして投稿。LassDas が次の見回りで再開します";
+    qAnswer.style.display = "none";
+    addEvent(stampNow(), "RFDEV-703", "ボードから回答を受領 — チケットへ投稿し再開待ち", true);
+  });
+
+  /* ---- interactive: Go from the board (two-step arm to avoid misfire) */
+  const goBtn = document.getElementById("go-btn");
+  const holdBtn = document.getElementById("hold-btn");
+  let armed = false;
+  goBtn.addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      goBtn.classList.add("armed");
+      goBtn.textContent = "もう一度押して確定 — 本番に反映されます";
+      return;
+    }
+    goBtn.textContent = "✓ Go を送信しました";
+    goBtn.disabled = true;
+    holdBtn.style.visibility = "hidden";
+    addEvent(stampNow(), "RFDEV-698", "ボードから Go を受領 — チケットへ投稿・本番反映を開始", true);
+    const goTrack = document.querySelector("#go-card .track");
+    setTrack(goTrack, 6, { implement: 2, review: 2 });
+  });
+  holdBtn.addEventListener("click", () => {
+    armed = false;
+    goBtn.classList.remove("armed");
+    goBtn.textContent = "Go — 本番反映を承認";
+  });
+
+  /* clocks */
+  let seconds = 0, el1 = 18 * 60 + 24, el2 = 62 * 60 + 11, el3 = 224 * 60 + 50, ago = 2;
+  const fmt = s => {
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+  };
+  setInterval(() => {
+    seconds++; el1++; el2++; el3++; ago++;
+    document.getElementById("el1").textContent = fmt(el1);
+    document.getElementById("el2").textContent = fmt(el2);
+    document.getElementById("el3").textContent = fmt(el3);
+    const now = new Date();
+    document.getElementById("clock").textContent =
+      [now.getHours(), now.getMinutes(), now.getSeconds()].map(v => String(v).padStart(2, "0")).join(":");
+    if (ago > 9) ago = 1;
+    document.getElementById("ago").textContent = ago;
+    if (seconds % 7 === 0) {
+      const [key, msg] = demoEvents[phase % demoEvents.length];
+      addEvent(stampNow(), key, msg, true);
+      phase = (phase + 1) % phases.length;
+      applyPhase(true);
+      ago = 1;
+    }
+  }, 1000);
+</script>

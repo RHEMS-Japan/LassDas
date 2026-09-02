@@ -39,6 +39,38 @@ import (
 //go:embed board.html
 var boardPage []byte
 
+// Demo skins: static mockups shown to people behind the board's own
+// credentials — never a second door. The embedded copy must equal the
+// committed mockup under docs/mockups (a test pins that).
+//
+//go:embed demo/hud.html
+var demoHUDPage []byte
+
+var demoPages = map[string][]byte{"hud": demoHUDPage}
+
+func serveDemo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	page, ok := demoPages[strings.TrimPrefix(r.URL.Path, "/demo/")]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writePage(w, page)
+}
+
+// writePage sends one self-contained HTML page under the board's strict
+// policy: inline style and script only, no external loads, no framing.
+func writePage(w http.ResponseWriter, page []byte) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	_, _ = w.Write(page)
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "statusboard:", err)
@@ -133,12 +165,9 @@ func run() error {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		_, _ = w.Write(boardPage)
+		writePage(w, boardPage)
 	}))
+	mux.Handle("/demo/", auth.wrap(serveDemo))
 	mux.Handle("/api/board", auth.wrap(board.serveBoard))
 	mux.Handle("/api/act", auth.wrap(board.serveAct))
 	mux.Handle("/stream", auth.wrap(board.serveStream))
