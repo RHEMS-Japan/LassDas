@@ -134,8 +134,21 @@ fabricated workflow link.
   — a pod security context decision, made at deployment.
 - **Tool identity**: the workflow measured its checkout and binaries
   every run; the pod verifies the stage binaries against optional sha256
-  pins in `runtime.json` (`worker_sha256` / `controller_sha256`) at
-  runner start.
+  pins in `runtime.json` (`worker_sha256` / `controller_sha256` /
+  `browsercheck_sha256`) at runner start. The pins are never copied by
+  hand: `deploy/pod/release.sh` reads them from the image's own
+  `/etc/lassdas/tool-pins.txt` and writes ConfigMap and image together
+  (the one time they were copied by hand, they were not — RFDEV-671 died
+  on "worker binary does not match its configured sha256 pin").
+- **Review leftovers**: a reviewing agent that runs the repository's own
+  tests leaves byproducts behind (a build cache, a config timestamp file,
+  a hidden lint cache). They are not tampering — the published change is
+  built from the sealed candidate, never from the tree — so the review
+  check compares tracked changes and candidate content only, the
+  reviewer's run is not scanned for changed files at all, and every
+  review ends by deleting the leftovers so the next round starts from the
+  candidate alone. Calling them tampering killed RFDEV-674 after its
+  review had passed.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
@@ -149,3 +162,30 @@ fabricated workflow link.
   (the clone token travels through a one-shot `GIT_ASKPASS` helper and is
   never stored), and a read-only base copy no agent is pointed at bounds
   what a change started from.
+
+## Release discipline: the regression set
+
+Every engine change goes out through `deploy/pod/release.sh`, and the
+script refuses to build until `go test ./...` passes. The test suite is
+the regression set: each live failure the pod has had is pinned by a test
+that reproduces the condition, so a fixed hole cannot reopen, and a new
+hole of a known class shows up before a ticket does. Adding a scenario
+means adding a row here and the test it names.
+
+| Scenario the live pod died on | Pinned by | Live case |
+| --- | --- | --- |
+| A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | RFDEV-672 |
+| A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | RFDEV-675 |
+| A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | RFDEV-674 |
+| A reviewer that edits, reverts, or commits what it was asked to judge | `cmd/worker` `TestAgentReviewRejectsAReviewerThatEditsTheTree`, `TestAgentReviewRejectsAReviewerThatCommits`; `internal/worker` `TestConfirmTreeMatchesCandidateRejectsAReviewerThatEdits`, `TestConfirmTreeMatchesCandidateChecksASubmittedNewFile`, `TestRepositoryHeadMovesWhenTheReviewerCommits` | — |
+| A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
+| An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | RFDEV-675 |
+| Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | RFDEV-671 |
+| A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
+
+The script's own steps, in order: clean committed tree → `go test ./...`
+→ build (arm64, no cache) → push → pins and toolchain read from the image
+→ `runtime.json` rewritten with the new engine sha and pins → dry run
+stops here; `--apply` patches the ConfigMap, sets the image by digest,
+waits for the rollout, and prints the pod identity check. The rollout is
+not done until the attendant log shows no pin failure.

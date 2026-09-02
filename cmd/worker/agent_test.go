@@ -246,6 +246,55 @@ func TestAgentReviewRejectsAReviewerThatEditsTheTree(t *testing.T) {
 	}
 }
 
+// A reviewer that commits leaves a clean status, and a commit of a file
+// outside the candidate leaves the candidate's content intact too — only
+// the head recorded before the review catches it.
+func TestAgentReviewRejectsAReviewerThatCommits(t *testing.T) {
+	fixture := newAgentFixture(t, editTheLabel,
+		`printf 'notes\n' > NOTES.md; `+
+			`git add NOTES.md; git -c user.name=r -c user.email=r@example.invalid commit -qm "quiet note"; `+
+			`echo '{"verdict":"pass","findings":[]}'`)
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t); err == nil {
+		t.Fatal("a reviewer that committed its edit was accepted")
+	}
+	if _, err := os.Stat(fixture.path("review.json")); err == nil {
+		t.Fatal("a review was written for a reviewer that committed")
+	}
+}
+
+// A reviewer that runs the repository's tests leaves byproducts behind. They
+// are not tampering (RFDEV-674 died calling them that), and they must be gone
+// afterwards so the next round does not seal them as the implementer's work.
+func TestAgentReviewToleratesAndCleansUpToolingByproducts(t *testing.T) {
+	fixture := newAgentFixture(t, editTheLabel,
+		`printf 'export default {};\n' > client/src/vitest.config.ts.timestamp-1.mjs; `+
+			`mkdir -p client/coverage; printf 'TN:\n' > client/coverage/lcov.info; printf '[]' > .eslintcache; `+
+			`echo '{"verdict":"pass","findings":[]}'`)
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t); err != nil {
+		t.Fatalf("a reviewer's tooling byproducts were treated as tampering: %v", err)
+	}
+	var review worker.Review
+	readAgentArtifact(t, fixture.path("review.json"), worker.MaxReviewJSONBytes, &review)
+	if review.Verdict != "pass" {
+		t.Fatalf("the verdict was not sealed: %+v", review)
+	}
+	for _, gone := range []string{"client/src/vitest.config.ts.timestamp-1.mjs", "client/coverage", ".eslintcache"} {
+		if _, err := os.Lstat(filepath.Join(fixture.repoRoot, filepath.FromSlash(gone))); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the review (%v)", gone, err)
+		}
+	}
+	changed, err := os.ReadFile(filepath.Join(fixture.repoRoot, "client", "src", "label.ts"))
+	if err != nil || string(changed) != "export const label = 'Updated label';\n" {
+		t.Fatalf("the submitted change did not survive the cleanup: %q %v", changed, err)
+	}
+}
+
 func TestAgentReviewRejectsAReviewerThatReportsNoVerdict(t *testing.T) {
 	fixture := newAgentFixture(t, editTheLabel, `echo "Looks good to me."`)
 	if err := fixture.implement(t); err != nil {

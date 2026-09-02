@@ -178,6 +178,10 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err := placeAgentKnowledge(agent, *knowledgeRoot, *repoRoot); err != nil {
 		return err
 	}
+	headBefore, err := worker.RepositoryHead(*repoRoot)
+	if err != nil {
+		return err
+	}
 
 	// The reviewer is not told which files it may touch, because it is not
 	// meant to touch any; a review that edits the tree is rejected below.
@@ -187,7 +191,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 	// burned real time is not, so the stage's worst case stays inside the
 	// job's budget. Every failed attempt's tail goes to the job log, the
 	// final one included, so nothing is masked.
-	outcome, runErr := worker.RunAgent(ctx, agent, *repoRoot, prompt, nil, nil)
+	outcome, runErr := worker.RunReviewingAgent(ctx, agent, *repoRoot, prompt)
 	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
 		select {
@@ -196,7 +200,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 			continue
 		case <-time.After(reviewRetryPause):
 		}
-		outcome, runErr = worker.RunAgent(ctx, agent, *repoRoot, prompt, nil, nil)
+		outcome, runErr = worker.RunReviewingAgent(ctx, agent, *repoRoot, prompt)
 	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
@@ -220,6 +224,18 @@ func runAgentReview(ctx context.Context, args []string) error {
 		return errors.New("ticket repository is not a configured consumer")
 	}
 	if err := worker.ConfirmTreeMatchesCandidate(*repoRoot, candidate, consumer); err != nil {
+		return err
+	}
+	headAfter, err := worker.RepositoryHead(*repoRoot)
+	if err != nil {
+		return err
+	}
+	if headAfter != headBefore {
+		return errors.New("the reviewing agent changed the tree: repository history")
+	}
+	// The next round starts from this tree; a reviewer's leftover must not
+	// become the implementer's work there.
+	if err := worker.CleanReviewByproducts(*repoRoot, candidate); err != nil {
 		return err
 	}
 	review, err := worker.AgentReviewFromRun(endpoint, run, candidate, source, request, config, time.Now().UTC())
