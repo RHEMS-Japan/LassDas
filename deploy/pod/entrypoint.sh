@@ -22,6 +22,13 @@ export LASSDAS_RUNTIME_CONFIG="${LASSDAS_RUNTIME_CONFIG:-/etc/lassdas/runtime.js
 export HERMES_KANBAN_BOARD="${HERMES_KANBAN_BOARD:-lassdas}"
 export HERMES_KANBAN_DB="${HERMES_KANBAN_DB:-$STATE/kanban.db}"
 export HERMES_TUI=
+# Hermes masks what looks like a credential in the text it sends to the
+# model, and treats source code the same way: an Authorization header's
+# literal `Bearer ${token}` reached the implementer as `*** ${token}`, which
+# it faithfully wrote back into the file (measured in the model gateway's
+# request archive, 2026-09-02). Secret inspection is the gateway's job here;
+# the agent must see the repository as it is.
+export HERMES_REDACT_SECRETS="${HERMES_REDACT_SECRETS:-false}"
 
 mkdir -p "$STATE/workspaces"
 
