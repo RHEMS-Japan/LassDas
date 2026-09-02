@@ -156,6 +156,11 @@
   }
   .node.done .nname { color: var(--cyan); }
   .node.now .nname { color: var(--white); }
+  /* Held: the run reached this step and stopped for a person. */
+  .node.hold .rail .fill { width: 100%; background: var(--amber); box-shadow: 0 0 8px var(--amber-dim); }
+  .node.hold .tick { border-color: var(--amber); box-shadow: 0 0 14px var(--amber-dim); }
+  .node.hold .tick::after { background: var(--amber); }
+  .node.hold .nname { color: var(--amber); }
   .node .laps {
     height: 14px; margin-top: 2px;
     font-family: var(--mono); font-size: 9.5px; color: var(--muted); letter-spacing: 0.2em;
@@ -329,12 +334,21 @@ function buildTrack(container) {
   }
 }
 
-function setTrack(container, stepID, round) {
-  const current = STEP_INDEX[stepID];
+function setTrack(container, stepID, round, stage) {
+  // An out-of-line state (attention) names the step it stopped at via
+  // `stage`; that node is held (amber), not running (white). Without the
+  // hint the whole rail went dark for a run that had reached staging.
+  let current = STEP_INDEX[stepID];
+  let held = false;
+  if (current === undefined && stage !== undefined && STEP_INDEX[stage] !== undefined) {
+    current = STEP_INDEX[stage];
+    held = true;
+  }
   container.classList.toggle("idle", current === undefined);
   container.querySelectorAll(".node").forEach((node, index) => {
     node.classList.toggle("done", current !== undefined && index < current);
-    node.classList.toggle("now", current !== undefined && index === current);
+    node.classList.toggle("now", current !== undefined && index === current && !held);
+    node.classList.toggle("hold", current !== undefined && index === current && held);
     const laps = node.querySelector(".laps");
     const showLaps = round > 1 && (node.dataset.step === "implement" || node.dataset.step === "review");
     laps.textContent = "×" + (showLaps ? round : 1);
@@ -505,7 +519,7 @@ function buildCard(run) {
 
   const track = el("div", "track");
   buildTrack(track);
-  setTrack(track, run.step, run.round || 0);
+  setTrack(track, run.step, run.round || 0, run.stage);
   card.appendChild(track);
 
   if (run.step === "question") card.appendChild(buildQuestionRow(run));

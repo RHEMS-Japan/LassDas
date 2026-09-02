@@ -51,6 +51,10 @@ type RunStatus struct {
 	// merely the local report file) and the promotion is not held. The
 	// board shows its Go button only here.
 	CanGo bool `json:"can_go,omitempty"`
+	// Stage names the pipeline step an out-of-line state (attention)
+	// belongs to, so the board lights the node where the run stopped
+	// instead of an empty rail. Empty for every in-line step.
+	Stage string `json:"stage,omitempty"`
 }
 
 // StepEvent is one appended line of events.jsonl: a delivery moved.
@@ -143,6 +147,13 @@ func (s *RunStatus) place(step, title, detail string) {
 	s.Step, s.StepTitle, s.Detail = step, title, detail
 }
 
+// placeAt is place for an out-of-line step, naming the pipeline stage it
+// belongs to.
+func (s *RunStatus) placeAt(step, stage, title, detail string) {
+	s.place(step, title, detail)
+	s.Stage = stage
+}
+
 func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.BoardTask) {
 	view := chainViewFor(tasks, run.DeliveryID)
 	status.Round = view.round
@@ -152,6 +163,7 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 	}
 	detail := fmt.Sprintf("%d 巡目", view.round)
 	var implementLeft, reviewLeft, blocked, humanLane bool
+	humanStage := "implement"
 	for stage, card := range view.cards {
 		if card.Status == "done" {
 			continue
@@ -160,6 +172,9 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 		// never touches — "in progress" would be a lie there.
 		if card.Status == "triage" || card.Status == "scheduled" {
 			humanLane = true
+			if strings.Contains(stage, "review") {
+				humanStage = "review"
+			}
 		}
 		if failedCardStatuses[card.Status] {
 			blocked = true
@@ -172,7 +187,7 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 	}
 	switch {
 	case humanLane:
-		status.place("attention", "人の対応待ち", detail+"・工程カードが人の確認レーンにあります")
+		status.placeAt("attention", humanStage, "人の対応待ち", detail+"・工程カードが人の確認レーンにあります")
 	case blocked:
 		status.place("implement", "工程の復旧処理中", detail)
 	case implementLeft:
@@ -199,6 +214,12 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		return
 	}
 	runDir := runDirectory(config, run.DeliveryID)
+	// An operator's sealed 「確認済み」 outranks the report that asked for it:
+	// the delivery is closed for the automation, whatever the report said.
+	if resolution, ok := readDeliverResolution(runDir); ok {
+		placeResolvedOutcome(status, resolution.Phase, resolution.Verdict)
+		return
+	}
 	outcome, sealed := readBoardOutcome(runDir)
 	if sealed && outcome.Phase == "release" {
 		placeReleaseOutcome(status, outcome.Verdict)
@@ -243,7 +264,7 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		case "pass":
 			status.place("done", "ステージング反映・確認済み", "")
 		case "unknown":
-			status.place("attention", "ステージング画面の確認ができませんでした", "手動での確認が必要です")
+			status.placeAt("attention", "confirm", "ステージング画面の確認ができませんでした", "手動での確認が必要です")
 		default:
 			status.place("failed", "ステージング画面の確認が不合格", "")
 		}
@@ -270,9 +291,9 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 	case "observe_failed":
 		status.place("done", "本番反映済み・画面は要確認", "")
 	case "deploy_failed":
-		status.place("attention", "本番反映の完了確認が必要", "運用担当者が状態を確認します")
+		status.placeAt("attention", "production", "本番反映の完了確認が必要", "運用担当者が状態を確認します")
 	case "merge_unverified":
-		status.place("attention", "本番反映の成否を確認中", "運用担当者が状態を確認します")
+		status.placeAt("attention", "production", "本番反映の成否を確認中", "運用担当者が状態を確認します")
 	default:
 		status.place("failed", "本番反映の工程で停止", "")
 	}
@@ -289,7 +310,7 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 	case verdict == "observe_failed":
 		status.place("failed", "ステージング反映済み・画面確認が不合格", "")
 	case verdict == "deploy_failed" || verdict == "merge_unverified":
-		status.place("attention", "ステージング反映の状態確認が必要", "運用担当者が状態を確認します")
+		status.placeAt("attention", "staging", "ステージング反映の状態確認が必要", "運用担当者が状態を確認します")
 	default:
 		status.place("failed", "ステージング反映で停止", "")
 	}
@@ -372,4 +393,19 @@ func WriteBoardStatus(dir string, snapshot BoardSnapshot) error {
 		return err
 	}
 	return os.Rename(temp, filepath.Join(dir, "board.json"))
+}
+
+// placeResolvedOutcome names the end of a delivery an operator confirmed
+// by hand: closed for the automation, with what the report could not
+// establish (a deploy, a merge) left to the operator's word rather than
+// asserted.
+func placeResolvedOutcome(status *RunStatus, phase, verdict string) {
+	switch {
+	case phase == "release":
+		status.place("done", "運用担当者が確認済み", "本番の状態は運用担当者の確認どおりです")
+	case verdict == "merge_unverified":
+		status.place("done", "運用担当者が確認済み", "ステージングへのマージの成否は運用担当者の確認どおり・本番反映は運用手順で行います")
+	default:
+		status.place("done", "運用担当者が確認済み", "ステージングの反映状態は運用担当者の確認どおり・本番反映は運用手順で行います")
+	}
 }

@@ -75,6 +75,11 @@ func syncDeliver(
 		return err
 	}
 	if releasePosted {
+		// A release report that asked an operator to look waits here for
+		// the operator's 「確認済み」; everything else is already over.
+		if verdict, since, waits := releaseAttentionVerdict(runDir); waits {
+			resolveAttention(ctx, config.Tracker, services.Backlog, run, runDir, "release", verdict, since, logger)
+		}
 		return sweepDeliverCards(ctx, hermes, cards)
 	}
 	if deliverFileExists(runDir, runner.DeliverProductionReportFile) {
@@ -208,7 +213,13 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 func advanceTowardsPromotion(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) error {
 	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
 	if err != nil || report.Verdict != "pass" || report.PromotionHold != "" {
-		return nil // failed — or promotion-held — staging reports are terminal
+		// Failed or promotion-held staging reports are terminal for the
+		// automation; the ones that asked an operator to look wait for the
+		// operator's 「確認済み」 so the board can stop calling them open.
+		if err == nil && attentionVerdict(report.Verdict) {
+			resolveAttention(ctx, config.Tracker, services.Backlog, run, runDir, "staging", report.Verdict, report.ObservedAt, logger)
+		}
+		return nil
 	}
 	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
 	if err != nil {

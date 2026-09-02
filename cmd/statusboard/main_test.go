@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +46,20 @@ func TestServeDemoServesOnlyTheKnownSkins(t *testing.T) {
 	serveDemo(recorder, httptest.NewRequest(http.MethodPost, "/demo/hud", nil))
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("a POST to the demo page was accepted (%d)", recorder.Code)
+	}
+}
+
+// The snapshot's stage hint is what keeps an attention state from
+// rendering as an empty rail; the page must read it and have a held style
+// to show it with.
+func TestBoardPageLightsTheStageAnAttentionStateStoppedAt(t *testing.T) {
+	page, err := os.ReadFile("board.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"run.stage", "STEP_INDEX[stage]", ".node.hold .tick"} {
+		if !strings.Contains(string(page), needle) {
+			t.Fatalf("board.html lacks %q", needle)
+		}
 	}
 }

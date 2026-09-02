@@ -199,3 +199,62 @@ func TestWriteBoardStatusAppendsOneEventPerMovedDelivery(t *testing.T) {
 		t.Fatalf("board.json = %+v, want the second snapshot", persisted)
 	}
 }
+
+// An attention state is off the rail (no pipeline step of its own), so the
+// snapshot names the stage it stopped at for the board to light; and an
+// operator's sealed 「確認済み」 ends the story as done, whatever the report
+// that asked for attention said.
+func TestAttentionCarriesTheStageItStoppedAtAndAnOperatorCanClearIt(t *testing.T) {
+	root := t.TempDir()
+	config := runtime.Config{}
+	config.Chain.RunsRoot = root
+	const delivery = "TKT-901:1"
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, delivery), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, delivery, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	success := state.RunOverview{State: "terminal", TerminalCode: "success", DeliveryID: delivery}
+
+	write("board-outcome.json", `{"phase":"staging","verdict":"deploy_failed","at":"2026-09-02T11:07:00Z"}`)
+	if got := classifyRun(config, success, nil); got.Step != "attention" || got.Stage != "staging" {
+		t.Fatalf("staging attention = %q at %q", got.Step, got.Stage)
+	}
+	write("board-outcome.json", `{"phase":"release","verdict":"merge_unverified","at":"2026-09-02T11:07:00Z"}`)
+	if got := classifyRun(config, success, nil); got.Step != "attention" || got.Stage != "production" {
+		t.Fatalf("release attention = %q at %q", got.Step, got.Stage)
+	}
+	write("deliver-resolution.json", `{"phase":"release","verdict":"merge_unverified","comment_id":12,"user_id":7001,"at":"2026-09-02T13:00:00Z"}`)
+	if got := classifyRun(config, success, nil); got.Step != "done" || got.Stage != "" || got.StepTitle != "運用担当者が確認済み" {
+		t.Fatalf("resolved = %q (%q) at %q", got.Step, got.StepTitle, got.Stage)
+	}
+
+	claimed := state.RunOverview{State: "claimed", DeliveryID: delivery}
+	tasks := []runtime.BoardTask{{Status: "triage", IdempotencyKey: runtime.ChainCardKey(delivery, "review-a", 1)}}
+	if got := classifyRun(config, claimed, tasks); got.Step != "attention" || got.Stage != "review" {
+		t.Fatalf("human lane on a review card = %q at %q", got.Step, got.Stage)
+	}
+	if got := classifyRun(config, state.RunOverview{State: "claimed", DeliveryID: delivery}, []runtime.BoardTask{{Status: "running", IdempotencyKey: runtime.ChainCardKey(delivery, "publish", 1)}}); got.Stage != "" {
+		t.Fatalf("an in-line step must not carry a stage hint, got %q", got.Stage)
+	}
+}
+
+func TestResolvedOutcomeDoesNotAssertWhatTheReportCouldNot(t *testing.T) {
+	var status RunStatus
+	placeResolvedOutcome(&status, "staging", "merge_unverified")
+	if status.Step != "done" || !strings.Contains(status.Detail, "マージの成否は運用担当者の確認どおり") {
+		t.Fatalf("staging merge_unverified = %q / %q", status.Step, status.Detail)
+	}
+	placeResolvedOutcome(&status, "staging", "deploy_failed")
+	if !strings.Contains(status.Detail, "反映状態は運用担当者の確認どおり") || strings.Contains(status.Detail, "反映済み") {
+		t.Fatalf("staging deploy_failed = %q", status.Detail)
+	}
+	placeResolvedOutcome(&status, "release", "deploy_failed")
+	if !strings.Contains(status.Detail, "本番の状態は運用担当者の確認どおり") {
+		t.Fatalf("release = %q", status.Detail)
+	}
+}

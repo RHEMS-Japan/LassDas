@@ -270,3 +270,37 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 	}
 	return builder.String() + facts.render()
 }
+
+// DeliverResolvedReport is an operator's confirmation of an attention
+// state (a report whose verdict asked a person to look), recorded once.
+type DeliverResolvedReport struct {
+	Phase   string // staging | release
+	Verdict string
+}
+
+// DeliverResolvedContent renders the acknowledgement of an operator's
+// 「確認済み」. The automation's part of this delivery ends here, and what
+// happens to production is said in so many words: the ticket must never
+// read as if the confirmation itself changed anything.
+func DeliverResolvedContent(runID string, report DeliverResolvedReport) string {
+	var builder strings.Builder
+	facts := CommentFacts{
+		State:     "運用担当者が確認済み・自動処理終了",
+		NextEvent: "以後の自動通知はありません",
+		AutoRetry: "なし",
+		Marker:    CommentMarker(string(RunCommentResolved), runID),
+	}
+	if report.Phase == "release" {
+		builder.WriteString("【運用担当者の確認を記録】本番反映の状態は運用担当者が確認しました。この依頼の自動処理はここで終了します。\n")
+		facts.NextActor = "なし（記録です）"
+		facts.Operation = "対応不要"
+		facts.Production = "確認済み（運用担当者による確認。詳細はこのコメントより前の報告を参照）"
+	} else {
+		builder.WriteString("【運用担当者の確認を記録】ステージング反映の状態は運用担当者が確認しました。本番への反映は自動では行わず、運用手順で行います。この依頼の自動処理はここで終了します。\n")
+		facts.NextActor = "運用担当者"
+		facts.Operation = "本番反映は運用手順で行います"
+		facts.Production = "未変更（自動処理による本番反映は行いません）"
+	}
+	builder.WriteString(facts.render())
+	return builder.String()
+}

@@ -149,6 +149,21 @@ fabricated workflow link.
   review ends by deleting the leftovers so the next round starts from the
   candidate alone. Calling them tampering killed a live run after its
   review had passed.
+- **Operator confirmation**: a report that asks a person to look
+  (`deploy_failed` / `merge_unverified`, staging or production) is not
+  the end of the story — the operator answers on the ticket with a
+  comment whose first line is exactly 「確認済み」, posted after that
+  report, by the requester or a user listed in `tracker.operator_user_ids`.
+  The attendant acknowledges it once (marker `resolved`), seals
+  `deliver-resolution.json` in the run directory, and the board shows the
+  delivery as done ("運用担当者が確認済み"). Before this existed the board
+  held such a delivery open for ever with nothing a person could press
+  (live, 2026-09-02). While it waits, the snapshot carries the stage the
+  run stopped at (`stage`) so the rail lights that node instead of going
+  dark. The tracker is read for the confirmation for 60 days after the
+  report (the board keeps showing the state afterwards), and a release
+  report whose outcome seal was lost falls back to the production report
+  file, so a lost seal cannot recreate the dead end.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
@@ -180,6 +195,7 @@ means adding a row here and the test it names.
 | A reviewer that edits, reverts, or commits what it was asked to judge | `cmd/worker` `TestAgentReviewRejectsAReviewerThatEditsTheTree`, `TestAgentReviewRejectsAReviewerThatCommits`; `internal/worker` `TestConfirmTreeMatchesCandidateRejectsAReviewerThatEdits`, `TestConfirmTreeMatchesCandidateChecksASubmittedNewFile`, `TestRepositoryHeadMovesWhenTheReviewerCommits` | — |
 | A model answer the contract refuses — unreadable (prose, a code fence, an unknown field) or readable but wrong in meaning (a pass verdict that lists reasons, a question id outside Q1–Q3) — on any of the eight JSON-answering calls | `internal/worker` `TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable`, `TestConverseJSONGivesUpAfterThreeUnreadableAnswers`, `TestConverseJSONDoesNotRetryATransportFailure`, `TestAssessReadinessSurvivesOneUnreadableAnswer`, `TestCheckReadinessSurvivesOneContractViolation` | live, 2026-09-02 |
 | A consumer whose staging deploy pushes no digest commit (its `staging_digest_commit` is unset), at the staging gate and again at the promotion gate | `cmd/controller` `TestStagingDeploymentValidationFollowsTheConsumerDigestPolicy`; `internal/githubapi` `TestCreatePromotionPullRequestAcceptsAConsumerWithoutADigestPolicy`, `TestPromotionProofFollowsTheConsumerDigestPolicy`; `internal/releaseproof` `TestStagingDeploymentAcceptsAConsumerWithoutADigestPolicy` | live, 2026-09-02 (the first gateway delivery to reach staging died at the staging gate; the promotion gate was found by review before a Go reached it) |
+| An attention state nobody could clear (a report told an operator to look; no way to record that they had), and a rail that went dark for it | `internal/attendant` `TestResolveAttentionPostsOnceAndSeals`, `TestResolveAttentionStaysSilentWithoutAValidConfirmation`, `TestOperatorConfirmationFollowsTheStopRules`, `TestAttentionCarriesTheStageItStoppedAtAndAnOperatorCanClearIt`; `internal/hook` `TestDeliverResolvedContentCarriesTheMarkerAndNamesProduction`; `cmd/statusboard` `TestBoardPageLightsTheStageAnAttentionStateStoppedAt` | live, 2026-09-02 (a delivery held open 4.5 hours after its staging deploy had succeeded) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |

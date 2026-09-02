@@ -28,6 +28,10 @@ const (
 	// RunCommentReleaseReport is the v2 delivery's final production
 	// summary, posted once after the Go-driven promotion ends either way.
 	RunCommentReleaseReport RunCommentKind = "rel-report"
+	// RunCommentResolved acknowledges an operator's 「確認済み」 on a report
+	// that asked for attention: the automation's part of the delivery ends
+	// there, recorded once on the ticket.
+	RunCommentResolved RunCommentKind = "resolved"
 )
 
 type RunCommentBeginRequest struct {

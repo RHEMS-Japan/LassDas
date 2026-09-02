@@ -231,6 +231,27 @@ type TrackerConfig struct {
 	AllowedActivityType int           `json:"allowed_activity_type"`
 	RequiredCategoryID  int64         `json:"required_category_id"`
 	BoardStatuses       BoardStatuses `json:"board_statuses"`
+	// OperatorUserIDs are the tracker users, besides the requester, whose
+	// 「確認済み」 comment resolves a report that asked for attention. Empty
+	// means the requester alone can.
+	OperatorUserIDs []int64 `json:"operator_user_ids,omitempty"`
+}
+
+// OperatorAllowed reports whether a tracker user may confirm an attention
+// state: the requester always can, and so can every listed operator.
+func (t TrackerConfig) OperatorAllowed(userID int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	if userID == t.AllowedCreatorID {
+		return true
+	}
+	for _, id := range t.OperatorUserIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // IdentityConfig fixes the owner identity the ledger seals into claims.
@@ -279,6 +300,11 @@ func Load(path string) (Config, error) {
 	// become runs. Widening it is a protocol change, not a config knob.
 	if t.AllowedActivityType != 1 {
 		return Config{}, errors.New("runtime config: allowed_activity_type must be 1 (issue created)")
+	}
+	for _, id := range t.OperatorUserIDs {
+		if id <= 0 {
+			return Config{}, errors.New("runtime config: operator_user_ids must be positive tracker user ids")
+		}
 	}
 	i := config.Identity
 	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
