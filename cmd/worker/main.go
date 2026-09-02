@@ -552,15 +552,12 @@ func runDeriveContract(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// One retry: a reasoning model occasionally returns one malformed
-	// response, and a whole run must not die on a single roll when a second
-	// costs seconds (a live run did, 2026-08-14). The first failure is
-	// printed so a systematic cause still leaves both reasons in the log.
+	// A malformed answer is asked again inside the call itself (the
+	// invoker's converseJSON, three answers at most, each retry carrying the
+	// decoder's objection); a second whole derivation on top of that would
+	// double the budget for nothing (a live run died on one bad roll on
+	// 2026-08-14, which is what the retry inside now covers).
 	derivation, _, err := invoker.DeriveTargetFiles(ctx, draft, listing, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "contract derivation attempt 1 failed", err)
-		derivation, _, err = invoker.DeriveTargetFiles(ctx, draft, listing, config)
-	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "contract derivation failed", err)
 		return errors.New("contract derivation failed")

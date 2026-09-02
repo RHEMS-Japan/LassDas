@@ -362,11 +362,15 @@ func (i *ModelInvoker) ReadContract(ctx context.Context, raw RawTicket, config C
 		return ContractIntake{}, InvocationUsage{}, errors.New("contract intake prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	response, usage, err := i.converse(ctx, endpoint, intakeSystemPrompt(), prompt, intakeJSONSchema(), maxIntakeResponseBytes)
-	if err != nil {
-		return ContractIntake{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelIntakeOutput([]byte(response))
+	var output ModelIntakeOutput
+	usage, err := i.converseJSON(ctx, endpoint, intakeSystemPrompt(), prompt, intakeJSONSchema(), maxIntakeResponseBytes, func(answer []byte) error {
+		decoded, err := DecodeModelIntakeOutput(answer)
+		if err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return ContractIntake{}, usage, err
 	}

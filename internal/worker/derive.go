@@ -260,11 +260,15 @@ func (i *ModelInvoker) DeriveTargetFiles(ctx context.Context, draft TicketDraft,
 		return ContractDerivation{}, InvocationUsage{}, errors.New("contract derivation prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	response, usage, err := i.converse(ctx, endpoint, deriveSystemPrompt(consumer), prompt, deriveJSONSchema(consumer), maxDeriveResponseBytes)
-	if err != nil {
-		return ContractDerivation{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelDeriveOutput([]byte(response))
+	var output ModelDeriveOutput
+	usage, err := i.converseJSON(ctx, endpoint, deriveSystemPrompt(consumer), prompt, deriveJSONSchema(consumer), maxDeriveResponseBytes, func(answer []byte) error {
+		decoded, err := DecodeModelDeriveOutput(answer)
+		if err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return ContractDerivation{}, usage, err
 	}

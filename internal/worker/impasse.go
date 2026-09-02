@@ -109,13 +109,17 @@ func (i *ModelInvoker) AskImpasse(
 		return ImpasseDecision{}, errors.New("impasse prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	response, usage, err := i.converse(ctx, endpoint, impasseSystemPrompt(), prompt, impasseJSONSchema(), maxImpasseResponseBytes)
+	var output ModelImpasseOutput
+	usage, err := i.converseJSON(ctx, endpoint, impasseSystemPrompt(), prompt, impasseJSONSchema(), maxImpasseResponseBytes, func(answer []byte) error {
+		var decoded ModelImpasseOutput
+		if err := decodeStrictJSON(answer, &decoded); err != nil {
+			return fmt.Errorf("impasse response is invalid: %w", err)
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return ImpasseDecision{}, err
-	}
-	var output ModelImpasseOutput
-	if err := decodeStrictJSON([]byte(response), &output); err != nil {
-		return ImpasseDecision{}, errors.New("impasse response is invalid")
 	}
 	if len(output.Questions) == 0 {
 		return ImpasseDecision{}, errors.New("impasse response carries no questions")

@@ -195,11 +195,15 @@ func (i *ModelInvoker) AssessReadiness(
 		return ReadinessAssessment{}, InvocationUsage{}, errors.New("readiness prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	response, usage, err := i.converse(ctx, endpoint, readinessSystemPrompt(), prompt, readinessJSONSchema(), maxReadinessResponseBytes)
-	if err != nil {
-		return ReadinessAssessment{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelReadinessOutput([]byte(response))
+	var output ModelReadinessOutput
+	usage, err := i.converseJSON(ctx, endpoint, readinessSystemPrompt(), prompt, readinessJSONSchema(), maxReadinessResponseBytes, func(answer []byte) error {
+		decoded, err := DecodeModelReadinessOutput(answer)
+		if err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return ReadinessAssessment{}, usage, err
 	}
@@ -241,11 +245,15 @@ func (i *ModelInvoker) CheckReadiness(
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Checker
-	response, usage, err := i.converse(ctx, endpoint, readinessCheckSystemPrompt(endpoint), prompt, readinessCheckJSONSchema(), maxReadinessCheckResponseBytes)
-	if err != nil {
-		return ReadinessCheck{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelReadinessCheckOutput([]byte(response))
+	var output ModelReadinessCheckOutput
+	usage, err := i.converseJSON(ctx, endpoint, readinessCheckSystemPrompt(endpoint), prompt, readinessCheckJSONSchema(), maxReadinessCheckResponseBytes, func(answer []byte) error {
+		decoded, err := DecodeModelReadinessCheckOutput(answer)
+		if err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return ReadinessCheck{}, usage, err
 	}

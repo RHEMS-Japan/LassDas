@@ -326,3 +326,109 @@ func TestConverseUnwrapsTheMarkBeforeLettingItTravel(t *testing.T) {
 		t.Fatalf("the mark itself was lost: %v", err)
 	}
 }
+
+// sequenceChatAPI answers each call with the next prepared response and
+// keeps every request, so a test can see the conversation a retry builds.
+type sequenceChatAPI struct {
+	outputs  []*ChatResponse
+	err      error
+	requests []ChatRequest
+}
+
+func (s *sequenceChatAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
+	s.requests = append(s.requests, request)
+	if s.err != nil {
+		return nil, s.err
+	}
+	index := len(s.requests) - 1
+	if index >= len(s.outputs) {
+		index = len(s.outputs) - 1
+	}
+	return s.outputs[index], nil
+}
+
+// A model that answers in prose is asked again in the same conversation,
+// with its own answer and the decoder's objection in front of it. Two live
+// readiness assessments died on their first unreadable answer (RFDEV-677/678).
+func TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable(t *testing.T) {
+	config, _, _ := validArtifactFixture(t)
+	api := &sequenceChatAPI{outputs: []*ChatResponse{
+		chatOutput("Sure! Here is my assessment:\n```json\n{\"status\":\"ready\"}\n```"),
+		chatOutput(`{"status":"ready"}`),
+	}}
+	invoker, _ := NewModelInvoker(api)
+	var decoded struct {
+		Status string `json:"status"`
+	}
+	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte) error {
+		return decodeStrictJSON(answer, &decoded)
+	})
+	if err != nil {
+		t.Fatalf("the corrected answer was not accepted: %v", err)
+	}
+	if decoded.Status != "ready" || len(api.requests) != 2 {
+		t.Fatalf("decoded = %+v, calls = %d", decoded, len(api.requests))
+	}
+	retry := api.requests[1].Messages
+	if len(retry) != 4 || retry[2].Role != "assistant" || !strings.Contains(retry[2].Content, "Sure!") ||
+		retry[3].Role != "user" || !strings.Contains(retry[3].Content, "読めませんでした") || !strings.Contains(retry[3].Content, "invalid character") {
+		t.Fatalf("the retry did not carry the answer and the objection: %+v", retry)
+	}
+	if usage.TotalTokens != 30 || usage.InputTokens != 20 || usage.OutputTokens != 10 {
+		t.Fatalf("usage was not summed across attempts: %+v", usage)
+	}
+}
+
+// Three unreadable answers end the call with an error that says what the
+// decoder objected to and how the last answer began — the failure must be
+// readable afterwards without the artifact that was never written.
+func TestConverseJSONGivesUpAfterThreeUnreadableAnswers(t *testing.T) {
+	config, _, _ := validArtifactFixture(t)
+	api := &sequenceChatAPI{outputs: []*ChatResponse{chatOutput("I cannot answer in JSON, sorry.\nSecond line.")}}
+	invoker, _ := NewModelInvoker(api)
+	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte) error {
+		return decodeStrictJSON(answer, &struct{}{})
+	})
+	if err == nil {
+		t.Fatal("three unreadable answers were accepted")
+	}
+	if len(api.requests) != modelAnswerAttempts {
+		t.Fatalf("the model was asked %d times, want %d", len(api.requests), modelAnswerAttempts)
+	}
+	if !strings.Contains(err.Error(), "answer 3 of 3, request request-123, began: I cannot answer in JSON, sorry. Second line.") || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("the final error does not carry the objection and the answer head: %v", err)
+	}
+	if usage.TotalTokens != 45 {
+		t.Fatalf("usage was not summed across the attempts: %+v", usage)
+	}
+}
+
+// A transport failure is not an unreadable answer: the transport owns its
+// own retry semantics, and asking again here would double them.
+func TestConverseJSONDoesNotRetryATransportFailure(t *testing.T) {
+	config, _, _ := validArtifactFixture(t)
+	api := &sequenceChatAPI{err: errors.New("connection reset")}
+	invoker, _ := NewModelInvoker(api)
+	_, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func([]byte) error { return nil })
+	if err == nil || len(api.requests) != 1 {
+		t.Fatalf("a transport failure was retried or swallowed: err=%v calls=%d", err, len(api.requests))
+	}
+}
+
+const testReadinessAnswerJSON = `{"decision":"ready","questions":[],"assumptions":[],"reject_code":""}`
+
+// The readiness assessor goes through the retrying call: a first answer
+// with a field the contract does not know is corrected on the second try.
+func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	valid := chatOutput(testReadinessAnswerJSON)
+	broken := chatOutput(strings.Replace(testReadinessAnswerJSON, `"decision"`, `"decision_note":"x","decision"`, 1))
+	api := &sequenceChatAPI{outputs: []*ChatResponse{broken, valid}}
+	invoker, _ := NewModelInvoker(api)
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err != nil {
+		t.Fatalf("the corrected readiness answer was not accepted: %v", err)
+	}
+	if len(api.requests) != 2 {
+		t.Fatalf("the assessor was asked %d times, want 2", len(api.requests))
+	}
+}

@@ -85,7 +85,8 @@ type ChatCompletionsAPI interface {
 
 // GatewayClient posts chat completions to endpoint.BaseURL with the API key
 // named by endpoint.APIKeyEnv. It fails closed on any transport surprise and
-// never retries: one ticket stage is one paid invocation.
+// never retries a transport failure; only an answer the contract cannot
+// read is asked again, by converseJSON, at most modelAnswerAttempts times.
 type GatewayClient struct {
 	client *http.Client
 }
@@ -221,19 +222,21 @@ func (i *ModelInvoker) GenerateCandidate(
 	if err != nil {
 		return Candidate{}, InvocationUsage{}, errors.New("generation prompt could not be built")
 	}
-	response, usage, err := i.converse(
+	var output ModelCandidateOutput
+	usage, err := i.converseJSON(
 		ctx, config.Models.Implementer, generationSystemPrompt(), prompt, candidateJSONSchema(request), maxCandidateResponseBytes,
+		func(answer []byte) error {
+			// No fence peeling here: the extractor the review path uses only
+			// finds verdict objects, so it never matched a candidate; a
+			// wrapped candidate is handled by asking the model again.
+			decoded, err := DecodeModelCandidateOutput(answer)
+			if err != nil {
+				return err
+			}
+			output = decoded
+			return nil
+		},
 	)
-	if err != nil {
-		return Candidate{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelCandidateOutput([]byte(response))
-	if err != nil {
-		// Same prose/fence wrapping tolerance as the review path.
-		if block, blockErr := lastJSONObject(response); blockErr == nil {
-			output, err = DecodeModelCandidateOutput([]byte(block))
-		}
-	}
 	if err != nil {
 		return Candidate{}, usage, err
 	}
@@ -263,22 +266,26 @@ func (i *ModelInvoker) ReviewCandidate(
 	if err != nil {
 		return Review{}, InvocationUsage{}, errors.New("review prompt could not be built")
 	}
-	response, usage, err := i.converse(ctx, endpoint, reviewSystemPrompt(endpoint), prompt, reviewJSONSchema(request), maxReviewResponseBytes)
-	if err != nil {
-		return Review{}, InvocationUsage{}, err
-	}
-	output, err := DecodeModelReviewOutput([]byte(response))
-	if err != nil {
-		// Models occasionally wrap the JSON in prose or a code fence even
-		// under a response schema (measured 2026-08-20: two consecutive
-		// stage-2 reviews, HTTP 200, unparseable as-is — the terminal
-		// failure of the first pod acceptance run). Peel the wrapping with
-		// the same extractor the agent-review path always used; every
-		// schema and verdict check still runs on what is found.
-		if block, blockErr := lastJSONObject(response); blockErr == nil {
-			output, err = DecodeModelReviewOutput([]byte(block))
+	var output ModelReviewOutput
+	usage, err := i.converseJSON(ctx, endpoint, reviewSystemPrompt(endpoint), prompt, reviewJSONSchema(request), maxReviewResponseBytes, func(answer []byte) error {
+		decoded, err := DecodeModelReviewOutput(answer)
+		if err != nil {
+			// Models occasionally wrap the JSON in prose or a code fence even
+			// under a response schema (measured 2026-08-20: two consecutive
+			// stage-2 reviews, HTTP 200, unparseable as-is — the terminal
+			// failure of the first pod acceptance run). Peel the wrapping with
+			// the same extractor the agent-review path always used; every
+			// schema and verdict check still runs on what is found.
+			if block, blockErr := lastJSONObject(string(answer)); blockErr == nil {
+				decoded, err = DecodeModelReviewOutput([]byte(block))
+			}
 		}
-	}
+		if err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
 	if err != nil {
 		return Review{}, usage, err
 	}
@@ -295,37 +302,106 @@ func (i *ModelInvoker) Preflight(ctx context.Context, endpoint ModelEndpoint) (I
 	}
 	preflight := endpoint
 	preflight.MaxOutputTokens = 128
-	response, usage, err := i.converse(
+	usage, err := i.converseJSON(
 		ctx,
 		preflight,
 		"Return only the exact JSON object requested. Do not add Markdown or commentary.",
 		`Return exactly {"status":"ready"}.`,
 		`{"type":"object","additionalProperties":false,"required":["status"],"properties":{"status":{"type":"string","enum":["ready"]}}}`,
 		1024,
+		func(answer []byte) error {
+			var decoded struct {
+				Status string `json:"status"`
+			}
+			if err := decodeStrictJSON(answer, &decoded); err != nil {
+				return fmt.Errorf("model preflight response is invalid: %w", err)
+			}
+			if decoded.Status != "ready" {
+				return errors.New("model preflight response is invalid: status is not ready")
+			}
+			return nil
+		},
 	)
 	if err != nil {
-		return InvocationUsage{}, err
-	}
-	var decoded struct {
-		Status string `json:"status"`
-	}
-	if err := decodeStrictJSON([]byte(response), &decoded); err != nil || decoded.Status != "ready" {
-		return usage, errors.New("model preflight response is invalid")
+		return usage, err
 	}
 	return usage, nil
 }
 
-func (i *ModelInvoker) converse(ctx context.Context, endpoint ModelEndpoint, systemPrompt, userPrompt, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
+// modelAnswerAttempts bounds how many times one JSON-answering call may ask
+// the model again for an answer the decoder can read.
+const modelAnswerAttempts = 3
+
+// converseJSON is one model conversation followed by the decode the caller
+// was about to do, with the retry every JSON-answering call needs. A model that answers
+// in prose, inside a code fence, or with a field the contract does not know
+// is asked again in the same conversation — its answer and the decoder's
+// objection appended — up to modelAnswerAttempts times. Two live tickets
+// died on their first unreadable readiness answer with nothing recorded
+// (RFDEV-677/678) while the review path had carried a retry for months; the
+// model now gets to correct itself before the run fails, and the final
+// error carries the objection and the head of the answer so the failure can
+// be read afterwards. Usage is summed across the attempts. A transport
+// failure is not retried here: the transport owns that decision.
+func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint, systemPrompt, userPrompt, schema string, maxResponseBytes int, decode func([]byte) error) (InvocationUsage, error) {
+	messages := []ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+	var total InvocationUsage
+	var last error
+	for attempt := 1; attempt <= modelAnswerAttempts; attempt++ {
+		response, usage, err := i.converseTurn(ctx, endpoint, messages, schema, maxResponseBytes)
+		if err != nil {
+			return total, err
+		}
+		total = sumInvocationUsage(total, usage)
+		objection := decode([]byte(response))
+		if objection == nil {
+			return total, nil
+		}
+		last = fmt.Errorf("%w (answer %d of %d, request %s, began: %s)", objection, attempt, modelAnswerAttempts, usage.RequestID, answerHead(response))
+		messages = append(messages,
+			ChatMessage{Role: "assistant", Content: response},
+			ChatMessage{Role: "user", Content: "前の答えは契約どおりに読めませんでした: " + objection.Error() +
+				"\n説明文や Markdown のコードフェンスを付けず、契約で決められた JSON オブジェクトだけをもう一度返してください。"},
+		)
+	}
+	return total, last
+}
+
+// answerHead is the first line-collapsed 240 bytes of an answer, cut on a
+// character boundary, for an error message that must stay readable.
+func answerHead(answer string) string {
+	head := strings.Join(strings.Fields(answer), " ")
+	if len(head) > 240 {
+		head = strings.ToValidUTF8(head[:240], "") + "…"
+	}
+	return head
+}
+
+func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
+	if total.RequestID == "" {
+		return usage
+	}
+	total.RequestID = usage.RequestID
+	total.StopReason = usage.StopReason
+	total.InputTokens += usage.InputTokens
+	total.OutputTokens += usage.OutputTokens
+	total.TotalTokens += usage.TotalTokens
+	total.LatencyMillis += usage.LatencyMillis
+	total.CostUSD += usage.CostUSD
+	return total
+}
+
+func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	if ctx == nil {
 		return "", InvocationUsage{}, errors.New("model invocation context is invalid")
 	}
 	request := ChatRequest{
 		Model:     endpoint.Model,
 		MaxTokens: endpoint.MaxOutputTokens,
-		Messages: []ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+		Messages:  messages,
 	}
 	if endpoint.Effort != "" {
 		request.ReasoningEffort = endpoint.Effort
