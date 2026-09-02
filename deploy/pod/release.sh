@@ -67,7 +67,9 @@ say "engine $engine_sha"
 # looked; a release now refuses any commit whose CI run is not green, which
 # also means the commit must be pushed first.
 say "CI verdict for $engine_sha"
-repo_slug="$(git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')"
+# owner/name from either remote form (git@host:owner/name.git, https://host/owner/name)
+repo_slug="$(git remote get-url origin | sed -E 's#\.git$##; s#.*[:/]([^/]+/[^/]+)$#\1#')"
+[[ "$repo_slug" == */* ]] || { echo "could not read owner/name from the origin remote" >&2; exit 2; }
 ci_verdict="$(gh run list --repo "$repo_slug" --commit "$engine_sha" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
 echo "${ci_verdict:-no run found}"
 [[ "$ci_verdict" == "completed/success" ]] || {
