@@ -60,6 +60,21 @@ fi
 engine_sha="$(git rev-parse HEAD)"
 say "engine $engine_sha"
 
+# ---- 1b. the public CI must have judged this exact commit ------------------
+# The purity gate (internal/enginepurity) runs only where the operator's
+# token list exists — in CI — so a green local `go test` says nothing about
+# it. This branch shipped for two days with that gate red before anyone
+# looked; a release now refuses any commit whose CI run is not green, which
+# also means the commit must be pushed first.
+say "CI verdict for $engine_sha"
+repo_slug="$(git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')"
+ci_verdict="$(gh run list --repo "$repo_slug" --commit "$engine_sha" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
+echo "${ci_verdict:-no run found}"
+[[ "$ci_verdict" == "completed/success" ]] || {
+  echo "CI for $engine_sha is not green (${ci_verdict:-no run found}); push the commit, wait for a green run, then release" >&2
+  exit 2
+}
+
 # ---- 2. what is live, read before anything is built or changed ------------
 # Every value the rollout will touch is read and checked up front, so a
 # mismatch stops the script before it has built anything, and long before

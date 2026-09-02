@@ -184,7 +184,9 @@ means adding a row here and the test it names.
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
 | A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
 
-The script's own steps, in order: clean committed tree → `go test ./...`
+The script's own steps, in order: clean committed tree → the commit's own
+CI run is green (the purity gate lives only there; a green local test says
+nothing about it) → `go test ./...`
 → build (arm64, no cache) → push → pins and toolchain read from the image
 → `runtime.json` rewritten with the new engine sha and pins → dry run
 stops here; `--apply` patches the ConfigMap, sets the image by digest,
