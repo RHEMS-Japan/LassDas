@@ -584,7 +584,7 @@ func runCreatePromotionPR(ctx context.Context, args []string, getenv func(string
 		ProductPaths: slices.Clone(staging.Binding.ProductPaths), AcceptanceEvidenceSHA256: visible.EvidenceSHA256,
 	}
 	pull, err := runtime.controller.CreatePromotionPullRequest(
-		ctx, proof, promotionPullRequestSpec(staging.Binding, visible.EvidenceSHA256),
+		ctx, proof, stagingDigestPolicyFor(staging.Binding.Repository), promotionPullRequestSpec(staging.Binding, visible.EvidenceSHA256),
 	)
 	if err != nil {
 		return failFrom("promotion_pr_create_failed", err)
@@ -661,7 +661,7 @@ func runMergePromotion(ctx context.Context, args []string, getenv func(string) s
 		return nil
 	}
 	merge, err := runtime.controller.MergePromotionPullRequest(
-		ctx, promotion.Payload.PullRequest, githubapi.CheckEvidence{}, promotion.Payload.Proof,
+		ctx, promotion.Payload.PullRequest, githubapi.CheckEvidence{}, promotion.Payload.Proof, stagingDigestPolicyFor(promotion.Binding.Repository),
 		promotionMergeSpec(promotion.Binding, promotion.Payload.Proof.AcceptanceEvidenceSHA256), waitOptions(), recordReflection,
 	)
 	if reflectionFailure != nil {

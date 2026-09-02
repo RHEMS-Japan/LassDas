@@ -15,9 +15,23 @@ func ValidateStagingDeployment(deployment githubapi.DeploymentResult, consumer w
 	if !validMerge(deployment.Merge) || deployment.Merge.BaseBranch != consumer.IntegrationBranch ||
 		!strings.HasPrefix(deployment.Merge.HeadBranch, "automation/") ||
 		deployment.Merge.HeadBranch == consumer.IntegrationBranch || deployment.Merge.HeadBranch == consumer.ReleaseBranch ||
-		!validObjectID(deployment.BranchHeadSHA) || deployment.BranchHeadSHA != deployment.DigestCommitSHA ||
+		!validObjectID(deployment.BranchHeadSHA) {
+		return time.Time{}, errors.New("staging deployment is invalid")
+	}
+	policy := consumer.StagingDigestCommitPolicy()
+	if !policy.Required {
+		// No digest policy: the staging deploy pushes nothing back, so the
+		// branch must still sit on the deployed merge and the observation must
+		// not claim a digest commit. The first gateway delivery to reach this
+		// gate was refused by the digest equality below, which only a consumer
+		// with a digest policy can satisfy.
+		if deployment.BranchHeadSHA != deployment.Merge.MergeSHA || deployment.DigestCommitSHA != "" ||
+			len(deployment.DigestPaths) != 0 {
+			return time.Time{}, errors.New("staging deployment is invalid")
+		}
+	} else if deployment.BranchHeadSHA != deployment.DigestCommitSHA ||
 		deployment.DigestCommitSHA == deployment.Merge.MergeSHA ||
-		!exactStringSet(deployment.DigestPaths, consumer.StagingDigestCommitPolicy().ExactPaths) {
+		!exactStringSet(deployment.DigestPaths, policy.ExactPaths) {
 		return time.Time{}, errors.New("staging deployment is invalid")
 	}
 	return validateWorkflowSet(

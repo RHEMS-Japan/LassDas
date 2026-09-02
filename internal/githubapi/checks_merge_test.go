@@ -141,7 +141,7 @@ func TestCreatePromotionPullRequestPinsBothLongLivedRefs(t *testing.T) {
 			BranchHeadSHA: shaD, DigestCommitSHA: shaD, DigestPaths: []string{"k8s/overlays/stg/kustomization.yaml"},
 		},
 		ProductPaths: []string{"client/src/page.tsx"}, AcceptanceEvidenceSHA256: acceptanceHash,
-	}, PullRequestSpec{Title: "promote sample", Body: "verified staging evidence " + acceptanceHash})
+	}, testStagingDigestPolicy(), PullRequestSpec{Title: "promote sample", Body: "verified staging evidence " + acceptanceHash})
 	if err != nil {
 		t.Fatalf("CreatePromotionPullRequest() error = %v", err)
 	}
@@ -200,7 +200,7 @@ func TestPromotionMergeRejectsNonEmptyCheckEvidenceBeforeHTTP(t *testing.T) {
 		HeadRef: "stg", HeadSHA: shaD, BaseRef: "prod", BaseSHA: sha2,
 	}
 
-	_, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{CheckRunIDs: []int64{1}}, PromotionProof{}, MergeSpec{CommitTitle: "promote"}, WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second}, discardMergeReflection)
+	_, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{CheckRunIDs: []int64{1}}, PromotionProof{}, DigestCommitPolicy{}, MergeSpec{CommitTitle: "promote"}, WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second}, discardMergeReflection)
 	if !IsInvariant(err, "unexpected_promotion_checks") {
 		t.Fatalf("MergePromotionPullRequest() error = %v", err)
 	}
@@ -214,7 +214,7 @@ func TestPromotionMergeRequiresReflectionRecorderBeforeHTTP(t *testing.T) {
 	}
 
 	_, err := controller.MergePromotionPullRequest(
-		context.Background(), pull, CheckEvidence{}, PromotionProof{}, MergeSpec{CommitTitle: "promote"},
+		context.Background(), pull, CheckEvidence{}, PromotionProof{}, DigestCommitPolicy{}, MergeSpec{CommitTitle: "promote"},
 		WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second}, nil,
 	)
 	if !IsInvariant(err, "missing_merge_reflection_recorder") {
@@ -236,7 +236,7 @@ func TestPromotionMergeTreatsEmptyChecksAsProofPathNotSuccessShortcut(t *testing
 		AcceptanceEvidenceSHA256: acceptanceHash,
 	}
 
-	_, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{}, proof, MergeSpec{CommitTitle: "promote"}, WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second}, discardMergeReflection)
+	_, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{}, proof, DigestCommitPolicy{}, MergeSpec{CommitTitle: "promote"}, WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second}, discardMergeReflection)
 	if !IsInvariant(err, "invalid_baseline") {
 		t.Fatalf("MergePromotionPullRequest() error = %v", err)
 	}
@@ -269,7 +269,7 @@ func TestPromotionMergeWithZeroChecksRevalidatesProofAndExactMerge(t *testing.T)
 	controller, transport := newTestController(t, steps, true)
 	var reflections []MergeReflection
 
-	merged, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{}, proof,
+	merged, err := controller.MergePromotionPullRequest(context.Background(), pull, CheckEvidence{}, proof, testStagingDigestPolicy(),
 		MergeSpec{CommitTitle: "promote", CommitMessage: "acceptance " + acceptanceHash},
 		WaitOptions{PollInterval: time.Millisecond, Timeout: time.Second},
 		func(reflection MergeReflection) error {
@@ -367,4 +367,88 @@ func mergeRequestSteps(t *testing.T, pull PullRequest, actualParents []string) [
 
 func directWorkflowRunJSON(runID, workflowID int64, name, displayTitle, path, branch, sha, event string) string {
 	return `{"id":` + formatInt(runID) + `,"workflow_id":` + formatInt(workflowID) + `,"name":"` + name + `","display_title":"` + displayTitle + `","html_url":"https://github.example/run","head_branch":"` + branch + `","head_sha":"` + sha + `","event":"` + event + `","status":"completed","conclusion":"success","path":"` + path + `","run_attempt":1,"created_at":"2026-08-03T00:01:00Z","updated_at":"2026-08-03T00:02:00Z","repository":{"full_name":"example/consumer"},"head_repository":{"full_name":"example/consumer"}}`
+}
+
+// testStagingDigestPolicy is the digest policy the promotion fixtures were
+// written against: one digest commit after the merge touching one file.
+func testStagingDigestPolicy() DigestCommitPolicy {
+	return DigestCommitPolicy{
+		Required: true, RequireDigestOnly: true,
+		ExactMessagePrefix: "[skip ci] update stg image digests for deploy ",
+		ExactPaths:         []string{"k8s/overlays/stg/kustomization.yaml"},
+		ActorLogin:         "github-actions[bot]",
+	}
+}
+
+// testPromotionProofWithoutDigest is the proof a consumer whose staging deploy
+// pushes nothing back produces: the integration branch sits on the merge and
+// no digest commit is claimed.
+func testPromotionProofWithoutDigest(acceptanceHash string) PromotionProof {
+	proof := testPromotionProof(acceptanceHash)
+	proof.Staging.BranchHeadSHA = sha4
+	proof.Staging.DigestCommitSHA = ""
+	proof.Staging.DigestPaths = nil
+	return proof
+}
+
+func TestCreatePromotionPullRequestAcceptsAConsumerWithoutADigestPolicy(t *testing.T) {
+	acceptanceHash := strings.Repeat("9", 64)
+	steps := []requestStep{
+		{method: http.MethodGet, path: "/repos/example/consumer/git/ref/heads/stg", body: refJSON("stg", sha4)},
+		{method: http.MethodGet, path: "/repos/example/consumer/git/ref/heads/prod", body: refJSON("prod", sha2)},
+		{method: http.MethodGet, path: "/repos/example/consumer/actions/runs/41", body: directWorkflowRunJSON(41, 262913062, "Deploy API/Client (stg)", "", ".github/workflows/deploy-stg.yml", "stg", sha4, "push")},
+		{method: http.MethodGet, path: "/repos/example/consumer/git/commits/" + sha4, body: gitCommitJSON(sha4, sha3, shaA, shaF)},
+		{method: http.MethodGet, path: "/repos/example/consumer/compare/" + shaA + "..." + sha4, body: compareJSON("ahead", shaA, shaB, shaA, shaB, []comparisonFile{{Filename: "client/src/page.tsx", Status: "modified"}})},
+		{method: http.MethodGet, path: "/repos/example/consumer/compare/" + sha2 + "..." + sha4, body: compareJSON("diverged", sha2, shaB, sha1, shaB, []comparisonFile{{Filename: "client/src/page.tsx", Status: "modified"}})},
+		{method: http.MethodGet, path: "/repos/example/consumer/git/ref/heads/stg", body: refJSON("stg", sha4)},
+		{method: http.MethodGet, path: "/repos/example/consumer/git/ref/heads/prod", body: refJSON("prod", sha2)},
+		{method: http.MethodPost, path: "/repos/example/consumer/pulls", status: http.StatusCreated, body: pullJSON(9, "open", "stg", sha4, "prod", sha2, nil)},
+	}
+	controller, transport := newTestController(t, steps, true)
+
+	pull, err := controller.CreatePromotionPullRequest(context.Background(), testPromotionProofWithoutDigest(acceptanceHash), DigestCommitPolicy{},
+		PullRequestSpec{Title: "promote sample", Body: "verified staging evidence " + acceptanceHash})
+	if err != nil {
+		t.Fatalf("CreatePromotionPullRequest() error = %v", err)
+	}
+	if pull.Number != 9 || pull.HeadRef != "stg" || pull.HeadSHA != sha4 || pull.BaseRef != "prod" || pull.BaseSHA != sha2 {
+		t.Fatalf("pull = %+v", pull)
+	}
+	transport.done()
+}
+
+func TestPromotionProofFollowsTheConsumerDigestPolicy(t *testing.T) {
+	acceptanceHash := strings.Repeat("9", 64)
+	spec := PullRequestSpec{Title: "promote sample", Body: "verified staging evidence " + acceptanceHash}
+	digestClaimed := testPromotionProofWithoutDigest(acceptanceHash)
+	digestClaimed.Staging.DigestCommitSHA = sha4
+	branchMoved := testPromotionProofWithoutDigest(acceptanceHash)
+	branchMoved.Staging.BranchHeadSHA = shaD
+	pathsClaimed := testPromotionProofWithoutDigest(acceptanceHash)
+	pathsClaimed.Staging.DigestPaths = []string{"k8s/overlays/stg/kustomization.yaml"}
+	pathsOutsidePolicy := testPromotionProof(acceptanceHash)
+	pathsOutsidePolicy.Staging.DigestPaths = []string{"k8s/overlays/prod/kustomization.yaml"}
+	tests := []struct {
+		name   string
+		proof  PromotionProof
+		policy DigestCommitPolicy
+		code   string
+	}{
+		{"a digest proof under no policy", testPromotionProof(acceptanceHash), DigestCommitPolicy{}, "invalid_promotion_proof"},
+		{"the merge claimed as its own digest under no policy", digestClaimed, DigestCommitPolicy{}, "invalid_promotion_proof"},
+		{"a branch past the merge under no policy", branchMoved, DigestCommitPolicy{}, "invalid_promotion_proof"},
+		{"digest paths claimed under no policy", pathsClaimed, DigestCommitPolicy{}, "invalid_promotion_proof"},
+		{"no digest under a digest policy", testPromotionProofWithoutDigest(acceptanceHash), testStagingDigestPolicy(), "invalid_promotion_proof"},
+		{"digest paths outside the policy", pathsOutsidePolicy, testStagingDigestPolicy(), "invalid_promotion_digest_paths"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controller, transport := newTestController(t, nil, true)
+			_, err := controller.CreatePromotionPullRequest(context.Background(), test.proof, test.policy, spec)
+			if !IsInvariant(err, test.code) {
+				t.Fatalf("CreatePromotionPullRequest() error = %v, want %s", err, test.code)
+			}
+			transport.done()
+		})
+	}
 }

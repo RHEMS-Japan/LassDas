@@ -223,7 +223,7 @@ func TestCreatePromotionPullRequestReconcilesAcceptedInvalidResponse(t *testing.
 	)
 	controller, transport := newTestController(t, steps, true)
 
-	pull, err := controller.CreatePromotionPullRequest(context.Background(), proof, PullRequestSpec{
+	pull, err := controller.CreatePromotionPullRequest(context.Background(), proof, testStagingDigestPolicy(), PullRequestSpec{
 		Title: "promote sample", Body: "verified staging evidence " + acceptanceHash,
 	})
 	if err != nil {

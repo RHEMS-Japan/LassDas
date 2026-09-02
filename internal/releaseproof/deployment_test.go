@@ -98,3 +98,40 @@ func TestProductionDeploymentRejectsAnyDigestCommit(t *testing.T) {
 		t.Fatal("ValidateProductionDeployment() accepted a production digest commit")
 	}
 }
+
+// A consumer whose staging deploy pushes no digest commit is validated
+// against the merge itself: the branch head is the deployed merge, and no
+// digest commit or path is claimed. The first gateway delivery to reach
+// staging was refused because the digest equality was demanded of it
+// regardless of the consumer having no digest policy.
+func TestStagingDeploymentAcceptsAConsumerWithoutADigestPolicy(t *testing.T) {
+	consumer := fixtureConsumer()
+	consumer.GitHub.StagingDigestCommit = nil
+	base := cloneDeployment(stagingFixture(t).StagingDeployment)
+	base.BranchHeadSHA = base.Merge.MergeSHA
+	base.DigestCommitSHA = ""
+	base.DigestPaths = nil
+	if _, err := ValidateStagingDeployment(base, consumer); err != nil {
+		t.Fatalf("a digest-free consumer's deployment was refused: %v", err)
+	}
+	tests := map[string]func(*githubapi.DeploymentResult){
+		"branch moved past the merge": func(value *githubapi.DeploymentResult) { value.BranchHeadSHA = objectID("e") },
+		"digest commit claimed":       func(value *githubapi.DeploymentResult) { value.DigestCommitSHA = value.Merge.MergeSHA },
+		"digest paths claimed": func(value *githubapi.DeploymentResult) {
+			value.DigestPaths = []string{"k8s/overlays/stg/kustomization.yaml"}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := cloneDeployment(base)
+			mutate(&candidate)
+			if _, err := ValidateStagingDeployment(candidate, consumer); err == nil {
+				t.Fatal("ValidateStagingDeployment() accepted invalid evidence for a digest-free consumer")
+			}
+		})
+	}
+	// The same evidence stays refused for a consumer that does have a policy.
+	if _, err := ValidateStagingDeployment(base, fixtureConsumer()); err == nil {
+		t.Fatal("a digest-free deployment was accepted under a digest policy")
+	}
+}

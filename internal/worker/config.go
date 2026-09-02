@@ -390,7 +390,9 @@ func (c ConsumerConfig) Contract() githubapi.Contract {
 }
 
 // StagingDigestCommitPolicy is the configured staging digest-commit policy.
-// A destination without one fails the staging digest checks closed.
+// A destination without one is held to the merge itself at the staging and
+// promotion gates: the branch must sit on the deployed merge and no digest
+// commit may be claimed.
 func (c ConsumerConfig) StagingDigestCommitPolicy() githubapi.DigestCommitPolicy {
 	if c.GitHub.StagingDigestCommit == nil {
 		return githubapi.DigestCommitPolicy{}

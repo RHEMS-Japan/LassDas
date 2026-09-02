@@ -53,7 +53,8 @@ func productionDigestPolicy() githubapi.DigestCommitPolicy {
 }
 
 // stagingDigestPolicyFor resolves the configured staging digest-commit policy
-// of one destination. A destination without one fails those checks closed.
+// of one destination. A destination without one is held to the merge itself:
+// its branch must sit on the deployed merge and no digest commit may be claimed.
 func stagingDigestPolicyFor(repository string) githubapi.DigestCommitPolicy {
 	consumer, err := loadedConfig.ConsumerFor(repository)
 	if err != nil {
