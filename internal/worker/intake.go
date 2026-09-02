@@ -362,42 +362,42 @@ func (i *ModelInvoker) ReadContract(ctx context.Context, raw RawTicket, config C
 		return ContractIntake{}, InvocationUsage{}, errors.New("contract intake prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	var output ModelIntakeOutput
-	usage, err := i.converseJSON(ctx, endpoint, intakeSystemPrompt(), prompt, intakeJSONSchema(), maxIntakeResponseBytes, func(answer []byte) error {
-		decoded, err := DecodeModelIntakeOutput(answer)
+	var intake ContractIntake
+	usage, err := i.converseJSON(ctx, endpoint, intakeSystemPrompt(), prompt, intakeJSONSchema(), maxIntakeResponseBytes, func(answer []byte, usage InvocationUsage) error {
+		output, err := DecodeModelIntakeOutput(answer)
 		if err != nil {
 			return err
 		}
-		output = decoded
+		gaps := append([]IntakeGap(nil), output.Gaps...)
+		repository := resolveIntakeRepository(output.Repository, config, &gaps)
+		verificationPath, expectedText, absentText, gaps := settleWordingPromise(
+			output.VerificationPath, output.ExpectedText, output.AbsentText, gaps)
+		sort.Slice(gaps, func(a, b int) bool { return gaps[a].Field < gaps[b].Field })
+		unsealed := ContractIntake{
+			SchemaVersion: ArtifactSchemaVersion, PromptVersion: intakePromptVersion,
+			DeliveryID: raw.DeliveryID, InputSHA256: raw.InputSHA256,
+			ConfigSHA256: raw.ConfigSHA256, ToolSHA: raw.ToolSHA, RawSHA256: raw.RawSHA256,
+			AssessorID: endpoint.ID, Vendor: endpoint.Vendor, Model: endpoint.Model, BaseURL: endpoint.BaseURL,
+			Effort: endpoint.Effort, StructuredOutput: endpoint.StructuredOutput, MaxOutputTokens: endpoint.MaxOutputTokens,
+			Repository:       repository,
+			VerificationPath: verificationPath, ExpectedText: expectedText,
+			AbsentText: absentText, Request: strings.TrimSpace(output.Request),
+			Gaps: gaps, Rationale: output.Rationale, Invocation: usage, ReadAt: time.Now().UTC(),
+		}
+		sealed, err := SealContractIntake(unsealed)
+		if err != nil {
+			return err
+		}
+		if err := sealed.Validate(raw, config); err != nil {
+			return err
+		}
+		intake = sealed
 		return nil
 	})
 	if err != nil {
 		return ContractIntake{}, usage, err
 	}
-	gaps := append([]IntakeGap(nil), output.Gaps...)
-	repository := resolveIntakeRepository(output.Repository, config, &gaps)
-	verificationPath, expectedText, absentText, gaps := settleWordingPromise(
-		output.VerificationPath, output.ExpectedText, output.AbsentText, gaps)
-	sort.Slice(gaps, func(a, b int) bool { return gaps[a].Field < gaps[b].Field })
-	intake := ContractIntake{
-		SchemaVersion: ArtifactSchemaVersion, PromptVersion: intakePromptVersion,
-		DeliveryID: raw.DeliveryID, InputSHA256: raw.InputSHA256,
-		ConfigSHA256: raw.ConfigSHA256, ToolSHA: raw.ToolSHA, RawSHA256: raw.RawSHA256,
-		AssessorID: endpoint.ID, Vendor: endpoint.Vendor, Model: endpoint.Model, BaseURL: endpoint.BaseURL,
-		Effort: endpoint.Effort, StructuredOutput: endpoint.StructuredOutput, MaxOutputTokens: endpoint.MaxOutputTokens,
-		Repository:       repository,
-		VerificationPath: verificationPath, ExpectedText: expectedText,
-		AbsentText: absentText, Request: strings.TrimSpace(output.Request),
-		Gaps: gaps, Rationale: output.Rationale, Invocation: usage, ReadAt: time.Now().UTC(),
-	}
-	sealed, err := SealContractIntake(intake)
-	if err != nil {
-		return ContractIntake{}, usage, err
-	}
-	if err := sealed.Validate(raw, config); err != nil {
-		return ContractIntake{}, usage, err
-	}
-	return sealed, usage, nil
+	return intake, usage, nil
 }
 
 // SealContractIntake computes the digest that binds an intake to its contents.

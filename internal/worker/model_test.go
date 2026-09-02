@@ -360,7 +360,7 @@ func TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable(t *testing.T) {
 	var decoded struct {
 		Status string `json:"status"`
 	}
-	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte) error {
+	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte, _ InvocationUsage) error {
 		return decodeStrictJSON(answer, &decoded)
 	})
 	if err != nil {
@@ -371,7 +371,7 @@ func TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable(t *testing.T) {
 	}
 	retry := api.requests[1].Messages
 	if len(retry) != 4 || retry[2].Role != "assistant" || !strings.Contains(retry[2].Content, "Sure!") ||
-		retry[3].Role != "user" || !strings.Contains(retry[3].Content, "読めませんでした") || !strings.Contains(retry[3].Content, "invalid character") {
+		retry[3].Role != "user" || !strings.Contains(retry[3].Content, "受け付けられませんでした") || !strings.Contains(retry[3].Content, "invalid character") {
 		t.Fatalf("the retry did not carry the answer and the objection: %+v", retry)
 	}
 	if usage.TotalTokens != 30 || usage.InputTokens != 20 || usage.OutputTokens != 10 {
@@ -386,7 +386,7 @@ func TestConverseJSONGivesUpAfterThreeUnreadableAnswers(t *testing.T) {
 	config, _, _ := validArtifactFixture(t)
 	api := &sequenceChatAPI{outputs: []*ChatResponse{chatOutput("I cannot answer in JSON, sorry.\nSecond line.")}}
 	invoker, _ := NewModelInvoker(api)
-	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte) error {
+	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte, _ InvocationUsage) error {
 		return decodeStrictJSON(answer, &struct{}{})
 	})
 	if err == nil {
@@ -409,7 +409,7 @@ func TestConverseJSONDoesNotRetryATransportFailure(t *testing.T) {
 	config, _, _ := validArtifactFixture(t)
 	api := &sequenceChatAPI{err: errors.New("connection reset")}
 	invoker, _ := NewModelInvoker(api)
-	_, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func([]byte) error { return nil })
+	_, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func([]byte, InvocationUsage) error { return nil })
 	if err == nil || len(api.requests) != 1 {
 		t.Fatalf("a transport failure was retried or swallowed: err=%v calls=%d", err, len(api.requests))
 	}
@@ -430,5 +430,28 @@ func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
 	}
 	if len(api.requests) != 2 {
 		t.Fatalf("the assessor was asked %d times, want 2", len(api.requests))
+	}
+}
+
+// A checker that answers "pass" but still lists reasons decodes fine and
+// fails the contract's meaning. That objection is now something the checker
+// is told and gets to fix (RFDEV-679 died on it one step past the decoder).
+func TestCheckReadinessSurvivesOneContractViolation(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	assessment, _ := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
+	api := &sequenceChatAPI{outputs: []*ChatResponse{
+		chatOutput(`{"verdict":"pass","reasons":[{"code":"looks-fine","message":"No objections."}]}`),
+		chatOutput(`{"verdict":"pass","reasons":[]}`),
+	}}
+	invoker, _ := NewModelInvoker(api)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	if err != nil {
+		t.Fatalf("the corrected check was not accepted: %v", err)
+	}
+	if check.Verdict != "pass" || len(api.requests) != 2 {
+		t.Fatalf("check = %+v, calls = %d", check, len(api.requests))
+	}
+	if !strings.Contains(api.requests[1].Messages[3].Content, "reasons do not match verdict") {
+		t.Fatalf("the checker was not told what was wrong: %q", api.requests[1].Messages[3].Content)
 	}
 }

@@ -222,27 +222,27 @@ func (i *ModelInvoker) GenerateCandidate(
 	if err != nil {
 		return Candidate{}, InvocationUsage{}, errors.New("generation prompt could not be built")
 	}
-	var output ModelCandidateOutput
+	var candidate Candidate
 	usage, err := i.converseJSON(
 		ctx, config.Models.Implementer, generationSystemPrompt(), prompt, candidateJSONSchema(request), maxCandidateResponseBytes,
-		func(answer []byte) error {
+		func(answer []byte, usage InvocationUsage) error {
 			// No fence peeling here: the extractor the review path uses only
 			// finds verdict objects, so it never matched a candidate; a
 			// wrapped candidate is handled by asking the model again.
-			decoded, err := DecodeModelCandidateOutput(answer)
+			output, err := DecodeModelCandidateOutput(answer)
 			if err != nil {
 				return err
 			}
-			output = decoded
+			sealed, err := NewCandidate(stage, output, source, request, config, usage, time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("generated candidate is invalid: %w", err)
+			}
+			candidate = sealed
 			return nil
 		},
 	)
 	if err != nil {
 		return Candidate{}, usage, err
-	}
-	candidate, err := NewCandidate(stage, output, source, request, config, usage, time.Now().UTC())
-	if err != nil {
-		return Candidate{}, usage, errors.New("generated candidate is invalid")
 	}
 	return candidate, usage, nil
 }
@@ -259,6 +259,11 @@ func (i *ModelInvoker) ReviewCandidate(
 	if i == nil || i.api == nil || candidate.Validate(source, request, config) != nil || !configuredReviewer(endpoint, config.Models.Reviewers) {
 		return Review{}, InvocationUsage{}, errors.New("review input is invalid")
 	}
+	// Same clock bound the sealed review will be held to, checked before any
+	// model call so a future-dated candidate fails once, not three times.
+	if time.Now().UTC().Add(allowedArtifactClockSkew).Before(candidate.GeneratedAt) {
+		return Review{}, InvocationUsage{}, errors.New("candidate is dated in the future")
+	}
 	if err := clarificationMatchesRequest(clarification, request); err != nil {
 		return Review{}, InvocationUsage{}, err
 	}
@@ -266,9 +271,9 @@ func (i *ModelInvoker) ReviewCandidate(
 	if err != nil {
 		return Review{}, InvocationUsage{}, errors.New("review prompt could not be built")
 	}
-	var output ModelReviewOutput
-	usage, err := i.converseJSON(ctx, endpoint, reviewSystemPrompt(endpoint), prompt, reviewJSONSchema(request), maxReviewResponseBytes, func(answer []byte) error {
-		decoded, err := DecodeModelReviewOutput(answer)
+	var review Review
+	usage, err := i.converseJSON(ctx, endpoint, reviewSystemPrompt(endpoint), prompt, reviewJSONSchema(request), maxReviewResponseBytes, func(answer []byte, usage InvocationUsage) error {
+		output, err := DecodeModelReviewOutput(answer)
 		if err != nil {
 			// Models occasionally wrap the JSON in prose or a code fence even
 			// under a response schema (measured 2026-08-20: two consecutive
@@ -277,21 +282,21 @@ func (i *ModelInvoker) ReviewCandidate(
 			// the same extractor the agent-review path always used; every
 			// schema and verdict check still runs on what is found.
 			if block, blockErr := lastJSONObject(string(answer)); blockErr == nil {
-				decoded, err = DecodeModelReviewOutput([]byte(block))
+				output, err = DecodeModelReviewOutput([]byte(block))
 			}
 		}
 		if err != nil {
 			return err
 		}
-		output = decoded
+		sealed, err := NewReview(candidate.Stage, endpoint, output, candidate, source, request, config, usage, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("generated review is invalid: %w", err)
+		}
+		review = sealed
 		return nil
 	})
 	if err != nil {
 		return Review{}, usage, err
-	}
-	review, err := NewReview(candidate.Stage, endpoint, output, candidate, source, request, config, usage, time.Now().UTC())
-	if err != nil {
-		return Review{}, usage, errors.New("generated review is invalid")
 	}
 	return review, usage, nil
 }
@@ -309,7 +314,7 @@ func (i *ModelInvoker) Preflight(ctx context.Context, endpoint ModelEndpoint) (I
 		`Return exactly {"status":"ready"}.`,
 		`{"type":"object","additionalProperties":false,"required":["status"],"properties":{"status":{"type":"string","enum":["ready"]}}}`,
 		1024,
-		func(answer []byte) error {
+		func(answer []byte, _ InvocationUsage) error {
 			var decoded struct {
 				Status string `json:"status"`
 			}
@@ -332,18 +337,22 @@ func (i *ModelInvoker) Preflight(ctx context.Context, endpoint ModelEndpoint) (I
 // the model again for an answer the decoder can read.
 const modelAnswerAttempts = 3
 
-// converseJSON is one model conversation followed by the decode the caller
-// was about to do, with the retry every JSON-answering call needs. A model that answers
-// in prose, inside a code fence, or with a field the contract does not know
-// is asked again in the same conversation — its answer and the decoder's
-// objection appended — up to modelAnswerAttempts times. Two live tickets
-// died on their first unreadable readiness answer with nothing recorded
-// (RFDEV-677/678) while the review path had carried a retry for months; the
-// model now gets to correct itself before the run fails, and the final
-// error carries the objection and the head of the answer so the failure can
-// be read afterwards. Usage is summed across the attempts. A transport
+// converseJSON is one model conversation followed by everything the caller
+// does to accept the answer — decoding it, checking it against the contract,
+// sealing the artifact — with the retry every JSON-answering call needs. An
+// answer the accept function refuses (prose, a code fence, an unknown field,
+// a pass verdict that still lists reasons, a question id outside Q1–Q3) is
+// answered in the same conversation with the model's own answer
+// and the objection appended, up to modelAnswerAttempts times. Two live
+// tickets died on their first unreadable readiness answer with nothing
+// recorded (RFDEV-677/678), and the next one died one step later on an
+// answer that decoded but failed the contract's meaning (RFDEV-679); the
+// model now gets to correct itself before the run fails, and the final error
+// carries the objection, the request id and the head of the answer so the
+// failure can be read afterwards. The accept function receives the usage
+// summed so far, because the artifacts it seals carry it. A transport
 // failure is not retried here: the transport owns that decision.
-func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint, systemPrompt, userPrompt, schema string, maxResponseBytes int, decode func([]byte) error) (InvocationUsage, error) {
+func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint, systemPrompt, userPrompt, schema string, maxResponseBytes int, accept func(answer []byte, usage InvocationUsage) error) (InvocationUsage, error) {
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
@@ -356,15 +365,15 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 			return total, err
 		}
 		total = sumInvocationUsage(total, usage)
-		objection := decode([]byte(response))
+		objection := accept([]byte(response), total)
 		if objection == nil {
 			return total, nil
 		}
 		last = fmt.Errorf("%w (answer %d of %d, request %s, began: %s)", objection, attempt, modelAnswerAttempts, usage.RequestID, answerHead(response))
 		messages = append(messages,
 			ChatMessage{Role: "assistant", Content: response},
-			ChatMessage{Role: "user", Content: "前の答えは契約どおりに読めませんでした: " + objection.Error() +
-				"\n説明文や Markdown のコードフェンスを付けず、契約で決められた JSON オブジェクトだけをもう一度返してください。"},
+			ChatMessage{Role: "user", Content: "前の答えは受け付けられませんでした: " + objection.Error() +
+				"\n指摘された点を直し、説明文や Markdown のコードフェンスを付けず、契約で決められた JSON オブジェクトだけをもう一度返してください。"},
 		)
 	}
 	return total, last

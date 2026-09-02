@@ -260,34 +260,35 @@ func (i *ModelInvoker) DeriveTargetFiles(ctx context.Context, draft TicketDraft,
 		return ContractDerivation{}, InvocationUsage{}, errors.New("contract derivation prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	var output ModelDeriveOutput
-	usage, err := i.converseJSON(ctx, endpoint, deriveSystemPrompt(consumer), prompt, deriveJSONSchema(consumer), maxDeriveResponseBytes, func(answer []byte) error {
-		decoded, err := DecodeModelDeriveOutput(answer)
+	var derivation ContractDerivation
+	usage, err := i.converseJSON(ctx, endpoint, deriveSystemPrompt(consumer), prompt, deriveJSONSchema(consumer), maxDeriveResponseBytes, func(answer []byte, usage InvocationUsage) error {
+		output, err := DecodeModelDeriveOutput(answer)
 		if err != nil {
 			return err
 		}
-		output = decoded
+		files := append([]string(nil), output.Files...)
+		sort.Strings(files)
+		sealed := ContractDerivation{
+			SchemaVersion: ArtifactSchemaVersion, PromptVersion: derivePromptVersion,
+			DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
+			ConfigSHA256: draft.ConfigSHA256, ToolSHA: draft.ToolSHA, ListingSHA256: listing.ListingSHA256,
+			AssessorID: endpoint.ID, Vendor: endpoint.Vendor, Model: endpoint.Model, BaseURL: endpoint.BaseURL,
+			Effort: endpoint.Effort, StructuredOutput: endpoint.StructuredOutput, MaxOutputTokens: endpoint.MaxOutputTokens,
+			TargetFiles: files, Rationale: output.Rationale, Invocation: usage, DerivedAt: time.Now().UTC(),
+		}
+		digest, err := sealedDigest(sealed)
+		if err != nil {
+			return errors.New("contract derivation could not be sealed")
+		}
+		sealed.DerivationSHA256 = digest
+		// A file the listing does not contain is the model's mistake to fix.
+		if err := sealed.Validate(draft, listing, config); err != nil {
+			return err
+		}
+		derivation = sealed
 		return nil
 	})
 	if err != nil {
-		return ContractDerivation{}, usage, err
-	}
-	files := append([]string(nil), output.Files...)
-	sort.Strings(files)
-	derivation := ContractDerivation{
-		SchemaVersion: ArtifactSchemaVersion, PromptVersion: derivePromptVersion,
-		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
-		ConfigSHA256: draft.ConfigSHA256, ToolSHA: draft.ToolSHA, ListingSHA256: listing.ListingSHA256,
-		AssessorID: endpoint.ID, Vendor: endpoint.Vendor, Model: endpoint.Model, BaseURL: endpoint.BaseURL,
-		Effort: endpoint.Effort, StructuredOutput: endpoint.StructuredOutput, MaxOutputTokens: endpoint.MaxOutputTokens,
-		TargetFiles: files, Rationale: output.Rationale, Invocation: usage, DerivedAt: time.Now().UTC(),
-	}
-	digest, err := sealedDigest(derivation)
-	if err != nil {
-		return ContractDerivation{}, usage, errors.New("contract derivation could not be sealed")
-	}
-	derivation.DerivationSHA256 = digest
-	if err := derivation.Validate(draft, listing, config); err != nil {
 		return ContractDerivation{}, usage, err
 	}
 	return derivation, usage, nil

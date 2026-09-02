@@ -195,26 +195,26 @@ func (i *ModelInvoker) AssessReadiness(
 		return ReadinessAssessment{}, InvocationUsage{}, errors.New("readiness prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	var output ModelReadinessOutput
-	usage, err := i.converseJSON(ctx, endpoint, readinessSystemPrompt(), prompt, readinessJSONSchema(), maxReadinessResponseBytes, func(answer []byte) error {
-		decoded, err := DecodeModelReadinessOutput(answer)
+	var assessment ReadinessAssessment
+	usage, err := i.converseJSON(ctx, endpoint, readinessSystemPrompt(), prompt, readinessJSONSchema(), maxReadinessResponseBytes, func(answer []byte, usage InvocationUsage) error {
+		output, err := DecodeModelReadinessOutput(answer)
 		if err != nil {
 			return err
 		}
-		output = decoded
+		normalizeReadinessTaxonomy(&output)
+		sealed, err := NewReadinessAssessment(attempt, output, clarification, answers, source, request, config, usage, time.Now().UTC())
+		if err != nil {
+			// Every message on this path is engine-authored static prose, so
+			// the reason may travel: it is what the model is told to fix, and
+			// without it a production failure leaves nothing to diagnose (the
+			// history artifact is only written on success).
+			return fmt.Errorf("generated readiness assessment is invalid: %w", err)
+		}
+		assessment = sealed
 		return nil
 	})
 	if err != nil {
 		return ReadinessAssessment{}, usage, err
-	}
-	normalizeReadinessTaxonomy(&output)
-	assessment, err := NewReadinessAssessment(attempt, output, clarification, answers, source, request, config, usage, time.Now().UTC())
-	if err != nil {
-		// Every message on this path is engine-authored static prose, so the
-		// reason may travel: without it a production failure leaves nothing to
-		// diagnose (measured on the first marked ticket after cutover - the
-		// history artifact is only written on success).
-		return ReadinessAssessment{}, usage, fmt.Errorf("generated readiness assessment is invalid: %w", err)
 	}
 	return assessment, usage, nil
 }
@@ -231,6 +231,12 @@ func (i *ModelInvoker) CheckReadiness(
 	if i == nil || i.api == nil || assessment.Validate(source, request, config) != nil {
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check input is invalid")
 	}
+	// A check sealed now must not predate its assessment; an assessment
+	// dated in the future would make every answer fail that bound inside
+	// the retry loop, three model calls for a clock problem.
+	if time.Now().UTC().Add(allowedArtifactClockSkew).Before(assessment.AssessedAt) {
+		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness assessment is dated in the future")
+	}
 	if err := clarificationMatchesRequest(clarification, request); err != nil {
 		return ReadinessCheck{}, InvocationUsage{}, err
 	}
@@ -245,22 +251,25 @@ func (i *ModelInvoker) CheckReadiness(
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Checker
-	var output ModelReadinessCheckOutput
-	usage, err := i.converseJSON(ctx, endpoint, readinessCheckSystemPrompt(endpoint), prompt, readinessCheckJSONSchema(), maxReadinessCheckResponseBytes, func(answer []byte) error {
-		decoded, err := DecodeModelReadinessCheckOutput(answer)
+	var check ReadinessCheck
+	usage, err := i.converseJSON(ctx, endpoint, readinessCheckSystemPrompt(endpoint), prompt, readinessCheckJSONSchema(), maxReadinessCheckResponseBytes, func(answer []byte, usage InvocationUsage) error {
+		output, err := DecodeModelReadinessCheckOutput(answer)
 		if err != nil {
 			return err
 		}
-		output = decoded
+		normalizeCheckAttribution(&output, assessment)
+		sealed, err := NewReadinessCheck(output, assessment, source, request, config, usage, time.Now().UTC())
+		if err != nil {
+			// The reason travels: a pass verdict that still lists reasons is
+			// something the checker can correct when told (RFDEV-679 died on
+			// this step with the reason hidden behind a fixed phrase).
+			return fmt.Errorf("generated readiness check is invalid: %w", err)
+		}
+		check = sealed
 		return nil
 	})
 	if err != nil {
 		return ReadinessCheck{}, usage, err
-	}
-	normalizeCheckAttribution(&output, assessment)
-	check, err := NewReadinessCheck(output, assessment, source, request, config, usage, time.Now().UTC())
-	if err != nil {
-		return ReadinessCheck{}, usage, errors.New("generated readiness check is invalid")
 	}
 	return check, usage, nil
 }
