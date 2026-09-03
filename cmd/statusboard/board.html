@@ -77,6 +77,8 @@
   .counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.1em; }
   .counts b { color: var(--cyan); font-weight: 400; }
   .counts b.warn { color: var(--red); }
+  /* Intake held: the attendant's one-line reason, in the requester's words. */
+  .notice { margin: 12px 0 0; padding: 9px 14px; border: 1px solid var(--amber); background: var(--amber-dim); color: var(--amber); font-family: var(--mono); font-size: 12px; letter-spacing: 0.05em; line-height: 1.6; }
 
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 22px; margin-top: 24px; }
   @media (max-width: 960px) { .cols { grid-template-columns: minmax(0, 1fr); } }
@@ -262,6 +264,7 @@
     <span class="counts" id="counts"></span>
     <span class="clock"><span id="ago">—</span></span>
   </header>
+  <div id="notice-banner" class="notice" role="status" hidden></div>
 
   <div class="cols">
     <div>
@@ -585,6 +588,9 @@ function renderBoard() {
     }
   }
 
+  const banner = document.getElementById("notice-banner");
+  banner.textContent = latestBoard.notice || "";
+  banner.hidden = !latestBoard.notice;
   const needAttention = active.filter(run => ACTIONABLE.has(run.step) || run.step === "attention").length;
   const counts = document.getElementById("counts");
   counts.replaceChildren();

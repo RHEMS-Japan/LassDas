@@ -13,3 +13,17 @@ func TestOperatorAllowedIsTheRequesterOrAListedOperator(t *testing.T) {
 		t.Fatal("an unlisted user was allowed with no operator list")
 	}
 }
+
+func TestFailureStreakLimitDefaultsToThreeAndCanBeSwitchedOff(t *testing.T) {
+	if got := (ChainConfig{}).FailureStreakLimitValue(); got != 3 {
+		t.Fatalf("default limit = %d, want 3", got)
+	}
+	off := 0
+	if got := (ChainConfig{FailureStreakLimit: &off}).FailureStreakLimitValue(); got != 0 {
+		t.Fatalf("explicit 0 = %d, want 0", got)
+	}
+	five := 5
+	if got := (ChainConfig{FailureStreakLimit: &five}).FailureStreakLimitValue(); got != 5 {
+		t.Fatalf("explicit 5 = %d, want 5", got)
+	}
+}

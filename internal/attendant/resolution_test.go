@@ -18,9 +18,11 @@ type fakeConfirmationSource struct {
 	listErr  error
 	addErr   error
 	added    []string
+	listings int
 }
 
 func (f *fakeConfirmationSource) ListComments(context.Context, int64, int64) ([]hook.BacklogComment, error) {
+	f.listings++
 	return f.comments, f.listErr
 }
 

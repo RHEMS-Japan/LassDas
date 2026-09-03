@@ -75,10 +75,20 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 	if err != nil {
 		return err
 	}
+	// The same failure ending the last N deliveries holds intake until an
+	// operator has looked; in-flight runs keep going.
+	streak := detectFailureStreak(runs, config.Chain.FailureStreakLimitValue(), streakResolvedIn(config))
+	if streak.Active {
+		streak.Active = holdForStreak(ctx, config.Tracker, services.Backlog, streak, runDirectory(config, streak.Newest.DeliveryID), logger)
+	}
 	for _, run := range runs {
 		view := chainViewFor(tasks, run.DeliveryID)
 		switch run.State {
 		case "queued":
+			if streak.Active {
+				logger.Info("intake held by failure streak", "run", run.RunID, "code", streak.Code, "count", streak.Count)
+				continue
+			}
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain start failed", "run", run.RunID, "error", err.Error())
 			}
@@ -185,6 +195,11 @@ func startQueuedRun(
 		return err
 	}
 	now := time.Now().UTC()
+	// A budget hold throttles its own retry: the run stays queued and
+	// unclaimed until the interval since the refusal has passed.
+	if budgetHeldRecently(runDir, now) {
+		return nil
+	}
 	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
 		SpaceKey:            config.Tracker.SpaceKey,
 		ProjectID:           config.Tracker.ProjectID,
@@ -218,6 +233,12 @@ func startQueuedRun(
 	if stopped {
 		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, "")
+	}
+	// Money before work: a key out of budget holds the run here. The claim
+	// is left to the next tick's recovery (a claim with no chain goes back
+	// to the queue) and the hold file throttles the next probe.
+	if checkBudgets(ctx, config, services.Backlog, run, runDir, envelope.Snapshot.IssueID, os.Getenv, budgetProbeClient, logger) {
+		return nil
 	}
 	token, err := readTargetToken(config)
 	if err != nil {

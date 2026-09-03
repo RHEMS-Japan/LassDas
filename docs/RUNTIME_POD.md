@@ -174,6 +174,31 @@ fabricated workflow link.
   without moving the reception. `LASSDAS_IMPLEMENTER_MAX_TURNS` (default
   200) caps the implementer's tool-calling iterations; the reviewers are
   capped at 40 in their profiles.
+- **Budget hold**: right before the reception starts, the attendant asks
+  the gateway for one token under every role's key (the reception's
+  direct calls from the consumer configuration, the three agent roles
+  from the environment). A refusal that names the budget holds the run:
+  `budget-hold.json` in the run directory, one ticket comment (marker
+  `budget-hold`), the board at intake as "予算不足で開始できません", and a
+  retry every 10 minutes that resumes by itself once the cap is raised.
+  Nothing else holds — a rate limit or an outage lets the run proceed.
+  The gateway's two money refusals both count: a key's budget cap and the
+  account's credit balance (`insufficient_quota`). The agent roles are
+  probed under the models `entrypoint.sh` exports, so a role the attendant
+  cannot see is logged, never silently skipped.
+  Before this a run on an exhausted key spent its allowance on refusals
+  and died as an unexplained model failure (live, 2026-09-02).
+- **Failure streak hold**: when the same failure ended the last N
+  deliveries (`chain.failure_streak_limit`, default 3; a success, a stop,
+  an expired or required clarification and a refused or unresolved
+  readiness end a streak — they say nothing about the automation), the
+  attendant stops taking new
+  deliveries, says so once on the newest failed ticket (marker
+  `streak-hold`) and shows the reason as the board's banner. The
+  operator's 「確認済み」 on that ticket lifts it (acknowledged once,
+  `failure-streak-resolution.json` recorded in that run's directory).
+  In-flight runs are not touched; the held ticket is read at most every
+  two minutes.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
@@ -207,6 +232,8 @@ means adding a row here and the test it names.
 | A consumer whose staging deploy pushes no digest commit (its `staging_digest_commit` is unset), at the staging gate and again at the promotion gate | `cmd/controller` `TestStagingDeploymentValidationFollowsTheConsumerDigestPolicy`; `internal/githubapi` `TestCreatePromotionPullRequestAcceptsAConsumerWithoutADigestPolicy`, `TestPromotionProofFollowsTheConsumerDigestPolicy`; `internal/releaseproof` `TestStagingDeploymentAcceptsAConsumerWithoutADigestPolicy` | live, 2026-09-02 (the first gateway delivery to reach staging died at the staging gate; the promotion gate was found by review before a Go reached it) |
 | An attention state nobody could clear (a report told an operator to look; no way to record that they had), and a rail that went dark for it | `internal/attendant` `TestResolveAttentionPostsOnceAndSeals`, `TestResolveAttentionStaysSilentWithoutAValidConfirmation`, `TestOperatorConfirmationFollowsTheStopRules`, `TestAttentionCarriesTheStageItStoppedAtAndAnOperatorCanClearIt`; `internal/hook` `TestDeliverResolvedContentCarriesTheMarkerAndNamesProduction`; `cmd/statusboard` `TestBoardPageLightsTheStageAnAttentionStateStoppedAt` | live, 2026-09-02 (a delivery held open 4.5 hours after its staging deploy had succeeded) |
 | An implementer that stops making progress and spends the whole iteration budget on it | not a test: `LASSDAS_IMPLEMENTER_MAX_TURNS` bounds the iterations per run (`entrypoint.sh`) | live, 2026-09-02 (458 of 500 iterations, 425 of them the same search, no file changed) |
+| A key out of budget spending a whole run on refusals | `internal/attendant` `TestCheckBudgetsHoldsOnceThrottlesAndClears`, `TestProbeBudgetOnlyABudgetRefusalCounts`, `TestRoleProbesCollapseDuplicatesAndReadTheEnvironment`, `TestBudgetHoldShowsAtIntakeAsAttention` | live, 2026-09-02 (the shared key ran dry; every ticket after it died as model_failed) |
+| The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |

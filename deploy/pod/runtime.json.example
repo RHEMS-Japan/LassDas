@@ -38,6 +38,7 @@
   "orchestration": "runner",
   "chain": {
     "runs_root": "/data/runs",
+    "failure_streak_limit": 3,
     "target_token_path": "/data/secrets/target-token",
     "profiles": {
       "implementer": "lassdas-implementer",

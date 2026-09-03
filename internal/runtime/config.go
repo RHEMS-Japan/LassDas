@@ -113,6 +113,10 @@ type ChainConfig struct {
 	// Profiles names the five stage profiles. Their worker.command (or, for
 	// the implementer, the native agent) is host-side Hermes configuration.
 	Profiles ChainProfiles `json:"profiles,omitempty"`
+	// FailureStreakLimit stops intake once this many deliveries in a row
+	// ended with the same failure; the operator's 「確認済み」 on the newest
+	// of them resumes it. Omitted means 3; 0 turns the hold off.
+	FailureStreakLimit *int `json:"failure_streak_limit,omitempty"`
 	// E2EProfile, when set, turns on the debug role: every successful
 	// delivery gets one post-merge staging observation card assigned to
 	// it. Empty (the default) leaves the role off.
@@ -306,6 +310,9 @@ func Load(path string) (Config, error) {
 			return Config{}, errors.New("runtime config: operator_user_ids must be positive tracker user ids")
 		}
 	}
+	if config.Chain.FailureStreakLimit != nil && *config.Chain.FailureStreakLimit < 0 {
+		return Config{}, errors.New("runtime config: chain.failure_streak_limit must be 0 (off) or positive")
+	}
 	i := config.Identity
 	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
 		i.WorkflowRef == "" || !commit40.MatchString(i.EngineSHA) {
@@ -424,4 +431,17 @@ func (c Config) Owner(hermesRunID int64) hook.PullOwner {
 		WorkflowRunID:     hermesRunID,
 		RunAttempt:        1,
 	}
+}
+
+// defaultFailureStreakLimit is how many identical failures in a row hold
+// intake when the configuration says nothing.
+const defaultFailureStreakLimit = 3
+
+// FailureStreakLimitValue resolves the configured streak limit: the
+// default when omitted, 0 when the hold is switched off.
+func (c ChainConfig) FailureStreakLimitValue() int {
+	if c.FailureStreakLimit == nil {
+		return defaultFailureStreakLimit
+	}
+	return *c.FailureStreakLimit
 }

@@ -90,6 +90,14 @@ worker:
 YAML
 done
 
+# The role models are read in two places — the profiles below and the
+# attendant's budget check before every reception — so their defaults are
+# resolved once, here, and exported. A role the attendant cannot see is a
+# role it cannot probe.
+export LASSDAS_IMPLEMENTER_MODEL="${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}"
+export LASSDAS_REVIEW_A_MODEL="${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}"
+export LASSDAS_REVIEW_B_MODEL="${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}"
+
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
 cat > "$REVIEW_A_HOME/config.yaml" <<YAML

@@ -63,3 +63,17 @@ func TestBoardPageLightsTheStageAnAttentionStateStoppedAt(t *testing.T) {
 		}
 	}
 }
+
+// The attendant's intake-hold banner rides in the snapshot as `notice`; the
+// page must render it.
+func TestBoardPageRendersTheIntakeHoldNotice(t *testing.T) {
+	page, err := os.ReadFile("board.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{`id="notice-banner"`, "latestBoard.notice"} {
+		if !strings.Contains(string(page), needle) {
+			t.Fatalf("board.html lacks %q", needle)
+		}
+	}
+}

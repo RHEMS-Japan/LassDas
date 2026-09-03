@@ -258,3 +258,22 @@ func TestResolvedOutcomeDoesNotAssertWhatTheReportCouldNot(t *testing.T) {
 		t.Fatalf("release = %q", status.Detail)
 	}
 }
+
+func TestBudgetHoldShowsAtIntakeAsAttention(t *testing.T) {
+	root := t.TempDir()
+	config := runtime.Config{}
+	config.Chain.RunsRoot = root
+	const delivery = "TKT-902:1"
+	if err := os.MkdirAll(filepath.Join(root, delivery), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, delivery, "budget-hold.json"), []byte(`{"roles":["実装役"],"at":"2026-09-03T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, runState := range []string{"queued", "claimed"} {
+		got := classifyRun(config, state.RunOverview{State: runState, DeliveryID: delivery}, nil)
+		if got.Step != "attention" || got.Stage != "intake" || !strings.Contains(got.Detail, "実装役") {
+			t.Fatalf("%s with a budget hold = %q at %q (%q)", runState, got.Step, got.Stage, got.Detail)
+		}
+	}
+}

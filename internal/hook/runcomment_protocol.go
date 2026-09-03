@@ -32,6 +32,14 @@ const (
 	// that asked for attention: the automation's part of the delivery ends
 	// there, recorded once on the ticket.
 	RunCommentResolved RunCommentKind = "resolved"
+	// RunCommentBudgetHold says a delivery cannot start because a role's
+	// key is out of budget; it resumes by itself once the cap is raised.
+	RunCommentBudgetHold RunCommentKind = "budget-hold"
+	// RunCommentStreakHold says intake is stopped because the same failure
+	// ended the last N deliveries; RunCommentStreakResolved acknowledges
+	// the operator's 「確認済み」 that lifts it.
+	RunCommentStreakHold     RunCommentKind = "streak-hold"
+	RunCommentStreakResolved RunCommentKind = "streak-resolved"
 )
 
 type RunCommentBeginRequest struct {

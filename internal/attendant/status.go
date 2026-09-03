@@ -28,6 +28,9 @@ type BoardSnapshot struct {
 	SchemaVersion int         `json:"schema_version"`
 	GeneratedAt   time.Time   `json:"generated_at"`
 	Runs          []RunStatus `json:"runs"`
+	// Notice is the one-line banner shown while intake is held (the same
+	// failure ended the last N deliveries); empty otherwise.
+	Notice string `json:"notice,omitempty"`
 }
 
 // RunStatus is one delivery's position in the pipeline, in requester terms.
@@ -84,6 +87,9 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
+	// The streak is read on the untrimmed list: trimming below reuses the
+	// slice's backing array.
+	streak := detectFailureStreak(runs, config.Chain.FailureStreakLimitValue(), streakResolvedIn(config))
 	// Trim BEFORE classifying: classification does per-run file I/O, and
 	// the ledger only grows. Terminal runs beyond twice the display limit
 	// (newest first) cannot appear on the board — resting ones are capped
@@ -116,6 +122,9 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 		kept = append(kept, run)
 	}
 	snapshot.Runs = kept
+	if streak.Active {
+		snapshot.Notice = streakNotice(streak)
+	}
 	return snapshot, nil
 }
 
@@ -126,10 +135,18 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 	}
 	switch run.State {
 	case "queued":
+		if hold, held := readBudgetHold(runDirectory(config, run.DeliveryID)); held {
+			placeBudgetHold(&status, hold)
+			break
+		}
 		status.place("intake", "受付待ち", "")
 	case "awaiting_answer":
 		status.place("question", "質問への回答待ち", "依頼者の返信を待っています")
 	case "claimed":
+		if hold, held := readBudgetHold(runDirectory(config, run.DeliveryID)); held {
+			placeBudgetHold(&status, hold)
+			break
+		}
 		classifyClaimed(&status, run, tasks)
 	case "terminal":
 		classifyAfterTerminal(&status, config, run, tasks)
