@@ -26,7 +26,11 @@ type PromotionPreview struct {
 
 // DeliverStagingReport is the staging-phase summary the attendant renders.
 type DeliverStagingReport struct {
-	Verdict            string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | stopped | card_failed
+	Verdict string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | stopped | card_failed
+	// Block names, with observe_blocked, why the page could not be judged:
+	// "sign_in" (the login did not land) or "redirect" (the page sent the
+	// browser elsewhere). It decides who has to act.
+	Block              string
 	TargetURL          string
 	ExpectedText       string
 	AbsentText         string
@@ -63,6 +67,8 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		builder.WriteString("【ステージング反映が未確認】マージ後、ステージングの自動デプロイの完了を確認できませんでした。\n\n")
 	case "observe_failed":
 		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、画面の自動確認が合格しませんでした。本番反映は行えません。\n\n")
+	case "observe_blocked":
+		builder.WriteString("【ステージング確認ができず】変更はステージングに反映されましたが、確認用の画面を開けなかったため、画面の合否を判定できませんでした。変更が正しいかどうかはこの結果からは分かりません。本番反映は行えません。\n\n")
 	case "stopped":
 		builder.WriteString("【停止を受け付けました】ご指示によりステージングへの反映を行わず停止しました。\n\n")
 	case "merge_unverified":
@@ -118,6 +124,20 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.State = "ステージング反映の工程で停止"
 		facts.NextActor = "運用担当者"
 		facts.Operation = "ステージングのブランチとデプロイの状態を確認します"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更（本番反映は行われません）"
+	case report.Verdict == "observe_blocked" && report.Block == "sign_in":
+		// The observation never reached the page: the session jar is the
+		// operator's to renew, and the requester's change is unjudged.
+		facts.State = "ステージング反映済み・画面確認は判定不能（ログイン状態切れ）"
+		facts.NextActor = "運用担当者"
+		facts.Operation = "確認用のログインをやり直し、このチケットに「確認済み」とコメント。画面の確認が必要なら依頼を起票し直します"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更（本番反映は行われません）"
+	case report.Verdict == "observe_blocked":
+		facts.State = "ステージング反映済み・画面確認は判定不能（別の画面へ転送）"
+		facts.NextActor = "依頼者"
+		facts.Operation = "転送されない画面を確認先に指定して起票し直してください（この依頼はここで終了。運用担当者がこのチケットに「確認済み」とコメントすると、進み具合の板から消えます）"
 		facts.NextEvent = "以後の自動通知はありません"
 		facts.Production = "未変更（本番反映は行われません）"
 	default:
@@ -181,7 +201,9 @@ func renderPreview(preview PromotionPreview) string {
 
 // DeliverReleaseReport is the production-phase summary.
 type DeliverReleaseReport struct {
-	Verdict            string // pass | promotion_failed | merge_unverified | deploy_failed | observe_failed | expired | card_failed
+	Verdict string // pass | promotion_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | expired | card_failed
+	// Block is the observe_blocked reason, as on the staging report.
+	Block              string
 	TargetURL          string
 	PullRequestURL     string
 	Detail             string
@@ -200,6 +222,8 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		builder.WriteString("【本番反映が未確認】本番ブランチへの反映は行われましたが、本番の自動デプロイの完了を確認できませんでした。\n\n")
 	case "observe_failed":
 		builder.WriteString("【本番反映済み・画面確認は不合格】本番への反映は完了しましたが、本番画面の自動確認が合格しませんでした。お手数ですが人の目での確認をお願いします。\n\n")
+	case "observe_blocked":
+		builder.WriteString("【本番反映済み・画面確認ができず】本番への反映は完了しましたが、確認用の画面を開けなかったため、本番画面の合否を判定できませんでした。お手数ですが人の目での確認をお願いします。\n\n")
 	case "expired":
 		builder.WriteString("【本番反映は行われませんでした】期限内に「Go」がなかったため、本番への反映は行わず終了しました。ステージングには反映済みのままです。\n\n")
 	case "stopped":
@@ -257,6 +281,15 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		facts.NextActor = "依頼者"
 		facts.Operation = "本番の画面をご確認ください"
 		facts.Production = "反映済み（画面の機械確認は不合格）"
+	case "observe_blocked":
+		facts.State = "本番反映済み・画面確認は判定不能"
+		facts.NextActor = "運用担当者"
+		if report.Block == "sign_in" {
+			facts.Operation = "確認用のログインをやり直し、本番の画面を確認したうえで、このチケットに「確認済み」とコメント"
+		} else {
+			facts.Operation = "本番の画面を人の目で確認し、このチケットに「確認済み」とコメント"
+		}
+		facts.Production = "反映済み（画面の機械確認は判定不能）"
 	case "merge_unverified":
 		facts.State = "本番反映の成否不明"
 		facts.NextActor = "運用担当者"

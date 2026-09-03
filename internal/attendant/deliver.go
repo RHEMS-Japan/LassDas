@@ -324,7 +324,7 @@ func reportDeliverStaging(ctx context.Context, config runtime.Config, services *
 		return nil
 	}
 	rendered := hook.DeliverStagingReport{
-		Verdict: report.Verdict, TargetURL: report.TargetURL,
+		Verdict: report.Verdict, Block: report.Block, TargetURL: report.TargetURL,
 		ExpectedText: report.ExpectedText, AbsentText: report.AbsentText,
 		Detail:         report.Detail,
 		Preview:        deliverPreview(report.Delta),
@@ -351,7 +351,7 @@ func reportDeliverRelease(ctx context.Context, services *runtime.Services, herme
 		return nil
 	}
 	rendered := hook.DeliverReleaseReport{
-		Verdict: report.Verdict, TargetURL: report.TargetURL,
+		Verdict: report.Verdict, Block: report.Block, TargetURL: report.TargetURL,
 		PullRequestURL: report.PullRequestURL, Detail: report.Detail,
 	}
 	attachments := deliverScreenshotAttachment(ctx, services, run, runDir, runner.DeliverProductionShotFile, "prod-"+run.IssueKey+".png", &rendered.ScreenshotAttached, logger)

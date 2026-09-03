@@ -13,6 +13,8 @@
       "production_origin": "https://example.com",
       "staging_workflow": "deploy-stg.yml",
       "production_workflow": "deploy.yml",
+      "staging_login_url": "https://api-stg.example.com/console/auth/login?returnTo=/console",
+      "observation_language": "en",
       "mode": {
         "id": "client-visible-change",
         "allowed_file_prefixes": [

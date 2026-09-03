@@ -50,9 +50,14 @@ const (
 // Failed steps are RESULTS (sealed, exit zero); only broken plumbing exits
 // non-zero and blocks the card.
 type DeliverReport struct {
-	SchemaVersion  int             `json:"schema_version"`
-	Phase          string          `json:"phase"`   // staging | production
-	Verdict        string          `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | promotion_failed
+	SchemaVersion int    `json:"schema_version"`
+	Phase         string `json:"phase"`   // staging | production
+	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | promotion_failed
+	// Block, with an observe_blocked verdict, says why the page could not
+	// be judged at all: "sign_in" (the consumer's login did not land — the
+	// session jar is no longer accepted) or "redirect" (the target sent the
+	// browser to another page). Neither says anything about the change.
+	Block          string          `json:"block,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
 	TargetURL      string          `json:"target_url,omitempty"`
 	ExpectedText   string          `json:"expected_text,omitempty"`
@@ -543,12 +548,15 @@ func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir stri
 	}
 	var cookieNote string
 	if repository, err := p.readJSONField(stageDir+"/ticket.json", "repository"); err == nil && repository != "" {
-		if origin, err := consumerOrigin(p.Config.ConsumerConfigPath, repository, "staging"); err == nil {
+		if origin, entry, err := consumerObservation(p.Config.ConsumerConfigPath, repository, "staging"); err == nil {
 			report.TargetURL = strings.TrimRight(origin, "/") + "/"
 			var cookies []visiblecheck.E2ECookie
-			cookies, cookieNote = loadE2ESessionCookies(os.Getenv(E2ESessionFileEnvironment))
-			if observed, err := visiblecheck.ObserveForReference(ctx, report.TargetURL, cookies); err == nil {
+			cookies, cookieNote = e2eSessionCookies()
+			if observed, err := visiblecheck.ObserveForReference(ctx, report.TargetURL, cookies, entry); err == nil {
 				report.FinalURL, report.StatusCode = observed.FinalURL, observed.StatusCode
+				if note := referenceBlockNote(observed.Block); note != "" {
+					cookieNote = strings.TrimSpace(cookieNote + " " + note)
+				}
 				if len(observed.ScreenshotPNG) > 0 {
 					if err := os.WriteFile(p.path(DeliverStagingShotFile), observed.ScreenshotPNG, 0o600); err == nil {
 						report.Screenshot = true
@@ -579,15 +587,19 @@ func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir stri
 // of promotion-grade proof.
 func (p *Pipeline) sealCourtesyObservation(ctx context.Context, stageDir, phase, detail string) error {
 	report := DeliverReport{Phase: phase, Verdict: "observe_failed", Detail: detail}
-	target, expected, absent, err := p.deliverVerification(stageDir, phase)
+	target, expected, absent, entry, err := p.deliverVerification(stageDir, phase)
 	if err == nil {
 		report.TargetURL, report.ExpectedText, report.AbsentText = target, expected, absent
-		cookies, cookieDetail := loadE2ESessionCookies(os.Getenv(E2ESessionFileEnvironment))
+		cookies, cookieDetail := e2eSessionCookies()
 		if cookieDetail != "" {
 			report.Detail = strings.TrimSpace(report.Detail + " " + cookieDetail)
 		}
-		if observed, observeErr := visiblecheck.ObserveForE2E(ctx, target, expected, absent, cookies); observeErr == nil {
+		if observed, observeErr := visiblecheck.ObserveForE2E(ctx, target, expected, absent, cookies, entry); observeErr == nil {
 			report.FinalURL, report.StatusCode = observed.FinalURL, observed.StatusCode
+			if verdict, block, blocked := courtesyVerdict(phase, observed); verdict != "" {
+				report.Verdict, report.Block = verdict, block
+				report.Detail = strings.TrimSpace(blocked + " " + cookieDetail)
+			}
 			shot := DeliverStagingShotFile
 			if phase == "production" {
 				shot = DeliverProductionShotFile
@@ -603,33 +615,70 @@ func (p *Pipeline) sealCourtesyObservation(ctx context.Context, stageDir, phase,
 	return p.sealDeliverReport(report)
 }
 
+// courtesyVerdict turns a blocked courtesy observation into the report's
+// honest verdict. A page the browser never reached says nothing about the
+// change, so it is neither a pass nor a fail: observe_blocked, with the
+// reason spelled out for the person who has to act. An observation that
+// did open the target keeps the sealed path's failure verdict (empty).
+func courtesyVerdict(phase string, observed visiblecheck.E2EObservation) (verdict, block, detail string) {
+	environment := "ステージング"
+	if phase == "production" {
+		environment = "本番"
+	}
+	switch observed.Block {
+	case visiblecheck.BlockSignIn:
+		detail := environment + "の確認用の画面にログインできなかったため、画面の合否を判定できませんでした。確認用のログイン状態が切れているか、取り消されています。"
+		if observed.FinalURL != "" {
+			detail += fmt.Sprintf("（ブラウザの停止先: %s）", observed.FinalURL)
+		}
+		return "observe_blocked", string(observed.Block),
+			detail + "運用担当者が確認用のログインをやり直すと、以後の依頼で自動確認が復旧します。この依頼の変更が正しいかどうかは、この結果からは分かりません。"
+	case visiblecheck.BlockRedirect:
+		return "observe_blocked", string(observed.Block),
+			fmt.Sprintf("確認先の画面が同じサイトの別の画面へ転送されたため、画面の合否を判定できませんでした（転送先: %s）。", observed.FinalURL) +
+				"組織の状態などで転送される画面は自動確認に向きません。転送されない画面を確認先に指定して起票し直してください。"
+	}
+	return "", "", ""
+}
+
+// referenceBlockNote says what the reference photo actually shows when
+// the browser was not let in. A redirect within the destination (its
+// root sending the browser to a default page) is the ordinary case for a
+// reference photo and needs no note.
+func referenceBlockNote(block visiblecheck.Block) string {
+	if block == visiblecheck.BlockSignIn {
+		return "確認用の画面にログインできなかったため、写真はログイン前の画面です。運用担当者が確認用のログインをやり直す必要があります。"
+	}
+	return ""
+}
+
 // deliverVerification reads the observation target from the SEALED round's
 // ticket — the same one every gate verb re-verifies — against the origin of
-// the phase's OWN environment.
-func (p *Pipeline) deliverVerification(stageDir, environment string) (string, string, string, error) {
+// the phase's OWN environment, with that environment's login entry.
+func (p *Pipeline) deliverVerification(stageDir, environment string) (string, string, string, visiblecheck.SignIn, error) {
 	ticket := stageDir + "/ticket.json"
 	repository, err := p.readJSONField(ticket, "repository")
 	if err != nil || repository == "" {
-		return "", "", "", errors.New("deliver needs the sealed ticket")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("deliver needs the sealed ticket")
 	}
 	verificationPath, err := p.readJSONField(ticket, "verification_path")
 	if err != nil || verificationPath == "" {
-		return "", "", "", errors.New("deliver needs the verification path")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("deliver needs the verification path")
 	}
 	expected, err := p.readJSONField(ticket, "expected_text")
 	if err != nil || expected == "" {
-		return "", "", "", errors.New("deliver needs the expected text")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("deliver needs the expected text")
 	}
 	absent, _ := p.readJSONField(ticket, "absent_text")
-	origin, err := consumerOrigin(p.Config.ConsumerConfigPath, repository, environment)
+	origin, entry, err := consumerObservation(p.Config.ConsumerConfigPath, repository, environment)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", visiblecheck.SignIn{}, err
 	}
-	return origin + verificationPath, expected, absent, nil
+	return origin + verificationPath, expected, absent, entry, nil
 }
 
 func (p *Pipeline) fillObservation(report *DeliverReport, stageDir, environment, visibleFile, shotFile string) {
-	if target, expected, absent, err := p.deliverVerification(stageDir, environment); err == nil {
+	if target, expected, absent, _, err := p.deliverVerification(stageDir, environment); err == nil {
 		report.TargetURL, report.ExpectedText, report.AbsentText = target, expected, absent
 	}
 	if finalURL, err := p.readJSONField(visibleFile, "final_url"); err == nil {

@@ -50,6 +50,28 @@ func BudgetHoldContent(runID string, roles []string) string {
 	}.render()
 }
 
+// SessionHoldContent announces that a delivery cannot start because the
+// observation browser could not sign in to a destination's staging: the
+// session jar an operator provisioned is no longer accepted, and the run
+// would only end as an unjudged screen. It waits and retries by itself
+// once the jar is renewed, so the requester has nothing to do.
+func SessionHoldContent(runID string, destinations []string) string {
+	var builder strings.Builder
+	builder.WriteString("【確認用のログイン状態が切れているため開始できません】納品後の画面確認に使うログイン状態を取り直せないため、この依頼の処理を開始できません。運用担当者が確認用のログインをやり直すと、人の操作なしで自動的に開始します。\n\n")
+	if len(destinations) > 0 {
+		builder.WriteString("ログインできなかった確認先: " + strings.Join(destinations, "、") + "\n")
+	}
+	return builder.String() + CommentFacts{
+		State:      "確認用のログイン状態切れで待機中",
+		NextActor:  "運用担当者",
+		Operation:  "確認用のログインをやり直し、セッション情報を更新する（起票者の操作は不要です）",
+		NextEvent:  "10 分ごとに再確認し、開始できた時点で実装方針を通知",
+		Production: "未変更",
+		AutoRetry:  "あり（10 分ごと）",
+		Marker:     CommentMarker(string(RunCommentSessionHold), runID),
+	}.render()
+}
+
 // FailureStreakContent announces that intake is held because the same
 // failure ended the last N deliveries in a row.
 func FailureStreakContent(runID, code string, count int) string {

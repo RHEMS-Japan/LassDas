@@ -299,6 +299,21 @@ type ConsumerConfig struct {
 	ProductionOrigin   string   `json:"production_origin"`
 	StagingWorkflow    string   `json:"staging_workflow"`
 	ProductionWorkflow string   `json:"production_workflow"`
+	// StagingLoginURL and ProductionLoginURL are the consumer's login
+	// entries for the observation browser, one per environment. The
+	// browser opens the entry with the session jar before every
+	// observation and counts itself signed in once it rests on the
+	// environment's own origin — so a console whose session lasts a day is
+	// signed in again on each visit for as long as the identity provider
+	// still recognises the jar. Optional: a public page needs none.
+	StagingLoginURL    string `json:"staging_login_url,omitempty"`
+	ProductionLoginURL string `json:"production_login_url,omitempty"`
+	// ObservationLanguage is the language the observation browser asks the
+	// destination's pages for (a BCP 47 tag such as "ja"). A console that
+	// follows the browser's language renders its default wording to a
+	// browser without one, and a promise about wording in another language
+	// could never be seen. Optional.
+	ObservationLanguage string `json:"observation_language,omitempty"`
 	// GitHub is the destination repository's observed delivery contract:
 	// branches, merge settings, the exact workflows and required jobs, and
 	// the staging digest-commit policy. These are the customer's observed
@@ -599,6 +614,20 @@ func (c ConsumerConfig) validate() error {
 	}
 	if c.StagingOrigin == c.ProductionOrigin {
 		return errors.New("consumer origins must differ")
+	}
+	if c.StagingLoginURL != "" && !ValidLoginURL(c.StagingLoginURL) {
+		return errors.New("consumer staging login url is invalid")
+	}
+	if c.ProductionLoginURL != "" && !ValidLoginURL(c.ProductionLoginURL) {
+		return errors.New("consumer production login url is invalid")
+	}
+	if c.StagingLoginURL != "" && c.StagingLoginURL == c.ProductionLoginURL {
+		// One entry for both environments signs the production observer
+		// in to staging, and every production report ends unjudged.
+		return errors.New("consumer login urls must differ")
+	}
+	if c.ObservationLanguage != "" && !languageTagPattern.MatchString(c.ObservationLanguage) {
+		return errors.New("consumer observation language is invalid")
 	}
 	if !validWorkflowFilename(c.StagingWorkflow) || !validWorkflowFilename(c.ProductionWorkflow) || c.StagingWorkflow == c.ProductionWorkflow {
 		return errors.New("consumer workflows are invalid")
@@ -923,10 +952,68 @@ func validateOrigin(value string) error {
 		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("must be an https origin without path, query, userinfo, or port")
 	}
-	if parsed.Hostname() != strings.ToLower(parsed.Hostname()) {
-		return errors.New("hostname must be lowercase")
+	if !asciiLowercaseHost(parsed.Hostname()) {
+		// The browser reports an internationalised host in punycode, which
+		// a landing check against the written origin would never match.
+		return errors.New("hostname must be lowercase ASCII")
 	}
 	return nil
+}
+
+// languageTagPattern is the shape of a BCP 47 tag the browser accepts on
+// its command line: a language subtag and optional dashed subtags.
+var languageTagPattern = regexp.MustCompile(`^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$`)
+
+// ValidLanguageTag reports whether a value may be handed to the browser as
+// the language to ask pages for. The lenient readers of the consumer
+// configuration (the attendant's probe, the runner's observation) apply
+// it too, so an unvalidated value never reaches a command line.
+func ValidLanguageTag(value string) bool {
+	return languageTagPattern.MatchString(value)
+}
+
+// ValidLoginURL accepts an absolute https link with a lowercase ASCII host
+// (the browser reports internationalised hosts in punycode, which a
+// landing check would never match) and neither userinfo, port, nor
+// fragment. A query is allowed — a login entry commonly carries where to
+// return to — but no whitespace or control characters anywhere.
+func ValidLoginURL(raw string) bool {
+	if raw == "" || len(raw) > 2048 || strings.ContainsAny(raw, "\x00\r\n\t ") {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Port() == "" &&
+		asciiLowercaseHost(parsed.Hostname()) && strings.HasPrefix(parsed.Path, "/") &&
+		parsed.Fragment == "" && parsed.String() == raw
+}
+
+func asciiLowercaseHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		if r > 0x7e || r < 0x21 || (r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// Origin is the environment's observation origin.
+func (c ConsumerConfig) Origin(environment string) string {
+	if environment == "production" {
+		return c.ProductionOrigin
+	}
+	return c.StagingOrigin
+}
+
+// LoginURL is the environment's login entry, empty when the consumer has
+// none for it.
+func (c ConsumerConfig) LoginURL(environment string) string {
+	if environment == "production" {
+		return c.ProductionLoginURL
+	}
+	return c.StagingLoginURL
 }
 
 func allowedPath(filename string, prefixes []string) bool {

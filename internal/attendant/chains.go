@@ -195,9 +195,9 @@ func startQueuedRun(
 		return err
 	}
 	now := time.Now().UTC()
-	// A budget hold throttles its own retry: the run stays queued and
-	// unclaimed until the interval since the refusal has passed.
-	if budgetHeldRecently(runDir, now) {
+	// A budget or session hold throttles its own retry: the run stays
+	// queued and unclaimed until the interval since the refusal has passed.
+	if budgetHeldRecently(runDir, now) || sessionHeldRecently(runDir, now) {
 		return nil
 	}
 	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
@@ -238,6 +238,12 @@ func startQueuedRun(
 	// is left to the next tick's recovery (a claim with no chain goes back
 	// to the queue) and the hold file throttles the next probe.
 	if checkBudgets(ctx, config, services.Backlog, run, runDir, envelope.Snapshot.IssueID, os.Getenv, budgetProbeClient, logger) {
+		return nil
+	}
+	// The observation browser's way in before the work: a destination the
+	// browser cannot sign in to would end the run as an unjudged screen.
+	// The login that lands renews the jar for the observations to come.
+	if checkSessions(ctx, config, services.Backlog, run, runDir, envelope.Snapshot.IssueID, liveSessionRenewer(os.Getenv), logger) {
 		return nil
 	}
 	token, err := readTargetToken(config)

@@ -35,6 +35,10 @@ const (
 	// RunCommentBudgetHold says a delivery cannot start because a role's
 	// key is out of budget; it resumes by itself once the cap is raised.
 	RunCommentBudgetHold RunCommentKind = "budget-hold"
+	// RunCommentSessionHold says a delivery cannot start because the
+	// observation browser cannot sign in to a destination's staging; it
+	// resumes by itself once the session jar is renewed.
+	RunCommentSessionHold RunCommentKind = "session-hold"
 	// RunCommentStreakHold says intake is stopped because the same failure
 	// ended the last N deliveries; RunCommentStreakResolved acknowledges
 	// the operator's 「確認済み」 that lifts it.

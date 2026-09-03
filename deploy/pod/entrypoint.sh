@@ -32,6 +32,19 @@ export HERMES_REDACT_SECRETS="${HERMES_REDACT_SECRETS:-false}"
 
 mkdir -p "$STATE/workspaces"
 
+# The observation browser's session jar: the operator's seed is a secret
+# mount (LASSDAS_E2E_SESSION_FILE); the engine's renewed copy — rewritten
+# by every login that lands — lives in the state volume, owner-only. The
+# copy remembers the seed it grew from and is the jar in use for as long
+# as that seed is the one mounted; a replaced seed wins over the copy.
+export LASSDAS_E2E_SESSION_STATE_FILE="${LASSDAS_E2E_SESSION_STATE_FILE:-$STATE/e2e-session/session.json}"
+# Owner-only when this process owns it; a directory somebody else made (a
+# read-only mount, a root-created volume) is left as it is rather than
+# failing the pod — the writer reports a jar it cannot keep at the time.
+E2E_SESSION_DIR="$(dirname "$LASSDAS_E2E_SESSION_STATE_FILE")"
+mkdir -p "$E2E_SESSION_DIR" 2>/dev/null || echo "note: $E2E_SESSION_DIR could not be created; the renewed jar will not be kept" >&2
+chmod 700 "$E2E_SESSION_DIR" 2>/dev/null || true
+
 # Profile with the direct-command worker (idempotent write; host-side
 # configuration is the only thing that decides what executes).
 PROFILE_HOME="$HOME/.hermes/profiles/lassdas-runner"

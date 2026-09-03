@@ -135,16 +135,14 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 	}
 	switch run.State {
 	case "queued":
-		if hold, held := readBudgetHold(runDirectory(config, run.DeliveryID)); held {
-			placeBudgetHold(&status, hold)
+		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
 			break
 		}
 		status.place("intake", "受付待ち", "")
 	case "awaiting_answer":
 		status.place("question", "質問への回答待ち", "依頼者の返信を待っています")
 	case "claimed":
-		if hold, held := readBudgetHold(runDirectory(config, run.DeliveryID)); held {
-			placeBudgetHold(&status, hold)
+		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
 			break
 		}
 		classifyClaimed(&status, run, tasks)
@@ -162,6 +160,21 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 
 func (s *RunStatus) place(step, title, detail string) {
 	s.Step, s.StepTitle, s.Detail = step, title, detail
+}
+
+// placeIntakeHold shows the hold that keeps a run off the rail before its
+// reception — money first, the observation browser's login second — and
+// reports whether one is in force.
+func placeIntakeHold(status *RunStatus, runDir string) bool {
+	if hold, held := readBudgetHold(runDir); held {
+		placeBudgetHold(status, hold)
+		return true
+	}
+	if hold, held := readSessionHold(runDir); held {
+		placeSessionHold(status, hold)
+		return true
+	}
+	return false
 }
 
 // placeAt is place for an out-of-line step, naming the pipeline stage it
@@ -307,6 +320,8 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 		status.place("stopped", "停止済み", "ご指示により本番反映を行わず終了")
 	case "observe_failed":
 		status.place("done", "本番反映済み・画面は要確認", "")
+	case "observe_blocked":
+		status.placeAt("attention", "production", "本番反映済み・画面確認ができず", "確認用の画面を開けなかったため人の目での確認が必要です")
 	case "deploy_failed":
 		status.placeAt("attention", "production", "本番反映の完了確認が必要", "運用担当者が状態を確認します")
 	case "merge_unverified":
@@ -326,6 +341,8 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 		status.place("stopped", "停止済み", "ご指示により停止しました")
 	case verdict == "observe_failed":
 		status.place("failed", "ステージング反映済み・画面確認が不合格", "")
+	case verdict == "observe_blocked":
+		status.placeAt("attention", "confirm", "ステージング反映済み・画面確認ができず", "確認用の画面を開けなかったため合否は判定できていません")
 	case verdict == "deploy_failed" || verdict == "merge_unverified":
 		status.placeAt("attention", "staging", "ステージング反映の状態確認が必要", "運用担当者が状態を確認します")
 	default:

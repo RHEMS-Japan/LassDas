@@ -43,7 +43,7 @@ type deliverResolution struct {
 // attentionVerdict reports whether a report verdict is one that waits for
 // an operator rather than ending the delivery.
 func attentionVerdict(verdict string) bool {
-	return verdict == "deploy_failed" || verdict == "merge_unverified"
+	return verdict == "deploy_failed" || verdict == "merge_unverified" || verdict == "observe_blocked"
 }
 
 // releaseAttentionVerdict names the attention verdict of a posted release

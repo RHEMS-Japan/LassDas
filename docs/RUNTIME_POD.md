@@ -213,6 +213,85 @@ fabricated workflow link.
   never stored), and a read-only base copy no agent is pointed at bounds
   what a change started from.
 
+## The observation session
+
+The consoles show a login page to a browser with no session, so the
+observation browser carries a jar of cookies. Two files hold it:
+
+- the seed, `LASSDAS_E2E_SESSION_FILE` — a secret mount, Playwright
+  storageState JSON, made once by a person who logs in;
+- the renewed copy, `LASSDAS_E2E_SESSION_STATE_FILE`
+  (`$STATE/e2e-session/session.json`, owner-only) — written by the
+  attendant after every sign-in that lands.
+
+The renewed copy remembers the digest of the seed it grew from, and it is
+the jar in use for as long as that seed is the one mounted; a seed the
+operator replaced wins over the copy. File times play no part (a secret
+mount is rewritten on every pod start). Cookies whose own expiry has
+passed are never installed. The copy keeps only cookies for the domains
+the seed had, the login host and the landing — never for a site the round
+trip merely passed through.
+
+A consumer whose console follows the browser's language names the
+language the browser asks for (`observation_language`, a BCP 47 tag):
+without it a fresh headless profile asks in English and a promise about
+Japanese wording can never be seen. A consumer whose console needs a
+login names its entry
+(`staging_login_url`, `production_login_url`). Before every observation
+the browser opens the entry with the jar and counts itself signed in once
+it rests on the environment's own origin, two seconds after the document
+completed: an identity provider that needs a person keeps the browser on
+its own page, and a console that rejects the jar sends the browser away to
+its portal. Measured live (2026-09-03): a console session that lasts a day
+was re-minted, with nobody at the keyboard, from the identity provider's
+session — which itself rolled forward a fortnight on each use.
+
+Every login that lands — the attendant's renewal and each observation's
+own sign-in — rewrites the renewed copy with the jar it left behind. The
+identity provider was seen to replace its session cookie on the first
+login made from a person's seed (the seed's values were dead an hour
+later), so the jar a login leaves behind is the only one known to work
+next time. For the same reason the seed must never be used from anywhere
+else once the pod has it: a login made elsewhere from the same seed kills
+the pod's copy.
+
+This is an operator's decision, not only a mechanism: a session the
+engine keeps signing in with never expires on its own, so the person who
+made the seed is not asked to log in again for as long as tickets keep
+coming (a fortnight without one, and the identity provider's session
+lapses by itself). The kept jar is a console session on the pod's state
+volume, owner-only, readable by whatever runs as the engine's user.
+
+Before the reception, right after the budget probe, the attendant signs
+in through every destination's staging entry, once per destination per
+few minutes rather than once per queued ticket. A login that lands
+rewrites the renewed copy. A login the destination REFUSES — the browser
+came to rest where a person is being asked to log in: a login page (an
+admin console keeps its own on the landing host), a callback carrying an
+error, an identity provider, a portal — holds the run: `session-hold.json`, one ticket comment
+(marker `session-hold`), the board at intake in attention, a retry every
+ten minutes, automatic resumption once an operator has logged in again
+and replaced the seed. A login that merely could not be reached (an
+outage, a browser-internal error page, a slow round trip) is logged and
+the run proceeds — its observation says what it sees. The same division
+the budget probe draws between "no money" and "no answer". An error page
+served at the login entry's own URL reads as a refusal; the hold it
+causes clears by itself once the entry answers again.
+
+An observation the browser could not make is reported as
+`observe_blocked`, never as a failed screen check: `sign_in` when the
+login did not land or the target sent the browser off the destination's
+own origin (a portal — the operator's to fix), `redirect` when the target
+sent the browser to another page of the same destination (the requester
+picks a page that does not redirect). A trailing slash or a fragment
+added on the way is not a redirect. Both blocks are attention states an
+operator closes with 「確認済み」; the URLs written to logs and tickets
+carry neither query nor fragment (a login round trip parks on callback
+URLs with authorization codes). The sealed observation itself stays as
+strict as before — it refuses anything short of the target page at its
+own URL — and the courtesy observation after a refusal is where the
+reason gets told, with a screenshot of wherever the browser ended up.
+
 ## Release discipline: the regression set
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
@@ -233,6 +312,8 @@ means adding a row here and the test it names.
 | An attention state nobody could clear (a report told an operator to look; no way to record that they had), and a rail that went dark for it | `internal/attendant` `TestResolveAttentionPostsOnceAndSeals`, `TestResolveAttentionStaysSilentWithoutAValidConfirmation`, `TestOperatorConfirmationFollowsTheStopRules`, `TestAttentionCarriesTheStageItStoppedAtAndAnOperatorCanClearIt`; `internal/hook` `TestDeliverResolvedContentCarriesTheMarkerAndNamesProduction`; `cmd/statusboard` `TestBoardPageLightsTheStageAnAttentionStateStoppedAt` | live, 2026-09-02 (a delivery held open 4.5 hours after its staging deploy had succeeded) |
 | An implementer that stops making progress and spends the whole iteration budget on it | not a test: `LASSDAS_IMPLEMENTER_MAX_TURNS` bounds the iterations per run (`entrypoint.sh`) | live, 2026-09-02 (458 of 500 iterations, 425 of them the same search, no file changed) |
 | A key out of budget spending a whole run on refusals | `internal/attendant` `TestCheckBudgetsHoldsOnceThrottlesAndClears`, `TestProbeBudgetOnlyABudgetRefusalCounts`, `TestRoleProbesCollapseDuplicatesAndReadTheEnvironment`, `TestBudgetHoldShowsAtIntakeAsAttention` | live, 2026-09-02 (the shared key ran dry; every ticket after it died as model_failed) |
+| An observation browser that never launched (a Chrome flag given as a number, which the allocator refuses before the exec), indistinguishable from a wrong page | `internal/visiblecheck` `TestBrowserOptionsAreAcceptedByTheAllocator` | live, 2026-09-01 → 09-03 (35 runs, not one screenshot; found by a container run of the real code against the real staging console) |
+| A screen check the browser could not make (an expired session jar sent it to the portal) reported as a failed check of a correct change, and a jar nobody renewed | `internal/visiblecheck` `TestLoadSessionCookiesFollowsTheSeedDigestNotFileTimes`, `TestInstallableCookiesDropOnlyTheExpired`, `TestLandedAcceptsTheOriginAndItsPathsOnly`, `TestStillSigningInKeepsTheLoginPageAndErrorsOffTheLanding`, `TestJarRejectedReadsWhereTheBrowserCameToRest`, `TestSameDocumentAndSameOrigin`, `TestSafeURLDropsQueryAndFragment`, `TestRelevantDomainsAndKeepCookie`, `TestWriteSessionFileRoundTripsOwnerOnly`; `internal/runner` `TestCourtesyVerdictNamesTheBlock`, `TestConsumerObservationCarriesTheLoginEntry`, `TestLoadE2ESessionCookies`; `internal/hook` `TestObserveBlockedReportsNameWhoActs`, `TestSessionHoldContentCarriesTheMarkerAndNamesTheDestination`; `internal/attendant` `TestCheckSessionsHoldsOnRefusalOnlyThrottlesAndClears`, `TestCheckSessionsClearsAStaleHoldWhenTheConfigIsUnreadable`, `TestSessionHoldShowsAtIntakeAsAttention`, `TestObserveBlockedIsAnAttentionState`; `internal/worker` `TestValidLoginURL`, `TestConsumerLoginURLsAreValidatedAndResolvedPerEnvironment`; `cmd/browsercheck` `TestSignInForPicksTheEnvironmentEntry` | live, 2026-09-03 (the first delivery to run every stage unattended reached staging and was refused at the screen check by a session 28 hours dead) |
 | The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |

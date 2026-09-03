@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/visiblecheck"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // The debug role's observation card: wait for the HUMAN merge and the
@@ -29,7 +30,9 @@ const (
 	// E2ESessionFileEnvironment names the optional session-cookie file
 	// (Playwright storageState JSON) the staging console needs; without it
 	// a login page turns every observation into an honest "unknown".
-	E2ESessionFileEnvironment = "LASSDAS_E2E_SESSION_FILE"
+	// E2ESessionStateFileEnvironment names the engine's renewed copy of it.
+	E2ESessionFileEnvironment      = visiblecheck.SessionFileEnvironment
+	E2ESessionStateFileEnvironment = visiblecheck.SessionStateFileEnvironment
 )
 
 // E2EResult is the observation verdict, sealed in the run directory.
@@ -81,12 +84,12 @@ func (p *Pipeline) RunE2ECheck(ctx context.Context) error {
 			})
 		}
 	}
-	target, expected, absent, err := p.e2eVerification()
+	target, expected, absent, entry, err := p.e2eVerification()
 	if err != nil {
 		return err
 	}
-	cookies, cookieDetail := loadE2ESessionCookies(os.Getenv(E2ESessionFileEnvironment))
-	observation, err := visiblecheck.ObserveForE2E(ctx, target, expected, absent, cookies)
+	cookies, cookieDetail := e2eSessionCookies()
+	observation, err := visiblecheck.ObserveForE2E(ctx, target, expected, absent, cookies, entry)
 	if err != nil {
 		return p.sealE2EResult(E2EResult{
 			Verdict: "unknown", TargetURL: target, ExpectedText: expected, AbsentText: absent,
@@ -100,6 +103,14 @@ func (p *Pipeline) RunE2ECheck(ctx context.Context) error {
 		ObservedAt: observation.ObservedAt,
 	}
 	switch {
+	case observation.Block == visiblecheck.BlockSignIn:
+		// The login did not land: the page was never reached, so this says
+		// nothing about the change.
+		result.Verdict = "unknown"
+		result.Detail = strings.TrimSpace("確認用の画面にログインできませんでした。確認用のログイン状態が切れているか、取り消されています。運用担当者が確認用のログインをやり直す必要があります。 " + cookieDetail)
+	case observation.Block == visiblecheck.BlockRedirect:
+		result.Verdict = "unknown"
+		result.Detail = strings.TrimSpace(fmt.Sprintf("確認先の画面が同じサイトの別の画面へ転送されました（転送先: %s）。組織の状態などで転送される画面は自動確認に向きません。 ", observation.FinalURL) + cookieDetail)
 	case observation.ExpectedSeen && observation.AbsentGone:
 		result.Verdict = "pass"
 	case looksLikeLogin(observation.FinalURL):
@@ -130,25 +141,25 @@ func (p *Pipeline) sealE2EResult(result E2EResult) error {
 
 // e2eVerification reads the observation target the readiness gate derived:
 // the page path, the text that must appear, the text that must be gone.
-func (p *Pipeline) e2eVerification() (string, string, string, error) {
+func (p *Pipeline) e2eVerification() (string, string, string, visiblecheck.SignIn, error) {
 	repository, err := p.readJSONField("readiness-ticket.json", "repository")
 	if err != nil || repository == "" {
-		return "", "", "", errors.New("e2e-check needs the readiness ticket")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("e2e-check needs the readiness ticket")
 	}
 	verificationPath, err := p.readJSONField("readiness-ticket.json", "verification_path")
 	if err != nil || verificationPath == "" {
-		return "", "", "", errors.New("e2e-check needs the verification path")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("e2e-check needs the verification path")
 	}
 	expected, err := p.readJSONField("readiness-ticket.json", "expected_text")
 	if err != nil || expected == "" {
-		return "", "", "", errors.New("e2e-check needs the expected text")
+		return "", "", "", visiblecheck.SignIn{}, errors.New("e2e-check needs the expected text")
 	}
 	absent, _ := p.readJSONField("readiness-ticket.json", "absent_text")
-	origin, err := consumerStagingOrigin(p.Config.ConsumerConfigPath, repository)
+	origin, entry, err := consumerObservation(p.Config.ConsumerConfigPath, repository, "staging")
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", visiblecheck.SignIn{}, err
 	}
-	return origin + verificationPath, expected, absent, nil
+	return origin + verificationPath, expected, absent, entry, nil
 }
 
 // consumerStagingOrigin resolves the destination's staging origin from the
@@ -157,44 +168,67 @@ func consumerStagingOrigin(consumerConfigPath, repository string) (string, error
 	return consumerOrigin(consumerConfigPath, repository, "staging")
 }
 
-// consumerOrigin resolves the observation origin for one environment — the
-// staging report must open the staging console and the production report
-// the production console, never each other's.
-func consumerOrigin(consumerConfigPath, repository, environment string) (string, error) {
+// consumerObservation resolves the observation origin and the login entry
+// for one environment — the staging report must open the staging console
+// and the production report the production console, never each other's.
+// The landing of a login is the environment's own origin.
+func consumerObservation(consumerConfigPath, repository, environment string) (string, visiblecheck.SignIn, error) {
 	raw, err := os.ReadFile(consumerConfigPath)
 	if err != nil {
-		return "", errors.New("consumer config unreadable")
+		return "", visiblecheck.SignIn{}, errors.New("consumer config unreadable")
 	}
 	var parsed struct {
 		Consumers []struct {
-			Repository       string `json:"repository"`
-			StagingOrigin    string `json:"staging_origin"`
-			ProductionOrigin string `json:"production_origin"`
+			Repository          string `json:"repository"`
+			StagingOrigin       string `json:"staging_origin"`
+			ProductionOrigin    string `json:"production_origin"`
+			StagingLoginURL     string `json:"staging_login_url"`
+			ProductionLoginURL  string `json:"production_login_url"`
+			ObservationLanguage string `json:"observation_language"`
 		} `json:"consumers"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", errors.New("consumer config invalid")
+		return "", visiblecheck.SignIn{}, errors.New("consumer config invalid")
 	}
 	for _, consumer := range parsed.Consumers {
 		if consumer.Repository != repository {
 			continue
 		}
-		origin := consumer.StagingOrigin
+		origin, login := consumer.StagingOrigin, consumer.StagingLoginURL
 		if environment == "production" {
-			origin = consumer.ProductionOrigin
+			origin, login = consumer.ProductionOrigin, consumer.ProductionLoginURL
 		}
 		if origin != "" {
-			return origin, nil
+			entry := visiblecheck.SignIn{}
+			if worker.ValidLanguageTag(consumer.ObservationLanguage) {
+				entry.Language = consumer.ObservationLanguage
+			}
+			if login != "" {
+				entry.LoginURL, entry.LandedPrefix = login, origin
+				entry.SeedPath, entry.KeepJarAt = os.Getenv(E2ESessionFileEnvironment), os.Getenv(E2ESessionStateFileEnvironment)
+			}
+			return origin, entry, nil
 		}
 	}
-	return "", errors.New("consumer observation origin missing")
+	return "", visiblecheck.SignIn{}, errors.New("consumer observation origin missing")
 }
 
-// loadE2ESessionCookies reads the operator-provisioned session file; the
-// implementation lives with the browser code so the sealed observations use
-// the identical loader.
-func loadE2ESessionCookies(path string) ([]visiblecheck.E2ECookie, string) {
-	return visiblecheck.LoadSessionCookies(path)
+// consumerOrigin is the origin half of consumerObservation.
+func consumerOrigin(consumerConfigPath, repository, environment string) (string, error) {
+	origin, _, err := consumerObservation(consumerConfigPath, repository, environment)
+	return origin, err
+}
+
+// loadE2ESessionCookies reads the session jar — the operator's seed and
+// the engine's renewed copy; the implementation lives with the browser
+// code so the sealed observations use the identical loader.
+func loadE2ESessionCookies(seedPath, statePath string) ([]visiblecheck.E2ECookie, string) {
+	return visiblecheck.LoadSessionCookies(seedPath, statePath)
+}
+
+// e2eSessionCookies reads the jar the pod environment names.
+func e2eSessionCookies() ([]visiblecheck.E2ECookie, string) {
+	return loadE2ESessionCookies(os.Getenv(E2ESessionFileEnvironment), os.Getenv(E2ESessionStateFileEnvironment))
 }
 
 func looksLikeLogin(finalURL string) bool {

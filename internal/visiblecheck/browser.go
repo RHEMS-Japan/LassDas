@@ -6,13 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/releaseproof"
 
-	"github.com/chromedp/cdproto/browser"
-	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -30,21 +27,23 @@ type documentResponse struct {
 
 // ObserveAndSealStaging starts a clean Chrome profile, installs the
 // operator-provisioned session cookies (the consoles render a login page to
-// a credential-free profile), navigates to the exact configured staging URL,
-// and seals that in-process observation against the complete staging release
-// proof. The cookies never enter the sealed evidence.
+// a credential-free profile), signs in through the consumer's login entry
+// when it has one, navigates to the exact configured staging URL, and seals
+// that in-process observation against the complete staging release proof.
+// The cookies never enter the sealed evidence.
 func ObserveAndSealStaging(
 	parent context.Context,
 	proof releaseproof.StagingProof,
 	input releaseproof.StagingInputs,
 	cookies []E2ECookie,
+	entry SignIn,
 ) (Evidence, []byte, error) {
 	binding, err := stagingBinding(proof, input)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
 	request := input.Request
-	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies)
+	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies, entry)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
@@ -66,6 +65,7 @@ func ObserveAndSealProduction(
 	stagingScreenshot []byte,
 	input releaseproof.StagingInputs,
 	cookies []E2ECookie,
+	entry SignIn,
 ) (Evidence, []byte, error) {
 	now := time.Now().UTC()
 	binding, err := productionBinding(proof, staging, stagingEvidence, stagingScreenshot, input, now)
@@ -73,7 +73,7 @@ func ObserveAndSealProduction(
 		return Evidence{}, nil, err
 	}
 	request := input.Request
-	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies)
+	observed, err := observe(parent, binding.origin+request.VerificationPath, request.ExpectedText, request.AbsentText, cookies, entry)
 	if err != nil {
 		return Evidence{}, nil, err
 	}
@@ -84,56 +84,35 @@ func ObserveAndSealProduction(
 	return evidence, append([]byte(nil), observed.screenshotPNG...), nil
 }
 
-func observe(parent context.Context, targetURL, expectedText, absentText string, cookies []E2ECookie) (capture, error) {
+// observe is the sealed observation: it refuses anything short of the
+// target page, at its own URL, showing the promised wording. A login that
+// does not land is a refusal like any other — the courtesy observation
+// that follows a refusal is where the reason gets told.
+func observe(parent context.Context, targetURL, expectedText, absentText string, cookies []E2ECookie, entry SignIn) (capture, error) {
 	if parent == nil || !validExactHTTPSURL(targetURL) || expectedText == "" || strings.ContainsAny(expectedText+absentText, "\x00\r\n") {
 		return capture{}, errors.New("browser observation request is invalid")
 	}
-	if err := validSessionCookies(cookies); err != nil {
+	var extra time.Duration
+	if entry.configured() {
+		extra = signInTimeout
+	}
+	session, err := openBrowser(parent, cookies, entry.Language, extra)
+	if err != nil {
 		return capture{}, err
 	}
-	executable, err := fixedChromeExecutable()
-	if err != nil {
-		return capture{}, errors.New("browser executable is invalid")
-	}
-	profile, err := os.MkdirTemp("", "visible-check-chrome-")
-	if err != nil {
-		return capture{}, errors.New("browser profile could not be created")
-	}
-	defer func() { _ = os.RemoveAll(profile) }()
-
-	ctx, cancel := context.WithTimeout(parent, browserTimeout)
-	defer cancel()
-	options := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
-	options = append(options,
-		chromedp.ExecPath(executable),
-		chromedp.UserDataDir(profile),
-		chromedp.Flag("incognito", true),
-		chromedp.Flag("disable-application-cache", true),
-		chromedp.Flag("disk-cache-size", 1),
-	)
-	allocator, cancelAllocator := chromedp.NewExecAllocator(ctx, options...)
-	defer cancelAllocator()
-	browserContext, cancelBrowser := chromedp.NewContext(allocator)
-	defer cancelBrowser()
-
-	var responseMu sync.Mutex
-	responses := make([]documentResponse, 0, 2)
-	chromedp.ListenTarget(browserContext, func(event any) {
-		response, ok := event.(*network.EventResponseReceived)
-		if !ok || response.Type != network.ResourceTypeDocument || response.Response == nil {
-			return
+	defer session.close()
+	if entry.configured() {
+		if _, err := signInAndKeep(session, entry, cookies); err != nil {
+			return capture{}, errors.New("browser sign-in failed")
 		}
-		responseMu.Lock()
-		responses = append(responses, documentResponse{
-			url: response.Response.URL, status: int(response.Response.Status), mimeType: response.Response.MimeType,
-		})
-		responseMu.Unlock()
-	})
+	}
+	// Only the target navigation's documents count: the login round trip
+	// may well have shown the very same page a moment ago.
+	session.responses.reset()
 
 	var finalURL string
 	var visibleText string
 	var screenshot []byte
-	var browserVersion string
 	var textBytes int64
 	var dimensions struct {
 		Width  int64 `json:"width"`
@@ -141,24 +120,8 @@ func observe(parent context.Context, targetURL, expectedText, absentText string,
 	}
 	var ready bool
 	actions := []chromedp.Action{
-		network.Enable(),
-		network.SetCacheDisabled(true),
-		chromedp.EmulateViewport(1440, 1000),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, product, _, _, _, err := browser.GetVersion().Do(ctx)
-			if err != nil {
-				return err
-			}
-			browserVersion, err = parseChromeProduct(product)
-			return err
-		}),
-	}
-	actions = append(actions, setCookieActions(cookies)...)
-	actions = append(actions,
 		chromedp.Navigate(targetURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-	)
-	actions = append(actions,
 		chromedp.PollFunction(
 			`(expected, absent) => {
 				if (document.readyState !== "complete" || !document.body) return false;
@@ -170,7 +133,7 @@ func observe(parent context.Context, targetURL, expectedText, absentText string,
 			chromedp.WithPollingInterval(250*time.Millisecond),
 			chromedp.WithPollingTimeout(pageReadyTimeout),
 		),
-		chromedp.Sleep(2*time.Second),
+		chromedp.Sleep(2 * time.Second),
 		chromedp.Location(&finalURL),
 		chromedp.Evaluate(`document.body ? new TextEncoder().encode(document.body.innerText || "").length : 0`, &textBytes),
 		chromedp.ActionFunc(func(context.Context) error {
@@ -192,25 +155,22 @@ func observe(parent context.Context, targetURL, expectedText, absentText string,
 			return nil
 		}),
 		chromedp.FullScreenshot(&screenshot, 90),
-	)
-	if err := chromedp.Run(browserContext, actions...); err != nil {
+	}
+	if err := chromedp.Run(session.browser, actions...); err != nil {
 		return capture{}, errors.New("browser observation failed")
 	}
 	if !ready || len([]byte(visibleText)) != int(textBytes) {
 		return capture{}, errors.New("browser rendered text is invalid")
 	}
 
-	responseMu.Lock()
-	observedResponses := append([]documentResponse(nil), responses...)
-	responseMu.Unlock()
-	status, err := exactDocumentStatus(observedResponses, finalURL)
+	status, err := exactDocumentStatus(session.responses.snapshot(), finalURL)
 	if err != nil {
 		return capture{}, err
 	}
 	result := capture{
 		requestedURL: targetURL, finalURL: finalURL, statusCode: status,
 		visibleText: visibleText, screenshotPNG: screenshot,
-		browser: "chrome", BrowserVersion: browserVersion, observedAt: time.Now().UTC(),
+		browser: "chrome", BrowserVersion: session.version, observedAt: time.Now().UTC(),
 	}
 	return result, nil
 }

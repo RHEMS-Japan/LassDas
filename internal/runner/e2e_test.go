@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/visiblecheck"
 )
 
 func e2ePipeline(t *testing.T) *Pipeline {
@@ -142,19 +144,65 @@ func TestConsumerStagingOrigin(t *testing.T) {
 }
 
 func TestLoadE2ESessionCookies(t *testing.T) {
-	if cookies, detail := loadE2ESessionCookies(""); cookies != nil || !strings.Contains(detail, "設定されていません") {
+	if cookies, detail := loadE2ESessionCookies("", ""); cookies != nil || !strings.Contains(detail, "設定されていません") {
 		t.Fatalf("unset path = %v, %q", cookies, detail)
 	}
-	if cookies, detail := loadE2ESessionCookies(filepath.Join(t.TempDir(), "absent.json")); cookies != nil || !strings.Contains(detail, "読めません") {
+	if cookies, detail := loadE2ESessionCookies(filepath.Join(t.TempDir(), "absent.json"), ""); cookies != nil || !strings.Contains(detail, "読めません") {
 		t.Fatalf("absent file = %v, %q", cookies, detail)
 	}
 	path := filepath.Join(t.TempDir(), "session.json")
 	if err := os.WriteFile(path, []byte(`{"cookies":[{"name":"s","value":"v","domain":"example.invalid","path":"/","secure":true,"httpOnly":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cookies, detail := loadE2ESessionCookies(path)
+	cookies, detail := loadE2ESessionCookies(path, "")
 	if len(cookies) != 1 || cookies[0].Name != "s" || !cookies[0].HTTPOnly || detail != "" {
 		t.Fatalf("cookies = %+v, %q", cookies, detail)
+	}
+	// A renewed copy grown from the mounted seed is the jar in use; an
+	// absent one, or one grown from another seed, leaves the seed in charge.
+	renewed := filepath.Join(t.TempDir(), "renewed.json")
+	if cookies, _ := loadE2ESessionCookies(path, renewed); len(cookies) != 1 || cookies[0].Name != "s" {
+		t.Fatalf("absent renewal must fall back to the seed: %+v", cookies)
+	}
+	if err := os.WriteFile(renewed, []byte(`{"cookies":[{"name":"r","value":"v","domain":"example.invalid","path":"/"}],"seed_sha256":"`+visiblecheck.SeedDigest(path)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cookies, _ := loadE2ESessionCookies(path, renewed); len(cookies) != 1 || cookies[0].Name != "r" {
+		t.Fatalf("a renewal of the mounted seed must win: %+v", cookies)
+	}
+	if err := os.WriteFile(renewed, []byte(`{"cookies":[{"name":"old","value":"v","domain":"example.invalid","path":"/"}],"seed_sha256":"0000"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cookies, _ := loadE2ESessionCookies(path, renewed); len(cookies) != 1 || cookies[0].Name != "s" {
+		t.Fatalf("a renewal of another seed must lose to the seed: %+v", cookies)
+	}
+}
+
+func TestConsumerObservationCarriesTheLoginEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "consumer.json")
+	raw := `{"consumers":[
+		{"repository":"example/one","staging_origin":"https://one.example.invalid","production_origin":"https://one-prod.example.invalid","staging_login_url":"https://one-api.example.invalid/login?returnTo=/console","observation_language":"ja"},
+		{"repository":"example/two","staging_origin":"https://two.example.invalid"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origin, entry, err := consumerObservation(path, "example/one", "staging")
+	if err != nil || origin != "https://one.example.invalid" || entry.LoginURL != "https://one-api.example.invalid/login?returnTo=/console" || entry.LandedPrefix != origin || entry.Language != "ja" {
+		t.Fatalf("staging = %q %+v %v", origin, entry, err)
+	}
+	if _, entry, err := consumerObservation(path, "example/one", "production"); err != nil || entry.LoginURL != "" || entry.Language != "ja" {
+		t.Fatalf("production without a login entry must sign in nowhere but keep the language: %+v %v", entry, err)
+	}
+	if _, entry, err := consumerObservation(path, "example/two", "staging"); err != nil || entry.LoginURL != "" {
+		t.Fatalf("a consumer without a login entry must sign in nowhere: %+v %v", entry, err)
+	}
+	// A language the strict loader would refuse never reaches the browser.
+	bad := `{"consumers":[{"repository":"example/three","staging_origin":"https://three.example.invalid","observation_language":"ja;q=0.9"}]}`
+	if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, entry, err := consumerObservation(path, "example/three", "staging"); err != nil || entry.Language != "" {
+		t.Fatalf("an invalid language must be dropped: %+v %v", entry, err)
 	}
 }
 
@@ -215,7 +263,7 @@ func TestE2EVerificationComposesTheTarget(t *testing.T) {
 	if err := os.WriteFile(pipeline.path("readiness-ticket.json"), []byte(ticket), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	target, expected, absent, err := pipeline.e2eVerification()
+	target, expected, absent, _, err := pipeline.e2eVerification()
 	if err != nil || target != "https://one.example.invalid/console/x" || expected != "絞り込み" || absent != "" {
 		t.Fatalf("verification = %q %q %q, %v", target, expected, absent, err)
 	}

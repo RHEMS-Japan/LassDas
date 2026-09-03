@@ -172,6 +172,11 @@ func checkBudgets(ctx context.Context, config runtime.Config, backlog operatorCo
 	models, err := loadModelConfig(config.ConsumerConfigPath)
 	if err != nil {
 		logger.Error("budget check: consumer config unreadable; proceeding", "run", run.RunID, "error", err.Error())
+		// A run that proceeds must not keep wearing an old hold on the
+		// board for the rest of its life.
+		if _, held := readBudgetHold(runDir); held {
+			_ = os.Remove(filepath.Join(runDir, budgetHoldFile))
+		}
 		return false
 	}
 	for _, role := range [][2]string{{"実装役", "LASSDAS_IMPLEMENTER_MODEL"}, {"レビュー役 A", "LASSDAS_REVIEW_A_MODEL"}, {"レビュー役 B", "LASSDAS_REVIEW_B_MODEL"}} {
