@@ -17,6 +17,12 @@ const (
 	chromeExecutable = "/opt/google/chrome/chrome"
 	browserTimeout   = 90 * time.Second
 	pageReadyTimeout = 45 * time.Second
+	// screenshotQuality must stay 100: that is what makes Chrome's capture
+	// a PNG, and the evidence rules (validatePNG) accept nothing else. At
+	// any lower value the capture is a JPEG — live, every sealed
+	// observation was rejected for its own screenshot the day the browser
+	// first launched (2026-09-03).
+	screenshotQuality = 100
 )
 
 // The sealed observation tool's exit codes, read by the runner: a refusal
@@ -167,7 +173,7 @@ func observe(parent context.Context, targetURL, expectedText, absentText string,
 			}
 			return nil
 		}),
-		chromedp.FullScreenshot(&screenshot, 90),
+		chromedp.FullScreenshot(&screenshot, screenshotQuality),
 	}
 	if err := chromedp.Run(session.browser, actions...); err != nil {
 		return capture{}, errors.New("browser observation failed")

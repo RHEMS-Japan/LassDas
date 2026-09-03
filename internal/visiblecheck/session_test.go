@@ -322,6 +322,18 @@ func TestBrowserOptionsAreAcceptedByTheAllocator(t *testing.T) {
 	}
 }
 
+// Chrome writes a PNG only at quality 100; the evidence rules decode PNG
+// and nothing else. A JPEG capture is refused, so the constant is pinned.
+func TestScreenshotsAreTakenAsPNG(t *testing.T) {
+	if screenshotQuality != 100 {
+		t.Fatalf("screenshotQuality = %d; below 100 Chrome captures JPEG and validatePNG refuses it", screenshotQuality)
+	}
+	jpeg := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, make([]byte, 128)...)
+	if err := validatePNG(jpeg); err == nil {
+		t.Fatal("a JPEG capture must be refused by the evidence rules")
+	}
+}
+
 func TestRenewSessionRejectsANilContextAndAnEmptyEntry(t *testing.T) {
 	if _, _, err := RenewSession(nil, SignIn{LoginURL: "https://a.example.invalid/login", LandedPrefix: "https://a.example.invalid"}, nil); err == nil {
 		t.Fatal("a nil context must be refused")

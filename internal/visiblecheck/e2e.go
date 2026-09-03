@@ -956,7 +956,7 @@ func fullPageScreenshot(browserContext context.Context) ([]byte, error) {
 			}
 			return nil
 		}),
-		chromedp.FullScreenshot(&screenshot, 90),
+		chromedp.FullScreenshot(&screenshot, screenshotQuality),
 	); err != nil {
 		return nil, errors.New("browser observation failed")
 	}
