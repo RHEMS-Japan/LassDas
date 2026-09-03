@@ -210,7 +210,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 		return p.sealReferenceStagingReport(ctx, stageDir)
 	}
 	if !p.exists(DeliverStagingVisibleFile) {
-		code, err := p.browsercheck(ctx, stageDir, reviews, "staging",
+		code, err := p.observeUntilSettled(ctx, stageDir, reviews, "staging",
 			"--staging-proof", p.path(DeliverStagingPlainProofFile),
 			"--evidence-out", p.path(DeliverStagingVisibleFile),
 			"--screenshot-out", p.path(DeliverStagingShotFile))
@@ -408,7 +408,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 		return err
 	}
 	if !p.exists(DeliverProductionVisibleFile) {
-		code, err := p.browsercheck(ctx, stageDir, reviews, "production",
+		code, err := p.observeUntilSettled(ctx, stageDir, reviews, "production",
 			"--staging-proof", p.path(DeliverStagingPlainProofFile),
 			"--production-proof", p.path(DeliverProductionPlainFile),
 			"--prior-evidence", p.path(DeliverStagingVisibleFile),
@@ -499,6 +499,40 @@ func (p *Pipeline) deliverBaseline() string {
 		return p.path(advancedBaselineFile)
 	}
 	return p.path("baseline.json")
+}
+
+// A deployment workflow's completion is not the moment the new build is
+// served: the new pod is ready, the old one still answers at the edge for
+// a while. Live, 2026-09-03, the sealed observation 30 seconds after a
+// green staging deploy saw the previous build — a screenshot byte-identical
+// to the one taken before the deploy — and a correct change was reported
+// as a failed screen check. So an observation the page refused is repeated,
+// a minute apart, for a few minutes before it counts; the evidence is the
+// one observation that passed, sealed like any other. Only the page's
+// refusal is waited out: a login the destination refused, invalid inputs
+// or unwritable outputs change nothing by waiting.
+var (
+	observationSettleAttempts = 5
+	observationSettleInterval = 60 * time.Second
+)
+
+// observeUntilSettled runs the sealed observation and, when the page
+// refused it, gives the deployment time and tries again, up to the settle
+// budget. Every other outcome is returned at once.
+func (p *Pipeline) observeUntilSettled(ctx context.Context, stageDir string, reviews []string, environment string, extra ...string) (int, error) {
+	for attempt := 1; ; attempt++ {
+		code, err := p.browsercheck(ctx, stageDir, reviews, environment, extra...)
+		if err != nil || code != visiblecheck.ExitEvidenceRejected || attempt >= observationSettleAttempts {
+			return code, err
+		}
+		p.Logger.Info("observation refused; giving the deployment time to serve the new build",
+			"environment", environment, "attempt", attempt, "of", observationSettleAttempts)
+		select {
+		case <-ctx.Done():
+			return code, ctx.Err()
+		case <-time.After(observationSettleInterval):
+		}
+	}
 }
 
 // browsercheck runs the sealed observation binary with the gate artifacts.

@@ -292,6 +292,15 @@ strict as before — it refuses anything short of the target page at its
 own URL — and the courtesy observation after a refusal is where the
 reason gets told, with a screenshot of wherever the browser ended up.
 
+A deployment workflow's completion is not the moment the new build is
+served: the new pod is ready while the old one still answers at the edge
+for a while. A sealed observation the page refused right after a deploy
+is repeated a minute apart, up to five times (about four minutes; an edge
+that takes longer to switch is outside this budget), before the refusal
+counts; the evidence is the one observation that passed. Only the page's
+refusal is waited out — the tool tells a refused login (exit 4) and every
+other failure (exit 1) apart from it (exit 3), and those return at once.
+
 ## Release discipline: the regression set
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
@@ -313,6 +322,7 @@ means adding a row here and the test it names.
 | An implementer that stops making progress and spends the whole iteration budget on it | not a test: `LASSDAS_IMPLEMENTER_MAX_TURNS` bounds the iterations per run (`entrypoint.sh`) | live, 2026-09-02 (458 of 500 iterations, 425 of them the same search, no file changed) |
 | A key out of budget spending a whole run on refusals | `internal/attendant` `TestCheckBudgetsHoldsOnceThrottlesAndClears`, `TestProbeBudgetOnlyABudgetRefusalCounts`, `TestRoleProbesCollapseDuplicatesAndReadTheEnvironment`, `TestBudgetHoldShowsAtIntakeAsAttention` | live, 2026-09-02 (the shared key ran dry; every ticket after it died as model_failed) |
 | An observation browser that never launched (a Chrome flag given as a number, which the allocator refuses before the exec), indistinguishable from a wrong page | `internal/visiblecheck` `TestBrowserOptionsAreAcceptedByTheAllocator` | live, 2026-09-01 → 09-03 (35 runs, not one screenshot; found by a container run of the real code against the real staging console) |
+| A green staging deploy whose new build was not yet served at the edge (the old pod still answered 30 seconds later), so the sealed observation judged the previous build and a correct change read as a failed check | `internal/runner` `TestObserveUntilSettledRepeatsARefusedObservation`, `TestObserveUntilSettledGivesUpAfterTheBudget`, `TestObserveUntilSettledReturnsEveryOtherOutcomeAtOnce`, `TestObserveUntilSettledStopsWhenCancelled`; `cmd/browsercheck` `TestExitCodesTellTheRefusalsApart` | live, 2026-09-03 (the first unattended delivery after the observer was fixed: the screenshot was byte-identical to one taken before the deploy) |
 | A screen check the browser could not make (an expired session jar sent it to the portal) reported as a failed check of a correct change, and a jar nobody renewed | `internal/visiblecheck` `TestLoadSessionCookiesFollowsTheSeedDigestNotFileTimes`, `TestInstallableCookiesDropOnlyTheExpired`, `TestLandedAcceptsTheOriginAndItsPathsOnly`, `TestStillSigningInKeepsTheLoginPageAndErrorsOffTheLanding`, `TestJarRejectedReadsWhereTheBrowserCameToRest`, `TestSameDocumentAndSameOrigin`, `TestSafeURLDropsQueryAndFragment`, `TestRelevantDomainsAndKeepCookie`, `TestWriteSessionFileRoundTripsOwnerOnly`; `internal/runner` `TestCourtesyVerdictNamesTheBlock`, `TestConsumerObservationCarriesTheLoginEntry`, `TestLoadE2ESessionCookies`; `internal/hook` `TestObserveBlockedReportsNameWhoActs`, `TestSessionHoldContentCarriesTheMarkerAndNamesTheDestination`; `internal/attendant` `TestCheckSessionsHoldsOnRefusalOnlyThrottlesAndClears`, `TestCheckSessionsClearsAStaleHoldWhenTheConfigIsUnreadable`, `TestSessionHoldShowsAtIntakeAsAttention`, `TestObserveBlockedIsAnAttentionState`; `internal/worker` `TestValidLoginURL`, `TestConsumerLoginURLsAreValidatedAndResolvedPerEnvironment`; `cmd/browsercheck` `TestSignInForPicksTheEnvironmentEntry` | live, 2026-09-03 (the first delivery to run every stage unattended reached staging and was refused at the screen check by a session 28 hours dead) |
 | The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |

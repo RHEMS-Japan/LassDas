@@ -19,6 +19,19 @@ const (
 	pageReadyTimeout = 45 * time.Second
 )
 
+// The sealed observation tool's exit codes, read by the runner: a refusal
+// worth waiting out (the page opened but did not show the promise — a
+// deployment may still be switching over) is told apart from a login the
+// destination refused (waiting changes nothing) and from every other
+// failure (invalid inputs, unwritable outputs).
+const (
+	ExitEvidenceRejected = 3
+	ExitSignInRefused    = 4
+)
+
+// ErrObservationSignIn is the sealed observation's login that did not land.
+var ErrObservationSignIn = errors.New("browser sign-in failed")
+
 type documentResponse struct {
 	url      string
 	status   int
@@ -103,7 +116,7 @@ func observe(parent context.Context, targetURL, expectedText, absentText string,
 	defer session.close()
 	if entry.configured() {
 		if _, err := signInAndKeep(session, entry, cookies); err != nil {
-			return capture{}, errors.New("browser sign-in failed")
+			return capture{}, ErrObservationSignIn
 		}
 	}
 	// Only the target navigation's documents count: the login round trip

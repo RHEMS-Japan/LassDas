@@ -34,6 +34,14 @@ type commandConfig struct {
 	screenshotOut       string
 }
 
+// The two refusals the runner treats differently from every other failure:
+// a page that did not show the promise may still be a deployment switching
+// over (worth waiting out), a login the destination refused is not.
+var (
+	errEvidenceRejected = errors.New("browser evidence was rejected")
+	errSignInRefused    = errors.New("browser sign-in was refused")
+)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -41,7 +49,18 @@ func main() {
 		// The reason is operational gold: every input here is a sealed
 		// artifact, and "which seal refused" is the whole diagnosis.
 		_, _ = fmt.Fprintln(os.Stderr, "browsercheck: verification failed:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
+	}
+}
+
+func exitCode(err error) int {
+	switch {
+	case errors.Is(err, errSignInRefused):
+		return visiblecheck.ExitSignInRefused
+	case errors.Is(err, errEvidenceRejected):
+		return visiblecheck.ExitEvidenceRejected
+	default:
+		return 1
 	}
 }
 
@@ -131,7 +150,10 @@ func run(ctx context.Context, args []string) error {
 		)
 	}
 	if err != nil {
-		return errors.New("browser evidence was rejected")
+		if errors.Is(err, visiblecheck.ErrObservationSignIn) {
+			return errSignInRefused
+		}
+		return errEvidenceRejected
 	}
 	if err := writeScreenshotExclusive(command.screenshotOut, screenshot); err != nil {
 		return errors.New("browser screenshot could not be written")
