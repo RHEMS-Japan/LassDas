@@ -347,9 +347,21 @@ func validStagingDeployment(deployment githubapi.DeploymentResult, binding deliv
 		return false
 	}
 	policy := stagingDigestPolicyFor(binding.Repository)
-	return validFeatureMerge(deployment.Merge, binding) && len(deployment.WorkflowRuns) == 1 &&
-		validWorkflowRun(deployment.WorkflowRuns[0], contract.StagingWorkflow, contract.IntegrationBranch, deployment.Merge.MergeSHA) &&
-		validObjectID(deployment.BranchHeadSHA) && deployment.BranchHeadSHA == deployment.DigestCommitSHA &&
+	if !validFeatureMerge(deployment.Merge, binding) || len(deployment.WorkflowRuns) != 1 ||
+		!validWorkflowRun(deployment.WorkflowRuns[0], contract.StagingWorkflow, contract.IntegrationBranch, deployment.Merge.MergeSHA) ||
+		!validObjectID(deployment.BranchHeadSHA) {
+		return false
+	}
+	if !policy.Required {
+		// A consumer whose staging deploy pushes no digest commit: the branch
+		// must still sit on the merge that was deployed, and the observation
+		// must not claim a digest commit it could not have found. The first
+		// gateway delivery to reach this gate died here because the digest
+		// equality below was demanded of a consumer that has no digest policy.
+		return deployment.BranchHeadSHA == deployment.Merge.MergeSHA && deployment.DigestCommitSHA == "" &&
+			len(deployment.DigestPaths) == 0
+	}
+	return deployment.BranchHeadSHA == deployment.DigestCommitSHA && deployment.DigestCommitSHA != deployment.Merge.MergeSHA &&
 		slices.Equal(deployment.DigestPaths, policy.ExactPaths)
 }
 

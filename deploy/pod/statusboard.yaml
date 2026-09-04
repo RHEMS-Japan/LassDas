@@ -1,0 +1,70 @@
+# The requester-facing status board (cmd/statusboard): live pipeline view
+# plus the answer/Go/stop actions, posted to the tracker as the requester's
+# own comments. Exposure is triple-guarded: allow-listed source CIDRs on
+# the shared ALB group, TLS with ssl-redirect, and the board's own basic
+# auth (fail-closed in the binary: no credentials, no server).
+#
+# Secrets (created by the operator, never in git). LASSDAS_BOARD_PASS must
+# be >= 16 chars (the binary refuses shorter) and LASSDAS_BOARD_TRACKER_KEY
+# is the REQUESTER's own key — the entrypoint moves both out of the process
+# environment into files before any card stage can spawn:
+#   kubectl create secret generic lassdas-board -n lassdas \
+#     --from-literal=LASSDAS_BOARD_USER=... \
+#     --from-literal=LASSDAS_BOARD_PASS=... \
+#     --from-literal=LASSDAS_BOARD_TRACKER_ORIGIN=https://<space>.backlog.com \
+#     --from-literal=LASSDAS_BOARD_TRACKER_SPACE=<space> \
+#     --from-literal=LASSDAS_BOARD_TRACKER_KEY=...
+# StatefulSet wiring (patch, never a whole-manifest apply):
+#   envFrom secretRef lassdas-board on the engine container.
+# Apply-time invariant for the shared ALB group (rin-v3): inbound-cidrs,
+# scheme and subnets must EXACTLY match the group's existing members —
+# a mismatched member stalls the whole group's reconcile, and the blast
+# radius is every console behind this ALB. Copy the values from the live
+# lassdas-dashboard ingress, never edit them independently.
+# Placeholders below (<...>) mirror statefulset.yaml's convention; fill
+# them from the live cluster at apply time.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lassdas-board
+  namespace: lassdas
+  labels: { app: lassdas }
+spec:
+  selector: { app: lassdas }
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lassdas-board
+  namespace: lassdas
+  labels: { app: lassdas }
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/group.name: rin-v3
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: <CERT_ARN>
+    alb.ingress.kubernetes.io/inbound-cidrs: <ALLOWED_CIDRS>
+    alb.ingress.kubernetes.io/subnets: <SUBNETS>
+    # SSE stays open long; match the dashboard ingress's idle timeout.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    external-dns.alpha.kubernetes.io/access: public
+    external-dns.alpha.kubernetes.io/hostname: <board-host>
+spec:
+  rules:
+    - host: <board-host>
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lassdas-board
+                port: { number: 9200 }

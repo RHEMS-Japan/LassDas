@@ -34,12 +34,33 @@ type commandConfig struct {
 	screenshotOut       string
 }
 
+// The two refusals the runner treats differently from every other failure:
+// a page that did not show the promise may still be a deployment switching
+// over (worth waiting out), a login the destination refused is not.
+var (
+	errEvidenceRejected = errors.New("browser evidence was rejected")
+	errSignInRefused    = errors.New("browser sign-in was refused")
+)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "browsercheck: verification failed")
-		os.Exit(1)
+		// The reason is operational gold: every input here is a sealed
+		// artifact, and "which seal refused" is the whole diagnosis.
+		_, _ = fmt.Fprintln(os.Stderr, "browsercheck: verification failed:", err)
+		os.Exit(exitCode(err))
+	}
+}
+
+func exitCode(err error) int {
+	switch {
+	case errors.Is(err, errSignInRefused):
+		return visiblecheck.ExitSignInRefused
+	case errors.Is(err, errEvidenceRejected):
+		return visiblecheck.ExitEvidenceRejected
+	default:
+		return 1
 	}
 }
 
@@ -99,10 +120,18 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("browser staging proof was rejected")
 	}
 
+	// The consoles render a login page to a credential-free profile, so the
+	// sealed observations carry the same operator-provisioned session the
+	// debug role uses, and sign in through the consumer's login entry when
+	// it has one. Missing or unreadable sessions degrade to none — the
+	// observation then fails honestly on the login page.
+	cookies, _ := visiblecheck.LoadSessionCookies(os.Getenv(visiblecheck.SessionFileEnvironment), os.Getenv(visiblecheck.SessionStateFileEnvironment))
+	entry := signInFor(config, request.Repository, command.environment)
+	entry.SeedPath, entry.KeepJarAt = os.Getenv(visiblecheck.SessionFileEnvironment), os.Getenv(visiblecheck.SessionStateFileEnvironment)
 	var evidence visiblecheck.Evidence
 	var screenshot []byte
 	if command.environment == "staging" {
-		evidence, screenshot, err = visiblecheck.ObserveAndSealStaging(ctx, staging, input)
+		evidence, screenshot, err = visiblecheck.ObserveAndSealStaging(ctx, staging, input, cookies, entry)
 	} else {
 		var production releaseproof.ProductionProof
 		if err := worker.ReadJSONFile(command.productionProofPath, worker.MaxArtifactJSONBytes, &production); err != nil {
@@ -117,11 +146,14 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("browser prior screenshot is invalid")
 		}
 		evidence, screenshot, err = visiblecheck.ObserveAndSealProduction(
-			ctx, production, staging, prior, priorScreenshot, input,
+			ctx, production, staging, prior, priorScreenshot, input, cookies, entry,
 		)
 	}
 	if err != nil {
-		return errors.New("browser evidence was rejected")
+		if errors.Is(err, visiblecheck.ErrObservationSignIn) {
+			return errSignInRefused
+		}
+		return errEvidenceRejected
 	}
 	if err := writeScreenshotExclusive(command.screenshotOut, screenshot); err != nil {
 		return errors.New("browser screenshot could not be written")
@@ -215,6 +247,24 @@ func parseCommand(args []string) (commandConfig, error) {
 		priorScreenshotPath: one("--prior-screenshot"), environment: environment, toolSHA: one("--tool-sha"),
 		evidenceOut: one("--evidence-out"), screenshotOut: one("--screenshot-out"),
 	}, nil
+}
+
+// signInFor resolves how the browser gets into the destination for the
+// environment being observed: the login entry from the configuration
+// (the landing being the environment's own origin) and the language the
+// pages are asked for. A consumer without an entry signs in nowhere.
+func signInFor(config worker.Config, repository, environment string) visiblecheck.SignIn {
+	for _, consumer := range config.Consumers {
+		if consumer.Repository != repository {
+			continue
+		}
+		entry := visiblecheck.SignIn{Language: consumer.ObservationLanguage}
+		if consumer.LoginURL(environment) != "" {
+			entry.LoginURL, entry.LandedPrefix = consumer.LoginURL(environment), consumer.Origin(environment)
+		}
+		return entry
+	}
+	return visiblecheck.SignIn{}
 }
 
 func validPathArgument(value string) bool {

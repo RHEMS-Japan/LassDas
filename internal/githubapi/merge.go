@@ -20,7 +20,7 @@ func (c *Controller) MergeFeaturePullRequest(ctx context.Context, pull PullReque
 	return c.mergePullRequest(ctx, pull, checks, spec, wait, true, nil)
 }
 
-func (c *Controller) MergePromotionPullRequest(ctx context.Context, pull PullRequest, checks CheckEvidence, proof PromotionProof, spec MergeSpec, wait WaitOptions, recordReflection MergeReflectionRecorder) (MergeResult, error) {
+func (c *Controller) MergePromotionPullRequest(ctx context.Context, pull PullRequest, checks CheckEvidence, proof PromotionProof, digestPolicy DigestCommitPolicy, spec MergeSpec, wait WaitOptions, recordReflection MergeReflectionRecorder) (MergeResult, error) {
 	if pull.BaseRef != c.contract.ReleaseBranch || pull.HeadRef != c.contract.IntegrationBranch {
 		return MergeResult{}, invariant("invalid_promotion_pull_request")
 	}
@@ -33,7 +33,7 @@ func (c *Controller) MergePromotionPullRequest(ctx context.Context, pull PullReq
 	if pull.HeadSHA != proof.Staging.BranchHeadSHA || pull.BaseSHA != proof.Baseline.Release.SHA || !strings.Contains(pull.Body, proof.AcceptanceEvidenceSHA256) {
 		return MergeResult{}, invariant("promotion_pull_proof_mismatch")
 	}
-	if err := c.verifyPromotionProof(ctx, proof); err != nil {
+	if err := c.verifyPromotionProof(ctx, proof, digestPolicy); err != nil {
 		return MergeResult{}, err
 	}
 	return c.mergePullRequest(ctx, pull, CheckEvidence{}, spec, wait, false, recordReflection)

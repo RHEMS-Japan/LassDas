@@ -15,7 +15,9 @@ import (
 
 const commentMarkerPrefix = "ticket-automation:v1"
 
-var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z-]{1,32}:[A-Za-z0-9_-]{1,128}(?::[A-Za-z0-9_.-]{1,64})*\]$`)
+// The kind class admits digits since the "e2e" kind joined; the end-of-body
+// anchor in ExtractCommentMarker stays the forgery defence either way.
+var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z0-9-]{1,32}:[A-Za-z0-9_-]{1,128}(?::[A-Za-z0-9_.-]{1,64})*\]$`)
 
 // CommentMarker renders the machine identifier for one automated comment:
 // kind, run, and the kind-specific qualifiers (question revision, notification

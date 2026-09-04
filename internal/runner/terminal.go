@@ -83,6 +83,7 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 		CommitURL: evidence["commit_url"], StagingEvidenceURL: evidence["staging_evidence_url"],
 		ProductionEvidenceURL: evidence["production_evidence_url"],
 		TrailText:             trail,
+		SpendText:             t.loadRunSpendText(ctx),
 	}
 	return t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
 		report.IssuedAt = issuedAt

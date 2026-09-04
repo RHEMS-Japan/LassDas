@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -184,9 +186,145 @@ func TestConfirmTreeMatchesCandidateRejectsAReviewerThatEdits(t *testing.T) {
 		t.Fatal("a reviewer that rewrote the change was accepted")
 	}
 
-	writeAgentFile(t, root, "client/src/label.ts", submitted)
-	writeAgentFile(t, root, "client/src/extra.ts", "export const added = true;\n")
+	// Reverting the submitted file to its base content leaves no tracked
+	// change at all — the content check is what still catches it.
+	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Send';\n")
 	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
-		t.Fatal("a reviewer that added a file was accepted")
+		t.Fatal("a reviewer that reverted the change was accepted")
+	}
+
+	writeAgentFile(t, root, "client/src/label.ts", submitted)
+	writeAgentFile(t, root, "README.md", "fixture rewritten by the reviewer\n")
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+		t.Fatal("a reviewer that edited a tracked file outside the candidate was accepted")
+	}
+}
+
+// A reviewer that runs the repository's own tests leaves untracked and
+// ignored byproducts behind. The published change is built from the sealed
+// candidate, so those files are noise, not tampering — treating them as
+// tampering killed a live run after its review had passed.
+func TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	consumer := fixtureConsumerForAgent()
+	submitted := "export const submitLabel = 'Submit';\n"
+	writeAgentFile(t, root, "client/src/label.ts", submitted)
+	candidate := Candidate{Files: []CandidateFile{{Path: "client/src/label.ts", Content: submitted}}}
+
+	writeAgentFile(t, root, "client/src/vitest.config.ts.timestamp-1.mjs", "export default {};\n")
+	writeAgentFile(t, root, ".gitignore", "*.tsbuildinfo\n")
+	writeAgentFile(t, root, "client/src/tsconfig.tsbuildinfo", "{}\n")
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+		t.Fatalf("a reviewer's tooling byproducts were treated as tampering: %v", err)
+	}
+}
+
+// After a review the tree is the next round's starting point. Everything the
+// reviewer left behind must go — untracked and ignored, files and
+// directories, hidden or not — while the candidate's own new file and the
+// tracked tree stay exactly as they are.
+func TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	submitted := "export const submitLabel = 'Submit';\n"
+	added := "export const added = true;\n"
+	writeAgentFile(t, root, "client/src/label.ts", submitted)
+	writeAgentFile(t, root, "client/src/extra.test.ts", added)
+	candidate := Candidate{Files: []CandidateFile{
+		{Path: "client/src/extra.test.ts", Content: added},
+		{Path: "client/src/label.ts", Content: submitted},
+	}}
+
+	writeAgentFile(t, root, ".gitignore", "*.tsbuildinfo\ncoverage/\n")
+	writeAgentFile(t, root, "client/src/vitest.config.ts.timestamp-1.mjs", "export default {};\n")
+	writeAgentFile(t, root, "client/src/tsconfig.tsbuildinfo", "{}\n")
+	writeAgentFile(t, root, "client/coverage/lcov.info", "TN:\n")
+	writeAgentFile(t, root, ".eslintcache", "[]\n")
+	writeAgentFile(t, root, "scratch/notes/todo.md", "later\n")
+
+	if err := CleanReviewByproducts(root, candidate); err != nil {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+	for _, gone := range []string{
+		".gitignore", "client/src/vitest.config.ts.timestamp-1.mjs", "client/src/tsconfig.tsbuildinfo",
+		"client/coverage", ".eslintcache", "scratch",
+	} {
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(gone))); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the cleanup (%v)", gone, err)
+		}
+	}
+	for path, expected := range map[string]string{
+		"client/src/label.ts": submitted, "client/src/extra.test.ts": added, "README.md": "fixture\n",
+	} {
+		actual, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil || string(actual) != expected {
+			t.Fatalf("%s was not left alone: %q %v", path, actual, err)
+		}
+	}
+	if err := ConfirmTreeMatchesCandidate(root, candidate, fixtureConsumerForAgent()); err != nil {
+		t.Fatalf("the cleaned tree no longer matches the candidate: %v", err)
+	}
+}
+
+// A reviewer that writes an ignore rule can make git fold the directory
+// holding a submitted new file into a single ignored entry. The cleanup must
+// refuse rather than delete the candidate's file along with it.
+func TestCleanReviewByproductsRefusesToDeleteADirectoryHoldingTheCandidate(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	added := "export const added = true;\n"
+	writeAgentFile(t, root, "client/src/newdir/extra.ts", added)
+	candidate := Candidate{Files: []CandidateFile{{Path: "client/src/newdir/extra.ts", Content: added}}}
+	writeAgentFile(t, root, "client/src/.gitignore", "newdir/\n")
+
+	if err := CleanReviewByproducts(root, candidate); err == nil {
+		t.Fatal("a directory holding the candidate's new file was deleted as a byproduct")
+	}
+	if _, err := os.Stat(filepath.Join(root, "client", "src", "newdir", "extra.ts")); err != nil {
+		t.Fatalf("the candidate's new file did not survive: %v", err)
+	}
+}
+
+// A reviewer that commits makes its edits invisible to a status scan; the
+// head recorded before the review is what exposes it.
+func TestRepositoryHeadMovesWhenTheReviewerCommits(t *testing.T) {
+	root, base := buildAgentRepository(t)
+	before, err := RepositoryHead(root)
+	if err != nil || before != base {
+		t.Fatalf("head was not read: %q %v (base %q)", before, err, base)
+	}
+	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Reviewer committed this';\n")
+	agentGit(t, root, "add", "-A")
+	agentGit(t, root, "-c", "user.name=reviewer", "-c", "user.email=reviewer@example.invalid", "commit", "-qm", "quiet fix")
+	after, err := RepositoryHead(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("a commit did not move the recorded head")
+	}
+}
+
+// A submitted new file is untracked, so the tracked-change scan cannot see
+// it; the content check must still notice when the reviewer rewrites it.
+func TestConfirmTreeMatchesCandidateChecksASubmittedNewFile(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	consumer := fixtureConsumerForAgent()
+	submitted := "export const added = true;\n"
+	writeAgentFile(t, root, "client/src/extra.test.ts", submitted)
+	candidate := Candidate{Files: []CandidateFile{{Path: "client/src/extra.test.ts", Content: submitted}}}
+
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+		t.Fatalf("an untouched new file was rejected: %v", err)
+	}
+
+	writeAgentFile(t, root, "client/src/extra.test.ts", "export const added = false;\n")
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+		t.Fatal("a reviewer that rewrote a submitted new file was accepted")
+	}
+
+	if err := os.Remove(filepath.Join(root, "client", "src", "extra.test.ts")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+		t.Fatal("a reviewer that deleted a submitted new file was accepted")
 	}
 }

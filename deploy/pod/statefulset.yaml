@@ -43,6 +43,10 @@ spec:
           image: <ECR>/lassdas-runtime@sha256:<digest>  # digest 指定 (latest 禁止)
           envFrom:
             - secretRef: { name: lassdas-engine }
+            # The status board's credentials and the requester's tracker
+            # key (deploy/pod/statusboard.yaml). Optional: without it the
+            # board process refuses to start and the pod runs unchanged.
+            - secretRef: { name: lassdas-board, optional: true }
           env:
             - name: LASSDAS_STATE_DIR
               value: /data

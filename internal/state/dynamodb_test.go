@@ -565,7 +565,7 @@ func testPullRequest(t *testing.T) hook.PullClaimRequest {
 			WorkflowSHA:       strings.Repeat("d", 40),
 			// Above 2^53 on purpose: the chain claim identity is a 63-bit
 			// hash, and a float64 detour in either store corrupts it (the
-			// The affected run had every terminal report refused over 314 lost
+			// one live run had every terminal report refused over 314 lost
 			// units). Keeping the fixture pathological makes every scenario
 			// a precision regression test.
 			WorkflowRunID:     7663335643410923834,

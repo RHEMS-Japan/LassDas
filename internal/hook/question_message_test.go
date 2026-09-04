@@ -121,6 +121,27 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 	cases = append(cases, contractCase{"question", question, CommentMarker("question", runID, "C1")})
 	snapshot := TicketSnapshot{RunID: runID, IssueKey: "TICKET-501"}
 	cases = append(cases, contractCase{"ack", AckCommentContent(snapshot), CommentMarker("ack", runID)})
+	plan := PlanCommentContent(runID, PlanFacts{
+		Request:     "一覧の取得失敗時に再試行の導線を出す",
+		Rationale:   "失敗メッセージの隣に再試行ボタンを描画し、一覧の取得だけをやり直す。",
+		TargetFiles: []string{"client/src/app/example/page.tsx"},
+		Assumptions: []string{"再試行は一覧の取得のみを対象とし、組織やカタログは取り直さない"},
+	})
+	cases = append(cases, contractCase{"plan", plan, CommentMarker("plan", runID)})
+	cases = append(cases, contractCase{"e2e", E2ECommentContent(runID, E2EReport{
+		Verdict: "pass", TargetURL: "https://staging.example.invalid/console/x",
+		ExpectedText: "絞り込み", ExpectedSeen: true, AbsentText: "旧表示", AbsentGone: true,
+		ScreenshotAttached: true,
+	}), CommentMarker("e2e", runID)})
+	cases = append(cases, contractCase{"stg-report", DeliverStagingContent(runID, DeliverStagingReport{
+		Verdict: "pass", TargetURL: "https://staging.example.invalid/console/x",
+		ExpectedText: "絞り込み", ScreenshotAttached: true, GoDeadlineDays: 7,
+		Preview: PromotionPreview{AheadBy: 2, Titles: []string{"feat: A", "fix: B"}},
+	}), CommentMarker("stg-report", runID)})
+	cases = append(cases, contractCase{"rel-report", DeliverReleaseContent(runID, DeliverReleaseReport{
+		Verdict: "pass", TargetURL: "https://example.invalid/console/x",
+		PullRequestURL: "https://github.example.invalid/o/r/pull/9", ScreenshotAttached: true,
+	}), CommentMarker("rel-report", runID)})
 	receipt, err := ReceiptCommentContent(record, 6002)
 	if err != nil {
 		t.Fatalf("ReceiptCommentContent() error = %v", err)

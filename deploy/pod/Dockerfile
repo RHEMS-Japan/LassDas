@@ -2,7 +2,7 @@
 # Build for linux/arm64 (the cluster's node architecture).
 
 # ---- Stage 1: engine binaries -------------------------------------------
-FROM golang:1.25-bookworm AS engine
+FROM golang:1.26-bookworm AS engine
 ARG ENGINE_SHA
 WORKDIR /src
 COPY . .
@@ -11,7 +11,9 @@ RUN test -n "$ENGINE_SHA" && \
     CGO_ENABLED=0 go build -trimpath -o /out/runner ./cmd/runner && \
     CGO_ENABLED=0 go build -trimpath -o /out/worker ./cmd/worker && \
     CGO_ENABLED=0 go build -trimpath -o /out/controller ./cmd/controller && \
-    (cd /out && sha256sum worker controller > tool-pins.txt)
+    CGO_ENABLED=0 go build -trimpath -o /out/browsercheck ./cmd/browsercheck && \
+    CGO_ENABLED=0 go build -trimpath -o /out/statusboard ./cmd/statusboard && \
+    (cd /out && sha256sum worker controller browsercheck > tool-pins.txt)
 
 # ---- Stage 2: runtime ----------------------------------------------------
 FROM debian:bookworm-slim
@@ -24,7 +26,11 @@ ARG PNPM_VERSION=9.15.4
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ca-certificates curl git tmux python3 python3-pip python3-venv \
       bubblewrap jq openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+      chromium fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/google/chrome \
+    && test -x /usr/lib/chromium/chromium \
+    && ln -s /usr/lib/chromium/chromium /opt/google/chrome/chrome
 
 # Node 22 (validation toolchain of node consumers) + pinned pnpm.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -42,7 +48,24 @@ RUN git clone --filter=blob:none https://github.com/RHEMS-Japan/hermes-agent /op
     && /opt/hermes/bin/pip install --no-cache-dir -e /opt/hermes-src \
     && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
 
-COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /usr/local/bin/
+# Pre-build the dashboard SPA (vite writes it to hermes_cli/web_dist) so
+# `hermes dashboard --skip-build` can serve the board UI without a runtime
+# npm build. npm resolves the workspace root's lockfile and installs into
+# the ROOT node_modules (web/ gets none), so the cleanup names both trees
+# by absolute path in the same layer; the editable install only needs the
+# sources plus the built dist.
+RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
+    && npm run build \
+    && rm -rf /opt/hermes-src/node_modules /opt/hermes-src/web/node_modules
+
+# The Go toolchain rides along for consumers whose deterministic validation
+# builds Go (the gateway repo's checks run `go` inside the validation
+# sandbox; a missing toolchain kills validation before it can record
+# anything).
+COPY --from=engine /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+
+COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
 COPY deploy/pod/entrypoint.sh /usr/local/bin/lassdas-entrypoint
 RUN chmod 0755 /usr/local/bin/lassdas-entrypoint

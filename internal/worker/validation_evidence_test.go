@@ -58,7 +58,7 @@ func validationEvidenceFixture(t *testing.T) (string, Config, TicketRequest, Sou
 
 func TestRunValidationEvidenceBindsExecutionAndPublishGate(t *testing.T) {
 	root, config, request, source, candidate, logPath := validationEvidenceFixture(t)
-	evidence, err := RunValidationEvidence(context.Background(), root, candidate, source, request, config)
+	evidence, err := RunValidationEvidence(context.Background(), root, candidate, source, request, config, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestRunValidationEvidenceBindsExecutionAndPublishGate(t *testing.T) {
 func TestRunValidationEvidenceRejectsConfigDrift(t *testing.T) {
 	root, config, request, source, candidate, _ := validationEvidenceFixture(t)
 	config.Consumers[0].Mode.VerifyCommands = [][]string{{"sh", "-c", "exit 0"}}
-	if _, err := RunValidationEvidence(context.Background(), root, candidate, source, request, config); err == nil {
+	if _, err := RunValidationEvidence(context.Background(), root, candidate, source, request, config, ""); err == nil {
 		t.Fatal("RunValidationEvidence() accepted config drift")
 	}
 }

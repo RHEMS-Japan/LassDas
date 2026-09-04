@@ -1,0 +1,442 @@
+<title>LassDas 状態ボード — NASA 管制室風モック</title>
+<style>
+  /* Mission-control committed theme: deep console navy, instrument white,
+     status-lamp steps. Fixed geometry; state = lamp lighting, never motion. */
+  :root {
+    --ground: #0A1526;
+    --panel: #101F36;
+    --panel-edge: #24385A;
+    --ink: #E8EEF7;
+    --muted: #7C8DA8;
+    --faint: #35486B;
+    --go: #43D675;
+    --go-dim: rgba(67, 214, 117, 0.14);
+    --amber: #FFC24B;
+    --amber-dim: rgba(255, 194, 75, 0.14);
+    --red: #FF5C49;
+    --cyan: #57C7FF;
+    --cyan-dim: rgba(87, 199, 255, 0.13);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Helvetica Neue", "Hiragino Sans", "Noto Sans JP", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    background-image:
+      linear-gradient(rgba(87,199,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(87,199,255,0.03) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 18px 24px 48px; }
+
+  /* ---- mission header ---- */
+  header {
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    border: 1px solid var(--panel-edge);
+    background: var(--panel);
+    padding: 12px 18px;
+    border-top: 3px solid var(--cyan);
+  }
+  .brand { font-family: var(--mono); font-size: 16px; letter-spacing: 0.3em; font-weight: 700; }
+  .brand small { color: var(--cyan); letter-spacing: 0.3em; font-weight: 400; font-size: 10px; display: block; }
+  .live { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--go); }
+  .live-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--go); box-shadow: 0 0 10px rgba(67,214,117,0.7); animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+  .clock { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .clock b { display: block; color: var(--ink); font-size: 18px; letter-spacing: 0.14em; }
+  .counts { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .counts b { color: var(--ink); font-weight: 700; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; margin-top: 20px; }
+  @media (max-width: 960px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+
+  .lane-label {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.3em;
+    color: var(--cyan); text-transform: uppercase; margin: 0 0 10px 2px;
+  }
+
+  /* ---- run cards: instrument panels ---- */
+  .runs { display: flex; flex-direction: column; gap: 14px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-top: 3px solid var(--amber);
+    padding: 14px 18px 16px;
+    position: relative;
+  }
+  .card.state-confirm, .card.state-question { border-top-color: var(--cyan); }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tkey { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--amber); letter-spacing: 0.06em; }
+  .state-confirm .tkey, .state-question .tkey { color: var(--cyan); }
+  .tsum { font-size: 14px; font-weight: 600; }
+  .elapsed { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .elapsed::before { content: "MET "; color: var(--faint); }
+
+  .nowline { display: flex; align-items: baseline; gap: 10px; margin: 9px 0 4px; height: 24px; overflow: hidden; }
+  .now-title { font-size: 15px; font-weight: 700; color: var(--amber); letter-spacing: 0.06em; white-space: nowrap; transition: opacity 0.35s ease; }
+  .state-confirm .now-title, .state-question .now-title { color: var(--cyan); }
+  .now-detail { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: opacity 0.35s ease; }
+  .nowline.swapping .now-title, .nowline.swapping .now-detail { opacity: 0; }
+
+  /* ---- pipeline: a row of status lamps (Apollo event lights) ---- */
+  .track { display: flex; align-items: flex-start; margin-top: 12px; gap: 6px; }
+  .node { flex: 1; min-width: 0; position: relative; text-align: center; }
+  .node .rail { display: none; }
+  .node .tick {
+    width: 100%; height: 26px;
+    background: #0C1930;
+    border: 1px solid var(--faint);
+    border-radius: 2px;
+    position: relative;
+    transition: background-color 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease;
+  }
+  .node .nname {
+    position: absolute; inset: 0; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+    color: var(--muted); letter-spacing: 0.1em; white-space: nowrap;
+    transition: color 0.5s ease;
+    margin: 0;
+  }
+  .node.done .tick { background: var(--go-dim); border-color: var(--go); box-shadow: inset 0 0 12px rgba(67,214,117,0.25); }
+  .node.done .nname { color: var(--go); }
+  .node.now .tick { background: var(--amber-dim); border-color: var(--amber); box-shadow: inset 0 0 14px rgba(255,194,75,0.3), 0 0 12px rgba(255,194,75,0.35); animation: lampglow 1.6s ease-in-out infinite; }
+  .node.now .nname { color: var(--amber); }
+  .state-confirm .node.now .tick { background: var(--cyan-dim); border-color: var(--cyan); box-shadow: inset 0 0 14px rgba(87,199,255,0.3), 0 0 12px rgba(87,199,255,0.35); }
+  .state-confirm .node.now .nname { color: var(--cyan); }
+  @keyframes lampglow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.45); } }
+  .node .laps {
+    height: 15px; margin-top: 3px;
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    opacity: 0; transition: opacity 0.5s ease, color 0.5s ease;
+  }
+  .node .laps.on { opacity: 1; }
+  .node.now .laps.on { color: var(--amber); }
+
+  /* ---- decision rows ---- */
+  .qrow {
+    margin-top: 12px; padding: 10px 12px;
+    background: var(--cyan-dim); border: 1px solid rgba(87,199,255,0.35); border-radius: 2px;
+    font-size: 13px; transition: background-color 0.6s ease, border-color 0.6s ease;
+  }
+  .qrow b { color: var(--cyan); }
+  .qrow.sent { background: var(--go-dim); border-color: rgba(67,214,117,0.4); }
+  .qrow.sent b { color: var(--go); }
+  .answer { display: flex; gap: 8px; margin-top: 10px; }
+  .answer input {
+    flex: 1; min-width: 0;
+    background: #0A1322; border: 1px solid var(--faint); border-radius: 2px;
+    color: var(--ink); font-family: var(--sans); font-size: 13px; padding: 8px 10px;
+  }
+  .answer input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(87,199,255,0.2); }
+  .btn {
+    font-family: var(--mono); font-size: 12.5px; font-weight: 700; letter-spacing: 0.12em;
+    border-radius: 2px; padding: 9px 16px; cursor: pointer;
+    border: 1px solid var(--cyan); background: rgba(87,199,255,0.16); color: var(--cyan);
+    transition: background-color 0.25s ease, color 0.25s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { background: rgba(87,199,255,0.3); }
+  .btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+  .btn.go { border-color: var(--go); background: var(--go); color: #04220F; }
+  .btn.go:hover { filter: brightness(1.12); }
+  .btn.go:focus-visible { outline-color: var(--go); }
+  .btn.armed { background: var(--red); border-color: var(--red); color: #fff; }
+  .btn.ghost { border-color: var(--panel-edge); background: transparent; color: var(--muted); font-weight: 400; }
+  .btn.ghost:hover { color: var(--ink); }
+  .via { margin-top: 7px; font-size: 11px; color: var(--muted); }
+  .approve-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+
+  /* ---- event log ---- */
+  .log { background: #0A1322; border: 1px solid var(--panel-edge); border-top: 3px solid var(--panel-edge); padding: 12px 0; max-height: 600px; overflow-y: auto; }
+  .ev {
+    display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 7px 16px;
+    border-left: 2px solid transparent;
+    transition: background-color 1.2s ease, border-color 1.2s ease;
+  }
+  .ev.enter { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; overflow: hidden; }
+  .ev.settling {
+    max-height: 80px; padding-top: 7px; padding-bottom: 7px; opacity: 1;
+    transition: max-height 0.5s ease, padding 0.5s ease, opacity 0.6s ease 0.15s,
+      background-color 1.2s ease, border-color 1.2s ease;
+  }
+  .ev.fresh { border-left-color: var(--amber); background: var(--amber-dim); }
+  .ev time { font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .ev .ekey { font-family: var(--mono); font-size: 11px; color: var(--amber); }
+  .ev .emsg { font-size: 12.5px; }
+
+  /* ---- finished lane ---- */
+  .finished { margin-top: 26px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; padding: 6px 12px;
+    background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 2px;
+    color: var(--muted); font-family: var(--mono);
+  }
+  .chip .ckey { color: var(--ink); }
+  .chip .mark { width: 8px; height: 8px; border-radius: 50%; }
+  .chip.ok .mark { background: var(--go); }
+  .chip.stop .mark { background: var(--muted); }
+  .chip.bad .mark { background: var(--red); }
+
+  .mock-note { margin-top: 30px; padding: 10px 14px; border: 1px dashed var(--faint); color: var(--muted); font-size: 12px; }
+  .mock-note b { color: var(--amber); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot, .node.now .tick { animation: none !important; }
+    .ev.enter, .ev.settling { transition: none !important; max-height: none; opacity: 1; padding: 7px 16px; }
+    .node .tick, .node .nname, .node .laps { transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="brand">LASSDAS<small>MISSION CONTROL</small></span>
+    <span class="live"><span class="live-dot"></span>ALL SYSTEMS GO</span>
+    <span class="counts">処理中 <b id="c-active">2</b> ・ 回答待ち <b>1</b> ・ 本日完了 <b>3</b></span>
+    <span class="clock">最終更新 <span id="ago">2</span> 秒前 ・ <span id="clock">15:42:07</span></span>
+  </header>
+
+  <div class="cols">
+    <div>
+      <p class="lane-label">進行中の依頼</p>
+      <div class="runs">
+
+        <div class="card" id="demo-card">
+          <div class="card-head">
+            <span class="tkey">TKT-701</span>
+            <span class="tsum">利用予算が月替わりで自動リセットされない問題の修正</span>
+            <span class="elapsed">経過 <span id="el1">18:24</span></span>
+          </div>
+          <div class="nowline" id="demo-now">
+            <span class="now-title" id="demo-title">実装・検証中</span>
+            <span class="now-detail" id="demo-detail">2 巡目 — レビュー指摘 2 件を修正しています</span>
+          </div>
+          <div class="track" id="demo-track"></div>
+        </div>
+
+        <div class="card state-confirm" id="go-card">
+          <div class="card-head">
+            <span class="tkey">TKT-698</span>
+            <span class="tsum">設定画面の保存ボタンが二重送信になる不具合</span>
+            <span class="elapsed">経過 <span id="el2">1:02:11</span></span>
+          </div>
+          <div class="nowline">
+            <span class="now-title">本番反映の承認待ち</span>
+            <span class="now-detail">ステージング確認済み — あなたの「Go」を待っています (残り 6 日)</span>
+          </div>
+          <div class="track" data-static="5" data-laps="implement:2,review:2"></div>
+          <div class="approve-row" id="go-actions">
+            <button class="btn go" id="go-btn">Go — 本番反映を承認</button>
+            <button class="btn ghost" id="hold-btn">今回は反映しない</button>
+            <span class="via">チケットにあなた本人のコメント「Go」として投稿されます</span>
+          </div>
+        </div>
+
+        <div class="card state-question" id="q-card">
+          <div class="card-head">
+            <span class="tkey">TKT-703</span>
+            <span class="tsum">通知メールの文面変更</span>
+            <span class="elapsed">経過 <span id="el3">3:44:50</span></span>
+          </div>
+          <div class="nowline">
+            <span class="now-title">質問への回答待ち</span>
+          </div>
+          <div class="qrow" id="q-row">
+            <div id="q-body"><b>LassDas からの質問:</b> 文面の変更は日本語のみですか？ 英語通知も同じ変更を適用しますか？</div>
+            <div class="answer" id="q-answer">
+              <input type="text" id="q-input" placeholder="ここに回答を入力… (例: 日本語のみでお願いします)" aria-label="質問への回答">
+              <button class="btn" id="q-send">回答を送信</button>
+            </div>
+            <div class="via">チケットにあなた本人のコメントとして投稿され、LassDas が自動で再開します</div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="finished">
+        <p class="lane-label">本日の完了</p>
+        <div class="chips">
+          <span class="chip ok"><span class="mark"></span><span class="ckey">TKT-694</span>本番反映済み 11:32</span>
+          <span class="chip ok"><span class="mark"></span><span class="ckey">TKT-689</span>本番反映済み 09:15</span>
+          <span class="chip stop"><span class="mark"></span><span class="ckey">TKT-696</span>ご指示により停止 10:04</span>
+        </div>
+      </div>
+
+      <p class="mock-note"><b>これはモックです。</b>NASA 管制室風スキン (濃紺の計器盤・工程 = 点灯式ステータスランプ・MET 経過時計)。データと進行は第一弾と同じ自動デモ。</p>
+    </div>
+
+    <div>
+      <p class="lane-label">運行ログ</p>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const STEPS = [
+    ["intake", "受付"], ["implement", "実装"], ["review", "レビュー"], ["checks", "検査"],
+    ["staging", "STG"], ["confirm", "確認"], ["production", "本番"],
+  ];
+
+  /* Build each track ONCE; state changes only toggle classes and lap
+     counters, so the geometry (rails, ticks, labels) never moves. */
+  function buildTrack(el) {
+    el.innerHTML = STEPS.map(([id, name]) =>
+      '<div class="node" data-step="' + id + '"><div class="rail"><div class="fill"></div></div>' +
+      '<div class="tick"></div><div class="nname">' + name + '</div><div class="laps"></div></div>'
+    ).join("");
+  }
+  function setTrack(el, current, laps) {
+    el.querySelectorAll(".node").forEach((node, index) => {
+      node.classList.toggle("done", index < current);
+      node.classList.toggle("now", index === current);
+      const lapEl = node.querySelector(".laps");
+      const count = (laps || {})[node.dataset.step] || 0;
+      lapEl.textContent = count > 1 ? "×" + count : "×1";
+      lapEl.classList.toggle("on", count > 1);
+    });
+  }
+  document.querySelectorAll("[data-static]").forEach(el => {
+    buildTrack(el);
+    const laps = {};
+    (el.dataset.laps || "").split(",").filter(Boolean).forEach(pair => {
+      const [k, v] = pair.split(":"); laps[k] = +v;
+    });
+    setTrack(el, +el.dataset.static, laps);
+  });
+
+  /* demo card cycles through the pipeline; laps count up as it loops */
+  const phases = [
+    ["implement", 1, "実装・検証中", "レビュー指摘 2 件を修正しています"],
+    ["review", 2, "レビュー中", "AI レビュアー 2 名が検査しています"],
+    ["checks", 3, "自動検査 (CI) 待ち", "納品した変更の検査が走っています"],
+    ["staging", 4, "ステージングへ反映中", "マージとデプロイの完了を待っています"],
+    ["confirm", 5, "ステージング画面を確認中", "ブラウザで実画面を検証・スクリーンショット取得中"],
+  ];
+  let phase = 0;
+  const demoLaps = { intake: 1, implement: 2, review: 1 };
+  const track = document.getElementById("demo-track");
+  const nowRow = document.getElementById("demo-now");
+  const title = document.getElementById("demo-title");
+  const detail = document.getElementById("demo-detail");
+  buildTrack(track);
+
+  function applyPhase(animated) {
+    const [stepID, step, t, d] = phases[phase];
+    demoLaps[stepID] = (demoLaps[stepID] || 0) + (animated ? 1 : 0);
+    setTrack(track, step, demoLaps);
+    const lapNow = demoLaps[stepID] > 1 ? demoLaps[stepID] + " 巡目 — " : "";
+    if (!animated) { title.textContent = t; detail.textContent = d; return; }
+    nowRow.classList.add("swapping");
+    setTimeout(() => {
+      title.textContent = t; detail.textContent = lapNow ? lapNow.replace(" — ", "") + "・" + d : d;
+      nowRow.classList.remove("swapping");
+    }, 360);
+  }
+  applyPhase(false);
+
+  /* event log */
+  const log = document.getElementById("log");
+  const seed = [
+    ["15:41", "TKT-701", "レビュー 1 巡目で指摘 2 件 — 実装 2 巡目へ差し戻し"],
+    ["15:36", "TKT-698", "ステージング確認合格 — スクリーンショットをチケットに添付"],
+    ["15:24", "TKT-701", "実装 1 巡目が完了 — レビューへ"],
+    ["15:07", "TKT-703", "質問を投稿 — 依頼者の回答待ちに移行"],
+    ["14:58", "TKT-698", "ステージングへ反映中"],
+    ["14:41", "TKT-701", "受付完了 — 実装を開始"],
+    ["11:32", "TKT-694", "本番反映済み — 本番画面の確認まで合格"],
+  ];
+  function stampNow() {
+    const now = new Date();
+    return String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+  }
+  function addEvent(time, key, msg, fresh) {
+    const row = document.createElement("div");
+    row.className = "ev" + (fresh ? " enter fresh" : "");
+    row.innerHTML = '<time>' + time + '</time><div><div class="ekey">' + key + '</div><div class="emsg">' + msg + '</div></div>';
+    log.prepend(row);
+    if (fresh) {
+      requestAnimationFrame(() => requestAnimationFrame(() => row.classList.add("settling")));
+      setTimeout(() => row.classList.remove("fresh"), 2600);
+      setTimeout(() => row.classList.remove("enter", "settling"), 1500);
+    }
+  }
+  seed.reverse().forEach(([t, k, m]) => addEvent(t, k, m, false));
+
+  const demoEvents = [
+    ["TKT-701", "実装 2 巡目が完了 — レビュー 2 巡目へ"],
+    ["TKT-701", "レビュー全通過 — 納品して自動検査 (CI) へ"],
+    ["TKT-701", "検査全緑 — ステージングへ自動マージ"],
+    ["TKT-701", "デプロイ完了 — 実画面の自動確認を開始"],
+    ["TKT-701", "確認合格 — 実装フェーズへ戻る (デモのループ)"],
+  ];
+
+  /* ---- interactive: answer the question from the board ---- */
+  const qRow = document.getElementById("q-row");
+  const qBody = document.getElementById("q-body");
+  const qAnswer = document.getElementById("q-answer");
+  document.getElementById("q-send").addEventListener("click", () => {
+    const text = document.getElementById("q-input").value.trim() || "日本語のみでお願いします";
+    qRow.classList.add("sent");
+    qBody.innerHTML = "<b>✓ 回答を送信しました:</b> 「" + text.replace(/</g, "&lt;") + "」 — チケットにあなたのコメントとして投稿。LassDas が次の見回りで再開します";
+    qAnswer.style.display = "none";
+    addEvent(stampNow(), "TKT-703", "ボードから回答を受領 — チケットへ投稿し再開待ち", true);
+  });
+
+  /* ---- interactive: Go from the board (two-step arm to avoid misfire) */
+  const goBtn = document.getElementById("go-btn");
+  const holdBtn = document.getElementById("hold-btn");
+  let armed = false;
+  goBtn.addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      goBtn.classList.add("armed");
+      goBtn.textContent = "もう一度押して確定 — 本番に反映されます";
+      return;
+    }
+    goBtn.textContent = "✓ Go を送信しました";
+    goBtn.disabled = true;
+    holdBtn.style.visibility = "hidden";
+    addEvent(stampNow(), "TKT-698", "ボードから Go を受領 — チケットへ投稿・本番反映を開始", true);
+    const goTrack = document.querySelector("#go-card .track");
+    setTrack(goTrack, 6, { implement: 2, review: 2 });
+  });
+  holdBtn.addEventListener("click", () => {
+    armed = false;
+    goBtn.classList.remove("armed");
+    goBtn.textContent = "Go — 本番反映を承認";
+  });
+
+  /* clocks */
+  let seconds = 0, el1 = 18 * 60 + 24, el2 = 62 * 60 + 11, el3 = 224 * 60 + 50, ago = 2;
+  const fmt = s => {
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+  };
+  setInterval(() => {
+    seconds++; el1++; el2++; el3++; ago++;
+    document.getElementById("el1").textContent = fmt(el1);
+    document.getElementById("el2").textContent = fmt(el2);
+    document.getElementById("el3").textContent = fmt(el3);
+    const now = new Date();
+    document.getElementById("clock").textContent =
+      [now.getHours(), now.getMinutes(), now.getSeconds()].map(v => String(v).padStart(2, "0")).join(":");
+    if (ago > 9) ago = 1;
+    document.getElementById("ago").textContent = ago;
+    if (seconds % 7 === 0) {
+      const [key, msg] = demoEvents[phase % demoEvents.length];
+      addEvent(stampNow(), key, msg, true);
+      phase = (phase + 1) % phases.length;
+      applyPhase(true);
+      ago = 1;
+    }
+  }, 1000);
+</script>

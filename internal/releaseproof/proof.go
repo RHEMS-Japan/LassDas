@@ -227,8 +227,16 @@ func validateStagingInput(input StagingInputs) error {
 	); err != nil {
 		return errors.New("worker publish gate is invalid")
 	}
-	if input.Source.BaseSHA != input.Baseline.Integration.SHA {
-		return errors.New("source baseline binding is invalid")
+	// The source base may be older than the baseline: the publish gate
+	// re-validates on an advanced integration base (per-file blob checks)
+	// and publishes there. validatePublishedFeature pins the PUBLISHED base
+	// to the baseline; the source base stays recorded for audit only. The
+	// blob checks cover the touched files; UNTOUCHED files are covered by
+	// the deterministic re-validation on the advanced base, so an advanced
+	// proof must carry that run's checkout — recorded, not assumed.
+	if input.Source.BaseSHA != input.Baseline.Integration.SHA &&
+		input.Validation.CheckedOutSHA != input.Baseline.Integration.SHA {
+		return errors.New("advanced-base validation binding is invalid")
 	}
 	paths := candidatePaths(input.Candidate)
 	if !slices.Equal(paths, input.Request.TargetFiles) || !sourcePathsEqual(input.Source, paths) ||
@@ -251,7 +259,13 @@ func (proof StagingProof) validateStatic(consumer worker.ConsumerConfig) error {
 		!validProductPaths(proof.ProductPaths) {
 		return errors.New("staging proof identity is invalid")
 	}
-	if err := validateBaseline(proof.Baseline, consumer); err != nil || proof.SourceBaseSHA != proof.Baseline.Integration.SHA {
+	// SourceBaseSHA is the base the implementation READ; the baseline is the
+	// base the publication USED. They differ whenever the integration branch
+	// advanced mid-run and the publish gate re-validated on the new base
+	// (its per-file blob checks are what prove the source still applies), so
+	// equality must not be required here — validatePublishedFeature already
+	// pins the published base to this baseline exactly.
+	if err := validateBaseline(proof.Baseline, consumer); err != nil {
 		return errors.New("staging baseline is invalid")
 	}
 	if err := validatePublishedFeature(proof.PublishedFeature, proof); err != nil {
@@ -305,12 +319,16 @@ func validateTarget(request worker.TicketRequest, config worker.Config) error {
 }
 
 func validateBaseline(baseline githubapi.Baseline, consumer worker.ConsumerConfig) error {
+	// The integration branch legitimately runs ahead of the release branch:
+	// deliveries land on staging continuously and promote only on the
+	// requester's Go, which approves the WHOLE branch with the delta spelled
+	// out in the staging report. Requiring identical trees here encoded the
+	// old promote-every-delivery rhythm and would refuse every delivery
+	// made while anything is awaiting its Go.
 	if baseline.Integration.Branch != consumer.IntegrationBranch || baseline.Release.Branch != consumer.ReleaseBranch ||
 		!validObjectID(baseline.Integration.SHA) || !validObjectID(baseline.Integration.TreeSHA) ||
 		!validObjectID(baseline.Release.SHA) || !validObjectID(baseline.Release.TreeSHA) ||
-		!validObjectID(baseline.MergeBaseSHA) || !validObjectID(baseline.MergeBaseTreeSHA) ||
-		baseline.Integration.TreeSHA != baseline.Release.TreeSHA ||
-		baseline.MergeBaseTreeSHA != baseline.Integration.TreeSHA {
+		!validObjectID(baseline.MergeBaseSHA) || !validObjectID(baseline.MergeBaseTreeSHA) {
 		return errors.New("baseline is invalid")
 	}
 	return nil

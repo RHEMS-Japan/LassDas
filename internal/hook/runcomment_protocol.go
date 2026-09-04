@@ -14,6 +14,36 @@ type RunCommentKind string
 const (
 	RunCommentAck     RunCommentKind = "ack"
 	RunCommentReceipt RunCommentKind = "answer-receipt"
+	// RunCommentPlan is the implementation-plan notice posted after the
+	// readiness gate passes and before the first card dispatches: what the
+	// automation understood and how to stop it. A notice, not a gate.
+	RunCommentPlan RunCommentKind = "plan"
+	// RunCommentE2E is the debug role's post-merge staging observation:
+	// what the browser saw on the deployed staging page, sealed once per
+	// run after the human merge and the staging deployment.
+	RunCommentE2E RunCommentKind = "e2e"
+	// RunCommentStagingReport is the v2 delivery's staging summary: the
+	// sealed evidence plus the Go instructions (or the honest failure).
+	RunCommentStagingReport RunCommentKind = "stg-report"
+	// RunCommentReleaseReport is the v2 delivery's final production
+	// summary, posted once after the Go-driven promotion ends either way.
+	RunCommentReleaseReport RunCommentKind = "rel-report"
+	// RunCommentResolved acknowledges an operator's 「確認済み」 on a report
+	// that asked for attention: the automation's part of the delivery ends
+	// there, recorded once on the ticket.
+	RunCommentResolved RunCommentKind = "resolved"
+	// RunCommentBudgetHold says a delivery cannot start because a role's
+	// key is out of budget; it resumes by itself once the cap is raised.
+	RunCommentBudgetHold RunCommentKind = "budget-hold"
+	// RunCommentSessionHold says a delivery cannot start because the
+	// observation browser cannot sign in to a destination's staging; it
+	// resumes by itself once the session jar is renewed.
+	RunCommentSessionHold RunCommentKind = "session-hold"
+	// RunCommentStreakHold says intake is stopped because the same failure
+	// ended the last N deliveries; RunCommentStreakResolved acknowledges
+	// the operator's 「確認済み」 that lifts it.
+	RunCommentStreakHold     RunCommentKind = "streak-hold"
+	RunCommentStreakResolved RunCommentKind = "streak-resolved"
 )
 
 type RunCommentBeginRequest struct {

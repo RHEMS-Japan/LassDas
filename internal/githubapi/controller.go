@@ -595,7 +595,7 @@ func (c *Controller) verifyChangedPaths(ctx context.Context, baseSHA, headSHA st
 	for _, file := range response.Files {
 		// A candidate carries full file contents, so its commit can modify
 		// an existing file or add a new one — nothing else. "added" was
-		// missing here until the first live delivery to create
+		// missing here until the first live delivery that did: the first live delivery to create
 		// files (a SQL migration and three new modules) passed both reviews
 		// and the deterministic validation, then died at this line.
 		if file.Status != "modified" && file.Status != "added" {
@@ -715,7 +715,7 @@ func (c *Controller) CreateFeaturePullRequest(ctx context.Context, feature Publi
 	return pull, nil
 }
 
-func (c *Controller) CreatePromotionPullRequest(ctx context.Context, proof PromotionProof, spec PullRequestSpec) (PullRequest, error) {
+func (c *Controller) CreatePromotionPullRequest(ctx context.Context, proof PromotionProof, digestPolicy DigestCommitPolicy, spec PullRequestSpec) (PullRequest, error) {
 	if err := c.client.requireVerified(); err != nil {
 		return PullRequest{}, err
 	}
@@ -725,7 +725,7 @@ func (c *Controller) CreatePromotionPullRequest(ctx context.Context, proof Promo
 	if !strings.Contains(spec.Body, proof.AcceptanceEvidenceSHA256) {
 		return PullRequest{}, invariant("promotion_pr_missing_acceptance_evidence")
 	}
-	if err := c.verifyPromotionProof(ctx, proof); err != nil {
+	if err := c.verifyPromotionProof(ctx, proof, digestPolicy); err != nil {
 		return PullRequest{}, err
 	}
 	body := map[string]any{
@@ -775,8 +775,8 @@ func (c *Controller) reconcileCreatedPullRequest(ctx context.Context, mutationEr
 	return PullRequest{}, mutationErr
 }
 
-func (c *Controller) verifyPromotionProof(ctx context.Context, proof PromotionProof) error {
-	productPaths, promotionPaths, err := c.validatePromotionProof(proof)
+func (c *Controller) verifyPromotionProof(ctx context.Context, proof PromotionProof, policy DigestCommitPolicy) error {
+	productPaths, promotionPaths, err := c.validatePromotionProof(proof, policy)
 	if err != nil {
 		return err
 	}
@@ -801,12 +801,14 @@ func (c *Controller) verifyPromotionProof(ctx context.Context, proof PromotionPr
 	if err := c.verifyMergeResult(ctx, proof.Staging.Merge); err != nil {
 		return err
 	}
-	digestCommit, err := c.getGitCommit(ctx, proof.Staging.DigestCommitSHA)
-	if err != nil {
-		return err
-	}
-	if !slices.Equal(digestCommit.Parents, []string{proof.Staging.Merge.MergeSHA}) {
-		return invariant("promotion_graph_mismatch")
+	if policy.Required {
+		digestCommit, err := c.getGitCommit(ctx, proof.Staging.DigestCommitSHA)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(digestCommit.Parents, []string{proof.Staging.Merge.MergeSHA}) {
+			return invariant("promotion_graph_mismatch")
+		}
 	}
 	if err := c.verifyPathSet(ctx, proof.Baseline.Integration.SHA, proof.Baseline.Integration.TreeSHA, proof.Staging.Merge.MergeSHA, productPaths, proof.Baseline.Integration.SHA, proof.Baseline.Integration.TreeSHA); err != nil {
 		return invariant("promotion_product_diff_mismatch")
@@ -828,27 +830,50 @@ func (c *Controller) verifyPromotionProof(ctx context.Context, proof PromotionPr
 	return nil
 }
 
-func (c *Controller) validatePromotionProof(proof PromotionProof) ([]string, []string, error) {
+// validatePromotionProof checks the proof's shape against the consumer's
+// staging digest policy. Under a policy the integration branch sits on the
+// digest commit that follows the merge and the proof names the policy's
+// paths; without one the staging deploy pushes nothing back, so the branch
+// must sit on the merge itself and the proof must claim no digest commit.
+func (c *Controller) validatePromotionProof(proof PromotionProof, policy DigestCommitPolicy) ([]string, []string, error) {
 	if err := c.validateBaseline(proof.Baseline); err != nil {
+		return nil, nil, err
+	}
+	if err := validateDigestPolicy(policy); err != nil {
 		return nil, nil, err
 	}
 	staging := proof.Staging
 	if staging.Merge.BaseBranch != c.contract.IntegrationBranch || staging.Merge.BaseSHA != proof.Baseline.Integration.SHA ||
 		staging.Merge.HeadBranch == "" || staging.Merge.HeadBranch == c.contract.IntegrationBranch || staging.Merge.HeadBranch == c.contract.ReleaseBranch || staging.Merge.MergeSHA == "" || staging.BranchHeadSHA == "" ||
-		staging.DigestCommitSHA != staging.BranchHeadSHA || len(staging.WorkflowRuns) != 1 ||
-		!deploymentRunMatches(staging.WorkflowRuns[0], c.contract.StagingWorkflow, c.contract.IntegrationBranch, staging.Merge.MergeSHA) || len(staging.DigestPaths) == 0 ||
+		len(staging.WorkflowRuns) != 1 ||
+		!deploymentRunMatches(staging.WorkflowRuns[0], c.contract.StagingWorkflow, c.contract.IntegrationBranch, staging.Merge.MergeSHA) ||
 		len(proof.AcceptanceEvidenceSHA256) != 64 || !validObjectID(proof.AcceptanceEvidenceSHA256) {
+		return nil, nil, invariant("invalid_promotion_proof")
+	}
+	if policy.Required {
+		if staging.DigestCommitSHA != staging.BranchHeadSHA || staging.DigestCommitSHA == staging.Merge.MergeSHA || len(staging.DigestPaths) == 0 {
+			return nil, nil, invariant("invalid_promotion_proof")
+		}
+	} else if staging.DigestCommitSHA != "" || staging.BranchHeadSHA != staging.Merge.MergeSHA || len(staging.DigestPaths) != 0 {
 		return nil, nil, invariant("invalid_promotion_proof")
 	}
 	productPaths, err := normalizeExactPaths(proof.ProductPaths)
 	if err != nil || len(productPaths) == 0 {
 		return nil, nil, invariant("invalid_promotion_product_paths")
 	}
-	digestPaths, err := normalizeExactPaths(staging.DigestPaths)
-	if err != nil {
-		return nil, nil, invariant("invalid_promotion_digest_paths")
+	promotionPaths := slices.Clone(productPaths)
+	if policy.Required {
+		digestPaths, err := normalizeExactPaths(staging.DigestPaths)
+		if err != nil {
+			return nil, nil, invariant("invalid_promotion_digest_paths")
+		}
+		expectedPaths := slices.Clone(policy.ExactPaths)
+		sort.Strings(expectedPaths)
+		if !slices.Equal(digestPaths, expectedPaths) {
+			return nil, nil, invariant("invalid_promotion_digest_paths")
+		}
+		promotionPaths = append(promotionPaths, digestPaths...)
 	}
-	promotionPaths := append(slices.Clone(productPaths), digestPaths...)
 	sort.Strings(promotionPaths)
 	for index := 1; index < len(promotionPaths); index++ {
 		if promotionPaths[index] == promotionPaths[index-1] {
@@ -890,7 +915,11 @@ func (c *Controller) verifyPathSet(ctx context.Context, baseSHA, baseTreeSHA, he
 	}
 	actual := make([]string, 0, len(comparison.Files))
 	for _, file := range comparison.Files {
-		if file.Status != "modified" {
+		// Same statuses the candidate gate accepts (verifyChangedPaths): a
+		// delivery can modify or add files, never delete. The promotion gate
+		// kept rejecting "added" after a live ticket fixed the candidate gate,
+		// which stranded every file-creating delivery at promotion time.
+		if file.Status != "modified" && file.Status != "added" {
 			return invariant("comparison_path_mismatch")
 		}
 		actual = append(actual, file.Filename)

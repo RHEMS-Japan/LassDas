@@ -189,10 +189,17 @@ func TestCheckReadinessBindsAssessment(t *testing.T) {
 	if api.request.ResponseFormat == nil || api.request.ResponseFormat.Type != "json_schema" {
 		t.Fatal("structured checker did not receive a JSON schema")
 	}
+	// A tampered assessment is refused before any model call — not asked
+	// about three times inside the retry loop.
+	counting := &sequenceChatAPI{outputs: []*ChatResponse{chatOutput(`{"verdict":"pass","reasons":[]}`)}}
+	invoker, _ = NewModelInvoker(counting)
 	tampered := assessment
 	tampered.Decision = ReadinessOutcomeClarification
 	if _, _, err := invoker.CheckReadiness(context.Background(), tampered, nil, nil, source, request, config); err == nil {
 		t.Fatal("CheckReadiness() accepted a tampered assessment")
+	}
+	if len(counting.requests) != 0 {
+		t.Fatalf("a tampered assessment reached the model %d times", len(counting.requests))
 	}
 }
 

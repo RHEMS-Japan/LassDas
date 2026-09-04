@@ -1,10 +1,20 @@
 #!/bin/bash
 # The pod's residents (docs/RUNTIME_POD.md): the attendant, the kanban
 # dispatch loop, the serve backend the Hermes One desktop app connects to,
-# and — per card — the runner the dispatcher spawns. The chat-platform
-# gateway daemon is deliberately not used: it brings an inbound surface
-# this constitution does not want. The serve backend binds loopback only,
-# so the sole way in is kubectl port-forward.
+# the requester status board (statusboard_loop, opt-in by secret), and —
+# per card — the runner the dispatcher spawns. The chat-platform gateway
+# daemon is deliberately not used: it brings an inbound surface this
+# constitution does not want. Inbound surfaces, exhaustively: kubectl
+# port-forward to the loopback serve backend; the authenticated board UI
+# when the operator opts in with LASSDAS_DASHBOARD=1 (see serve_loop);
+# the status board on :9200 when its credentials secret is mounted —
+# basic-auth-guarded in-process and CIDR/TLS-guarded at its ingress
+# (deploy/pod/statusboard.yaml); and the tracker's bell — POST
+# /webhook/<token>, existing only when LASSDAS_BOARD_BELL_TOKEN is set,
+# public by design but token-gated in the path (constant-time check,
+# wrong token = 404): its body is discarded unread, so even a valid ring
+# can only trigger one rate-limited extra look at the tracker, never
+# inject data (deploy/pod/statusboard-hook.yaml).
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"
@@ -12,8 +22,28 @@ export LASSDAS_RUNTIME_CONFIG="${LASSDAS_RUNTIME_CONFIG:-/etc/lassdas/runtime.js
 export HERMES_KANBAN_BOARD="${HERMES_KANBAN_BOARD:-lassdas}"
 export HERMES_KANBAN_DB="${HERMES_KANBAN_DB:-$STATE/kanban.db}"
 export HERMES_TUI=
+# Hermes masks what looks like a credential in the text it sends to the
+# model, and treats source code the same way: an Authorization header's
+# literal `Bearer ${token}` reached the implementer as `*** ${token}`, which
+# it faithfully wrote back into the file (measured in the model gateway's
+# request archive, 2026-09-02). Secret inspection is the gateway's job here;
+# the agent must see the repository as it is.
+export HERMES_REDACT_SECRETS="${HERMES_REDACT_SECRETS:-false}"
 
 mkdir -p "$STATE/workspaces"
+
+# The observation browser's session jar: the operator's seed is a secret
+# mount (LASSDAS_E2E_SESSION_FILE); the engine's renewed copy — rewritten
+# by every login that lands — lives in the state volume, owner-only. The
+# copy remembers the seed it grew from and is the jar in use for as long
+# as that seed is the one mounted; a replaced seed wins over the copy.
+export LASSDAS_E2E_SESSION_STATE_FILE="${LASSDAS_E2E_SESSION_STATE_FILE:-$STATE/e2e-session/session.json}"
+# Owner-only when this process owns it; a directory somebody else made (a
+# read-only mount, a root-created volume) is left as it is rather than
+# failing the pod — the writer reports a jar it cannot keep at the time.
+E2E_SESSION_DIR="$(dirname "$LASSDAS_E2E_SESSION_STATE_FILE")"
+mkdir -p "$E2E_SESSION_DIR" 2>/dev/null || echo "note: $E2E_SESSION_DIR could not be created; the renewed jar will not be kept" >&2
+chmod 700 "$E2E_SESSION_DIR" 2>/dev/null || true
 
 # Profile with the direct-command worker (idempotent write; host-side
 # configuration is the only thing that decides what executes).
@@ -45,6 +75,42 @@ worker:
 YAML
 done
 
+# The debug role's card: waits for the human merge and the staging deploy,
+# then observes the deployed page. Idempotent like every profile above.
+E2E_HOME="$HOME/.hermes/profiles/lassdas-e2e"
+mkdir -p "$E2E_HOME"
+cat > "$E2E_HOME/config.yaml" <<'YAML'
+worker:
+  command:
+    - /usr/local/bin/runner
+    - e2e-check
+YAML
+
+# The v2 delivery cards: CI wait, staging merge + sealed observation, and
+# the Go-driven promotion. One state-driven verb, three milestones.
+for DELIVER_STAGE in checks:checks integrate:staging-observed promote:production-observed; do
+  DELIVER_NAME="lassdas-${DELIVER_STAGE%%:*}"
+  DELIVER_UNTIL="${DELIVER_STAGE#*:}"
+  DELIVER_HOME="$HOME/.hermes/profiles/$DELIVER_NAME"
+  mkdir -p "$DELIVER_HOME"
+  cat > "$DELIVER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - deliver
+    - --until
+    - $DELIVER_UNTIL
+YAML
+done
+
+# The role models are read in two places — the profiles below and the
+# attendant's budget check before every reception — so their defaults are
+# resolved once, here, and exported. A role the attendant cannot see is a
+# role it cannot probe.
+export LASSDAS_IMPLEMENTER_MODEL="${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}"
+export LASSDAS_REVIEW_A_MODEL="${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}"
+export LASSDAS_REVIEW_B_MODEL="${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}"
+
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
 cat > "$REVIEW_A_HOME/config.yaml" <<YAML
@@ -59,7 +125,7 @@ model:
   name: ${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:?LASSDAS_GATEWAY_BASE_URL is required}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_REVIEW_A_KEY
 agent:
   max_turns: 40
@@ -79,7 +145,7 @@ model:
   name: ${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:?LASSDAS_GATEWAY_BASE_URL is required}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_REVIEW_B_KEY
 agent:
   max_turns: 40
@@ -91,6 +157,12 @@ YAML
 # one measured working on the pod (2026-08-24: OK-implementer /
 # OK-review-a / OK-review-b probes through all three identities); written
 # every boot like the other profiles, so a restart heals drift.
+#
+# agent.max_turns is Hermes' cap on tool-calling iterations (its default is
+# 500). An implementer that stops making progress burns the whole budget:
+# measured live 2026-09-02, one run spent 458 iterations — 425 of them the
+# same file search — without changing a file. The cap is an operator
+# setting so the money a run can waste is bounded per deployment.
 IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
 mkdir -p "$IMPLEMENTER_HOME"
 cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
@@ -99,8 +171,10 @@ model:
   name: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
 providers:
   lassdas-gateway:
-    base_url: ${LASSDAS_GATEWAY_BASE_URL:?LASSDAS_GATEWAY_BASE_URL is required}
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
     api_key_env: LASSDAS_IMPLEMENTER_KEY
+agent:
+  max_turns: ${LASSDAS_IMPLEMENTER_MAX_TURNS:-200}
 YAML
 
 # Cards orchestration: the destination credential moves from the process
@@ -114,6 +188,41 @@ if grep -q '"orchestration"[[:space:]]*:[[:space:]]*"cards"' "$LASSDAS_RUNTIME_C
     printf '%s' "$TARGET_GITHUB_TOKEN" > "$STATE/secrets/target-token"
     umask 022
     unset TARGET_GITHUB_TOKEN
+  fi
+fi
+
+# The board's credentials leave the process environment for the same
+# reason as TARGET_GITHUB_TOKEN above: every card stage — the untrusted
+# implementer included — spawns from this environment, and the requester's
+# tracker key carries the requester's full authority.
+mkdir -p "$STATE/secrets"
+if [ -n "${LASSDAS_BOARD_TRACKER_KEY:-}" ]; then
+  umask 077
+  printf '%s' "$LASSDAS_BOARD_TRACKER_KEY" > "$STATE/secrets/board-tracker-key"
+  umask 022
+  unset LASSDAS_BOARD_TRACKER_KEY
+  export LASSDAS_BOARD_TRACKER_KEY_FILE="$STATE/secrets/board-tracker-key"
+fi
+if [ -n "${LASSDAS_BOARD_PASS:-}" ]; then
+  if [ "${#LASSDAS_BOARD_PASS}" -ge 16 ]; then
+    umask 077
+    printf '%s' "$LASSDAS_BOARD_PASS" > "$STATE/secrets/board-pass"
+    umask 022
+    export LASSDAS_BOARD_PASS_FILE="$STATE/secrets/board-pass"
+  else
+    # The binary would refuse it anyway; skipping the file keeps the
+    # start guard honest instead of spawning a permanent crash loop.
+    echo "statusboard: LASSDAS_BOARD_PASS is shorter than 16 chars; board disabled (fail-closed)" >&2
+  fi
+  unset LASSDAS_BOARD_PASS
+fi
+# The tracker trio configures the board's answer/Go/stop actions; a
+# partial set would make the binary refuse to start (fail-closed) and the
+# loop retry forever, so degrade to the watch-only board loudly instead.
+if [ -n "${LASSDAS_BOARD_TRACKER_KEY_FILE:-}" ] || [ -n "${LASSDAS_BOARD_TRACKER_ORIGIN:-}" ] || [ -n "${LASSDAS_BOARD_TRACKER_SPACE:-}" ]; then
+  if [ -z "${LASSDAS_BOARD_TRACKER_KEY_FILE:-}" ] || [ -z "${LASSDAS_BOARD_TRACKER_ORIGIN:-}" ] || [ -z "${LASSDAS_BOARD_TRACKER_SPACE:-}" ]; then
+    echo "statusboard: tracker settings are partial; board actions disabled (watch-only)" >&2
+    unset LASSDAS_BOARD_TRACKER_KEY_FILE LASSDAS_BOARD_TRACKER_ORIGIN LASSDAS_BOARD_TRACKER_SPACE
   fi
 fi
 
@@ -137,17 +246,50 @@ DISPATCHER=$!
 # Board UI backend (Hermes One connects through kubectl port-forward). A UI
 # crash must not take down a card mid-run, so it restarts in place instead
 # of joining the fatal wait below.
+#
+# LASSDAS_DASHBOARD=1 swaps the loopback-only backend for `hermes dashboard`
+# on an outward bind: the same server plus the browser UI. Hermes refuses a
+# non-loopback bind without an auth provider (basic-auth env or OIDC), so an
+# unauthenticated exposure cannot be misconfigured into existence; the image
+# ships the pre-built SPA, hence --skip-build.
 serve_loop() {
   while true; do
-    hermes serve --host 127.0.0.1 --port "${HERMES_SERVE_PORT:-9119}" \
-      || echo "serve exited rc=$?" >&2
+    if [ "${LASSDAS_DASHBOARD:-}" = "1" ]; then
+      hermes dashboard --skip-build --no-open \
+        --host "${HERMES_SERVE_HOST:-0.0.0.0}" --port "${HERMES_SERVE_PORT:-9119}" \
+        || echo "serve exited rc=$?" >&2
+    else
+      hermes serve --host 127.0.0.1 --port "${HERMES_SERVE_PORT:-9119}" \
+        || echo "serve exited rc=$?" >&2
+    fi
     sleep 5
   done
 }
 serve_loop &
 SERVE=$!
 
-term() { kill "$ATTENDANT" "$DISPATCHER" "$SERVE" 2>/dev/null || true; }
+# The status board: the requester-facing live view (and, when the
+# requester credential is mounted, the answer/Go/stop actions). Restarts
+# in place like the board UI backend — losing the viewer must never take
+# down a card mid-run. It refuses to start without adequate basic-auth
+# credentials (fail-closed), so the loop logs and retries rather than
+# exposing anything.
+statusboard_loop() {
+  while true; do
+    statusboard || echo "statusboard exited rc=$?" >&2
+    sleep 5
+  done
+}
+# Same gate the binary enforces (user + a password source): a partial
+# secret must not become a permanent 5-second crash loop.
+if [ -n "${LASSDAS_BOARD_USER:-}" ] && [ -n "${LASSDAS_BOARD_PASS_FILE:-}" ]; then
+  statusboard_loop &
+  STATUSBOARD=$!
+elif [ -n "${LASSDAS_BOARD_USER:-}" ]; then
+  echo "statusboard NOT started: LASSDAS_BOARD_PASS is missing (fail-closed)" >&2
+fi
+
+term() { kill "$ATTENDANT" "$DISPATCHER" "$SERVE" ${STATUSBOARD:-} 2>/dev/null || true; }
 trap term TERM INT
 
 # Either resident dying takes the pod down (restart = clean recovery: the

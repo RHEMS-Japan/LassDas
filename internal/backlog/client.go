@@ -1,10 +1,12 @@
 package backlog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -301,11 +303,64 @@ func (c *Client) AddComment(ctx context.Context, issueID int64, content string) 
 	return c.AddCommentNotifying(ctx, issueID, content, nil)
 }
 
+// maxAttachmentBytes bounds one uploaded file. Screenshots are the only
+// caller today and a full-page PNG stays well under this.
+const maxAttachmentBytes = 8 << 20
+
+var attachmentFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// UploadAttachment stages one file on the space (POST /api/v2/space/attachment)
+// and returns the attachment id a subsequent comment can bind.
+func (c *Client) UploadAttachment(ctx context.Context, filename string, content []byte) (int64, error) {
+	if !attachmentFilenamePattern.MatchString(filename) || len(content) == 0 || len(content) > maxAttachmentBytes {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_attachment")
+	}
+	endpoint := *c.origin
+	endpoint.Path = "/api/v2/space/attachment"
+	query := endpoint.Query()
+	query.Set("apiKey", c.apiKey)
+	endpoint.RawQuery = query.Encode()
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", filename)
+	if err != nil {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
+	}
+	if _, err := part.Write(content); err != nil {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
+	}
+	if err := form.Close(); err != nil {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), &body)
+	if err != nil {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	var uploaded struct {
+		ID int64 `json:"id"`
+	}
+	if err := c.doJSON(request, http.StatusOK, &uploaded); err != nil {
+		return 0, err
+	}
+	if uploaded.ID <= 0 {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
+	}
+	return uploaded.ID, nil
+}
+
 // AddCommentNotifying posts a comment and sends a Backlog notification to the
 // listed users, which is how the question and its reminders actually reach
 // the requester instead of sitting unread on the issue.
 func (c *Client) AddCommentNotifying(ctx context.Context, issueID int64, content string, notifiedUserIDs []int64) (int64, error) {
-	if issueID <= 0 || !validCommentContent(content) {
+	return c.AddCommentNotifyingWithAttachments(ctx, issueID, content, notifiedUserIDs, nil)
+}
+
+// AddCommentNotifyingWithAttachments additionally binds previously uploaded
+// attachments (UploadAttachment) to the comment.
+func (c *Client) AddCommentNotifyingWithAttachments(ctx context.Context, issueID int64, content string, notifiedUserIDs, attachmentIDs []int64) (int64, error) {
+	if issueID <= 0 || !validCommentContent(content) || len(attachmentIDs) > 10 {
 		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment")
 	}
 	endpoint := *c.origin
@@ -319,6 +374,12 @@ func (c *Client) AddCommentNotifying(ctx context.Context, issueID int64, content
 			return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment")
 		}
 		form.Add("notifiedUserId[]", strconv.FormatInt(userID, 10))
+	}
+	for _, attachmentID := range attachmentIDs {
+		if attachmentID <= 0 {
+			return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment")
+		}
+		form.Add("attachmentId[]", strconv.FormatInt(attachmentID, 10))
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(form.Encode()))
 	if err != nil {

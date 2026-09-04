@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LassDas 状態ボード</title>
+<style>
+  /* Committed single-theme cyber-HUD. Layout principle: nothing moves or
+     resizes on a state change — transitions are color/glow/fill only.
+     All dynamic text is rendered via textContent (never innerHTML). */
+  :root {
+    --ground: #020A09;
+    --panel: rgba(10, 26, 24, 0.72);
+    --panel-edge: #16403B;
+    --ink: #C9E9E3;
+    --muted: #567D77;
+    --faint: #123230;
+    --cyan: #41E8D2;
+    --cyan-dim: rgba(65, 232, 210, 0.10);
+    --lime: #9BE87A;
+    --lime-dim: rgba(155, 232, 122, 0.10);
+    --amber: #FFC24B;
+    --amber-dim: rgba(255, 194, 75, 0.12);
+    --red: #FF5E4D;
+    --red-dim: rgba(255, 94, 77, 0.12);
+    --white: #EAF7F4;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Hiragino Sans", "Noto Sans JP", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13.5px;
+    line-height: 1.65;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(1100px 600px at 80% -10%, rgba(65,232,210,0.05), transparent 60%),
+      repeating-linear-gradient(0deg, transparent 0 88px, rgba(65,232,210,0.025) 88px 89px),
+      repeating-linear-gradient(90deg, transparent 0 88px, rgba(65,232,210,0.025) 88px 89px);
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 24px 48px; }
+  a { color: inherit; }
+
+  /* ---- connection banner (hidden by default) ---- */
+  #conn-banner {
+    display: none; position: sticky; top: 0; z-index: 50;
+    background: var(--red-dim); border: 1px solid var(--red); color: var(--red);
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em;
+    padding: 8px 14px; margin-bottom: 14px;
+  }
+  #conn-banner.on { display: block; }
+
+  /* ---- HUD header ---- */
+  header {
+    display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap;
+    padding: 8px 2px 12px;
+    border-bottom: 1px solid var(--panel-edge);
+    position: relative;
+  }
+  header::before, header::after {
+    content: ""; position: absolute; width: 14px; height: 14px; bottom: -1px;
+    border-bottom: 1px solid var(--cyan);
+  }
+  header::before { left: 0; border-left: 1px solid var(--cyan); }
+  header::after { right: 0; border-right: 1px solid var(--cyan); }
+  .brand { font-family: var(--mono); font-size: 15px; letter-spacing: 0.46em; font-weight: 400; color: var(--white); }
+  .brand small { color: var(--cyan); letter-spacing: 0.34em; font-weight: 400; font-size: 9.5px; display: block; margin-top: 3px; }
+  .live { display: inline-flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 11.5px; color: var(--cyan); letter-spacing: 0.2em; }
+  .live.dead { color: var(--red); }
+  .live-dot { width: 9px; height: 9px; border-radius: 50%; border: 1px solid currentColor; position: relative; }
+  .live-dot::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: currentColor; animation: breathe 3s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .clock { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: 0.12em; }
+  .counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); letter-spacing: 0.1em; }
+  .counts b { color: var(--cyan); font-weight: 400; }
+  .counts b.warn { color: var(--red); }
+  /* Intake held: the attendant's one-line reason, in the requester's words. */
+  .notice { margin: 12px 0 0; padding: 9px 14px; border: 1px solid var(--amber); background: var(--amber-dim); color: var(--amber); font-family: var(--mono); font-size: 12px; letter-spacing: 0.05em; line-height: 1.6; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 22px; margin-top: 24px; }
+  @media (max-width: 960px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+
+  .lane-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.4em;
+    color: var(--muted); text-transform: uppercase; margin: 22px 0 12px 2px;
+  }
+  .lane-label:first-child { margin-top: 0; }
+  .lane-label::before { content: "// "; color: var(--cyan); }
+
+  /* ---- run cards ---- */
+  .runs { display: flex; flex-direction: column; gap: 18px; }
+  .empty-state {
+    border: 1px dashed var(--faint); color: var(--muted);
+    padding: 26px 20px; text-align: center; font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    padding: 15px 18px 17px;
+    position: relative;
+  }
+  .card::before, .card::after { content: ""; position: absolute; width: 16px; height: 16px; pointer-events: none; }
+  .card::before { top: -1px; left: -1px; border-top: 1px solid var(--edge, var(--cyan)); border-left: 1px solid var(--edge, var(--cyan)); }
+  .card::after { bottom: -1px; right: -1px; border-bottom: 1px solid var(--edge, var(--cyan)); border-right: 1px solid var(--edge, var(--cyan)); }
+  .card.tone-act { --edge: var(--lime); }
+  .card.tone-warn { --edge: var(--amber); }
+  .card.tone-bad { --edge: var(--red); }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tkey { font-family: var(--mono); font-size: 12.5px; color: var(--cyan); letter-spacing: 0.14em; text-decoration: none; }
+  a.tkey:hover { text-decoration: underline; }
+  .tone-act .tkey { color: var(--lime); }
+  .tone-warn .tkey { color: var(--amber); }
+  .tone-bad .tkey { color: var(--red); }
+  .tsum { font-size: 13.5px; font-weight: 600; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46em; }
+  .elapsed { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0.1em; }
+
+  .nowline { display: flex; align-items: baseline; gap: 12px; margin: 9px 0 4px; height: 24px; overflow: hidden; }
+  .now-title { font-size: 14.5px; font-weight: 600; color: var(--cyan); letter-spacing: 0.24em; white-space: nowrap; }
+  .tone-act .now-title { color: var(--lime); }
+  .tone-warn .now-title { color: var(--amber); }
+  .tone-bad .now-title { color: var(--red); }
+  .now-detail { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); min-width: 0; }
+
+  /* ---- pipeline ---- */
+  .track { display: flex; align-items: flex-start; margin-top: 16px; }
+  .track.idle { opacity: 0.45; }
+  .node { flex: 1; min-width: 0; position: relative; text-align: center; }
+  .node .rail { position: absolute; top: 6px; left: -50%; width: 100%; height: 1px; background: var(--faint); z-index: 1; }
+  .node:first-child .rail { display: none; }
+  .node .rail .fill { position: absolute; inset: 0; width: 0%; background: var(--cyan); transition: width 1.1s cubic-bezier(0.4,0,0.2,1); box-shadow: 0 0 8px rgba(65,232,210,0.5); }
+  .node.done .rail .fill { width: 100%; }
+  /* The running light lives INSIDE the fill (a moving gradient) — a
+     separate sweeping element kept overshooting the rail's ends. */
+  .node.now .rail .fill {
+    width: 100%;
+    background: linear-gradient(90deg, var(--cyan) 40%, var(--white));
+    background-size: 200% 100%;
+    animation: flow 1.8s linear infinite;
+  }
+  @keyframes flow { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+  .node .tick {
+    width: 13px; height: 13px; border-radius: 50%; margin: 0 auto;
+    background: var(--ground); border: 1px solid var(--faint);
+    position: relative; z-index: 2;
+    transition: border-color 0.5s ease, box-shadow 0.5s ease;
+  }
+  .node .tick::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: transparent; transition: background-color 0.5s ease; }
+  .node.done .tick { border-color: var(--cyan); }
+  .node.done .tick::after { background: var(--cyan); }
+  .node.now .tick { border-color: var(--white); box-shadow: 0 0 14px rgba(234,247,244,0.5); }
+  .node.now .tick::after { background: var(--white); }
+  .node .nname {
+    font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 9px;
+    letter-spacing: 0.3em; white-space: nowrap; transition: color 0.5s ease;
+  }
+  .node.done .nname { color: var(--cyan); }
+  .node.now .nname { color: var(--white); }
+  /* Held: the run reached this step and stopped for a person. */
+  .node.hold .rail .fill { width: 100%; background: var(--amber); box-shadow: 0 0 8px var(--amber-dim); }
+  .node.hold .tick { border-color: var(--amber); box-shadow: 0 0 14px var(--amber-dim); }
+  .node.hold .tick::after { background: var(--amber); }
+  .node.hold .nname { color: var(--amber); }
+  .node .laps {
+    height: 14px; margin-top: 2px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--muted); letter-spacing: 0.2em;
+    opacity: 0; transition: opacity 0.5s ease;
+  }
+  .node .laps.on { opacity: 1; }
+  .node.now .laps.on { color: var(--white); }
+
+  /* ---- decision rows ---- */
+  .qrow {
+    margin-top: 14px; padding: 11px 13px;
+    background: var(--lime-dim); border: 1px solid rgba(155,232,122,0.3);
+    font-size: 12.5px;
+  }
+  .qrow.state-sent { background: var(--cyan-dim); border-color: rgba(65,232,210,0.3); }
+  .qrow.state-error { background: var(--red-dim); border-color: rgba(255,94,77,0.4); }
+  .qrow .qtitle { color: var(--lime); letter-spacing: 0.06em; font-weight: 600; }
+  .qrow.state-sent .qtitle { color: var(--cyan); }
+  .qrow.state-error .qtitle { color: var(--red); }
+  .answer { display: flex; gap: 8px; margin-top: 10px; align-items: flex-start; }
+  .answer textarea {
+    flex: 1; min-width: 0; min-height: 38px; max-height: 160px; resize: vertical;
+    background: rgba(2,10,9,0.8); border: 1px solid var(--faint);
+    color: var(--ink); font-family: var(--mono); font-size: 12.5px; padding: 8px 11px;
+    letter-spacing: 0.04em; line-height: 1.5;
+  }
+  .answer textarea:focus { outline: none; border-color: var(--lime); box-shadow: 0 0 0 1px rgba(155,232,122,0.3); }
+  .btn {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.26em;
+    padding: 9px 17px; cursor: pointer;
+    border: 1px solid var(--lime); background: transparent; color: var(--lime);
+    transition: background-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { background: var(--lime-dim); box-shadow: 0 0 12px rgba(155,232,122,0.25); }
+  .btn:focus-visible { outline: 1px solid var(--lime); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+  .btn.go { border-color: var(--cyan); color: var(--cyan); }
+  .btn.go:hover:not(:disabled) { background: var(--cyan-dim); box-shadow: 0 0 12px rgba(65,232,210,0.3); }
+  .btn.armed { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 0 16px rgba(255,94,77,0.5); }
+  .btn.ghost { border-color: var(--faint); color: var(--muted); letter-spacing: 0.1em; }
+  .btn.ghost:hover:not(:disabled) { color: var(--ink); background: transparent; box-shadow: none; }
+  .via { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em; }
+  .approve-row { display: flex; align-items: center; gap: 10px; margin-top: 13px; flex-wrap: wrap; }
+
+  /* ---- event log ---- */
+  .log { background: rgba(2,10,9,0.85); border: 1px solid var(--panel-edge); padding: 13px 0; max-height: 620px; overflow-y: auto; }
+  .ev {
+    display: grid; grid-template-columns: 50px 1fr; gap: 10px; padding: 6px 15px;
+    border-left: 1px solid transparent;
+    transition: background-color 1.4s ease, border-color 1.4s ease;
+  }
+  .ev.enter { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; overflow: hidden; }
+  .ev.settling {
+    max-height: 90px; padding-top: 6px; padding-bottom: 6px; opacity: 1;
+    transition: max-height 0.5s ease, padding 0.5s ease, opacity 0.7s ease 0.15s,
+      background-color 1.4s ease, border-color 1.4s ease;
+  }
+  .ev.fresh { border-left-color: var(--cyan); background: var(--cyan-dim); }
+  .ev time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; letter-spacing: 0.08em; }
+  .ev .ekey { font-family: var(--mono); font-size: 10.5px; color: var(--cyan); letter-spacing: 0.12em; }
+  .ev .emsg { font-size: 12px; }
+  .ev-day {
+    padding: 6px 15px; color: var(--faint); font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; text-align: center;
+  }
+
+  /* ---- finished lane ---- */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11.5px; padding: 6px 12px;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em;
+    text-decoration: none;
+  }
+  .chip:hover { border-color: var(--muted); }
+  .chip .ckey { color: var(--ink); }
+  .chip .mark { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .chip.ok .mark { background: var(--cyan); }
+  .chip.stop .mark { background: var(--muted); }
+  .chip.bad .mark { background: var(--red); }
+
+  footer { margin-top: 34px; color: var(--faint); font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot::after, .node.now .rail .fill { animation: none !important; }
+    .ev.enter, .ev.settling { transition: none !important; max-height: none; opacity: 1; padding: 6px 15px; }
+    .node .rail .fill, .node .tick, .node .tick::after, .node .nname, .node .laps { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="conn-banner" role="alert">接続が切れています — 再接続を試みています。表示は最後に受信した状態のままです</div>
+
+  <header>
+    <div class="brand">LASSDAS<small>TACTICAL OVERWATCH</small></div>
+    <span class="live" id="live"><span class="live-dot"></span><span id="live-text">接続中…</span></span>
+    <span class="counts" id="counts"></span>
+    <span class="clock"><span id="ago">—</span></span>
+  </header>
+  <div id="notice-banner" class="notice" role="status" hidden></div>
+
+  <div class="cols">
+    <div>
+      <p class="lane-label">進行中の依頼</p>
+      <div class="runs" id="runs"></div>
+      <p class="lane-label">完了・終了</p>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div>
+      <p class="lane-label">運行ログ</p>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <footer id="footer">LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。新しい依頼の受付と Go の検知は毎分の見回りです。</footer>
+</div>
+
+<script>
+"use strict";
+/* All dynamic content is DOM-built with textContent — tracker-controlled
+   strings (titles, details) must never reach innerHTML. */
+
+const STEPS = [
+  ["intake", "受付"], ["implement", "実装"], ["review", "審査"], ["checks", "検査"],
+  ["staging", "STG"], ["confirm", "確認"], ["production", "本番"],
+];
+const STEP_INDEX = Object.fromEntries(STEPS.map(([id], i) => [id, i]));
+const RESTING = new Set(["done", "stopped", "failed"]);
+const ACTIONABLE = new Set(["confirm", "question"]);
+const TONE = { confirm: "tone-act", question: "tone-act", attention: "tone-warn", failed: "tone-bad", stopped: "", done: "" };
+
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+/* ---- state ---- */
+let lastPayloadAt = 0;       // ms, local receive time
+let lastServerSentAt = null; // ISO from server
+let trackerBase = "";
+let actionsEnabled = false;
+let sentActions = new Map(); // "action:issue" -> at
+const localPending = new Map(); // same key -> "sending" | "error:<msg>"
+const knownEvents = new Set();
+const cardStates = new Map(); // delivery_id -> {armed, armTimer, countdown}
+// Reserved for the answer phase (issue #14): drafts and the caret
+// restoration below are dormant until the board grows an answer box
+// again — nothing writes them today.
+const drafts = new Map(); // issue_id -> text
+
+/* ---- rendering ---- */
+function trackerURL(issueKey) {
+  if (!trackerBase || !issueKey) return null;
+  return trackerBase.replace(/\/$/, "") + "/view/" + encodeURIComponent(issueKey);
+}
+
+function buildTrack(container) {
+  for (const [id, name] of STEPS) {
+    const node = el("div", "node");
+    node.dataset.step = id;
+    const rail = el("div", "rail");
+    rail.appendChild(el("div", "fill"));
+    node.appendChild(rail);
+    node.appendChild(el("div", "tick"));
+    node.appendChild(el("div", "nname", name));
+    node.appendChild(el("div", "laps", "×1"));
+    container.appendChild(node);
+  }
+}
+
+function setTrack(container, stepID, round, stage) {
+  // An out-of-line state (attention) names the step it stopped at via
+  // `stage`; that node is held (amber), not running (white). Without the
+  // hint the whole rail went dark for a run that had reached staging.
+  let current = STEP_INDEX[stepID];
+  let held = false;
+  if (current === undefined && stage !== undefined && STEP_INDEX[stage] !== undefined) {
+    current = STEP_INDEX[stage];
+    held = true;
+  }
+  container.classList.toggle("idle", current === undefined);
+  container.querySelectorAll(".node").forEach((node, index) => {
+    node.classList.toggle("done", current !== undefined && index < current);
+    node.classList.toggle("now", current !== undefined && index === current && !held);
+    node.classList.toggle("hold", current !== undefined && index === current && held);
+    const laps = node.querySelector(".laps");
+    const showLaps = round > 1 && (node.dataset.step === "implement" || node.dataset.step === "review");
+    laps.textContent = "×" + (showLaps ? round : 1);
+    laps.classList.toggle("on", showLaps);
+  });
+}
+
+function fmtElapsed(claimedAtMs) {
+  if (!claimedAtMs) return "";
+  const total = Math.max(0, Math.floor((Date.now() - claimedAtMs) / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return "経過 " + (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+}
+
+function actKey(action, issueID) { return action + ":" + issueID; }
+
+async function postAction(action, issueID, text, onDone) {
+  const key = actKey(action, issueID);
+  localPending.set(key, "sending");
+  renderBoard();
+  try {
+    const response = await fetch("/api/act", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, issue_id: issueID, text: text || "" }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      localPending.set(key, "error:" + (body || response.status).toString().slice(0, 120));
+    } else {
+      localPending.delete(key);
+      sentActions.set(key, new Date().toISOString());
+    }
+  } catch (error) {
+    localPending.set(key, "error:通信に失敗しました。再試行してください");
+  }
+  if (onDone) onDone();
+  renderBoard();
+}
+
+function decisionState(action, issueID) {
+  const key = actKey(action, issueID);
+  if (localPending.has(key)) {
+    const value = localPending.get(key);
+    return value === "sending" ? { kind: "sending" } : { kind: "error", message: value.slice(6) };
+  }
+  if (sentActions.has(key)) {
+    // The "sent" veil only bridges the gap until the server reacts; past
+    // that, the server state (the card's own step) is the truth — and a
+    // journal line falling out of the tail window must not resurrect a
+    // button either way.
+    const at = Date.parse(sentActions.get(key) || "");
+    if (!Number.isNaN(at) && Date.now() - at < 15 * 60 * 1000) return { kind: "sent" };
+  }
+  return { kind: "idle" };
+}
+
+function buildQuestionRow(run) {
+  // Answering from the board stays closed (issue #14 phase 2): the intake
+  // grammar is not carried here yet, and a send that never gets adopted
+  // is worse than no button.
+  const row = el("div", "qrow");
+  row.appendChild(el("div", "qtitle", "LassDas からの質問がチケットにあります"));
+  const link = trackerURL(run.issue_key);
+  if (link) {
+    const via = el("div", "via");
+    const anchor = el("a", null, "チケットを開いて質問を確認・回答する ↗");
+    anchor.href = link; anchor.target = "_blank"; anchor.rel = "noopener";
+    via.appendChild(anchor);
+    row.appendChild(via);
+  }
+  row.appendChild(el("div", "via", "回答はチケットのコメントで行ってください (ボードからの回答送信は段階解禁: issue #14)"));
+  return row;
+}
+
+function buildGoRow(run) {
+  const row = el("div", "approve-row");
+  const goState = decisionState("go", run.issue_id);
+  const stopState = decisionState("stop", run.issue_id);
+  if (goState.kind === "sent") {
+    const note = el("div", "qrow state-sent");
+    note.appendChild(el("div", "qtitle", "✓ Go をチケットへ投稿しました"));
+    note.appendChild(el("div", "via", "LassDas が次の見回り (1 分以内) で検知し、本番反映を開始します。以後の進行はこのボードに出ます"));
+    return note;
+  }
+  if (stopState.kind === "sent") {
+    const note = el("div", "qrow state-sent");
+    note.appendChild(el("div", "qtitle", "✓ 停止をチケットへ投稿しました"));
+    note.appendChild(el("div", "via", "LassDas が次の見回りで検知し、本番反映を行わず停止します"));
+    return note;
+  }
+  const cardState = cardStates.get(run.delivery_id) || {};
+  const go = el("button", "btn go", "Go — 本番反映を承認");
+  const hold = el("button", "btn ghost", "反映しない (停止を送信)");
+  const via = el("span", "via", "どちらもチケットへあなた本人のコメントとして投稿されます");
+  const sending = goState.kind === "sending" || stopState.kind === "sending";
+  if (sending) { go.disabled = true; hold.disabled = true; go.textContent = "送信中…"; }
+  else if (cardState.armed) {
+    go.classList.add("armed");
+    go.textContent = "もう一度押して確定 (" + cardState.countdown + ")";
+  }
+  go.addEventListener("click", () => {
+    const state = cardStates.get(run.delivery_id) || {};
+    if (!state.armed) {
+      state.armed = true;
+      state.countdown = 10;
+      clearInterval(state.armTimer);
+      state.armTimer = setInterval(() => {
+        const current = cardStates.get(run.delivery_id);
+        if (!current || !current.armed) return;
+        current.countdown--;
+        if (current.countdown <= 0) { current.armed = false; clearInterval(current.armTimer); }
+        renderBoard();
+      }, 1000);
+      cardStates.set(run.delivery_id, state);
+      renderBoard();
+      return;
+    }
+    state.armed = false;
+    clearInterval(state.armTimer);
+    postAction("go", run.issue_id);
+  });
+  hold.addEventListener("click", () => {
+    const state = cardStates.get(run.delivery_id) || {};
+    if (state.armed) { state.armed = false; clearInterval(state.armTimer); renderBoard(); return; }
+    if (!confirm("本番反映を行わず停止します。チケットに「停止」を投稿しますか？")) return;
+    postAction("stop", run.issue_id);
+  });
+  row.appendChild(go);
+  row.appendChild(hold);
+  row.appendChild(via);
+  if (goState.kind === "error" || stopState.kind === "error") {
+    const err = el("div", "qrow state-error");
+    err.appendChild(el("div", "qtitle", "投稿に失敗しました: " + (goState.kind === "error" ? goState.message : stopState.message)));
+    err.appendChild(el("div", "via", "もう一度お試しください"));
+    row.appendChild(err);
+  }
+  return row;
+}
+
+function buildCard(run) {
+  const card = el("div", "card");
+  card.dataset.delivery = run.delivery_id;
+  const tone = TONE[run.step];
+  if (tone) card.classList.add(tone);
+
+  const head = el("div", "card-head");
+  const link = trackerURL(run.issue_key);
+  if (link) {
+    const anchor = el("a", "tkey", run.issue_key || run.delivery_id);
+    anchor.href = link; anchor.target = "_blank"; anchor.rel = "noopener";
+    head.appendChild(anchor);
+  } else {
+    head.appendChild(el("span", "tkey", run.issue_key || run.delivery_id));
+  }
+  const summary = el("span", "tsum", run.summary || "");
+  summary.title = run.summary || "";
+  head.appendChild(summary);
+  const elapsed = el("span", "elapsed", fmtElapsed(run.claimed_at_ms));
+  elapsed.dataset.claimed = run.claimed_at_ms || 0;
+  head.appendChild(elapsed);
+  card.appendChild(head);
+
+  const nowline = el("div", "nowline");
+  nowline.appendChild(el("span", "now-title", run.step_title || ""));
+  nowline.appendChild(el("span", "now-detail", run.detail || ""));
+  card.appendChild(nowline);
+
+  const track = el("div", "track");
+  buildTrack(track);
+  setTrack(track, run.step, run.round || 0, run.stage);
+  card.appendChild(track);
+
+  if (run.step === "question") card.appendChild(buildQuestionRow(run));
+  // The Go/stop controls appear ONLY when the server says a Go would be
+  // honoured right now (can_go) — never on a file-only confirm, never
+  // during the legacy observation step.
+  if (actionsEnabled && run.issue_id && run.step === "confirm" && run.can_go) {
+    card.appendChild(buildGoRow(run));
+  }
+  return card;
+}
+
+function buildChip(run) {
+  const link = trackerURL(run.issue_key);
+  const chip = el(link ? "a" : "span", "chip");
+  if (link) { chip.href = link; chip.target = "_blank"; chip.rel = "noopener"; }
+  chip.classList.add(run.step === "done" ? "ok" : run.step === "stopped" ? "stop" : "bad");
+  chip.appendChild(el("span", "mark"));
+  chip.appendChild(el("span", "ckey", run.issue_key || run.delivery_id));
+  chip.appendChild(el("span", null, run.step_title || run.step));
+  return chip;
+}
+
+let latestBoard = { runs: [] };
+
+function renderBoard() {
+  // A redraw replaces the DOM; if the user is typing an answer, carry the
+  // caret across so the input never visibly jumps.
+  const focused = document.activeElement;
+  const focusDraft = focused && focused.dataset ? focused.dataset.draftFor : null;
+  const caret = focusDraft ? [focused.selectionStart, focused.selectionEnd] : null;
+  const runs = (latestBoard.runs || []).slice();
+  const active = runs.filter(run => !RESTING.has(run.step));
+  const resting = runs.filter(run => RESTING.has(run.step));
+  active.sort((a, b) => {
+    const aAct = ACTIONABLE.has(a.step) ? 0 : 1;
+    const bAct = ACTIONABLE.has(b.step) ? 0 : 1;
+    if (aAct !== bAct) return aAct - bAct;
+    return (b.claimed_at_ms || 0) - (a.claimed_at_ms || 0);
+  });
+
+  const runsBox = document.getElementById("runs");
+  runsBox.replaceChildren();
+  if (active.length === 0) {
+    runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));
+  } else {
+    for (const run of active) runsBox.appendChild(buildCard(run));
+  }
+
+  const chips = document.getElementById("chips");
+  chips.replaceChildren();
+  if (resting.length === 0) {
+    chips.appendChild(el("span", "chip", "まだありません"));
+  } else {
+    for (const run of resting) chips.appendChild(buildChip(run));
+  }
+
+  if (focusDraft) {
+    const revived = document.querySelector('textarea[data-draft-for="' + focusDraft + '"]');
+    if (revived) {
+      revived.focus();
+      if (caret && caret[0] !== null) revived.setSelectionRange(caret[0], caret[1]);
+    }
+  }
+
+  const banner = document.getElementById("notice-banner");
+  banner.textContent = latestBoard.notice || "";
+  banner.hidden = !latestBoard.notice;
+  const needAttention = active.filter(run => ACTIONABLE.has(run.step) || run.step === "attention").length;
+  const counts = document.getElementById("counts");
+  counts.replaceChildren();
+  counts.appendChild(document.createTextNode("処理中 "));
+  counts.appendChild(el("b", null, String(active.length)));
+  counts.appendChild(document.createTextNode(" ／ 要対応 "));
+  counts.appendChild(el("b", needAttention > 0 ? "warn" : null, String(needAttention)));
+  counts.appendChild(document.createTextNode(" ／ 完了・終了 "));
+  counts.appendChild(el("b", null, String(resting.length)));
+}
+
+/* ---- event log (idempotent inserts, day separators) ---- */
+function eventID(event) { return (event.at || "") + "|" + (event.delivery_id || "") + "|" + (event.step || ""); }
+
+function renderEvents(events, fresh) {
+  const log = document.getElementById("log");
+  for (const event of events) {
+    const id = eventID(event);
+    if (knownEvents.has(id)) continue;
+    knownEvents.add(id);
+    const row = el("div", "ev" + (fresh ? " enter fresh" : ""));
+    const when = event.at ? new Date(event.at) : null;
+    const stamp = when ? String(when.getHours()).padStart(2, "0") + ":" + String(when.getMinutes()).padStart(2, "0") : "—";
+    row.appendChild(el("time", null, stamp));
+    const body = el("div");
+    body.appendChild(el("div", "ekey", event.issue_key || event.delivery_id || ""));
+    body.appendChild(el("div", "emsg", (event.step_title || event.step || "") + (event.detail ? " — " + event.detail : "")));
+    row.appendChild(body);
+    log.prepend(row);
+    if (fresh) {
+      requestAnimationFrame(() => requestAnimationFrame(() => row.classList.add("settling")));
+      setTimeout(() => row.classList.remove("fresh"), 2600);
+      setTimeout(() => row.classList.remove("enter", "settling"), 1500);
+    }
+  }
+}
+
+/* ---- live feed ---- */
+function applyPayload(payload, firstLoad) {
+  lastPayloadAt = Date.now();
+  lastServerSentAt = payload.sent_at || null;
+  trackerBase = payload.tracker_base || "";
+  actionsEnabled = !!payload.actions_enabled;
+  sentActions = new Map();
+  for (const raw of payload.actions || []) {
+    try {
+      const action = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (action && action.action && action.issue_id) sentActions.set(actKey(action.action, action.issue_id), action.at);
+    } catch (_) { /* skip torn line */ }
+  }
+  try { latestBoard = typeof payload.board === "string" ? JSON.parse(payload.board) : (payload.board || { runs: [] }); }
+  catch (_) { latestBoard = { runs: [] }; }
+  document.getElementById("footer").textContent = actionsEnabled
+    ? "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。操作 (回答 / Go / 停止) はチケットへあなた本人のコメントとして投稿されます。"
+    : "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。新しい依頼の受付と Go の検知は毎分の見回りです。このボードは閲覧専用です (操作機能は段階解禁: issue #14)。";
+  renderBoard();
+  const events = (payload.events || []).map(raw => {
+    try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_) { return null; }
+  }).filter(Boolean);
+  renderEvents(events, !firstLoad);
+}
+
+let source = null;
+let firstLoad = true;
+function connect() {
+  source = new EventSource("/stream");
+  source.addEventListener("board", message => {
+    setConnected(true);
+    try { applyPayload(JSON.parse(message.data), firstLoad); } catch (_) { /* keep last good state */ }
+    firstLoad = false;
+  });
+  source.onerror = () => {
+    setConnected(false);
+    // EventSource retries network drops by itself but goes CLOSED for
+    // non-2xx answers (a pod restart behind the ALB) — reconnect those.
+    if (source.readyState === EventSource.CLOSED) {
+      setTimeout(() => { if (source.readyState === EventSource.CLOSED) connect(); }, 5000);
+    }
+  };
+}
+
+function setConnected(connected) {
+  document.getElementById("conn-banner").classList.toggle("on", !connected);
+  const live = document.getElementById("live");
+  live.classList.toggle("dead", !connected);
+  document.getElementById("live-text").textContent = connected ? "ONLINE" : "再接続中…";
+}
+
+/* per-second local refresh: elapsed counters + the honest freshness line */
+setInterval(() => {
+  document.querySelectorAll(".elapsed").forEach(node => {
+    const claimed = Number(node.dataset.claimed || 0);
+    if (claimed) node.textContent = fmtElapsed(claimed);
+  });
+  const ago = document.getElementById("ago");
+  if (!lastPayloadAt) { ago.textContent = "受信待ち…"; return; }
+  const seconds = Math.floor((Date.now() - lastPayloadAt) / 1000);
+  ago.textContent = "最終受信 " + (seconds < 60 ? seconds + " 秒前" : Math.floor(seconds / 60) + " 分前");
+  // The attendant writes every minute; silence far beyond that is stale
+  // data even if the SSE pipe itself is alive.
+  if (seconds > 180) setConnected(false);
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

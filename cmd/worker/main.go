@@ -113,7 +113,14 @@ func runValidation(ctx context.Context, args []string) error {
 	candidatePath := flags.String("candidate", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	outputPath := flags.String("out", "", "")
+	// The base the caller actually checked out. Optional for compatibility;
+	// the base-advance retry validates on a base that is NOT the one the
+	// source snapshot chains to, and the sealed evidence must say so.
+	checkoutSHA := flags.String("checkout-sha", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *repoRoot, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
+		return errors.New("run-validation arguments are invalid")
+	}
+	if *checkoutSHA != "" && !worker.ValidToolSHA(*checkoutSHA) {
 		return errors.New("run-validation arguments are invalid")
 	}
 	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
@@ -124,7 +131,7 @@ func runValidation(ctx context.Context, args []string) error {
 	if err := worker.ReadJSONFile(*candidatePath, worker.MaxArtifactJSONBytes, &candidate); err != nil {
 		return errors.New("candidate artifact could not be read")
 	}
-	evidence, err := worker.RunValidationEvidence(ctx, *repoRoot, candidate, source, request, config)
+	evidence, err := worker.RunValidationEvidence(ctx, *repoRoot, candidate, source, request, config, *checkoutSHA)
 	if err != nil {
 		// The command line comes from the fixed consumer configuration; the
 		// tail is untrusted build output and stays in the job log only.
@@ -545,15 +552,12 @@ func runDeriveContract(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// One retry: a reasoning model occasionally returns one malformed
-	// response, and a whole run must not die on a single roll when a second
-	// costs seconds (a live run did, 2026-08-14). The first failure is
-	// printed so a systematic cause still leaves both reasons in the log.
+	// A malformed answer is asked again inside the call itself (the
+	// invoker's converseJSON, three answers at most, each retry carrying the
+	// decoder's objection); a second whole derivation on top of that would
+	// double the budget for nothing (a live run died on one bad roll on
+	// 2026-08-14, which is what the retry inside now covers).
 	derivation, _, err := invoker.DeriveTargetFiles(ctx, draft, listing, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "contract derivation attempt 1 failed", err)
-		derivation, _, err = invoker.DeriveTargetFiles(ctx, draft, listing, config)
-	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "contract derivation failed", err)
 		return errors.New("contract derivation failed")

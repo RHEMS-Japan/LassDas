@@ -29,7 +29,12 @@ type ValidationEvidence struct {
 	SourceSHA256     string                   `json:"source_sha256"`
 	CandidateSHA256  string                   `json:"candidate_sha256"`
 	BaseSHA          string                   `json:"base_sha"`
-	Stage            int                      `json:"stage"`
+	// CheckedOutSHA is the base the validation ACTUALLY ran on. It equals
+	// BaseSHA except on a publish base-advance retry, where the same
+	// candidate is re-validated on a freshly advanced integration base —
+	// the sealed record must say where the commands really ran.
+	CheckedOutSHA string `json:"checked_out_sha,omitempty"`
+	Stage         int    `json:"stage"`
 	Tools            []ObservedTool           `json:"tools"`
 	Commands         [][]string               `json:"commands"`
 	Files            []ValidationFileEvidence `json:"files"`
@@ -48,6 +53,7 @@ func RunValidationEvidence(
 	source SourceSnapshot,
 	request TicketRequest,
 	config Config,
+	checkoutSHA string,
 ) (ValidationEvidence, error) {
 	if ctx == nil || candidate.Validate(source, request, config) != nil {
 		return ValidationEvidence{}, errors.New("validation evidence input is invalid")
@@ -96,12 +102,16 @@ func RunValidationEvidence(
 		}
 		files = append(files, ValidationFileEvidence{Path: file.Path, SHA256: digestBytes(content)})
 	}
+	checkedOut := checkoutSHA
+	if checkedOut == "" {
+		checkedOut = source.BaseSHA
+	}
 	evidence := ValidationEvidence{
 		SchemaVersion: ValidationEvidenceSchemaVersion,
 		DeliveryID:    request.DeliveryID, InputSHA256: request.InputSHA256,
 		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA,
 		SourceSHA256: source.SourceSHA256, CandidateSHA256: candidate.CandidateSHA256,
-		BaseSHA: source.BaseSHA, Stage: candidate.Stage,
+		BaseSHA: source.BaseSHA, CheckedOutSHA: checkedOut, Stage: candidate.Stage,
 		Tools:    tools,
 		Commands: expectedValidationCommands(consumer), Files: files,
 		StartedAt: startedAt, CompletedAt: time.Now().UTC(),
@@ -126,7 +136,8 @@ func (e ValidationEvidence) Validate(candidate Candidate, source SourceSnapshot,
 		e.DeliveryID != request.DeliveryID || e.InputSHA256 != request.InputSHA256 ||
 		e.ConfigSHA256 != request.ConfigSHA256 || e.ToolSHA != request.ToolSHA ||
 		e.SourceSHA256 != source.SourceSHA256 || e.CandidateSHA256 != candidate.CandidateSHA256 ||
-		e.BaseSHA != source.BaseSHA || e.Stage != candidate.Stage || !sha256Pattern.MatchString(e.ValidationSHA256) {
+		e.BaseSHA != source.BaseSHA || e.Stage != candidate.Stage || !sha256Pattern.MatchString(e.ValidationSHA256) ||
+		(e.CheckedOutSHA != "" && !commitPattern.MatchString(e.CheckedOutSHA)) {
 		return errors.New("validation evidence identity is invalid")
 	}
 	if e.StartedAt.IsZero() || e.CompletedAt.IsZero() || e.StartedAt.Location() != time.UTC || e.CompletedAt.Location() != time.UTC ||

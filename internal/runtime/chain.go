@@ -49,7 +49,7 @@ func ChainStages(chain ChainConfig) []ChainStage {
 		// The card wall must outlast the reviewing agent's own budget
 		// (agents.reviewer_agents timeout, 60 minutes) plus sealing
 		// overhead, or the kanban SIGTERM kills a working review from
-		// outside: both affected live runs died at exactly this
+		// outside: both live runs of two tickets died at exactly this
 		// wall while their reviewers were mid-judgment.
 		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60},
 		{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60},
@@ -57,9 +57,12 @@ func ChainStages(chain ChainConfig) []ChainStage {
 		// verify commands, each with its own ten-minute ceiling
 		// (ValidationCommandTimeout) — a legal consumer configuration can
 		// spend fifty minutes before anything hangs, so thirty (the design
-		// sketch's number) would time out honest work.
+		// sketch's number) would time out honest work. The publish card
+		// below carries the same bound for the same reason: its
+		// base-advance retry re-runs this exact validation on the freshly
+		// advanced base before publishing again.
 		{Name: StageValidate, Profile: chain.Profiles.Validate, MaxRuntimeSeconds: 60 * 60},
-		{Name: StagePublish, Profile: chain.Profiles.Publish, MaxRuntimeSeconds: 15 * 60},
+		{Name: StagePublish, Profile: chain.Profiles.Publish, MaxRuntimeSeconds: 60 * 60},
 	}
 }
 

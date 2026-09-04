@@ -13,6 +13,15 @@ type QuestionCommentClient interface {
 	AddCommentNotifying(context.Context, int64, string, []int64) (int64, error)
 }
 
+// CommentAttachmentClient is the optional upgrade a comment client may offer:
+// binding previously uploaded attachments to a comment. Kept out of
+// QuestionCommentClient so the many existing fakes stay valid — the one
+// caller that needs it (the debug role's screenshot) degrades to a plain
+// comment when the client cannot attach.
+type CommentAttachmentClient interface {
+	AddCommentNotifyingWithAttachments(ctx context.Context, issueID int64, content string, notifiedUserIDs, attachmentIDs []int64) (int64, error)
+}
+
 type QuestionReportProcessor interface {
 	ProcessQuestionReport(context.Context, QuestionReportRequest) Result
 }
@@ -253,10 +262,15 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if err != nil {
 		return s.failure("question_tick_load", err, "")
 	}
+	// The intake completion runs EVERY tick, active runs or not. The old
+	// gate ("only when no run is active") assumed the single-run Lambda
+	// world; under the cards orchestration many runs proceed in parallel,
+	// and that gate starved every new ticket for as long as any run lived
+	// — found live when the second of two simultaneous tickets was never
+	// ingested while the first was being implemented.
+	ingestResult := s.completeLostIngest(ctx)
 	if !notice.Exists {
-		// No active run: this wake-up may complete a lost webhook instead
-		// (README: 既存 5 分 schedule は active run がない場合に限り照合する).
-		return s.completeLostIngest(ctx)
+		return ingestResult
 	}
 	// A notice that could not be posted must never hold back the answer
 	// adoption or the deadline: a stuck acknowledgement would otherwise mean
@@ -278,7 +292,9 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 		if noticePending {
 			return noticeResult
 		}
-		return s.result(DecisionAccepted, "question_tick_idle", "")
+		// Nothing more decisive happened: the tick's outcome is whatever
+		// the intake completion found (ingested or idle).
+		return ingestResult
 	}
 	deliveryID := snapshot.Record.DeliveryID
 	// A sealed question whose comment was never bound means the poster died
@@ -654,14 +670,21 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 }
 
 func (s *QuestionTickService) postRunComment(ctx context.Context, kind RunCommentKind, qualifier, content, deliveryID string) (Result, bool) {
+	return s.postRunCommentRouted(ctx, s.config, kind, qualifier, content, deliveryID, nil)
+}
+
+// postRunCommentRouted is postRunComment with an explicit route and optional
+// comment attachments. A terminal run has no pending row for the route to
+// resolve through, so its callers pin the run id on the route themselves.
+func (s *QuestionTickService) postRunCommentRouted(ctx context.Context, route ReportRouteConfig, kind RunCommentKind, qualifier, content, deliveryID string, attachmentIDs []int64) (Result, bool) {
 	now := s.now().UTC()
 	leaseToken, err := s.token()
 	if err != nil {
 		return s.result(DecisionInternal, "question_tick_token_failed", deliveryID), false
 	}
 	binding, disposition, err := s.store.BeginRunComment(ctx, RunCommentBeginRequest{
-		Route: s.config, Kind: kind, Qualifier: qualifier, ContentSHA256: TerminalReportDigest([]byte(content)),
-		StartedAt: now, LeaseUntil: now.Add(s.config.LeaseDuration), LeaseToken: leaseToken,
+		Route: route, Kind: kind, Qualifier: qualifier, ContentSHA256: TerminalReportDigest([]byte(content)),
+		StartedAt: now, LeaseUntil: now.Add(route.LeaseDuration), LeaseToken: leaseToken,
 	})
 	if err != nil {
 		return s.failure("question_tick_notice_begin", err, deliveryID), false
@@ -682,13 +705,18 @@ func (s *QuestionTickService) postRunComment(ctx context.Context, kind RunCommen
 		return s.failure("question_tick_notice_lookup", err, deliveryID), false
 	}
 	if !found {
-		commentID, err = s.backlog.AddCommentNotifying(ctx, binding.IssueID, content, []int64{s.config.AllowedCreatorID})
+		notified := []int64{route.AllowedCreatorID}
+		if attacher, ok := s.backlog.(CommentAttachmentClient); ok && len(attachmentIDs) > 0 {
+			commentID, err = attacher.AddCommentNotifyingWithAttachments(ctx, binding.IssueID, content, notified, attachmentIDs)
+		} else {
+			commentID, err = s.backlog.AddCommentNotifying(ctx, binding.IssueID, content, notified)
+		}
 		if err != nil {
 			return s.failure("question_tick_notice_add", err, deliveryID), false
 		}
 	}
 	complete, err := s.store.CompleteRunComment(ctx, RunCommentCompleteRequest{
-		Route: s.config, Kind: kind, Qualifier: qualifier, ContentSHA256: TerminalReportDigest([]byte(content)),
+		Route: route, Kind: kind, Qualifier: qualifier, ContentSHA256: TerminalReportDigest([]byte(content)),
 		LeaseToken: leaseToken, CommentID: commentID, PostedAt: s.now().UTC(),
 	})
 	if err != nil {
@@ -698,6 +726,91 @@ func (s *QuestionTickService) postRunComment(ctx context.Context, kind RunCommen
 		return Result{}, true
 	}
 	return s.result(DecisionInvalid, "question_tick_notice_conflict", deliveryID), false
+}
+
+// PostPlanComment posts the run's implementation-plan notice exactly once
+// (the same lease/marker machinery as the acceptance notice). It is a
+// notice, not a gate: the return value only says whether the notice is now
+// known to be on the ticket, and the caller continues the run either way —
+// a missing plan notice must never block a delivery.
+func (s *QuestionTickService) PostPlanComment(ctx context.Context, deliveryID, content string) bool {
+	posted, err := s.store.RunCommentState(ctx, s.config, RunCommentPlan, "")
+	if err != nil {
+		s.failure("question_tick_plan_state", err, deliveryID)
+		return false
+	}
+	if posted {
+		return true
+	}
+	_, ok := s.postRunComment(ctx, RunCommentPlan, "", content, deliveryID)
+	return ok
+}
+
+// E2ECommentPosted reports whether the run's observation comment is already
+// on the ticket, so the attendant neither re-uploads the screenshot nor
+// re-renders the comment once it landed.
+func (s *QuestionTickService) E2ECommentPosted(ctx context.Context, runID string) (bool, error) {
+	route := s.config
+	route.ExpectedRunID = runID
+	return s.store.RunCommentState(ctx, route, RunCommentE2E, "")
+}
+
+// PostE2EComment posts the debug role's post-merge staging observation
+// exactly once per run. A terminal run has no pending row left for the
+// route to resolve through, so the run id is pinned on the route explicitly
+// — the same precedent the report and answer services use. A notice, not a
+// gate: the caller reports the boolean and moves on.
+func (s *QuestionTickService) PostE2EComment(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentE2E, "question_tick_e2e_state", runID, deliveryID, content, attachmentIDs)
+}
+
+// StagingReportPosted / ReleaseReportPosted report whether the v2 delivery
+// summaries already landed, so the attendant neither re-uploads screenshots
+// nor re-renders content.
+func (s *QuestionTickService) StagingReportPosted(ctx context.Context, runID string) (bool, error) {
+	route := s.config
+	route.ExpectedRunID = runID
+	return s.store.RunCommentState(ctx, route, RunCommentStagingReport, "")
+}
+
+func (s *QuestionTickService) ReleaseReportPosted(ctx context.Context, runID string) (bool, error) {
+	route := s.config
+	route.ExpectedRunID = runID
+	return s.store.RunCommentState(ctx, route, RunCommentReleaseReport, "")
+}
+
+// PostStagingReport / PostReleaseReport post the v2 delivery summaries
+// exactly once per run, on the same pinned-run route as the E2E comment.
+func (s *QuestionTickService) PostStagingReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentStagingReport, "question_tick_stg_report_state", runID, deliveryID, content, attachmentIDs)
+}
+
+func (s *QuestionTickService) PostReleaseReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentReleaseReport, "question_tick_rel_report_state", runID, deliveryID, content, attachmentIDs)
+}
+
+// postTerminalRunComment is the shared exactly-once posting for comments on
+// terminal runs: no pending row remains, so the run id is pinned on the
+// route explicitly. A notice, not a gate.
+func (s *QuestionTickService) postTerminalRunComment(
+	ctx context.Context,
+	kind RunCommentKind,
+	failureCode string,
+	runID, deliveryID, content string,
+	attachmentIDs []int64,
+) bool {
+	route := s.config
+	route.ExpectedRunID = runID
+	posted, err := s.store.RunCommentState(ctx, route, kind, "")
+	if err != nil {
+		s.failure(failureCode, err, deliveryID)
+		return false
+	}
+	if posted {
+		return true
+	}
+	_, ok := s.postRunCommentRouted(ctx, route, kind, "", content, deliveryID, attachmentIDs)
+	return ok
 }
 
 // completeLostIngest reads the project's recent updates past the stored

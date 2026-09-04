@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/githubapi"
@@ -14,6 +17,47 @@ import (
 	"automation.internal/ticket-ingress/internal/visiblecheck"
 	"automation.internal/ticket-ingress/internal/worker"
 )
+
+// extractPublishOption removes one optional name/value pair from a pairwise
+// argument list. The publish command grew host-side-only options after the
+// shared parser froze its required/repeated contract; stripping them first
+// keeps every other verb's argument contract byte-identical.
+func extractPublishOption(args []string, name string) ([]string, string) {
+	for index := 0; index+1 < len(args); index += 2 {
+		if args[index] == name {
+			trimmed := append(append(make([]string, 0, len(args)-2), args[:index]...), args[index+2:]...)
+			return trimmed, args[index+1]
+		}
+	}
+	return args, ""
+}
+
+var publishSourceBasePattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
+
+// writePublishFailure leaves a machine-readable failure reason for the
+// runner, which retries exactly one class of refusal (the integration base
+// advancing mid-run) and treats everything else as final. Best-effort by
+// design: the exit code stays the authoritative failure signal, and the
+// file carries invariant names only — never repository content or tokens.
+func writePublishFailure(path, code string, err error) {
+	if path == "" {
+		return
+	}
+	invariantCode := ""
+	var invariantError *githubapi.InvariantError
+	if errors.As(err, &invariantError) {
+		invariantCode = invariantError.Code
+	}
+	payload, marshalErr := json.Marshal(struct {
+		Code      string `json:"code"`
+		Invariant string `json:"invariant,omitempty"`
+	}{Code: code, Invariant: invariantCode})
+	if marshalErr != nil {
+		return
+	}
+	_ = os.Remove(path)
+	_ = os.WriteFile(path, payload, 0o600)
+}
 
 func runBaseline(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
 	arguments, err := parseCommandArguments(args, []string{"--config", "--draft", "--out"})
@@ -55,6 +99,11 @@ func runBaseline(ctx context.Context, args []string, getenv func(string) string,
 }
 
 func runPublishFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, sourceBase := extractPublishOption(args, "--source-base")
+	args, failureOut := extractPublishOption(args, "--failure-out")
+	if sourceBase != "" && !publishSourceBasePattern.MatchString(sourceBase) {
+		return fail("arguments_invalid")
+	}
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--out",
 	}, "--review")
@@ -97,8 +146,20 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 	if err != nil {
 		return fail("baseline_artifact_invalid")
 	}
+	// The source snapshot chains to the base it was recorded on. Normally
+	// that must be the baseline being published against; on a base-advance
+	// retry the runner supplies the ORIGINAL base via --source-base, has
+	// re-validated the same candidate on the freshly advanced baseline, and
+	// PublishFeature's per-file blob checks below hold every touched path to
+	// the recorded blob against the advanced tree — a touched path that also
+	// moved upstream refuses as source_blob_changed.
+	expectedSourceBase := baseline.Baseline.Integration.SHA
+	if sourceBase != "" {
+		expectedSourceBase = sourceBase
+	}
 	if worker.ValidatePublishGate(decision, validation, candidate, reviews, source, request, runtime.config) != nil ||
-		source.BaseSHA != baseline.Baseline.Integration.SHA {
+		source.BaseSHA != expectedSourceBase {
+		writePublishFailure(failureOut, "publish_gate_rejected", nil)
 		return fail("publish_gate_rejected")
 	}
 	binding := newDeliveryBinding(request, source, candidate, decision, validation)
@@ -125,6 +186,7 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 	}
 	feature, err := runtime.controller.PublishFeature(ctx, baseline.Baseline, spec)
 	if err != nil {
+		writePublishFailure(failureOut, "feature_publish_failed", err)
 		return failFrom("feature_publish_failed", err)
 	}
 	if !validPublishedFeature(feature, binding) {
@@ -228,6 +290,132 @@ func runWaitFeature(ctx context.Context, args []string, getenv func(string) stri
 	return nil
 }
 
+// runAwaitMergedStaging is the debug role's trigger: wait for a HUMAN to
+// merge the delivered pull request, then for the staging deployment workflow
+// of that merge commit to succeed (the digest commit included). It performs
+// no mutation and writes a plain progress record — not a sealed proof: the
+// pull_request delivery never builds the release-proof chain, and the E2E
+// observation this gates is a courtesy report, not a promotion input.
+func runAwaitMergedStaging(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	pull, err := readDeliveryArtifact[featurePRPayload](arguments.one("--feature-pr"), kindFeaturePR, request, runtime.config)
+	if err != nil || !validFeaturePRPayload(pull.Payload, pull.Binding) {
+		return fail("feature_pr_artifact_invalid")
+	}
+	merge, err := runtime.controller.AwaitFeatureMerge(ctx, pull.Payload.PullRequest, mergedStagingWait())
+	if err != nil {
+		return failFrom("feature_merge_wait_failed", err)
+	}
+	deployment, err := runtime.controller.AwaitStaging(ctx, merge, waitOptions(), runtime.consumer.StagingDigestCommitPolicy())
+	if err != nil {
+		return failFrom("staging_wait_failed", err)
+	}
+	record := struct {
+		SchemaVersion int       `json:"schema_version"`
+		DeliveryID    string    `json:"delivery_id"`
+		MergedSHA     string    `json:"merged_sha"`
+		StagingRunID  int64     `json:"staging_run_id"`
+		BranchHeadSHA string    `json:"branch_head_sha"`
+		ObservedAt    time.Time `json:"observed_at"`
+	}{
+		SchemaVersion: 1, DeliveryID: request.DeliveryID, MergedSHA: merge.MergeSHA,
+		BranchHeadSHA: deployment.BranchHeadSHA, ObservedAt: time.Now().UTC(),
+	}
+	if len(deployment.WorkflowRuns) == 1 {
+		record.StagingRunID = deployment.WorkflowRuns[0].ID
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), record, controllerArtifactMaxBytes); err != nil {
+		return fail("merged_staging_artifact_write_failed")
+	}
+	return nil
+}
+
+// mergedStagingWait bounds the human-merge wait. A merge decision is a
+// human's, not a deployment's: hours are normal, so the poll is slow and
+// the budget wide — the debug card's own wall is the final bound.
+func mergedStagingWait() githubapi.WaitOptions {
+	return githubapi.WaitOptions{PollInterval: time.Minute, Timeout: 72 * time.Hour}
+}
+
+// read-merged reads one pull request's merged state, nothing else. The
+// delivery uses it AFTER a merge verb failed, to report honestly whether
+// the merge itself landed — the merge verbs can fail after the merge did.
+func runReadMerged(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--number", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	number, err := strconv.ParseInt(arguments.one("--number"), 10, 64)
+	if err != nil || number <= 0 {
+		return fail("arguments_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	merged, err := runtime.controller.ReadPullMerged(ctx, number)
+	if err != nil {
+		return failFrom("read_merged_failed", err)
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), merged, controllerArtifactMaxBytes); err != nil {
+		return fail("read_merged_write_failed")
+	}
+	return nil
+}
+
+// promotion-delta reads what a stg→prod promotion would carry RIGHT NOW.
+// The requester sees this list in the staging report before writing Go —
+// the rail moves the whole branch, and Go approves the whole list.
+func runPromotionDelta(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--out"})
+	if err != nil {
+		return err
+	}
+	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	request, err := readTicket(arguments.one("--ticket"), config)
+	if err != nil {
+		return fail("ticket_artifact_invalid")
+	}
+	runtime, err := prepareRuntime(ctx, config, request.Repository, getenv, transport)
+	if err != nil {
+		return err
+	}
+	delta, err := runtime.controller.ReadPromotionDelta(ctx)
+	if err != nil {
+		return failFrom("promotion_delta_failed", err)
+	}
+	if err := worker.WriteJSONFileExclusive(arguments.one("--out"), delta, controllerArtifactMaxBytes); err != nil {
+		return fail("promotion_delta_write_failed")
+	}
+	return nil
+}
+
 func runMergeFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--checks", "--out"})
 	if err != nil {
@@ -309,10 +497,14 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 		return fail("baseline_artifact_invalid")
 	}
 	merge, err := readDeliveryArtifact[featureMergePayload](arguments.one("--feature-merge"), kindFeatureMerge, request, runtime.config)
+	// The published base must be the recorded baseline. The SOURCE base may
+	// legitimately be older — the integration branch advanced mid-run and
+	// the publish gate re-validated on the new base — and source identity
+	// itself is pinned by the binding's artifact digests below.
 	if err != nil || !validFeatureMergePayload(merge.Payload, merge.Binding) ||
 		gate.decision.DecisionSHA256 != merge.Binding.DecisionSHA256 ||
 		!merge.Binding.matchesArtifacts(gate.source, gate.candidate, gate.validation) ||
-		gate.source.BaseSHA != merge.Payload.Feature.Base.SHA || gate.source.BaseSHA != baseline.Baseline.Integration.SHA {
+		merge.Payload.Feature.Base.SHA != baseline.Baseline.Integration.SHA {
 		return fail("feature_merge_artifact_invalid")
 	}
 	deployment, err := runtime.controller.AwaitStaging(ctx, merge.Payload.Merge, waitOptions(), stagingDigestPolicyFor(merge.Binding.Repository))
@@ -392,7 +584,7 @@ func runCreatePromotionPR(ctx context.Context, args []string, getenv func(string
 		ProductPaths: slices.Clone(staging.Binding.ProductPaths), AcceptanceEvidenceSHA256: visible.EvidenceSHA256,
 	}
 	pull, err := runtime.controller.CreatePromotionPullRequest(
-		ctx, proof, promotionPullRequestSpec(staging.Binding, visible.EvidenceSHA256),
+		ctx, proof, stagingDigestPolicyFor(staging.Binding.Repository), promotionPullRequestSpec(staging.Binding, visible.EvidenceSHA256),
 	)
 	if err != nil {
 		return failFrom("promotion_pr_create_failed", err)
@@ -469,7 +661,7 @@ func runMergePromotion(ctx context.Context, args []string, getenv func(string) s
 		return nil
 	}
 	merge, err := runtime.controller.MergePromotionPullRequest(
-		ctx, promotion.Payload.PullRequest, githubapi.CheckEvidence{}, promotion.Payload.Proof,
+		ctx, promotion.Payload.PullRequest, githubapi.CheckEvidence{}, promotion.Payload.Proof, stagingDigestPolicyFor(promotion.Binding.Repository),
 		promotionMergeSpec(promotion.Binding, promotion.Payload.Proof.AcceptanceEvidenceSHA256), waitOptions(), recordReflection,
 	)
 	if reflectionFailure != nil {

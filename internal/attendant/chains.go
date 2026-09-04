@@ -75,10 +75,20 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 	if err != nil {
 		return err
 	}
+	// The same failure ending the last N deliveries holds intake until an
+	// operator has looked; in-flight runs keep going.
+	streak := detectFailureStreak(runs, config.Chain.FailureStreakLimitValue(), streakResolvedIn(config))
+	if streak.Active {
+		streak.Active = holdForStreak(ctx, config.Tracker, services.Backlog, streak, runDirectory(config, streak.Newest.DeliveryID), logger)
+	}
 	for _, run := range runs {
 		view := chainViewFor(tasks, run.DeliveryID)
 		switch run.State {
 		case "queued":
+			if streak.Active {
+				logger.Info("intake held by failure streak", "run", run.RunID, "code", streak.Code, "count", streak.Count)
+				continue
+			}
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain start failed", "run", run.RunID, "error", err.Error())
 			}
@@ -86,9 +96,19 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			if err := advanceClaimedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain advance failed", "run", run.RunID, "error", err.Error())
 			}
+		case "terminal":
+			// The run itself is closed; what may remain is the debug
+			// role's post-merge observation, or the v2 delivery
+			// continuation (config makes the two mutually exclusive).
+			if err := syncE2E(ctx, config, services, hermes, run, tasks, logger); err != nil {
+				logger.Error("e2e sync failed", "run", run.RunID, "error", err.Error())
+			}
+			if err := syncDeliver(ctx, config, services, hermes, run, tasks, logger); err != nil {
+				logger.Error("deliver sync failed", "run", run.RunID, "error", err.Error())
+			}
 		default:
-			// awaiting_answer, terminal and the question-sealed report
-			// flavors belong to the reception tick's own machinery.
+			// awaiting_answer and the question-sealed report flavors
+			// belong to the reception tick's own machinery.
 		}
 	}
 	return nil
@@ -175,6 +195,11 @@ func startQueuedRun(
 		return err
 	}
 	now := time.Now().UTC()
+	// A budget or session hold throttles its own retry: the run stays
+	// queued and unclaimed until the interval since the refusal has passed.
+	if budgetHeldRecently(runDir, now) || sessionHeldRecently(runDir, now) {
+		return nil
+	}
 	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
 		SpaceKey:            config.Tracker.SpaceKey,
 		ProjectID:           config.Tracker.ProjectID,
@@ -193,6 +218,32 @@ func startQueuedRun(
 	}
 	if disposition != hook.PullAcquired {
 		logger.Info("queued run not claimable this tick", "run", run.RunID, "disposition", string(disposition))
+		return nil
+	}
+	// A stop request already on the ticket cancels the run before any model
+	// work is spent. The check sits before the intake pipeline on purpose:
+	// when the comment listing fails here, the retried tick has lost nothing,
+	// whereas a failure after the readiness gate would re-run the whole
+	// assessment on every retry. A stop arriving later is honoured at the
+	// next round boundary.
+	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
+	if err != nil {
+		return fmt.Errorf("stop check before intake: %w", err)
+	}
+	if stopped {
+		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, "")
+	}
+	// Money before work: a key out of budget holds the run here. The claim
+	// is left to the next tick's recovery (a claim with no chain goes back
+	// to the queue) and the hold file throttles the next probe.
+	if checkBudgets(ctx, config, services.Backlog, run, runDir, envelope.Snapshot.IssueID, os.Getenv, budgetProbeClient, logger) {
+		return nil
+	}
+	// The observation browser's way in before the work: a destination the
+	// browser cannot sign in to would end the run as an unjudged screen.
+	// The login that lands renews the jar for the observations to come.
+	if checkSessions(ctx, config, services.Backlog, run, runDir, envelope.Snapshot.IssueID, liveSessionRenewer(os.Getenv), logger) {
 		return nil
 	}
 	token, err := readTargetToken(config)
@@ -216,6 +267,25 @@ func startQueuedRun(
 			outcome.Code = hook.TerminalInternalFailed
 		}
 		return terminal.Report(ctx, outcome.Code, outcome, pipeline.Repository())
+	}
+	// Readiness passed. Post the implementation-plan notice — a notice, not
+	// a gate: a failed post is logged and the run continues.
+	if !services.Tick.PostPlanComment(ctx, envelope.DeliveryID, hook.PlanCommentContent(envelope.Snapshot.RunID, loadPlanFacts(runDir))) {
+		logger.Error("plan notice not posted; run continues", "run", run.RunID)
+	}
+	// One opportunistic re-check before the first cards, for a stop request
+	// that arrived while the gate was running. Best-effort on purpose: a
+	// listing failure here must not send the whole gate into a retry loop,
+	// so it logs and proceeds — the fail-closed checks are the claim-time
+	// one above and every round boundary after this.
+	if stopped, stopErr := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID); stopErr != nil {
+		logger.Error("stop re-check unreadable; proceeding", "run", run.RunID, "error", stopErr.Error())
+	} else if stopped {
+		repository, repositoryErr := readField(runDir, "ticket-draft.json", "repository")
+		if repositoryErr != nil {
+			repository = ""
+		}
+		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
 	if err := pipeline.RenderImplementInstruction(ctx, 1); err != nil {
 		return err
@@ -334,13 +404,23 @@ func handleChainFailure(
 		if limitErr != nil {
 			return limitErr
 		}
-		if view.round < limit {
-			return regenerateRound(ctx, hermes, config, run, view, logger)
+		stopped, stopErr := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
+		if stopErr != nil {
+			return fmt.Errorf("stop check before round %d: %w", view.round+1, stopErr)
 		}
-		// The decide verb converts a final-round revise into nonconverged;
-		// a revise at the limit means the artifacts and the configuration
-		// disagree, and the run ends honestly instead of looping.
-		code = hook.TerminalModelFailed
+		switch {
+		case stopped:
+			// The requester asked the run to stop: finished cards stay
+			// finished, no next round is created, and the run ends honestly.
+			code = hook.TerminalCancelled
+		case view.round < limit:
+			return regenerateRound(ctx, hermes, config, run, view, logger)
+		default:
+			// The decide verb converts a final-round revise into nonconverged;
+			// a revise at the limit means the artifacts and the configuration
+			// disagree, and the run ends honestly instead of looping.
+			code = hook.TerminalModelFailed
+		}
 	case actionAskQuestion:
 		if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
 			return err
@@ -352,6 +432,9 @@ func handleChainFailure(
 	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-1")); err == nil {
 		pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
 		_ = pipeline.EnsureTrail(ctx)
+		// The publish card records why a delivery stopped in its own
+		// process; the recomposed trail would silently drop it otherwise.
+		pipeline.AttachDeliveryStopReason()
 	}
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {

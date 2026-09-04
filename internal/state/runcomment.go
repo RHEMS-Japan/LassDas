@@ -258,7 +258,8 @@ func runCommentMarkerMatches(marker map[string]types.AttributeValue, runKey stri
 }
 
 func validRunCommentKind(kind hook.RunCommentKind) bool {
-	return kind == hook.RunCommentAck || kind == hook.RunCommentReceipt
+	return kind == hook.RunCommentAck || kind == hook.RunCommentReceipt || kind == hook.RunCommentPlan ||
+		kind == hook.RunCommentE2E || kind == hook.RunCommentStagingReport || kind == hook.RunCommentReleaseReport
 }
 
 func validRunCommentBeginRequest(request hook.RunCommentBeginRequest) bool {

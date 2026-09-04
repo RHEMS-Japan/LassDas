@@ -211,6 +211,9 @@ func (p *Pipeline) cloneTargetTo(ctx context.Context, destination string) error 
 	if err := os.RemoveAll(destination); err != nil {
 		return err
 	}
+	if p.cloneTarget != nil {
+		return p.cloneTarget(ctx, destination)
+	}
 	repository, err := p.readJSONField("ticket-draft.json", "repository")
 	if err != nil {
 		return err

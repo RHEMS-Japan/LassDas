@@ -8,6 +8,7 @@
     "allowed_creator_id": 0,
     "allowed_activity_type": 1,
     "required_category_id": 0,
+    "operator_user_ids": [],
     "board_statuses": {
       "running": 0,
       "awaiting_answer": 0,
@@ -37,6 +38,7 @@
   "orchestration": "runner",
   "chain": {
     "runs_root": "/data/runs",
+    "failure_streak_limit": 3,
     "target_token_path": "/data/secrets/target-token",
     "profiles": {
       "implementer": "lassdas-implementer",

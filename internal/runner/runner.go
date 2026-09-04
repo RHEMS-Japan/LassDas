@@ -49,6 +49,10 @@ type Pipeline struct {
 
 	consumerRepository string
 	delivery           string
+	// cloneTarget lets package tests stand in for the network clone of the
+	// destination repository; nil means the real github.com clone.
+	// Production never sets it.
+	cloneTarget func(ctx context.Context, destination string) error
 	// prepared is set once Prepare has cleared the workspace, so nothing
 	// left by an earlier dispatch can pass for this run's history.
 	prepared bool
@@ -213,6 +217,7 @@ func (p *Pipeline) verifyToolPins() error {
 	for _, pin := range []struct{ path, want, name string }{
 		{p.Config.WorkerBin, p.Config.WorkerSHA256, "worker"},
 		{p.Config.ControllerBin, p.Config.ControllerSHA256, "controller"},
+		{p.Config.BrowserCheckBin, p.Config.BrowserCheckSHA256, "browsercheck"},
 	} {
 		if pin.want == "" {
 			continue

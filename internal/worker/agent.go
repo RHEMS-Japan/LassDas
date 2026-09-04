@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,7 @@ const (
 	// on purpose: when the configured budget clears this wall, an overrunning
 	// agent is stopped by the card's max_runtime instead — a timed_out card is
 	// re-spawned by the dispatcher for a second attempt, while an in-process
-	// budget kill ends the whole chain as model_failed. An affected run's second
+	// budget kill ends the whole chain as model_failed. a live ticket's second
 	// review burned its full 60 minutes mid-investigation and took the run
 	// with it; the wall would have given it a fresh attempt.
 	MaxAgentRuntime = 120 * time.Minute
@@ -124,19 +125,43 @@ type AgentOutcome struct {
 // it changed. The credential is read from this process's environment and
 // passed to the child; it is never written to configuration or transcript.
 func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string) (AgentOutcome, error) {
+	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt)
+	if err != nil {
+		return outcome, err
+	}
+	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.ChangedFiles = changed
+	return outcome, nil
+}
+
+// RunReviewingAgent runs a reviewer the same way but does not scan the tree
+// afterwards: a reviewer's changes are not a deliverable to record, and the
+// strict scan died on the hidden caches a reviewer's tooling leaves behind
+// (an .eslintcache is "not addressable"), killing reviews that had passed.
+// What a reviewer may and may not do to the tree is judged by
+// ConfirmTreeMatchesCandidate against the sealed candidate instead.
+func RunReviewingAgent(ctx context.Context, config AgentConfig, workspace, prompt string) (AgentOutcome, error) {
+	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt)
+	return outcome, err
+}
+
+func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string) (AgentOutcome, string, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
-		return AgentOutcome{}, errors.New("agent input is invalid")
+		return AgentOutcome{}, "", errors.New("agent input is invalid")
 	}
 	if err := config.validate(); err != nil {
-		return AgentOutcome{}, err
+		return AgentOutcome{}, "", err
 	}
 	root, err := validatedWorkspace(workspace)
 	if err != nil {
-		return AgentOutcome{}, err
+		return AgentOutcome{}, "", err
 	}
 	environment, err := agentEnvironment(config)
 	if err != nil {
-		return AgentOutcome{}, err
+		return AgentOutcome{}, "", err
 	}
 
 	runContext, cancel := context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
@@ -176,18 +201,12 @@ func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string,
 		outcome.ExitCode = command.ProcessState.ExitCode()
 	}
 	if runContext.Err() != nil {
-		return outcome, errors.New("agent run exceeded its time limit")
+		return outcome, root, errors.New("agent run exceeded its time limit")
 	}
 	if runErr != nil {
-		return outcome, errors.New("agent run failed")
+		return outcome, root, errors.New("agent run failed")
 	}
-
-	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)
-	if err != nil {
-		return outcome, err
-	}
-	outcome.ChangedFiles = changed
-	return outcome, nil
+	return outcome, root, nil
 }
 
 // MaxAgentPromptBytes bounds the instruction handed to an agent.
@@ -308,10 +327,19 @@ func isDeclaredByproduct(path string, names []string) bool {
 
 func gitOutput(root string, arguments ...string) (string, error) {
 	command := exec.Command("git", append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, arguments...)...) // #nosec G204 -- fixed arguments.
-	var out bytes.Buffer
+	var out, problems bytes.Buffer
 	command.Stdout = &out
-	command.Stderr = nil
+	command.Stderr = &problems
 	if err := command.Run(); err != nil {
+		// git says why it refused on stderr ("not a git repository", a lock
+		// held by another process); without it a failure is just "exit 128".
+		detail := strings.TrimSpace(problems.String())
+		if len(detail) > 512 {
+			detail = detail[:512]
+		}
+		if detail != "" {
+			return "", fmt.Errorf("%w: %s", err, detail)
+		}
 		return "", err
 	}
 	return out.String(), nil

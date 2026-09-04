@@ -109,29 +109,33 @@ func (i *ModelInvoker) AskImpasse(
 		return ImpasseDecision{}, errors.New("impasse prompt could not be built")
 	}
 	endpoint := config.Models.Readiness.Assessor
-	response, usage, err := i.converse(ctx, endpoint, impasseSystemPrompt(), prompt, impasseJSONSchema(), maxImpasseResponseBytes)
-	if err != nil {
-		return ImpasseDecision{}, err
-	}
 	var output ModelImpasseOutput
-	if err := decodeStrictJSON([]byte(response), &output); err != nil {
-		return ImpasseDecision{}, errors.New("impasse response is invalid")
-	}
-	if len(output.Questions) == 0 {
-		return ImpasseDecision{}, errors.New("impasse response carries no questions")
-	}
-	// The dimension is taxonomy metadata nothing downstream acts on, and an
-	// impasse question is by construction a user-visible behavior choice. It
-	// is stamped here rather than requested from the model, so a mislabeled
-	// but otherwise sound question cannot be lost to its label (the first
-	// live ask died exactly that way).
-	for index := range output.Questions {
-		output.Questions[index].Dimension = "user_visible_behavior"
-	}
-	if len(output.Questions) > MaxReadinessQuestions {
-		return ImpasseDecision{}, errors.New("impasse questions exceed the limit")
-	}
-	if err := validateClarificationQuestions(output.Questions); err != nil {
+	usage, err := i.converseJSON(ctx, endpoint, impasseSystemPrompt(), prompt, impasseJSONSchema(), maxImpasseResponseBytes, func(answer []byte, _ InvocationUsage) error {
+		var decoded ModelImpasseOutput
+		if err := decodeStrictJSON(answer, &decoded); err != nil {
+			return fmt.Errorf("impasse response is invalid: %w", err)
+		}
+		if len(decoded.Questions) == 0 {
+			return errors.New("impasse response carries no questions")
+		}
+		// The dimension is taxonomy metadata nothing downstream acts on, and
+		// an impasse question is by construction a user-visible behavior
+		// choice. It is stamped here rather than requested from the model, so
+		// a mislabeled but otherwise sound question cannot be lost to its
+		// label (the first live ask died exactly that way).
+		for index := range decoded.Questions {
+			decoded.Questions[index].Dimension = "user_visible_behavior"
+		}
+		if len(decoded.Questions) > MaxReadinessQuestions {
+			return errors.New("impasse questions exceed the limit")
+		}
+		if err := validateClarificationQuestions(decoded.Questions); err != nil {
+			return err
+		}
+		output = decoded
+		return nil
+	})
+	if err != nil {
 		return ImpasseDecision{}, err
 	}
 	sealed.Outcome = ImpasseOutcomeAsk
