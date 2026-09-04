@@ -1,11 +1,11 @@
-# 調査・設計役 — 実物を計ってから、直し方を決める係 (設計書 v0.7、issue #18)
+# 調査・設計役 — 実物を計ってから、直し方を決める係 (設計書 v0.8、issue #18)
 
 発注者決定 (2026-09-04): **調査と設計は 1 つの役にする。実装は別の軽い役にする。**
 理由は一文で言える — 動いているシステムの不具合や改修では、コードを読むだけの調査は推測であって実測ではなく、推測の上に建てた設計は実装役に忠実に間違えさせる。だから「計る」と「決める」は同じ頭で連続して行い、「写す」だけを分離する。
 
 本書は #18 の受入条件 6 点を決める。実装はしない。用語は [TRUST_MODEL.md](TRUST_MODEL.md) に従う (指紋 = SHA-256、確定記録 = 自分の指紋を含む JSON)。
 
-変更履歴: v0.1 (2026-09-04) 初版 → v0.2 (同日) 独立レビュー 2 系統 (敵対レビュー BLOCKER 3 / 3 層ゲート採点 FAIL 52 点) を反映。役を「プロセスを持たないモデル呼び出し」に改め、資格情報を資源単位で定義し、設計書を納品の関所に束縛した。→ v0.3 (同日) 敵対レビューの全 24 件を照合し、v0.2 に残っていた 8 件 (DB の守りの主従・設計レビューの記録形・調査だけの依頼の終端・調査報告のレビュー・レビュー役の入力・設計役の分離・回帰表の固定場所・上限の置き場) を反映。→ v0.4 (同日) v0.2 への再評価 (敵対レビュー 2 巡目 FIXED 6 / PARTIAL 5 / 新規 8、3 層ゲート 78 点・新規 BLOCKER 1) を反映。実測の記録を連鎖値にして巡ごとの調査報告を接頭辞で検算できるようにし、カードとプロファイルを実在の仕組みに合わせ、cookie jar の扱い・会話の予算・「方針の誤り」の機械の信号を定めた。→ v0.5 (同日) v0.3 への敵対レビュー 2 巡目 (FIXED 20 / PARTIAL 4、新規 MAJOR 1 = DB ロールが関数の既定 EXECUTE と `set_config` で破れる) を反映。→ v0.6 (同日) v0.3 への 3 層ゲート再採点 (79 点・BLOCKER 2 = v0.4/v0.5 で解消済み) の残り 6 件 (巡をまたぐ予算の数え直し・手数の置き場の例外・調査だけの決め手・レビュー A の設定キー・段階 0 の件数の内訳・分離テストの名前) を反映。→ v0.7 (同日) v0.4 への敵対レビュー 3 巡目 (FIXED 15 / PARTIAL 1 / 新規 5) の残り: 進行係は終了コードを見られない (記録で分類する)・調査だけの依頼のレビュー記録の形・`investigate` カードの冪等キー・添付は 1 コメント 10 件まで・巡と件数の混同、を反映。
+変更履歴: v0.1 (2026-09-04) 初版 → v0.2 (同日) 独立レビュー 2 系統 (敵対レビュー BLOCKER 3 / 3 層ゲート採点 FAIL 52 点) を反映。役を「プロセスを持たないモデル呼び出し」に改め、資格情報を資源単位で定義し、設計書を納品の関所に束縛した。→ v0.3 (同日) 敵対レビューの全 24 件を照合し、v0.2 に残っていた 8 件 (DB の守りの主従・設計レビューの記録形・調査だけの依頼の終端・調査報告のレビュー・レビュー役の入力・設計役の分離・回帰表の固定場所・上限の置き場) を反映。→ v0.4 (同日) v0.2 への再評価 (敵対レビュー 2 巡目 FIXED 6 / PARTIAL 5 / 新規 8、3 層ゲート 78 点・新規 BLOCKER 1) を反映。実測の記録を連鎖値にして巡ごとの調査報告を接頭辞で検算できるようにし、カードとプロファイルを実在の仕組みに合わせ、cookie jar の扱い・会話の予算・「方針の誤り」の機械の信号を定めた。→ v0.5 (同日) v0.3 への敵対レビュー 2 巡目 (FIXED 20 / PARTIAL 4、新規 MAJOR 1 = DB ロールが関数の既定 EXECUTE と `set_config` で破れる) を反映。→ v0.6 (同日) v0.3 への 3 層ゲート再採点 (79 点・BLOCKER 2 = v0.4/v0.5 で解消済み) の残り 6 件 (巡をまたぐ予算の数え直し・手数の置き場の例外・調査だけの決め手・レビュー A の設定キー・段階 0 の件数の内訳・分離テストの名前) を反映。→ v0.7 (同日) v0.4 への敵対レビュー 3 巡目 (FIXED 15 / PARTIAL 1 / 新規 5) の残り: 進行係は終了コードを見られない (記録で分類する)・調査だけの依頼のレビュー記録の形・`investigate` カードの冪等キー・添付は 1 コメント 10 件まで・巡と件数の混同、を反映。→ v0.8 (同日) v0.4 への最終採点 (84 点、v0.5 相当で概算 89 点・BLOCKER 0) の残り 3 件 (userData / overrides を返す AWS API の Deny、ステージング宣言の設定キー、連鎖値の正規形) を反映。
 
 ## 0. この係が要る根拠 (実測)
 
@@ -103,7 +103,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 
 1. **資格情報が書けず、見てはいけないものを返さない** — これが本体。資源と操作の単位で列挙する。動詞の接頭辞 (get/describe/list) で分類してはいけない: `get` は Secret の中身も、オブジェクトの本文も、鍵の発行も返す
    - Kubernetes: 読み取り用 ServiceAccount の Role は **resources を列挙**する。`pods`, `pods/log`, `deployments`, `statefulsets`, `services`, `endpoints`, `events`, `ingresses` に get/list/watch。**`secrets`, `configmaps`, `serviceaccounts/token`, `pods/exec`, `pods/portforward`, `pods/attach` は含めない** (configmaps は設定に秘密が混ざる前提で除外。必要な設定値は消費側が probe の固定 argv に書く)。`pods` / `deployments` の get は pod spec の env 直書き値 (configmaps と同じ危険区分) を返し得るので、カタログの固定 argv は `-o wide` / `custom-columns` / `rollout status` のような**本文を返さない出力形**だけにし、`-o yaml` / `-o json` / `describe` はカタログに載せない。それでも残る露出 (probe の設計ミス) は 3 層目の走査だけで守る残余として受け入れる
-   - AWS: 読み取り用ロールのポリシーは Allow を `Describe*` / `List*` と、内容を返さない `Get*` (例: `cloudwatch:GetMetricData`, `elbv2:DescribeTargetHealth`) に絞り、**明示 Deny** を置く: `s3:GetObject`, `dynamodb:GetItem/BatchGetItem/Query/Scan`, `logs:GetLogEvents/FilterLogEvents/StartQuery` (ログ本文)、`secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `kms:Decrypt`, `ecr:GetAuthorizationToken`, `sts:GetSessionToken/GetFederationToken/AssumeRole`, `iam:*AccessKey*`, `rds-data:*`。`Describe*` の包括 Allow の中で設定本文を返すもの (`ecs:DescribeTaskDefinition`, `ec2:DescribeInstanceAttribute` の userData, `lambda:GetFunction`, `lambda:GetFunctionConfiguration` の環境変数) も Deny する。ログ本文が要る消費側は、本文を含まない集計 (メトリクス) か、§8 の範囲で個別に許す
+   - AWS: 読み取り用ロールのポリシーは Allow を `Describe*` / `List*` と、内容を返さない `Get*` (例: `cloudwatch:GetMetricData`, `elbv2:DescribeTargetHealth`) に絞り、**明示 Deny** を置く: `s3:GetObject`, `dynamodb:GetItem/BatchGetItem/Query/Scan`, `logs:GetLogEvents/FilterLogEvents/StartQuery` (ログ本文)、`secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `kms:Decrypt`, `ecr:GetAuthorizationToken`, `sts:GetSessionToken/GetFederationToken/AssumeRole`, `iam:*AccessKey*`, `rds-data:*`。`Describe*` の包括 Allow の中で設定本文を返すもの (`ecs:DescribeTaskDefinition`, `ecs:DescribeTasks` の overrides, `ec2:DescribeInstanceAttribute` と `ec2:DescribeLaunchTemplateVersions` と `autoscaling:DescribeLaunchConfigurations` の userData, `lambda:GetFunction`, `lambda:GetFunctionConfiguration` の環境変数) も Deny する。ログ本文が要る消費側は、本文を含まない集計 (メトリクス) か、§8 の範囲で個別に許す
    - DB: **本体 = SELECT だけを GRANT した専用ロール** (表・スキーマの所有物ゼロ、`CREATE` なし、`pg_read_server_files` 等の既定ロール非付与、`dblink` / `postgres_fdw` / `pg_read_file` 系の関数は EXECUTE を REVOKE)。**PostgreSQL は関数の EXECUTE を既定で PUBLIC に与える**ので、SELECT だけの GRANT でも `SELECT writer_fn()` (SECURITY DEFINER で書く関数) は通る。対象スキーマの全関数について `REVOKE EXECUTE … FROM PUBLIC` し、`ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` で以後の関数にも効かせる (段階 0 の試験に含める)。GRANT 先は**顧客の内容を含まない列だけを持つビュー**で、表そのものへの権限は与えない。`default_transaction_read_only` / `transaction_read_only` は誰でも `SET` で外せる (PostgreSQL の USERSET) ので、接続時に立てるが守りには数えない。段階 0 で「読み取りユーザーが `SET transaction_read_only = off` を実行できても `UPDATE` が権限エラーで失敗する」ことを実機で固定する (§10)。環境ごとのビューの違いは §8
    - HTTP: 許可ホストの列挙 (§3.2)。cookie jar の値は関所だけが持つ
 2. **形の関所** — §3.2 のカタログ検査。費用と早期停止のためで、保証の根拠ではない
@@ -120,7 +120,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 
 ### 3.5 記録 (何を計ったかが後から追えること)
 
-実測は 1 件ごとに `{id, probe id, 埋めた値, 開始/終了時刻, 終了コード, 出力本文 (上限内), 出力の指紋, 抜粋の範囲, 拒否の有無と理由}` を関所が書く。役が要約したものではなく、関所が取った生の出力。ファイルは `measurements.jsonl` (追記のみ・1 行 1 件)。各行は自分の内容の指紋に加えて**前の行までの連鎖値**を持つ (`chain_sha256 = sha256(prev_chain_sha256 + line_sha256)`、先頭は空文字から)。「先頭から N 行」が 1 つの連鎖値で検算できるので、巡をまたいで追記しても前の巡が封緘した接頭辞はそのまま検算できる (§4.1)。
+実測は 1 件ごとに `{id, probe id, 埋めた値, 開始/終了時刻, 終了コード, 出力本文 (上限内), 出力の指紋, 抜粋の範囲, 拒否の有無と理由}` を関所が書く。役が要約したものではなく、関所が取った生の出力。ファイルは `measurements.jsonl` (追記のみ・1 行 1 件)。各行は自分の内容の指紋 (`line_sha256`。既存の確定記録と同じ規約で、`line_sha256` と `chain_sha256` の 2 項目を除いた正規形 JSON から計算する) に加えて**前の行までの連鎖値**を持つ (`chain_sha256 = sha256(prev_chain_sha256 + line_sha256)`、先頭は空文字から)。「先頭から N 行」が 1 つの連鎖値で検算できるので、巡をまたいで追記しても前の巡が封緘した接頭辞はそのまま検算できる (§4.1)。
 
 ## 4. AC2 — 出力の形式
 
@@ -207,7 +207,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 
 | 環境 | 状態・設定・計測 | ログ | 保存されたデータ | 秘密 |
 |---|---|---|---|---|
-| ステージング | 可 | 可 (本文を含むものも) | 可 (ビュー経由。既定は本番と同じ内容なしビュー。消費側が「ステージングに顧客の内容は無い」と設定で宣言した場合だけ、内容列を持つビューを追加で GRANT できる) | 不可 |
+| ステージング | 可 | 可 (本文を含むものも) | 可 (ビュー経由。既定は本番と同じ内容なしビュー。消費側が「ステージングに顧客の内容は無い」と設定 `design.staging_has_no_customer_content: true` で宣言した場合だけ、内容列を持つビューを追加で GRANT できる) | 不可 |
 | 本番 | 可 | **本文を含むものは不可** (集計・件数・時刻は可) | **原則不可** (顧客の会話本文・個人情報を含む行)。件数・時刻・ID の存在確認は可 | 不可 |
 
 実現の形 (§3.3 で列挙した資格情報そのもの):
@@ -235,7 +235,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | `internal/runner/deliver.go` | 計測形の確認 (§4.3): 反映後に関所が同じ probe を実行して閾値と比べ、写真係の判定と同じ場所 (`deliverVerification`) に載せる |
 | `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` (`report_protocol.go`) と streak の扱い (`investigated` だけが streak を切る) |
 | `internal/worker/artifact.go`, `impasse.go` | 確定記録 `DesignReview` / `DesignDecision` と検算、`design-impasse-question` |
-| 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design.review_investigation`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens` |
+| 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design.review_investigation`, `design.staging_has_no_customer_content`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens` |
 | 上限の置き場 (規則) | **巡数と役の定義** (`design.*`, `agents.*`, `models.*`) は消費側設定。**手数と壁時間** (`chain.investigate.max_probes` / `max_runtime_seconds`, `apply` の `MaxRuntimeSeconds`) は runtime.json の `chain` (既存のカードの壁と同じ場所)。Hermes エージェントの手数 (`agent.max_turns`) はプロファイルが持つ (既存のレビュー役と同じ)。同じ値を 2 か所に置かない |
 | docs | TRUST_MODEL.md の登場人物表に 3 行 (調査・設計役 / 写し役 / 画面確認)、RUNTIME_POD.md の住人と回帰表 |
 
