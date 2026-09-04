@@ -1,11 +1,11 @@
-# 調査・設計役 — 実物を計ってから、直し方を決める係 (設計書 v0.4、issue #18)
+# 調査・設計役 — 実物を計ってから、直し方を決める係 (設計書 v0.5、issue #18)
 
 発注者決定 (2026-09-04): **調査と設計は 1 つの役にする。実装は別の軽い役にする。**
 理由は一文で言える — 動いているシステムの不具合や改修では、コードを読むだけの調査は推測であって実測ではなく、推測の上に建てた設計は実装役に忠実に間違えさせる。だから「計る」と「決める」は同じ頭で連続して行い、「写す」だけを分離する。
 
 本書は #18 の受入条件 6 点を決める。実装はしない。用語は [TRUST_MODEL.md](TRUST_MODEL.md) に従う (指紋 = SHA-256、確定記録 = 自分の指紋を含む JSON)。
 
-変更履歴: v0.1 (2026-09-04) 初版 → v0.2 (同日) 独立レビュー 2 系統 (敵対レビュー BLOCKER 3 / 3 層ゲート採点 FAIL 52 点) を反映。役を「プロセスを持たないモデル呼び出し」に改め、資格情報を資源単位で定義し、設計書を納品の関所に束縛した。→ v0.3 (同日) 敵対レビューの全 24 件を照合し、v0.2 に残っていた 8 件 (DB の守りの主従・設計レビューの記録形・調査だけの依頼の終端・調査報告のレビュー・レビュー役の入力・設計役の分離・回帰表の固定場所・上限の置き場) を反映。→ v0.4 (同日) v0.2 への再評価 (敵対レビュー 2 巡目 FIXED 6 / PARTIAL 5 / 新規 8、3 層ゲート 78 点・新規 BLOCKER 1) を反映。実測の記録を連鎖値にして巡ごとの調査報告を接頭辞で検算できるようにし、カードとプロファイルを実在の仕組みに合わせ、cookie jar の扱い・会話の予算・「方針の誤り」の機械の信号を定めた。
+変更履歴: v0.1 (2026-09-04) 初版 → v0.2 (同日) 独立レビュー 2 系統 (敵対レビュー BLOCKER 3 / 3 層ゲート採点 FAIL 52 点) を反映。役を「プロセスを持たないモデル呼び出し」に改め、資格情報を資源単位で定義し、設計書を納品の関所に束縛した。→ v0.3 (同日) 敵対レビューの全 24 件を照合し、v0.2 に残っていた 8 件 (DB の守りの主従・設計レビューの記録形・調査だけの依頼の終端・調査報告のレビュー・レビュー役の入力・設計役の分離・回帰表の固定場所・上限の置き場) を反映。→ v0.4 (同日) v0.2 への再評価 (敵対レビュー 2 巡目 FIXED 6 / PARTIAL 5 / 新規 8、3 層ゲート 78 点・新規 BLOCKER 1) を反映。実測の記録を連鎖値にして巡ごとの調査報告を接頭辞で検算できるようにし、カードとプロファイルを実在の仕組みに合わせ、cookie jar の扱い・会話の予算・「方針の誤り」の機械の信号を定めた。→ v0.5 (同日) v0.3 への敵対レビュー 2 巡目 (FIXED 20 / PARTIAL 4、新規 MAJOR 1 = DB ロールが関数の既定 EXECUTE と `set_config` で破れる) を反映。
 
 ## 0. この係が要る根拠 (実測)
 
@@ -94,7 +94,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 ```
 
 - `exec` は **固定 argv + 正規表現で形を縛った穴** だけ。シェルは無い (パイプ・リダイレクト・変数展開・複数コマンドは存在しない)。穴の値は正規表現に一致し、空白・制御文字・`;` を含まない
-- `sql` は関所が自分の DB ドライバで接続する (psql を起動しない。`~/.psqlrc` の類は読まれない)。**拡張プロトコルで 1 文だけ送る** (複文は構造的に送れない)。正規表現は `^\s*SELECT\b` で始まり `;` を含まない文だけ (`EXPLAIN ANALYZE` は DML を実行し得るので許さない)。接続直後に `SET transaction_read_only = on` と `statement_timeout` / `lock_timeout` を発行するが、これらはセッション設定で外せる補助であって本体ではない。**本体の守りは DB 側の権限** (§3.3)。副作用を持つ関数 (`pg_advisory_*`, `pg_notify`, `pg_terminate_backend`, `pg_cancel_backend`, `dblink*`, `lo_*`, `pg_read_*`) は関所が名前で拒否し (補助)、`pg_sleep` のような遅い文は `statement_timeout` が止める
+- `sql` は関所が自分の DB ドライバで接続する (psql を起動しない。`~/.psqlrc` の類は読まれない)。**拡張プロトコルで 1 文だけ送る** (複文は構造的に送れない)。正規表現は `^\s*SELECT\b` で始まり `;` を含まない文だけ (`EXPLAIN ANALYZE` は DML を実行し得るので許さない)。接続直後に `SET transaction_read_only = on` と `statement_timeout` / `lock_timeout` を発行するが、これらはセッション設定で外せる補助であって本体ではない。**本体の守りは DB 側の権限** (§3.3)。接続は probe ごとに使い捨て (再利用しない) で、1 文は `BEGIN READ ONLY` の中で送る。副作用を持つ関数 (`pg_advisory_*`, `pg_notify`, `pg_terminate_backend`, `pg_cancel_backend`, `dblink*`, `lo_*`, `pg_read_*`) と設定を変える手段 (`set_config`, `SET`) は関所が名前で拒否し (補助)、`pg_sleep` のような遅い文は `statement_timeout` が止める
 - `http` は関所の HTTP クライアントで、許可ホストだけ・GET/HEAD だけ・パスとクエリは probe ごとの正規表現 (`path`) に一致するものだけ・転送 (3xx) には従わない・応答本文は返さない (`returns` に書いた項目だけ)。私有アドレスとリンクローカル (169.254.0.0/16) 宛の拒否は**名前解決の後、接続する時点**で行う (DNS が私有アドレスを返す場合を含む)。認証後の計測が要るときは、関所が写真係と同じ cookie jar を**読み取り専用**で付ける: `Set-Cookie` は書き戻さない。ID 基盤 (ログイン入口) のホストは許可ホストに入れない (ID 基盤は使用のたびにセッション cookie を差し替えるので、そこへ打つと jar が死ぬ。RUNTIME_POD.md「The observation session」)。応答が jar の cookie 名に対する `Set-Cookie` を返したら、その実測を `rotated` として記録し、以後その依頼ではそのホストへ打たない。**モデルは cookie の値を見ない**
 - 出力の上限 (既定 256 KiB / 件) と時間の上限 (既定 60 秒 / 件) を probe ごとに持てる。1 依頼の実測の合計 (run dir に残す分) は 16 MiB まで。チケットへの添付は §4.4 の別上限
 - カタログ外の依頼、正規表現に合わない穴、上限超過は **実行せず、拒否として記録** する (モデルには「その形は無い」と返す)
@@ -104,7 +104,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 1. **資格情報が書けず、見てはいけないものを返さない** — これが本体。資源と操作の単位で列挙する。動詞の接頭辞 (get/describe/list) で分類してはいけない: `get` は Secret の中身も、オブジェクトの本文も、鍵の発行も返す
    - Kubernetes: 読み取り用 ServiceAccount の Role は **resources を列挙**する。`pods`, `pods/log`, `deployments`, `statefulsets`, `services`, `endpoints`, `events`, `ingresses` に get/list/watch。**`secrets`, `configmaps`, `serviceaccounts/token`, `pods/exec`, `pods/portforward`, `pods/attach` は含めない** (configmaps は設定に秘密が混ざる前提で除外。必要な設定値は消費側が probe の固定 argv に書く)。`pods` / `deployments` の get は pod spec の env 直書き値 (configmaps と同じ危険区分) を返し得るので、カタログの固定 argv は `-o wide` / `custom-columns` / `rollout status` のような**本文を返さない出力形**だけにし、`-o yaml` / `-o json` / `describe` はカタログに載せない。それでも残る露出 (probe の設計ミス) は 3 層目の走査だけで守る残余として受け入れる
    - AWS: 読み取り用ロールのポリシーは Allow を `Describe*` / `List*` と、内容を返さない `Get*` (例: `cloudwatch:GetMetricData`, `elbv2:DescribeTargetHealth`) に絞り、**明示 Deny** を置く: `s3:GetObject`, `dynamodb:GetItem/BatchGetItem/Query/Scan`, `logs:GetLogEvents/FilterLogEvents/StartQuery` (ログ本文)、`secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `kms:Decrypt`, `ecr:GetAuthorizationToken`, `sts:GetSessionToken/GetFederationToken/AssumeRole`, `iam:*AccessKey*`, `rds-data:*`。`Describe*` の包括 Allow の中で設定本文を返すもの (`ecs:DescribeTaskDefinition`, `ec2:DescribeInstanceAttribute` の userData, `lambda:GetFunction`, `lambda:GetFunctionConfiguration` の環境変数) も Deny する。ログ本文が要る消費側は、本文を含まない集計 (メトリクス) か、§8 の範囲で個別に許す
-   - DB: **本体 = SELECT だけを GRANT した専用ロール** (表・スキーマの所有物ゼロ、`CREATE` なし、`pg_read_server_files` 等の既定ロール非付与、`dblink` / `postgres_fdw` / `pg_read_file` 系の関数は EXECUTE を REVOKE)。GRANT 先は**顧客の内容を含まない列だけを持つビュー**で、表そのものへの権限は与えない。`default_transaction_read_only` / `transaction_read_only` は誰でも `SET` で外せる (PostgreSQL の USERSET) ので、接続時に立てるが守りには数えない。段階 0 で「読み取りユーザーが `SET transaction_read_only = off` を実行できても `UPDATE` が権限エラーで失敗する」ことを実機で固定する (§10)。環境ごとのビューの違いは §8
+   - DB: **本体 = SELECT だけを GRANT した専用ロール** (表・スキーマの所有物ゼロ、`CREATE` なし、`pg_read_server_files` 等の既定ロール非付与、`dblink` / `postgres_fdw` / `pg_read_file` 系の関数は EXECUTE を REVOKE)。**PostgreSQL は関数の EXECUTE を既定で PUBLIC に与える**ので、SELECT だけの GRANT でも `SELECT writer_fn()` (SECURITY DEFINER で書く関数) は通る。対象スキーマの全関数について `REVOKE EXECUTE … FROM PUBLIC` し、`ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` で以後の関数にも効かせる (段階 0 の試験に含める)。GRANT 先は**顧客の内容を含まない列だけを持つビュー**で、表そのものへの権限は与えない。`default_transaction_read_only` / `transaction_read_only` は誰でも `SET` で外せる (PostgreSQL の USERSET) ので、接続時に立てるが守りには数えない。段階 0 で「読み取りユーザーが `SET transaction_read_only = off` を実行できても `UPDATE` が権限エラーで失敗する」ことを実機で固定する (§10)。環境ごとのビューの違いは §8
    - HTTP: 許可ホストの列挙 (§3.2)。cookie jar の値は関所だけが持つ
 2. **形の関所** — §3.2 のカタログ検査。費用と早期停止のためで、保証の根拠ではない
 3. **秘密の伏せ字は関所の責任** — probe の出力を保存する前に、関所が鍵の形 (`AKIA…`, `csk-…`, `Bearer …`, `-----BEGIN … PRIVATE KEY-----`, JWT の 3 節、cookie 値) を走査し、**検出したら出力を保存せず、依頼を拒否として記録する** (伏せて保存はしない。伏せ字は漏れ検出の最終手段であって、資格情報の列挙 (1 層目) が本体)。Hermes の秘密マスク (`HERMES_REDACT_SECRETS`) は Pod では**無効化されている** (`deploy/pod/entrypoint.sh`、実装役にコードを原文で見せるため) ので、当てにしない
@@ -116,7 +116,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 読み取り用の資格情報 (AWS ロールの引き受け設定・DB の DSN・K8s の SA トークン・cookie jar) は関所のプロセス (uid 1000) だけが使う。Pod では実装役・レビュー役も uid 1000 で動いている (RUNTIME_POD.md「Credentials」: 別 UID 化は未達の Phase-3 関門、issue #23) ので、**同じ UID の別エージェントがこれらのファイルを読める** という露出は残る。本書はそれを次のように扱う:
 
 - 露出しても**書けない** (1 層目) こと、**顧客の内容と秘密を返さない** (1 層目) ことを先に成立させる。したがって漏れても「調査・設計役が見てよいもの」以上は見えない
-- #23 (エージェントの別 UID 化) を **段階 2 の前提** にする。段階 0・1 (調査モードだけ) は #23 無しで始めてよい。理由: 調査モードでは写し役も実装役も動かず、Pod で同時に走る他の役のリスクは今日と同じ
+- #23 (エージェントの別 UID 化) を **段階 2 の前提** にする。段階 0・1 (調査モードだけ) は #23 無しで始めてよい。理由: 段階 1 で同じ UID で動く他の役はレビュー A (調査報告の根拠を判定する。§5) だけで、その露出は今日のレビュー役と同じ。写し役 (リポジトリの内容から指示を受け得る役) が動き始める段階 2 から、別 UID を前提にする
 
 ### 3.5 記録 (何を計ったかが後から追えること)
 
@@ -162,19 +162,19 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 ### 4.4 頼んだ人に見えるもの
 
 - **調査報告コメント** (marker `investigation`、1 回だけ): findings の要点 (measured / inferred を明示)、unknowns、次の一手。`measurements.jsonl` は添付する (§3.3 の走査を通ったものだけ。添付前に関所がもう一度走査する)
-- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**・失敗連続保留の streak を切る) を `report_protocol` に足す。コメント本文は 16 KiB 内に収め、`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (1 件 256 KiB × 最大 20 件・合計 4 MiB。橋の添付上限 8 MiB (`internal/backlog/client.go`) の半分。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として数える (streak を切らない)
+- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**・失敗連続保留の streak を切る) を `report_protocol` に足す。コメント本文は 16 KiB 内に収め、`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (1 件 256 KiB × 最大 16 件・合計 4 MiB。橋の添付上限 8 MiB (`internal/backlog/client.go`) の半分。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として数える (streak を切らない)
 - **実装方針コメント** (既存 marker `plan`) の中身を、設計書の要約 (cause / approach / files / verification) に置き換える。**頼んだ人は、コードが書かれる前に方針を読める**。証跡 (trail、6 KiB 上限) と PR 本文にも「設計の要約」節を足す
 - 板 (状態ボード) の段階: `investigating` (調査中) / `designing` (設計中) / `design-review` (設計のレビュー中) を足す。レールの節点「調査」「設計」は受付と実装の間に置く
 
 ## 5. AC3 — 設計レビュー (コードの前に方針を止める)
 
 - レビュー役 A/B (別会社。モデルと資格情報は既存のレビュー役の設定を使うが、**プロファイルは design-review 用に別建て**: 現行の `worker.command` はプロファイルごとに `--stage review-a/b` を固定で持つため) が `design-N.json` を判定する。**記録の形は新設する** (既存の `Review` は候補の指紋と `path ∈ target_files` に束縛されているので流用できない): `DesignReview{design_sha256, reviewer_id, vendor, model, lens, verdict: pass | revise, findings[{code, section ∈ {cause, approach, files, verification, blast_radius, not_doing}, message}], review_sha256}` と `DesignDecision{design_sha256, review_sha256s[2], outcome: approved | nonconverged, decision_sha256}` (どちらも §4.1 と同じ実行への束縛の項目を持つ)。pass のとき findings は空、1 人でも revise なら不成立、という規則は既存と同じ。カードは `design-review-a` / `design-review-b` / `design-decide` で、`EnsureChain` が `needs_design` のときだけ作る。冪等キーは `<delivery>:design-review-a:d<N>` (N = 設計の巡)。行き詰まりの質問は `design-impasse-question` (design-N.json + DesignReview ×2 から作る。既存の `impasse-question` は候補前提なので別 verb)
-- **作者は自分を審判しない** を設計役にも適用する: 設計役のモデルと鍵は `separatedAgents` の対象で、設計役と同じ (baseURL, model) のレビュー役は 1 人まで。設計役の鍵はレビュー役の鍵と別に持つ (§9)
+- **作者は自分を審判しない** を設計役にも適用する: 設計役はエージェントではなくモデル呼び出し (`ModelEndpoint`) なので、`separatedAgents` (起動定義の分離) ではなく **`ModelConfig` の「実装役と同一 (baseURL, model) のレビュー役は 1 人まで」の規則を設計役にも適用**する。設計役の鍵はレビュー役の鍵と別に持つ (§9)
 - 観点 (lens) は実装レビューと分ける。設定 `models.reviewers[].design_lens`:
   - **A (根拠)**: 原因は実測に支えられているか。`inferred` だけで立っている結論はないか。計るべきで計っていないものはないか
   - **B (方針)**: 触るファイルは必要十分か。副作用の見落としは。確認方法はその変更を判定できるか。より小さい直し方はないか
 - レビュー役の入力 = `design-N.json` + `investigation-N.json` + `measurements.jsonl` (生出力つき) + 基線のリポジトリ読み取り。probe は打てない (レビュー役は計らない)
-- **調査だけの依頼にもレビュー A (根拠) を 1 巡かける** (B は不要。方針が無い)。関所の検算は「引用した実測 ID が実在し拒否でない」までで、引用の中身が主張を支えているかは A が判定する。revise なら役は報告を `investigation-N+1` として書き直す。巡数の上限は設計と同じ `design_max_rounds` を共有し、上限で pass しなければ報告はチケットに出さず `investigation_incomplete` で正直に終わる
+- **調査だけの依頼にもレビュー A (根拠) を 1 巡かける** (B は不要。方針が無い)。関所の検算は「引用した実測 ID が実在し拒否でない」までで、引用の中身が主張を支えているかは A が判定する。revise なら役は報告を `investigation-N+1` として書き直す。巡数の上限は設計と同じ `design_max_rounds` を共有し、上限で pass しなければ報告はチケットに出さず `investigation_nonconverged` で正直に終わる (手数・壁時間の尽きた `investigation_incomplete` とは別の終端。原因が違う)
 - 巡数: 消費側設定 `design_max_rounds` (既定 3。既存の `max_stages` と同じ場所に置く)。revise のとき役は既存の実測を消さず (`measurements.jsonl` は追記のみ)、**追加の実測は 1 依頼の残り予算 (60 回・30 分) の中で可** (「計るべきで計っていない」が A の観点なので、計り直せなければ応えられない)。次の巡は `investigate` カードをもう 1 回動かす (入力 = 前の巡の `design-N.json` + `DesignReview` ×2 を `previous-findings` として渡す。#11 と同じ機構)。役は `investigation-N+1.json` (接頭辞 N+1 件で封緘し直す) と `design-N+1.json` を出す。上限でも合意しなければ **正直に停止** し (終端コード `design_nonconverged`。失敗として数える)、争点を発注者への 2 択質問に変換する
 - 質問の予算は既存どおり **1 依頼あたり 2 回** で、受付・設計・実装で共有する (先に使った工程が消費する)。設計で 2 回使い切れば実装では質問できず、行き詰まりは失敗で終わる
 - 設計レビューの合格 = `design-N.json` の指紋を `design-decision.json` に封緘。以後の写し役の指示・候補の確定記録・納品ゲートがこの指紋を参照する
@@ -196,7 +196,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 ## 7. AC5 — 写し役の契約 (設計書つきの依頼)
 
 - **指示** = `DESIGN.md` (関所の描画) + 守ること。「設計書に書かれていない変更をしない」「`files[]` 以外を触らない (許可範囲をさらに狭める)」「迷ったら止まる」
-- **迷ったら止まる** の形: 写し役は run dir に `revise-design.json` (理由・どの項目か) を書いて **exit 0** で終わる (Hermes の契約では exit 0 = エージェント完了)。同じカードの封緘段 (`seal-candidate`) がこのファイルを見つけたら候補を封緘せず `design-objection.json` として確定記録にし、**カードを専用の終了コード (`ExitDesignObjection`) で終える**。進行係はこのコードを失敗ではなく「設計に戻す」と分類し、写し役のカードを退役させて設計の次の巡 (`investigate` カード N+1) を作る。実装の巡 (`implement-N`) は数えない。異議は設計の巡として `design_max_rounds` を消費する
+- **迷ったら止まる** の形: 写し役は run dir に `revise-design.json` (理由・どの項目か) を書いて **exit 0** で終わる (Hermes の契約では exit 0 = エージェント完了)。候補を封緘するカード (現行では review-a カード冒頭の `seal-candidate`) がこのファイルを見つけたら候補を封緘せず `design-objection.json` として確定記録にし、**そのカードを専用の終了コード (`ExitDesignObjection`) で終える** (写し役のカード自体は exit 0 で終わっているので、検知点は封緘するカード)。進行係はこのコードを失敗ではなく「設計に戻す」と分類し、その巡の実装・レビューのカードを退役させ、stage-N を `objection` で閉じて (候補は無い)、設計の次の巡 (`investigate` カード d<N+1>) を作る。実装の巡番号は進めない。異議は設計の巡として `design_max_rounds` を消費する
 - **モデルと手数**: 消費側設定 `agents.applier` (軽いモデル、`max_turns` 40)、カードの壁 = `ChainStage.MaxRuntimeSeconds` に 1,200 秒 (40 手 × 平均 20 秒 = 800 秒 + 封緘の余裕。カードの壁は中の予算より長くする、は `internal/runtime/chain.go` が実 2 件の死因として記録した規則)。設計なしの依頼は従来の `agents.implementer`
 - **実装後の検算 (関所)**: 候補の確定記録 `candidate.json` に `design_sha256` を入れ、**`candidate.files ⊆ design.files[]`** を封緘時と納品ゲートの両方で機械検査する。納品ゲートには `design-N.json` と `design-decision.json` を引数で渡し (`ValidatePublishGate` の引数を増やす)、候補の `design_sha256` と決定の `design_sha256` の一致・決定の `outcome = approved`・files の包含を検査する。AI に任せない
 - **実装後のレビュー (AI)**: 観点は「設計書の各項目が差分に現れているか」「余計な変更がないか」に加え、TARGET_SHAPE の 4 層緩和にある「実際に動かす」観点を**残す** (設計どおりでも動かないことはある)。方針の再審はしない (設計レビューで済んでいる)
@@ -223,17 +223,17 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 
 | 場所 | 変更 |
 |---|---|
-| `internal/runtime/chain.go` の stage 定数と `ChainStages` | `investigate` (調査報告と、設計ありなら設計書まで **1 カード** で出す。§2 の 1 役 = 1 カード), `design-review-a`, `design-review-b`, `design-decide`, `apply` を追加。`EnsureChain` は `needs_design` のときだけ設計系の 3 枚と `apply` を作る。壁時間は `investigate` **2,400 秒** (役の壁 1,800 秒 + 封緘の余裕。カードの壁は中の予算より長くする — `chain.go` が実 2 件の死因として記録) / `design-review-*` 既存のレビューと同じ / `apply` 1,200 秒 |
+| `internal/runtime/chain.go` の stage 定数と `ChainStages` | `investigate` (調査報告と、設計ありなら設計書まで **1 カード** で出す。§2 の 1 役 = 1 カード), `design-review-a`, `design-review-b`, `design-decide`, `apply` を追加。`EnsureChain` は `needs_design` のときだけ設計系の 3 枚と `apply` を作る。壁時間は `investigate` **2,400 秒** (役の壁 1,800 秒 + 封緘の余裕。カードの壁は中の予算より長くする — `chain.go` が実 2 件の死因として記録) / `design-review-*` 既存のレビューと同じ / `design-decide` 300 秒 (validate と同形の非 AI) / `apply` 1,200 秒。調査だけの依頼では `investigate` → `design-review-a` (入力は `investigation-N.json` だけ) → `design-decide` の 3 枚 |
 | `internal/runtime/config.go` `ChainProfiles` と `deploy/pod/entrypoint.sh` | `ChainProfiles` (現在 5 項目固定) に 5 項目を足す: `investigate` と `design_decide` (validate / publish と同形の非 AI プロファイル。関所のプロセスが動く)、`design_review_a` / `design_review_b` (既存のレビュー役のモデル・鍵を使い、`worker.command` に `--stage design-review-a/b` を持つ別プロファイル)、`applier` (軽いモデル、`LASSDAS_APPLIER_MODEL` / `LASSDAS_APPLIER_KEY`)。調査・設計役のモデルは消費側設定 `models.designer` と `LASSDAS_DESIGNER_KEY` |
 | `internal/attendant/budget.go` のロール表 | 調査・設計役と写し役の鍵を予算疎通に加える |
 | `internal/worker` 受付 (`readiness.go`, `intake.go`) | `needs_design`, `design_reason`, `approach_in_ticket`, `request_kind` をスキーマ版上げで追加。確認役の検算規則 |
-| `internal/worker` 新規 `probe` パッケージ | カタログの読み込みと検査、exec / sql / http の実行器、記録 (`measurements.jsonl`)、秘密走査 |
+| 新規 `internal/probe` パッケージ | カタログの読み込みと検査、exec / sql / http の実行器、記録 (`measurements.jsonl` の連鎖値)、秘密走査 |
 | `internal/worker` 新規 `investigate` | モデルの反復呼び出し (道具 1 種類)、`investigation-N.json` / `design-N.json` の確定記録と検算、`DESIGN.md` の描画 |
 | `cmd/worker` | `investigate` 副命令、`design-instruction` (写し役の指示描画)、`seal-candidate` の `design_sha256` 束縛と `revise-design.json` の扱い、`ValidatePublishGate` の files 包含検査 |
 | `cmd/worker/agent.go` | 設計レビューのプロンプト (`design_lens`)、写し役のプロンプト |
-| `internal/attendant` | 新カードの生成・退役、`ExitDesignObjection` の分類と設計巡の再開、終端 `investigated` / `design_nonconverged` / `investigation_incomplete` の扱い、板の段階 |
+| `internal/attendant` | 新カードの生成・退役、冪等キーの `:d<N>` (設計の巡) を `ParseChainCardKey` / `chainViewFor` が実装の巡と区別して読むこと、`ExitDesignObjection` の分類と設計巡の再開、終端 `investigated` / `design_nonconverged` / `investigation_nonconverged` / `investigation_incomplete` の扱い、板の段階 |
 | `internal/runner/deliver.go` | 計測形の確認 (§4.3): 反映後に関所が同じ probe を実行して閾値と比べ、写真係の判定と同じ場所 (`deliverVerification`) に載せる |
-| `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` (`report_protocol.go`) と streak の扱い |
+| `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` (`report_protocol.go`) と streak の扱い (`investigated` だけが streak を切る) |
 | `internal/worker/artifact.go`, `impasse.go` | 確定記録 `DesignReview` / `DesignDecision` と検算、`design-impasse-question` |
 | 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens` |
 | 上限の置き場 (規則) | **巡数と役の定義** (`design.*`, `agents.*`, `models.*`) は消費側設定。**手数と壁時間** (`chain.investigate.max_probes` / `max_runtime_seconds`, `apply` の `MaxRuntimeSeconds`) は runtime.json の `chain` (既存のカードの壁と同じ場所)。同じ値を両方に置かない |
@@ -243,7 +243,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 
 | 段階 | 内容 | 受入 (計れる形で) |
 |---|---|---|
-| 0 | probe 実行器・記録・秘密走査・確定記録の検算を**単体テストで固定** (稼働環境なし)。資格情報 3 本 (AWS 読み取りロール / DB 読み取りユーザーとビュー / K8s 読み取り SA) と probe カタログ。**中身を提示してから適用** | 故意の試験 10 件が全部拒否される: K8s の `secrets` get、`pods/exec`、AWS `secretsmanager:GetSecretValue`、`s3:GetObject`、DB の表への直接 SELECT、`SET transaction_read_only = off` のあとの `UPDATE`、複文 (`SELECT 1; UPDATE …`)、`EXPLAIN ANALYZE DELETE …`、`dblink`、HTTP のリンクローカル宛 |
+| 0 | probe 実行器・記録・秘密走査・確定記録の検算を**単体テストで固定** (稼働環境なし)。資格情報 3 本 (AWS 読み取りロール / DB 読み取りユーザーとビュー / K8s 読み取り SA) と probe カタログ。**中身を提示してから適用** | 故意の試験 11 件が全部拒否される: K8s の `secrets` get、`pods/exec`、AWS `secretsmanager:GetSecretValue`、`s3:GetObject`、DB の表への直接 SELECT、`SET transaction_read_only = off` のあとの `UPDATE`、複文 (`SELECT 1; UPDATE …`)、`EXPLAIN ANALYZE DELETE …`、`dblink`、SECURITY DEFINER で書く関数の `SELECT writer_fn()`、HTTP のリンクローカル宛 |
 | 1 | 調査モードだけ。調べるだけの依頼を **3 本** 流す (例: 認証後の遅延を工程ごとに計る) | 3 本すべてで調査報告がチケットに付く。findings の `measured` の 100% が実在する実測 ID を引用。probe の拒否を除く失敗 0 |
 | 2 | 設計モード + 設計レビュー + 写し役。**#23 を前提**。無害な変更依頼を **5 本** 流す | 5 本のうち、方針の誤りが実装後に見つかる件数 (§5 の 3 信号) **0**。写し役が手数上限 40 に到達した件数 **0**、手数の中央値 **20 以下**。設計 1 巡の費用が実装 1 巡の費用を超えない (実測で記録) |
 | 3 | 設計を飛ばす判定を有効化 | 直近 10 本で、飛ばした依頼の実装後差し戻しが **1 本以下**。理由が受付コメントに出る |
@@ -274,7 +274,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | 出力に鍵の形が含まれたまま保存・添付される | 秘密走査: 保存せず拒否として記録。添付前の再走査 | `internal/probe` `TestSecretShapedOutputIsRefused` |
 | `measured` の finding が実測 ID を引用していない / 引用先が拒否 / `measurements.jsonl` の指紋不一致 | investigation の検算 | `internal/worker` `TestInvestigationRequiresMeasuredEvidence` |
 | 設計書の `files[]` に許可範囲外のパス / `cause` に `measured` が無い / 文言の確認方法が変更前のファイルにある | design の検算 | `internal/worker` `TestDesignValidation` |
-| 設計レビューの記録が候補前提の `Review` 検算に落ちる / 設計役と同じモデルのレビュー役が 2 人 | `DesignReview` / `DesignDecision` の検算、`separatedAgents` | `internal/worker` `TestDesignReviewArtifacts`, `TestDesignerIsSeparatedFromReviewers` |
+| 設計レビューの記録が候補前提の `Review` 検算に落ちる / 設計役と同じモデルのレビュー役が 2 人 | `DesignReview` / `DesignDecision` の検算、`ModelConfig` の同一 (baseURL, model) 規則 | `internal/worker` `TestDesignReviewArtifacts`, `TestDesignerIsSeparatedFromReviewers` |
 | 写し役が `files[]` に無いファイルを変えた | `seal-candidate` と `ValidatePublishGate` の包含検査 | `cmd/worker` `TestSealRefusesFilesOutsideDesign`, `internal/worker` `TestPublishGateRequiresDesignSubset` |
 | `DESIGN.md` と `design-N.json` が食い違う | 描画は決定論 (同じ入力から同じ出力) をテストで固定 | `internal/worker` `TestDesignRenderingIsDeterministic` |
 | 写し役の `revise-design.json` が無視されて候補が封緘される | 封緘段のテスト | `cmd/worker` `TestSealTurnsObjectionIntoDesignRound` |
@@ -287,4 +287,4 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | `http` probe が私有アドレスに解決するホストへ接続する / jar の cookie を書き戻す / ID 基盤のホストへ打つ | 接続時の判定・読み取り専用の jar・ホストの除外 | `internal/probe` `TestHTTPProbeRefusesPrivateResolution`, `TestHTTPProbeNeverWritesJar` |
 | 写し役の異議が失敗として数えられ、設計に戻らない | `ExitDesignObjection` の分類 | `internal/attendant` `TestDesignObjectionReopensDesignRound` |
 
-稼働環境が要るのは段階 0 の「資格情報で拒否される」試験 10 件だけ。上の表は全部、稼働環境なしの単体テストで固定できる。
+稼働環境が要るのは段階 0 の「資格情報で拒否される」試験 11 件だけ。上の表は全部、稼働環境なしの単体テストで固定できる。
