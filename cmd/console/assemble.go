@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -17,12 +19,20 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runner"
+	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 type consoleServer struct {
-	config consoleConfig
-	dynamo *dynamodb.Client
-	client *http.Client
+	config        consoleConfig
+	dynamo        *dynamodb.Client
+	local         *state.LocalStore
+	runtimeConfig *runtime.Config
+	workerConfig  *worker.Config
+	hermes        *runtime.Hermes
+	client        *http.Client
 	// The tracker key's owner, read once at startup. Zero means unknown,
 	// and unknown keeps the answering write switched off.
 	keyOwnerID   int64
@@ -172,7 +182,16 @@ type ticketResponse struct {
 	AnsweringReason string `json:"answering_reason,omitempty"`
 	// QuestionCommentID is the ledger's current question comment when the
 	// run is awaiting an answer - the only comment the panel may bind to.
-	QuestionCommentID string `json:"question_comment_id,omitempty"`
+	QuestionCommentID string     `json:"question_comment_id,omitempty"`
+	RunStatus         *runStatus `json:"run_status,omitempty"`
+}
+
+type runStatus struct {
+	Now         string `json:"now"`
+	SoFar       string `json:"so_far"`
+	Next        string `json:"next"`
+	Estimate    string `json:"estimate"`
+	TerminalURL string `json:"terminal_url,omitempty"`
 }
 
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[0-9]+$`)
@@ -240,7 +259,146 @@ func (s *consoleServer) handleTicket(w http.ResponseWriter, r *http.Request) {
 			response.CurrentJobs = jobs
 		}
 	}
+	if response.Current != nil && s.local != nil {
+		response.RunStatus = s.localRunStatus(r.Context(), key, response.Current)
+	}
 	writeJSON(w, response)
+}
+
+func (s *consoleServer) localRunStatus(ctx context.Context, key string, current *overviewTicket) *runStatus {
+	runs, err := s.local.ScanRuns(ctx)
+	if err != nil {
+		return &runStatus{Now: "不明 (ledger read failed)", SoFar: "不明", Next: "不明", Estimate: "不明"}
+	}
+	var run *state.RunOverview
+	for i := range runs {
+		if runs[i].IssueKey == key || runs[i].RunID == key {
+			run = &runs[i]
+			break
+		}
+	}
+	if run == nil {
+		return nil
+	}
+	stage, cycle, review, decision := "不明", 0, "不明", run.TerminalCode
+	status := &runStatus{}
+	if run.ClaimedAt > 0 {
+		end := time.Now().UTC().UnixMilli()
+		if run.CompletedAt > 0 {
+			end = run.CompletedAt
+		}
+		status.Estimate = "残り時間は算出不能 (経過 " + time.Duration(end-run.ClaimedAt).Round(time.Second).String() + ")"
+	}
+	if s.hermes != nil {
+		cards, err := s.hermes.ListBoardTasks(ctx)
+		if err != nil {
+			stage = "不明 (kanban read failed)"
+		} else {
+			stage, cycle = selectBoardStage(cards, run.DeliveryID)
+		}
+	}
+	validatedCycle := 0
+	if s.runtimeConfig != nil && s.workerConfig != nil && run.DeliveryID != "" {
+		runDir := runtime.RunDirectory(s.runtimeConfig.Chain, run.DeliveryID)
+		history := runDir + "/history"
+		if summary, err := worker.LoadTrailSummary(history, *s.workerConfig, s.runtimeConfig.Identity.EngineSHA); err == nil {
+			parts := make([]string, 0, len(summary.Cycles))
+			for _, cycle := range summary.Cycles {
+				reviews := make([]string, 0, len(cycle.Reviews))
+				for _, item := range cycle.Reviews {
+					reviews = append(reviews, fmt.Sprintf("%s:%s 指摘%d件 %s", item.Reviewer, item.Verdict, item.Findings, time.Duration(item.DurationMillis)*time.Millisecond))
+				}
+				parts = append(parts, fmt.Sprintf("%d周目 %s", cycle.Number, strings.Join(reviews, "/")))
+			}
+			review, decision = strings.Join(parts, " | "), summary.Decision
+			if len(summary.Cycles) > 0 {
+				validatedCycle = summary.Cycles[len(summary.Cycles)-1].Number
+			}
+		} else if stage == "terminal" || run.State == "terminal" {
+			review = "不明 (sealed trail read failed)"
+		}
+		if run.State == "terminal" && run.TerminalCode == string(hook.TerminalSuccess) && validatedCycle > 0 {
+			status.TerminalURL = sealedTerminalURL(filepath.Join(runDir, runner.ChainOutcomeFile), validatedCycle, s.runtimeConfig.Identity.Repository)
+		}
+	}
+	if decision == "" {
+		decision = "進行中"
+	}
+	if run.State == "terminal" {
+		stage = "terminal"
+	}
+	status.Now = fmt.Sprintf("%s (%d周目)", stage, cycle)
+	status.SoFar = review
+	status.Next = nextRunStep(stage, decision)
+	if status.TerminalURL != "" {
+		status.Next = "完了: 最終結果を確認"
+	}
+	if status.Estimate == "" {
+		status.Estimate = "未開始"
+	}
+	return status
+}
+
+func nextRunStep(stage, decision string) string {
+	switch stage {
+	case runtime.StageImplement:
+		return "実装後にレビュー A へ進みます"
+	case runtime.StageReviewA:
+		return "レビュー A 通過後にレビュー B へ進みます"
+	case runtime.StageReviewB:
+		return "レビュー B 通過後に判定へ進みます"
+	case runtime.StageValidate:
+		return "検証通過後に納品へ進みます"
+	case runtime.StagePublish:
+		return "納品結果を封緘します"
+	case "terminal":
+		return "終了: " + decision
+	default:
+		return decision
+	}
+}
+
+func selectBoardStage(cards []runtime.BoardTask, deliveryID string) (string, int) {
+	order := map[string]int{runtime.StageImplement: 0, runtime.StageReviewA: 1, runtime.StageReviewB: 2, runtime.StageValidate: 3, runtime.StagePublish: 4}
+	stage, round, rank := "不明", 0, 99
+	for _, card := range cards {
+		delivery, candidate, candidateRound, ok := runtime.ParseChainCardKey(card.IdempotencyKey)
+		candidateRank, known := order[candidate]
+		if !ok || !known || delivery != deliveryID || card.Status == "archived" || card.Status == "done" {
+			continue
+		}
+		if candidateRound > round || candidateRound == round && candidateRank < rank {
+			stage, round, rank = candidate, candidateRound, candidateRank
+		}
+	}
+	return stage, round
+}
+
+func sealedTerminalURL(path string, validatedCycle int, repository string) string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64*1024 {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var outcome runner.ChainOutcome
+	if json.Unmarshal(raw, &outcome) != nil || outcome.Stage != validatedCycle {
+		return ""
+	}
+	value := outcome.Evidence["pull_request_url"]
+	parsed, err := url.Parse(value)
+	expectedPrefix := "/" + repository + "/pull/"
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" ||
+		!strings.HasPrefix(parsed.Path, expectedPrefix) || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return ""
+	}
+	pullID := strings.TrimPrefix(parsed.Path, expectedPrefix)
+	if _, err := strconv.ParseInt(pullID, 10, 64); err != nil || strings.Contains(pullID, "/") {
+		return ""
+	}
+	return value
 }
 
 // trackerTimeline reads every comment on the ticket and classifies the
@@ -394,6 +552,17 @@ func (s *consoleServer) workflowJobs(ctx context.Context, runID string) ([]jobNo
 // generation plus a handful of bookkeeping rows - a scan is the honest
 // simple read at this scale.
 func (s *consoleServer) scanState(ctx context.Context) ([]map[string]string, error) {
+	if s.local != nil {
+		runs, err := s.local.ScanRuns(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]map[string]string, 0, len(runs))
+		for _, run := range runs {
+			rows = append(rows, localRunRow(run))
+		}
+		return rows, nil
+	}
 	rows := make([]map[string]string, 0, 128)
 	var start map[string]types.AttributeValue
 	for {
@@ -421,6 +590,31 @@ func (s *consoleServer) scanState(ctx context.Context) ([]map[string]string, err
 		}
 		start = output.LastEvaluatedKey
 	}
+}
+
+func localRunRow(run state.RunOverview) map[string]string {
+	runID := run.IssueKey
+	if runID == "" {
+		runID = run.RunID
+	}
+	row := map[string]string{
+		"pk": run.Key, "record_type": "run", "run_id": runID, "delivery_id": run.DeliveryID,
+		"state": run.State, "terminal_code": run.TerminalCode,
+		"envelope_json": run.EnvelopeJSON, "question_record_json": run.QuestionRecordJSON,
+	}
+	if run.QuestionCommentID > 0 {
+		row["question_comment_id"] = strconv.FormatInt(run.QuestionCommentID, 10)
+	}
+	if run.QueuedAt > 0 {
+		row["queued_at"] = strconv.FormatInt(run.QueuedAt, 10)
+	}
+	if run.ClaimedAt > 0 {
+		row["claimed_at"] = strconv.FormatInt(run.ClaimedAt, 10)
+	}
+	if run.CompletedAt > 0 {
+		row["terminal_completed_at"] = strconv.FormatInt(run.CompletedAt, 10)
+	}
+	return row
 }
 
 func basePK(pk string) string {
