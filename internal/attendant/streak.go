@@ -34,6 +34,7 @@ const (
 // tickets that could not be worked.
 var streakExemptCodes = map[string]bool{
 	string(hook.TerminalSuccess):               true,
+	string(hook.TerminalInvestigated):          true,
 	string(hook.TerminalCancelled):             true,
 	string(hook.TerminalClarificationExpired):  true,
 	string(hook.TerminalClarificationRequired): true,
