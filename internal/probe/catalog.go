@@ -413,8 +413,15 @@ func (c Catalog) Resolve(request Request) (Plan, *Refusal) {
 			}))
 		}
 	}
-	if spec.Kind == KindHTTP && plan.Args["method"] == "" {
-		plan.Args["method"] = spec.Methods[0]
+	if spec.Kind == KindHTTP {
+		if plan.Args["method"] == "" {
+			plan.Args["method"] = spec.Methods[0]
+		}
+		// The path is appended to the host: without a leading slash a
+		// value could carry a port or another authority.
+		if path := plan.Args["path"]; !strings.HasPrefix(path, "/") || strings.Contains(path, "//") || strings.ContainsAny(path, "@:\\") {
+			return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q slot \"path\": must start with / and carry no authority", spec.ID)}
+		}
 	}
 	return plan, nil
 }
@@ -432,6 +439,10 @@ func slotValueProblem(value string, allowSpaces bool) string {
 		return "value is too long"
 	case strings.ContainsRune(value, ';'):
 		return "value contains a statement separator"
+	case strings.HasPrefix(value, "-"):
+		// A value starting with "-" would be read as a flag by the command
+		// it is handed to, whatever the pattern allowed.
+		return "value starts with a dash"
 	}
 	for _, r := range value {
 		if unicode.IsSpace(r) && (r != ' ' || !allowSpaces) {

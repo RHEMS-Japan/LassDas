@@ -32,9 +32,9 @@ func sealedDesign(t *testing.T, files ...string) (investigate.Design, investigat
 	for _, file := range files {
 		changes = append(changes, investigate.FileChange{Path: file, Changes: []string{"x"}})
 	}
-	design, err := investigate.NewDesign(identity, 1, investigate.ModelDesignOutput{Cause: "c", CauseEvidence: []string{"m-0001"}, Approach: "a", Files: changes,
+	design, err := investigate.NewDesign(identity, 1, investigate.ModelDesignOutput{Cause: "c", CauseEvidence: []string{"m-0001"}, Approach: "a", Alternatives: []string{"x"}, Files: changes,
 		Verification: investigate.Verification{Form: investigate.VerificationWording, Path: "/p", ExpectedText: "new"}, BlastRadius: []string{"b"}},
-		investigation, investigate.Bounds{AllowedFilePrefixes: []string{"web/"}, MaxFiles: 4, Catalog: catalog})
+		investigation, investigate.Bounds{AllowedFilePrefixes: []string{"web/"}, MaxFiles: 4, Catalog: catalog, RepoRoot: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

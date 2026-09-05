@@ -58,7 +58,7 @@ func (r AgentRun) Validate(config Config) error {
 	if err != nil {
 		return errors.New("worker configuration is invalid")
 	}
-	if r.SchemaVersion != ArtifactSchemaVersion || r.Stage < 1 || r.Stage > config.MaxStages ||
+	if r.SchemaVersion != ArtifactSchemaVersion || r.Stage < 1 || r.Stage > config.maxRunStage() ||
 		!deliveryPattern.MatchString(r.DeliveryID) || !sha256Pattern.MatchString(r.InputSHA256) ||
 		r.ConfigSHA256 != configSHA || !ValidToolSHA(r.ToolSHA) || !commitPattern.MatchString(r.BaseSHA) ||
 		r.PromptBytes > MaxAgentPromptBytes ||

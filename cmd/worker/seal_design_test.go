@@ -55,14 +55,20 @@ func sealedDesignForRun(t *testing.T, fixture agentFixture, deliveryID string, f
 		t.Fatal(err)
 	}
 	changes := make([]investigate.FileChange, 0, len(files))
+	absent := ""
 	for _, file := range files {
 		changes = append(changes, investigate.FileChange{Path: file, Changes: []string{"update the label"}})
+		if file == "client/src/label.ts" {
+			// The wording check reads the baseline: only a design that names
+			// the file carrying the old label can promise its disappearance.
+			absent = "Old label"
+		}
 	}
 	design, err := investigate.NewDesign(identity, 1, investigate.ModelDesignOutput{
-		Cause: "The label is hard-coded", CauseEvidence: []string{"m-0001"}, Approach: "Replace the label",
-		Files: changes, Verification: investigate.Verification{Form: investigate.VerificationWording, Path: "/page", ExpectedText: "Updated label", AbsentText: "Old label"},
+		Cause: "The label is hard-coded", CauseEvidence: []string{"m-0001"}, Approach: "Replace the label", Alternatives: []string{"Add a translation key"},
+		Files: changes, Verification: investigate.Verification{Form: investigate.VerificationWording, Path: "/page", ExpectedText: "Updated label", AbsentText: absent},
 		BlastRadius: []string{"the page"},
-	}, investigation, investigate.Bounds{AllowedFilePrefixes: consumer.Mode.AllowedFilePrefixes, MaxFiles: consumer.Mode.MaxFiles, Catalog: catalog})
+	}, investigation, investigate.Bounds{AllowedFilePrefixes: consumer.Mode.AllowedFilePrefixes, MaxFiles: consumer.Mode.MaxFiles, Catalog: catalog, RepoRoot: fixture.baseRoot})
 	if err != nil {
 		t.Fatal(err)
 	}

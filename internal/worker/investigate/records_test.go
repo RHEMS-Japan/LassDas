@@ -192,6 +192,9 @@ func TestDesignValidation(t *testing.T) {
 			o.Verification = Verification{Form: VerificationMeasurement, Probe: "http.timing", Args: map[string]string{"path": "/page"}, Metric: "time_total"}
 		}, "threshold"},
 		{"empty blast radius", func(o *ModelDesignOutput) { o.BlastRadius = nil }, "out of bounds"},
+		{"no alternatives", func(o *ModelDesignOutput) { o.Alternatives = nil }, "out of bounds"},
+		{"newline in cause", func(o *ModelDesignOutput) { o.Cause = "line one\n# heading" }, "invalid"},
+		{"one-character wording", func(o *ModelDesignOutput) { o.Verification.ExpectedText = "Q" }, "wording verification is invalid"},
 	}
 	for _, tc := range refused {
 		output := goodDesignOutput()
@@ -210,6 +213,19 @@ func TestDesignValidation(t *testing.T) {
 	other.Round = 2
 	if err := design.Validate(testIdentity, other, bounds); err == nil {
 		t.Error("design accepted against another round")
+	}
+	// An investigation edited after sealing, fingerprint kept, is refused.
+	edited := investigation
+	edited.Findings = append([]Finding(nil), investigation.Findings...)
+	edited.Findings[0].Evidence = []string{"m-0003"}
+	if err := design.Validate(testIdentity, edited, bounds); err == nil || !strings.Contains(err.Error(), "does not verify") {
+		t.Errorf("edited investigation accepted: %v", err)
+	}
+	if err := design.Validate(testIdentity, investigation, Bounds{AllowedFilePrefixes: bounds.AllowedFilePrefixes, Catalog: bounds.Catalog, RepoRoot: bounds.RepoRoot}); err == nil {
+		t.Error("MaxFiles 0 accepted")
+	}
+	if err := design.Validate(testIdentity, investigation, Bounds{AllowedFilePrefixes: bounds.AllowedFilePrefixes, MaxFiles: 4, Catalog: bounds.Catalog}); err == nil {
+		t.Error("wording form accepted without a working copy to check")
 	}
 	tampered := design
 	tampered.Approach = "Do something else"

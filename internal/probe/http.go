@@ -25,7 +25,7 @@ type Cookie struct {
 const (
 	httpDialTimeout   = 10 * time.Second
 	httpMaxBodyBytes  = 4 * 1024 * 1024
-	httpUserAgent     = "lassdas-probe/1"
+	httpUserAgent     = "measurement-probe/1"
 	errRedirectStatus = "redirects are not followed"
 )
 
@@ -119,6 +119,9 @@ func runHTTPWith(ctx context.Context, plan Plan, jar []Cookie, lookup resolver, 
 			}
 			if dialHost != host {
 				return nil, fmt.Errorf("dial to %q refused: not the probe's host", dialHost)
+			}
+			if port != "443" && hooks.port == "" {
+				return nil, fmt.Errorf("dial to port %s refused: probes speak https on 443 only", port)
 			}
 			addresses, err := lookup(ctx, dialHost)
 			if err != nil {

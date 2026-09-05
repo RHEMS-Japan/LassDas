@@ -23,6 +23,13 @@ const (
 // symbolic links that point outside (checked after resolution).
 func repoPath(root, relative string) (string, error) {
 	cleaned := filepath.Clean("/" + relative)
+	for _, element := range strings.Split(cleaned, string(filepath.Separator)) {
+		if element == ".git" {
+			// The repository's own metadata (remotes, credential helpers,
+			// hooks) is not the consumer's source and is never read.
+			return "", errors.New("the repository metadata is not readable")
+		}
+	}
 	full := filepath.Join(root, cleaned)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {

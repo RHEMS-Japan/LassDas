@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -81,6 +82,12 @@ func measurementID(n int) string { return fmt.Sprintf("m-%04d", n) }
 // Append assigns the id, computes the fingerprints and writes one line.
 func (r *Recorder) Append(measurement Measurement) (Measurement, error) {
 	measurement.ID = measurementID(r.count + 1)
+	// JSON can carry only valid UTF-8: an output cut inside a multibyte
+	// character would be escaped on the way out and come back different,
+	// and the line's fingerprint would never re-derive. Normalise first,
+	// hash what is stored.
+	measurement.Output = strings.ToValidUTF8(measurement.Output, "\uFFFD")
+	measurement.Reason = strings.ToValidUTF8(measurement.Reason, "\uFFFD")
 	measurement.OutputSHA256 = digestHex([]byte(measurement.Output))
 	measurement.LineSHA256, measurement.ChainSHA256 = "", ""
 	encoded, err := json.Marshal(measurement)
@@ -123,6 +130,12 @@ func digestHex(value []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// maxLineBytes bounds one stored line: the largest permitted output
+// (4 × DefaultMaxOutputBytes) escaped at the worst JSON ratio (6 ×) plus
+// the record's own fields. A writer can never produce a line the reader
+// refuses.
+const maxLineBytes = 4*DefaultMaxOutputBytes*6 + 64*1024
+
 // ErrChainBroken reports a line whose fingerprint or chain value does not
 // re-derive: the file was edited, reordered or truncated in the middle.
 var ErrChainBroken = errors.New("measurements chain is broken")
@@ -161,7 +174,7 @@ func ReadPrefix(path string, n int) ([]Measurement, error) {
 	defer file.Close()
 	var out []Measurement
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*DefaultMaxOutputBytes)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
 	for scanner.Scan() && len(out) < n {
 		var measurement Measurement
 		if err := json.Unmarshal(scanner.Bytes(), &measurement); err != nil {
@@ -176,7 +189,7 @@ func ReadPrefix(path string, n int) ([]Measurement, error) {
 // chain, and stops after limit lines (limit < 0 walks everything).
 func verifyChain(reader io.Reader, limit int) (int, string, error) {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*DefaultMaxOutputBytes)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
 	count, chain := 0, ""
 	for scanner.Scan() {
 		if limit >= 0 && count >= limit {

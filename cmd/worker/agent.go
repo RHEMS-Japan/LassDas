@@ -191,26 +191,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 
 	// The reviewer is not told which files it may touch, because it is not
 	// meant to touch any; a review that edits the tree is rejected below.
-	//
-	// A failed attempt that died fast is retried on a fresh conversation
-	// (the upstream lottery - see worker.ReviewAttemptLimit); one that
-	// burned real time is not, so the stage's worst case stays inside the
-	// job's budget. Every failed attempt's tail goes to the job log, the
-	// final one included, so nothing is masked.
-	outcome, runErr := worker.RunReviewingAgent(ctx, agent, *repoRoot, prompt)
-	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
-		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
-		select {
-		case <-ctx.Done():
-			attempt = worker.ReviewAttemptLimit
-			continue
-		case <-time.After(reviewRetryPause):
-		}
-		outcome, runErr = worker.RunReviewingAgent(ctx, agent, *repoRoot, prompt)
-	}
-	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
-	}
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt)
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: candidate.Stage,
 		DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
@@ -252,6 +233,31 @@ func runAgentReview(ctx context.Context, args []string) error {
 		return errors.New("review artifact could not be written")
 	}
 	return nil
+}
+
+// runReviewingAgentWithRetries launches a reviewing agent and retries a
+// failed attempt that died fast on a fresh conversation (the upstream
+// lottery - see worker.ReviewAttemptLimit); one that burned real time is
+// not retried, so the stage's worst case stays inside the job's budget.
+// Every failed attempt's tail goes to the job log, the final one included,
+// so nothing is masked. The design reviewers share it: they are the same
+// launch judging a different subject.
+func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig, repoRoot, prompt string) (worker.AgentOutcome, error) {
+	outcome, runErr := worker.RunReviewingAgent(ctx, agent, repoRoot, prompt)
+	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
+		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
+		select {
+		case <-ctx.Done():
+			attempt = worker.ReviewAttemptLimit
+			continue
+		case <-time.After(reviewRetryPause):
+		}
+		outcome, runErr = worker.RunReviewingAgent(ctx, agent, repoRoot, prompt)
+	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
+	}
+	return outcome, runErr
 }
 
 // reviewAgentPrompt states what to judge and the exact shape of the answer.
@@ -425,7 +431,9 @@ const maxPromptFindingsBytes = 16 * 1024
 // boundedFindingsJSON renders the previous rounds' findings within the byte
 // budget, dropping objections from the tail — deterministically — when they
 // do not fit, and reporting how many were dropped so the instruction says so.
-func boundedFindingsJSON(findings []worker.ModelFinding, budget int) (string, int) {
+// It is generic over the finding shape: a design review's findings travel
+// to the next design round the same way.
+func boundedFindingsJSON[T any](findings []T, budget int) (string, int) {
 	for kept := len(findings); kept > 0; kept-- {
 		encoded, err := json.Marshal(findings[:kept])
 		if err == nil && len(encoded) <= budget {
