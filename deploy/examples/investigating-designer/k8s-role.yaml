@@ -1,0 +1,46 @@
+# Read-only Kubernetes identity for the investigating designer
+# (docs/INVESTIGATING_DESIGNER.md §3.3, layer 1).
+#
+# Resources are listed one by one. Nothing is granted by verb prefix:
+# `get` on a Secret returns the secret, so `secrets`, `configmaps`,
+# `serviceaccounts/token`, `pods/exec`, `pods/portforward` and
+# `pods/attach` are absent on purpose. Bind the Role per namespace the
+# role may look at; there is no ClusterRole.
+#
+# Replace <consumer-namespace>. Nothing else is instance-specific.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lassdas-investigator
+  namespace: <consumer-namespace>
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lassdas-investigator-read
+  namespace: <consumer-namespace>
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lassdas-investigator-read
+  namespace: <consumer-namespace>
+subjects:
+  - kind: ServiceAccount
+    name: lassdas-investigator
+    namespace: <consumer-namespace>
+roleRef:
+  kind: Role
+  name: lassdas-investigator-read
+  apiGroup: rbac.authorization.k8s.io

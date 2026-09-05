@@ -301,6 +301,21 @@ counts; the evidence is the one observation that passed. Only the page's
 refusal is waited out — the tool tells a refused login (exit 4) and every
 other failure (exit 1) apart from it (exit 3), and those return at once.
 
+## The investigating designer's identities
+
+The investigating designer (docs/INVESTIGATING_DESIGNER.md) is not a
+resident and not an agent: the runner's `investigate` card drives a model
+call whose only tool is `probe`, and the kernel executes each probe with
+three read-only identities — a namespaced Kubernetes ServiceAccount, an
+AWS role with an explicit Deny list, and a PostgreSQL login that can
+`SELECT` from content-free views and call no function. Their shapes live
+in `deploy/examples/investigating-designer/`; the consumer applies them
+and records the eleven stage-0 refusals listed there before the role is
+enabled. The kernel process alone holds the kubeconfig context, the AWS
+profile and the DSN; until the agents run under their own UID (#23) the
+exposure is bounded by what the identities allow, which is nothing
+writable and nothing secret.
+
 ## Release discipline: the regression set
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
@@ -328,6 +343,7 @@ means adding a row here and the test it names.
 | The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
+| A read-only identity that is read-only in name only (a `get` that returns a Secret, a `SELECT` that calls a writer function, a session that switches `transaction_read_only` off) | not a test: the eleven stage-0 refusals in `deploy/examples/investigating-designer/README.md`, recorded per consumer before the role is enabled; rows 7, 8 and 11 become `internal/probe` tests with the probe package | design review, 2026-09-04 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
 | A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
 
