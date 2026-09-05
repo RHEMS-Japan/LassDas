@@ -515,7 +515,7 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// is asked once more by converseTurn (live 2026-09-05: one such
 		// verdict ended a seven-measurement round as model_failed).
 		if output.Choices[0].FinishReason == ChatFinishContentFilter {
-			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, output.Choices[0].FinishReason)
+			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, ChatFinishContentFilter)
 		}
 		return "", InvocationUsage{}, errors.New(
 			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)

@@ -46,6 +46,10 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 		output := chatOutput(strings.TrimPrefix(answer, contentFilterMarker))
 		output.Choices[0].FinishReason = ChatFinishContentFilter
 		return output, nil
+	case strings.HasPrefix(answer, lengthMarker):
+		output := chatOutput(strings.TrimPrefix(answer, lengthMarker))
+		output.Choices[0].FinishReason = "length"
+		return output, nil
 	}
 	return chatOutput(answer), nil
 }
@@ -58,6 +62,7 @@ const (
 	noUsageMarker        = "\x00nousage\x00"
 	emptyContentMarker   = "\x00empty\x00"
 	contentFilterMarker  = "\x00filtered\x00"
+	lengthMarker         = "\x00length\x00"
 )
 
 func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, string) {
@@ -349,5 +354,14 @@ func TestInvestigateAsksAgainOnceAfterAContentFilterVerdict(t *testing.T) {
 	invoker, _ = NewModelInvoker(api)
 	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseRefused) || len(api.requests) != 2 || !strings.Contains(err.Error(), "content_filter") {
 		t.Fatalf("two refused turns in a row: err = %v after %d requests, want the refusal named after 2", err, len(api.requests))
+	}
+
+	// A length cutoff is not asked again: the same request cannot give it
+	// more room, so it travels after exactly one request, named.
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{lengthMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err == nil || len(api.requests) != 1 || !strings.Contains(err.Error(), "finish_reason=length") {
+		t.Fatalf("a length cutoff: err = %v after %d requests, want one request and the cutoff named", err, len(api.requests))
 	}
 }
