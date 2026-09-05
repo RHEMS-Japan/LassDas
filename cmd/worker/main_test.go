@@ -216,12 +216,47 @@ func TestRunDoesNotEchoRejectedInput(t *testing.T) {
 
 func runCLITestGit(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+	// No background maintenance: after a commit, git starts a detached
+	// `maintenance run --auto`, which takes .git/objects/maintenance.lock
+	// and removes it when it finishes — while the test copies or walks the
+	// tree. maintenance.auto=false keeps that child from starting (the
+	// switch git consults); gc.auto=0 is the same guard for older git.
+	command := exec.Command("git", append([]string{"-C", root, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", arguments, err, output)
 	}
 	return string(output)
+}
+
+// copyWorkingTree copies a repository's working tree, leaving .git behind:
+// the copy stands in for the base the agent started from, and nothing in it
+// is read through git.
+func copyWorkingTree(t *testing.T, source, destination string) {
+	t.Helper()
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" && relative != "." {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(destination, relative), 0o750)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(destination, relative), content, 0o600)
+	})
+	if err != nil {
+		t.Fatalf("base copy failed: %v", err)
+	}
 }
 
 // A requester who omits the target file must reach the pipeline: the file is

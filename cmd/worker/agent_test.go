@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,14 +95,13 @@ func newTunedAgentFixture(t *testing.T, implementerBody, reviewerBody string, tu
 	runCLITestGit(t, repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture")
 
 	// The base the agent started from is kept out of its reach, which is where
-	// the before-bytes of every change are read from.
+	// the before-bytes of every change are read from. Only the working tree
+	// is copied: git's background maintenance writes and removes lock files
+	// under .git after a commit, and a whole-repository copy racing it
+	// failed on the hosted runner (`cp: cannot stat .git/objects/maintenance.lock`,
+	// three CI runs on 2026-09-05).
 	baseRoot := filepath.Join(directory, "base")
-	if output, err := exec.Command("cp", "-R", repoRoot, baseRoot).CombinedOutput(); err != nil {
-		t.Fatalf("base copy failed: %v: %s", err, output)
-	}
-	if err := os.RemoveAll(filepath.Join(baseRoot, ".git")); err != nil {
-		t.Fatal(err)
-	}
+	copyWorkingTree(t, repoRoot, baseRoot)
 
 	return agentFixture{
 		directory: directory, configPath: configPath, draftPath: draftPath, repoRoot: repoRoot,
