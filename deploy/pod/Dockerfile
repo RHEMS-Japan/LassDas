@@ -45,11 +45,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Read-only observation tools for the investigating designer's exec probes
 # (docs/INVESTIGATING_DESIGNER.md §3.2): kubectl and the AWS CLI, pinned by
-# version and checksum (about 290 MB together). The image is linux/arm64
+# version and checksum (about 310 MB together). The image is linux/arm64
 # (the release script builds that platform); the guard makes any other
-# architecture fail here rather than at the first probe. Neither tool holds a credential: the identities
-# reach them through the kubeconfig and the role pointers the kernel passes
-# to exec probes (internal/probe ExecEnvironmentNames).
+# architecture fail here rather than at the first probe. Neither tool holds
+# a credential: the identities reach them through the kubeconfig and the
+# role pointers the kernel passes to exec probes (internal/probe
+# ExecEnvironmentNames).
 RUN { test "$(uname -m)" = "aarch64" || { echo "deploy/pod/Dockerfile builds linux/arm64 only (kubectl and the AWS CLI are pinned for arm64)" >&2; exit 1; }; } \
     && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/arm64/kubectl" \
     && echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - \
