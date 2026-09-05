@@ -69,6 +69,17 @@ type ChatChoice struct {
 	Message      ChatMessage `json:"message"`
 }
 
+// ErrModelResponseMetadata and ErrModelResponseContent name a response the
+// gateway returned in one piece but out of shape: a usage block whose counts
+// are missing or do not add up, or a choice that is not one assistant
+// message. A caller that holds an unchanged conversation may ask the same
+// turn once more; the investigating designer does (live 2026-09-05: one
+// such response ended an 18-probe investigation as model_failed).
+var (
+	ErrModelResponseMetadata = errors.New("model response metadata is invalid")
+	ErrModelResponseContent  = errors.New("model response content is invalid")
+)
+
 // ChatResponse is the subset of an OpenAI-compatible chat completions
 // response the pipeline consumes and verifies.
 type ChatResponse struct {
@@ -442,12 +453,18 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	if output == nil {
 		return "", InvocationUsage{}, errors.New("model invocation failed")
 	}
-	if output.Usage == nil || output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||
+	if output.Usage == nil {
+		return "", InvocationUsage{}, fmt.Errorf("%w (no usage)", ErrModelResponseMetadata)
+	}
+	if output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||
 		output.Usage.TotalTokens <= 0 || output.Usage.PromptTokens+output.Usage.CompletionTokens != output.Usage.TotalTokens {
-		return "", InvocationUsage{}, errors.New("model response metadata is invalid")
+		// The three counts are the only upstream values named here: numbers
+		// the spend record needs and nothing the transport could smuggle.
+		return "", InvocationUsage{}, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", ErrModelResponseMetadata,
+			output.Usage.PromptTokens, output.Usage.CompletionTokens, output.Usage.TotalTokens)
 	}
 	if len(output.Choices) != 1 || output.Choices[0].Message.Role != "assistant" {
-		return "", InvocationUsage{}, errors.New("model response content is invalid")
+		return "", InvocationUsage{}, ErrModelResponseContent
 	}
 	if output.Choices[0].FinishReason != ChatFinishStop {
 		// The finish reason is a provider enum, safe to echo, and it is the
