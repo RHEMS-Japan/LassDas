@@ -1,6 +1,7 @@
 package attendant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
