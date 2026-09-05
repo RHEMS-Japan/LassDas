@@ -34,3 +34,14 @@ func TestMeasurementVerificationIsSkippedWithoutADesign(t *testing.T) {
 		t.Errorf("no design: checked %v err %v", checked, err)
 	}
 }
+
+func TestMeasurementCheckFilesLiveUnderTheWorkspace(t *testing.T) {
+	p := &Pipeline{Workspace: t.TempDir()}
+	if got := p.stageFile("history/stage-1", "staging-measurement-check.json"); got != p.path("history/stage-1/staging-measurement-check.json") {
+		t.Errorf("relative stage dir resolved to %q", got)
+	}
+	abs := t.TempDir()
+	if got := p.stageFile(abs, "x.json"); got != abs+"/x.json" {
+		t.Errorf("absolute stage dir resolved to %q", got)
+	}
+}

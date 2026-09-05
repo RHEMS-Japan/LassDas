@@ -77,3 +77,34 @@ func TestPlanHeadlineFollowsTheRequestKind(t *testing.T) {
 		t.Errorf("plain headline: %s", plain)
 	}
 }
+
+func TestDeliverCommentsCarryTheMeasurement(t *testing.T) {
+	line := &MeasurementLine{Probe: "http.timing", Metric: "time_total", Threshold: 3, Value: 0.412, Pass: true}
+	staging := DeliverStagingContent("run-1", DeliverStagingReport{Verdict: "pass", ScreenChecked: true, GoDeadlineDays: 3, Measurement: line})
+	if !strings.Contains(staging, "反映後の計測: http.timing の time_total = 0.412（閾値 3 以下）→ 合格") {
+		t.Errorf("staging pass lacks the measurement line: %s", staging)
+	}
+	failed := DeliverStagingContent("run-1", DeliverStagingReport{Verdict: "measure_failed", Measurement: &MeasurementLine{Probe: "http.timing", Metric: "time_total", Threshold: 3, Value: 4.2, Detail: "time_total = 4.2 が閾値 3 を超えています"}})
+	for _, want := range []string{"設計書が約束した計測が閾値を満たしませんでした", "→ 不合格", "計測が不合格"} {
+		if !strings.Contains(failed, want) {
+			t.Errorf("staging measure_failed lacks %q: %s", want, failed)
+		}
+	}
+	if strings.Contains(failed, "工程が結果を残さず終了") {
+		t.Error("measure_failed fell into the default headline")
+	}
+	release := DeliverReleaseContent("run-1", DeliverReleaseReport{Verdict: "measure_failed", Measurement: &MeasurementLine{Probe: "http.timing", Metric: "time_total", Threshold: 3, Value: 5}})
+	if !strings.Contains(release, "計測は閾値超過") || strings.Contains(release, "工程が結果を残さず終了") {
+		t.Errorf("release measure_failed: %s", release)
+	}
+}
+
+func TestDesignCommentReusesThePlanStopSentence(t *testing.T) {
+	content := DesignCommentContent("run-1", DesignFacts{Round: 2, Cause: "c", Approach: "a", Files: []string{"web/x"}, Verification: "v", BlastRadius: []string{"b"}})
+	if !strings.Contains(content, planStopSentence) || strings.Contains(content, "カードが始まる前までに") {
+		t.Errorf("design comment promises its own stop gate: %s", content)
+	}
+	if !strings.Contains(content, "設計 2 巡目") {
+		t.Errorf("design comment does not name its round: %s", content)
+	}
+}

@@ -113,7 +113,7 @@ func (p *Pipeline) measurementVerification(ctx context.Context, stageDir, phase 
 		}
 	}
 	encoded, _ := json.MarshalIndent(check, "", "  ")
-	if err := os.WriteFile(filepath.Join(stageDir, phase+"-measurement-check.json"), append(encoded, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(p.stageFile(stageDir, phase+"-measurement-check.json"), append(encoded, '\n'), 0o600); err != nil {
 		return true, false, "", err
 	}
 	return true, check.Pass, check.Detail, nil
@@ -163,7 +163,7 @@ func observationJarFromFiles(seed, state string) []probe.Cookie {
 // fillMeasurement copies the sealed measurement check, when one was made,
 // into the report next to the screen check.
 func (p *Pipeline) fillMeasurement(report *DeliverReport, stageDir, phase string) {
-	raw, err := os.ReadFile(filepath.Join(stageDir, phase+"-measurement-check.json"))
+	raw, err := os.ReadFile(p.stageFile(stageDir, phase+"-measurement-check.json"))
 	if err != nil {
 		return
 	}
@@ -191,4 +191,14 @@ func (p *Pipeline) sealMeasurementFailure(stageDir, phase, detail string) error 
 		p.fillObservation(&report, stageDir, "production", DeliverProductionVisibleFile, DeliverProductionShotFile)
 	}
 	return p.sealDeliverReport(report)
+}
+
+// stageFile resolves a file under the stage directory the deliver verbs
+// pass around, which is workspace-relative (like every other deliver
+// artifact) unless a caller already made it absolute.
+func (p *Pipeline) stageFile(stageDir, name string) string {
+	if filepath.IsAbs(stageDir) {
+		return filepath.Join(stageDir, name)
+	}
+	return p.path(filepath.Join(stageDir, name))
 }

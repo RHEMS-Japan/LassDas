@@ -316,12 +316,24 @@ func nextDesignRound(
 // attachments per comment; docs/INVESTIGATING_DESIGNER.md §4.4).
 const maxAttachedMeasurements = 9
 
-// maxMeasurementAttachmentBytes is the per-file cap of §4.4 (256 KiB);
-// maxMeasurementsFileAttachmentBytes is the tracker's own per-file limit.
-const (
-	maxMeasurementAttachmentBytes      = 256 * 1024
-	maxMeasurementsFileAttachmentBytes = 8 * 1024 * 1024
-)
+// maxMeasurementAttachmentBytes is the per-file cap of §4.4 (256 KiB).
+const maxMeasurementAttachmentBytes = 256 * 1024
+
+// measurementsIndex renders the sealed measurements without their outputs,
+// one JSON line each, for the requester's attachment.
+func measurementsIndex(measurements []probe.Measurement) []byte {
+	var b bytes.Buffer
+	for _, measurement := range measurements {
+		measurement.Output = ""
+		encoded, err := json.Marshal(measurement)
+		if err != nil {
+			continue
+		}
+		b.Write(encoded)
+		b.WriteByte('\n')
+	}
+	return b.Bytes()
+}
 
 // postDesignComments shows the requester what the round produced: the
 // investigation report (measurements attached) once it is sealed, and the
@@ -408,12 +420,17 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 		return nil, 0
 	}
 	var ids []int64
-	if raw, err := os.ReadFile(path); err == nil {
-		if kind, found := probe.SecretShaped(string(raw), nil); found {
-			logger.Error("measurements file not attached: it carries a secret shape", "kind", kind)
-		} else if len(raw) > maxMeasurementsFileAttachmentBytes {
-			logger.Error("measurements file not attached: larger than the attachment limit", "bytes", len(raw))
-		} else if id, err := services.Backlog.UploadAttachment(ctx, "measurements.jsonl", raw); err == nil {
+	// The attached measurements file is the index: every line without its
+	// output (ids, probes, arguments, times, fingerprints, refusals). The
+	// outputs the report cites travel as their own files; the full file
+	// stays in the run directory. This keeps the index under the per-file
+	// cap however large the outputs were.
+	if index := measurementsIndex(measurements); len(index) > 0 {
+		if kind, found := probe.SecretShaped(string(index), nil); found {
+			logger.Error("measurements index not attached: it carries a secret shape", "kind", kind)
+		} else if len(index) > maxMeasurementAttachmentBytes {
+			logger.Error("measurements index not attached: larger than the per-file cap", "bytes", len(index))
+		} else if id, err := services.Backlog.UploadAttachment(ctx, "measurements.jsonl", index); err == nil {
 			ids = append(ids, id)
 		}
 	}

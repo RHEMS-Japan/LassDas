@@ -45,6 +45,34 @@ type DeliverStagingReport struct {
 	// reference path's deploy-only pass; the headline must never claim a
 	// screen check that did not happen.
 	ScreenChecked bool
+	// Measurement is the design's measurement promise judged after the
+	// deployment, when the design made one.
+	Measurement *MeasurementLine
+}
+
+// MeasurementLine is what the requester reads of a post-deployment
+// measurement: what was measured, the threshold, the value, the verdict.
+type MeasurementLine struct {
+	Probe     string
+	Metric    string
+	Threshold float64
+	Value     float64
+	Pass      bool
+	Detail    string
+}
+
+func (m *MeasurementLine) render() string {
+	if m == nil {
+		return ""
+	}
+	verdict := "合格"
+	if !m.Pass {
+		verdict = "不合格"
+	}
+	if m.Detail != "" && !m.Pass {
+		return fmt.Sprintf("反映後の計測: %s の %s = %g（閾値 %g 以下）→ %s（%s）\n", m.Probe, m.Metric, m.Value, m.Threshold, verdict, m.Detail)
+	}
+	return fmt.Sprintf("反映後の計測: %s の %s = %g（閾値 %g 以下）→ %s\n", m.Probe, m.Metric, m.Value, m.Threshold, verdict)
 }
 
 // DeliverStagingContent renders the staging report with the Go
@@ -65,6 +93,8 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		builder.WriteString("【ステージング反映できず】ステージングへの自動マージが完了しませんでした。\n\n")
 	case "deploy_failed":
 		builder.WriteString("【ステージング反映が未確認】マージ後、ステージングの自動デプロイの完了を確認できませんでした。\n\n")
+	case "measure_failed":
+		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、設計書が約束した計測が閾値を満たしませんでした。本番反映は行えません。\n\n")
 	case "observe_failed":
 		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、画面の自動確認が合格しませんでした。本番反映は行えません。\n\n")
 	case "observe_blocked":
@@ -85,6 +115,7 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 	if report.AbsentText != "" {
 		fmt.Fprintf(&builder, "消えているべき表示: 「%s」\n", report.AbsentText)
 	}
+	builder.WriteString(report.Measurement.render())
 	if report.Detail != "" {
 		fmt.Fprintf(&builder, "補足: %s\n", report.Detail)
 	}
@@ -118,6 +149,12 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.Operation = "内容に問題がなければ「Go」とコメント。反映しない場合は何もしないでください"
 		facts.NextEvent = fmt.Sprintf("「Go」で本番反映が始まります（%d 日以内にない場合、本番反映は行わず終了します）", report.GoDeadlineDays)
 		facts.Production = "未変更（Go があるまで本番には反映されません）"
+	case report.Verdict == "measure_failed":
+		facts.State = "ステージング反映済み・計測が不合格"
+		facts.NextActor = "依頼者"
+		facts.Operation = "計測値と閾値を確認し、必要なら直し方を変えて再度起票してください"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更"
 	case report.Verdict == "deploy_failed" || report.Verdict == "merge_unverified":
 		// The staging state itself needs an operator's eyes; the requester
 		// has nothing to fix.
@@ -208,6 +245,7 @@ type DeliverReleaseReport struct {
 	PullRequestURL     string
 	Detail             string
 	ScreenshotAttached bool
+	Measurement        *MeasurementLine
 }
 
 // DeliverReleaseContent renders the final production report.
@@ -220,6 +258,8 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		builder.WriteString("【本番反映できず】Go を受けましたが、本番反映の準備が関所で止まりました。ステージングが確認時点から進んだ場合は、再確認からやり直す必要があります。\n\n")
 	case "deploy_failed":
 		builder.WriteString("【本番反映が未確認】本番ブランチへの反映は行われましたが、本番の自動デプロイの完了を確認できませんでした。\n\n")
+	case "measure_failed":
+		builder.WriteString("【本番反映済み・計測は閾値超過】本番への反映は完了しましたが、設計書が約束した計測が閾値を満たしませんでした。自動的な追加変更やロールバックは行っていません。お手数ですが状態の確認をお願いします。\n\n")
 	case "observe_failed":
 		builder.WriteString("【本番反映済み・画面確認は不合格】本番への反映は完了しましたが、本番画面の自動確認が合格しませんでした。お手数ですが人の目での確認をお願いします。\n\n")
 	case "observe_blocked":
@@ -239,6 +279,7 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 	if report.PullRequestURL != "" {
 		fmt.Fprintf(&builder, "反映内容 (昇格 PR): %s\n", report.PullRequestURL)
 	}
+	builder.WriteString(report.Measurement.render())
 	if report.Detail != "" {
 		fmt.Fprintf(&builder, "補足: %s\n", report.Detail)
 	}
@@ -276,6 +317,11 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		facts.NextActor = "なし（停止の確認報告です）"
 		facts.Operation = "対応不要。本番反映が必要になったら再度起票してください"
 		facts.Production = "未変更（ステージングには反映済み）"
+	case "measure_failed":
+		facts.State = "本番反映済み・計測は閾値超過"
+		facts.NextActor = "依頼者"
+		facts.Operation = "本番の状態を確認し、必要なら直し方を変えて再度起票してください"
+		facts.Production = "反映済み（計測は閾値を超過）"
 	case "observe_failed":
 		facts.State = "本番反映済み・画面は要確認"
 		facts.NextActor = "依頼者"

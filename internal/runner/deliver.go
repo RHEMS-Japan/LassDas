@@ -604,6 +604,11 @@ func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir stri
 		PromotionHold: "このチケットには画面に表示される内容の約束が無く、本番反映に必要な画面確認の合格証拠を作れないため、自動の本番反映は行いません。" +
 			"ステージングでの動作確認は人の目で行ってください。本番へ反映する場合は、運用の昇格手順で反映してください。",
 	}
+	p.fillMeasurement(&report, stageDir, "staging")
+	if report.Measurement != nil && report.Measurement.Pass {
+		report.PromotionHold = "このチケットには画面に表示される内容の約束が無いため画面確認は行っていませんが、設計書が約束した計測は合格しました。" +
+			"本番反映に必要な画面確認の合格証拠は作れないため、自動の本番反映は行いません。本番へ反映する場合は、運用の昇格手順で反映してください。"
+	}
 	var cookieNote string
 	if repository, err := p.readJSONField(stageDir+"/ticket.json", "repository"); err == nil && repository != "" {
 		if origin, entry, err := consumerObservation(p.Config.ConsumerConfigPath, repository, "staging"); err == nil {

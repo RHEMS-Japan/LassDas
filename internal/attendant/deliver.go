@@ -331,6 +331,7 @@ func reportDeliverStaging(ctx context.Context, config runtime.Config, services *
 		GoDeadlineDays: int(config.Chain.Deliver.GoWait().Hours() / 24),
 		PromotionHold:  report.PromotionHold,
 		ScreenChecked:  report.ScreenChecked,
+		Measurement:    measurementLine(report.Measurement),
 	}
 	attachments := deliverScreenshotAttachment(ctx, services, run, runDir, runner.DeliverStagingShotFile, "stg-"+run.IssueKey+".png", &rendered.ScreenshotAttached, logger)
 	content := hook.DeliverStagingContent(run.RunID, rendered)
@@ -353,6 +354,7 @@ func reportDeliverRelease(ctx context.Context, services *runtime.Services, herme
 	rendered := hook.DeliverReleaseReport{
 		Verdict: report.Verdict, Block: report.Block, TargetURL: report.TargetURL,
 		PullRequestURL: report.PullRequestURL, Detail: report.Detail,
+		Measurement: measurementLine(report.Measurement),
 	}
 	attachments := deliverScreenshotAttachment(ctx, services, run, runDir, runner.DeliverProductionShotFile, "prod-"+run.IssueKey+".png", &rendered.ScreenshotAttached, logger)
 	content := hook.DeliverReleaseContent(run.RunID, rendered)
@@ -457,4 +459,13 @@ func deliverPreview(raw json.RawMessage) hook.PromotionPreview {
 		preview.Titles = append(preview.Titles, commit.Title)
 	}
 	return preview
+}
+
+// measurementLine turns the sealed measurement check into the requester's
+// line, or nil when the design made no measurement promise.
+func measurementLine(check *runner.MeasurementCheck) *hook.MeasurementLine {
+	if check == nil {
+		return nil
+	}
+	return &hook.MeasurementLine{Probe: check.Probe, Metric: check.Metric, Threshold: check.Threshold, Value: check.Value, Pass: check.Pass, Detail: check.Detail}
 }
