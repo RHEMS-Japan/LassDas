@@ -83,6 +83,7 @@ func TestLoadPlanFactsReadsTheSealedArtifacts(t *testing.T) {
 	write("intake.json", `{"rationale":"失敗表示の隣に再試行ボタンを置く。"}`)
 	write("history/readiness/assessment-1.json", `{"assumptions":[{"statement":"古い前提"}]}`)
 	write("history/readiness/assessment-2.json", `{"assumptions":[{"statement":"一覧のみ取り直す"},{"statement":"  "}]}`)
+	write("history/readiness/decision.json", `{"outcome":"ready","needs_design":true,"design_reason":"trigger_word"}`)
 
 	facts := loadPlanFacts(runDir)
 	if facts.Request != "再試行の導線を出す" {
@@ -97,6 +98,15 @@ func TestLoadPlanFactsReadsTheSealedArtifacts(t *testing.T) {
 	// The newest assessment wins and blank statements are dropped.
 	if len(facts.Assumptions) != 1 || facts.Assumptions[0] != "一覧のみ取り直す" {
 		t.Fatalf("Assumptions = %v", facts.Assumptions)
+	}
+	// The design decision is read from the sealed readiness decision.
+	if !facts.NeedsDesign || facts.DesignReason != "trigger_word" {
+		t.Fatalf("design decision = (%v, %q)", facts.NeedsDesign, facts.DesignReason)
+	}
+	// A decision sealed before the design stage existed says nothing about it.
+	write("history/readiness/decision.json", `{"outcome":"ready"}`)
+	if facts := loadPlanFacts(runDir); facts.NeedsDesign || facts.DesignReason != "" {
+		t.Fatalf("an old decision produced a design decision: (%v, %q)", facts.NeedsDesign, facts.DesignReason)
 	}
 }
 
@@ -124,13 +134,15 @@ func TestLoadPlanFactsFallsBackAndToleratesAbsence(t *testing.T) {
 
 func TestPlanCommentContentRendersTheFacts(t *testing.T) {
 	content := hook.PlanCommentContent("run-42", hook.PlanFacts{
-		Request:     "再試行の導線を出す",
-		Rationale:   strings.Repeat("あ", 700),
-		TargetFiles: []string{"client/a.tsx"},
-		Assumptions: []string{"一覧のみ取り直す"},
+		Request:      "再試行の導線を出す",
+		Rationale:    strings.Repeat("あ", 700),
+		TargetFiles:  []string{"client/a.tsx"},
+		Assumptions:  []string{"一覧のみ取り直す"},
+		DesignReason: "approach_in_ticket",
 	})
 	for _, want := range []string{
 		"【実装方針】", "依頼の解釈: 再試行の導線を出す", "client/a.tsx", "一覧のみ取り直す",
+		"設計なし: 方針が本文にあるため設計を省略",
 		"「停止」とだけ書いたコメント", "…（以下略）",
 	} {
 		if !strings.Contains(content, want) {

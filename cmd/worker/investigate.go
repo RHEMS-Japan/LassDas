@@ -131,7 +131,21 @@ func runInvestigate(ctx context.Context, args []string) error {
 		Turns int                    `json:"turns"`
 		Usage worker.InvocationUsage `json:"usage"`
 	}{Turns: result.Turns, Usage: result.Usage})
-	return os.WriteFile(filepath.Join(*outDir, "invocation.json"), append(usage, '\n'), 0o644)
+	if err := os.WriteFile(filepath.Join(*outDir, "invocation.json"), append(usage, '\n'), 0o644); err != nil {
+		return err
+	}
+	// The report seals the budget spent up to the report; the design phase
+	// spends more wall time after it. The round file carries the whole
+	// round's spend so the next round is charged for all of it.
+	spent, _ := json.Marshal(roundSpend{ProbesUsed: session.Used, ElapsedSeconds: carry.ElapsedSeconds + int(time.Since(started).Seconds())})
+	return os.WriteFile(filepath.Join(*outDir, "round.json"), append(spent, '\n'), 0o644)
+}
+
+// roundSpend is the whole round's budget use, report and design phases
+// together (§5: the next round continues from it).
+type roundSpend struct {
+	ProbesUsed     int `json:"probes_used"`
+	ElapsedSeconds int `json:"elapsed_seconds"`
 }
 
 // previousRound reads the earlier round's sealed records, when there was
@@ -149,6 +163,12 @@ func previousRound(dir string, identity investigate.Identity, measurementsPath s
 		return investigate.Budget{}, nil, fmt.Errorf("previous investigation does not verify: %w", err)
 	}
 	carry := investigate.Budget{ProbesUsed: investigation.ProbesUsed, ElapsedSeconds: investigation.ElapsedSeconds}
+	if raw, err := os.ReadFile(filepath.Join(dir, "round.json")); err == nil {
+		var spent roundSpend
+		if json.Unmarshal(raw, &spent) == nil && spent.ProbesUsed >= carry.ProbesUsed && spent.ElapsedSeconds >= carry.ElapsedSeconds {
+			carry = investigate.Budget{ProbesUsed: spent.ProbesUsed, ElapsedSeconds: spent.ElapsedSeconds}
+		}
+	}
 	context := map[string]json.RawMessage{}
 	for _, name := range []string{"design.json", "decision.json"} {
 		if raw, err := os.ReadFile(filepath.Join(dir, name)); err == nil && json.Valid(raw) {

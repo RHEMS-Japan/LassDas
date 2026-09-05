@@ -18,8 +18,10 @@ import (
 // content-free views, EXECUTE revoked. The refusals below stop the shapes
 // that a SELECT-only grant would otherwise let through unnoticed.
 var (
-	sqlForbiddenFunction = regexp.MustCompile(`(?i)\b(pg_advisory_[a-z_]*|pg_try_advisory_[a-z_]*|pg_notify|pg_terminate_backend|pg_cancel_backend|dblink[a-z_]*|lo_[a-z_]+|pg_read_[a-z_]+|pg_ls_[a-z_]+|pg_stat_file|set_config|pg_reload_conf|pg_switch_wal|pg_create_[a-z_]+|pg_drop_[a-z_]+|pg_logical_[a-z_]+|txid_[a-z_]+|pg_export_snapshot|pg_sleep[a-z_]*)\s*\(`)
-	sqlForbiddenClause   = regexp.MustCompile(`(?i)\b(EXPLAIN|INTO|FOR\s+(?:NO\s+KEY\s+)?UPDATE|FOR\s+(?:KEY\s+)?SHARE|LOCK|COPY|SET|RESET|DO|CALL|WITH\s+RECURSIVE)\b`)
+	sqlForbiddenFunction     = regexp.MustCompile(`(?i)\b(pg_advisory_[a-z_]*|pg_try_advisory_[a-z_]*|pg_notify|pg_terminate_backend|pg_cancel_backend|dblink[a-z_]*|lo_[a-z_]+|pg_read_[a-z_]+|pg_ls_[a-z_]+|pg_stat_file|set_config|pg_reload_conf|pg_switch_wal|pg_create_[a-z_]+|pg_drop_[a-z_]+|pg_logical_[a-z_]+|txid_[a-z_]+|pg_export_snapshot|pg_sleep[a-z_]*)\s*\(`)
+	sqlStringLiteral         = regexp.MustCompile(`'(?:[^']|'')*'`)
+	sqlUnicodeOrEscapePrefix = regexp.MustCompile(`(?i)(?:^|[\s(,=])(?:U&|E|B|X)''`)
+	sqlForbiddenClause       = regexp.MustCompile(`(?i)\b(EXPLAIN|INTO|FOR\s+(?:NO\s+KEY\s+)?UPDATE|FOR\s+(?:KEY\s+)?SHARE|LOCK|COPY|SET|RESET|DO|CALL|WITH\s+RECURSIVE)\b`)
 )
 
 // sqlStatementProblem names why a statement is refused before it is sent.
@@ -28,18 +30,22 @@ func sqlStatementProblem(statement string) string {
 	// Quoted identifiers, comments, dollar quoting and Unicode escapes can
 	// spell a forbidden name so that no regular expression sees it. A read
 	// statement needs none of them.
-	if strings.ContainsAny(statement, "\"$\\") || strings.Contains(statement, "/*") || strings.Contains(statement, "--") ||
-		strings.Contains(strings.ToUpper(statement), "U&") || strings.Contains(strings.ToUpper(statement), "E'") {
+	if strings.Count(statement, "'")%2 != 0 {
+		return "unbalanced quote"
+	}
+	// String literals may carry anything; the rules below apply to the code
+	// around them, so blank the literals first (doubled quotes included).
+	code := sqlStringLiteral.ReplaceAllString(statement, "''")
+	if strings.ContainsAny(code, "\"$\\") || strings.Contains(code, "/*") || strings.Contains(code, "--") ||
+		sqlUnicodeOrEscapePrefix.MatchString(code) {
 		return "quoted identifiers, comments, dollar quoting and escape strings are not allowed"
 	}
+	statement = code
 	if m := sqlForbiddenFunction.FindStringSubmatch(statement); m != nil {
 		return fmt.Sprintf("function %s is not allowed", strings.ToLower(m[1]))
 	}
 	if m := sqlForbiddenClause.FindStringSubmatch(statement); m != nil {
 		return fmt.Sprintf("%s is not part of a read", strings.ToUpper(strings.Join(strings.Fields(m[1]), " ")))
-	}
-	if strings.Count(statement, "'")%2 != 0 {
-		return "unbalanced quote"
 	}
 	return ""
 }

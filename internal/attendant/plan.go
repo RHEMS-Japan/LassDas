@@ -55,6 +55,16 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	if readPlanArtifact(filepath.Join(runDir, "intake.json"), &intake) == nil {
 		facts.Rationale = intake.Rationale
 	}
+	// The design decision comes from the sealed readiness decision. A run
+	// whose decision predates the design stage carries no reason, and the
+	// notice then says nothing about it rather than guessing.
+	var decision struct {
+		NeedsDesign  bool   `json:"needs_design"`
+		DesignReason string `json:"design_reason"`
+	}
+	if readPlanArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &decision) == nil {
+		facts.NeedsDesign, facts.DesignReason = decision.NeedsDesign, decision.DesignReason
+	}
 	for attempt := readinessAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []struct {

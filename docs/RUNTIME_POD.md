@@ -301,6 +301,22 @@ counts; the evidence is the one observation that passed. Only the page's
 refusal is waited out — the tool tells a refused login (exit 4) and every
 other failure (exit 1) apart from it (exit 3), and those return at once.
 
+## The investigating designer's identities
+
+The investigating designer (docs/INVESTIGATING_DESIGNER.md) is not a
+resident and not an agent: the runner's `investigate` card drives a model
+call whose only tool is `probe`, and the kernel executes each probe with
+three read-only identities — a namespaced Kubernetes ServiceAccount, an
+AWS role with an explicit Deny list, and a PostgreSQL login that can
+`SELECT` from content-free views and call no function outside
+`pg_catalog` (EXECUTE revoked from PUBLIC in every schema the role can
+use). Their shapes live in `deploy/examples/investigating-designer/`; the
+consumer applies them and records the eleven stage-0 refusals listed
+there before the role is enabled. The kernel process alone holds the
+kubeconfig context, the AWS profile and the DSN; until the agents run
+under their own UID (#23) the exposure is bounded by what the identities
+allow, which is nothing writable and nothing secret.
+
 ## Release discipline: the regression set
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
@@ -327,6 +343,8 @@ means adding a row here and the test it names.
 | A screen check the browser could not make (an expired session jar sent it to the portal) reported as a failed check of a correct change, and a jar nobody renewed | `internal/visiblecheck` `TestLoadSessionCookiesFollowsTheSeedDigestNotFileTimes`, `TestInstallableCookiesDropOnlyTheExpired`, `TestLandedAcceptsTheOriginAndItsPathsOnly`, `TestStillSigningInKeepsTheLoginPageAndErrorsOffTheLanding`, `TestJarRejectedReadsWhereTheBrowserCameToRest`, `TestSameDocumentAndSameOrigin`, `TestSafeURLDropsQueryAndFragment`, `TestRelevantDomainsAndKeepCookie`, `TestWriteSessionFileRoundTripsOwnerOnly`; `internal/runner` `TestCourtesyVerdictNamesTheBlock`, `TestConsumerObservationCarriesTheLoginEntry`, `TestLoadE2ESessionCookies`; `internal/hook` `TestObserveBlockedReportsNameWhoActs`, `TestSessionHoldContentCarriesTheMarkerAndNamesTheDestination`; `internal/attendant` `TestCheckSessionsHoldsOnRefusalOnlyThrottlesAndClears`, `TestCheckSessionsClearsAStaleHoldWhenTheConfigIsUnreadable`, `TestSessionHoldShowsAtIntakeAsAttention`, `TestObserveBlockedIsAnAttentionState`; `internal/worker` `TestValidLoginURL`, `TestConsumerLoginURLsAreValidatedAndResolvedPerEnvironment`; `cmd/browsercheck` `TestSignInForPicksTheEnvironmentEntry` | live, 2026-09-03 (the first delivery to run every stage unattended reached staging and was refused at the screen check by a session 28 hours dead) |
 | The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
+| The proposer says "no design" and the checker disagrees, and the design is skipped anyway | `internal/worker` `TestNeedsDesignFallsToSafeSide` | — (design #18 §6, issue #30) |
+| A destination with no trigger vocabulary configured letting a change skip its design | `internal/worker` `TestEmptyTriggerWordsNeverSkipDesign` | — (design #18 §6, issue #30) |
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
 | A probe request outside the declared shape (an unknown id, a slot value with whitespace or `;`, an http path outside its pattern, a link-local address) executed anyway | `internal/probe` `TestCatalogRefusesOutOfShapeRequests`, `TestHTTPProbeRefusesPrivateResolution` | design review, 2026-09-04 |
 | A sql probe that lets a SELECT-only grant be bypassed (two statements, `EXPLAIN ANALYZE` of a write, `set_config`, advisory locks, `dblink`, `SELECT … INTO`, `FOR UPDATE`) | `internal/probe` `TestSQLProbeSendsOneReadStatement` | design review, 2026-09-04 |
@@ -339,6 +357,7 @@ means adding a row here and the test it names.
 | Design profiles half-configured | `internal/runtime` `TestDesignProfilesAreSetTogether` | design review, 2026-09-04 |
 | An applier changing a file the design does not name, or its objection ignored and a candidate sealed anyway | `cmd/worker` `TestSealRefusesFilesOutsideDesign`, `TestSealTurnsObjectionIntoDesignRound`; `internal/worker` `TestPublishGateRequiresDesignSubset` | design review, 2026-09-04 |
 | An investigation-only delivery with no ending, or its ending counted as a failure | `internal/hook` `TestInvestigatedIsATerminalCode`; `internal/attendant` streak exemption | design review, 2026-09-04 |
+| A read-only identity that is read-only in name only (a `get` that returns a Secret, a `SELECT` that calls a writer function, a session that switches `transaction_read_only` off) | not a test: the eleven stage-0 refusals in `deploy/examples/investigating-designer/README.md`, recorded per consumer before the role is enabled; rows 7, 8 and 11 become `internal/probe` tests with the probe package | design review, 2026-09-04 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
 | A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
 

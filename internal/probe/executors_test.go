@@ -92,6 +92,16 @@ func TestSQLProbeSendsOneReadStatement(t *testing.T) {
 		"SELECT 'unbalanced FROM runs_shape":                                       "unbalanced quote",
 		"WITH RECURSIVE r AS (SELECT 1 UNION ALL SELECT 1 FROM r) SELECT * FROM r": "declared shape",
 	}
+	for statement, reason := range map[string]string{
+		"SELECT \"pg_terminate_backend\"(1)":     "quoted identifiers",
+		"SELECT pg_terminate_backend/**/(1)":     "comments",
+		"SELECT U&\"set_config\"('a','b',false)": "quoted identifiers",
+		"SELECT $$x$$":                           "dollar quoting",
+		"SELECT 1 -- and more":                   "comments",
+		"SELECT E'\\x41'":                        "escape strings",
+	} {
+		refusedStatements[statement] = reason
+	}
 	before := len(connector.conns)
 	for statement, reason := range refusedStatements {
 		outcome, err := session.Run(context.Background(), Request{Probe: "sql.read", Args: map[string]string{"query": statement}})
@@ -104,6 +114,16 @@ func TestSQLProbeSendsOneReadStatement(t *testing.T) {
 	}
 	if len(connector.conns) != before {
 		t.Errorf("a refused statement opened a connection (%d -> %d)", before, len(connector.conns))
+	}
+	for _, statement := range []string{
+		"SELECT count(*) FROM runs_shape WHERE note = 'a--b'",
+		"SELECT count(*) FROM runs_shape WHERE state LIKE'done%'",
+		"SELECT count(*) FROM runs_shape WHERE created_at > date'2026-09-01'",
+		"SELECT count(*) FROM runs_shape WHERE tag = 'AU&B' AND price = '$5'",
+	} {
+		if reason := sqlStatementProblem(statement); reason != "" {
+			t.Errorf("legitimate read %q refused: %s", statement, reason)
+		}
 	}
 	if !strings.Contains(safeDBError(errors.New("connect to postgres://u:p@h/db failed")), "withheld") {
 		t.Error("safeDBError leaked a connection string")
