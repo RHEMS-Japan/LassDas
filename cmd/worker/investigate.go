@@ -170,7 +170,7 @@ func previousRound(dir string, identity investigate.Identity, measurementsPath s
 		}
 	}
 	context := map[string]json.RawMessage{}
-	for _, name := range []string{"design.json", "decision.json"} {
+	for _, name := range []string{"design.json", "decision.json", "objection.json"} {
 		if raw, err := os.ReadFile(filepath.Join(dir, name)); err == nil && json.Valid(raw) {
 			context[strings.TrimSuffix(name, ".json")] = raw
 		}

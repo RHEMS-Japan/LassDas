@@ -330,7 +330,13 @@ func startQueuedRun(
 		}
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
-	plan := chainPlanFor(config, runDir, run, logger)
+	plan, err := chainPlanFor(config, runDir, run, logger)
+	if err != nil {
+		// Fail closed: a request the decision routed to the investigating
+		// designer must not be handed to the implementer instead.
+		logger.Error("chain shape unavailable; ending honestly", "run", run.RunID, "error", err.Error())
+		return terminal.Report(ctx, hook.TerminalInternalFailed, runner.Outcome{Code: hook.TerminalInternalFailed}, pipeline.Repository())
+	}
 	if plan.Shape == runtime.ShapeImplement {
 		if err := pipeline.RenderImplementInstruction(ctx, 1); err != nil {
 			return err
@@ -345,23 +351,21 @@ func startQueuedRun(
 	return nil
 }
 
-// chainPlanFor reads the shape the readiness decision asks for. A shape that
-// needs the design profiles on a pod that has none falls back to the
-// original chain and says so loudly: a delivery that never starts would be
-// worse for the requester than one that skips the design, and the log line
-// is what the operator fixes the configuration from.
-func chainPlanFor(config runtime.Config, runDir string, run state.RunOverview, logger Logger) runtime.ChainPlan {
+// chainPlanFor reads the shape the readiness decision asks for. It fails
+// closed: a decision that cannot be read, or a shape whose profiles the pod
+// does not have, is an error the caller ends the run with — the decision
+// said "investigate" or "design first", and running the implementer instead
+// would silently do something else with the requester's ticket.
+func chainPlanFor(config runtime.Config, runDir string, run state.RunOverview, logger Logger) (runtime.ChainPlan, error) {
 	plan, err := runner.ChainPlanFromDecision(runDir, config.ConsumerConfigPath)
 	if err != nil {
-		logger.Error("readiness decision gives no chain shape; running the original chain", "run", run.RunID, "error", err.Error())
-		return runtime.ChainPlan{Shape: runtime.ShapeImplement}
+		return runtime.ChainPlan{}, fmt.Errorf("readiness decision gives no chain shape: %w", err)
 	}
 	if plan.Shape != runtime.ShapeImplement && !config.Chain.Profiles.DesignEnabled() {
-		logger.Error("the decision asks for the investigating designer but the pod has no design profiles; running the original chain",
-			"run", run.RunID, "shape", string(plan.Shape))
-		return runtime.ChainPlan{Shape: runtime.ShapeImplement}
+		logger.Error("the decision asks for the investigating designer but the pod has no design profiles", "run", run.RunID, "shape", string(plan.Shape))
+		return runtime.ChainPlan{}, errors.New("the pod has no profiles for the investigating designer's cards")
 	}
-	return plan
+	return plan, nil
 }
 
 // advanceClaimedRun keeps one in-flight chain honest: heal missing cards,
@@ -396,7 +400,19 @@ func advanceClaimedRun(
 		}
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
-	plan := chainPlanFor(config, runDir, run, logger)
+	plan, err := chainPlanFor(config, runDir, run, logger)
+	if err != nil {
+		logger.Error("chain shape unavailable for a claimed run; ending honestly", "run", run.RunID, "error", err.Error())
+		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+		repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+		if readErr != nil {
+			repository = ""
+		}
+		if err := terminal.Report(ctx, hook.TerminalInternalFailed, runner.Outcome{Code: hook.TerminalInternalFailed}, repository); err != nil {
+			return err
+		}
+		return archiveChain(ctx, hermes, view.all)
+	}
 	rounds := view.rounds()
 	if rounds.Design == 0 {
 		rounds.Design = 1
@@ -497,7 +513,7 @@ func handleChainFailure(
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
 		case view.round < limit:
-			if plan := chainPlanFor(config, runDir, run, logger); plan.Shape == runtime.ShapeDesign {
+			if plan, planErr := chainPlanFor(config, runDir, run, logger); planErr == nil && plan.Shape == runtime.ShapeDesign {
 				// A design-backed delivery: a reviewer who found the design
 				// itself wrong sends the run back to the designer; anything
 				// else is another application of the same design.
