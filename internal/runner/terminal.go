@@ -62,16 +62,52 @@ var terminalRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za
 // consumer repository the run delivered to ("" when the run failed before
 // any repository work — the protocol accepts that explicitly).
 func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome Outcome, repository string) error {
+	report, err := t.buildReport(ctx, code, outcome, repository, true)
+	if err != nil {
+		return err
+	}
+	return t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
+		report.IssuedAt = issuedAt
+		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
+			return hook.Result{}, fmt.Errorf("terminal report shape invalid: %w", err)
+		}
+		return t.services.Report.ProcessTerminalReport(ctx, report), nil
+	})
+}
+
+// ReportDigest is the digest the store would seal for this outcome — the
+// record's immutable fields, without the attempt timestamp, the trail or
+// the spend line. A re-submission of a pending report compares it with the
+// digest the row was begun with before choosing what to send.
+func (t *Terminal) ReportDigest(ctx context.Context, code hook.TerminalCode, outcome Outcome, repository string) (string, error) {
+	report, err := t.buildReport(ctx, code, outcome, repository, false)
+	if err != nil {
+		return "", err
+	}
+	// The record excludes the attempt timestamp; the shape check still wants
+	// one, as every attempt carries one.
+	report.IssuedAt = time.Now().UTC()
+	record, err := hook.MarshalTerminalReportRecord(report)
+	if err != nil {
+		return "", fmt.Errorf("terminal report shape invalid: %w", err)
+	}
+	return hook.TerminalReportDigest(record), nil
+}
+
+// buildReport assembles the request the way cmd/reporter did. withSpend
+// says whether to read the live spend line; the digest does not include it,
+// so a digest-only build skips the gateway read.
+func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outcome Outcome, repository string, withSpend bool) (hook.TerminalReportRequest, error) {
 	if repository != "" && !terminalRepositoryPattern.MatchString(repository) {
-		return fmt.Errorf("consumer repository %q is not owner/name", repository)
+		return hook.TerminalReportRequest{}, fmt.Errorf("consumer repository %q is not owner/name", repository)
 	}
 	trail, err := t.loadTrail(code)
 	if err != nil {
-		return err
+		return hook.TerminalReportRequest{}, err
 	}
 	owner, err := t.owner(ctx)
 	if err != nil {
-		return err
+		return hook.TerminalReportRequest{}, err
 	}
 	evidence := outcome.Evidence
 	report := hook.TerminalReportRequest{
@@ -86,15 +122,11 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 		CommitURL: evidence["commit_url"], StagingEvidenceURL: evidence["staging_evidence_url"],
 		ProductionEvidenceURL: evidence["production_evidence_url"],
 		TrailText:             trail,
-		SpendText:             t.loadRunSpendText(ctx),
 	}
-	return t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
-		report.IssuedAt = issuedAt
-		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
-			return hook.Result{}, fmt.Errorf("terminal report shape invalid: %w", err)
-		}
-		return t.services.Report.ProcessTerminalReport(ctx, report), nil
-	})
+	if withSpend {
+		report.SpendText = t.loadRunSpendText(ctx)
+	}
+	return report, nil
 }
 
 // owner is the identity this run's reports are bound to: the one the run

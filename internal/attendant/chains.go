@@ -504,16 +504,23 @@ const (
 	pendingTerminalNeedsOperator pendingTerminalAction = "needs_operator"
 )
 
-// classifyPendingTerminal keeps the re-submit honest: without the chain
-// cards the outcome cannot be rebuilt identically (and the claimed-run path
-// would requeue and rerun the whole delivery), and without a terminal code
-// there is nothing to resubmit.
+// classifyPendingTerminal keeps the re-submit honest. The code was decided
+// when the report was first begun and sits in the run row; only two reports
+// are rebuilt from the chain cards and the artifacts they left — a success
+// (its stage and evidence) and an investigated ending (its sealed report and
+// attachments) — so those need the cards, and everything else (cancelled at
+// claim, rejected or failed in preparation, a chain that could not be
+// derived, a failed model stage) is re-submitted from the row alone. Nothing
+// is ever requeued: the claimed-run path would rerun the whole delivery.
 func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerminalAction, string) {
 	if run.TerminalCode == "" || !hook.TerminalCode(run.TerminalCode).Valid() {
 		return pendingTerminalNeedsOperator, "the pending report carries no terminal code"
 	}
-	if !view.hasChain() {
-		return pendingTerminalNeedsOperator, "the chain cards are gone; the report cannot be rebuilt identically"
+	switch hook.TerminalCode(run.TerminalCode) {
+	case hook.TerminalSuccess, hook.TerminalInvestigated:
+		if !view.hasChain() {
+			return pendingTerminalNeedsOperator, "the chain cards are gone; a " + run.TerminalCode + " report is rebuilt from them"
+		}
 	}
 	return pendingTerminalResubmit, ""
 }
@@ -525,6 +532,8 @@ func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerm
 // Nothing here heals cards, checks for a stop, or requeues: the outcome was
 // decided when the report was first begun (live 2026-09-05: a run whose
 // completion failed stayed pending for over an hour with nothing driving it).
+// A report from before any card existed has no cards to archive and no run
+// directory artifacts to lean on; its envelope comes from the ledger's copy.
 func resubmitPendingTerminal(
 	ctx context.Context,
 	config runtime.Config,
@@ -540,7 +549,7 @@ func resubmitPendingTerminal(
 		return nil
 	}
 	runDir := runDirectory(config, run.DeliveryID)
-	envelope, err := readEnvelope(runDir, run.DeliveryID)
+	envelope, err := pendingEnvelope(runDir, run)
 	if err != nil {
 		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", "run envelope unreadable: "+err.Error())
 		return nil
@@ -552,16 +561,53 @@ func resubmitPendingTerminal(
 	case hook.TerminalInvestigated:
 		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 	}
-	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
-	if readErr != nil {
-		repository = ""
-	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	repository, err := pendingRepository(ctx, terminal, runDir, run, code)
+	if err != nil {
+		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
+		return nil
+	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
 		return err
 	}
 	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
 	return archiveChain(ctx, hermes, view.all)
+}
+
+// pendingRepository picks the repository the pending report was begun with.
+// The first report named the consumer repository only once the run had
+// resolved it (Pipeline.Repository), and "" before that — while the run
+// directory may hold a ticket draft naming the repository either way (the
+// draft is written before the consumer is resolved, and a directory can
+// carry a previous attempt's draft). The store seals the repository into
+// the report digest, so sending the other one would be refused as a
+// conflict on every tick — the same silence this path exists to end. Both
+// candidates are rebuilt and the one that reproduces the row's digest is
+// sent; neither matching is left to a person.
+func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode) (string, error) {
+	if run.TerminalReportSHA256 == "" {
+		return "", errors.New("the pending report carries no digest")
+	}
+	candidates := []string{""}
+	if drafted, err := readField(runDir, "ticket-draft.json", "repository"); err == nil && drafted != "" {
+		candidates = []string{drafted, ""}
+	}
+	for _, candidate := range candidates {
+		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code}, candidate)
+		if err != nil {
+			if candidate != "" {
+				// The draft's value could not be shaped into a report, so
+				// the first attempt cannot have sent it either; the other
+				// candidate decides.
+				continue
+			}
+			return "", err
+		}
+		if digest == run.TerminalReportSHA256 {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("no rebuilt report reproduces the pending report's digest")
 }
 
 func reportChainSuccess(
@@ -770,6 +816,29 @@ func readEnvelope(runDir, deliveryID string) (hook.DispatchEnvelope, error) {
 		return hook.DispatchEnvelope{}, errors.New("envelope names another delivery")
 	}
 	return envelope, nil
+}
+
+// pendingEnvelope reads the envelope a pending terminal report is rebuilt
+// under: the run directory's copy when it is there and readable, otherwise
+// the ledger's own copy of the sealed envelope (the row keeps it from the
+// dispatch on, and the store re-checks the report against it). Both are
+// checked to name this delivery.
+func pendingEnvelope(runDir string, run state.RunOverview) (hook.DispatchEnvelope, error) {
+	envelope, err := readEnvelope(runDir, run.DeliveryID)
+	if err == nil {
+		return envelope, nil
+	}
+	if run.EnvelopeJSON == "" {
+		return hook.DispatchEnvelope{}, err
+	}
+	var stored hook.DispatchEnvelope
+	if json.Unmarshal([]byte(run.EnvelopeJSON), &stored) != nil {
+		return hook.DispatchEnvelope{}, errors.New("ledger envelope invalid")
+	}
+	if stored.DeliveryID != run.DeliveryID {
+		return hook.DispatchEnvelope{}, errors.New("ledger envelope names another delivery")
+	}
+	return stored, nil
 }
 
 // maxWorkspaceFieldBytes bounds every artifact read here; the files are
