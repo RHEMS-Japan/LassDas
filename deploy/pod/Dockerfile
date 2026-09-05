@@ -22,6 +22,10 @@ ARG HERMES_FORK_REF=dbb70f612d0146002b8815f90e8391d202626c9f
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG CODEX_VERSION=0.146.0
 ARG PNPM_VERSION=9.15.4
+ARG KUBECTL_VERSION=v1.35.8
+ARG KUBECTL_SHA256=cc749967b62f4422260bc9c0aa7a7c55f45175ae38cb8d95767b5d2b7e04c1fd
+ARG AWSCLI_VERSION=2.36.40
+ARG AWSCLI_SHA256=f26e08d0d64d9f35f304a9df94d63cbd11ffe8881c8b4bf60be934cf9e4d13a9
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ca-certificates curl git tmux python3 python3-pip python3-venv \
@@ -38,6 +42,27 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && npm install --global --no-audit --no-fund pnpm@${PNPM_VERSION} \
        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
        @openai/codex@${CODEX_VERSION}
+
+# Read-only observation tools for the investigating designer's exec probes
+# (docs/INVESTIGATING_DESIGNER.md §3.2): kubectl and the AWS CLI, pinned by
+# version and checksum. The image is linux/arm64 (the release script builds
+# that platform); the guard makes any other architecture fail here rather
+# than at the first probe. Neither tool holds a credential: the identities
+# reach them through the kubeconfig and the role pointers the kernel passes
+# to exec probes (internal/probe ExecEnvironmentNames).
+RUN test "$(uname -m)" = "aarch64" \
+    && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/arm64/kubectl" \
+    && echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/kubectl \
+    && curl -fsSL -o /tmp/awscli.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWSCLI_VERSION}.zip" \
+    && echo "${AWSCLI_SHA256}  /tmp/awscli.zip" | sha256sum -c - \
+    && apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && unzip -q /tmp/awscli.zip -d /tmp/awscli \
+    && /tmp/awscli/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli \
+    && rm -rf /tmp/awscli /tmp/awscli.zip \
+    && kubectl version --client >/dev/null \
+    && aws --version
 
 # The Hermes fork, pinned by commit. Hermes refuses wheel builds by
 # design; the editable install against a pinned checkout is the supported

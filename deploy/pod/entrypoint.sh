@@ -196,6 +196,16 @@ for DESIGN_REVIEW in a:LASSDAS_REVIEW_A_MODEL:LASSDAS_REVIEW_A_KEY:anthropic/cla
   DR_KEY_VAR="${DR_REST%%:*}"
   DR_DEFAULT="${DR_REST#*:}"
   eval "DR_MODEL=\${${DR_MODEL_VAR}:-${DR_DEFAULT}}"
+  # A design-review judge may differ from the candidate-review judge of the
+  # same letter: docs/INVESTIGATING_DESIGNER.md §11 leans reviewer A to a
+  # heavy model of another vendor than the designer's, while the candidate
+  # reviews keep their own. The override names the model and, where the
+  # gateway issues keys per model, the variable holding that model's key.
+  DR_UPPER=$(printf '%s' "$DR_LETTER" | tr a-z A-Z)
+  eval "DR_OVERRIDE_MODEL=\${LASSDAS_DESIGN_REVIEW_${DR_UPPER}_MODEL:-}"
+  eval "DR_OVERRIDE_KEY=\${LASSDAS_DESIGN_REVIEW_${DR_UPPER}_KEY:-}"
+  if [ -n "$DR_OVERRIDE_MODEL" ]; then DR_MODEL="$DR_OVERRIDE_MODEL"; fi
+  if [ -n "$DR_OVERRIDE_KEY" ]; then DR_KEY_VAR="LASSDAS_DESIGN_REVIEW_${DR_UPPER}_KEY"; fi
   DR_HOME="$HOME/.hermes/profiles/lassdas-design-review-${DR_LETTER}"
   mkdir -p "$DR_HOME"
   cat > "$DR_HOME/config.yaml" <<YAML
