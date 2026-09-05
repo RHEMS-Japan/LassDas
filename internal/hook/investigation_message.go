@@ -107,6 +107,9 @@ type DesignFacts struct {
 func DesignCommentContent(runID string, facts DesignFacts) string {
 	var builder strings.Builder
 	builder.WriteString("【設計】調査の結果から次の直し方を決め、独立したレビューを通しました。この設計書どおりに実装に進みます。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n")
+	if facts.Round > 1 {
+		fmt.Fprintf(&builder, "\n（設計 %d 巡目です。前の設計はレビューまたは実装役の指摘で差し戻され、この設計に置き換わりました）\n", facts.Round)
+	}
 	if cause := truncatePlanText(facts.Cause); cause != "" {
 		builder.WriteString("\n原因: " + cause + "\n")
 	}
@@ -119,7 +122,7 @@ func DesignCommentContent(runID string, facts DesignFacts) string {
 	}
 	writePlanList(&builder, "影響する範囲", facts.BlastRadius)
 	writePlanList(&builder, "やらないこと", facts.NotDoing)
-	builder.WriteString("\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。この掲示のあと、次の工程（実装）のカードが始まる前までに反映されます。実行中の工程は最後まで走り切りますが、その先の工程は開始されません。\n")
+	builder.WriteString(planStopSentence)
 	return capBody(builder.String(), planBodyMaxBytes) + CommentFacts{
 		State:      "設計書を掲示・実装へ進行中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",

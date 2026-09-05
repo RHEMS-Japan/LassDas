@@ -114,6 +114,11 @@ const (
 // the automation is about to build, where it intends to write, and how to
 // stop it. A notice, not a gate — the run continues whether or not the
 // requester reads it.
+// planStopSentence is the one true description of how a requester stops a
+// run and when the stop takes effect. Every comment that offers a stop
+// reuses it, so no comment promises a gate the chain does not have.
+const planStopSentence = "\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前までに反映され、以後の新しい工程は開始されません。実行中の工程は最後まで走り切り、指摘なしで最後まで進んだ場合は Pull Request をマージしないことで反映を止められます。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n"
+
 func PlanCommentContent(runID string, facts PlanFacts) string {
 	var builder strings.Builder
 	builder.WriteString(planHeadline(facts))
@@ -128,7 +133,7 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	}
 	writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
-	builder.WriteString("\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前までに反映され、以後の新しい工程は開始されません。実行中の工程は最後まで走り切り、指摘なしで最後まで進んだ場合は Pull Request をマージしないことで反映を止められます。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n")
+	builder.WriteString(planStopSentence)
 	return capPlanBody(builder.String()) + CommentFacts{
 		State:      "実装方針を掲示・自動処理中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",
