@@ -55,6 +55,15 @@ const (
 	TerminalProductionDeploymentUnverified TerminalCode = "production_deployment_unverified"
 	TerminalProductionVerificationFailed   TerminalCode = "production_verification_failed"
 	TerminalInternalFailed                 TerminalCode = "internal_failed"
+	// The investigating designer's endings (docs/INVESTIGATING_DESIGNER.md
+	// §4.4, §5): a sealed investigation report delivered without a pull
+	// request; a round whose probe budget or wall ran out before a record
+	// was sealed; a report the evidence review never passed; a design the
+	// design reviews never agreed on.
+	TerminalInvestigated              TerminalCode = "investigated"
+	TerminalInvestigationIncomplete   TerminalCode = "investigation_incomplete"
+	TerminalInvestigationNonconverged TerminalCode = "investigation_nonconverged"
+	TerminalDesignNonconverged        TerminalCode = "design_nonconverged"
 )
 
 func (c TerminalCode) valid() bool {
@@ -63,7 +72,8 @@ func (c TerminalCode) valid() bool {
 		TerminalReadinessUnresolved, TerminalClarificationExpired, TerminalCancelled,
 		TerminalModelFailed, TerminalNonconverged,
 		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
-		TerminalProductionVerificationFailed, TerminalInternalFailed:
+		TerminalProductionVerificationFailed, TerminalInternalFailed,
+		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged, TerminalDesignNonconverged:
 		return true
 	default:
 		return false

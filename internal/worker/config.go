@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/probe"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,8 +46,43 @@ type Config struct {
 	Models        ModelConfig      `json:"models"`
 	Agents        AgentSet         `json:"agents"`
 	MaxStages     int              `json:"max_stages"`
+	// Probes is the investigating designer's catalogue of read-only
+	// measurements (docs/INVESTIGATING_DESIGNER.md §3.2): the shapes the
+	// kernel may execute for the role, declared by the consumer. Optional;
+	// without it the role can only read the repository.
+	Probes []probe.Spec `json:"probes,omitempty"`
 	// AnswerKnowledge names where adopted answers are preserved, if anywhere.
 	AnswerKnowledge *AnswerKnowledgeConfig `json:"answer_knowledge,omitempty"`
+	// DesignMaxRounds bounds the design review rounds: a design (or an
+	// investigation report) the reviewers still object to at this round
+	// ends the delivery as nonconverged instead of going on. Zero means
+	// DefaultDesignMaxRounds; omitempty keeps existing configurations'
+	// digests unchanged.
+	DesignMaxRounds int `json:"design_max_rounds,omitempty"`
+}
+
+// DefaultDesignMaxRounds is the design review round limit a configuration
+// gets when it sets none.
+const DefaultDesignMaxRounds = 3
+
+// DesignRounds is the effective design review round limit.
+func (c Config) DesignRounds() int {
+	if c.DesignMaxRounds == 0 {
+		return DefaultDesignMaxRounds
+	}
+	return c.DesignMaxRounds
+}
+
+// maxRunStage bounds the stage an agent run record may carry. An
+// implementing or reviewing run belongs to an implementation stage, a
+// design reviewer's run to a design round, and the record's one field is
+// held to whichever limit is larger; the stages that consume a run hold it
+// to their own limit as well.
+func (c Config) maxRunStage() int {
+	if rounds := c.DesignRounds(); rounds > c.MaxStages {
+		return rounds
+	}
+	return c.MaxStages
 }
 
 // AgentSet names the coding agents the framework runs: one that implements
@@ -552,6 +588,12 @@ type ModelConfig struct {
 	Implementer ModelEndpoint   `json:"implementer"`
 	Reviewers   []ModelEndpoint `json:"reviewers"`
 	Readiness   ReadinessModels `json:"readiness"`
+	// Designer is the investigating designer's endpoint (the kernel calls it
+	// directly; there is no agent). Optional until the design stages are
+	// enabled. Like the implementer, at most one reviewer may share its
+	// (base URL, model): a design judged only by its own author's model
+	// family would be self-judgment.
+	Designer *ModelEndpoint `json:"designer,omitempty"`
 	// VendorHosts, when present, pins every declared vendor name to the hosts
 	// its endpoints may be reached through. The different-vendor rules below
 	// otherwise trust the vendor string as written: a config could call two
@@ -586,6 +628,12 @@ type ModelEndpoint struct {
 	Effort           string `json:"effort,omitempty"`
 	StructuredOutput bool   `json:"structured_output"`
 	MaxOutputTokens  int32  `json:"max_output_tokens"`
+	// DesignLens is the lens this reviewer judges a design or an
+	// investigation report under, when the consumer wants its own wording.
+	// Without one the first configured reviewer judges the evidence and
+	// the second the approach (the framework's built-in lenses). Reviewers
+	// only.
+	DesignLens string `json:"design_lens,omitempty"`
 }
 
 func LoadConfig(filename string) (Config, error) {
@@ -639,6 +687,9 @@ func (c Config) Validate() error {
 	if err := c.Models.validate(); err != nil {
 		return err
 	}
+	if err := c.validateProbes(); err != nil {
+		return err
+	}
 	if err := c.Agents.validate(); err != nil {
 		return err
 	}
@@ -664,6 +715,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")
+	}
+	if c.DesignMaxRounds < 0 || c.DesignMaxRounds > 10 {
+		return errors.New("design_max_rounds must be between 1 and 10")
 	}
 	if c.AnswerKnowledge != nil {
 		if err := c.AnswerKnowledge.validate(); err != nil {
@@ -869,6 +923,25 @@ func (c ModelConfig) validate() error {
 	if len(vendors) < 2 {
 		return errors.New("reviewers must use at least two vendors")
 	}
+	if c.Designer != nil {
+		if err := c.Designer.validate(false); err != nil {
+			return fmt.Errorf("designer: %w", err)
+		}
+		if _, exists := ids[c.Designer.ID]; exists {
+			return errors.New("designer id duplicates another model id")
+		}
+		ids[c.Designer.ID] = struct{}{}
+		designerModelKey := strings.ToLower(c.Designer.BaseURL + "\x00" + c.Designer.Model)
+		sharedWithDesigner := 0
+		for _, reviewer := range c.Reviewers {
+			if strings.ToLower(reviewer.BaseURL+"\x00"+reviewer.Model) == designerModelKey {
+				sharedWithDesigner++
+			}
+		}
+		if sharedWithDesigner > 1 {
+			return errors.New("at most one reviewer may share the designer endpoint and model")
+		}
+	}
 	if err := c.Readiness.Assessor.validate(false); err != nil {
 		return fmt.Errorf("readiness assessor: %w", err)
 	}
@@ -971,6 +1044,9 @@ func (m ModelEndpoint) validate(reviewer bool) error {
 	}
 	if !reviewer && m.Lens != "" {
 		return errors.New("implementer lens must be empty")
+	}
+	if m.DesignLens != "" && (!reviewer || strings.TrimSpace(m.DesignLens) != m.DesignLens || len(m.DesignLens) > 512 || strings.ContainsAny(m.DesignLens, "\r\n\x00")) {
+		return errors.New("reviewer design lens is invalid")
 	}
 	switch m.Effort {
 	case "", "low", "medium", "high", "xhigh", "max":
@@ -1104,4 +1180,38 @@ func (c ConsumerConfig) LoginURL(environment string) string {
 
 func allowedPath(filename string, prefixes []string) bool {
 	return slices.ContainsFunc(prefixes, func(prefix string) bool { return strings.HasPrefix(filename, prefix) })
+}
+
+// validateProbes checks the investigating designer's catalogue the way the
+// kernel will resolve it, and keeps every consumer's login entry — the
+// identity provider that rotates the session cookie on use — out of the
+// http probes' hosts.
+func (c Config) validateProbes() error {
+	if len(c.Probes) == 0 {
+		return nil
+	}
+	catalog, err := probe.NewCatalog(c.Probes)
+	if err != nil {
+		return fmt.Errorf("probes: %w", err)
+	}
+	var loginHosts []string
+	for _, consumer := range c.Consumers {
+		for _, entry := range []string{consumer.StagingLoginURL, consumer.ProductionLoginURL} {
+			if entry == "" {
+				continue
+			}
+			if parsed, err := url.Parse(entry); err == nil && parsed.Host != "" {
+				loginHosts = append(loginHosts, strings.ToLower(parsed.Host))
+			}
+		}
+	}
+	if err := catalog.ForbidHosts(loginHosts); err != nil {
+		return fmt.Errorf("probes: %w (the identity provider rotates the session cookie on every use)", err)
+	}
+	return nil
+}
+
+// ProbeCatalog is the validated catalogue, built-ins included.
+func (c Config) ProbeCatalog() (probe.Catalog, error) {
+	return probe.NewCatalog(c.Probes)
 }

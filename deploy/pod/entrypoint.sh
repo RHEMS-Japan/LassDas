@@ -62,7 +62,7 @@ YAML
 # profile the card dispatches under is what `hermes --profile <name> -z`
 # runs the review with, so each judge carries its own provider block and
 # its own credential variable (two judges, two gateway identities).
-for CHAIN_STAGE in validate publish; do
+for CHAIN_STAGE in validate publish investigate design-decide; do
   STAGE_HOME="$HOME/.hermes/profiles/lassdas-${CHAIN_STAGE}"
   mkdir -p "$STAGE_HOME"
   cat > "$STAGE_HOME/config.yaml" <<YAML
@@ -110,6 +110,12 @@ done
 export LASSDAS_IMPLEMENTER_MODEL="${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}"
 export LASSDAS_REVIEW_A_MODEL="${LASSDAS_REVIEW_A_MODEL:-anthropic/claude-opus-5}"
 export LASSDAS_REVIEW_B_MODEL="${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}"
+# The investigating designer (docs/INVESTIGATING_DESIGNER.md §11): the
+# designer is the strongest model (the kernel calls it directly, under its
+# own key); the applier that copies an approved design is a light model.
+# Defaults follow the implementer and the second reviewer's vendor.
+export LASSDAS_DESIGNER_MODEL="${LASSDAS_DESIGNER_MODEL:-${LASSDAS_IMPLEMENTER_MODEL}}"
+export LASSDAS_APPLIER_MODEL="${LASSDAS_APPLIER_MODEL:-${LASSDAS_REVIEW_B_MODEL}}"
 
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
@@ -175,6 +181,57 @@ providers:
     api_key_env: LASSDAS_IMPLEMENTER_KEY
 agent:
   max_turns: ${LASSDAS_IMPLEMENTER_MAX_TURNS:-200}
+YAML
+
+# The design-review profiles: the same two judges, their own gateway
+# identities, dispatched under `--stage design-review-a/b` so the runner
+# judges the sealed design (or the investigation report) instead of a
+# candidate. worker.command is fixed per profile, which is why these are
+# profiles of their own and not the review profiles reused.
+for DESIGN_REVIEW in a:LASSDAS_REVIEW_A_MODEL:LASSDAS_REVIEW_A_KEY:anthropic/claude-opus-5 b:LASSDAS_REVIEW_B_MODEL:LASSDAS_REVIEW_B_KEY:openai/gpt-5.6-sol-pro; do
+  DR_LETTER="${DESIGN_REVIEW%%:*}"
+  DR_REST="${DESIGN_REVIEW#*:}"
+  DR_MODEL_VAR="${DR_REST%%:*}"
+  DR_REST="${DR_REST#*:}"
+  DR_KEY_VAR="${DR_REST%%:*}"
+  DR_DEFAULT="${DR_REST#*:}"
+  eval "DR_MODEL=\${${DR_MODEL_VAR}:-${DR_DEFAULT}}"
+  DR_HOME="$HOME/.hermes/profiles/lassdas-design-review-${DR_LETTER}"
+  mkdir -p "$DR_HOME"
+  cat > "$DR_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - design-review-${DR_LETTER}
+model:
+  provider: custom:lassdas-gateway
+  name: ${DR_MODEL}
+providers:
+  lassdas-gateway:
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
+    api_key_env: ${DR_KEY_VAR}
+agent:
+  max_turns: 40
+YAML
+done
+
+# The applier profile: a native agent like the implementer, but it copies
+# an approved design and stops on doubt (docs/INVESTIGATING_DESIGNER.md §7).
+# Forty turns is its whole budget: the design already decided everything.
+APPLIER_HOME="$HOME/.hermes/profiles/lassdas-applier"
+mkdir -p "$APPLIER_HOME"
+cat > "$APPLIER_HOME/config.yaml" <<YAML
+model:
+  provider: custom:lassdas-gateway
+  name: ${LASSDAS_APPLIER_MODEL}
+providers:
+  lassdas-gateway:
+    base_url: ${LASSDAS_GATEWAY_BASE_URL:?set LASSDAS_GATEWAY_BASE_URL (the OpenAI-compatible model gateway, e.g. https://gateway.example.com/api/v1)}
+    api_key_env: LASSDAS_APPLIER_KEY
+agent:
+  max_turns: ${LASSDAS_APPLIER_MAX_TURNS:-40}
 YAML
 
 # Cards orchestration: the destination credential moves from the process

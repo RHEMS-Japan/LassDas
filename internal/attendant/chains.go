@@ -117,21 +117,40 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 // chainView is one delivery's chain as the board tells it: the current
 // (highest) round's cards by stage, and every living chain card of any
 // round for retirement sweeps.
+// chainView is what the board says about one delivery: the newest
+// implementation round and its cards, and — for the investigating
+// designer's shapes — the newest design round and its cards, which count
+// separately (`:d<N>` keys) because a design can restart without an
+// implementation having happened.
 type chainView struct {
 	round int
 	cards map[string]runtime.BoardTask
-	all   []runtime.BoardTask
+	// designRound is the newest design round on the board (0 when none).
+	designRound int
+	designCards map[string]runtime.BoardTask
+	all         []runtime.BoardTask
 }
 
 func chainViewFor(tasks []runtime.BoardTask, deliveryID string) chainView {
-	view := chainView{cards: map[string]runtime.BoardTask{}}
+	view := chainView{cards: map[string]runtime.BoardTask{}, designCards: map[string]runtime.BoardTask{}}
 	rounds := map[int]map[string]runtime.BoardTask{}
+	designRounds := map[int]map[string]runtime.BoardTask{}
 	for _, task := range tasks {
 		delivery, stage, round, ok := runtime.ParseChainCardKey(task.IdempotencyKey)
 		if !ok || delivery != deliveryID || task.Status == "archived" {
 			continue
 		}
 		view.all = append(view.all, task)
+		if runtime.IsDesignStage(stage) {
+			if designRounds[round] == nil {
+				designRounds[round] = map[string]runtime.BoardTask{}
+			}
+			designRounds[round][stage] = task
+			if round > view.designRound {
+				view.designRound = round
+			}
+			continue
+		}
 		if rounds[round] == nil {
 			rounds[round] = map[string]runtime.BoardTask{}
 		}
@@ -143,13 +162,37 @@ func chainViewFor(tasks []runtime.BoardTask, deliveryID string) chainView {
 	if view.round > 0 {
 		view.cards = rounds[view.round]
 	}
+	if view.designRound > 0 {
+		view.designCards = designRounds[view.designRound]
+	}
 	return view
 }
 
+// hasChain reports whether the board carries any live card of the delivery.
+func (v chainView) hasChain() bool { return v.round > 0 || v.designRound > 0 }
+
+// rounds is the pair EnsureChainFor keys new cards by.
+func (v chainView) rounds() runtime.ChainRounds {
+	return runtime.ChainRounds{Design: v.designRound, Implement: v.round}
+}
+
+// card returns the newest round's card of a stage, whichever counter it lives in.
+func (v chainView) card(stage string) (runtime.BoardTask, bool) {
+	if runtime.IsDesignStage(stage) {
+		task, ok := v.designCards[stage]
+		return task, ok
+	}
+	task, ok := v.cards[stage]
+	return task, ok
+}
+
 func (v chainView) existingKeys(deliveryID string) map[string]runtime.BoardTask {
-	existing := make(map[string]runtime.BoardTask, len(v.cards))
+	existing := make(map[string]runtime.BoardTask, len(v.cards)+len(v.designCards))
 	for stage, task := range v.cards {
 		existing[runtime.ChainCardKey(deliveryID, stage, v.round)] = task
+	}
+	for stage, task := range v.designCards {
+		existing[runtime.ChainCardKey(deliveryID, stage, v.designRound)] = task
 	}
 	return existing
 }
@@ -287,15 +330,42 @@ func startQueuedRun(
 		}
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
-	if err := pipeline.RenderImplementInstruction(ctx, 1); err != nil {
-		return err
+	plan, err := chainPlanFor(config, runDir, run, logger)
+	if err != nil {
+		// Fail closed: a request the decision routed to the investigating
+		// designer must not be handed to the implementer instead.
+		logger.Error("chain shape unavailable; ending honestly", "run", run.RunID, "error", err.Error())
+		return terminal.Report(ctx, hook.TerminalInternalFailed, runner.Outcome{Code: hook.TerminalInternalFailed}, pipeline.Repository())
 	}
-	terminalCard, err := runtime.EnsureChain(ctx, hermes, config.Chain, nil, run.DeliveryID, run.RunID, run.Summary, 1)
+	if plan.Shape == runtime.ShapeImplement {
+		if err := pipeline.RenderImplementInstruction(ctx, 1); err != nil {
+			return err
+		}
+	}
+	rounds := runtime.ChainRounds{Design: 1, Implement: 1}
+	terminalCard, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, nil, run.DeliveryID, run.RunID, run.Summary, rounds)
 	if err != nil {
 		return err
 	}
-	logger.Info("chain created", "run", run.RunID, "round", 1, "terminal_card", terminalCard)
+	logger.Info("chain created", "run", run.RunID, "shape", string(plan.Shape), "round", 1, "terminal_card", terminalCard)
 	return nil
+}
+
+// chainPlanFor reads the shape the readiness decision asks for. It fails
+// closed: a decision that cannot be read, or a shape whose profiles the pod
+// does not have, is an error the caller ends the run with — the decision
+// said "investigate" or "design first", and running the implementer instead
+// would silently do something else with the requester's ticket.
+func chainPlanFor(config runtime.Config, runDir string, run state.RunOverview, logger Logger) (runtime.ChainPlan, error) {
+	plan, err := runner.ChainPlanFromDecision(runDir, config.ConsumerConfigPath)
+	if err != nil {
+		return runtime.ChainPlan{}, fmt.Errorf("readiness decision gives no chain shape: %w", err)
+	}
+	if plan.Shape != runtime.ShapeImplement && !config.Chain.Profiles.DesignEnabled() {
+		logger.Error("the decision asks for the investigating designer but the pod has no design profiles", "run", run.RunID, "shape", string(plan.Shape))
+		return runtime.ChainPlan{}, errors.New("the pod has no profiles for the investigating designer's cards")
+	}
+	return plan, nil
 }
 
 // advanceClaimedRun keeps one in-flight chain honest: heal missing cards,
@@ -313,7 +383,7 @@ func advanceClaimedRun(
 	view chainView,
 	logger Logger,
 ) error {
-	if view.round == 0 {
+	if !view.hasChain() {
 		logger.Info("claimed run has no chain; requeueing", "run", run.RunID)
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
@@ -330,14 +400,51 @@ func advanceClaimedRun(
 		}
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
-	if _, err := runtime.EnsureChain(ctx, hermes, config.Chain, view.existingKeys(run.DeliveryID), run.DeliveryID, run.RunID, run.Summary, view.round); err != nil {
+	plan, err := chainPlanFor(config, runDir, run, logger)
+	if err != nil {
+		logger.Error("chain shape unavailable for a claimed run; ending honestly", "run", run.RunID, "error", err.Error())
+		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+		repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+		if readErr != nil {
+			repository = ""
+		}
+		if err := terminal.Report(ctx, hook.TerminalInternalFailed, runner.Outcome{Code: hook.TerminalInternalFailed}, repository); err != nil {
+			return err
+		}
+		return archiveChain(ctx, hermes, view.all)
+	}
+	// An objection transition interrupted between "archive the round" and
+	// "create the next design round" leaves the done design cards and an
+	// objection record with no implementation cards; healing from here would
+	// re-apply the objected design. Resume the transition instead.
+	if plan.Shape == runtime.ShapeDesign && view.round == 0 && view.designRound > 0 {
+		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
+			if _, decided := readField(runDir, fmt.Sprintf("history/design-%d/decision.json", view.designRound+1), "outcome"); decided != nil {
+				logger.Info("resuming an interrupted objection transition", "run", run.RunID, "design_round", view.designRound)
+				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design (resumed)", logger)
+			}
+		}
+	}
+	rounds := view.rounds()
+	if rounds.Design == 0 {
+		rounds.Design = 1
+	}
+	if rounds.Implement == 0 {
+		rounds.Implement = 1
+	}
+	if _, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, view.existingKeys(run.DeliveryID), run.DeliveryID, run.RunID, run.Summary, rounds); err != nil {
 		return err
 	}
-	if task, ok := view.cards[runtime.StagePublish]; ok && task.Status == "done" {
+	stages := runtime.ChainStagesFor(config.Chain, plan)
+	last := stages[len(stages)-1]
+	if task, ok := view.card(last.Name); ok && task.Status == "done" {
+		if plan.Shape == runtime.ShapeInvestigation {
+			return reportInvestigated(ctx, config, services, envelope, run, view, logger)
+		}
 		return reportChainSuccess(ctx, config, services, envelope, run, logger)
 	}
-	for _, stage := range runtime.ChainStages(config.Chain) {
-		task, ok := view.cards[stage.Name]
+	for _, stage := range stages {
+		task, ok := view.card(stage.Name)
 		if !ok || !failedCardStatuses[task.Status] {
 			continue
 		}
@@ -346,6 +453,9 @@ func advanceClaimedRun(
 		// kind so an unexpected one is diagnosable from the record.
 		logger.Info("chain card failed", "run", run.RunID, "stage", stage.Name,
 			"status", task.Status, "block_kind", task.BlockKind)
+		if handled, err := handleDesignChainFailure(ctx, config, services, hermes, envelope, run, view, plan, stage.Name, logger); handled {
+			return err
+		}
 		return handleChainFailure(ctx, config, services, hermes, envelope, run, view, stage.Name, logger)
 	}
 	return nil
