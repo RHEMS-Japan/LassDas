@@ -561,16 +561,47 @@ func resubmitPendingTerminal(
 	case hook.TerminalInvestigated:
 		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 	}
-	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
-	if readErr != nil {
-		repository = ""
-	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	repository, err := pendingRepository(ctx, terminal, runDir, run, code)
+	if err != nil {
+		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
+		return nil
+	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
 		return err
 	}
 	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
 	return archiveChain(ctx, hermes, view.all)
+}
+
+// pendingRepository picks the repository the pending report was begun with.
+// The first report named the consumer repository only once the run had
+// resolved it (Pipeline.Repository), and "" before that — while the run
+// directory may hold a ticket draft naming the repository either way (the
+// draft is written before the consumer is resolved, and a directory can
+// carry a previous attempt's draft). The store seals the repository into
+// the report digest, so sending the other one would be refused as a
+// conflict on every tick — the same silence this path exists to end. Both
+// candidates are rebuilt and the one that reproduces the row's digest is
+// sent; neither matching is left to a person.
+func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode) (string, error) {
+	if run.TerminalReportSHA256 == "" {
+		return "", errors.New("the pending report carries no digest")
+	}
+	candidates := []string{""}
+	if drafted, err := readField(runDir, "ticket-draft.json", "repository"); err == nil && drafted != "" {
+		candidates = []string{drafted, ""}
+	}
+	for _, candidate := range candidates {
+		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code}, candidate)
+		if err != nil {
+			return "", err
+		}
+		if digest == run.TerminalReportSHA256 {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("no rebuilt report reproduces the pending report's digest")
 }
 
 func reportChainSuccess(
@@ -782,9 +813,10 @@ func readEnvelope(runDir, deliveryID string) (hook.DispatchEnvelope, error) {
 }
 
 // pendingEnvelope reads the envelope a pending terminal report is rebuilt
-// under: the run directory's copy when the run got that far, otherwise the
-// ledger's own copy of the sealed envelope (the row keeps it from the
-// dispatch on). Both are checked to name this delivery.
+// under: the run directory's copy when it is there and readable, otherwise
+// the ledger's own copy of the sealed envelope (the row keeps it from the
+// dispatch on, and the store re-checks the report against it). Both are
+// checked to name this delivery.
 func pendingEnvelope(runDir string, run state.RunOverview) (hook.DispatchEnvelope, error) {
 	envelope, err := readEnvelope(runDir, run.DeliveryID)
 	if err == nil {

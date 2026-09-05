@@ -1746,13 +1746,16 @@ type RunOverview struct {
 	QuestionSealed bool
 	// TerminalCode is set for terminal runs; the attendant retires the
 	// card itself only for its own terminations (expiry, cancel).
-	TerminalCode       string
-	EnvelopeJSON       string
-	QuestionRecordJSON string
-	QuestionCommentID  int64
-	IssueID            int64
-	IssueKey           string
-	Summary            string
+	TerminalCode string
+	// TerminalReportSHA256 is the digest of the report a pending or terminal
+	// run was begun with; a re-submission must rebuild exactly that report.
+	TerminalReportSHA256 string
+	EnvelopeJSON         string
+	QuestionRecordJSON   string
+	QuestionCommentID    int64
+	IssueID              int64
+	IssueKey             string
+	Summary              string
 }
 
 // ScanRuns lists every run row in the ledger. Read-only; the attendant uses
@@ -1789,6 +1792,7 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		entry.CompletedAt, _ = row.int64At("terminal_completed_at")
 		entry.QuestionSealed = row.has("question_record_sha256")
 		entry.TerminalCode, _ = row.str("terminal_code")
+		entry.TerminalReportSHA256, _ = row.str("terminal_report_sha256")
 		entry.EnvelopeJSON, _ = row.str("envelope_json")
 		entry.QuestionRecordJSON, _ = row.str("question_record_json")
 		entry.QuestionCommentID, _ = row.int64At("question_comment_id")
