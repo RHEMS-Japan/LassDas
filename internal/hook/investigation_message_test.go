@@ -68,7 +68,7 @@ func TestPlanHeadlineFollowsTheRequestKind(t *testing.T) {
 	if !strings.Contains(investigation, "【調査方針】") || strings.Contains(investigation, "実装を開始します") {
 		t.Errorf("investigation headline: %s", investigation)
 	}
-	if strings.Contains(investigation, "触る予定の範囲") || strings.Contains(investigation, "Pull Request") || !strings.Contains(investigation, "調査を止めたい場合") {
+	if strings.Contains(investigation, "触る予定の範囲") || strings.Contains(investigation, "Pull Request をマージしない") || !strings.Contains(investigation, "調査を止めたい場合") {
 		t.Errorf("investigation notice talks about implementation: %s", investigation)
 	}
 	design := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "change", NeedsDesign: true, DesignReason: "default"})
