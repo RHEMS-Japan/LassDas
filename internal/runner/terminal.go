@@ -69,7 +69,10 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	if err != nil {
 		return err
 	}
-	owner := t.config.Owner(t.hermesRunID)
+	owner, err := t.owner(ctx)
+	if err != nil {
+		return err
+	}
 	evidence := outcome.Evidence
 	report := hook.TerminalReportRequest{
 		Protocol:   hook.TerminalReportProtocolVersion,
@@ -92,6 +95,49 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 		}
 		return t.services.Report.ProcessTerminalReport(ctx, report), nil
 	})
+}
+
+// owner is the identity this run's reports are bound to: the one the run
+// was claimed under, read from the ledger's run row. The engine that ends a
+// run is not always the engine that claimed it — a release in between
+// changes Identity.EngineSHA — and the store refuses a terminal report or
+// question whose owner differs from the claim (terminal_report_conflict,
+// live 2026-09-05). A row that cannot be read is an error, not a reason to
+// report under the current identity: that would recreate the refusal, and
+// an owner that changed between attempts would turn a retry into a conflict.
+// The run stays claimed and the next tick drives it again. Only a run with
+// no claim row (or no store, in tests) reports under the current identity,
+// which the store then judges on its own.
+func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
+	fallback := t.config.Owner(t.hermesRunID)
+	if t.services == nil || t.services.Store == nil {
+		return fallback, nil
+	}
+	route := t.services.Route
+	route.ExpectedRunID = t.envelope.Snapshot.RunID
+	// A transient ledger read failure is retried the way the report itself
+	// is (terminalSubmitAttempts × terminalRetryDelay); the row's values do
+	// not change between attempts, so the report digest stays the same.
+	var err error
+	for attempt := 1; attempt <= terminalSubmitAttempts; attempt++ {
+		var claimed hook.PullOwner
+		var found bool
+		claimed, found, err = t.services.Store.ClaimOwner(ctx, route)
+		if err == nil {
+			if !found {
+				return fallback, nil
+			}
+			return claimed, nil
+		}
+		if attempt < terminalSubmitAttempts {
+			select {
+			case <-ctx.Done():
+				return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", ctx.Err())
+			case <-time.After(terminalRetryDelay):
+			}
+		}
+	}
+	return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", err)
 }
 
 // loadTrail reads the delivery trail when the run composed one. The
@@ -133,7 +179,10 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 	if err != nil {
 		return err
 	}
-	owner := t.config.Owner(t.hermesRunID)
+	owner, err := t.owner(ctx)
+	if err != nil {
+		return err
+	}
 	// The schedule is sealed once, exactly as cmd/questioner computed it
 	// once and retried the same record: recomputing per retry could change
 	// the record digest across a day boundary and turn an idempotent

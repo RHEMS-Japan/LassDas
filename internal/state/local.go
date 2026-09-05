@@ -681,6 +681,50 @@ func (s *LocalStore) resolveRunRoute(ctx context.Context, route hook.ReportRoute
 	return rebound, nil
 }
 
+// ClaimOwner returns the owner identity the run was claimed under — the
+// repository, workflow and engine revision written into the run row at
+// claim, for the run route.ExpectedRunID names. A terminal report or question
+// is bound to that identity, not to whatever engine happens to run when the
+// run ends: a run claimed under one revision and reported under the next was
+// refused as terminal_report_conflict for ever (live 2026-09-05). found is
+// false when no run row exists or the row carries no claim.
+func (s *LocalStore) ClaimOwner(ctx context.Context, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
+	if route.Validate() != nil {
+		return hook.PullOwner{}, false, localFailure(hook.FailureRejected, "invalid_claim_owner_lookup")
+	}
+	txn, err := s.beginRead(ctx)
+	if err != nil {
+		return hook.PullOwner{}, false, localFailure(hook.FailureRetryable, "claim_owner_read_failed")
+	}
+	defer txn.rollback()
+	runRow, err := txn.getItem(makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), route.ExpectedRunID))
+	if err != nil {
+		return hook.PullOwner{}, false, localFailure(hook.FailureRetryable, "claim_owner_read_failed")
+	}
+	if runRow == nil {
+		return hook.PullOwner{}, false, nil
+	}
+	return claimOwnerFromRow(runRow)
+}
+
+// claimOwnerFromRow reads the six owner fields the claim wrote; a row
+// missing any of them is not a claimed run.
+func claimOwnerFromRow(runRow item) (hook.PullOwner, bool, error) {
+	repositorySHA256, ok1 := runRow.str("repository_sha256")
+	workflowRefSHA256, ok2 := runRow.str("workflow_ref_sha256")
+	workflowSHA, ok3 := runRow.str("workflow_sha")
+	repositoryID, ok4 := runRow.int64At("repository_id")
+	workflowRunID, ok5 := runRow.int64At("workflow_run_id")
+	runAttempt, ok6 := runRow.int64At("run_attempt")
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) {
+		return hook.PullOwner{}, false, nil
+	}
+	return hook.PullOwner{
+		RepositoryID: repositoryID, RepositorySHA256: repositorySHA256, WorkflowRefSHA256: workflowRefSHA256,
+		WorkflowSHA: workflowSHA, WorkflowRunID: workflowRunID, RunAttempt: int(runAttempt),
+	}, true, nil
+}
+
 func (s *LocalStore) BeginTerminal(ctx context.Context, request hook.TerminalBeginRequest) (hook.TerminalBinding, hook.TerminalBeginDisposition, error) {
 	if !validTerminalBeginRequest(request) {
 		return hook.TerminalBinding{}, "", localFailure(hook.FailureRejected, "invalid_terminal_begin")

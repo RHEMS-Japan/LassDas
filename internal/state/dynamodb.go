@@ -708,6 +708,37 @@ func (s *DynamoStore) resolveRunRoute(ctx context.Context, route hook.ReportRout
 
 var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,8}$`)
 
+// ClaimOwner is LocalStore.ClaimOwner for the DynamoDB store: the owner
+// identity the run row was written with at claim.
+func (s *DynamoStore) ClaimOwner(ctx context.Context, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
+	if route.Validate() != nil {
+		return hook.PullOwner{}, false, hook.NewExternalFailure("dynamodb", hook.FailureRejected, "invalid_claim_owner_lookup")
+	}
+	runKey := makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), route.ExpectedRunID)
+	output, err := s.api.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.table), Key: map[string]types.AttributeValue{"pk": stringValue(runKey)}, ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		return hook.PullOwner{}, false, hook.NewExternalFailure("dynamodb", hook.FailureRetryable, "claim_owner_read_failed")
+	}
+	if len(output.Item) == 0 {
+		return hook.PullOwner{}, false, nil
+	}
+	repositorySHA256, ok1 := attributeString(output.Item, "repository_sha256")
+	workflowRefSHA256, ok2 := attributeString(output.Item, "workflow_ref_sha256")
+	workflowSHA, ok3 := attributeString(output.Item, "workflow_sha")
+	repositoryID, ok4 := attributeInt64(output.Item, "repository_id")
+	workflowRunID, ok5 := attributeInt64(output.Item, "workflow_run_id")
+	runAttempt, ok6 := attributeInt64(output.Item, "run_attempt")
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) {
+		return hook.PullOwner{}, false, nil
+	}
+	return hook.PullOwner{
+		RepositoryID: repositoryID, RepositorySHA256: repositorySHA256, WorkflowRefSHA256: workflowRefSHA256,
+		WorkflowSHA: workflowSHA, WorkflowRunID: workflowRunID, RunAttempt: int(runAttempt),
+	}, true, nil
+}
+
 func (s *DynamoStore) loadTerminalBinding(ctx context.Context, runID string, route hook.ReportRouteConfig) (terminalStoredBinding, error) {
 	runKey := makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), runID)
 	runOutput, err := s.api.GetItem(ctx, &dynamodb.GetItemInput{
