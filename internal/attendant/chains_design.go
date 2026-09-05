@@ -203,9 +203,9 @@ func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, co
 		}
 	}
 	pipeline := &runner.Pipeline{Config: config, Workspace: runDirectory(config, run.DeliveryID), Logger: logger}
-	round := pipeline.LatestDesignRound()
+	_, round := pipeline.ApprovedDesign()
 	if round < 1 {
-		return errors.New("design-backed round has no design to re-apply")
+		return errors.New("design-backed round has no approved design to re-apply")
 	}
 	if err := pipeline.RenderApplyInstruction(ctx, round); err != nil {
 		return err
