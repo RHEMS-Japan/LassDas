@@ -518,7 +518,7 @@ func TestConverseTurnKeepsTheCutoffWhenTheWiderAskFailsOtherwise(t *testing.T) {
 	invoker, _ := NewModelInvoker(api)
 	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
 	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
-	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") || !strings.Contains(err.Error(), "script exhausted") && !strings.Contains(err.Error(), "model invocation failed") {
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") || !strings.Contains(err.Error(), "model invocation failed") {
 		t.Fatalf("cutoff then a transport failure: err = %v after %d requests, want the cutoff kept", err, len(api.requests))
 	}
 }

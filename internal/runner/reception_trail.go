@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // receptionCutoffMarker is the worker's own phrase for an answer the model
@@ -13,11 +15,7 @@ import (
 // after it say whether the worker could ask again with a wider allowance
 // (internal/worker converseTurn), so the note tells the requester only
 // what happened.
-const (
-	receptionCutoffMarker  = "finish_reason=length"
-	receptionCutoffAgain   = "cut off again"
-	receptionCutoffCeiling = "already at the ceiling"
-)
+const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 
 // noteReceptionCutoff leaves the requester a reason when a reception stage
 // (the readiness pair, the contract derivation) failed because the model's
@@ -46,9 +44,9 @@ func receptionCutoffNote(stage, stderr string) string {
 	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
 	switch {
-	case strings.Contains(stderr, receptionCutoffAgain):
+	case strings.Contains(stderr, worker.CutoffAskedAgainPhrase):
 		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
-	case strings.Contains(stderr, receptionCutoffCeiling):
+	case strings.Contains(stderr, worker.CutoffAtCeilingPhrase):
 		note += "上限は既に最大値だったため、聞き直しはできませんでした。"
 	}
 	note += "同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"

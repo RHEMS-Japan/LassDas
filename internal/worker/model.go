@@ -28,6 +28,11 @@ const (
 	// ChatFinishLength is the provider ending the answer at max_tokens; the
 	// same turn can be given more room (converseTurn does, once).
 	ChatFinishLength = "length"
+	// CutoffAskedAgainPhrase and CutoffAtCeilingPhrase are the words a
+	// cutoff error carries about what converseTurn could do; the runner
+	// reads them from the worker's stderr to tell the requester the same.
+	CutoffAskedAgainPhrase = "asked again with the wider allowance and cut off again"
+	CutoffAtCeilingPhrase  = "the allowance is already at the ceiling"
 )
 
 // ChatMessage is one OpenAI-compatible chat message.
@@ -468,10 +473,10 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		switch {
 		case errors.Is(err, errModelResponseTruncated):
 			if cutoff != nil {
-				return "", InvocationUsage{}, fmt.Errorf("%w; asked again with the wider allowance and cut off again", err)
+				return "", InvocationUsage{}, fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase)
 			}
 			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
-				return "", InvocationUsage{}, fmt.Errorf("%w; the allowance is already at the ceiling of %d tokens", err, MaxConfiguredOutputTokens)
+				return "", InvocationUsage{}, fmt.Errorf("%w; %s of %d tokens", err, CutoffAtCeilingPhrase, MaxConfiguredOutputTokens)
 			}
 			cutoff = err
 			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)

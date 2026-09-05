@@ -126,7 +126,7 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if tail.String() != "efghijKLMNOPQRSTUV"[2:] || len(tail.String()) != 16 {
+	if tail.String() != "ghijKLMNOPQRSTUV" {
 		t.Fatalf("tail = %q", tail.String())
 	}
 }
