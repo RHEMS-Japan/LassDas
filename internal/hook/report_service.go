@@ -59,6 +59,10 @@ type TerminalReportStore interface {
 
 type TerminalCommentClient interface {
 	FindExactComment(context.Context, int64, string) (int64, bool, error)
+	// FindCommentWithMarker finds a posted comment by the machine tag it
+	// ends with, so a re-submitted report whose body drifted (the spend
+	// line is read live) is recognised instead of posted twice.
+	FindCommentWithMarker(context.Context, int64, string) (int64, bool, error)
 	AddComment(context.Context, int64, string) (int64, error)
 }
 
@@ -145,11 +149,19 @@ func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, repor
 
 	comment := fixedTerminalComment(report, reportDigest)
 	// Backlog's comment API has no idempotency key. The lease serializes live
-	// writers, and this exact-content lookup repairs the ambiguous case where a
-	// previous POST succeeded but the terminal DynamoDB update did not.
-	commentID, found, err := s.backlog.FindExactComment(ctx, binding.IssueID, comment)
+	// writers, and these lookups repair the ambiguous case where a previous
+	// POST succeeded but the terminal store update did not: first by the
+	// marker (run, code and digest — the same report even when the trail or
+	// the live spend line drifted), then by exact content.
+	commentID, found, err := s.backlog.FindCommentWithMarker(ctx, binding.IssueID, terminalCommentFacts(report, reportDigest).Marker)
 	if err != nil {
 		return s.backlogFailure("terminal_comment_lookup", err, report.DeliveryID)
+	}
+	if !found {
+		commentID, found, err = s.backlog.FindExactComment(ctx, binding.IssueID, comment)
+		if err != nil {
+			return s.backlogFailure("terminal_comment_lookup", err, report.DeliveryID)
+		}
 	}
 	if !found {
 		commentID, err = s.backlog.AddComment(ctx, binding.IssueID, comment)

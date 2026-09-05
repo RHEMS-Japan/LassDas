@@ -148,10 +148,9 @@ func (c *Client) GetIssue(ctx context.Context, issueID int64) (hook.CanonicalIss
 	}, nil
 }
 
-func (c *Client) FindExactComment(ctx context.Context, issueID int64, content string) (int64, bool, error) {
-	if issueID <= 0 || !validCommentContent(content) {
-		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
-	}
+// latestComments reads the newest 100 comments of an issue, newest first —
+// the window both comment lookups scan.
+func (c *Client) latestComments(ctx context.Context, issueID int64) ([]commentResponse, error) {
 	path := "/api/v2/issues/" + strconv.FormatInt(issueID, 10) + "/comments"
 	endpoint := *c.origin
 	endpoint.Path = path
@@ -162,25 +161,76 @@ func (c *Client) FindExactComment(ctx context.Context, issueID int64, content st
 	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
+		return nil, hook.NewExternalFailure("backlog", hook.FailureRejected, "request_invalid")
 	}
 	request.Header.Set("Accept", "application/json")
 	var comments []commentResponse
 	if err := c.doJSON(request, http.StatusOK, &comments); err != nil {
-		return 0, false, err
+		return nil, err
 	}
 	if len(comments) > 100 {
-		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
+		return nil, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
 	}
 	for _, comment := range comments {
 		if comment.ID <= 0 || comment.IssueID != issueID {
-			return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
+			return nil, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
 		}
+	}
+	return comments, nil
+}
+
+// FindExactComment answers the id of the newest comment whose body equals
+// content exactly, among the issue's latest 100 comments.
+func (c *Client) FindExactComment(ctx context.Context, issueID int64, content string) (int64, bool, error) {
+	if issueID <= 0 || !validCommentContent(content) {
+		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
+	}
+	comments, err := c.latestComments(ctx, issueID)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, comment := range comments {
 		if comment.Content == content {
 			return comment.ID, true, nil
 		}
 	}
 	return 0, false, nil
+}
+
+// FindCommentWithMarker answers the id of the newest comment whose body
+// contains marker — the one-line machine tag every automation comment ends
+// with — among the issue's latest 100 comments. A re-submitted terminal
+// report is found by its marker even when the body around it changed (the
+// spend line is read live), so the report completes without a second
+// comment (live 2026-09-05).
+func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marker string) (int64, bool, error) {
+	if issueID <= 0 || !validCommentMarker(marker) {
+		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
+	}
+	comments, err := c.latestComments(ctx, issueID)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, comment := range comments {
+		if strings.Contains(comment.Content, marker) {
+			return comment.ID, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+// validCommentMarker accepts the bracketed one-line tag the automation
+// writes: printable ASCII, no whitespace, bounded.
+func validCommentMarker(marker string) bool {
+	if len(marker) < 8 || len(marker) > 256 || marker[0] != '[' || marker[len(marker)-1] != ']' {
+		return false
+	}
+	for _, r := range marker {
+		if r <= ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 const (

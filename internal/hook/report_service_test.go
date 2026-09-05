@@ -33,13 +33,15 @@ func (f *terminalFakeStore) CompleteTerminal(_ context.Context, request Terminal
 }
 
 type terminalFakeComments struct {
-	findIDs      []int64
-	findResults  []bool
-	findErrors   []error
-	addIDs       []int64
-	addErrors    []error
-	findContents []string
-	addContents  []string
+	findIDs       []int64
+	findResults   []bool
+	findErrors    []error
+	addIDs        []int64
+	addErrors     []error
+	findContents  []string
+	addContents   []string
+	addedIDs      []int64
+	markerLookups []string
 }
 
 func (f *terminalFakeComments) FindExactComment(_ context.Context, _ int64, content string) (int64, bool, error) {
@@ -48,10 +50,22 @@ func (f *terminalFakeComments) FindExactComment(_ context.Context, _ int64, cont
 	return valueAt(f.findIDs, index), valueAt(f.findResults, index), valueAt(f.findErrors, index)
 }
 
+func (f *terminalFakeComments) FindCommentWithMarker(_ context.Context, _ int64, marker string) (int64, bool, error) {
+	f.markerLookups = append(f.markerLookups, marker)
+	for i, content := range f.addContents {
+		if strings.Contains(content, marker) && i < len(f.addedIDs) {
+			return f.addedIDs[i], true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 func (f *terminalFakeComments) AddComment(_ context.Context, _ int64, content string) (int64, error) {
 	f.addContents = append(f.addContents, content)
 	index := len(f.addContents) - 1
-	return valueAt(f.addIDs, index), valueAt(f.addErrors, index)
+	id := valueAt(f.addIDs, index)
+	f.addedIDs = append(f.addedIDs, id)
+	return id, valueAt(f.addErrors, index)
 }
 
 func valueAt[T any](values []T, index int) T {
@@ -165,8 +179,10 @@ func TestTerminalReportRetryFindsExistingCommentInsteadOfPostingDuplicate(t *tes
 	if first.Decision != DecisionRetryRequested || second.Decision != DecisionAccepted {
 		t.Fatalf("results: first=%+v second=%+v", first, second)
 	}
-	if len(comments.addContents) != 1 || len(comments.findContents) != 2 || comments.findContents[0] != comments.findContents[1] {
-		t.Fatalf("retry posted a duplicate: find=%d add=%d", len(comments.findContents), len(comments.addContents))
+	// The retry recognises the posted comment by its marker before any
+	// exact-content lookup, so the exact lookup ran once (the first attempt).
+	if len(comments.addContents) != 1 || len(comments.findContents) != 1 || len(comments.markerLookups) != 2 {
+		t.Fatalf("retry posted a duplicate: find=%d marker=%d add=%d", len(comments.findContents), len(comments.markerLookups), len(comments.addContents))
 	}
 	if store.beginRequests[0].ReportSHA256 != store.beginRequests[1].ReportSHA256 || store.beginRequests[0].ReportJSON != store.beginRequests[1].ReportJSON {
 		t.Fatal("fresh retry timestamp changed the immutable terminal outcome")
@@ -237,5 +253,37 @@ func TestEveryFiniteTerminalCodeHasADedicatedUserFacingMessage(t *testing.T) {
 		if strings.Contains(comment, fallback) {
 			t.Fatalf("code %q fell back to the generic message", code)
 		}
+	}
+}
+
+// A re-submitted report whose comment body drifted — the spend line is read
+// live, the trail may have grown — is recognised by its marker: no second
+// final-result comment is posted and the completion binds the posted one.
+func TestTerminalReportRetryFindsTheCommentByMarkerWhenTheBodyDrifted(t *testing.T) {
+	store := &terminalFakeStore{
+		beginBindings:     []TerminalBinding{{IssueID: 404, IssueKey: "TICKET-505"}, {IssueID: 404, IssueKey: "TICKET-505"}},
+		beginDispositions: []TerminalBeginDisposition{TerminalBeginAcquired, TerminalBeginAcquired},
+		completeResults:   []TerminalCompleteDisposition{TerminalCompleted, TerminalCompleted},
+	}
+	comments := &terminalFakeComments{addIDs: []int64{808, 909}}
+	service := newTerminalTestService(t, store, comments, nil)
+	first := terminalTestRequest(TerminalModelFailed)
+	first.SpendText = "合計: $0.05"
+	if result := service.ProcessTerminalReport(context.Background(), first); result.Decision != DecisionAccepted {
+		t.Fatalf("first report: %+v", result)
+	}
+	second := first
+	second.SpendText = "合計: $0.07"
+	if result := service.ProcessTerminalReport(context.Background(), second); result.Decision != DecisionAccepted {
+		t.Fatalf("second report: %+v", result)
+	}
+	if len(comments.addContents) != 1 {
+		t.Fatalf("a second final-result comment was posted: %d comments", len(comments.addContents))
+	}
+	if len(comments.markerLookups) != 2 || !strings.HasPrefix(comments.markerLookups[1], "[ticket-automation:v1:terminal:") {
+		t.Fatalf("marker lookups = %v", comments.markerLookups)
+	}
+	if len(store.completeRequests) != 2 || store.completeRequests[1].CommentID != 808 {
+		t.Fatalf("the completion did not bind the posted comment: %+v", store.completeRequests)
 	}
 }

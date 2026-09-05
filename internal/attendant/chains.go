@@ -92,17 +92,22 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain start failed", "run", run.RunID, "error", err.Error())
 			}
-		case "claimed", "terminal_report_pending":
-			// A run whose terminal report was begun but never completed —
-			// the comment posted, the completion lost to a transient store
-			// failure, the quick retries met the run's own lease — is
-			// driven exactly like a claimed run: the same report is
-			// derived again and re-submitted; the store re-acquires after
-			// the lease expired when the digest matches, the exact-comment
-			// lookup finds the posted comment, and the run completes. Left
-			// alone it stayed pending for ever (live 2026-09-05).
+		case "claimed":
 			if err := advanceClaimedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain advance failed", "run", run.RunID, "error", err.Error())
+			}
+		case "terminal_report_pending":
+			// The terminal report was begun but never completed: the comment
+			// may be on the ticket, the completion was lost to a transient
+			// store failure, and the quick retries met the run's own lease.
+			// A question-sealed run's ending belongs to the reception tick;
+			// every other one is re-submitted as it was — never healed,
+			// requeued or reclassified, which would rerun or contradict it.
+			if run.QuestionSealed {
+				continue
+			}
+			if err := resubmitPendingTerminal(ctx, config, services, hermes, run, view, logger); err != nil {
+				logger.Error("pending terminal report not completed", "run", run.RunID, "error", err.Error())
 			}
 		case "terminal":
 			// The run itself is closed; what may remain is the debug
@@ -486,6 +491,76 @@ func advanceClaimedRun(
 		return handleChainFailure(ctx, config, services, hermes, envelope, run, view, stage.Name, logger)
 	}
 	return nil
+}
+
+// pendingTerminalAction says what the tick does with a run whose terminal
+// report stayed pending: resubmit the report it already decided, or leave it
+// to a person when the pieces the report is built from are gone.
+type pendingTerminalAction string
+
+const (
+	pendingTerminalResubmit      pendingTerminalAction = "resubmit"
+	pendingTerminalNeedsOperator pendingTerminalAction = "needs_operator"
+)
+
+// classifyPendingTerminal keeps the re-submit honest: without the chain
+// cards the outcome cannot be rebuilt identically (and the claimed-run path
+// would requeue and rerun the whole delivery), and without a terminal code
+// there is nothing to resubmit.
+func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerminalAction, string) {
+	if run.TerminalCode == "" || !hook.TerminalCode(run.TerminalCode).Valid() {
+		return pendingTerminalNeedsOperator, "the pending report carries no terminal code"
+	}
+	if !view.hasChain() {
+		return pendingTerminalNeedsOperator, "the chain cards are gone; the report cannot be rebuilt identically"
+	}
+	return pendingTerminalResubmit, ""
+}
+
+// resubmitPendingTerminal submits the same terminal report again. The store
+// re-acquires a pending report whose digest matches once its lease expired,
+// the report service finds the posted comment by its marker, and the
+// completion lands; the cards are then archived as they would have been.
+// Nothing here heals cards, checks for a stop, or requeues: the outcome was
+// decided when the report was first begun (live 2026-09-05: a run whose
+// completion failed stayed pending for over an hour with nothing driving it).
+func resubmitPendingTerminal(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	hermes *runtime.Hermes,
+	run state.RunOverview,
+	view chainView,
+	logger Logger,
+) error {
+	action, reason := classifyPendingTerminal(run, view)
+	if action != pendingTerminalResubmit {
+		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", reason)
+		return nil
+	}
+	runDir := runDirectory(config, run.DeliveryID)
+	envelope, err := readEnvelope(runDir, run.DeliveryID)
+	if err != nil {
+		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", "run envelope unreadable: "+err.Error())
+		return nil
+	}
+	code := hook.TerminalCode(run.TerminalCode)
+	switch code {
+	case hook.TerminalSuccess:
+		return reportChainSuccess(ctx, config, services, envelope, run, logger)
+	case hook.TerminalInvestigated:
+		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
+	}
+	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+	if readErr != nil {
+		repository = ""
+	}
+	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+		return err
+	}
+	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
+	return archiveChain(ctx, hermes, view.all)
 }
 
 func reportChainSuccess(
