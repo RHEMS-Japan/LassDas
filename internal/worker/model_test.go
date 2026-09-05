@@ -455,3 +455,23 @@ func TestCheckReadinessSurvivesOneContractViolation(t *testing.T) {
 		t.Fatalf("the checker was not told what was wrong: %q", api.requests[1].Messages[3].Content)
 	}
 }
+
+// The re-ask belongs to converseTurn, so the reception's direct calls get it
+// too: a preflight whose first answer comes back out of shape is asked again
+// once and succeeds on the second request.
+func TestPreflightAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
+	config := validTestConfig()
+	api := &loopScriptAPI{answers: []string{malformedUsageMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Preflight(context.Background(), config.Models.Implementer); err != nil {
+		t.Fatalf("Preflight after one malformed response: %v", err)
+	}
+	if len(api.requests) != 2 {
+		t.Fatalf("requests = %d, want the malformed turn asked again once", len(api.requests))
+	}
+	api = &loopScriptAPI{answers: []string{malformedUsageMarker + `{"status":"ready"}`, malformedUsageMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Preflight(context.Background(), config.Models.Implementer); !errors.Is(err, errModelResponseMetadata) || len(api.requests) != 2 {
+		t.Fatalf("two malformed responses: err = %v after %d requests, want the metadata error after 2", err, len(api.requests))
+	}
+}

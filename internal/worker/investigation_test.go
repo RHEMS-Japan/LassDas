@@ -15,6 +15,10 @@ import (
 )
 
 // loopScriptAPI answers each turn from a script and keeps every request.
+// The tests exercise the re-ask path directly; the pause before asking again
+// is for the live gateway, not for them.
+func init() { malformedTurnDelay = 0 }
+
 type loopScriptAPI struct {
 	answers  []string
 	requests []ChatRequest
@@ -27,8 +31,29 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 	}
 	answer := f.answers[0]
 	f.answers = f.answers[1:]
+	switch {
+	case strings.HasPrefix(answer, malformedUsageMarker):
+		output := chatOutput(strings.TrimPrefix(answer, malformedUsageMarker))
+		output.Usage.TotalTokens = output.Usage.PromptTokens + output.Usage.CompletionTokens + 7
+		return output, nil
+	case strings.HasPrefix(answer, noUsageMarker):
+		output := chatOutput(strings.TrimPrefix(answer, noUsageMarker))
+		output.Usage = nil
+		return output, nil
+	case answer == emptyContentMarker:
+		return chatOutput(""), nil
+	}
 	return chatOutput(answer), nil
 }
+
+// The markers make the scripted API return an answer out of shape: a usage
+// block whose total does not add up (the shape the live gateway returned
+// once), no usage block, or an empty assistant message.
+const (
+	malformedUsageMarker = "\x00malformed\x00"
+	noUsageMarker        = "\x00nousage\x00"
+	emptyContentMarker   = "\x00empty\x00"
+)
 
 func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, string) {
 	t.Helper()
@@ -240,5 +265,60 @@ func TestInvestigationTaskPromptNamesTheHostArgumentForMultiHostProbes(t *testin
 	input.Session.Catalog = single
 	if prompt := investigationTaskPrompt(input); strings.Contains(prompt, "host_argument") {
 		t.Errorf("single-host entry carries host_argument: %s", prompt)
+	}
+}
+
+// One out-of-shape response does not end the round: the same turn is asked
+// again and the round seals with its measurements; two in a row are the
+// transport's failure. The count restarts after every turn that came back
+// in shape, and every shape refusal — usage that does not add up, no usage,
+// an empty message — is asked again the same way.
+func TestInvestigateAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
+	probeRead := `{"probe":{"probe":"repo.read","args":{"path":"web/page.tmpl"}}}`
+	probeList := `{"probe":{"probe":"repo.list"}}`
+	report := `{"report":{"questions":["Where is the label?"],"findings":[{"claim":"The label is in web/page.tmpl","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Replace it."}}`
+
+	// One malformed response, then the same turn answered in shape.
+	input, path := investigationFixture(t, 10)
+	api := &loopScriptAPI{answers: []string{probeRead, malformedUsageMarker + report, report}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("Investigate: %v (%s)", err, result.Incomplete)
+	}
+	if len(api.requests) != 3 || result.Turns != 2 || result.Investigation.MeasurementsCount != 1 {
+		t.Fatalf("requests %d turns %d measurements %d; want the malformed turn asked again", len(api.requests), result.Turns, result.Investigation.MeasurementsCount)
+	}
+	if err := result.Investigation.Validate(input.Identity, path); err != nil {
+		t.Errorf("sealed report: %v", err)
+	}
+
+	// Malformed, in shape, malformed, in shape: the count restarts after
+	// every turn that came back in shape, so the round still seals.
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{malformedUsageMarker + probeRead, probeRead, noUsageMarker + probeList, probeList, emptyContentMarker, report}}
+	invoker, _ = NewModelInvoker(api)
+	if result, err = invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err != nil {
+		t.Fatalf("alternating shapes: %v (%s)", err, result.Incomplete)
+	}
+	if len(api.requests) != 6 || result.Turns != 3 || result.Investigation.MeasurementsCount != 2 {
+		t.Fatalf("alternating shapes: requests %d turns %d measurements %d", len(api.requests), result.Turns, result.Investigation.MeasurementsCount)
+	}
+
+	// Two in a row: the failure travels after exactly two requests.
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{malformedUsageMarker + probeList, malformedUsageMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseMetadata) {
+		t.Fatalf("two malformed responses in a row: err = %v, want the metadata error", err)
+	}
+	if len(api.requests) != 2 {
+		t.Fatalf("requests after two malformed responses = %d, want 2", len(api.requests))
+	}
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{emptyContentMarker, emptyContentMarker, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseContent) || len(api.requests) != 2 {
+		t.Fatalf("two empty messages in a row: err = %v after %d requests, want the content error after 2", err, len(api.requests))
 	}
 }
