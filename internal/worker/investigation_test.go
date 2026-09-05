@@ -60,7 +60,7 @@ func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, stri
 }
 
 const reportAnswer = `{"report":{"questions":["Where is the label?"],"findings":[{"claim":"The label is in web/page.tmpl","evidence":["m-0002"],"confidence":"measured"}],"unknowns":[],"next":"Replace it."}}`
-const designAnswer = `{"design":{"cause":"The label is hard-coded","cause_evidence":["m-0002"],"approach":"Replace the label","alternatives":[],"files":[{"path":"web/page.tmpl","changes":["replace Old label with New label"]}],"verification":{"form":"wording","path":"/page","expected_text":"New label","absent_text":"Old label"},"blast_radius":["the page header"],"not_doing":[]}}`
+const designAnswer = `{"design":{"cause":"The label is hard-coded","cause_evidence":["m-0002"],"approach":"Replace the label","alternatives":["Add a translation key"],"files":[{"path":"web/page.tmpl","changes":["replace Old label with New label"]}],"verification":{"form":"wording","path":"/page","expected_text":"New label","absent_text":"Old label"},"blast_radius":["the page header"],"not_doing":[]}}`
 
 func TestInvestigateSealsReportAndDesignFromOneConversation(t *testing.T) {
 	input, path := investigationFixture(t, 10)
@@ -98,6 +98,29 @@ func TestInvestigateSealsReportAndDesignFromOneConversation(t *testing.T) {
 	}
 	if !strings.Contains(api.requests[0].Messages[1].Content, `"catalogue"`) || !strings.Contains(api.requests[0].Messages[0].Content, "exactly one JSON object") {
 		t.Error("task prompt lacks the catalogue or the contract")
+	}
+}
+
+func TestInvestigateRefusesProbesAfterTheReportIsSealed(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	input.Mode = ModeDesign
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.read","args":{"path":"web/page.tmpl"}}}`,
+		`{"report":{"questions":["Where is the label?"],"findings":[{"claim":"The label is in web/page.tmpl","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Replace it."}}`,
+		`{"probe":{"probe":"repo.list"}}`, // after the seal: objected, not executed
+		`{"design":{"cause":"The label is hard-coded","cause_evidence":["m-0001"],"approach":"Replace the label","alternatives":["Add a translation key"],"files":[{"path":"web/page.tmpl","changes":["replace Old label with New label"]}],"verification":{"form":"wording","path":"/page","expected_text":"New label","absent_text":"Old label"},"blast_radius":["the page header"],"not_doing":[]}}`,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("Investigate: %v (%s)", err, result.Incomplete)
+	}
+	if input.Session.Used != 1 || result.Investigation.ProbesUsed != 1 || result.Investigation.MeasurementsCount != 1 || result.Design == nil {
+		t.Errorf("a probe ran after the seal: used %d sealed %d", input.Session.Used, result.Investigation.ProbesUsed)
+	}
+	last := api.requests[3].Messages[len(api.requests[3].Messages)-1].Content
+	if !strings.Contains(last, "measurements are closed") && !strings.Contains(last, "no more measurements") {
+		t.Errorf("model was not told the measurements are closed: %s", last)
 	}
 }
 
