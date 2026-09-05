@@ -47,6 +47,9 @@ type Session struct {
 	lookup    resolver
 	now       func() time.Time
 	httpHooks httpTestHooks
+	// rotatedHosts are hosts that answered an http probe with a Set-Cookie
+	// for a jar cookie; the session does not address them again (§3.2).
+	rotatedHosts map[string]bool
 }
 
 // ErrBudgetExhausted ends the round honestly when the probe budget is spent.
@@ -69,7 +72,13 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 	}
 	limits := s.Limits
 	if limits.MaxProbes <= 0 {
-		limits = DefaultLimits
+		limits.MaxProbes = DefaultLimits.MaxProbes
+	}
+	if limits.MaxTotalBytes <= 0 {
+		limits.MaxTotalBytes = DefaultLimits.MaxTotalBytes
+	}
+	if limits.ExcerptBytes <= 0 {
+		limits.ExcerptBytes = DefaultLimits.ExcerptBytes
 	}
 	if s.Used >= limits.MaxProbes {
 		return Outcome{}, ErrBudgetExhausted
@@ -102,6 +111,10 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 		}
 		result = runSQL(ctx, plan, dsn, connector)
 	case KindHTTP:
+		if s.rotatedHosts[plan.Spec.Hosts[0]] {
+			result = execResult{exitCode: -1, failure: "refused: the host rotated the session cookie earlier in this request; it is not addressed again"}
+			break
+		}
 		lookup := s.lookup
 		if lookup == nil {
 			lookup = systemResolver
@@ -109,6 +122,12 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 		var http httpProbeResult
 		http, result = runHTTPWith(ctx, plan, s.Jar, lookup, s.httpHooks)
 		rotated = http.rotated
+		if rotated {
+			if s.rotatedHosts == nil {
+				s.rotatedHosts = map[string]bool{}
+			}
+			s.rotatedHosts[plan.Spec.Hosts[0]] = true
+		}
 	default:
 		result = execResult{exitCode: -1, failure: "kind has no executor"}
 	}
