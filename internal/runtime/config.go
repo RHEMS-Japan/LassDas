@@ -224,6 +224,31 @@ type ChainProfiles struct {
 	ReviewB     string `json:"review_b,omitempty"`
 	Validate    string `json:"validate,omitempty"`
 	Publish     string `json:"publish,omitempty"`
+	// The investigating designer's profiles (docs/INVESTIGATING_DESIGNER.md
+	// §9): investigate and design_decide are kernel processes like validate;
+	// design_review_a/b run the configured reviewers under their own
+	// `--stage`; applier is the light native agent that copies a design.
+	// All five are set together or not at all.
+	Investigate   string `json:"investigate,omitempty"`
+	DesignReviewA string `json:"design_review_a,omitempty"`
+	DesignReviewB string `json:"design_review_b,omitempty"`
+	DesignDecide  string `json:"design_decide,omitempty"`
+	Applier       string `json:"applier,omitempty"`
+}
+
+// DesignEnabled reports whether the design profiles are configured.
+func (p ChainProfiles) DesignEnabled() bool {
+	return p.Investigate != "" && p.DesignReviewA != "" && p.DesignReviewB != "" && p.DesignDecide != "" && p.Applier != ""
+}
+
+func (p ChainProfiles) designPartiallyConfigured() bool {
+	set := 0
+	for _, name := range []string{p.Investigate, p.DesignReviewA, p.DesignReviewB, p.DesignDecide, p.Applier} {
+		if name != "" {
+			set++
+		}
+	}
+	return set > 0 && set < 5
 }
 
 type TrackerConfig struct {
@@ -358,6 +383,17 @@ func (c Config) validateOrchestration() error {
 				return errors.New("runtime config: chain profiles must not reuse the runner profile")
 			}
 			seen[name] = struct{}{}
+		}
+		if p.designPartiallyConfigured() {
+			return errors.New("runtime config: chain design profiles (investigate, design_review_a, design_review_b, design_decide, applier) are set together or not at all")
+		}
+		if p.DesignEnabled() {
+			for _, name := range []string{p.Investigate, p.DesignReviewA, p.DesignReviewB, p.DesignDecide, p.Applier} {
+				if _, duplicate := seen[name]; duplicate || name == c.HermesProfile {
+					return errors.New("runtime config: chain design profiles must not reuse another profile")
+				}
+				seen[name] = struct{}{}
+			}
 		}
 		if c.Chain.RunsRoot == "" {
 			return errors.New("runtime config: cards orchestration needs chain.runs_root")

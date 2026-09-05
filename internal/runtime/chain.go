@@ -29,7 +29,62 @@ const (
 	StageReviewB   = "review-b"
 	StageValidate  = "validate"
 	StagePublish   = "publish"
+
+	// The investigating designer's stages (docs/INVESTIGATING_DESIGNER.md
+	// §9). They count in design rounds (`:d<N>` keys), the stages above in
+	// implementation rounds (`:r<N>`), because a design round can restart
+	// without an implementation round having happened.
+	StageInvestigate   = "investigate"
+	StageDesignReviewA = "design-review-a"
+	StageDesignReviewB = "design-review-b"
+	StageDesignDecide  = "design-decide"
+	// StageApply is the light implementer that copies an approved design.
+	// It counts in implementation rounds like the implement card it replaces.
+	StageApply = "apply"
 )
+
+// ChainShape selects which cards a delivery runs.
+type ChainShape string
+
+const (
+	// ShapeImplement is the original chain: implement, two reviews, validate, publish.
+	ShapeImplement ChainShape = "implement"
+	// ShapeInvestigation ends with a sealed investigation report: investigate,
+	// one evidence review and the decision (or investigate alone when the
+	// consumer turned the report review off).
+	ShapeInvestigation ChainShape = "investigation"
+	// ShapeDesign measures, designs, has the design reviewed, then applies
+	// it: investigate, two design reviews, design-decide, apply, and the
+	// original review / validate / publish tail.
+	ShapeDesign ChainShape = "design"
+)
+
+// ChainPlan is the shape plus the consumer switches that vary it.
+type ChainPlan struct {
+	Shape ChainShape
+	// ReviewInvestigation adds the evidence review to an investigation-only
+	// delivery (consumer `design.review_investigation`, default on).
+	ReviewInvestigation bool
+}
+
+// IsDesignStage reports whether a stage counts in design rounds.
+func IsDesignStage(stage string) bool {
+	switch stage {
+	case StageInvestigate, StageDesignReviewA, StageDesignReviewB, StageDesignDecide:
+		return true
+	}
+	return false
+}
+
+// knownStage reports whether a stage name is one the chain runs.
+func knownStage(stage string) bool {
+	switch stage {
+	case StageImplement, StageReviewA, StageReviewB, StageValidate, StagePublish,
+		StageInvestigate, StageDesignReviewA, StageDesignReviewB, StageDesignDecide, StageApply:
+		return true
+	}
+	return false
+}
 
 // ChainStage is one step of the chain: which profile runs it and how long
 // it may take. The runtimes are the operating premise from the migration
@@ -42,8 +97,54 @@ type ChainStage struct {
 	MaxRuntimeSeconds int
 }
 
-// ChainStages is the chain for one configuration, in order.
+// ChainStages is the original chain for one configuration, in order.
 func ChainStages(chain ChainConfig) []ChainStage {
+	return ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement})
+}
+
+// ChainStagesFor is the chain for one plan, in order.
+func ChainStagesFor(chain ChainConfig, plan ChainPlan) []ChainStage {
+	tail := implementChainStages(chain)
+	switch plan.Shape {
+	case ShapeInvestigation:
+		stages := []ChainStage{investigateStage(chain)}
+		if plan.ReviewInvestigation {
+			stages = append(stages,
+				ChainStage{Name: StageDesignReviewA, Profile: chain.Profiles.DesignReviewA, MaxRuntimeSeconds: 70 * 60},
+				ChainStage{Name: StageDesignDecide, Profile: chain.Profiles.DesignDecide, MaxRuntimeSeconds: 5 * 60},
+			)
+		}
+		return stages
+	case ShapeDesign:
+		stages := []ChainStage{
+			investigateStage(chain),
+			// The design reviews carry the implementation reviews' wall:
+			// the same agents judge, only the subject differs.
+			{Name: StageDesignReviewA, Profile: chain.Profiles.DesignReviewA, MaxRuntimeSeconds: 70 * 60},
+			{Name: StageDesignReviewB, Profile: chain.Profiles.DesignReviewB, MaxRuntimeSeconds: 70 * 60},
+			// design-decide is a kernel process like validate; five minutes
+			// outlasts reading two reviews and sealing a decision.
+			{Name: StageDesignDecide, Profile: chain.Profiles.DesignDecide, MaxRuntimeSeconds: 5 * 60},
+			// The applier copies a reviewed design: 40 turns at the measured
+			// 20 seconds each is 800 seconds; the wall leaves room for the
+			// seal that follows on the next card.
+			{Name: StageApply, Profile: chain.Profiles.Applier, MaxRuntimeSeconds: 20 * 60},
+		}
+		return append(stages, tail[1:]...)
+	default:
+		return tail
+	}
+}
+
+// investigateStage is the kernel-driven investigating designer. The role's
+// own budget is 1,800 seconds (docs/INVESTIGATING_DESIGNER.md §3.1); the
+// card wall must outlast it plus the seal, or the kanban SIGTERM kills a
+// working round from outside — the same lesson the review walls record.
+func investigateStage(chain ChainConfig) ChainStage {
+	return ChainStage{Name: StageInvestigate, Profile: chain.Profiles.Investigate, MaxRuntimeSeconds: 40 * 60}
+}
+
+func implementChainStages(chain ChainConfig) []ChainStage {
 	return []ChainStage{
 		{Name: StageImplement, Profile: chain.Profiles.Implementer, MaxRuntimeSeconds: 90 * 60},
 		// The card wall must outlast the reviewing agent's own budget
@@ -66,20 +167,31 @@ func ChainStages(chain ChainConfig) []ChainStage {
 	}
 }
 
-// ChainCardKey is the idempotency key of one stage card.
+// ChainCardKey is the idempotency key of one stage card. Design stages
+// count in design rounds (`:d<N>`), the others in implementation rounds
+// (`:r<N>`), so a second design round never collides with the finished
+// cards of the first.
 func ChainCardKey(deliveryID, stage string, round int) string {
+	if IsDesignStage(stage) {
+		return fmt.Sprintf("%s:%s:d%d", deliveryID, stage, round)
+	}
 	return fmt.Sprintf("%s:%s:r%d", deliveryID, stage, round)
 }
 
 // ParseChainCardKey splits a chain card key back into its parts. The second
 // return is false for keys of other shapes (the runner mode's plain
-// delivery-id cards above all).
+// delivery-id cards above all). The round returned is the design round for
+// design stages and the implementation round otherwise.
 func ParseChainCardKey(key string) (deliveryID, stage string, round int, ok bool) {
-	last := strings.LastIndex(key, ":r")
-	if last <= 0 {
+	last := strings.LastIndex(key, ":")
+	if last <= 0 || last+2 > len(key) {
 		return "", "", 0, false
 	}
-	if _, err := fmt.Sscanf(key[last:], ":r%d", &round); err != nil || round < 1 {
+	letter := key[last+1]
+	if letter != 'r' && letter != 'd' {
+		return "", "", 0, false
+	}
+	if _, err := fmt.Sscanf(key[last+2:], "%d", &round); err != nil || round < 1 {
 		return "", "", 0, false
 	}
 	rest := key[:last]
@@ -88,9 +200,7 @@ func ParseChainCardKey(key string) (deliveryID, stage string, round int, ok bool
 		return "", "", 0, false
 	}
 	deliveryID, stage = rest[:middle], rest[middle+1:]
-	switch stage {
-	case StageImplement, StageReviewA, StageReviewB, StageValidate, StagePublish:
-	default:
+	if !knownStage(stage) || IsDesignStage(stage) != (letter == 'd') {
 		return "", "", 0, false
 	}
 	// Only the canonical spelling round-trips; Sscanf alone would accept
@@ -123,11 +233,45 @@ func EnsureChain(
 	deliveryID, runID, summary string,
 	round int,
 ) (string, error) {
-	if round < 1 {
-		return "", fmt.Errorf("chain round %d is invalid", round)
+	return EnsureChainFor(ctx, hermes, chain, ChainPlan{Shape: ShapeImplement}, existing, deliveryID, runID, summary, ChainRounds{Implement: round})
+}
+
+// ChainRounds are the two counters a delivery's cards live in.
+type ChainRounds struct {
+	// Design is the current design round (investigate and the design
+	// reviews); 0 for a shape without design stages.
+	Design int
+	// Implement is the current implementation round (implement or apply and
+	// the tail); 0 for a shape without implementation stages.
+	Implement int
+}
+
+func (r ChainRounds) roundFor(stage string) int {
+	if IsDesignStage(stage) {
+		return r.Design
+	}
+	return r.Implement
+}
+
+// EnsureChainFor creates the missing cards of one plan, keyed by the round
+// each stage counts in, chained parent to child, after the last living
+// card. Rounds must be positive for every stage the plan contains.
+func EnsureChainFor(
+	ctx context.Context,
+	hermes *Hermes,
+	chain ChainConfig,
+	plan ChainPlan,
+	existing map[string]BoardTask,
+	deliveryID, runID, summary string,
+	rounds ChainRounds,
+) (string, error) {
+	stages := ChainStagesFor(chain, plan)
+	for _, stage := range stages {
+		if rounds.roundFor(stage.Name) < 1 {
+			return "", fmt.Errorf("chain round for stage %s is invalid", stage.Name)
+		}
 	}
 	workspace := "dir:" + RunDirectory(chain, deliveryID)
-	stages := ChainStages(chain)
 	// The last stage with a living card gates everything before it: the
 	// kanban treats an archived parent as satisfied, so recreating an
 	// earlier stage would hand it straight to dispatch and run it in
@@ -137,13 +281,14 @@ func EnsureChain(
 	// creation resumes only after the last living card.
 	lastLive := -1
 	for index, stage := range stages {
-		if task, ok := existing[ChainCardKey(deliveryID, stage.Name, round)]; ok && task.Status != "archived" {
+		if task, ok := existing[ChainCardKey(deliveryID, stage.Name, rounds.roundFor(stage.Name))]; ok && task.Status != "archived" {
 			lastLive = index
 		}
 	}
 	parent := ""
 	terminal := ""
 	for index, stage := range stages {
+		round := rounds.roundFor(stage.Name)
 		key := ChainCardKey(deliveryID, stage.Name, round)
 		if task, ok := existing[key]; ok && task.Status != "archived" {
 			parent = task.ID
@@ -155,15 +300,19 @@ func EnsureChain(
 			// the kanban's gating is concerned; nothing safe to recreate.
 			continue
 		}
-		title := fmt.Sprintf("%s %s r%d", runID, stage.Name, round)
+		letter := "r"
+		if IsDesignStage(stage.Name) {
+			letter = "d"
+		}
+		title := fmt.Sprintf("%s %s %s%d", runID, stage.Name, letter, round)
 		if summary != "" {
-			title = fmt.Sprintf("%s %s r%d: %s", runID, stage.Name, round, summary)
+			title = fmt.Sprintf("%s %s %s%d: %s", runID, stage.Name, letter, round, summary)
 		}
 		body := fmt.Sprintf(
 			"Automated ticket run, stage %s of round %d.\nDelivery: %s\nTicket: %s\n\nDispatched by the LassDas attendant; the assignee profile runs this stage in the shared run directory.",
 			stage.Name, round, deliveryID, runID,
 		)
-		if stage.Name == StageImplement {
+		if stage.Name == StageImplement || stage.Name == StageApply {
 			// The implement card runs a native agent whose whole prompt is
 			// the kernel-rendered instruction file the attendant placed in
 			// the shared directory — the card body must not become a second
