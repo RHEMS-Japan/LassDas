@@ -92,7 +92,15 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain start failed", "run", run.RunID, "error", err.Error())
 			}
-		case "claimed":
+		case "claimed", "terminal_report_pending":
+			// A run whose terminal report was begun but never completed —
+			// the comment posted, the completion lost to a transient store
+			// failure, the quick retries met the run's own lease — is
+			// driven exactly like a claimed run: the same report is
+			// derived again and re-submitted; the store re-acquires after
+			// the lease expired when the digest matches, the exact-comment
+			// lookup finds the posted comment, and the run completes. Left
+			// alone it stayed pending for ever (live 2026-09-05).
 			if err := advanceClaimedRun(ctx, config, services, hermes, run, view, logger); err != nil {
 				logger.Error("chain advance failed", "run", run.RunID, "error", err.Error())
 			}
@@ -107,8 +115,8 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 				logger.Error("deliver sync failed", "run", run.RunID, "error", err.Error())
 			}
 		default:
-			// awaiting_answer and the question-sealed report flavors
-			// belong to the reception tick's own machinery.
+			// awaiting_answer and question_report_pending belong to the
+			// reception tick's own machinery.
 		}
 	}
 	return nil
