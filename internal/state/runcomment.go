@@ -257,9 +257,19 @@ func runCommentMarkerMatches(marker map[string]types.AttributeValue, runKey stri
 		attributeStringEquals(marker, "reply_kind", string(kind))
 }
 
+// validRunCommentKind accepts every one-shot run comment the hook protocol
+// defines. The list is the store's copy of hook's constants: a kind added
+// to the protocol but not here made the attendant unable to ask whether the
+// comment was posted, and a run whose report was approved waited for ever
+// (the investigation report, live 2026-09-05).
 func validRunCommentKind(kind hook.RunCommentKind) bool {
-	return kind == hook.RunCommentAck || kind == hook.RunCommentReceipt || kind == hook.RunCommentPlan ||
-		kind == hook.RunCommentE2E || kind == hook.RunCommentStagingReport || kind == hook.RunCommentReleaseReport
+	switch kind {
+	case hook.RunCommentAck, hook.RunCommentReceipt, hook.RunCommentPlan,
+		hook.RunCommentInvestigation, hook.RunCommentDesign,
+		hook.RunCommentE2E, hook.RunCommentStagingReport, hook.RunCommentReleaseReport:
+		return true
+	}
+	return false
 }
 
 func validRunCommentBeginRequest(request hook.RunCommentBeginRequest) bool {

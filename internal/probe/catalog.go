@@ -379,6 +379,24 @@ func (c Catalog) Resolve(request Request) (Plan, *Refusal) {
 			args[name] = value
 			continue
 		}
+		if spec.Kind == KindHTTP && name == "host" {
+			// An http probe that lists several hosts is addressed with a
+			// host argument; the value must be one of the listed hosts, and
+			// runHTTP dials nothing else. Without this the request fell to
+			// the first host and the model could not measure the others
+			// (live 2026-09-05: every timing hit the first listed host).
+			allowed := false
+			for _, candidate := range spec.Hosts {
+				if candidate == value {
+					allowed = true
+				}
+			}
+			if !allowed {
+				return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q does not address host %q", spec.ID, value)}
+			}
+			args[name] = value
+			continue
+		}
 		re, declared := spec.compiled[name]
 		if !declared {
 			return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q has no slot %q", spec.ID, name)}
