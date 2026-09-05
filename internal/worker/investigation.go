@@ -129,6 +129,15 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			continue
 		}
 		switch {
+		case answer.Probe != nil && phase == ModeDesign:
+			// The report sealed the measurements this round stands on; a
+			// probe now would sit outside probes_used and the chain prefix.
+			rejections++
+			if rejections >= modelAnswerAttempts {
+				result.Incomplete = "the model kept asking for measurements after the report was sealed"
+				return result, ErrInvestigationIncomplete
+			}
+			conversation.objection(response, "the investigation is sealed; no more measurements this round. Answer with the design, citing the ids your measured findings already carry.")
 		case answer.Probe != nil:
 			outcome, err := input.Session.Run(ctx, *answer.Probe)
 			if errors.Is(err, probe.ErrBudgetExhausted) {
@@ -175,7 +184,7 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				return result, nil
 			}
 			phase = ModeDesign
-			conversation.append(response, fmt.Sprintf(`{"sealed":"investigation","investigation_sha256":%q,"instruction":"The investigation is sealed. Now answer with the design as {\"design\":{...}} — or with more probe requests first if the remaining budget allows. Every id in cause_evidence must be one your measured findings cite."}`, record.InvestigationSHA256))
+			conversation.append(response, fmt.Sprintf(`{"sealed":"investigation","investigation_sha256":%q,"instruction":"The investigation is sealed and measurements are closed for this round. Answer with the design as {\"design\":{...}}. Every id in cause_evidence must be one your measured findings cite."}`, record.InvestigationSHA256))
 		default:
 			output, err := investigate.DecodeModelDesignOutput(answer.Design)
 			if err != nil {

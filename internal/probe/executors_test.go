@@ -140,7 +140,7 @@ func TestHTTPProbeRefusesPrivateResolution(t *testing.T) {
 			t.Errorf("%s (%s): refused %v reason %q", name, ip, outcome.Measurement.Refused, outcome.Measurement.Reason)
 		}
 	}
-	for _, ip := range []string{"93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"} {
+	for _, ip := range []string{"203.0.113.10", "2001:db8::10"} {
 		if !addressAllowed(net.ParseIP(ip)) {
 			t.Errorf("public address %s refused", ip)
 		}
@@ -210,7 +210,16 @@ func TestHTTPProbeNeverWritesJar(t *testing.T) {
 	if kind, found := SecretShaped("session=original-value-0001", session.forbiddenLiterals()); !found || kind != "known secret value" {
 		t.Errorf("jar value not refused: %q %v", kind, found)
 	}
+	// After a rotation the host is closed for the rest of the request.
+	outcome, err = session.Run(context.Background(), Request{Probe: "http.timing", Args: map[string]string{"path": "/console"}})
+	if err != nil || !outcome.Measurement.Refused || !strings.Contains(outcome.Measurement.Reason, "rotated") {
+		t.Errorf("second request to a rotated host: %+v %v", outcome.Measurement, err)
+	}
+	if requests != 1 {
+		t.Errorf("server saw %d requests; the rotated host must not be addressed again", requests)
+	}
 	// Redirects are not followed: the 302 is the recorded answer.
+	session.rotatedHosts = nil
 	outcome, err = session.Run(context.Background(), Request{Probe: "http.timing", Args: map[string]string{"path": "/redirect"}})
 	if err != nil || outcome.Measurement.Refused || !strings.Contains(outcome.Excerpt, "status=302") {
 		t.Errorf("redirect: %+v %q %v", outcome.Measurement, outcome.Excerpt, err)

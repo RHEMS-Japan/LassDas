@@ -224,6 +224,7 @@ func (p *Pipeline) chainDesignDecide(ctx context.Context, reviewers []string) er
 	args := []string{
 		"decide-design", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 		"--investigation", filepath.Join(roundDir, "investigation.json"), "--round", strconv.Itoa(round),
+		"--measurements", p.path("measurements.jsonl"),
 	}
 	if _, err := os.Stat(filepath.Join(roundDir, "design.json")); err == nil {
 		args = append(args, "--design", filepath.Join(roundDir, "design.json"))

@@ -51,6 +51,11 @@ func runExec(ctx context.Context, plan Plan, env []string) execResult {
 	defer cancel()
 	writer := &cappedWriter{cap: plan.Spec.MaxOutput()}
 	command := exec.CommandContext(ctx, plan.Argv[0], plan.Argv[1:]...) // #nosec G204 -- argv is the catalogue's fixed shape with regex-checked slots
+	if env == nil {
+		// A nil Env would hand the child the kernel's whole environment,
+		// credentials included; an empty one hands it nothing.
+		env = []string{}
+	}
 	command.Env = env
 	command.Stdin = nil
 	command.Stdout = writer

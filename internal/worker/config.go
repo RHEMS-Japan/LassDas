@@ -53,6 +53,36 @@ type Config struct {
 	Probes []probe.Spec `json:"probes,omitempty"`
 	// AnswerKnowledge names where adopted answers are preserved, if anywhere.
 	AnswerKnowledge *AnswerKnowledgeConfig `json:"answer_knowledge,omitempty"`
+	// DesignMaxRounds bounds the design review rounds: a design (or an
+	// investigation report) the reviewers still object to at this round
+	// ends the delivery as nonconverged instead of going on. Zero means
+	// DefaultDesignMaxRounds; omitempty keeps existing configurations'
+	// digests unchanged.
+	DesignMaxRounds int `json:"design_max_rounds,omitempty"`
+}
+
+// DefaultDesignMaxRounds is the design review round limit a configuration
+// gets when it sets none.
+const DefaultDesignMaxRounds = 3
+
+// DesignRounds is the effective design review round limit.
+func (c Config) DesignRounds() int {
+	if c.DesignMaxRounds == 0 {
+		return DefaultDesignMaxRounds
+	}
+	return c.DesignMaxRounds
+}
+
+// maxRunStage bounds the stage an agent run record may carry. An
+// implementing or reviewing run belongs to an implementation stage, a
+// design reviewer's run to a design round, and the record's one field is
+// held to whichever limit is larger; the stages that consume a run hold it
+// to their own limit as well.
+func (c Config) maxRunStage() int {
+	if rounds := c.DesignRounds(); rounds > c.MaxStages {
+		return rounds
+	}
+	return c.MaxStages
 }
 
 // AgentSet names the coding agents the framework runs: one that implements
@@ -515,6 +545,12 @@ type ModelEndpoint struct {
 	Effort           string `json:"effort,omitempty"`
 	StructuredOutput bool   `json:"structured_output"`
 	MaxOutputTokens  int32  `json:"max_output_tokens"`
+	// DesignLens is the lens this reviewer judges a design or an
+	// investigation report under, when the consumer wants its own wording.
+	// Without one the first configured reviewer judges the evidence and
+	// the second the approach (the framework's built-in lenses). Reviewers
+	// only.
+	DesignLens string `json:"design_lens,omitempty"`
 }
 
 func LoadConfig(filename string) (Config, error) {
@@ -596,6 +632,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")
+	}
+	if c.DesignMaxRounds < 0 || c.DesignMaxRounds > 10 {
+		return errors.New("design_max_rounds must be between 1 and 10")
 	}
 	if c.AnswerKnowledge != nil {
 		if err := c.AnswerKnowledge.validate(); err != nil {
@@ -919,6 +958,9 @@ func (m ModelEndpoint) validate(reviewer bool) error {
 	}
 	if !reviewer && m.Lens != "" {
 		return errors.New("implementer lens must be empty")
+	}
+	if m.DesignLens != "" && (!reviewer || strings.TrimSpace(m.DesignLens) != m.DesignLens || len(m.DesignLens) > 512 || strings.ContainsAny(m.DesignLens, "\r\n\x00")) {
+		return errors.New("reviewer design lens is invalid")
 	}
 	switch m.Effort {
 	case "", "low", "medium", "high", "xhigh", "max":

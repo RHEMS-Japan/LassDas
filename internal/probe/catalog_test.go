@@ -44,6 +44,7 @@ func TestCatalogRefusesOutOfShapeRequests(t *testing.T) {
 		{"http post", Request{Probe: "http.timing", Args: map[string]string{"path": "/console", "method": "POST"}}, "does not allow method"},
 		{"http path outside shape", Request{Probe: "http.timing", Args: map[string]string{"path": "/console?x=1"}}, "declared shape"},
 		{"http traversal", Request{Probe: "http.timing", Args: map[string]string{"path": "/../admin"}}, "declared shape"},
+		{"leading dash", Request{Probe: "k8s.logs", Args: map[string]string{"pod": "-web", "since": "5m"}}, "dash"},
 	}
 	for _, tc := range refused {
 		plan, refusal := catalog.Resolve(tc.request)
