@@ -298,6 +298,12 @@ const applyInstructionRules = `
 // without a design (the original chain), so every caller adds the design
 // arguments only when there is one.
 func (p *Pipeline) approvedDesignPath() string {
+	path, _ := p.approvedDesign()
+	return path
+}
+
+// approvedDesign returns the newest approved design and its round.
+func (p *Pipeline) approvedDesign() (string, int) {
 	for round := p.LatestDesignRound(); round >= 1; round-- {
 		outcome, err := p.readJSONField(fmt.Sprintf("history/design-%d/decision.json", round), "outcome")
 		if err != nil || outcome != "approved" {
@@ -305,8 +311,34 @@ func (p *Pipeline) approvedDesignPath() string {
 		}
 		design := filepath.Join(p.designRoundDir(round), "design.json")
 		if _, err := os.Stat(design); err == nil {
-			return design
+			return design, round
 		}
 	}
-	return ""
+	return "", 0
+}
+
+// ErrNoApprovedDesign is the fail-closed answer for a design-backed
+// delivery whose approved design cannot be found: the seal, the reviews and
+// the gate must not fall back to the original chain's rules by accident.
+var ErrNoApprovedDesign = errors.New("a design-backed round has no approved design to hold the change to")
+
+// requiredDesign returns the approved design when the delivery's plan is the
+// design shape, "" when the plan is the original chain, and
+// ErrNoApprovedDesign when the design shape has no approved design.
+func (p *Pipeline) requiredDesign() (string, int, error) {
+	plan, err := ChainPlanFromDecision(p.Workspace, p.Config.ConsumerConfigPath)
+	if err != nil || plan.Shape != runtime.ShapeDesign {
+		return "", 0, nil
+	}
+	design, round := p.approvedDesign()
+	if design == "" {
+		return "", 0, ErrNoApprovedDesign
+	}
+	return design, round, nil
+}
+
+// designObjectionPath is where the seal records an applier's objection to
+// the design of one design round; the attendant reads the same path.
+func (p *Pipeline) designObjectionPath(designRound int) string {
+	return filepath.Join(p.designRoundDir(designRound), "objection.json")
 }

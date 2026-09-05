@@ -136,18 +136,15 @@ func TestSealTurnsObjectionIntoDesignRound(t *testing.T) {
 	if err := os.WriteFile(objection, []byte(`{"reason":"the label is rendered from a translation key, not the file the design names","section":"files"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stageDir := fixture.path("history/stage-1")
-	if err := os.MkdirAll(stageDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	err := fixture.sealCandidate(t, "--design", design, "--objection", objection, "--objection-out", filepath.Join(stageDir, "design-objection.json"))
+	stageDir := fixture.path("history/design-1")
+	err := fixture.sealCandidate(t, "--design", design, "--objection", objection, "--objection-out", filepath.Join(stageDir, "objection.json"))
 	if err == nil || !strings.Contains(err.Error(), "objected") {
 		t.Fatalf("objection did not fail the seal: %v", err)
 	}
 	if _, statErr := os.Stat(fixture.path("candidate.json")); statErr == nil {
 		t.Fatal("a candidate was sealed despite the objection")
 	}
-	raw, readErr := os.ReadFile(filepath.Join(stageDir, "design-objection.json"))
+	raw, readErr := os.ReadFile(filepath.Join(stageDir, "objection.json"))
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
@@ -165,8 +162,20 @@ func TestSealTurnsObjectionIntoDesignRound(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.repoRoot, "client", "src", "label.ts"), []byte("export const label = 'Updated label';\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.sealCandidate(t, "--design", design, "--objection", objection, "--objection-out", filepath.Join(stageDir, "design-objection-2.json")); err != nil {
+	// The record stays where it is; a second seal of the same round finds no
+	// objection file and seals normally (the round's objection record is
+	// already there, which is fine: the attendant reopened the design).
+	if err := fixture.sealCandidate(t, "--design", design, "--objection", objection, "--objection-out", filepath.Join(stageDir, "objection.json")); err != nil {
 		t.Fatalf("second seal after the objection: %v", err)
+	}
+	// A pipe or an oversized file in place of the objection is refused, not read.
+	fixture3 := newAgentFixture(t, "true", "true")
+	design3 := sealedDesignFor(t, fixture3, "client/src/label.ts")
+	if err := os.WriteFile(fixture3.path("revise-design.json"), []byte(`{"reason":"`+strings.Repeat("x", maxObjectionBytes)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture3.sealCandidate(t, "--design", design3, "--objection", fixture3.path("revise-design.json"), "--objection-out", fixture3.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("oversized objection accepted: %v", err)
 	}
 	// An unreadable objection is refused rather than silently ignored.
 	fixture2 := newAgentFixture(t, "true", "true")
