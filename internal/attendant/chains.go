@@ -826,7 +826,7 @@ func readEnvelope(runDir, deliveryID string) (hook.DispatchEnvelope, error) {
 func pendingEnvelope(runDir string, run state.RunOverview) (hook.DispatchEnvelope, error) {
 	envelope, err := readEnvelope(runDir, run.DeliveryID)
 	if err == nil {
-		return envelope, nil
+		return withClarification(envelope, run), nil
 	}
 	if run.EnvelopeJSON == "" {
 		return hook.DispatchEnvelope{}, err
@@ -838,7 +838,18 @@ func pendingEnvelope(runDir string, run state.RunOverview) (hook.DispatchEnvelop
 	if stored.DeliveryID != run.DeliveryID {
 		return hook.DispatchEnvelope{}, errors.New("ledger envelope names another delivery")
 	}
-	return stored, nil
+	return withClarification(stored, run), nil
+}
+
+// withClarification attaches the row's clarification record to an envelope
+// that lacks one, the way Pull hands a resumed run its envelope: the
+// ledger keeps the record beside the envelope, and the terminal that ends
+// the run preserves the adopted answers from it.
+func withClarification(envelope hook.DispatchEnvelope, run state.RunOverview) hook.DispatchEnvelope {
+	if envelope.ClarificationJSON == "" && run.ClarificationJSON != "" {
+		envelope.ClarificationJSON = run.ClarificationJSON
+	}
+	return envelope
 }
 
 // maxWorkspaceFieldBytes bounds every artifact read here; the files are

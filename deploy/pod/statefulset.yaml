@@ -5,8 +5,11 @@
 #     --from-literal=MODEL_API_KEY_IMPLEMENTER=... \
 #     --from-literal=MODEL_API_KEY_REVIEWER=... \
 #     --from-literal=TARGET_GITHUB_TOKEN=...
-# Config (runtime.json + m1-consumer.json + knowledge/):
+# Config (runtime.json + m1-consumer.json), read-only in the pod:
 #   kubectl create configmap lassdas-config -n lassdas --from-file=...
+# The knowledge tree (runtime.json's knowledge_root, /data/instance in the
+# example) lives on the state volume, not in the ConfigMap: the engine
+# writes a resumed run's adopted answers into it (docs/RUNTIME_POD.md).
 apiVersion: v1
 kind: Namespace
 metadata:

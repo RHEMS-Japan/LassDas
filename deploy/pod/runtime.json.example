@@ -25,7 +25,7 @@
   "automation_run_id": "run_YYYYMMDD_<24 hex>",
   "report_destinations": [],
   "consumer_config_path": "/etc/lassdas/config/m1-consumer.json",
-  "knowledge_root": "/etc/lassdas/config/knowledge",
+  "knowledge_root": "/data/instance",
   "worker_bin": "/usr/local/bin/worker",
   "controller_bin": "/usr/local/bin/controller",
   "browsercheck_bin": "",

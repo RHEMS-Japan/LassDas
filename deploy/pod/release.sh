@@ -224,10 +224,10 @@ if [[ "$apply" != "--apply" ]]; then
 fi
 
 # ---- 8. apply: the ConfigMap key alone, then the image ---------------------
-# A merge patch touches only runtime.json; the ConfigMap also carries the
-# consumer config and knowledge, which a whole-object apply would drop. If
-# the image update fails, the key is put back so pins and binaries never
-# stay crossed.
+# A merge patch touches only runtime.json; the ConfigMap may also carry the
+# consumer config, which a whole-object apply would drop. If the image
+# update fails, the key is put back so pins and binaries never stay
+# crossed.
 refuse_inflight   # again: the build took minutes, a run may have started
 say "patch configmap/$configmap (runtime.json only)"
 patch_new="$(mktemp)"; patch_old="$(mktemp)"

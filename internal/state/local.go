@@ -1751,11 +1751,15 @@ type RunOverview struct {
 	// run was begun with; a re-submission must rebuild exactly that report.
 	TerminalReportSHA256 string
 	EnvelopeJSON         string
-	QuestionRecordJSON   string
-	QuestionCommentID    int64
-	IssueID              int64
-	IssueKey             string
-	Summary              string
+	// ClarificationJSON is the row's cumulative clarification record, kept
+	// beside the envelope (Pull attaches it to the envelope it hands out; a
+	// re-submission from the row has to do the same).
+	ClarificationJSON  string
+	QuestionRecordJSON string
+	QuestionCommentID  int64
+	IssueID            int64
+	IssueKey           string
+	Summary            string
 }
 
 // ScanRuns lists every run row in the ledger. Read-only; the attendant uses
@@ -1794,6 +1798,7 @@ func (s *LocalStore) ScanRuns(ctx context.Context) ([]RunOverview, error) {
 		entry.TerminalCode, _ = row.str("terminal_code")
 		entry.TerminalReportSHA256, _ = row.str("terminal_report_sha256")
 		entry.EnvelopeJSON, _ = row.str("envelope_json")
+		entry.ClarificationJSON, _ = row.str("clarification_json")
 		entry.QuestionRecordJSON, _ = row.str("question_record_json")
 		entry.QuestionCommentID, _ = row.int64At("question_comment_id")
 		if envelopeJSON, ok := row.str("envelope_json"); ok {
