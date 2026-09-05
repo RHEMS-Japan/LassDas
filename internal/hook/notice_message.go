@@ -141,7 +141,7 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	}
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
 	if facts.RequestKind == "investigation" {
-		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、その先の工程は開始されません。\n")
+		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、停止が読み取られた時点で調査報告の掲示と計り直し（次の巡）は行わず、停止として終了します。\n")
 	} else {
 		builder.WriteString(planStopSentence)
 	}

@@ -435,6 +435,24 @@ func advanceClaimedRun(
 	if _, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, view.existingKeys(run.DeliveryID), run.DeliveryID, run.RunID, run.Summary, rounds); err != nil {
 		return err
 	}
+	// An investigation-only delivery honours 「停止」 before its report is
+	// posted: the stop is read here, at the one place the report leaves the
+	// pod, and the run ends as cancelled with nothing posted.
+	if plan.Shape == runtime.ShapeInvestigation && services.Backlog != nil {
+		if stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID); err != nil {
+			logger.Error("stop check before the investigation report unreadable; proceeding", "run", run.RunID, "error", err.Error())
+		} else if stopped {
+			terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+			repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+			if readErr != nil {
+				repository = ""
+			}
+			if err := terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository); err != nil {
+				return err
+			}
+			return archiveChain(ctx, hermes, view.all)
+		}
+	}
 	postDesignComments(ctx, config, services, run, view, plan, logger)
 	stages := runtime.ChainStagesFor(config.Chain, plan)
 	last := stages[len(stages)-1]
