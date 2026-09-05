@@ -197,6 +197,10 @@ func (s *Session) clock() time.Time {
 	return time.Now().UTC()
 }
 
+// ExecEnvironmentNames are the only variables exec probes inherit from the
+// kernel: the path, the home, and the read-only cloud identities' pointers.
+var ExecEnvironmentNames = []string{"PATH", "HOME", "KUBECONFIG", "AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"}
+
 // EnvFromProcess picks the named variables out of the process environment
 // for exec probes; nothing else is inherited.
 func EnvFromProcess(names []string) []string {

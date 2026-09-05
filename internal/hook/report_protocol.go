@@ -66,6 +66,11 @@ const (
 	TerminalDesignNonconverged        TerminalCode = "design_nonconverged"
 )
 
+// Valid reports whether c is one of the terminal codes the automation ends
+// with. The ledger and the reporter defer to it so a code added here is
+// accepted everywhere a report travels.
+func (c TerminalCode) Valid() bool { return c.valid() }
+
 func (c TerminalCode) valid() bool {
 	switch c {
 	case TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,

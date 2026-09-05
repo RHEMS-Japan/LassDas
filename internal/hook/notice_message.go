@@ -43,6 +43,9 @@ type PlanFacts struct {
 	// than guessed.
 	NeedsDesign  bool
 	DesignReason string
+	// RequestKind is the reception's sealed request_kind (change |
+	// investigation); empty for a decision sealed before the field existed.
+	RequestKind string
 }
 
 // designReasonPhrases are the requester-facing sentences for the machine
@@ -111,9 +114,14 @@ const (
 // the automation is about to build, where it intends to write, and how to
 // stop it. A notice, not a gate — the run continues whether or not the
 // requester reads it.
+// planStopSentence is the one true description of how a requester stops a
+// run and when the stop takes effect. Every comment that offers a stop
+// reuses it, so no comment promises a gate the chain does not have.
+const planStopSentence = "\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前までに反映され、以後の新しい工程は開始されません。実行中の工程は最後まで走り切り、指摘なしで最後まで進んだ場合は Pull Request をマージしないことで反映を止められます。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n"
+
 func PlanCommentContent(runID string, facts PlanFacts) string {
 	var builder strings.Builder
-	builder.WriteString("【実装方針】受付審査を通過したため、次の方針で実装を開始します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n")
+	builder.WriteString(planHeadline(facts))
 	if request := truncatePlanText(facts.Request); request != "" {
 		builder.WriteString("\n依頼の解釈: " + request + "\n")
 	}
@@ -123,9 +131,20 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	if reason := strings.TrimSpace(facts.DesignReason); reason != "" {
 		builder.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
 	}
-	writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
+	if facts.RequestKind != "investigation" {
+		// An investigation changes nothing; a design decides the files later.
+		if facts.NeedsDesign {
+			writePlanList(&builder, "受付が見当をつけた範囲（実際に変えるファイルは設計書で決めます）", facts.TargetFiles)
+		} else {
+			writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
+		}
+	}
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
-	builder.WriteString("\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前までに反映され、以後の新しい工程は開始されません。実行中の工程は最後まで走り切り、指摘なしで最後まで進んだ場合は Pull Request をマージしないことで反映を止められます。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n")
+	if facts.RequestKind == "investigation" {
+		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、停止が読み取られた時点で調査報告の掲示と計り直し（次の巡）は行わず、停止として終了します。\n")
+	} else {
+		builder.WriteString(planStopSentence)
+	}
 	return capPlanBody(builder.String()) + CommentFacts{
 		State:      "実装方針を掲示・自動処理中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",
@@ -204,4 +223,18 @@ func ReceiptCommentContent(record QuestionRecord, answerCommentID int64) (string
 		AutoRetry:  "なし（再開後の処理は自動で進みます）",
 		Marker:     CommentMarker("answer-receipt", record.AutomationRunID, tag, fmt.Sprintf("%d", answerCommentID)),
 	}.render(), nil
+}
+
+// planHeadline says what starts now, in the requester's terms: an
+// investigation only, an investigation and a design before any code, or the
+// implementation straight away.
+func planHeadline(facts PlanFacts) string {
+	switch {
+	case facts.RequestKind == "investigation":
+		return "【調査方針】受付審査を通過したため、次の内容を調査します。稼働環境とリポジトリは読み取りだけで、コードの変更と Pull Request はありません。調査の結果はこのチケットに報告します。ご対応は不要です（止めたい場合のみ、下の停止方法をご利用ください）。\n"
+	case facts.NeedsDesign:
+		return "【実装方針】受付審査を通過したため、まず稼働環境を計って原因と直し方を設計書にまとめ、独立したレビューを通してから実装します。設計書の要約はコードを書く前にこのチケットに掲示します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n"
+	default:
+		return "【実装方針】受付審査を通過したため、次の方針で実装を開始します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n"
+	}
 }

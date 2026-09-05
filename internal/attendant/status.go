@@ -187,6 +187,9 @@ func (s *RunStatus) placeAt(step, stage, title, detail string) {
 func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.BoardTask) {
 	view := chainViewFor(tasks, run.DeliveryID)
 	status.Round = view.round
+	if placeDesignStage(status, view) {
+		return
+	}
 	if view.round == 0 {
 		status.place("intake", "受付処理中", "作業の準備をしています")
 		return
@@ -235,6 +238,10 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 // endings (expired, stopped, dead cards) exist only as posted comments,
 // and without the seal the board would keep telling the previous story.
 func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.RunOverview, tasks []runtime.BoardTask) {
+	if run.TerminalCode == string(hook.TerminalInvestigated) {
+		status.place("done", "調査報告を掲示して完了", "調査のみの依頼のため、コードの変更と Pull Request はありません")
+		return
+	}
 	if run.TerminalCode != string(hook.TerminalSuccess) {
 		if run.TerminalCode == string(hook.TerminalCancelled) {
 			status.place("stopped", "停止済み", "ご指示により停止しました")
@@ -320,6 +327,8 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 		status.place("stopped", "停止済み", "ご指示により本番反映を行わず終了")
 	case "observe_failed":
 		status.place("done", "本番反映済み・画面は要確認", "")
+	case "measure_failed":
+		status.place("done", "本番反映済み・計測は閾値超過", "設計書が約束した計測値を満たしていません")
 	case "observe_blocked":
 		status.placeAt("attention", "production", "本番反映済み・画面確認ができず", "確認用の画面を開けなかったため人の目での確認が必要です")
 	case "deploy_failed":
@@ -341,6 +350,8 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 		status.place("stopped", "停止済み", "ご指示により停止しました")
 	case verdict == "observe_failed":
 		status.place("failed", "ステージング反映済み・画面確認が不合格", "")
+	case verdict == "measure_failed":
+		status.place("failed", "ステージング反映済み・計測が閾値を超過", "設計書が約束した計測値を満たしていません")
 	case verdict == "observe_blocked":
 		status.placeAt("attention", "confirm", "ステージング反映済み・画面確認ができず", "確認用の画面を開けなかったため合否は判定できていません")
 	case verdict == "deploy_failed" || verdict == "merge_unverified":
@@ -442,4 +453,41 @@ func placeResolvedOutcome(status *RunStatus, phase, verdict string) {
 	default:
 		status.place("done", "運用担当者が確認済み", "ステージングの反映状態は運用担当者の確認どおり・本番反映は運用手順で行います")
 	}
+}
+
+// placeDesignStage shows the investigating designer's stages while any of
+// the newest design round's cards is still open: 調査 while the investigate
+// card runs, 設計 while its reviews and decision run. Once the design round
+// is done the implementation cards take over as before.
+func placeDesignStage(status *RunStatus, view chainView) bool {
+	if view.designRound == 0 {
+		return false
+	}
+	detail := fmt.Sprintf("設計 %d 巡目", view.designRound)
+	open := false
+	investigating := false
+	blocked := false
+	for stage, card := range view.designCards {
+		if card.Status == "done" {
+			continue
+		}
+		open = true
+		if failedCardStatuses[card.Status] {
+			blocked = true
+		}
+		if stage == runtime.StageInvestigate {
+			investigating = true
+		}
+	}
+	switch {
+	case !open:
+		return false
+	case blocked:
+		status.place("design", "工程の復旧処理中", detail)
+	case investigating:
+		status.place("investigate", "調査中（稼働環境とリポジトリを読み取りだけで計っています）", detail)
+	default:
+		status.place("design", "設計中・設計レビュー中", detail)
+	}
+	return true
 }

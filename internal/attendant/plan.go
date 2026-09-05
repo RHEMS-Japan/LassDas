@@ -61,9 +61,10 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	var decision struct {
 		NeedsDesign  bool   `json:"needs_design"`
 		DesignReason string `json:"design_reason"`
+		RequestKind  string `json:"request_kind"`
 	}
 	if readPlanArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &decision) == nil {
-		facts.NeedsDesign, facts.DesignReason = decision.NeedsDesign, decision.DesignReason
+		facts.NeedsDesign, facts.DesignReason, facts.RequestKind = decision.NeedsDesign, decision.DesignReason, decision.RequestKind
 	}
 	for attempt := readinessAttempts; attempt >= 1; attempt-- {
 		var assessment struct {

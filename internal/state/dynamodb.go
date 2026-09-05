@@ -862,16 +862,10 @@ func terminalStateShapeValid(item map[string]types.AttributeValue) bool {
 }
 
 func validTerminalCode(code string) bool {
-	switch hook.TerminalCode(code) {
-	case hook.TerminalSuccess, hook.TerminalInputRejected, hook.TerminalReadinessRejected, hook.TerminalClarificationRequired,
-		hook.TerminalReadinessUnresolved, hook.TerminalClarificationExpired, hook.TerminalCancelled,
-		hook.TerminalModelFailed, hook.TerminalNonconverged,
-		hook.TerminalValidationFailed, hook.TerminalReleaseFailed, hook.TerminalProductionDeploymentUnverified,
-		hook.TerminalProductionVerificationFailed, hook.TerminalInternalFailed:
-		return true
-	default:
-		return false
-	}
+	// One list, kept in the hook: a terminal code the hook accepts must be
+	// one the ledger records, or a run whose comment was posted stays
+	// "report pending" forever.
+	return hook.TerminalCode(code).Valid()
 }
 
 // questionRecordJSONValid re-checks that the stored sealed question record is

@@ -781,6 +781,41 @@ func (s *QuestionTickService) ReleaseReportPosted(ctx context.Context, runID str
 
 // PostStagingReport / PostReleaseReport post the v2 delivery summaries
 // exactly once per run, on the same pinned-run route as the E2E comment.
+// RunCommentPosted reports whether a run comment of the kind and qualifier
+// was already posted, so callers can skip the work that precedes a post
+// (uploading attachments, for one) instead of repeating it every tick.
+func (s *QuestionTickService) RunCommentPosted(ctx context.Context, runID string, kind RunCommentKind, qualifier string) (bool, error) {
+	route := s.config
+	route.ExpectedRunID = runID
+	return s.store.RunCommentState(ctx, route, kind, qualifier)
+}
+
+// PostInvestigationComment posts the investigating designer's report for one
+// design round (the qualifier names the round), measurements attached.
+func (s *QuestionTickService) PostInvestigationComment(ctx context.Context, runID, deliveryID, qualifier, content string, attachmentIDs []int64) bool {
+	return s.postQualifiedRunComment(ctx, RunCommentInvestigation, "question_tick_investigation_state", runID, deliveryID, qualifier, content, attachmentIDs)
+}
+
+// PostDesignComment posts an approved design's summary for one design round.
+func (s *QuestionTickService) PostDesignComment(ctx context.Context, runID, deliveryID, qualifier, content string) bool {
+	return s.postQualifiedRunComment(ctx, RunCommentDesign, "question_tick_design_state", runID, deliveryID, qualifier, content, nil)
+}
+
+func (s *QuestionTickService) postQualifiedRunComment(ctx context.Context, kind RunCommentKind, failureCode, runID, deliveryID, qualifier, content string, attachmentIDs []int64) bool {
+	route := s.config
+	route.ExpectedRunID = runID
+	posted, err := s.store.RunCommentState(ctx, route, kind, qualifier)
+	if err != nil {
+		s.failure(failureCode, err, deliveryID)
+		return false
+	}
+	if posted {
+		return true
+	}
+	_, ok := s.postRunCommentRouted(ctx, route, kind, qualifier, content, deliveryID, attachmentIDs)
+	return ok
+}
+
 func (s *QuestionTickService) PostStagingReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
 	return s.postTerminalRunComment(ctx, RunCommentStagingReport, "question_tick_stg_report_state", runID, deliveryID, content, attachmentIDs)
 }

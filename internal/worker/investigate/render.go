@@ -109,3 +109,29 @@ func sortStrings(values []string) {
 		}
 	}
 }
+
+// Summary renders the design in a few lines for the ticket comment and the
+// trail: cause, approach, files, verification. Same input, same text.
+func (d Design) Summary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "原因: %s (根拠 %s)\n", d.Cause, strings.Join(d.CauseEvidence, ", "))
+	fmt.Fprintf(&b, "直し方: %s\n", d.Approach)
+	fmt.Fprintf(&b, "変更するファイル: %s\n", strings.Join(d.FilePaths(), ", "))
+	b.WriteString("反映後の確認: " + d.VerificationSummary() + "\n")
+	return b.String()
+}
+
+// VerificationSummary says how the change will be judged, in one line.
+func (d Design) VerificationSummary() string {
+	switch d.Verification.Form {
+	case VerificationWording:
+		text := fmt.Sprintf("画面 %s に「%s」が表示される", d.Verification.Path, d.Verification.ExpectedText)
+		if d.Verification.AbsentText != "" {
+			text += fmt.Sprintf("、「%s」は表示されない", d.Verification.AbsentText)
+		}
+		return text
+	case VerificationMeasurement:
+		return fmt.Sprintf("計測 %s の %s が %g 以下", d.Verification.Probe, d.Verification.Metric, d.Verification.Threshold)
+	}
+	return ""
+}

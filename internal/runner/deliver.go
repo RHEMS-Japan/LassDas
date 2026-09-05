@@ -74,6 +74,9 @@ type DeliverReport struct {
 	// delta all block it). The attendant then reports honestly instead of
 	// asking for a Go that could only fail.
 	PromotionHold string `json:"promotion_hold,omitempty"`
+	// Measurement is the design's measurement promise judged after this
+	// phase's deployment, when the design made one.
+	Measurement *MeasurementCheck `json:"measurement,omitempty"`
 	// ScreenChecked marks a pass whose screen WAS machine-verified. The
 	// reference path (no visible-wording promise on the ticket) passes
 	// without checking any screen, and the report headline must never
@@ -207,6 +210,12 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 	// explicit no-promise shape takes this path — an unreadable ticket or
 	// a broken consumer config keeps failing loudly downstream.
 	if verificationPath, err := p.readJSONField(stageDir+"/ticket.json", "verification_path"); err == nil && verificationPath == "" {
+		// No screen promise; a design's measurement promise is still judged.
+		if checked, pass, detail, err := p.measurementVerification(ctx, stageDir, "staging"); err != nil {
+			return err
+		} else if checked && !pass {
+			return p.sealMeasurementFailure(stageDir, "staging", detail)
+		}
 		return p.sealReferenceStagingReport(ctx, stageDir)
 	}
 	if !p.exists(DeliverStagingVisibleFile) {
@@ -225,6 +234,14 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 				"ステージング画面の機械確認が合格しませんでした。本番反映は行えません（合格の証拠が封印された場合のみ昇格できます）。")
 		}
 	}
+	// A design that promised a measurement is judged by it as well: the
+	// probe runs against the deployed environment and the value must sit
+	// under the threshold (docs/INVESTIGATING_DESIGNER.md §4.3).
+	if checked, pass, detail, err := p.measurementVerification(ctx, stageDir, "staging"); err != nil {
+		return err
+	} else if checked && !pass {
+		return p.sealMeasurementFailure(stageDir, "staging", detail)
+	}
 	if !p.exists(DeliverDeltaFile) {
 		if code, err := p.controller(ctx, "promotion-delta", append([]string{"promotion-delta"},
 			p.deliverCommon(stageDir, "--out", p.path(DeliverDeltaFile))...)); err != nil {
@@ -235,6 +252,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 	}
 	report := DeliverReport{Phase: "staging", Verdict: "pass", ScreenChecked: true}
 	p.fillObservation(&report, stageDir, "staging", DeliverStagingVisibleFile, DeliverStagingShotFile)
+	p.fillMeasurement(&report, stageDir, "staging")
 	p.fillDelta(&report)
 	report.PromotionHold = p.promotionHold()
 	if sha, err := p.readJSONField(DeliverMergeFile, "payload", "merge", "MergeSHA"); err == nil {
@@ -423,8 +441,14 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 				"本番反映は完了しましたが、本番画面の機械確認が合格しませんでした。手動でご確認ください。")
 		}
 	}
+	if checked, pass, detail, err := p.measurementVerification(ctx, stageDir, "production"); err != nil {
+		return err
+	} else if checked && !pass {
+		return p.sealMeasurementFailure(stageDir, "production", detail)
+	}
 	report := DeliverReport{Phase: "production", Verdict: "pass", ScreenChecked: true}
 	p.fillObservation(&report, stageDir, "production", DeliverProductionVisibleFile, DeliverProductionShotFile)
+	p.fillMeasurement(&report, stageDir, "production")
 	if url, err := p.readJSONField(DeliverPromotionFile, "payload", "pull_request", "HTMLURL"); err == nil {
 		report.PullRequestURL = url
 	}
@@ -579,6 +603,11 @@ func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir stri
 		Phase: "staging", Verdict: "pass",
 		PromotionHold: "このチケットには画面に表示される内容の約束が無く、本番反映に必要な画面確認の合格証拠を作れないため、自動の本番反映は行いません。" +
 			"ステージングでの動作確認は人の目で行ってください。本番へ反映する場合は、運用の昇格手順で反映してください。",
+	}
+	p.fillMeasurement(&report, stageDir, "staging")
+	if report.Measurement != nil && report.Measurement.Pass {
+		report.PromotionHold = "このチケットには画面に表示される内容の約束が無いため画面確認は行っていませんが、設計書が約束した計測は合格しました。" +
+			"本番反映に必要な画面確認の合格証拠は作れないため、自動の本番反映は行いません。本番へ反映する場合は、運用の昇格手順で反映してください。"
 	}
 	var cookieNote string
 	if repository, err := p.readJSONField(stageDir+"/ticket.json", "repository"); err == nil && repository != "" {

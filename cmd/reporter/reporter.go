@@ -194,18 +194,7 @@ func parseFlags(args []string) (commandFlags, error) {
 	}, nil
 }
 
-func validTerminalCode(code hook.TerminalCode) bool {
-	switch code {
-	case hook.TerminalSuccess, hook.TerminalInputRejected, hook.TerminalReadinessRejected, hook.TerminalClarificationRequired,
-		hook.TerminalReadinessUnresolved, hook.TerminalClarificationExpired, hook.TerminalCancelled,
-		hook.TerminalModelFailed, hook.TerminalNonconverged,
-		hook.TerminalValidationFailed, hook.TerminalReleaseFailed, hook.TerminalProductionDeploymentUnverified,
-		hook.TerminalProductionVerificationFailed, hook.TerminalInternalFailed:
-		return true
-	default:
-		return false
-	}
-}
+func validTerminalCode(code hook.TerminalCode) bool { return code.Valid() }
 
 func loadEnvelope(filePath string) (hook.DispatchEnvelope, error) {
 	encoded, err := readRegularFile(filePath, maxEnvelopeFileBytes, false)
