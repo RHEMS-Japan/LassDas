@@ -247,3 +247,33 @@ func containsID(ids []string, want string) bool {
 	}
 	return false
 }
+
+func TestInterruptedObjectionTransitionIsResumedNotHealed(t *testing.T) {
+	// After the objection transition archived the implementation cards but
+	// died before creating design round 2: only the done design cards remain.
+	card := func(id, stage string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: "done", IdempotencyKey: runtime.ChainCardKey("delivery-1", stage, round)}
+	}
+	view := chainViewFor([]runtime.BoardTask{
+		card("t_i1", runtime.StageInvestigate, 1), card("t_a1", runtime.StageDesignReviewA, 1),
+		card("t_b1", runtime.StageDesignReviewB, 1), card("t_d1", runtime.StageDesignDecide, 1),
+	}, "delivery-1")
+	if view.round != 0 || view.designRound != 1 {
+		t.Fatalf("view rounds: %+v", view.rounds())
+	}
+	config, runDir := designRunConfig(t, 3)
+	if err := os.WriteFile(filepath.Join(runDir, "history", "design-1", "objection.json"), []byte(`{"reason":"x","section":"files"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hermes, callLog := fakeBoard(t)
+	// The resumed transition creates design round 2 and a fresh apply round 1,
+	// never an apply card under the objected design alone.
+	err := nextDesignRound(context.Background(), hermes, config, state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, view, runtime.ChainPlan{Shape: runtime.ShapeDesign}, "resumed", &recordingLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, created := boardCalls(t, callLog)
+	if len(created) == 0 || created[0] != "delivery-1:investigate:d2" || !containsID(created, "delivery-1:apply:r1") {
+		t.Errorf("resumed transition created %v", created)
+	}
+}
