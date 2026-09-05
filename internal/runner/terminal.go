@@ -115,14 +115,29 @@ func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
 	}
 	route := t.services.Route
 	route.ExpectedRunID = t.envelope.Snapshot.RunID
-	claimed, found, err := t.services.Store.ClaimOwner(ctx, route)
-	if err != nil {
-		return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", err)
+	// A transient ledger read failure is retried the way the report itself
+	// is (terminalSubmitAttempts × terminalRetryDelay); the row's values do
+	// not change between attempts, so the report digest stays the same.
+	var err error
+	for attempt := 1; attempt <= terminalSubmitAttempts; attempt++ {
+		var claimed hook.PullOwner
+		var found bool
+		claimed, found, err = t.services.Store.ClaimOwner(ctx, route)
+		if err == nil {
+			if !found {
+				return fallback, nil
+			}
+			return claimed, nil
+		}
+		if attempt < terminalSubmitAttempts {
+			select {
+			case <-ctx.Done():
+				return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", ctx.Err())
+			case <-time.After(terminalRetryDelay):
+			}
+		}
 	}
-	if !found {
-		return fallback, nil
-	}
-	return claimed, nil
+	return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", err)
 }
 
 // loadTrail reads the delivery trail when the run composed one. The

@@ -341,8 +341,9 @@ kernel's user can read.
 A release while a run's step is executing is refused by
 `deploy/pod/release.sh`: it reads the board in the running pod, before the
 build and again before the apply, and refuses when a run is outside done /
-failed / stopped / question / confirm / intake (waiting for an answer, a Go
-or a first card does not block) — or when the board cannot be read at all.
+failed / stopped / question / confirm / intake / attention (waiting for an
+answer, a Go, a first card or a person — a card in a human lane, no budget,
+an expired sign-in — does not block) — or when the board cannot be read at all.
 `RELEASE_ALLOW_INFLIGHT=1` overrides both for the release that fixes a
 stuck run. Independently of that guard, a run is ended under the identity
 it was claimed with: the terminal report and the question record take
