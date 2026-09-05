@@ -7,6 +7,10 @@
 # `pods/attach` are absent on purpose. Bind the Role per namespace the
 # role may look at; there is no ClusterRole.
 #
+# `get` on pods and deployments returns the pod spec, env literals
+# included; the catalogue rule that keeps those out of probe output
+# (content-free output shapes only) is in README.md.
+#
 # Replace <consumer-namespace>. Nothing else is instance-specific.
 apiVersion: v1
 kind: ServiceAccount
@@ -25,7 +29,7 @@ rules:
     resources: ["pods", "pods/log", "services", "endpoints", "events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "replicasets"]
+    resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]

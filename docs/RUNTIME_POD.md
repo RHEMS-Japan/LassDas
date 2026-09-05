@@ -308,13 +308,14 @@ resident and not an agent: the runner's `investigate` card drives a model
 call whose only tool is `probe`, and the kernel executes each probe with
 three read-only identities — a namespaced Kubernetes ServiceAccount, an
 AWS role with an explicit Deny list, and a PostgreSQL login that can
-`SELECT` from content-free views and call no function. Their shapes live
-in `deploy/examples/investigating-designer/`; the consumer applies them
-and records the eleven stage-0 refusals listed there before the role is
-enabled. The kernel process alone holds the kubeconfig context, the AWS
-profile and the DSN; until the agents run under their own UID (#23) the
-exposure is bounded by what the identities allow, which is nothing
-writable and nothing secret.
+`SELECT` from content-free views and call no function outside
+`pg_catalog` (EXECUTE revoked from PUBLIC in every schema the role can
+use). Their shapes live in `deploy/examples/investigating-designer/`; the
+consumer applies them and records the eleven stage-0 refusals listed
+there before the role is enabled. The kernel process alone holds the
+kubeconfig context, the AWS profile and the DSN; until the agents run
+under their own UID (#23) the exposure is bounded by what the identities
+allow, which is nothing writable and nothing secret.
 
 ## Release discipline: the regression set
 
