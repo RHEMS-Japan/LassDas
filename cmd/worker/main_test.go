@@ -216,8 +216,11 @@ func TestRunDoesNotEchoRejectedInput(t *testing.T) {
 
 func runCLITestGit(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
-	// No background maintenance: a detached `git gc --auto` after the
-	// fixture commit kept writing under .git while the tests read the tree.
+	// No background maintenance: after a commit, git starts a detached
+	// `maintenance run --auto`, which takes .git/objects/maintenance.lock
+	// and removes it when it finishes — while the test copies or walks the
+	// tree. maintenance.auto=false keeps that child from starting (the
+	// switch git consults); gc.auto=0 is the same guard for older git.
 	command := exec.Command("git", append([]string{"-C", root, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {

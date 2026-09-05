@@ -52,7 +52,10 @@ func gitBaseRepo(t *testing.T) (string, string) {
 	directory := t.TempDir()
 	execGit := func(args ...string) string {
 		t.Helper()
-		command := exec.Command("git", append([]string{"-C", directory}, args...)...)
+		// No background maintenance (see cmd/worker/main_test.go): the local
+		// clone below walks .git/objects while a detached maintenance child
+		// could still hold its lock there.
+		command := exec.Command("git", append([]string{"-C", directory, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
 		command.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
