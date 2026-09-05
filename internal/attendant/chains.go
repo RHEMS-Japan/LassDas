@@ -413,6 +413,18 @@ func advanceClaimedRun(
 		}
 		return archiveChain(ctx, hermes, view.all)
 	}
+	// An objection transition interrupted between "archive the round" and
+	// "create the next design round" leaves the done design cards and an
+	// objection record with no implementation cards; healing from here would
+	// re-apply the objected design. Resume the transition instead.
+	if plan.Shape == runtime.ShapeDesign && view.round == 0 && view.designRound > 0 {
+		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
+			if _, decided := readField(runDir, fmt.Sprintf("history/design-%d/decision.json", view.designRound+1), "outcome"); decided != nil {
+				logger.Info("resuming an interrupted objection transition", "run", run.RunID, "design_round", view.designRound)
+				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design (resumed)", logger)
+			}
+		}
+	}
 	rounds := view.rounds()
 	if rounds.Design == 0 {
 		rounds.Design = 1
