@@ -636,6 +636,12 @@ type ModelEndpoint struct {
 	DesignLens string `json:"design_lens,omitempty"`
 }
 
+// MaxConfiguredOutputTokens is the ceiling of a model endpoint's
+// max_output_tokens. Validate refuses a larger configuration, and a turn cut
+// off at its allowance is asked again with more room only below it
+// (converseTurn).
+const MaxConfiguredOutputTokens = 32768
+
 func LoadConfig(filename string) (Config, error) {
 	var config Config
 	if err := ReadJSONFile(filename, MaxConfigJSONBytes, &config); err != nil {
@@ -1030,7 +1036,7 @@ func ValidateModelEndpoint(m ModelEndpoint) error {
 func (m ModelEndpoint) validate(reviewer bool) error {
 	if !identifierPattern.MatchString(m.ID) || m.Vendor == "" || m.Model == "" ||
 		strings.TrimSpace(m.Vendor) != m.Vendor || strings.TrimSpace(m.Model) != m.Model ||
-		strings.ContainsAny(m.Vendor+m.Model, "\r\n\x00") || m.MaxOutputTokens < 128 || m.MaxOutputTokens > 32768 {
+		strings.ContainsAny(m.Vendor+m.Model, "\r\n\x00") || m.MaxOutputTokens < 128 || m.MaxOutputTokens > MaxConfiguredOutputTokens {
 		return errors.New("model endpoint is invalid")
 	}
 	if err := validateModelBaseURL(m.BaseURL); err != nil {
