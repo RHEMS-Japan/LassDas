@@ -595,6 +595,12 @@ func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir st
 	for _, candidate := range candidates {
 		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code}, candidate)
 		if err != nil {
+			if candidate != "" {
+				// The draft's value could not be shaped into a report, so
+				// the first attempt cannot have sent it either; the other
+				// candidate decides.
+				continue
+			}
 			return "", err
 		}
 		if digest == run.TerminalReportSHA256 {

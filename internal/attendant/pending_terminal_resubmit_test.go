@@ -215,6 +215,21 @@ func TestPendingTerminalIsRebuiltWithTheRepositoryTheRowWasBegunWith(t *testing.
 	}
 }
 
+// A draft whose repository cannot even be shaped into a report (the first
+// attempt could not have sent it) does not stop the re-submission: the
+// other candidate decides.
+func TestPendingTerminalSkipsADraftRepositoryThatCannotBeReported(t *testing.T) {
+	fixture := newPendingFixture(t, "")
+	fixture.writeRunDir(t, "not a repository")
+	logger := &pendingTestLogger{}
+	if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), logger); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.comments.posted) != 1 || fixture.store.completes != 1 {
+		t.Fatalf("comments = %d, completes = %d; want the report completed once from the other candidate", len(fixture.comments.posted), fixture.store.completes)
+	}
+}
+
 // A row whose digest no rebuilt report reproduces is left to a person:
 // nothing reaches the store or the ticket, and nothing is requeued.
 func TestPendingTerminalThatCannotBeReproducedStaysWithTheOperator(t *testing.T) {
