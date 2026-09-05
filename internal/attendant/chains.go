@@ -504,16 +504,23 @@ const (
 	pendingTerminalNeedsOperator pendingTerminalAction = "needs_operator"
 )
 
-// classifyPendingTerminal keeps the re-submit honest: without the chain
-// cards the outcome cannot be rebuilt identically (and the claimed-run path
-// would requeue and rerun the whole delivery), and without a terminal code
-// there is nothing to resubmit.
+// classifyPendingTerminal keeps the re-submit honest. The code was decided
+// when the report was first begun and sits in the run row; only two reports
+// are rebuilt from the chain cards and the artifacts they left — a success
+// (its stage and evidence) and an investigated ending (its sealed report and
+// attachments) — so those need the cards, and everything else (cancelled at
+// claim, rejected or failed in preparation, a chain that could not be
+// derived, a failed model stage) is re-submitted from the row alone. Nothing
+// is ever requeued: the claimed-run path would rerun the whole delivery.
 func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerminalAction, string) {
 	if run.TerminalCode == "" || !hook.TerminalCode(run.TerminalCode).Valid() {
 		return pendingTerminalNeedsOperator, "the pending report carries no terminal code"
 	}
-	if !view.hasChain() {
-		return pendingTerminalNeedsOperator, "the chain cards are gone; the report cannot be rebuilt identically"
+	switch hook.TerminalCode(run.TerminalCode) {
+	case hook.TerminalSuccess, hook.TerminalInvestigated:
+		if !view.hasChain() {
+			return pendingTerminalNeedsOperator, "the chain cards are gone; a " + run.TerminalCode + " report is rebuilt from them"
+		}
 	}
 	return pendingTerminalResubmit, ""
 }
@@ -525,6 +532,8 @@ func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerm
 // Nothing here heals cards, checks for a stop, or requeues: the outcome was
 // decided when the report was first begun (live 2026-09-05: a run whose
 // completion failed stayed pending for over an hour with nothing driving it).
+// A report from before any card existed has no cards to archive and no run
+// directory artifacts to lean on; its envelope comes from the ledger's copy.
 func resubmitPendingTerminal(
 	ctx context.Context,
 	config runtime.Config,
@@ -540,7 +549,7 @@ func resubmitPendingTerminal(
 		return nil
 	}
 	runDir := runDirectory(config, run.DeliveryID)
-	envelope, err := readEnvelope(runDir, run.DeliveryID)
+	envelope, err := pendingEnvelope(runDir, run)
 	if err != nil {
 		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", "run envelope unreadable: "+err.Error())
 		return nil
@@ -770,6 +779,28 @@ func readEnvelope(runDir, deliveryID string) (hook.DispatchEnvelope, error) {
 		return hook.DispatchEnvelope{}, errors.New("envelope names another delivery")
 	}
 	return envelope, nil
+}
+
+// pendingEnvelope reads the envelope a pending terminal report is rebuilt
+// under: the run directory's copy when the run got that far, otherwise the
+// ledger's own copy of the sealed envelope (the row keeps it from the
+// dispatch on). Both are checked to name this delivery.
+func pendingEnvelope(runDir string, run state.RunOverview) (hook.DispatchEnvelope, error) {
+	envelope, err := readEnvelope(runDir, run.DeliveryID)
+	if err == nil {
+		return envelope, nil
+	}
+	if run.EnvelopeJSON == "" {
+		return hook.DispatchEnvelope{}, err
+	}
+	var stored hook.DispatchEnvelope
+	if json.Unmarshal([]byte(run.EnvelopeJSON), &stored) != nil {
+		return hook.DispatchEnvelope{}, errors.New("ledger envelope invalid")
+	}
+	if stored.DeliveryID != run.DeliveryID {
+		return hook.DispatchEnvelope{}, errors.New("ledger envelope names another delivery")
+	}
+	return stored, nil
 }
 
 // maxWorkspaceFieldBytes bounds every artifact read here; the files are
