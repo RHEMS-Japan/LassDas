@@ -52,6 +52,19 @@ const (
 	RunCommentStreakResolved RunCommentKind = "streak-resolved"
 )
 
+// StoreRunCommentKinds are the kinds whose one-shot marker lives in the run
+// store (begin / complete / state). The remaining kinds are found by scanning
+// the ticket for their marker and never reach the store. A kind posted
+// through the store but missing here made RunCommentState refuse it and a
+// finished run wait for ever (the investigation report, live 2026-09-05).
+func StoreRunCommentKinds() []RunCommentKind {
+	return []RunCommentKind{
+		RunCommentAck, RunCommentReceipt, RunCommentPlan,
+		RunCommentInvestigation, RunCommentDesign,
+		RunCommentE2E, RunCommentStagingReport, RunCommentReleaseReport,
+	}
+}
+
 type RunCommentBeginRequest struct {
 	Route         ReportRouteConfig
 	Kind          RunCommentKind

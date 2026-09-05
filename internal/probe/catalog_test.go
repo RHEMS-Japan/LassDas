@@ -142,8 +142,11 @@ func TestHTTPProbeHostArgumentSelectsAmongDeclaredHosts(t *testing.T) {
 	if _, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "other.example.invalid", "path": "/"}}); refusal == nil || !strings.Contains(refusal.Reason, "does not address host") {
 		t.Fatalf("host outside the list accepted: %v", refusal)
 	}
-	if plan, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"path": "/"}}); refusal != nil || plan.Args["host"] != "" {
-		t.Fatalf("host-less request changed: plan %+v refusal %v", plan, refusal)
+	if plan, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"path": "/"}}); refusal != nil || plan.Args["host"] != "console.example.invalid" {
+		t.Fatalf("host-less request must record the first host: plan %+v refusal %v", plan, refusal)
+	}
+	if _, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "api.example.invalid\n", "path": "/"}}); refusal == nil || !strings.Contains(refusal.Reason, "host") {
+		t.Fatalf("host with a control character accepted: %v", refusal)
 	}
 	single := testCatalog(t)
 	if _, refusal = single.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "app-stg.example.invalid", "path": "/console"}}); refusal != nil {

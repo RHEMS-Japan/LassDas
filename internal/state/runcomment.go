@@ -257,17 +257,16 @@ func runCommentMarkerMatches(marker map[string]types.AttributeValue, runKey stri
 		attributeStringEquals(marker, "reply_kind", string(kind))
 }
 
-// validRunCommentKind accepts every one-shot run comment the hook protocol
-// defines. The list is the store's copy of hook's constants: a kind added
-// to the protocol but not here made the attendant unable to ask whether the
-// comment was posted, and a run whose report was approved waited for ever
-// (the investigation report, live 2026-09-05).
+// validRunCommentKind accepts the kinds hook.StoreRunCommentKinds names —
+// the one-shot comments whose marker lives in the store. A kind posted
+// through the store but missing from that list made RunCommentState refuse
+// it and a run whose report was approved wait for ever (the investigation
+// report, live 2026-09-05).
 func validRunCommentKind(kind hook.RunCommentKind) bool {
-	switch kind {
-	case hook.RunCommentAck, hook.RunCommentReceipt, hook.RunCommentPlan,
-		hook.RunCommentInvestigation, hook.RunCommentDesign,
-		hook.RunCommentE2E, hook.RunCommentStagingReport, hook.RunCommentReleaseReport:
-		return true
+	for _, known := range hook.StoreRunCommentKinds() {
+		if kind == known {
+			return true
+		}
 	}
 	return false
 }
