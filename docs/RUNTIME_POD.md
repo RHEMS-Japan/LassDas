@@ -216,15 +216,24 @@ fabricated workflow link.
 - **Adopted answers are preserved by the runner, not by a job of the
   instance repository.** The workflow rendered a resumed run's adopted
   answers (`worker preserve-answers`) and committed the record to the
-  instance repository's knowledge tree. The pod reads a copy of that tree
-  on its state volume (`knowledge_root`), so a commit would never reach
-  it; instead `Terminal.Report` writes the record under
-  `knowledge_root/<answer_knowledge.to>/<ticket key>.md` once the terminal
-  report has sealed, whatever the terminal code, replacing an older
-  revision of the same ticket through a rename. The reception reads that
-  directory on the next ticket (`worker.LoadPreservedAnswers`), so a point
-  the requester settled is not asked again. Failures are logged for the
-  operator and never fail the run.
+  instance repository's knowledge tree. The pod's knowledge tree is the
+  operator's copy of that tree on the state volume (`knowledge_root`,
+  `/data/instance` in the example), and it has to be writable for this: a
+  tree served from the read-only ConfigMap mount can only be read, and the
+  engine logs `adopted answers not preserved` and moves on. Once the
+  terminal report has sealed, `Terminal.Report` renders the record from
+  the sealed envelope the run was claimed with (the snapshot re-sealed as
+  the raw ticket, plus the cumulative clarification record — not from the
+  workspace, which a run that died before read-ticket never filled) and
+  writes it under `knowledge_root/<answer_knowledge.to>/<ticket key>.md`,
+  replacing an older revision of the same ticket through a rename and
+  refusing symlinks on the way. The reception reads that directory on the
+  next ticket (`worker.LoadPreservedAnswers`), so a point the requester
+  settled is not asked again. The question tick's own terminals — a run
+  cancelled or expired while it waited for an answer — do not pass through
+  `Terminal.Report`, so a run whose later round expired keeps no record of
+  its earlier answers. Failures are logged for the operator and never fail
+  the run.
 
 ## The observation session
 
