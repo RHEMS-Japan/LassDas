@@ -649,9 +649,15 @@ primary assessor の最小出力は次とする。自由な文章、未知の fi
       "evidence": "許可された source 上の根拠"
     }
   ],
-  "reject_code": ""
+  "reject_code": "",
+  "request_kind": "change | investigation",
+  "approach_in_ticket": false,
+  "approach_excerpt": "本文からの引用（approach_in_ticket が true のときだけ）",
+  "needs_design": true
 }
 ```
+
+末尾の 4 項目は設計工程の要否 (issue #18 §6 / #30) の起案役側の答え。機械が引用の実在・対象ファイル数 (2 以下)・消費側設定 `design.trigger_words` (未設定なら省略不可) を検算し、checker が独立に再導出した `request_kind` / `needs_design` と不一致なら設計ありに倒す。結果は `readiness/decision.json` (`schema_version` 2) に `needs_design` / `design_reason` として封緘され、受付後の【実装方針】コメントに 1 行で出る。書き方は [docs/TICKET_AUTHORING.md](docs/TICKET_AUTHORING.md)。
 
 **M1 のモデル構成案**:
 
