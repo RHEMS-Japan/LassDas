@@ -79,7 +79,11 @@ func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles
 	}
 	gateArgs := append(common, reviewFileArgs(stageDir, reviewFiles)...)
 	gateArgs = append(gateArgs, "--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"))
-	if design := p.approvedDesignPath(); design != "" {
+	design, _, err := p.requiredDesign()
+	if err != nil {
+		return true, err
+	}
+	if design != "" {
 		gateArgs = append(gateArgs, "--design", design, "--design-decision", filepath.Join(filepath.Dir(design), "decision.json"))
 	}
 	if code, err := p.worker(ctx, "verify-publish-gate", append([]string{"verify-publish-gate"}, gateArgs...)); err != nil || code != 0 {

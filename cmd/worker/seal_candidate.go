@@ -140,17 +140,26 @@ type DesignObjection struct {
 	ObjectionSHA256 string    `json:"objection_sha256"`
 }
 
+// maxObjectionBytes bounds the applier's revise-design.json.
+const maxObjectionBytes = 16 * 1024
+
 var objectionSections = map[string]bool{"cause": true, "approach": true, "files": true, "verification": true, "blast_radius": true, "not_doing": true}
 
 // sealDesignObjection turns the applier's revise-design.json into a sealed
 // record next to where the candidate would go, and moves the applier's file
 // with it so a later seal of the same round cannot find it twice.
 func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA string, stage int, design *investigate.Design) (bool, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
+	if _, err := os.Lstat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
+		return false, errors.New("the applier's objection could not be read")
+	}
+	// The applier wrote this file; read it the way the implementer's report
+	// is read — a regular file, bounded — so a pipe or a link cannot hang or
+	// bloat the card.
+	raw, err := worker.ReadBoundedRegularFile(path, int64(maxObjectionBytes))
+	if err != nil {
 		return false, errors.New("the applier's objection could not be read")
 	}
 	var objection struct {
@@ -177,6 +186,9 @@ func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA str
 	}
 	sum := sha256.Sum256(encoded)
 	record.ObjectionSHA256 = hex.EncodeToString(sum[:])
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return false, errors.New("the objection record's directory could not be created")
+	}
 	if err := worker.WriteJSONFileExclusive(out, record, worker.MaxArtifactJSONBytes); err != nil {
 		return false, errors.New("the objection record could not be written")
 	}

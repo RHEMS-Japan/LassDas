@@ -126,7 +126,7 @@ func handleDesignChainFailure(
 		// The card that seals the applier's work is where an objection
 		// surfaces: the applier left revise-design.json and the seal turned
 		// it into a sealed design-objection.json instead of a candidate.
-		if objected, err := designObjectionRecorded(runDir, view.round); err == nil && objected {
+		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
 			return true, nextDesignRound(ctx, hermes, config, run, view, plan, "the applier objected to the design", logger)
 		}
 		return false, nil
@@ -145,15 +145,74 @@ func handleDesignChainFailure(
 	return true, archiveChain(ctx, hermes, view.all)
 }
 
-// designObjectionRecorded reports whether the implementation round's seal
-// recorded an applier objection instead of a candidate.
-func designObjectionRecorded(runDir string, implementRound int) (bool, error) {
-	for _, dir := range []string{fmt.Sprintf("history/stage-%d", implementRound), fmt.Sprintf("history/stage-%d/objection", implementRound)} {
-		if _, err := os.Stat(filepath.Join(runDir, dir, "design-objection.json")); err == nil {
-			return true, nil
-		}
+// designObjectionRecorded reports whether the seal recorded an applier's
+// objection to the given design round's design (the runner writes it as
+// history/design-<N>/objection.json, so both sides agree on the round).
+func designObjectionRecorded(runDir string, designRound int) (bool, error) {
+	if designRound < 1 {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(designRoundDir(runDir, designRound), "objection.json")); err == nil {
+		return true, nil
 	}
 	return false, nil
+}
+
+// reviewsFlagDesignWrong reports whether any sealed review of the
+// implementation round carries the finding code design-wrong: the reviewer
+// judged that the design itself does not hold, which sends the delivery back
+// to the designer rather than to another implementation round.
+func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) bool {
+	for _, reviewer := range reviewers {
+		raw, err := os.ReadFile(filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json"))
+		if err != nil {
+			continue
+		}
+		var review struct {
+			Findings []struct {
+				Code string `json:"code"`
+			} `json:"findings"`
+		}
+		if json.Unmarshal(raw, &review) != nil {
+			continue
+		}
+		for _, finding := range review.Findings {
+			if finding.Code == "design-wrong" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// regenerateDesignBackedRound starts the next implementation round of a
+// design-backed delivery: the applier gets the approved design's instruction
+// again (with the reviewers' findings riding in the run directory), never the
+// original implementer's.
+func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, config runtime.Config, run state.RunOverview, view chainView, plan runtime.ChainPlan, logger Logger) error {
+	for _, task := range view.all {
+		if task.Status == "done" {
+			continue
+		}
+		if err := hermes.Archive(ctx, task.ID); err != nil {
+			return err
+		}
+	}
+	pipeline := &runner.Pipeline{Config: config, Workspace: runDirectory(config, run.DeliveryID), Logger: logger}
+	round := pipeline.LatestDesignRound()
+	if round < 1 {
+		return errors.New("design-backed round has no design to re-apply")
+	}
+	if err := pipeline.RenderApplyInstruction(ctx, round); err != nil {
+		return err
+	}
+	rounds := runtime.ChainRounds{Design: view.designRound, Implement: view.round + 1}
+	terminalCard, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, nil, run.DeliveryID, run.RunID, run.Summary, rounds)
+	if err != nil {
+		return err
+	}
+	logger.Info("design-backed round regenerated", "run", run.RunID, "implement_round", rounds.Implement, "terminal_card", terminalCard)
+	return nil
 }
 
 // nextDesignRound retires the cards that are not done and creates the next

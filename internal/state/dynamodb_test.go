@@ -568,8 +568,8 @@ func testPullRequest(t *testing.T) hook.PullClaimRequest {
 			// one live run had every terminal report refused over 314 lost
 			// units). Keeping the fixture pathological makes every scenario
 			// a precision regression test.
-			WorkflowRunID:     7663335643410923834,
-			RunAttempt:        1,
+			WorkflowRunID: 7663335643410923834,
+			RunAttempt:    1,
 		},
 		IssuedAt:  testQueuedAt.Add(time.Second),
 		ClaimedAt: testQueuedAt.Add(2 * time.Second),
@@ -1212,7 +1212,7 @@ func testTerminalReport(t *testing.T, envelope hook.DispatchEnvelope, code hook.
 		Repository:        "example/target",
 		RunURL: "https://github.com/example/automation-receiver/actions/runs/" +
 			strconv.FormatInt(pull.Owner.WorkflowRunID, 10) + "/attempts/" + strconv.Itoa(pull.Owner.RunAttempt),
-		IssuedAt:          testQueuedAt.Add(3 * time.Second),
+		IssuedAt: testQueuedAt.Add(3 * time.Second),
 	}
 }
 
