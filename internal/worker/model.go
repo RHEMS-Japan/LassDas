@@ -25,6 +25,9 @@ const (
 	ChatFinishStop = "stop"
 	// ChatFinishContentFilter is the provider's refusal classifier declining the turn.
 	ChatFinishContentFilter = "content_filter"
+	// ChatFinishLength is the provider ending the answer at max_tokens; the
+	// same turn can be given more room (converseTurn does, once).
+	ChatFinishLength = "length"
 )
 
 // ChatMessage is one OpenAI-compatible chat message.
@@ -85,6 +88,10 @@ var (
 	// errModelResponseRefused is the provider declining one turn
 	// (finish_reason=content_filter): asked again once like the two above.
 	errModelResponseRefused = errors.New("model declined to answer the turn")
+	// errModelResponseTruncated marks a turn the provider ended at the output
+	// allowance (finish_reason=length): converseTurn asks the same turn once
+	// more with the allowance widened, below the configuration ceiling.
+	errModelResponseTruncated = errors.New("model response ended before a complete answer")
 )
 
 // malformedTurnRetries is how many out-of-shape responses in a row one turn
@@ -110,10 +117,11 @@ type ChatCompletionsAPI interface {
 
 // GatewayClient posts chat completions to endpoint.BaseURL with the API key
 // named by endpoint.APIKeyEnv. It fails closed on any transport surprise and
-// never retries a transport failure. Two kinds of answer are asked again,
+// never retries a transport failure. Three kinds of answer are asked again,
 // each by the caller that owns the unchanged conversation: one the contract
-// cannot read (converseJSON, at most modelAnswerAttempts times) and one the
-// gateway returned out of shape (converseTurn, once).
+// cannot read (converseJSON, at most modelAnswerAttempts times), one the
+// gateway returned out of shape (converseTurn, once) and one the provider
+// cut off at the output allowance (converseTurn, once with more room).
 type GatewayClient struct {
 	client *http.Client
 }
@@ -431,25 +439,77 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 	return total
 }
 
-// converseTurn asks one turn. A response the gateway returned out of shape
-// (errModelResponseMetadata / errModelResponseContent) is asked again once
-// after malformedTurnDelay: the messages are the caller's and unchanged,
-// nothing was recorded, and one such response must not end a run — every
-// direct model call in the reception and the investigating designer's loop
-// goes through here. A second in a row, or any other error, travels.
+// converseTurn asks one turn. Two kinds of answer are asked again, each on
+// the caller's unchanged messages with nothing recorded: a response the
+// gateway returned out of shape (errModelResponseMetadata /
+// errModelResponseContent / errModelResponseRefused) once after
+// malformedTurnDelay, and a response the provider cut off at the output
+// allowance (errModelResponseTruncated) once with the allowance widened
+// toward MaxConfiguredOutputTokens — a readiness answer long enough to hit
+// the allowance ended a live run as model_failed that the next attempt
+// passed (2026-09-05). At the ceiling there is no room to give, so the
+// cutoff travels at once. A second of either kind, or any other error,
+// travels named; an error after the widened re-ask still carries the
+// cutoff that caused it, so the caller's log names the cutoff whatever
+// ended the turn. The widened allowance lives for this turn only: a
+// conversation whose every answer is long pays one cut-off request per
+// turn, and the tokens of a discarded turn are billed but not recorded
+// (the spend line is read from the gateway, not summed here). Every direct
+// model call in the reception and the investigating designer's loop goes
+// through here.
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
-	for attempt := 0; ; attempt++ {
+	malformed := 0
+	var cutoff error
+	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
-		if err == nil || attempt >= malformedTurnRetries || !(errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused)) {
-			return response, usage, err
+		if err == nil {
+			return response, usage, nil
+		}
+		switch {
+		case errors.Is(err, errModelResponseTruncated):
+			if cutoff != nil {
+				return "", InvocationUsage{}, fmt.Errorf("%w; asked again with the wider allowance and cut off again", err)
+			}
+			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
+				return "", InvocationUsage{}, fmt.Errorf("%w; the allowance is already at the ceiling of %d tokens", err, MaxConfiguredOutputTokens)
+			}
+			cutoff = err
+			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
+			continue
+		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
+			if malformed >= malformedTurnRetries {
+				return "", InvocationUsage{}, afterCutoff(cutoff, err)
+			}
+			malformed++
+		default:
+			return "", InvocationUsage{}, afterCutoff(cutoff, err)
 		}
 		select {
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
-			return "", InvocationUsage{}, fmt.Errorf("model invocation failed: %w", ctx.Err())
+			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("model invocation failed: %w", ctx.Err()))
 		case <-time.After(malformedTurnDelay):
 		}
 	}
+}
+
+// afterCutoff keeps the cutoff that led to a widened re-ask in the error
+// that ends the turn, so it is still named (and still errModelResponseTruncated)
+// when the re-ask failed for another reason.
+func afterCutoff(cutoff, err error) error {
+	if cutoff == nil {
+		return err
+	}
+	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
+}
+
+// widenedOutputAllowance doubles an output allowance, stopping at the
+// configuration ceiling.
+func widenedOutputAllowance(current int32) int32 {
+	if current >= MaxConfiguredOutputTokens/2 {
+		return MaxConfiguredOutputTokens
+	}
+	return current * 2
 }
 
 func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
@@ -516,6 +576,10 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// verdict ended a seven-measurement round as model_failed).
 		if output.Choices[0].FinishReason == ChatFinishContentFilter {
 			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, ChatFinishContentFilter)
+		}
+		if output.Choices[0].FinishReason == ChatFinishLength {
+			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
+				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
 		return "", InvocationUsage{}, errors.New(
 			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)

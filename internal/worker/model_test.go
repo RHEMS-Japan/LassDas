@@ -475,3 +475,50 @@ func TestPreflightAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
 		t.Fatalf("two malformed responses: err = %v after %d requests, want the metadata error after 2", err, len(api.requests))
 	}
 }
+
+// A turn the provider ended at the output allowance is asked once more with
+// the allowance widened; a second cutoff, or one already at the ceiling,
+// travels named after the requests it took.
+func TestConverseTurnAsksAgainWithMoreRoomAfterACutOff(t *testing.T) {
+	config := validTestConfig()
+	api := &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Preflight(context.Background(), config.Models.Implementer); err != nil {
+		t.Fatalf("Preflight after one cutoff: %v", err)
+	}
+	if len(api.requests) != 2 || api.requests[0].MaxTokens != 128 || api.requests[1].MaxTokens != 256 {
+		t.Fatalf("requests = %d (allowances %d, %d), want the cut-off turn asked again with twice the allowance",
+			len(api.requests), api.requests[0].MaxTokens, api.requests[len(api.requests)-1].MaxTokens)
+	}
+
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	_, err := invoker.Preflight(context.Background(), config.Models.Implementer)
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") {
+		t.Fatalf("two cutoffs: err = %v after %d requests, want the cutoff named after 2", err, len(api.requests))
+	}
+
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{}`, `{}`}}
+	invoker, _ = NewModelInvoker(api)
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 1 || !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("a cutoff at the ceiling: err = %v after %d requests, want one request and the ceiling named", err, len(api.requests))
+	}
+	if widenedOutputAllowance(20000) != MaxConfiguredOutputTokens || widenedOutputAllowance(4096) != 8192 {
+		t.Fatal("widenedOutputAllowance must double and stop at the ceiling")
+	}
+}
+
+// A widened re-ask that fails for another reason still names the cutoff
+// that caused it, so the caller's log and the requester's note keep the
+// cause.
+func TestConverseTurnKeepsTheCutoffWhenTheWiderAskFailsOtherwise(t *testing.T) {
+	api := &loopScriptAPI{answers: []string{lengthMarker + `{}`}}
+	invoker, _ := NewModelInvoker(api)
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") || !strings.Contains(err.Error(), "script exhausted") && !strings.Contains(err.Error(), "model invocation failed") {
+		t.Fatalf("cutoff then a transport failure: err = %v after %d requests, want the cutoff kept", err, len(api.requests))
+	}
+}
