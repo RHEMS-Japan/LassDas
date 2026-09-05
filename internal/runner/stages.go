@@ -180,6 +180,7 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 			"--derivation-out", p.path("derivation.json"),
 			"--out", p.path("readiness-ticket.json"),
 		}, p.modelKeyEnv()...); err != nil || code != 0 {
+			p.noteReceptionCutoff("契約の導出")
 			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	}
@@ -508,6 +509,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		assessArgs = append(assessArgs, p.clarificationArgs()...)
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			p.noteReceptionCutoff("受付の判定")
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
 		checkArgs := []string{
@@ -518,6 +520,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		checkArgs = append(checkArgs, p.clarificationArgs()...)
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			p.noteReceptionCutoff("受付の確認")
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
 		readinessArgs = append(readinessArgs, "--assessment", assessment, "--check", check)
@@ -542,6 +545,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+		p.noteReceptionCutoff("受付の判断")
 		return Outcome{Code: hook.TerminalModelFailed}, err
 	}
 	readinessOutcome, err := p.readJSONField(relPath(p.Workspace, decision), "outcome")

@@ -60,6 +60,10 @@ type Pipeline struct {
 	// file itself; only that is trusted — a file that merely exists could
 	// have been left by anyone.
 	trailWritten bool
+	// lastStepStderr keeps the tail of the most recent step's stderr, so a
+	// stage that failed can tell the requester why in the trail (the worker
+	// explains its refusal there and nowhere else).
+	lastStepStderr string
 }
 
 // Outcome is what the pipeline hands back to the runner's terminal logic.
@@ -117,7 +121,9 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = p.Workspace
 	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
+	stderrTail := &tailBuffer{limit: stepStderrTailBytes}
+	command.Stderr = io.MultiWriter(os.Stderr, stderrTail)
+	defer func() { p.lastStepStderr = stderrTail.String() }()
 	command.Env = append(os.Environ(), extraEnv...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
@@ -137,6 +143,26 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	}
 	return -1, fmt.Errorf("step %s could not run: %w", name, err)
 }
+
+// stepStderrTailBytes bounds what a step's stderr leaves behind for the
+// trail note; the worker's refusal line sits at the end of it.
+const stepStderrTailBytes = 4096
+
+// tailBuffer keeps the last limit bytes written to it.
+type tailBuffer struct {
+	limit int
+	data  []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.data = append(b.data, p...)
+	if len(b.data) > b.limit {
+		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string { return string(b.data) }
 
 func (p *Pipeline) worker(ctx context.Context, name string, arguments []string, extraEnv ...string) (int, error) {
 	argv := append([]string{p.Config.WorkerBin}, arguments...)

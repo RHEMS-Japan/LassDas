@@ -356,12 +356,19 @@ func TestInvestigateAsksAgainOnceAfterAContentFilterVerdict(t *testing.T) {
 		t.Fatalf("two refused turns in a row: err = %v after %d requests, want the refusal named after 2", err, len(api.requests))
 	}
 
-	// A length cutoff is not asked again: the same request cannot give it
-	// more room, so it travels after exactly one request, named.
+	// A length cutoff is asked again once with a wider allowance: the second
+	// answer goes through and the round continues (here until the script
+	// runs out). Two cutoffs in a row travel named after exactly two requests.
 	input, _ = investigationFixture(t, 10)
 	api = &loopScriptAPI{answers: []string{lengthMarker + probeList, probeList}}
 	invoker, _ = NewModelInvoker(api)
-	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err == nil || len(api.requests) != 1 || !strings.Contains(err.Error(), "finish_reason=length") {
-		t.Fatalf("a length cutoff: err = %v after %d requests, want one request and the cutoff named", err, len(api.requests))
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); errors.Is(err, errModelResponseTruncated) || len(api.requests) < 2 || api.requests[1].MaxTokens != 8192 {
+		t.Fatalf("a length cutoff: err = %v after %d requests, want the turn asked again with 8192 tokens of room", err, len(api.requests))
+	}
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{lengthMarker + probeList, lengthMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") {
+		t.Fatalf("two length cutoffs: err = %v after %d requests, want the cutoff named after 2", err, len(api.requests))
 	}
 }
