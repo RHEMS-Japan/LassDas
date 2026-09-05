@@ -97,6 +97,8 @@ func run(ctx context.Context, args []string) error {
 		return runVerifyValidation(args[1:])
 	case "verify-publish-gate":
 		return runVerifyPublishGate(args[1:])
+	case "investigate":
+		return runInvestigate(ctx, args[1:])
 	case "preflight":
 		return runPreflight(ctx, args[1:])
 	default:

@@ -138,6 +138,14 @@ func (p *Pipeline) RunChainStage(ctx context.Context, stage string) error {
 	repoRoot := p.path("target-repo")
 	baseRoot := p.path("target-base")
 	switch stage {
+	case runtime.StageInvestigate:
+		return p.chainInvestigate(ctx, repoRoot, baseSHA)
+	case runtime.StageDesignReviewA:
+		return p.chainDesignReview(ctx, reviewers, 0, repoRoot, baseSHA)
+	case runtime.StageDesignReviewB:
+		return p.chainDesignReview(ctx, reviewers, 1, repoRoot, baseSHA)
+	case runtime.StageDesignDecide:
+		return p.chainDesignDecide(ctx, reviewers)
 	case runtime.StageReviewA:
 		return p.chainSealAndReview(ctx, reviewers, 0, repoRoot, baseRoot, baseSHA)
 	case runtime.StageReviewB:
