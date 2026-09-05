@@ -16,14 +16,18 @@ type cappedWriter struct {
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
-	w.total += len(p)
+	n := len(p)
+	w.total += n
 	if remaining := w.cap - w.buf.Len(); remaining > 0 {
 		if len(p) > remaining {
 			p = p[:remaining]
 		}
 		w.buf.Write(p)
 	}
-	return len(p), nil
+	// Always report the full length: a short write would stop the copy
+	// from the child's pipe and kill the child with SIGPIPE, turning a
+	// capped output into a failed measurement.
+	return n, nil
 }
 
 func (w *cappedWriter) truncated() bool { return w.total > w.buf.Len() }
