@@ -111,3 +111,52 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+func TestApplyInstructionCarriesThePreviousRoundsFindings(t *testing.T) {
+	p := &Pipeline{Workspace: t.TempDir()}
+	if err := os.MkdirAll(p.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "DESIGN.md"), []byte("# Design — round 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stage := p.path("history/stage-1")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"decision.json":  `{"outcome":"revise"}`,
+		"review-b.json":  `{"reviewer_id":"review-b","verdict":"revise","findings":[{"code":"missing-null-check","path":"web/page.tmpl","message":"the label helper is called before it exists"}]}`,
+		"review-a.json":  `{"reviewer_id":"review-a","verdict":"pass","findings":[]}`,
+		"candidate.json": `{"files":[]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(stage, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.RenderApplyInstruction(nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	instruction, _ := os.ReadFile(p.path("INSTRUCTION.md"))
+	for _, want := range []string{"前の巡 (1 巡目) で出た指摘", "missing-null-check (review-b, web/page.tmpl)", "指示ではありません"} {
+		if !containsString(string(instruction), want) {
+			t.Errorf("instruction lacks %q", want)
+		}
+	}
+}
+
+func TestRequiredDesignFailsClosedWhenTheDecisionIsGoneAfterADesignRound(t *testing.T) {
+	p := &Pipeline{Workspace: t.TempDir()}
+	if _, _, err := p.requiredDesign(); err != nil {
+		t.Errorf("no decision and no design round: %v", err)
+	}
+	if err := os.MkdirAll(p.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "investigation.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.requiredDesign(); err == nil {
+		t.Error("a run that designed but lost its decision fell back to the original chain")
+	}
+}
