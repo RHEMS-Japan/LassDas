@@ -22,6 +22,10 @@ import (
 // defaultDesignMaxRounds is the design doc's default for design_max_rounds.
 const defaultDesignMaxRounds = 3
 
+// errDesignRoundLimit says the design rounds are spent; the run ends as
+// nonconverged instead of starting another round.
+var errDesignRoundLimit = errors.New("design round limit reached")
+
 // consumerDesignMaxRounds reads the destination's design round limit
 // leniently: absent means the default.
 func consumerDesignMaxRounds(consumerConfigPath string) int {
@@ -112,7 +116,7 @@ func handleDesignChainFailure(
 		case err != nil:
 			code = hook.TerminalModelFailed
 		case outcome == "revise":
-			return true, nextDesignRound(ctx, hermes, config, run, view, plan, "design review asked for a revision", logger)
+			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "design review asked for a revision", logger)
 		case outcome == "nonconverged" && plan.Shape == runtime.ShapeInvestigation:
 			code = hook.TerminalInvestigationNonconverged
 		case outcome == "nonconverged":
@@ -127,7 +131,7 @@ func handleDesignChainFailure(
 		// surfaces: the applier left revise-design.json and the seal turned
 		// it into a sealed design-objection.json instead of a candidate.
 		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
-			return true, nextDesignRound(ctx, hermes, config, run, view, plan, "the applier objected to the design", logger)
+			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design", logger)
 		}
 		return false, nil
 	default:
@@ -215,6 +219,42 @@ func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, co
 	return nil
 }
 
+// nextDesignRoundOrEnd starts the next design round, or — when the rounds
+// are spent — ends the run honestly with the shape's nonconverged code and
+// retires every card, so the run never sits claimed with a failing card.
+func nextDesignRoundOrEnd(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	hermes *runtime.Hermes,
+	envelope hook.DispatchEnvelope,
+	run state.RunOverview,
+	view chainView,
+	plan runtime.ChainPlan,
+	why string,
+	logger Logger,
+) error {
+	err := nextDesignRound(ctx, hermes, config, run, view, plan, why, logger)
+	if !errors.Is(err, errDesignRoundLimit) {
+		return err
+	}
+	code := hook.TerminalDesignNonconverged
+	if plan.Shape == runtime.ShapeInvestigation {
+		code = hook.TerminalInvestigationNonconverged
+	}
+	runDir := runDirectory(config, run.DeliveryID)
+	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+	if readErr != nil {
+		repository = ""
+	}
+	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+		return err
+	}
+	logger.Info("design rounds spent; run ended", "run", run.RunID, "why", why, "code", string(code))
+	return archiveChain(ctx, hermes, view.all)
+}
+
 // nextDesignRound retires the cards that are not done and creates the next
 // design round; the implementation counter advances only so the fresh apply
 // card gets a key of its own — the round budget (max_stages) is counted from
@@ -232,39 +272,28 @@ func nextDesignRound(
 	limit := consumerDesignMaxRounds(config.ConsumerConfigPath)
 	if view.designRound >= limit {
 		// The decide verb converts a last-round revise into nonconverged; an
-		// objection at the limit has no verb to do that, so the attendant
-		// ends the run honestly here.
-		return errors.New("design round limit reached: " + why)
+		// objection at the limit has no verb to do that, so the caller ends
+		// the run honestly on this signal.
+		return fmt.Errorf("%w: %s", errDesignRoundLimit, why)
 	}
+	// Every card of the newest implementation round goes, done ones
+	// included: the apply card that objected must not stay done below a new
+	// design (the kanban would treat it as satisfied and dispatch the tail),
+	// and archiving frees its key, so the implementation round number does
+	// not move — which keeps the runner's own count (decisions sealed) and
+	// the board's count the same. Design cards of the old round stay; the
+	// new round is keyed one higher.
 	for _, task := range view.all {
-		if task.Status == "done" {
+		if _, stage, _, ok := runtime.ParseChainCardKey(task.IdempotencyKey); ok && runtime.IsDesignStage(stage) && task.Status == "done" {
 			continue
 		}
 		if err := hermes.Archive(ctx, task.ID); err != nil {
 			return err
 		}
 	}
-	// Cards that are done but sit below the retired ones in the parent chain
-	// (the apply card whose objection brought us here) must not be reused:
-	// their keys carry the implementation round, so the next round's tail is
-	// keyed one higher. Design cards are keyed by the new design round.
 	rounds := runtime.ChainRounds{Design: view.designRound + 1, Implement: view.round}
-	if plan.Shape == runtime.ShapeDesign {
-		if _, done := view.cards[runtime.StageApply]; done && view.cards[runtime.StageApply].Status == "done" {
-			rounds.Implement = view.round + 1
-		}
-		if rounds.Implement < 1 {
-			rounds.Implement = 1
-		}
-		for _, task := range view.cards {
-			if task.Status == "done" && task.ID != view.cards[runtime.StageApply].ID {
-				// A done tail card below a retired one would be re-gated by
-				// the kanban as satisfied; archive it so the new chain is whole.
-				if err := hermes.Archive(ctx, task.ID); err != nil {
-					return err
-				}
-			}
-		}
+	if plan.Shape == runtime.ShapeDesign && rounds.Implement < 1 {
+		rounds.Implement = 1
 	}
 	terminalCard, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, nil, run.DeliveryID, run.RunID, run.Summary, rounds)
 	if err != nil {
