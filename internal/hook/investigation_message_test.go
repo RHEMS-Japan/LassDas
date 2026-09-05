@@ -62,3 +62,18 @@ func TestInvestigatedIsATerminalCode(t *testing.T) {
 		t.Error("board phases for the new codes are wrong")
 	}
 }
+
+func TestPlanHeadlineFollowsTheRequestKind(t *testing.T) {
+	investigation := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "investigation"})
+	if !strings.Contains(investigation, "【調査方針】") || strings.Contains(investigation, "実装を開始します") {
+		t.Errorf("investigation headline: %s", investigation)
+	}
+	design := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "change", NeedsDesign: true, DesignReason: "default"})
+	if !strings.Contains(design, "設計書にまとめ") || strings.Contains(design, "次の方針で実装を開始します") {
+		t.Errorf("design headline: %s", design)
+	}
+	plain := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "change"})
+	if !strings.Contains(plain, "次の方針で実装を開始します") {
+		t.Errorf("plain headline: %s", plain)
+	}
+}

@@ -43,6 +43,9 @@ type PlanFacts struct {
 	// than guessed.
 	NeedsDesign  bool
 	DesignReason string
+	// RequestKind is the reception's sealed request_kind (change |
+	// investigation); empty for a decision sealed before the field existed.
+	RequestKind string
 }
 
 // designReasonPhrases are the requester-facing sentences for the machine
@@ -113,7 +116,7 @@ const (
 // requester reads it.
 func PlanCommentContent(runID string, facts PlanFacts) string {
 	var builder strings.Builder
-	builder.WriteString("【実装方針】受付審査を通過したため、次の方針で実装を開始します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n")
+	builder.WriteString(planHeadline(facts))
 	if request := truncatePlanText(facts.Request); request != "" {
 		builder.WriteString("\n依頼の解釈: " + request + "\n")
 	}
@@ -204,4 +207,18 @@ func ReceiptCommentContent(record QuestionRecord, answerCommentID int64) (string
 		AutoRetry:  "なし（再開後の処理は自動で進みます）",
 		Marker:     CommentMarker("answer-receipt", record.AutomationRunID, tag, fmt.Sprintf("%d", answerCommentID)),
 	}.render(), nil
+}
+
+// planHeadline says what starts now, in the requester's terms: an
+// investigation only, an investigation and a design before any code, or the
+// implementation straight away.
+func planHeadline(facts PlanFacts) string {
+	switch {
+	case facts.RequestKind == "investigation":
+		return "【調査方針】受付審査を通過したため、次の内容を調査します。稼働環境とリポジトリは読み取りだけで、コードの変更と Pull Request はありません。調査の結果はこのチケットに報告します。ご対応は不要です（止めたい場合のみ、下の停止方法をご利用ください）。\n"
+	case facts.NeedsDesign:
+		return "【実装方針】受付審査を通過したため、まず稼働環境を計って原因と直し方を設計書にまとめ、独立したレビューを通してから実装します。設計書の要約はコードを書く前にこのチケットに掲示します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n"
+	default:
+		return "【実装方針】受付審査を通過したため、次の方針で実装を開始します。ご対応は不要です（方針が違う場合のみ、下の停止方法をご利用ください）。\n"
+	}
 }
