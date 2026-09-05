@@ -32,6 +32,15 @@ func (f *fakeBacklog) FindExactComment(_ context.Context, _ int64, content strin
 	return 0, false, nil
 }
 
+func (f *fakeBacklog) FindCommentWithMarker(_ context.Context, _ int64, marker string) (int64, bool, error) {
+	for _, comment := range f.comments {
+		if strings.Contains(comment.Body, marker) {
+			return comment.CommentID, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 func (f *fakeBacklog) AddCommentNotifying(_ context.Context, _ int64, content string, _ []int64) (int64, error) {
 	f.nextID++
 	f.comments = append(f.comments, hook.BacklogComment{
