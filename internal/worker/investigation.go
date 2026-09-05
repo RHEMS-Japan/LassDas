@@ -72,14 +72,6 @@ type InvestigationResult struct {
 // be sealed within the budget.
 var ErrInvestigationIncomplete = errors.New("investigation incomplete")
 
-// malformedTurnRetries is how many out-of-shape responses in a row the loop
-// asks again before the failure travels; malformedTurnDelay is the pause
-// before asking.
-const (
-	malformedTurnRetries = 1
-	malformedTurnDelay   = 2 * time.Second
-)
-
 // turnAnswer is the one JSON shape the model may answer with.
 type turnAnswer struct {
 	Probe  *probe.Request  `json:"probe,omitempty"`
@@ -111,7 +103,6 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 	phase := ModeInvestigation
 	rejections := 0
 	budgetWarned := false
-	malformed := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			result.Incomplete = "the wall ended the round before a record was sealed"
@@ -123,24 +114,8 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				result.Incomplete = "the wall ended the round before a record was sealed"
 				return result, ErrInvestigationIncomplete
 			}
-			// A response out of shape (usage that does not add up, not one
-			// assistant message) is asked again once: the conversation has
-			// not changed, nothing was recorded, and one such answer must
-			// not end a round that already holds a dozen measurements. A
-			// second one in a row is the transport's failure and travels.
-			if (errors.Is(err, ErrModelResponseMetadata) || errors.Is(err, ErrModelResponseContent)) && malformed < malformedTurnRetries {
-				malformed++
-				select {
-				case <-ctx.Done():
-					result.Incomplete = "the wall ended the round before a record was sealed"
-					return result, ErrInvestigationIncomplete
-				case <-time.After(malformedTurnDelay):
-				}
-				continue
-			}
 			return result, err
 		}
-		malformed = 0
 		result.Turns++
 		result.Usage = sumInvocationUsage(result.Usage, usage)
 		answer, objection := decodeTurnAnswer([]byte(response), phase)

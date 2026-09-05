@@ -69,16 +69,25 @@ type ChatChoice struct {
 	Message      ChatMessage `json:"message"`
 }
 
-// ErrModelResponseMetadata and ErrModelResponseContent name a response the
-// gateway returned in one piece but out of shape: a usage block whose counts
-// are missing or do not add up, or a choice that is not one assistant
-// message. A caller that holds an unchanged conversation may ask the same
-// turn once more; the investigating designer does (live 2026-09-05: one
-// such response ended an 18-probe investigation as model_failed).
+// errModelResponseMetadata and errModelResponseContent name a response the
+// gateway returned in one piece but out of shape: a usage block that is
+// missing or does not add up, a request id outside its pattern, a choice
+// that is not one assistant message, or content that is empty or over the
+// limit. The conversation is unchanged when they are returned, so
+// converseTurn asks the same turn once more before the failure travels
+// (live 2026-09-05: one such response ended an 18-probe investigation as
+// model_failed). Each carries the detail that failed, as counts only.
 var (
-	ErrModelResponseMetadata = errors.New("model response metadata is invalid")
-	ErrModelResponseContent  = errors.New("model response content is invalid")
+	errModelResponseMetadata = errors.New("model response metadata is invalid")
+	errModelResponseContent  = errors.New("model response content is invalid")
 )
+
+// malformedTurnRetries is how many out-of-shape responses in a row one turn
+// tolerates before its failure travels; malformedTurnDelay is the pause
+// before asking again (a variable so tests need not wait).
+const malformedTurnRetries = 1
+
+var malformedTurnDelay = 2 * time.Second
 
 // ChatResponse is the subset of an OpenAI-compatible chat completions
 // response the pipeline consumes and verifies.
@@ -96,8 +105,10 @@ type ChatCompletionsAPI interface {
 
 // GatewayClient posts chat completions to endpoint.BaseURL with the API key
 // named by endpoint.APIKeyEnv. It fails closed on any transport surprise and
-// never retries a transport failure; only an answer the contract cannot
-// read is asked again, by converseJSON, at most modelAnswerAttempts times.
+// never retries a transport failure. Two kinds of answer are asked again,
+// each by the caller that owns the unchanged conversation: one the contract
+// cannot read (converseJSON, at most modelAnswerAttempts times) and one the
+// gateway returned out of shape (converseTurn, once).
 type GatewayClient struct {
 	client *http.Client
 }
@@ -414,7 +425,27 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 	return total
 }
 
+// converseTurn asks one turn. A response the gateway returned out of shape
+// (errModelResponseMetadata / errModelResponseContent) is asked again once
+// after malformedTurnDelay: the messages are the caller's and unchanged,
+// nothing was recorded, and one such response must not end a run — every
+// direct model call in the reception and the investigating designer's loop
+// goes through here. A second in a row, or any other error, travels.
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
+	for attempt := 0; ; attempt++ {
+		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
+		if err == nil || attempt >= malformedTurnRetries || !(errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent)) {
+			return response, usage, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", InvocationUsage{}, err
+		case <-time.After(malformedTurnDelay):
+		}
+	}
+}
+
+func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	if ctx == nil {
 		return "", InvocationUsage{}, errors.New("model invocation context is invalid")
 	}
@@ -454,17 +485,17 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		return "", InvocationUsage{}, errors.New("model invocation failed")
 	}
 	if output.Usage == nil {
-		return "", InvocationUsage{}, fmt.Errorf("%w (no usage)", ErrModelResponseMetadata)
+		return "", InvocationUsage{}, fmt.Errorf("%w (no usage)", errModelResponseMetadata)
 	}
 	if output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||
 		output.Usage.TotalTokens <= 0 || output.Usage.PromptTokens+output.Usage.CompletionTokens != output.Usage.TotalTokens {
 		// The three counts are the only upstream values named here: numbers
 		// the spend record needs and nothing the transport could smuggle.
-		return "", InvocationUsage{}, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", ErrModelResponseMetadata,
+		return "", InvocationUsage{}, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", errModelResponseMetadata,
 			output.Usage.PromptTokens, output.Usage.CompletionTokens, output.Usage.TotalTokens)
 	}
 	if len(output.Choices) != 1 || output.Choices[0].Message.Role != "assistant" {
-		return "", InvocationUsage{}, ErrModelResponseContent
+		return "", InvocationUsage{}, fmt.Errorf("%w (choices=%d, not one assistant message)", errModelResponseContent, len(output.Choices))
 	}
 	if output.Choices[0].FinishReason != ChatFinishStop {
 		// The finish reason is a provider enum, safe to echo, and it is the
@@ -476,10 +507,10 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {
-		return "", InvocationUsage{}, errors.New("model response content is invalid")
+		return "", InvocationUsage{}, fmt.Errorf("%w (content %d bytes, limit %d)", errModelResponseContent, len(response), maxResponseBytes)
 	}
 	if !modelRequestIDPattern.MatchString(output.ID) {
-		return "", InvocationUsage{}, errors.New("model response metadata is invalid")
+		return "", InvocationUsage{}, fmt.Errorf("%w (request id outside its pattern)", errModelResponseMetadata)
 	}
 	cost := output.Usage.Cost
 	if cost < 0 {
