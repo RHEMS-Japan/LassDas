@@ -216,3 +216,29 @@ func TestInvestigationWithdrawsOldExcerptsOverTheBudget(t *testing.T) {
 		t.Errorf("latest excerpt withdrawn too: %s", messages[5].Content)
 	}
 }
+
+// The model is told how to choose among a probe's hosts: the catalogue entry
+// of an http probe with several hosts carries host_argument, one with a
+// single host does not (live 2026-09-05: without it every timing went to
+// the first host).
+func TestInvestigationTaskPromptNamesTheHostArgumentForMultiHostProbes(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	multi, err := probe.NewCatalog([]probe.Spec{{ID: "http.timing", Kind: probe.KindHTTP, Hosts: []string{"console.example.invalid", "api.example.invalid"},
+		Methods: []string{"GET"}, Returns: []string{"status", "time_total", "bytes"}, Args: map[string]string{"path": `/[a-z]{0,20}`}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Session.Catalog = multi
+	if prompt := investigationTaskPrompt(input); !strings.Contains(prompt, `"host_argument":"add \"host\" to args, one of hosts; omitted = hosts[0]"`) {
+		t.Errorf("multi-host entry lacks host_argument: %s", prompt)
+	}
+	single, err := probe.NewCatalog([]probe.Spec{{ID: "http.timing", Kind: probe.KindHTTP, Hosts: []string{"console.example.invalid"},
+		Methods: []string{"GET"}, Returns: []string{"status", "time_total", "bytes"}, Args: map[string]string{"path": `/[a-z]{0,20}`}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Session.Catalog = single
+	if prompt := investigationTaskPrompt(input); strings.Contains(prompt, "host_argument") {
+		t.Errorf("single-host entry carries host_argument: %s", prompt)
+	}
+}

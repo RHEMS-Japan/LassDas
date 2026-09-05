@@ -34,15 +34,34 @@ func TestEveryRunCommentKindIsStoredOrMarkerScanned(t *testing.T) {
 		}
 		for _, spec := range gen.Specs {
 			value, ok := spec.(*ast.ValueSpec)
-			if !ok {
+			if !ok || len(value.Values) != 1 {
 				continue
 			}
-			ident, ok := value.Type.(*ast.Ident)
-			if !ok || ident.Name != "RunCommentKind" || len(value.Values) != 1 {
-				continue
-			}
-			lit, ok := value.Values[0].(*ast.BasicLit)
-			if !ok {
+			// Two spellings declare a kind: `Name RunCommentKind = "lit"` and
+			// `Name = RunCommentKind("lit")`. Anything else typed as the kind
+			// is a shape this test cannot read and must not pass silently.
+			var lit *ast.BasicLit
+			if ident, typed := value.Type.(*ast.Ident); typed && ident.Name == "RunCommentKind" {
+				lit, _ = value.Values[0].(*ast.BasicLit)
+				if lit == nil {
+					t.Errorf("%s: a RunCommentKind constant must be a string literal", value.Names[0].Name)
+					continue
+				}
+			} else if call, converted := value.Values[0].(*ast.CallExpr); converted {
+				fun, isIdent := call.Fun.(*ast.Ident)
+				if !isIdent || fun.Name != "RunCommentKind" {
+					continue
+				}
+				if len(call.Args) != 1 {
+					t.Errorf("%s: a RunCommentKind conversion must wrap one string literal", value.Names[0].Name)
+					continue
+				}
+				lit, _ = call.Args[0].(*ast.BasicLit)
+				if lit == nil {
+					t.Errorf("%s: a RunCommentKind conversion must wrap a string literal", value.Names[0].Name)
+					continue
+				}
+			} else {
 				continue
 			}
 			raw, err := strconv.Unquote(lit.Value)
