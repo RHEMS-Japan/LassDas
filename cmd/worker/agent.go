@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -96,7 +97,7 @@ func runImplement(ctx context.Context, args []string) error {
 		return errors.New("the implementing agent did not finish: " + runErr.Error())
 	}
 
-	return sealObservedChain(outcome.ChangedFiles, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath)
+	return sealObservedChain(outcome.ChangedFiles, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, "")
 }
 
 // runAgentReview hands the finished change to the reviewing agent, in the same
@@ -134,12 +135,17 @@ func runAgentReview(ctx context.Context, args []string) error {
 	clarificationPath := flags.String("clarification", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
+	designMDPath := flags.String("design-md", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) ||
 		!allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *reviewerID, *repoRoot, *baseSHA, *runOutPath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) {
 		return errors.New("agent-review arguments are invalid")
+	}
+	designMD, err := readDesignMarkdown(*designMDPath)
+	if err != nil {
+		return err
 	}
 	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
 	if err != nil {
@@ -168,7 +174,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings)
+	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings, designMD)
 	if err != nil {
 		// The builder's failures are static prose ("instruction is too
 		// large") - naming them is what made the third live ticket's death
@@ -252,6 +258,22 @@ func runAgentReview(ctx context.Context, args []string) error {
 // The reviewer is pointed at the ticket and the changed files but left free to
 // read the rest of the repository, which is what makes its objections worth
 // more than a reading of the diff.
+// maxDesignMarkdownBytes bounds the approved design shown to a reviewer.
+const maxDesignMarkdownBytes = 64 * 1024
+
+// readDesignMarkdown loads the kernel-rendered design an applier followed,
+// when the review is of a design-backed change.
+func readDesignMarkdown(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	content, err := worker.ReadBoundedRegularFile(path, int64(maxDesignMarkdownBytes))
+	if err != nil || !utf8.Valid(content) {
+		return "", errors.New("the approved design's rendering could not be read")
+	}
+	return string(content), nil
+}
+
 func reviewAgentPrompt(
 	candidate worker.Candidate,
 	source worker.SourceSnapshot,
@@ -259,6 +281,7 @@ func reviewAgentPrompt(
 	endpoint worker.ModelEndpoint,
 	clarification *worker.ClarificationContext,
 	findings []worker.ModelFinding,
+	designMD string,
 ) (string, error) {
 	changed := make([]string, 0, len(candidate.Files))
 	for _, file := range candidate.Files {
@@ -286,6 +309,21 @@ func reviewAgentPrompt(
 		"",
 		"### 変更されたファイル",
 		strings.Join(changed, "\n"),
+	}
+	if designMD != "" {
+		// A design-backed change is judged against its design, not re-argued
+		// (docs/INVESTIGATING_DESIGNER.md §7): does each item of the design
+		// appear in the diff, is anything extra, and does it actually run.
+		// The approach itself was reviewed before the code existed.
+		sections = append(sections,
+			"",
+			"## この変更は承認済みの設計書を写したものです",
+			"設計書の各項目が差分に現れているか、設計書に無い変更が混ざっていないか、そして実際に動くかを見てください。方針の良し悪しは設計レビューで済んでいるので再審しません。",
+			"設計書どおりに写しても成り立たない (前提が崩れている、動かない) と判断したときだけ、code を `design-wrong` にして revise を返してください。それは設計を作った側に戻る合図です。",
+			"",
+			"### 承認済みの設計書",
+			designMD,
+		)
 	}
 	head := sections
 	sections = nil

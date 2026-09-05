@@ -392,6 +392,12 @@ func (d Design) Validate(identity Identity, investigation Investigation, bounds 
 	return nil
 }
 
+// DigestMatches re-derives the design's fingerprint from its content.
+func (d Design) DigestMatches() bool {
+	digest, err := designDigest(d)
+	return err == nil && digest == d.DesignSHA256 && sha256Pattern.MatchString(d.DesignSHA256)
+}
+
 // FilePaths returns the design's file set, sorted, for the seal and the
 // publish gate to check the candidate against.
 func (d Design) FilePaths() []string {

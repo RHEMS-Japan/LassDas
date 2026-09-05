@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"automation.internal/ticket-ingress/internal/hook"
 )
@@ -77,9 +78,11 @@ func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles
 		return true, err
 	}
 	gateArgs := append(common, reviewFileArgs(stageDir, reviewFiles)...)
-	if code, err := p.worker(ctx, "verify-publish-gate", append([]string{"verify-publish-gate"},
-		append(gateArgs,
-			"--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"))...)); err != nil || code != 0 {
+	gateArgs = append(gateArgs, "--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"))
+	if design := p.approvedDesignPath(); design != "" {
+		gateArgs = append(gateArgs, "--design", design, "--design-decision", filepath.Join(filepath.Dir(design), "decision.json"))
+	}
+	if code, err := p.worker(ctx, "verify-publish-gate", append([]string{"verify-publish-gate"}, gateArgs...)); err != nil || code != 0 {
 		return true, err
 	}
 	return false, nil

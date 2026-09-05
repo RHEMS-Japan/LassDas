@@ -291,3 +291,21 @@ const applyInstructionRules = `
 - Never add automation, CI/CD, release, credential, IAM, repository-governance or deployment machinery. Never claim to have run a command or observed a deployment.
 - Do not commit; the seal reads the working tree.
 `
+
+// approvedDesignPath is the design the current implementation round applies:
+// the newest design round whose decision approved it. Empty for a delivery
+// without a design (the original chain), so every caller adds the design
+// arguments only when there is one.
+func (p *Pipeline) approvedDesignPath() string {
+	for round := p.LatestDesignRound(); round >= 1; round-- {
+		outcome, err := p.readJSONField(fmt.Sprintf("history/design-%d/decision.json", round), "outcome")
+		if err != nil || outcome != "approved" {
+			continue
+		}
+		design := filepath.Join(p.designRoundDir(round), "design.json")
+		if _, err := os.Stat(design); err == nil {
+			return design
+		}
+	}
+	return ""
+}

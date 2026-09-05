@@ -21,20 +21,20 @@ type ValidationFileEvidence struct {
 }
 
 type ValidationEvidence struct {
-	SchemaVersion    int                      `json:"schema_version"`
-	DeliveryID       string                   `json:"delivery_id"`
-	InputSHA256      string                   `json:"input_sha256"`
-	ConfigSHA256     string                   `json:"config_sha256"`
-	ToolSHA          string                   `json:"tool_sha"`
-	SourceSHA256     string                   `json:"source_sha256"`
-	CandidateSHA256  string                   `json:"candidate_sha256"`
-	BaseSHA          string                   `json:"base_sha"`
+	SchemaVersion   int    `json:"schema_version"`
+	DeliveryID      string `json:"delivery_id"`
+	InputSHA256     string `json:"input_sha256"`
+	ConfigSHA256    string `json:"config_sha256"`
+	ToolSHA         string `json:"tool_sha"`
+	SourceSHA256    string `json:"source_sha256"`
+	CandidateSHA256 string `json:"candidate_sha256"`
+	BaseSHA         string `json:"base_sha"`
 	// CheckedOutSHA is the base the validation ACTUALLY ran on. It equals
 	// BaseSHA except on a publish base-advance retry, where the same
 	// candidate is re-validated on a freshly advanced integration base —
 	// the sealed record must say where the commands really ran.
-	CheckedOutSHA string `json:"checked_out_sha,omitempty"`
-	Stage         int    `json:"stage"`
+	CheckedOutSHA    string                   `json:"checked_out_sha,omitempty"`
+	Stage            int                      `json:"stage"`
 	Tools            []ObservedTool           `json:"tools"`
 	Commands         [][]string               `json:"commands"`
 	Files            []ValidationFileEvidence `json:"files"`
