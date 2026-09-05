@@ -97,19 +97,23 @@ REVOKE EXECUTE ON ALL FUNCTIONS  IN SCHEMA public, lassdas_ro, <app_schema> FROM
 REVOKE EXECUTE ON ALL PROCEDURES IN SCHEMA public, lassdas_ro, <app_schema> FROM PUBLIC;
 GRANT  EXECUTE ON ALL FUNCTIONS  IN SCHEMA public, <app_schema> TO <app_role>;   -- the application keeps working
 GRANT  EXECUTE ON ALL PROCEDURES IN SCHEMA public, <app_schema> TO <app_role>;
--- Defaults for future functions, per (creating role, schema). Each REVOKE
--- is paired with the GRANT that keeps the application able to call what
--- its migrations create. FUNCTIONS here covers procedures too (default
--- privileges cannot tell them apart).
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     IN SCHEMA public       REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     IN SCHEMA public       GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     IN SCHEMA <app_schema> REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     IN SCHEMA <app_schema> GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
-ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> IN SCHEMA public       REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> IN SCHEMA public       GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
-ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> IN SCHEMA <app_schema> REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> IN SCHEMA <app_schema> GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
-ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     IN SCHEMA lassdas_ro   REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;   -- no <app_role> pair: the application calls nothing here
+-- Defaults for future functions. These have to be the creating role's
+-- GLOBAL defaults (no IN SCHEMA): PostgreSQL adds per-schema default
+-- privileges to the global ones and never subtracts, so a REVOKE ... FROM
+-- PUBLIC written IN SCHEMA changes nothing and the built-in PUBLIC EXECUTE
+-- keeps applying to every function the role creates afterwards (stage-0
+-- row 10 in README.md is what catches this: a SECURITY DEFINER writer
+-- created after a per-schema version was still callable by the
+-- investigator on a staging rehearsal, 2026-09-05). Each REVOKE is paired
+-- with the GRANT that keeps the application able to call what its
+-- migrations create. FUNCTIONS here covers procedures too (default
+-- privileges cannot tell them apart). The global default reaches every
+-- schema the role creates functions in, lassdas_ro included, which is why
+-- there is no separate lassdas_ro line.
+ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE <owner_role>     GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
+ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE <migration_role> GRANT  EXECUTE ON FUNCTIONS TO <app_role>;
 -- Repeat the paired lines for every other role that creates functions.
 
 -- 5. Extensions that reach outside the database. If installed, their
