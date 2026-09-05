@@ -367,3 +367,54 @@ func TestSessionRecordsRefusalsAndBudget(t *testing.T) {
 		t.Errorf("secret output stored: %+v", stored[2])
 	}
 }
+
+// A probe that lists two hosts is addressed with a host argument; a rotation
+// on one host closes that host alone, the other is still measured, and the
+// dialer is asked for the host the request named.
+func TestHTTPProbeRotationClosesOnlyTheRotatedHost(t *testing.T) {
+	var requests int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.SetCookie(w, &http.Cookie{Name: "console_session", Value: "rotated-value-0002", Path: "/"})
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	_, port, _ := net.SplitHostPort(serverURL.Host)
+	catalog, err := NewCatalog([]Spec{{ID: "http.timing", Kind: KindHTTP, Hosts: []string{"console.example.invalid", "api.example.invalid"}, Methods: []string{"GET"},
+		Returns: []string{"status", "time_total", "bytes"}, Args: map[string]string{"path": `/[a-z]{0,20}`}, Cookies: CookiesObservationJar}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := OpenRecorder(filepath.Join(t.TempDir(), "measurements.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	session := &Session{Catalog: catalog, Recorder: recorder,
+		Jar:       []Cookie{{Name: "console_session", Value: "original-value-0001", Domain: "console.example.invalid", Path: "/"}},
+		httpHooks: httpTestHooks{allowLoopback: true, port: port, tlsConfig: &tls.Config{InsecureSkipVerify: true}}} // #nosec G402 -- test server certificate
+	session.lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		asked = append(asked, host)
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+
+	first, err := session.Run(context.Background(), Request{Probe: "http.timing", Args: map[string]string{"path": "/console"}})
+	if err != nil || first.Measurement.Refused || !first.Measurement.Rotated || first.Measurement.Args["host"] != "console.example.invalid" {
+		t.Fatalf("first host: %+v %v", first.Measurement, err)
+	}
+	again, err := session.Run(context.Background(), Request{Probe: "http.timing", Args: map[string]string{"host": "console.example.invalid", "path": "/console"}})
+	if err != nil || !again.Measurement.Refused || !strings.Contains(again.Measurement.Reason, "rotated") {
+		t.Fatalf("rotated host addressed again: %+v %v", again.Measurement, err)
+	}
+	other, err := session.Run(context.Background(), Request{Probe: "http.timing", Args: map[string]string{"host": "api.example.invalid", "path": "/health"}})
+	if err != nil || other.Measurement.Refused || other.Measurement.Args["host"] != "api.example.invalid" {
+		t.Fatalf("second host after the first rotated: %+v %v", other.Measurement, err)
+	}
+	if requests != 2 {
+		t.Errorf("server saw %d requests; the rotated host must not be addressed again, the other must", requests)
+	}
+	if len(asked) != 2 || asked[0] != "console.example.invalid" || asked[1] != "api.example.invalid" {
+		t.Errorf("resolver asked for %v; the request's host must reach the dialer", asked)
+	}
+}

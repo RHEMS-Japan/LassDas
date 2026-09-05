@@ -89,11 +89,11 @@ func runHTTP(ctx context.Context, plan Plan, jar []Cookie, lookup resolver) (htt
 }
 
 func runHTTPWith(ctx context.Context, plan Plan, jar []Cookie, lookup resolver, hooks httpTestHooks) (httpProbeResult, execResult) {
-	host := plan.Spec.Hosts[0]
-	if len(plan.Spec.Hosts) > 1 {
-		if want, ok := plan.Args["host"]; ok {
-			host = want
-		}
+	// Resolve puts the effective host in the plan (the requested one, or
+	// the first listed); the list check below is what keeps it honest.
+	host := plan.Args["host"]
+	if host == "" {
+		host = plan.Spec.Hosts[0]
 	}
 	allowed := false
 	for _, candidate := range plan.Spec.Hosts {

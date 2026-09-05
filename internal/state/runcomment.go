@@ -257,9 +257,18 @@ func runCommentMarkerMatches(marker map[string]types.AttributeValue, runKey stri
 		attributeStringEquals(marker, "reply_kind", string(kind))
 }
 
+// validRunCommentKind accepts the kinds hook.StoreRunCommentKinds names —
+// the one-shot comments whose marker lives in the store. A kind posted
+// through the store but missing from that list made RunCommentState refuse
+// it and a run whose report was approved wait for ever (the investigation
+// report, live 2026-09-05).
 func validRunCommentKind(kind hook.RunCommentKind) bool {
-	return kind == hook.RunCommentAck || kind == hook.RunCommentReceipt || kind == hook.RunCommentPlan ||
-		kind == hook.RunCommentE2E || kind == hook.RunCommentStagingReport || kind == hook.RunCommentReleaseReport
+	for _, known := range hook.StoreRunCommentKinds() {
+		if kind == known {
+			return true
+		}
+	}
+	return false
 }
 
 func validRunCommentBeginRequest(request hook.RunCommentBeginRequest) bool {

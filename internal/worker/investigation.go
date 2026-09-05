@@ -324,6 +324,9 @@ func investigationTaskPrompt(input InvestigationInput) string {
 		if spec.Kind == probe.KindHTTP {
 			entry["hosts"] = spec.Hosts
 			entry["methods"] = spec.Methods
+			if len(spec.Hosts) > 1 {
+				entry["host_argument"] = "add \"host\" to args, one of hosts; omitted = hosts[0]"
+			}
 		}
 		catalogue = append(catalogue, entry)
 	}

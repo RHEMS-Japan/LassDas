@@ -123,3 +123,33 @@ func TestCatalogValidation(t *testing.T) {
 		t.Errorf("catalogue has %d specs", len(parsed.Specs()))
 	}
 }
+
+// An http probe with several hosts is addressed with a host argument; a
+// host outside the list is refused, and a probe with one host still takes
+// its own host by name.
+func TestHTTPProbeHostArgumentSelectsAmongDeclaredHosts(t *testing.T) {
+	catalog, err := NewCatalog([]Spec{
+		{ID: "http.timing", Kind: KindHTTP, Hosts: []string{"console.example.invalid", "api.example.invalid"}, Methods: []string{"GET"},
+			Returns: []string{"status", "time_total", "bytes"}, Args: map[string]string{"path": `/[a-z0-9/_-]{0,80}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, refusal := catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "api.example.invalid", "path": "/health"}})
+	if refusal != nil || plan.Args["host"] != "api.example.invalid" {
+		t.Fatalf("second host not selected: plan %+v refusal %v", plan, refusal)
+	}
+	if _, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "other.example.invalid", "path": "/"}}); refusal == nil || !strings.Contains(refusal.Reason, "does not address host") {
+		t.Fatalf("host outside the list accepted: %v", refusal)
+	}
+	if plan, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"path": "/"}}); refusal != nil || plan.Args["host"] != "console.example.invalid" {
+		t.Fatalf("host-less request must record the first host: plan %+v refusal %v", plan, refusal)
+	}
+	if _, refusal = catalog.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "api.example.invalid\n", "path": "/"}}); refusal == nil || !strings.Contains(refusal.Reason, "host") {
+		t.Fatalf("host with a control character accepted: %v", refusal)
+	}
+	single := testCatalog(t)
+	if _, refusal = single.Resolve(Request{Probe: "http.timing", Args: map[string]string{"host": "app-stg.example.invalid", "path": "/console"}}); refusal != nil {
+		t.Fatalf("a probe's own host refused by name: %v", refusal)
+	}
+}

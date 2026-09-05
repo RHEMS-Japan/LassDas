@@ -112,7 +112,7 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 		}
 		result = runSQL(ctx, plan, dsn, connector)
 	case KindHTTP:
-		if s.rotatedHosts[plan.Spec.Hosts[0]] {
+		if s.rotatedHosts[plan.Args["host"]] {
 			result = execResult{exitCode: -1, failure: "refused: the host rotated the session cookie earlier in this request; it is not addressed again"}
 			break
 		}
@@ -127,7 +127,7 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 			if s.rotatedHosts == nil {
 				s.rotatedHosts = map[string]bool{}
 			}
-			s.rotatedHosts[plan.Spec.Hosts[0]] = true
+			s.rotatedHosts[plan.Args["host"]] = true
 		}
 	default:
 		result = execResult{exitCode: -1, failure: "kind has no executor"}

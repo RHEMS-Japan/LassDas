@@ -73,7 +73,8 @@ type Spec struct {
 	Argv []string `json:"argv,omitempty"`
 	// Args maps a slot name to the anchored regular expression its value
 	// must match in full. For sql the slot is "query"; for http it is
-	// "path" (and optionally "method").
+	// "path" (and optionally "method"). An http request may also carry
+	// "host" — not a slot with a pattern, but a choice among Hosts.
 	Args map[string]string `json:"args,omitempty"`
 
 	// DSNEnv names the environment variable, visible to the kernel alone,
@@ -84,6 +85,8 @@ type Spec struct {
 
 	// Hosts lists the only hosts an http probe may address (lowercase ASCII,
 	// no port, no userinfo). The identity provider's host must not be here.
+	// A request names one of them in its "host" argument; without one the
+	// first is used.
 	Hosts []string `json:"hosts,omitempty"`
 	// Methods lists the allowed methods; GET and HEAD are the only choices.
 	Methods []string `json:"methods,omitempty"`
@@ -242,7 +245,7 @@ func (c *Catalog) add(spec Spec) error {
 		}
 		for slot := range compiled {
 			if slot != "path" && slot != "method" {
-				return fmt.Errorf("probe %q: http probes take path and method slots only", spec.ID)
+				return fmt.Errorf("probe %q: http probes take path and method slots only (the host is chosen with a host argument, not a slot)", spec.ID)
 			}
 		}
 		if len(spec.Argv) > 0 || spec.DSNEnv != "" {
@@ -379,6 +382,27 @@ func (c Catalog) Resolve(request Request) (Plan, *Refusal) {
 			args[name] = value
 			continue
 		}
+		if spec.Kind == KindHTTP && name == "host" {
+			// An http probe that lists several hosts is addressed with a
+			// host argument; the value must be one of the listed hosts, and
+			// runHTTP dials nothing else. Without this the request fell to
+			// the first host and the model could not measure the others
+			// (live 2026-09-05: every timing hit the first listed host).
+			if reason := slotValueProblem(value, false); reason != "" {
+				return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q host: %s", spec.ID, reason)}
+			}
+			allowed := false
+			for _, candidate := range spec.Hosts {
+				if candidate == value {
+					allowed = true
+				}
+			}
+			if !allowed {
+				return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q does not address host %q", spec.ID, value)}
+			}
+			args[name] = value
+			continue
+		}
 		re, declared := spec.compiled[name]
 		if !declared {
 			return Plan{}, &Refusal{Reason: fmt.Sprintf("probe %q has no slot %q", spec.ID, name)}
@@ -416,6 +440,11 @@ func (c Catalog) Resolve(request Request) (Plan, *Refusal) {
 	if spec.Kind == KindHTTP {
 		if plan.Args["method"] == "" {
 			plan.Args["method"] = spec.Methods[0]
+		}
+		// The effective host is always in the plan, so the measurement
+		// records it and the session's rotation bookkeeping keys on it.
+		if plan.Args["host"] == "" {
+			plan.Args["host"] = spec.Hosts[0]
 		}
 		// The path is appended to the host: without a leading slash a
 		// value could carry a port or another authority.
