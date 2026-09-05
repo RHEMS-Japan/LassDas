@@ -243,6 +243,24 @@ func nextDesignRoundOrEnd(
 	why string,
 	logger Logger,
 ) error {
+	runDir := runDirectory(config, run.DeliveryID)
+	// A design-round boundary honours 「停止」 like the implementation-round
+	// boundary does: no next round starts after the requester asked to stop.
+	if services != nil && services.Backlog != nil {
+		if stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID); err != nil {
+			logger.Error("stop check before the next design round unreadable; proceeding", "run", run.RunID, "error", err.Error())
+		} else if stopped {
+			repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+			if readErr != nil {
+				repository = ""
+			}
+			terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+			if err := terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository); err != nil {
+				return err
+			}
+			return archiveChain(ctx, hermes, view.all)
+		}
+	}
 	err := nextDesignRound(ctx, hermes, config, run, view, plan, why, logger)
 	if !errors.Is(err, errDesignRoundLimit) {
 		return err
@@ -251,7 +269,6 @@ func nextDesignRoundOrEnd(
 	if plan.Shape == runtime.ShapeInvestigation {
 		code = hook.TerminalInvestigationNonconverged
 	}
-	runDir := runDirectory(config, run.DeliveryID)
 	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
 	if readErr != nil {
 		repository = ""
@@ -431,7 +448,7 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 			logger.Error("measurements index not attached: it carries a secret shape", "kind", kind)
 		} else if len(index) > maxMeasurementAttachmentBytes {
 			logger.Error("measurements index not attached: larger than the per-file cap", "bytes", len(index))
-		} else if id, err := services.Backlog.UploadAttachment(ctx, "measurements.jsonl", index); err == nil {
+		} else if id, err := services.Backlog.UploadAttachment(ctx, "measurements-index.jsonl", index); err == nil {
 			ids = append(ids, id)
 		}
 	}

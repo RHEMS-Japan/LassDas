@@ -68,7 +68,7 @@ func InvestigationCommentContent(runID string, facts InvestigationFacts) string 
 	fmt.Fprintf(&builder, "\n実測は %d 件です。", facts.MeasurementsCount)
 	switch {
 	case facts.AttachedCount > 0:
-		fmt.Fprintf(&builder, "生の出力は添付ファイル %d 件（measurements.jsonl と measurement-<番号>.txt）で確認できます。", facts.AttachedCount)
+		fmt.Fprintf(&builder, "添付ファイル %d 件で確認できます（measurements-index.jsonl = 実測の索引、measurement-<番号>.txt = 引用した実測の生の出力）。", facts.AttachedCount)
 	default:
 		builder.WriteString("生の出力は添付できなかったため、運用担当者が実行記録から取り出します。")
 	}

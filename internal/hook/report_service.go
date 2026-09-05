@@ -296,6 +296,13 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 			facts.Operation = "Pull Request の内容をご確認のうえ、マージをご判断ください"
 			facts.Production = "未変更（Pull Request 作成まで）"
 		}
+	case TerminalInvestigated:
+		facts.NextActor = "起票者"
+		facts.Operation = "このチケットに掲示した調査報告と添付の実測をご確認ください（対応は不要です）"
+		facts.Production = "未変更（コードの変更も Pull Request もありません）"
+	case TerminalInvestigationIncomplete:
+		facts.NextActor = "起票者"
+		facts.Operation = "調査の範囲を絞って再度起票すると、改めて調査します"
 	case TerminalClarificationExpired:
 		facts.NextActor = "起票者"
 		facts.Operation = "再度依頼する場合は、確認事項への回答内容を反映した新しいチケットとして起票してください"

@@ -177,8 +177,12 @@ func (p *Pipeline) fillMeasurement(report *DeliverReport, stageDir, phase string
 // happened, the screen (if promised) may be fine, and the measurement the
 // design promised is not — which the report says in those words.
 func (p *Pipeline) sealMeasurementFailure(stageDir, phase, detail string) error {
+	phaseName := "ステージング"
+	if phase == "production" {
+		phaseName = "本番"
+	}
 	report := DeliverReport{Phase: phase, Verdict: "measure_failed",
-		Detail: phase + "での計測が設計書の閾値を満たしませんでした（" + detail + "）。"}
+		Detail: phaseName + "での計測が設計書の閾値を満たしませんでした（" + detail + "）。"}
 	if phase == "staging" {
 		report.Detail += "本番反映は行えません。"
 	} else {

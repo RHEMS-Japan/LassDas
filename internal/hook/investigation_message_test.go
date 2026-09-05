@@ -21,7 +21,7 @@ func TestInvestigationCommentContentShowsStandingAndAttachments(t *testing.T) {
 			t.Errorf("comment lacks %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "kubectl") || !strings.Contains(content, "添付ファイル 3 件") {
+	if strings.Contains(content, "kubectl") || !strings.Contains(content, "添付ファイル 3 件で確認できます") || !strings.Contains(content, "measurements-index.jsonl") {
 		t.Errorf("comment wording: %s", content)
 	}
 	none := InvestigationCommentContent("run-1", InvestigationFacts{Questions: []string{"q"}, Next: "n", MeasurementsCount: 2})
