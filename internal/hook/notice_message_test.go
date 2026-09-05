@@ -18,10 +18,17 @@ func TestPlanCommentContentCarriesTheDesignDecisionLine(t *testing.T) {
 	if !strings.Contains(kept, "\n設計あり: 本文に「どう直すか」が書かれていないため\n") {
 		t.Fatalf("kept design is not reported:\n%s", kept)
 	}
-	// A reason this package has never heard of still shows, naming the code.
+	// A reason this package has never heard of still shows the decision, with
+	// a neutral sentence - never the machine code itself.
 	future := PlanCommentContent("run-42", PlanFacts{NeedsDesign: true, DesignReason: "future_code"})
-	if !strings.Contains(future, "設計あり: 理由コード future_code") {
+	if !strings.Contains(future, "\n設計あり: 理由は自動処理の記録に残しています\n") {
 		t.Fatalf("unknown reason was dropped:\n%s", future)
+	}
+	if strings.Contains(future, "future_code") {
+		t.Fatalf("a machine code reached the requester:\n%s", future)
+	}
+	if got := DesignDecisionLine(false, "future_code"); got != "設計なし: 理由は自動処理の記録に残しています" {
+		t.Fatalf("DesignDecisionLine(unknown, skipped) = %q", got)
 	}
 	// No reason, no line: the notice never guesses.
 	silent := PlanCommentContent("run-42", PlanFacts{Request: "ラベルの文言を変える"})

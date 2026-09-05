@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -64,8 +65,11 @@ const (
 	RequestKindInvestigation = "investigation"
 
 	// The design reasons sealed into decision.json. The first three keep the
-	// design off; every other one keeps it on. They are machine codes - the
-	// requester-facing sentence for each lives with the ticket comment.
+	// design off; every other one keeps it on. The last two name the voice
+	// that did not agree to the skip - by saying the change needs a design,
+	// or by calling the request an investigation while the other voice
+	// called it a change. They are machine codes - the requester-facing
+	// sentence for each lives with the ticket comment.
 	DesignReasonInvestigation     = "investigation"
 	DesignReasonApproachInTicket  = "approach_in_ticket"
 	DesignReasonDefaultOff        = "design_default_off"
@@ -82,6 +86,11 @@ const (
 	// maxApproachExcerptBytes bounds the quoted approach. The quote is
 	// evidence, not the ticket over again.
 	maxApproachExcerptBytes = 2000
+	// minApproachExcerptRunes is the shortest quote that can stand as
+	// evidence once whitespace is collapsed. A word or two is a fragment,
+	// not a statement of how a change is made, and a model steered into
+	// quoting one must not be able to turn it into a skipped design.
+	minApproachExcerptRunes = 12
 )
 
 // DesignReasons lists every reason a sealed decision may carry, so a
@@ -835,12 +844,18 @@ func collapseSpaces(text string) string {
 }
 
 // excerptInTicket reports whether a quoted approach really appears in the
-// ticket text. Runs of whitespace are collapsed on both sides because a model
-// re-flows line breaks when it quotes; nothing else is normalised, so a
-// paraphrase is not a quote and an empty quote is not evidence.
+// ticket text and is long enough to be a statement of one. Runs of
+// whitespace are collapsed on both sides because a model re-flows line
+// breaks when it quotes; nothing else is normalised, so a paraphrase is not a
+// quote. A quote shorter than minApproachExcerptRunes (a word or two) and a
+// quote that is merely the ticket's title are not evidence either: both say
+// what, not how, and a model that quotes them has found no approach.
 func excerptInTicket(excerpt string, request TicketRequest) bool {
 	quoted := collapseSpaces(excerpt)
-	return quoted != "" && strings.Contains(collapseSpaces(readinessTicketText(request)), quoted)
+	if utf8.RuneCountInString(quoted) < minApproachExcerptRunes || quoted == collapseSpaces(request.Summary) {
+		return false
+	}
+	return strings.Contains(collapseSpaces(readinessTicketText(request)), quoted)
 }
 
 // ticketTriggerWord returns the first configured trigger word the ticket text
@@ -904,10 +919,14 @@ func judgeAssessmentDesign(output ModelReadinessOutput, request TicketRequest, c
 
 // judgeDecisionDesign is the two-AI rule: the proposer's sealed judgment and
 // the checker's independent re-derivation, a disagreement landing on design.
-// An investigation needs both to say so; a lone voice reads as change. The
-// mechanical conditions are applied again here to the sealed claims, so a
-// checker that overrules the kind cannot leave a change without the check
-// its kind gets.
+// An investigation needs both to say so; a lone voice reads as change. A
+// voice that called the request an investigation never judged whether the
+// change could skip its design - its sealed needs_design is the
+// investigation short-circuit, not a verdict - so once the kind is decided
+// as change, that voice counts as keeping the design: a skip still needs
+// two voices that both judged the change. The mechanical conditions are
+// applied again here to the sealed claims, so a checker that overrules the
+// kind cannot leave a change without the check its kind gets.
 func judgeDecisionDesign(final ReadinessAssessment, finalCheck ReadinessCheck, request TicketRequest, consumer ConsumerConfig) designJudgment {
 	judgment := designJudgment{
 		RequestKind: RequestKindChange, ApproachInTicket: final.ApproachInTicket, ApproachExcerpt: final.ApproachExcerpt,
@@ -915,7 +934,9 @@ func judgeDecisionDesign(final ReadinessAssessment, finalCheck ReadinessCheck, r
 	if final.RequestKind == RequestKindInvestigation && finalCheck.RequestKind == RequestKindInvestigation {
 		judgment.RequestKind = RequestKindInvestigation
 	}
-	judgment.NeedsDesign, judgment.DesignReason = designVerdict(judgment.RequestKind, final.ApproachInTicket, final.NeedsDesign, finalCheck.NeedsDesign, request, consumer)
+	proposerVeto := final.NeedsDesign || final.RequestKind != judgment.RequestKind
+	checkerVeto := finalCheck.NeedsDesign || finalCheck.RequestKind != judgment.RequestKind
+	judgment.NeedsDesign, judgment.DesignReason = designVerdict(judgment.RequestKind, final.ApproachInTicket, proposerVeto, checkerVeto, request, consumer)
 	return judgment
 }
 
@@ -1201,7 +1222,7 @@ Return exactly one JSON object and no Markdown. Its schema is:
 {"decision":"ready|clarification_required|reject|unresolvable","questions":[{"id":"Q1","dimension":"user_visible_behavior|acceptance_criterion|preapproved_scope_choice|safety_or_data","question":"...","why_blocking":"...","choices":[{"id":"a","label":"...","effect":"user-visible result of choosing it"}]}],"assumptions":[{"kind":"repository_convention|non_user_visible_implementation","statement":"...","evidence":"..."}],"reject_code":"","request_kind":"change|investigation","approach_in_ticket":false,"approach_excerpt":"","needs_design":true}
 Ask a question only when all four conditions hold: (1) two or more permitted answers lead to materially different results in user-visible behavior, acceptance criteria, pre-approved scope, safety, or data behavior, (2) the answer cannot be derived from the ticket fields, ticket body, or the provided source files, (3) the choice changes one of those outcomes, and (4) only the requester can decide it.
 Also decide, from the ticket text alone, whether the change needs a design before code. ` + designPromptRules + `
-approach_in_ticket is true only when the ticket text states how the change is to be made, and approach_excerpt must then quote that statement verbatim from the ticket summary or request in USER_DATA_JSON - never a paraphrase, never text from anywhere else; the engine checks that the quote is really there and drops the claim otherwise. When the ticket says only what should be different, approach_in_ticket is false and approach_excerpt is an empty string.
+approach_in_ticket is true only when the ticket text states how the change is to be made, and approach_excerpt must then quote that whole statement verbatim from the ticket request in USER_DATA_JSON - the full sentence or clause, never a fragment of a few words, never the ticket's title alone, never a paraphrase, never text from anywhere else; the engine checks that the quote is really there and drops the claim otherwise. When the ticket says only what should be different, approach_in_ticket is false and approach_excerpt is an empty string.
 Every question must offer 2 to 4 mutually exclusive choices, and each effect must state the user-visible result of choosing it. Free-text answers are not accepted. If a blocking ambiguity cannot be expressed as 2 to 4 bounded choices, do not ask; return decision unresolvable so an operator can rework the ticket.
 Never ask about variable names, styling technique, component structure, test implementation, anything derivable from the provided source, optional improvements, or preferences that do not change the user-visible outcome. Record such autonomous choices as assumptions with their evidence instead of asking.
 Never ask for API keys, passwords, private keys, tokens, cookies, or any other credential or secret, and never instruct anyone to post one. If required credentials appear to be missing, return decision unresolvable; that is an operator configuration failure, not a requester question.

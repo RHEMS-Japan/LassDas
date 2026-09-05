@@ -58,9 +58,15 @@ var designReasonPhrases = map[string]string{
 	"target_files_over_two":  "触る予定のファイルが 3 つ以上のため",
 	"trigger_words_unset":    "設計を省略できる語彙が納品先に設定されていないため（安全側）",
 	"trigger_word":           "本文に稼働環境の観測を示す語があるため",
-	"proposer":               "受付の起案役が設計を要すると判断したため",
-	"checker_disagreed":      "受付の確認役が設計を要すると判断したため（起案役と不一致）",
+	"proposer":               "受付の起案役が設計の省略に同意しなかったため",
+	"checker_disagreed":      "受付の確認役が設計の省略に同意しなかったため（起案役と不一致）",
 }
+
+// designReasonUnknownPhrase is what the ticket says for a reason code this
+// package has no sentence for: the decision still shows, the reason stays
+// in the sealed record. A machine code is never put in front of a
+// requester.
+const designReasonUnknownPhrase = "理由は自動処理の記録に残しています"
 
 // DesignReasonPhrase is the requester-facing sentence for one design_reason
 // code, and whether the code is one this package knows.
@@ -72,8 +78,9 @@ func DesignReasonPhrase(reason string) (string, bool) {
 // DesignDecisionLine renders the reception's design decision as the one line
 // the plan notice carries: what was decided and why, in the requester's
 // terms. It reports the sealed judgment; what the chain does with it is the
-// runtime's business. An unknown code still renders, naming the code, so a
-// newer engine's reason is never silently dropped.
+// runtime's business. An unknown code still renders the decision with a
+// neutral sentence, so a newer engine's reason is neither dropped nor shown
+// as a code.
 func DesignDecisionLine(needsDesign bool, reason string) string {
 	verdict := "設計なし"
 	if needsDesign {
@@ -81,7 +88,7 @@ func DesignDecisionLine(needsDesign bool, reason string) string {
 	}
 	phrase, known := DesignReasonPhrase(reason)
 	if !known {
-		phrase = "理由コード " + reason
+		phrase = designReasonUnknownPhrase
 	}
 	return verdict + ": " + phrase
 }

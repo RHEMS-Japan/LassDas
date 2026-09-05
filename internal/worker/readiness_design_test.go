@@ -169,14 +169,22 @@ func TestNeedsDesignFallsToSafeSide(t *testing.T) {
 		t.Fatalf("silent checker, decision = (%v, %q), error = %v", silent.NeedsDesign, silent.DesignReason, err)
 	}
 
-	// The kind, too: an investigation needs both voices; a lone one is a change.
+	// The kind, too: an investigation needs both voices; a lone one is a
+	// change. And the voice that called it an investigation never judged the
+	// change - its sealed needs_design false is the investigation
+	// short-circuit - so it counts as keeping the design: with every
+	// mechanical condition met, the other voice alone must not skip it.
 	loneInvestigation := designDecision(t, designOutput(RequestKindInvestigation, false, "", false), RequestKindChange, true, source, request, config)
 	if loneInvestigation.RequestKind != RequestKindChange || !loneInvestigation.NeedsDesign || loneInvestigation.DesignReason != DesignReasonApproachMissing {
 		t.Fatalf("lone investigation, decision = %+v", loneInvestigation)
 	}
+	proposerInvestigation := designDecision(t, designOutput(RequestKindInvestigation, true, designApproachQuote, false), RequestKindChange, false, source, request, config)
+	if proposerInvestigation.RequestKind != RequestKindChange || !proposerInvestigation.NeedsDesign || proposerInvestigation.DesignReason != DesignReasonProposer {
+		t.Fatalf("proposer said investigation with a quote, checker said skip: decision = %+v", proposerInvestigation)
+	}
 	loneChecker := designDecision(t, skipOutput(), RequestKindInvestigation, false, source, request, config)
-	if loneChecker.RequestKind != RequestKindChange || loneChecker.NeedsDesign {
-		t.Fatalf("lone checker investigation, decision = %+v", loneChecker)
+	if loneChecker.RequestKind != RequestKindChange || !loneChecker.NeedsDesign || loneChecker.DesignReason != DesignReasonChecker {
+		t.Fatalf("proposer said skip, checker said investigation: decision = %+v", loneChecker)
 	}
 
 	// Editing the sealed decision to a skip fails both the gate check and the
@@ -215,6 +223,12 @@ func TestApproachExcerptMustAppearInTheTicket(t *testing.T) {
 		"empty quote":         designOutput(RequestKindChange, true, "", false),
 		"quote without claim": designOutput(RequestKindChange, false, designApproachQuote, false),
 		"text from elsewhere": designOutput(RequestKindChange, true, "export const label = 'Old label';", false),
+		// A fragment is in the ticket but is no statement of an approach.
+		"one letter":       designOutput(RequestKindChange, true, "a", false),
+		"one word":         designOutput(RequestKindChange, true, "the", false),
+		"eleven runes":     designOutput(RequestKindChange, true, "change the ", false),
+		"the title alone":  designOutput(RequestKindChange, true, request.Summary, false),
+		"the title spaced": designOutput(RequestKindChange, true, "  Change  one visible\nlabel ", false),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assessment := seal(output)
@@ -226,6 +240,12 @@ func TestApproachExcerptMustAppearInTheTicket(t *testing.T) {
 	reflowed := seal(designOutput(RequestKindChange, true, " change the label constant\n  in Example.tsx to the new wording ", false))
 	if !reflowed.ApproachInTicket || reflowed.NeedsDesign || reflowed.ApproachExcerpt != "change the label constant\n  in Example.tsx to the new wording" {
 		t.Fatalf("re-flowed quote was not recognised: %+v", reflowed)
+	}
+	// The length floor is a floor: twelve runes of the body pass it (the
+	// meaning of a quote is the two models' judgment, not the engine's).
+	floor := seal(designOutput(RequestKindChange, true, "change the l", false))
+	if !floor.ApproachInTicket || floor.NeedsDesign {
+		t.Fatalf("a quote on the length floor was refused: %+v", floor)
 	}
 	// A sealed assessment whose quote is not in the ticket is refused even
 	// with its digest recomputed.
