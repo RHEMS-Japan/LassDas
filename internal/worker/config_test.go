@@ -116,6 +116,47 @@ func TestConfigRejectsSecondReviewerOnImplementerEndpoint(t *testing.T) {
 	}
 }
 
+// The design review round limit defaults when unset and is bounded when set;
+// the run-record stage bound follows the larger of the two limits.
+func TestConfigDesignMaxRoundsDefaultsAndBounds(t *testing.T) {
+	config := validTestConfig()
+	if config.DesignRounds() != DefaultDesignMaxRounds || config.maxRunStage() != config.MaxStages {
+		t.Fatalf("DesignRounds() = %d, maxRunStage() = %d", config.DesignRounds(), config.maxRunStage())
+	}
+	config.DesignMaxRounds = 10
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if config.DesignRounds() != 10 || config.maxRunStage() != 10 {
+		t.Fatalf("DesignRounds() = %d, maxRunStage() = %d", config.DesignRounds(), config.maxRunStage())
+	}
+	for _, value := range []int{11, -1} {
+		config.DesignMaxRounds = value
+		if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "design_max_rounds") {
+			t.Errorf("Validate() with design_max_rounds %d: %v", value, err)
+		}
+	}
+}
+
+// A reviewer may carry its own design lens; an implementer may not, and a
+// lens is one line of text like the review lens.
+func TestConfigValidatesDesignLens(t *testing.T) {
+	config := validTestConfig()
+	config.Models.Reviewers[0].DesignLens = "Is the cause supported by measured evidence?"
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	config.Models.Reviewers[0].DesignLens = "two\nlines"
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted a design lens with a line break")
+	}
+	config = validTestConfig()
+	config.Models.Implementer.DesignLens = "evidence"
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted a design lens on the implementer")
+	}
+}
+
 func TestConfigAcceptsVendorHostTable(t *testing.T) {
 	config := validTestConfig()
 	config.Models.VendorHosts = map[string][]string{
