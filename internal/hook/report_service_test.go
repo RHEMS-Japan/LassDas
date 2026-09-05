@@ -268,12 +268,12 @@ func TestTerminalReportRetryFindsTheCommentByMarkerWhenTheBodyDrifted(t *testing
 	comments := &terminalFakeComments{addIDs: []int64{808, 909}}
 	service := newTerminalTestService(t, store, comments, nil)
 	first := terminalTestRequest(TerminalModelFailed)
-	first.SpendText = "合計: $0.05"
+	first.SpendText = "spend line, first reading"
 	if result := service.ProcessTerminalReport(context.Background(), first); result.Decision != DecisionAccepted {
 		t.Fatalf("first report: %+v", result)
 	}
 	second := first
-	second.SpendText = "合計: $0.07"
+	second.SpendText = "spend line, second reading"
 	if result := service.ProcessTerminalReport(context.Background(), second); result.Decision != DecisionAccepted {
 		t.Fatalf("second report: %+v", result)
 	}
