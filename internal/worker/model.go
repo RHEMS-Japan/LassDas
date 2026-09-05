@@ -373,7 +373,8 @@ const modelAnswerAttempts = 3
 // carries the objection, the request id and the head of the answer so the
 // failure can be read afterwards. The accept function receives the usage
 // summed so far, because the artifacts it seals carry it. A transport
-// failure is not retried here: the transport owns that decision.
+// failure is not retried here: the transport owns that decision, and a
+// response returned out of shape is asked again by converseTurn, not here.
 func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint, systemPrompt, userPrompt, schema string, maxResponseBytes int, accept func(answer []byte, usage InvocationUsage) error) (InvocationUsage, error) {
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
@@ -439,7 +440,8 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		}
 		select {
 		case <-ctx.Done():
-			return "", InvocationUsage{}, err
+			// The wall, not the shape, is what ended this turn.
+			return "", InvocationUsage{}, fmt.Errorf("model invocation failed: %w", ctx.Err())
 		case <-time.After(malformedTurnDelay):
 		}
 	}
@@ -490,7 +492,8 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 	if output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||
 		output.Usage.TotalTokens <= 0 || output.Usage.PromptTokens+output.Usage.CompletionTokens != output.Usage.TotalTokens {
 		// The three counts are the only upstream values named here: numbers
-		// the spend record needs and nothing the transport could smuggle.
+		// the operator needs to see which condition failed, and nothing the
+		// transport could smuggle.
 		return "", InvocationUsage{}, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", errModelResponseMetadata,
 			output.Usage.PromptTokens, output.Usage.CompletionTokens, output.Usage.TotalTokens)
 	}
