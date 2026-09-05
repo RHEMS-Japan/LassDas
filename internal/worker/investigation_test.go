@@ -42,6 +42,10 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 		return output, nil
 	case answer == emptyContentMarker:
 		return chatOutput(""), nil
+	case strings.HasPrefix(answer, contentFilterMarker):
+		output := chatOutput(strings.TrimPrefix(answer, contentFilterMarker))
+		output.Choices[0].FinishReason = ChatFinishContentFilter
+		return output, nil
 	}
 	return chatOutput(answer), nil
 }
@@ -53,6 +57,7 @@ const (
 	malformedUsageMarker = "\x00malformed\x00"
 	noUsageMarker        = "\x00nousage\x00"
 	emptyContentMarker   = "\x00empty\x00"
+	contentFilterMarker  = "\x00filtered\x00"
 )
 
 func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, string) {
@@ -320,5 +325,29 @@ func TestInvestigateAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
 	invoker, _ = NewModelInvoker(api)
 	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseContent) || len(api.requests) != 2 {
 		t.Fatalf("two empty messages in a row: err = %v after %d requests, want the content error after 2", err, len(api.requests))
+	}
+}
+
+// A provider's refusal of one turn (finish_reason=content_filter) is asked
+// again once like an out-of-shape response; two in a row travel with the
+// refusal named, and a length cutoff is still not asked again.
+func TestInvestigateAsksAgainOnceAfterAContentFilterVerdict(t *testing.T) {
+	probeList := `{"probe":{"probe":"repo.list"}}`
+	report := `{"report":{"questions":["What is there?"],"findings":[{"claim":"The listing was taken","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Nothing."}}`
+	input, _ := investigationFixture(t, 10)
+	api := &loopScriptAPI{answers: []string{probeList, contentFilterMarker + report, report}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("Investigate after one refused turn: %v (%s)", err, result.Incomplete)
+	}
+	if len(api.requests) != 3 || result.Turns != 2 || result.Investigation.MeasurementsCount != 1 {
+		t.Fatalf("requests %d turns %d measurements %d; want the refused turn asked again", len(api.requests), result.Turns, result.Investigation.MeasurementsCount)
+	}
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{contentFilterMarker + probeList, contentFilterMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); !errors.Is(err, errModelResponseRefused) || len(api.requests) != 2 || !strings.Contains(err.Error(), "content_filter") {
+		t.Fatalf("two refused turns in a row: err = %v after %d requests, want the refusal named after 2", err, len(api.requests))
 	}
 }

@@ -23,6 +23,8 @@ const (
 	maxTransportResponseBytes = 8 * 1024 * 1024
 	// ChatFinishStop is the only completion outcome the pipeline accepts.
 	ChatFinishStop = "stop"
+	// ChatFinishContentFilter is the provider's refusal classifier declining the turn.
+	ChatFinishContentFilter = "content_filter"
 )
 
 // ChatMessage is one OpenAI-compatible chat message.
@@ -80,6 +82,9 @@ type ChatChoice struct {
 var (
 	errModelResponseMetadata = errors.New("model response metadata is invalid")
 	errModelResponseContent  = errors.New("model response content is invalid")
+	// errModelResponseRefused is the provider declining one turn
+	// (finish_reason=content_filter): asked again once like the two above.
+	errModelResponseRefused = errors.New("model declined to answer the turn")
 )
 
 // malformedTurnRetries is how many out-of-shape responses in a row one turn
@@ -435,7 +440,7 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	for attempt := 0; ; attempt++ {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
-		if err == nil || attempt >= malformedTurnRetries || !(errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent)) {
+		if err == nil || attempt >= malformedTurnRetries || !(errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused)) {
 			return response, usage, err
 		}
 		select {
@@ -504,7 +509,14 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// The finish reason is a provider enum, safe to echo, and it is the
 		// difference between "raise max_output_tokens" (length) and every
 		// other remedy — the first oversized live review died as a bare
-		// "content is invalid" with the cutoff hidden inside.
+		// "content is invalid" with the cutoff hidden inside. A refusal
+		// classifier's verdict (content_filter) is the provider declining
+		// one turn, not a shape the caller can fix; the same unchanged turn
+		// is asked once more by converseTurn (live 2026-09-05: one such
+		// verdict ended a seven-measurement round as model_failed).
+		if output.Choices[0].FinishReason == ChatFinishContentFilter {
+			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, output.Choices[0].FinishReason)
+		}
 		return "", InvocationUsage{}, errors.New(
 			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
 	}
