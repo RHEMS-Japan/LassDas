@@ -512,7 +512,7 @@ func handleChainFailure(
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
 		case view.round < limit:
-			if plan := chainPlanFor(config, runDir, run, logger); plan.Shape == runtime.ShapeDesign {
+			if plan, planErr := chainPlanFor(config, runDir, run, logger); planErr == nil && plan.Shape == runtime.ShapeDesign {
 				// A design-backed delivery: a reviewer who found the design
 				// itself wrong sends the run back to the designer; anything
 				// else is another application of the same design.
