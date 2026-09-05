@@ -147,9 +147,11 @@ func NewInvestigation(identity Identity, round int, output ModelInvestigationOut
 	return record, nil
 }
 
-// Validate re-derives everything a later stage relies on: identity, the
-// measurements prefix, every measured finding's evidence, the fingerprint.
-func (r Investigation) Validate(identity Identity, measurementsPath string) error {
+// ValidateBinding re-derives what a later stage can check without the
+// measurements file: identity, round, the budget's sanity, the shape of
+// every field and the fingerprint. Cited measurement ids are checked for
+// form only here; Validate holds them to the sealed measurements as well.
+func (r Investigation) ValidateBinding(identity Identity) error {
 	if r.SchemaVersion != SchemaVersion || r.Identity != identity || r.Round < 1 {
 		return errors.New("investigation identity is invalid")
 	}
@@ -158,6 +160,27 @@ func (r Investigation) Validate(identity Identity, measurementsPath string) erro
 	}
 	if r.ProbesUsed < 0 || r.ElapsedSeconds < 0 || r.MeasurementsCount < 0 || r.ProbesUsed < r.MeasurementsCount {
 		return errors.New("investigation budget is invalid")
+	}
+	// An empty prefix has the empty chain value; a non-empty one a digest.
+	if (r.MeasurementsCount == 0) != (r.MeasurementsChainSHA256 == "") ||
+		(r.MeasurementsCount > 0 && !sha256Pattern.MatchString(r.MeasurementsChainSHA256)) {
+		return errors.New("investigation measurements chain is invalid")
+	}
+	if err := validateInvestigationText(r.Questions, r.Findings, r.Unknowns, r.Next, nil); err != nil {
+		return err
+	}
+	digest, err := investigationDigest(r)
+	if err != nil || digest != r.InvestigationSHA256 {
+		return errors.New("investigation digest is invalid")
+	}
+	return nil
+}
+
+// Validate re-derives everything a later stage relies on: identity, the
+// measurements prefix, every measured finding's evidence, the fingerprint.
+func (r Investigation) Validate(identity Identity, measurementsPath string) error {
+	if err := r.ValidateBinding(identity); err != nil {
+		return err
 	}
 	chain, err := probe.VerifyPrefix(measurementsPath, r.MeasurementsCount)
 	if err != nil {
@@ -174,14 +197,7 @@ func (r Investigation) Validate(identity Identity, measurementsPath string) erro
 	for _, measurement := range measurements {
 		usable[measurement.ID] = !measurement.Refused
 	}
-	if err := validateInvestigationText(r.Questions, r.Findings, r.Unknowns, r.Next, usable); err != nil {
-		return err
-	}
-	digest, err := investigationDigest(r)
-	if err != nil || digest != r.InvestigationSHA256 {
-		return errors.New("investigation digest is invalid")
-	}
-	return nil
+	return validateInvestigationText(r.Questions, r.Findings, r.Unknowns, r.Next, usable)
 }
 
 // MeasuredEvidence lists every measurement id a measured finding cites.
@@ -197,6 +213,10 @@ func (r Investigation) MeasuredEvidence() map[string]bool {
 	return out
 }
 
+// validateInvestigationText checks the report's text and the form of every
+// cited measurement id. usable maps the sealed measurements' ids to whether
+// they executed; nil skips the existence check (ValidateBinding, which has
+// no measurements file to read).
 func validateInvestigationText(questions []string, findings []Finding, unknowns []string, next string, usable map[string]bool) error {
 	if len(questions) == 0 || len(questions) > maxQuestions || len(findings) > maxFindings || len(unknowns) > maxUnknowns {
 		return errors.New("investigation has the wrong number of questions, findings or unknowns")
@@ -229,6 +249,9 @@ func validateInvestigationText(questions []string, findings []Finding, unknowns 
 				return errors.New("measured finding cites no measurement")
 			}
 			for _, id := range finding.Evidence {
+				if usable == nil {
+					continue
+				}
 				ok, present := usable[id]
 				if !present {
 					return fmt.Errorf("measured finding cites %s, which is not among the sealed measurements", id)
@@ -239,6 +262,9 @@ func validateInvestigationText(questions []string, findings []Finding, unknowns 
 			}
 		case ConfidenceInferred:
 			for _, id := range finding.Evidence {
+				if usable == nil {
+					continue
+				}
 				if _, present := usable[id]; !present {
 					return fmt.Errorf("finding cites %s, which is not among the sealed measurements", id)
 				}
@@ -346,9 +372,13 @@ func NewDesign(identity Identity, round int, output ModelDesignOutput, investiga
 	return record, nil
 }
 
-// Validate re-derives the binding to the investigation, the file set, the
-// cause's evidence, the verification and the fingerprint.
-func (d Design) Validate(identity Identity, investigation Investigation, bounds Bounds) error {
+// ValidateBinding re-derives what a later stage can check without the
+// consumer's bounds: the binding to the investigation, the cause's
+// evidence, the shape of every field and the fingerprint. Validate
+// additionally holds the file set and the verification to the bounds; the
+// design reviewers and the design decision, which have no consumer bounds
+// in hand, check the binding and leave the bounds to the stages that do.
+func (d Design) ValidateBinding(identity Identity, investigation Investigation) error {
 	if d.SchemaVersion != SchemaVersion || d.Identity != identity || d.Round != investigation.Round ||
 		investigation.Identity != identity || d.InvestigationSHA256 != investigation.InvestigationSHA256 ||
 		!sha256Pattern.MatchString(d.InvestigationSHA256) {
@@ -379,10 +409,10 @@ func (d Design) Validate(identity Identity, investigation Investigation, bounds 
 			}
 		}
 	}
-	if err := validateFiles(d.Files, bounds); err != nil {
+	if err := validateFileShape(d.Files); err != nil {
 		return err
 	}
-	if err := validateVerification(d.Verification, d.Files, bounds); err != nil {
+	if err := validateVerificationShape(d.Verification); err != nil {
 		return err
 	}
 	digest, err := designDigest(d)
@@ -390,6 +420,18 @@ func (d Design) Validate(identity Identity, investigation Investigation, bounds 
 		return errors.New("design digest is invalid")
 	}
 	return nil
+}
+
+// Validate re-derives the binding to the investigation, the file set, the
+// cause's evidence, the verification and the fingerprint.
+func (d Design) Validate(identity Identity, investigation Investigation, bounds Bounds) error {
+	if err := d.ValidateBinding(identity, investigation); err != nil {
+		return err
+	}
+	if err := validateFileBounds(d.Files, bounds); err != nil {
+		return err
+	}
+	return validateVerificationBounds(d.Verification, d.Files, bounds)
 }
 
 // FilePaths returns the design's file set, sorted, for the seal and the
@@ -403,9 +445,11 @@ func (d Design) FilePaths() []string {
 	return out
 }
 
-func validateFiles(files []FileChange, bounds Bounds) error {
-	if len(files) == 0 || (bounds.MaxFiles > 0 && len(files) > bounds.MaxFiles) {
-		return errors.New("design names no files or too many")
+// validateFileShape checks the file set on its own: well-formed, distinct
+// paths, each with its change notes.
+func validateFileShape(files []FileChange) error {
+	if len(files) == 0 {
+		return errors.New("design names no files")
 	}
 	seen := map[string]bool{}
 	for _, file := range files {
@@ -414,9 +458,6 @@ func validateFiles(files []FileChange, bounds Bounds) error {
 			return fmt.Errorf("design file path %q is invalid", file.Path)
 		}
 		seen[file.Path] = true
-		if !withinPrefixes(file.Path, bounds.AllowedFilePrefixes) {
-			return fmt.Errorf("design file %q is outside the allowed prefixes", file.Path)
-		}
 		if len(file.Changes) == 0 || len(file.Changes) > maxChangeNotes {
 			return fmt.Errorf("design file %q lists no changes or too many", file.Path)
 		}
@@ -424,6 +465,20 @@ func validateFiles(files []FileChange, bounds Bounds) error {
 			if !validText(change, maxShortText) {
 				return fmt.Errorf("design file %q has an invalid change note", file.Path)
 			}
+		}
+	}
+	return nil
+}
+
+// validateFileBounds holds the file set to the consumer's writable scope
+// and file count.
+func validateFileBounds(files []FileChange, bounds Bounds) error {
+	if bounds.MaxFiles > 0 && len(files) > bounds.MaxFiles {
+		return fmt.Errorf("design names too many files: %d over the %d allowed", len(files), bounds.MaxFiles)
+	}
+	for _, file := range files {
+		if !withinPrefixes(file.Path, bounds.AllowedFilePrefixes) {
+			return fmt.Errorf("design file %q is outside the allowed prefixes", file.Path)
 		}
 	}
 	return nil
@@ -441,7 +496,9 @@ func withinPrefixes(path string, prefixes []string) bool {
 	return false
 }
 
-func validateVerification(v Verification, files []FileChange, bounds Bounds) error {
+// validateVerificationShape checks the promise on its own: one form, only
+// that form's fields, a known metric and a positive threshold.
+func validateVerificationShape(v Verification) error {
 	switch v.Form {
 	case VerificationWording:
 		if v.Probe != "" || len(v.Args) > 0 || v.Metric != "" || v.Threshold != 0 {
@@ -451,11 +508,32 @@ func validateVerification(v Verification, files []FileChange, bounds Bounds) err
 			(v.AbsentText != "" && !validText(v.AbsentText, maxShortText)) {
 			return errors.New("wording verification is invalid")
 		}
-		return wordingCheck(v, files, bounds.RepoRoot)
+		return nil
 	case VerificationMeasurement:
 		if v.Path != "" || v.ExpectedText != "" || v.AbsentText != "" {
 			return errors.New("measurement verification carries wording fields")
 		}
+		switch v.Metric {
+		case "time_total", "status", "bytes", "rows", "value":
+		default:
+			return errors.New("verification metric is unknown")
+		}
+		if v.Threshold <= 0 {
+			return errors.New("verification threshold must be positive")
+		}
+		return nil
+	default:
+		return errors.New("verification form must be wording or measurement")
+	}
+}
+
+// validateVerificationBounds holds the promise to what the consumer has: a
+// wording promise to the baseline files, a measurement to the catalogue.
+func validateVerificationBounds(v Verification, files []FileChange, bounds Bounds) error {
+	switch v.Form {
+	case VerificationWording:
+		return wordingCheck(v, files, bounds.RepoRoot)
+	case VerificationMeasurement:
 		spec, ok := bounds.Catalog.Lookup(v.Probe)
 		if !ok {
 			return fmt.Errorf("verification probe %q is not in the catalogue", v.Probe)
@@ -463,16 +541,8 @@ func validateVerification(v Verification, files []FileChange, bounds Bounds) err
 		if _, refusal := bounds.Catalog.Resolve(probe.Request{Probe: v.Probe, Args: v.Args}); refusal != nil {
 			return fmt.Errorf("verification probe request is refused: %s", refusal.Reason)
 		}
-		switch v.Metric {
-		case "time_total", "status", "bytes", "rows", "value":
-		default:
-			return errors.New("verification metric is unknown")
-		}
 		if spec.Kind == probe.KindHTTP && (v.Metric == "rows" || v.Metric == "value") {
 			return errors.New("verification metric does not fit an http probe")
-		}
-		if v.Threshold <= 0 {
-			return errors.New("verification threshold must be positive")
 		}
 		return nil
 	default:

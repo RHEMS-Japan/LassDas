@@ -79,8 +79,12 @@ func run(ctx context.Context, args []string) error {
 		return runReview(ctx, args[1:])
 	case "agent-review":
 		return runAgentReview(ctx, args[1:])
+	case "agent-design-review":
+		return runAgentDesignReview(ctx, args[1:])
 	case "decide":
 		return runDecide(args[1:])
+	case "decide-design":
+		return runDecideDesign(args[1:])
 	case "impasse-question":
 		return runImpasseQuestion(ctx, args[1:])
 	case "compose-trail":
