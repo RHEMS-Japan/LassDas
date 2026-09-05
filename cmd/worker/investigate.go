@@ -28,9 +28,7 @@ const (
 	// investigationWallSeconds is the role's budget across the rounds of one
 	// request (§3.1); the card wall outlasts it.
 	investigationWallSeconds = 1800
-	// probeExecEnvironment is the only environment exec probes inherit.
-	probeExecEnvironment = "PATH,HOME,KUBECONFIG,AWS_PROFILE,AWS_CONFIG_FILE,AWS_SHARED_CREDENTIALS_FILE,AWS_REGION,AWS_DEFAULT_REGION,AWS_ROLE_ARN,AWS_WEB_IDENTITY_TOKEN_FILE"
-	incompleteFile       = "incomplete.json"
+	incompleteFile           = "incomplete.json"
 )
 
 func runInvestigate(ctx context.Context, args []string) error {
@@ -87,7 +85,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 	}
 	session := &probe.Session{
 		Catalog: catalog, Recorder: recorder, Limits: probe.DefaultLimits,
-		Env:      probe.EnvFromProcess(strings.Split(probeExecEnvironment, ",")),
+		Env:      probe.EnvFromProcess(probe.ExecEnvironmentNames),
 		RepoRoot: *repoRoot,
 		DSN:      dsnLookup(catalog),
 		Jar:      observationJar(*sessionSeed, *sessionState),

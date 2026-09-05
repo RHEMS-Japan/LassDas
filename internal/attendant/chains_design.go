@@ -65,6 +65,12 @@ func reportInvestigated(
 	if _, err := os.Stat(filepath.Join(designRoundDir(runDir, round), "investigation.json")); err != nil {
 		return errors.New("investigation card is done but no sealed report exists")
 	}
+	if !investigationCommentPosted(ctx, services, run, round) {
+		// The report must reach the ticket before the run says it did;
+		// the next tick posts it (postDesignComments) and ends the run then.
+		logger.Info("investigation report not yet on the ticket; ending deferred", "run", run.RunID)
+		return nil
+	}
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {
 		repository = ""
@@ -281,6 +287,13 @@ func nextDesignRound(
 // attachments per comment; docs/INVESTIGATING_DESIGNER.md §4.4).
 const maxAttachedMeasurements = 9
 
+// maxMeasurementAttachmentBytes is the per-file cap of §4.4 (256 KiB);
+// maxMeasurementsFileAttachmentBytes is the tracker's own per-file limit.
+const (
+	maxMeasurementAttachmentBytes      = 256 * 1024
+	maxMeasurementsFileAttachmentBytes = 8 * 1024 * 1024
+)
+
 // postDesignComments shows the requester what the round produced: the
 // investigation report (measurements attached) once it is sealed, and the
 // design's summary once the design reviews approved it. Both are posted at
@@ -295,23 +308,31 @@ func postDesignComments(ctx context.Context, config runtime.Config, services *ru
 	if err != nil {
 		return
 	}
-	reviewed := plan.Shape == runtime.ShapeDesign || !plan.ReviewInvestigation
-	if plan.Shape == runtime.ShapeInvestigation && plan.ReviewInvestigation {
+	qualifier := fmt.Sprintf("d%d", view.designRound)
+	// The report is shown once the round's reviews stand behind it: the
+	// evidence review for an investigation-only request (unless the
+	// consumer turned it off), the design decision for a design request.
+	reviewed := plan.Shape == runtime.ShapeInvestigation && !plan.ReviewInvestigation
+	if !reviewed {
 		outcome, err := readField(runDir, fmt.Sprintf("history/design-%d/decision.json", view.designRound), "outcome")
 		reviewed = err == nil && outcome == "approved"
 	}
-	if reviewed {
+	if !reviewed {
+		return
+	}
+	posted, err := services.Tick.RunCommentPosted(ctx, run.RunID, hook.RunCommentInvestigation, qualifier)
+	if err != nil {
+		logger.Error("investigation comment state unreadable", "run", run.RunID, "error", err.Error())
+		return
+	}
+	if !posted {
 		attachments, omitted := uploadMeasurements(ctx, services, runDir, investigation, logger)
-		facts := investigationFacts(investigation, plan.Shape == runtime.ShapeInvestigation, omitted)
-		if !services.Tick.PostInvestigationComment(ctx, run.RunID, run.DeliveryID, hook.InvestigationCommentContent(run.RunID, facts), attachments) {
+		facts := investigationFacts(investigation, plan.Shape == runtime.ShapeInvestigation, len(attachments), omitted)
+		if !services.Tick.PostInvestigationComment(ctx, run.RunID, run.DeliveryID, qualifier, hook.InvestigationCommentContent(run.RunID, facts), attachments) {
 			logger.Error("investigation report not posted; run continues", "run", run.RunID)
 		}
 	}
 	if plan.Shape != runtime.ShapeDesign {
-		return
-	}
-	outcome, err := readField(runDir, fmt.Sprintf("history/design-%d/decision.json", view.designRound), "outcome")
-	if err != nil || outcome != "approved" {
 		return
 	}
 	design, err := investigate.ReadDesign(filepath.Join(roundDir, "design.json"))
@@ -320,14 +341,24 @@ func postDesignComments(ctx context.Context, config runtime.Config, services *ru
 	}
 	facts := hook.DesignFacts{Round: design.Round, Cause: design.Cause, Approach: design.Approach, Files: design.FilePaths(),
 		Verification: design.VerificationSummary(), BlastRadius: design.BlastRadius, NotDoing: design.NotDoing}
-	if !services.Tick.PostDesignComment(ctx, run.RunID, run.DeliveryID, hook.DesignCommentContent(run.RunID, facts)) {
+	if !services.Tick.PostDesignComment(ctx, run.RunID, run.DeliveryID, qualifier, hook.DesignCommentContent(run.RunID, facts)) {
 		logger.Error("design summary not posted; run continues", "run", run.RunID)
 	}
 }
 
-func investigationFacts(investigation investigate.Investigation, endsHere bool, omitted int) hook.InvestigationFacts {
+// investigationCommentPosted reports whether the round's report reached the
+// ticket; an investigation-only delivery does not end before it did.
+func investigationCommentPosted(ctx context.Context, services *runtime.Services, run state.RunOverview, designRound int) bool {
+	if services.Tick == nil {
+		return false
+	}
+	posted, err := services.Tick.RunCommentPosted(ctx, run.RunID, hook.RunCommentInvestigation, fmt.Sprintf("d%d", designRound))
+	return err == nil && posted
+}
+
+func investigationFacts(investigation investigate.Investigation, endsHere bool, attached, omitted int) hook.InvestigationFacts {
 	facts := hook.InvestigationFacts{Round: investigation.Round, Questions: investigation.Questions, Unknowns: investigation.Unknowns,
-		Next: investigation.Next, MeasurementsCount: investigation.MeasurementsCount, AttachmentsOmitted: omitted, EndsHere: endsHere}
+		Next: investigation.Next, MeasurementsCount: investigation.MeasurementsCount, AttachedCount: attached, AttachmentsOmitted: omitted, EndsHere: endsHere}
 	for _, finding := range investigation.Findings {
 		facts.Findings = append(facts.Findings, hook.InvestigationFindingFact{Claim: finding.Claim, Measured: finding.Confidence == investigate.ConfidenceMeasured, Evidence: finding.Evidence})
 	}
@@ -351,6 +382,8 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 	if raw, err := os.ReadFile(path); err == nil {
 		if kind, found := probe.SecretShaped(string(raw), nil); found {
 			logger.Error("measurements file not attached: it carries a secret shape", "kind", kind)
+		} else if len(raw) > maxMeasurementsFileAttachmentBytes {
+			logger.Error("measurements file not attached: larger than the attachment limit", "bytes", len(raw))
 		} else if id, err := services.Backlog.UploadAttachment(ctx, "measurements.jsonl", raw); err == nil {
 			ids = append(ids, id)
 		}
@@ -362,6 +395,12 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 			continue
 		}
 		if attached >= maxAttachedMeasurements {
+			omitted++
+			continue
+		}
+		if len(measurement.Output) > maxMeasurementAttachmentBytes {
+			// The design's per-file cap (§4.4); the full output stays in the
+			// run directory.
 			omitted++
 			continue
 		}

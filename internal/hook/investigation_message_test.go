@@ -14,15 +14,19 @@ func TestInvestigationCommentContentShowsStandingAndAttachments(t *testing.T) {
 			{Claim: "Nothing else references it", Measured: false},
 		},
 		Unknowns: []string{"Whether the page caches it"}, Next: "Replace the label.",
-		MeasurementsCount: 3, AttachmentsOmitted: 1, EndsHere: true,
+		MeasurementsCount: 3, AttachedCount: 3, AttachmentsOmitted: 1, EndsHere: true,
 	})
 	for _, want := range []string{"【調査報告】", "調査のみのため、ここで完了", "2 巡目", "Where is the label?", "実測 m-0002", "（推測）", "Whether the page caches it", "次の一手: Replace the label.", "実測は 3 件", "1 件は省略", CommentMarker("investigation", "run-1")} {
 		if !strings.Contains(content, want) {
 			t.Errorf("comment lacks %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "kubectl") || strings.Contains(content, "measurements.jsonl と") == false {
+	if strings.Contains(content, "kubectl") || !strings.Contains(content, "添付ファイル 3 件") {
 		t.Errorf("comment wording: %s", content)
+	}
+	none := InvestigationCommentContent("run-1", InvestigationFacts{Questions: []string{"q"}, Next: "n", MeasurementsCount: 2})
+	if strings.Contains(none, "添付ファイル") || !strings.Contains(none, "添付できなかった") {
+		t.Errorf("zero attachments claimed as attached: %s", none)
 	}
 	continuing := InvestigationCommentContent("run-1", InvestigationFacts{Questions: []string{"q"}, Next: "n", MeasurementsCount: 1})
 	if !strings.Contains(continuing, "設計書を作り") || strings.Contains(continuing, "ここで完了") {

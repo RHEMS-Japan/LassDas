@@ -77,7 +77,7 @@ func (p *Pipeline) measurementVerification(ctx context.Context, stageDir, phase 
 	}
 	session := &probe.Session{
 		Catalog: catalog, Recorder: recorder, Limits: probe.Limits{MaxProbes: recorder.Count() + 1, MaxTotalBytes: 16 << 20, ExcerptBytes: 32 << 10},
-		Env: probe.EnvFromProcess([]string{"PATH", "HOME", "KUBECONFIG", "AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_REGION", "AWS_DEFAULT_REGION"}),
+		Env: probe.EnvFromProcess(probe.ExecEnvironmentNames),
 		DSN: func(name string) string {
 			if declared[name] {
 				return os.Getenv(name)
@@ -158,4 +158,37 @@ func observationJarFromFiles(seed, state string) []probe.Cookie {
 		out = append(out, probe.Cookie{Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path, Secure: cookie.Secure})
 	}
 	return out
+}
+
+// fillMeasurement copies the sealed measurement check, when one was made,
+// into the report next to the screen check.
+func (p *Pipeline) fillMeasurement(report *DeliverReport, stageDir, phase string) {
+	raw, err := os.ReadFile(filepath.Join(stageDir, phase+"-measurement-check.json"))
+	if err != nil {
+		return
+	}
+	var check MeasurementCheck
+	if json.Unmarshal(raw, &check) == nil && check.Probe != "" {
+		report.Measurement = &check
+	}
+}
+
+// sealMeasurementFailure ends the phase with its own verdict: the deployment
+// happened, the screen (if promised) may be fine, and the measurement the
+// design promised is not — which the report says in those words.
+func (p *Pipeline) sealMeasurementFailure(stageDir, phase, detail string) error {
+	report := DeliverReport{Phase: phase, Verdict: "measure_failed",
+		Detail: phase + "での計測が設計書の閾値を満たしませんでした（" + detail + "）。"}
+	if phase == "staging" {
+		report.Detail += "本番反映は行えません。"
+	} else {
+		report.Detail += "自動的な追加変更やロールバックは行っていません。"
+	}
+	p.fillMeasurement(&report, stageDir, phase)
+	if phase == "staging" {
+		p.fillObservation(&report, stageDir, "staging", DeliverStagingVisibleFile, DeliverStagingShotFile)
+	} else {
+		p.fillObservation(&report, stageDir, "production", DeliverProductionVisibleFile, DeliverProductionShotFile)
+	}
+	return p.sealDeliverReport(report)
 }

@@ -16,8 +16,10 @@ type InvestigationFacts struct {
 	Unknowns          []string
 	Next              string
 	MeasurementsCount int
-	// AttachmentsOmitted counts raw outputs that did not fit the attachment
-	// budget and stayed in the run directory.
+	// AttachedCount is how many files travel with the comment (the
+	// measurements file counts); AttachmentsOmitted counts raw outputs that
+	// did not fit the attachment budget and stayed in the run directory.
+	AttachedCount      int
 	AttachmentsOmitted int
 	// EndsHere says the request asked for the investigation only.
 	EndsHere bool
@@ -63,7 +65,13 @@ func InvestigationCommentContent(runID string, facts InvestigationFacts) string 
 	if next := truncatePlanText(facts.Next); next != "" {
 		builder.WriteString("\n次の一手: " + next + "\n")
 	}
-	fmt.Fprintf(&builder, "\n実測は %d 件です。生の出力は添付ファイル（measurements.jsonl と measurement-<番号>.txt）で確認できます。", facts.MeasurementsCount)
+	fmt.Fprintf(&builder, "\n実測は %d 件です。", facts.MeasurementsCount)
+	switch {
+	case facts.AttachedCount > 0:
+		fmt.Fprintf(&builder, "生の出力は添付ファイル %d 件（measurements.jsonl と measurement-<番号>.txt）で確認できます。", facts.AttachedCount)
+	default:
+		builder.WriteString("生の出力は添付できなかったため、運用担当者が実行記録から取り出します。")
+	}
 	if facts.AttachmentsOmitted > 0 {
 		fmt.Fprintf(&builder, "添付の上限を超えた %d 件は省略しました（運用担当者は実行記録から取り出せます）。", facts.AttachmentsOmitted)
 	}
@@ -111,7 +119,7 @@ func DesignCommentContent(runID string, facts DesignFacts) string {
 	}
 	writePlanList(&builder, "影響する範囲", facts.BlastRadius)
 	writePlanList(&builder, "やらないこと", facts.NotDoing)
-	builder.WriteString("\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。\n")
+	builder.WriteString("\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。この掲示のあと、次の工程（実装）のカードが始まる前までに反映されます。実行中の工程は最後まで走り切りますが、その先の工程は開始されません。\n")
 	return capBody(builder.String(), planBodyMaxBytes) + CommentFacts{
 		State:      "設計書を掲示・実装へ進行中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",
