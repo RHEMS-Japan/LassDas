@@ -29,7 +29,9 @@ func buildAgentRepository(t *testing.T) (string, string) {
 
 func agentGit(t *testing.T, root string, arguments ...string) string {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+	// No background maintenance: a detached `git gc --auto` after the
+	// fixture commit kept writing under .git while the tests read the tree.
+	command := exec.Command("git", append([]string{"-C", root, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", arguments, err, output)
@@ -217,14 +219,34 @@ func TestReadObservedChangesRejectsMoreFilesThanTheDestinationAllows(t *testing.
 }
 
 // copyAgentBase keeps an untouched copy of the base out of the agent's reach.
+// Only the working tree is copied: git's background maintenance writes and
+// removes lock files under .git after a commit, and a whole-repository copy
+// racing it failed on the hosted runner.
 func copyAgentBase(t *testing.T, root string) string {
 	t.Helper()
 	base := filepath.Join(t.TempDir(), "base")
-	if output, err := exec.Command("cp", "-R", root, base).CombinedOutput(); err != nil {
-		t.Fatalf("base copy failed: %v: %s", err, output)
-	}
-	if err := os.RemoveAll(filepath.Join(base, ".git")); err != nil {
-		t.Fatal(err)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" && relative != "." {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(base, relative), 0o750)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(base, relative), content, 0o600)
+	})
+	if err != nil {
+		t.Fatalf("base copy failed: %v", err)
 	}
 	return base
 }
