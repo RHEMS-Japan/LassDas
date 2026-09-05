@@ -317,6 +317,25 @@ kubeconfig context, the AWS profile and the DSN; until the agents run
 under their own UID (#23) the exposure is bounded by what the identities
 allow, which is nothing writable and nothing secret.
 
+The image ships the two clients the exec probes run — `kubectl` and the
+AWS CLI, pinned by version and checksum in the Dockerfile (about 310 MB
+together) — and nothing that holds a credential of its own. An exec probe
+inherits only `PATH`, `HOME` and the identity pointers (`KUBECONFIG`,
+`AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`,
+`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_ROLE_ARN`,
+`AWS_WEB_IDENTITY_TOKEN_FILE`; `internal/probe` `ExecEnvironmentNames`).
+The consumer points `KUBECONFIG` at a kubeconfig whose token is the
+ServiceAccount's projected token file. For AWS there are two shapes, and
+they do not mix: either the cluster's pod-identity webhook sets
+`AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` from the ServiceAccount's
+role annotation and the catalogue's `aws` argv names **no** `--profile`
+(an explicit `--profile` in the argv makes the AWS CLI ignore those two
+variables; the `AWS_PROFILE` variable alone does not), or
+the catalogue names `--profile <readonly>` and that profile itself carries
+`role_arn` and `web_identity_token_file` in the file `AWS_CONFIG_FILE`
+points at. Neither variable carries a secret value; each names a file the
+kernel's user can read.
+
 ## Release discipline: the regression set
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
