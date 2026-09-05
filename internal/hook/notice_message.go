@@ -131,9 +131,20 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	if reason := strings.TrimSpace(facts.DesignReason); reason != "" {
 		builder.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
 	}
-	writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
+	if facts.RequestKind != "investigation" {
+		// An investigation changes nothing; a design decides the files later.
+		if facts.NeedsDesign {
+			writePlanList(&builder, "受付が見当をつけた範囲（実際に変えるファイルは設計書で決めます）", facts.TargetFiles)
+		} else {
+			writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
+		}
+	}
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
-	builder.WriteString(planStopSentence)
+	if facts.RequestKind == "investigation" {
+		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、その先の工程は開始されません。\n")
+	} else {
+		builder.WriteString(planStopSentence)
+	}
 	return capPlanBody(builder.String()) + CommentFacts{
 		State:      "実装方針を掲示・自動処理中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",
