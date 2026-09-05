@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -144,6 +145,9 @@ func (s *Session) record(measurement Measurement, result execResult, refused boo
 	if result.timedOut && measurement.Reason == "" {
 		measurement.Reason = "timed out"
 	}
+	// Normalise before the excerpt is cut so the model sees a prefix of
+	// exactly what is stored.
+	result.output = strings.ToValidUTF8(result.output, "\uFFFD")
 	if !refused {
 		if kind, found := SecretShaped(result.output, s.forbiddenLiterals()); found {
 			// The output is not kept; the attempt is.
