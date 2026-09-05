@@ -220,7 +220,11 @@ fabricated workflow link.
   operator's copy of that tree on the state volume (`knowledge_root`,
   `/data/instance` in the example), and it has to be writable for this: a
   tree served from the read-only ConfigMap mount can only be read, and the
-  engine logs `adopted answers not preserved` and moves on. Once the
+  engine logs `adopted answers not preserved` and moves on. The operator
+  seeds that copy once from the instance repository (nothing in the image
+  or the entrypoint does it) and refreshes it by hand when the repository's
+  tree changes; the records the engine writes exist only on the volume, so
+  a refresh must not replace the answers directory. Once the
   terminal report has sealed, `Terminal.Report` renders the record from
   the sealed envelope the run was claimed with (the snapshot re-sealed as
   the raw ticket, plus the cumulative clarification record — not from the
