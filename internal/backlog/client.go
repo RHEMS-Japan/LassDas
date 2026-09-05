@@ -197,12 +197,14 @@ func (c *Client) FindExactComment(ctx context.Context, issueID int64, content st
 	return 0, false, nil
 }
 
-// FindCommentWithMarker answers the id of the newest comment whose body
-// contains marker — the one-line machine tag every automation comment ends
-// with — among the issue's latest 100 comments. A re-submitted terminal
-// report is found by its marker even when the body around it changed (the
-// spend line is read live), so the report completes without a second
-// comment (live 2026-09-05).
+// FindCommentWithMarker answers the id of the newest comment whose FINAL
+// line is marker — the machine tag every automation comment ends with —
+// among the issue's latest 100 comments. The final-line anchor is the
+// contract's forgery defence (hook.ExtractCommentMarker): a requester's
+// quote of the footer ("> [...]") or a paste of it in the body does not
+// match. A re-submitted terminal report is found by its marker even when
+// the body around it changed (the spend line is read live), so the report
+// completes without a second comment (live 2026-09-05).
 func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marker string) (int64, bool, error) {
 	if issueID <= 0 || !validCommentMarker(marker) {
 		return 0, false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
@@ -212,7 +214,7 @@ func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marke
 		return 0, false, err
 	}
 	for _, comment := range comments {
-		if strings.Contains(comment.Content, marker) {
+		if hook.ExtractCommentMarker(comment.Content) == marker {
 			return comment.ID, true, nil
 		}
 	}

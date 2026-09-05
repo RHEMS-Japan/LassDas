@@ -103,6 +103,33 @@ func TestFindExactCommentUsesOnlyLatestIssueComments(t *testing.T) {
 	}
 }
 
+// The marker lookup matches the marker as a comment's final line only: a
+// newer comment that quotes the footer, or pastes it inside its body, is not
+// the automation's comment and is not returned.
+func TestFindCommentWithMarkerAnchorsToTheFinalLine(t *testing.T) {
+	const marker = "[ticket-automation:v1:terminal:TICKET-505:model_failed:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" + "]"
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v2/issues/404/comments" {
+			t.Fatalf("unexpected request: method=%s path=%s", request.Method, request.URL.Path)
+		}
+		return response(200, `[`+
+			`{"id":811,"issueId":404,"content":"> `+marker+`\nこの結果について質問です"},`+
+			`{"id":810,"issueId":404,"content":"`+marker+` was pasted here\nand more text"},`+
+			`{"id":809,"issueId":404,"content":"自動処理の最終結果: model_failed\n合計: 1 unit\n`+marker+`"},`+
+			`{"id":808,"issueId":404,"content":"other"}]`), nil
+	})
+	commentID, found, err := testClient(t, transport, 0).FindCommentWithMarker(context.Background(), 404, marker)
+	if err != nil || !found || commentID != 809 {
+		t.Fatalf("commentID=%d found=%v err=%v; want the automation's own comment 809", commentID, found, err)
+	}
+	if _, found, err := testClient(t, transport, 0).FindCommentWithMarker(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-505:success:"+strings.Repeat("f", 64)+"]"); err != nil || found {
+		t.Fatalf("a marker nobody posted: found=%v err=%v", found, err)
+	}
+	if _, _, err := testClient(t, transport, 0).FindCommentWithMarker(context.Background(), 404, "not a marker"); err == nil {
+		t.Fatal("an unshaped marker was accepted")
+	}
+}
+
 func TestAddCommentUsesOnlyFixedCommentEndpointAndDoesNotChangeStatus(t *testing.T) {
 	const fixedComment = "fixed terminal result\n[automation-report:0123456789abcdef]"
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {

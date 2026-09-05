@@ -53,7 +53,7 @@ func (f *terminalFakeComments) FindExactComment(_ context.Context, _ int64, cont
 func (f *terminalFakeComments) FindCommentWithMarker(_ context.Context, _ int64, marker string) (int64, bool, error) {
 	f.markerLookups = append(f.markerLookups, marker)
 	for i, content := range f.addContents {
-		if strings.Contains(content, marker) && i < len(f.addedIDs) {
+		if ExtractCommentMarker(content) == marker && i < len(f.addedIDs) {
 			return f.addedIDs[i], true, nil
 		}
 	}
@@ -108,8 +108,8 @@ func TestTerminalReportServicePostsOnlyFixedCommentAndCompletesOutbox(t *testing
 	if result.Decision != DecisionAccepted || result.Code != "terminal_report_recorded" {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(comments.findContents) != 1 || len(comments.addContents) != 1 || comments.findContents[0] != comments.addContents[0] {
-		t.Fatalf("comment calls: find=%d add=%d", len(comments.findContents), len(comments.addContents))
+	if len(comments.markerLookups) != 1 || len(comments.findContents) != 0 || len(comments.addContents) != 1 {
+		t.Fatalf("comment calls: marker=%d find=%d add=%d", len(comments.markerLookups), len(comments.findContents), len(comments.addContents))
 	}
 	comment := comments.addContents[0]
 	for _, expected := range []string{string(TerminalSuccess), report.RunURL, report.PullRequestURL, report.CommitURL, report.StagingEvidenceURL, report.ProductionEvidenceURL, "[ticket-automation:v1:terminal:"} {
@@ -179,9 +179,9 @@ func TestTerminalReportRetryFindsExistingCommentInsteadOfPostingDuplicate(t *tes
 	if first.Decision != DecisionRetryRequested || second.Decision != DecisionAccepted {
 		t.Fatalf("results: first=%+v second=%+v", first, second)
 	}
-	// The retry recognises the posted comment by its marker before any
-	// exact-content lookup, so the exact lookup ran once (the first attempt).
-	if len(comments.addContents) != 1 || len(comments.findContents) != 1 || len(comments.markerLookups) != 2 {
+	// The retry recognises the posted comment by its marker; the terminal
+	// path never asks for an exact-content match.
+	if len(comments.addContents) != 1 || len(comments.findContents) != 0 || len(comments.markerLookups) != 2 {
 		t.Fatalf("retry posted a duplicate: find=%d marker=%d add=%d", len(comments.findContents), len(comments.markerLookups), len(comments.addContents))
 	}
 	if store.beginRequests[0].ReportSHA256 != store.beginRequests[1].ReportSHA256 || store.beginRequests[0].ReportJSON != store.beginRequests[1].ReportJSON {

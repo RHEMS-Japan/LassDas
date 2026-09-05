@@ -62,7 +62,8 @@ func chainOwnerRunID(deliveryID string) int64 {
 // are claimed, prepared and given their first round; claimed runs have
 // their chain healed, their finished publish reported, and their failures
 // classified from artifacts into regeneration, a question, or an honest
-// terminal.
+// terminal; a run whose terminal report stayed pending has the same report
+// submitted again until it completes.
 func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, logger Logger) error {
 	runs, err := services.Store.ScanRuns(ctx)
 	if err != nil {
