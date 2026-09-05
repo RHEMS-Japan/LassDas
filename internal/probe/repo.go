@@ -42,6 +42,15 @@ func repoPath(root, relative string) (string, error) {
 	if resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
 		return "", errors.New("path leaves the repository")
 	}
+	// A symbolic link inside the working copy may point at .git; the check
+	// on the requested path did not see that, so check the resolved one.
+	if rel, err := filepath.Rel(resolvedRoot, resolved); err == nil {
+		for _, element := range strings.Split(rel, string(filepath.Separator)) {
+			if element == ".git" {
+				return "", errors.New("the repository metadata is not readable")
+			}
+		}
+	}
 	return resolved, nil
 }
 

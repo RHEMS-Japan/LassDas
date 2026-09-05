@@ -84,6 +84,24 @@ func TestRepoProbesNeverReadTheGitDirectory(t *testing.T) {
 			t.Errorf("%s read the git directory: %+v %q", request.Probe, outcome.Measurement, outcome.Excerpt)
 		}
 	}
+	// A symbolic link inside the working copy that points at .git is caught
+	// after resolution, not only on the requested path.
+	if err := os.Symlink(filepath.Join(root, ".git"), filepath.Join(root, "meta")); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []Request{
+		{Probe: "repo.read", Args: map[string]string{"path": "meta/config"}},
+		{Probe: "repo.list", Args: map[string]string{"path": "meta"}},
+		{Probe: "repo.grep", Args: map[string]string{"pattern": "extraheader", "path": "meta"}},
+	} {
+		outcome, err := session.Run(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(outcome.Excerpt, "extraheader") || outcome.Measurement.ExitCode == 0 {
+			t.Errorf("%s reached .git through a link: %+v %q", request.Probe, outcome.Measurement, outcome.Excerpt)
+		}
+	}
 	outcome, err := session.Run(context.Background(), Request{Probe: "repo.grep", Args: map[string]string{"pattern": "extraheader"}})
 	if err != nil || strings.Contains(outcome.Excerpt, "extraheader") {
 		t.Errorf("grep from the root walked into .git: %q %v", outcome.Excerpt, err)

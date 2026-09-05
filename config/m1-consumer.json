@@ -15,6 +15,18 @@
       "production_workflow": "deploy.yml",
       "staging_login_url": "https://api-stg.example.com/console/auth/login?returnTo=/console",
       "observation_language": "en",
+      "design": {
+        "default": "on",
+        "trigger_words": [
+          "slow",
+          "intermittent",
+          "in production",
+          "logs",
+          "root cause",
+          "investigate"
+        ],
+        "review_investigation": true
+      },
       "mode": {
         "id": "client-visible-change",
         "allowed_file_prefixes": [

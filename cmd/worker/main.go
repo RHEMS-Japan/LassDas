@@ -679,6 +679,11 @@ func runGenerate(ctx context.Context, args []string) error {
 		checks = append(checks, check)
 	}
 	if err := readiness.Validate(assessments, checks, source, request, config); err != nil {
+		// The reason travels to the log, as decide-readiness's does: every
+		// message on this path is engine-authored static prose, and a run
+		// that straddled an engine release (an older decision or prompt
+		// version) is otherwise indistinguishable from a tampered chain.
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness decision chain was rejected", err)
 		return errors.New("readiness decision chain was rejected")
 	}
 	var previous *worker.Candidate

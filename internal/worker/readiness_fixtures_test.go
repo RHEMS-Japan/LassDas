@@ -97,15 +97,19 @@ func (s *scriptedChatAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, re
 
 func expectedAssessorResponse(t *testing.T, fixture readinessFixture) string {
 	t.Helper()
+	// The design half is answered the way a real proposer answers a ticket
+	// that states what should change but not how: a change, no quoted
+	// approach, design kept.
+	const design = `,"request_kind":"change","approach_in_ticket":false,"approach_excerpt":"","needs_design":true}`
 	switch fixture.ExpectedDecision {
 	case ReadinessOutcomeReady:
-		return `{"decision":"ready","questions":[],"assumptions":[{"kind":"non_user_visible_implementation","statement":"Constant naming follows the existing file convention.","evidence":"Existing declarations in client/src/components/Example.tsx"}],"reject_code":""}`
+		return `{"decision":"ready","questions":[],"assumptions":[{"kind":"non_user_visible_implementation","statement":"Constant naming follows the existing file convention.","evidence":"Existing declarations in client/src/components/Example.tsx"}],"reject_code":""` + design
 	case ReadinessOutcomeClarification:
-		return `{"decision":"clarification_required","questions":[{"id":"Q1","dimension":"preapproved_scope_choice","question":"Which occurrences of the wording should change?","why_blocking":"The visible result differs by chosen scope.","choices":[{"id":"a","label":"Heading only","effect":"The submit button keeps the old wording."},{"id":"b","label":"Both occurrences","effect":"Heading and submit button both show the new wording."}]}],"assumptions":[],"reject_code":""}`
+		return `{"decision":"clarification_required","questions":[{"id":"Q1","dimension":"preapproved_scope_choice","question":"Which occurrences of the wording should change?","why_blocking":"The visible result differs by chosen scope.","choices":[{"id":"a","label":"Heading only","effect":"The submit button keeps the old wording."},{"id":"b","label":"Both occurrences","effect":"Heading and submit button both show the new wording."}]}],"assumptions":[],"reject_code":""` + design
 	case ReadinessOutcomeReject:
-		return `{"decision":"reject","questions":[],"assumptions":[],"reject_code":"` + fixture.ExpectedRejectCode + `"}`
+		return `{"decision":"reject","questions":[],"assumptions":[],"reject_code":"` + fixture.ExpectedRejectCode + `"` + design
 	case ReadinessOutcomeUnresolved:
-		return `{"decision":"unresolvable","questions":[],"assumptions":[],"reject_code":""}`
+		return `{"decision":"unresolvable","questions":[],"assumptions":[],"reject_code":""` + design
 	default:
 		t.Fatalf("fixture %q has an unsupported expected decision %q", fixture.Name, fixture.ExpectedDecision)
 		return ""
@@ -155,7 +159,7 @@ func TestReadinessFixturesAreExecutableAndGateCorrectly(t *testing.T) {
 
 			api := &scriptedChatAPI{responses: []scriptedResponse{
 				{text: expectedAssessorResponse(t, fixture), requestID: "request-fixture-assessor"},
-				{text: `{"verdict":"pass","reasons":[]}`, requestID: "request-fixture-checker"},
+				{text: `{"verdict":"pass","reasons":[],"request_kind":"change","needs_design":true}`, requestID: "request-fixture-checker"},
 			}}
 			invoker, err := NewModelInvoker(api)
 			if err != nil {
