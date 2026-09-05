@@ -45,7 +45,12 @@
       "review_a": "lassdas-review-a",
       "review_b": "lassdas-review-b",
       "validate": "lassdas-validate",
-      "publish": "lassdas-publish"
+      "publish": "lassdas-publish",
+      "investigate": "lassdas-investigate",
+      "design_review_a": "lassdas-design-review-a",
+      "design_review_b": "lassdas-design-review-b",
+      "design_decide": "lassdas-design-decide",
+      "applier": "lassdas-applier"
     }
   }
 }
