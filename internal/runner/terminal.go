@@ -69,7 +69,7 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	if err != nil {
 		return err
 	}
-	owner := t.config.Owner(t.hermesRunID)
+	owner := t.owner(ctx)
 	evidence := outcome.Evidence
 	report := hook.TerminalReportRequest{
 		Protocol:   hook.TerminalReportProtocolVersion,
@@ -92,6 +92,30 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 		}
 		return t.services.Report.ProcessTerminalReport(ctx, report), nil
 	})
+}
+
+// owner is the identity this run's reports are bound to: the one the run
+// was claimed under, read from the ledger's run row. The engine that ends a
+// run is not always the engine that claimed it — a release in between
+// changes Identity.EngineSHA — and the store refuses a terminal report or
+// question whose owner differs from the claim (terminal_report_conflict,
+// live 2026-09-05). When the row cannot be read the current identity is
+// the fallback, which is exact for a run claimed by this engine.
+func (t *Terminal) owner(ctx context.Context) hook.PullOwner {
+	fallback := t.config.Owner(t.hermesRunID)
+	if t.services == nil || t.services.Store == nil {
+		return fallback
+	}
+	route := t.services.Route
+	route.ExpectedRunID = t.envelope.Snapshot.RunID
+	claimed, found, err := t.services.Store.ClaimOwner(ctx, t.envelope.Snapshot.RunID, route)
+	if err != nil || !found {
+		if err != nil {
+			t.logger.Error("claim owner unreadable; reporting under the current identity", "run", t.envelope.Snapshot.RunID, "error", err.Error())
+		}
+		return fallback
+	}
+	return claimed
 }
 
 // loadTrail reads the delivery trail when the run composed one. The
@@ -133,7 +157,7 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 	if err != nil {
 		return err
 	}
-	owner := t.config.Owner(t.hermesRunID)
+	owner := t.owner(ctx)
 	// The schedule is sealed once, exactly as cmd/questioner computed it
 	// once and retried the same record: recomputing per retry could change
 	// the record digest across a day boundary and turn an idempotent

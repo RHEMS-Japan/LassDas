@@ -338,6 +338,14 @@ kernel's user can read.
 
 ## Release discipline: the regression set
 
+A release with runs in flight is refused by `deploy/pod/release.sh`
+(`RELEASE_ALLOW_INFLIGHT=1` overrides it for the release that fixes a stuck
+run). Independently of that guard, a run is ended under the identity it was
+claimed with: the terminal report and the question record take their owner
+— repository, workflow and engine revision — from the ledger's run row, not
+from the engine that happens to be running, so a run that outlives a
+release still reaches `terminal`.
+
 Every engine change goes out through `deploy/pod/release.sh`, and the
 script refuses to build until `go test ./...` passes. The test suite is
 the regression set: each live failure the pod has had is pinned by a test
@@ -378,6 +386,7 @@ means adding a row here and the test it names.
 | An investigation-only delivery with no ending, or its ending counted as a failure | `internal/hook` `TestInvestigatedIsATerminalCode`; `internal/attendant` streak exemption | design review, 2026-09-04 |
 | A read-only identity that is read-only in name only (a `get` that returns a Secret, a `SELECT` that calls a writer function, a session that switches `transaction_read_only` off) | not a test: the eleven stage-0 refusals in `deploy/examples/investigating-designer/README.md`, recorded per consumer before the role is enabled; rows 7, 8 and 11 become `internal/probe` tests with the probe package | design review, 2026-09-04 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
+| A run claimed under one engine revision is ended by the next: the terminal report is refused as `terminal_report_conflict` for ever when the owner comes from the running engine | `internal/state` `TestClaimOwnerIsTheIdentityTheRunWasClaimedUnder`; `Terminal.owner` reads the claim owner from the run row | live, 2026-09-05 (an investigation-only run claimed under 55ed29c, reported under 896efa8) |
 | A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
 
 The script's own steps, in order: clean committed tree → the commit's own

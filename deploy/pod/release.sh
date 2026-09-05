@@ -87,6 +87,31 @@ echo "${ci_verdict:-no run found}"
 # it has changed anything.
 say "live configuration ($KUBE_CONTEXT / $KUBE_NAMESPACE)"
 container="${CONTAINER:-$(kc get "statefulset/$statefulset" -o jsonpath='{.spec.template.spec.containers[0].name}')}"
+
+# ---- 2b. no run in flight --------------------------------------------------
+# A restart interrupts the cards of every run in flight; crash recovery
+# resumes them, but a release is not the moment to prove it. Refuse while the
+# board shows a run outside done / failed / stopped. RELEASE_ALLOW_INFLIGHT=1
+# overrides for the one legitimate case: the release *is* the fix for a run
+# that cannot advance (first used 2026-09-05, when the run needed the
+# engine's own fix to end).
+if [[ "$apply" == "--apply" && "${RELEASE_ALLOW_INFLIGHT:-0}" != "1" ]]; then
+  pod="$(kc get pod -l "app=$statefulset" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -n "$pod" ]]; then
+    inflight="$(kc exec "$pod" -c "$container" -- python3 -c '
+import json
+d = json.load(open("'"${RELEASE_BOARD_PATH:-/data/status/board.json}"'"))
+for r in d.get("runs", []):
+    if r.get("step") not in ("done", "failed", "stopped"):
+        print(r.get("issue_key"), r.get("step"))
+' 2>/dev/null || true)"
+    if [[ -n "$inflight" ]]; then
+      echo "runs in flight on the board; refusing to release while they run (RELEASE_ALLOW_INFLIGHT=1 overrides when this release is the fix for a stuck run):" >&2
+      echo "$inflight" >&2
+      exit 2
+    fi
+  fi
+fi
 [[ -n "$container" ]] || { echo "could not read the container name from statefulset/$statefulset" >&2; exit 1; }
 kc get "statefulset/$statefulset" -o jsonpath='{.spec.template.spec.containers[*].name}' | tr ' ' '\n' | grep -qx "$container" \
   || { echo "statefulset/$statefulset has no container named $container" >&2; exit 1; }
