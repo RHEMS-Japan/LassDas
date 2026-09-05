@@ -222,6 +222,38 @@ func CandidateFromObservedChanges(
 	run AgentRun,
 	generatedAt time.Time,
 ) (Candidate, error) {
+	return candidateFromObservedChanges(stage, observed, source, request, config, run, generatedAt, "")
+}
+
+// CandidateFromObservedChangesForDesign seals a candidate that applies an
+// approved design, carrying the design's fingerprint so the publish gate
+// can hold the two together.
+func CandidateFromObservedChangesForDesign(
+	stage int,
+	observed []ObservedChange,
+	source SourceSnapshot,
+	request TicketRequest,
+	config Config,
+	run AgentRun,
+	generatedAt time.Time,
+	designSHA256 string,
+) (Candidate, error) {
+	if !sha256Pattern.MatchString(designSHA256) {
+		return Candidate{}, errors.New("candidate design fingerprint is invalid")
+	}
+	return candidateFromObservedChanges(stage, observed, source, request, config, run, generatedAt, designSHA256)
+}
+
+func candidateFromObservedChanges(
+	stage int,
+	observed []ObservedChange,
+	source SourceSnapshot,
+	request TicketRequest,
+	config Config,
+	run AgentRun,
+	generatedAt time.Time,
+	designSHA256 string,
+) (Candidate, error) {
 	if err := source.Validate(request, config); err != nil || stage < 1 || stage > config.MaxStages {
 		return Candidate{}, errors.New("candidate input is invalid")
 	}
@@ -256,6 +288,7 @@ func CandidateFromObservedChanges(
 		Implementer: config.Models.Implementer,
 		Invocation:  agentInvocation(config, run),
 		GeneratedAt: generatedAt, Files: files, Rationale: agentRationale(run),
+		DesignSHA256: designSHA256,
 	}
 	digest, err := candidateDigest(candidate)
 	if err != nil {

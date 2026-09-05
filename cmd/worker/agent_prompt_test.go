@@ -43,7 +43,7 @@ func TestReviewAgentPromptBoundsPreviousFindings(t *testing.T) {
 		findings = append(findings, worker.ModelFinding{Code: "bulk-objection", Path: "client/src/label.ts", Message: long})
 	}
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil, findings)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, findings, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestReviewAgentPromptCarriesPreviousFindings(t *testing.T) {
 	candidate, source := promptFixtureFiles(1, 40)
 	findings := []worker.ModelFinding{{Code: "stale-caller", Path: "client/src/label.ts", Message: "A caller still expects the old text."}}
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil, findings)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, findings, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestReviewAgentPromptCarriesPreviousFindings(t *testing.T) {
 func TestReviewAgentPromptEmbedsThePatchesWhenTheyFit(t *testing.T) {
 	candidate, source := promptFixtureFiles(1, 40)
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil, nil)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestReviewAgentPromptEmbedsThePatchesWhenTheyFit(t *testing.T) {
 func TestReviewAgentPromptFallsBackToOutlinesWhenPatchesOvergrow(t *testing.T) {
 	candidate, source := promptFixtureFiles(40, 120)
 	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
-		worker.ModelEndpoint{Lens: "correctness"}, nil, nil)
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

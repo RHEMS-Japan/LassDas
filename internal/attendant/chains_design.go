@@ -162,6 +162,63 @@ func designObjectionRecorded(runDir string, designRound int) (bool, error) {
 	return false, nil
 }
 
+// reviewsFlagDesignWrong reports whether any sealed review of the
+// implementation round carries the finding code design-wrong: the reviewer
+// judged that the design itself does not hold, which sends the delivery back
+// to the designer rather than to another implementation round.
+func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) bool {
+	for _, reviewer := range reviewers {
+		raw, err := os.ReadFile(filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json"))
+		if err != nil {
+			continue
+		}
+		var review struct {
+			Findings []struct {
+				Code string `json:"code"`
+			} `json:"findings"`
+		}
+		if json.Unmarshal(raw, &review) != nil {
+			continue
+		}
+		for _, finding := range review.Findings {
+			if finding.Code == "design-wrong" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// regenerateDesignBackedRound starts the next implementation round of a
+// design-backed delivery: the applier gets the approved design's instruction
+// again (with the reviewers' findings riding in the run directory), never the
+// original implementer's.
+func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, config runtime.Config, run state.RunOverview, view chainView, plan runtime.ChainPlan, logger Logger) error {
+	for _, task := range view.all {
+		if task.Status == "done" {
+			continue
+		}
+		if err := hermes.Archive(ctx, task.ID); err != nil {
+			return err
+		}
+	}
+	pipeline := &runner.Pipeline{Config: config, Workspace: runDirectory(config, run.DeliveryID), Logger: logger}
+	_, round := pipeline.ApprovedDesign()
+	if round < 1 {
+		return errors.New("design-backed round has no approved design to re-apply")
+	}
+	if err := pipeline.RenderApplyInstruction(ctx, round); err != nil {
+		return err
+	}
+	rounds := runtime.ChainRounds{Design: view.designRound, Implement: view.round + 1}
+	terminalCard, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, nil, run.DeliveryID, run.RunID, run.Summary, rounds)
+	if err != nil {
+		return err
+	}
+	logger.Info("design-backed round regenerated", "run", run.RunID, "implement_round", rounds.Implement, "terminal_card", terminalCard)
+	return nil
+}
+
 // nextDesignRoundOrEnd starts the next design round, or — when the rounds
 // are spent — ends the run honestly with the shape's nonconverged code and
 // retires every card, so the run never sits claimed with a failing card.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -188,6 +189,16 @@ func (p *Pipeline) chainSealAndReview(ctx context.Context, reviewers []string, i
 			"--source-out", stageDir + "/source.json",
 			"--out", stageDir + "/candidate.json",
 		}
+		design, designRound, err := p.requiredDesign()
+		if err != nil {
+			return err
+		}
+		if design != "" {
+			// A design-backed round: the seal holds the applier to the design
+			// and turns an objection into the design round's record instead.
+			sealArgs = append(sealArgs, "--design", design,
+				"--objection", p.path("revise-design.json"), "--objection-out", p.designObjectionPath(designRound))
+		}
 		if code, err := p.worker(ctx, "seal-candidate", sealArgs); err != nil || code != 0 {
 			return errors.New("the implemented change could not be sealed")
 		}
@@ -232,6 +243,13 @@ func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, in
 		}
 	}
 	reviewArgs = append(reviewArgs, p.clarificationArgs()...)
+	design, _, err := p.requiredDesign()
+	if err != nil {
+		return err
+	}
+	if design != "" {
+		reviewArgs = append(reviewArgs, "--design-md", filepath.Join(filepath.Dir(design), "DESIGN.md"))
+	}
 	reviewArgs = append(reviewArgs, "--reviewer", reviewer,
 		"--run-out", fmt.Sprintf("%s/%s-run.json", stageDir, reviewer),
 		"--out", fmt.Sprintf("%s/%s.json", stageDir, reviewer))

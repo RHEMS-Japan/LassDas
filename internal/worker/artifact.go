@@ -59,20 +59,24 @@ type ModelCandidateFile struct {
 }
 
 type Candidate struct {
-	SchemaVersion   int             `json:"schema_version"`
-	Stage           int             `json:"stage"`
-	DeliveryID      string          `json:"delivery_id"`
-	InputSHA256     string          `json:"input_sha256"`
-	ConfigSHA256    string          `json:"config_sha256"`
-	ToolSHA         string          `json:"tool_sha"`
-	SourceSHA256    string          `json:"source_sha256"`
-	BaseSHA         string          `json:"base_sha"`
-	Implementer     ModelEndpoint   `json:"implementer"`
-	Invocation      InvocationUsage `json:"invocation"`
-	GeneratedAt     time.Time       `json:"generated_at"`
-	Files           []CandidateFile `json:"files"`
-	Rationale       string          `json:"rationale"`
-	CandidateSHA256 string          `json:"candidate_sha256"`
+	SchemaVersion int             `json:"schema_version"`
+	Stage         int             `json:"stage"`
+	DeliveryID    string          `json:"delivery_id"`
+	InputSHA256   string          `json:"input_sha256"`
+	ConfigSHA256  string          `json:"config_sha256"`
+	ToolSHA       string          `json:"tool_sha"`
+	SourceSHA256  string          `json:"source_sha256"`
+	BaseSHA       string          `json:"base_sha"`
+	Implementer   ModelEndpoint   `json:"implementer"`
+	Invocation    InvocationUsage `json:"invocation"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	Files         []CandidateFile `json:"files"`
+	Rationale     string          `json:"rationale"`
+	// DesignSHA256 binds a candidate that applies an approved design to that
+	// design (docs/INVESTIGATING_DESIGNER.md §7); empty for the original
+	// chain, which keeps every existing digest unchanged.
+	DesignSHA256    string `json:"design_sha256,omitempty"`
+	CandidateSHA256 string `json:"candidate_sha256"`
 }
 
 type CandidateFile struct {

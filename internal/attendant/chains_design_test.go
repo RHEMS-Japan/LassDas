@@ -91,6 +91,15 @@ func TestDesignObjectionRecorded(t *testing.T) {
 	if objected, _ := designObjectionRecorded(runDir, 2); objected {
 		t.Error("objection of another round reported")
 	}
+	if err := os.MkdirAll(filepath.Join(runDir, "history", "stage-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "history", "stage-1", "review-b.json"), []byte(`{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"}) || reviewsFlagDesignWrong(runDir, 2, []string{"review-a", "review-b"}) {
+		t.Error("design-wrong finding not read from the sealed reviews")
+	}
 }
 
 // --- fake board for the design-round transitions -------------------------

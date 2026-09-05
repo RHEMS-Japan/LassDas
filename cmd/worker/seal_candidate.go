@@ -1,11 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/worker"
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 )
 
 // runSealCandidate seals a change an externally-launched implementer left in
@@ -32,9 +39,12 @@ func runSealCandidate(args []string) error {
 	ticketOutPath := flags.String("ticket-out", "", "")
 	sourceOutPath := flags.String("source-out", "", "")
 	outputPath := flags.String("out", "", "")
+	designPath := flags.String("design", "", "")
+	objectionPath := flags.String("objection", "", "")
+	objectionOutPath := flags.String("objection-out", "", "")
 	if !parseFlags(flags, args) ||
 		!allPresent(*configPath, *toolSHA, *draftPath, *repoRoot, *baseRoot, *baseSHA, *runOutPath, *ticketOutPath, *sourceOutPath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) || *stage < 1 {
+		!worker.ValidToolSHA(*toolSHA) || *stage < 1 || (*objectionPath == "") != (*objectionOutPath == "") {
 		return errors.New("seal-candidate arguments are invalid")
 	}
 	config, err := readConfig(*configPath)
@@ -60,10 +70,37 @@ func runSealCandidate(args []string) error {
 	if err != nil {
 		return err
 	}
+	var design *investigate.Design
+	if *designPath != "" {
+		loaded, err := investigate.ReadDesign(*designPath)
+		if err != nil || !loaded.DigestMatches() {
+			return errors.New("the approved design could not be read or is not intact")
+		}
+		if loaded.DeliveryID != draft.DeliveryID || loaded.InputSHA256 != draft.InputSHA256 || loaded.ConfigSHA256 != draft.ConfigSHA256 ||
+			loaded.ToolSHA != draft.ToolSHA || loaded.BaseSHA != *baseSHA {
+			return errors.New("the design belongs to another run")
+		}
+		design = &loaded
+	}
+	if *objectionPath != "" {
+		if objected, err := sealDesignObjection(*objectionPath, *objectionOutPath, draft, *baseSHA, *stage, design); err != nil {
+			return err
+		} else if objected {
+			// The applier stopped instead of editing: the objection is the
+			// round's record, no candidate is sealed, and the card fails so
+			// the attendant reads the record and reopens the design.
+			return errors.New("the applier objected to the design; no candidate was sealed")
+		}
+	}
 
 	changed, err := worker.ChangedFilesUnder(*repoRoot, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts)
 	if err != nil {
 		return err
+	}
+	if design != nil {
+		if err := worker.ChangedFilesWithinDesign(changed, *design); err != nil {
+			return err
+		}
 	}
 	run, err := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
@@ -78,7 +115,87 @@ func runSealCandidate(args []string) error {
 	if err := worker.WriteJSONFileExclusive(*runOutPath, run, worker.MaxArtifactJSONBytes); err != nil {
 		return errors.New("run artifact could not be written")
 	}
-	return sealObservedChain(changed, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath)
+	designSHA := ""
+	if design != nil {
+		designSHA = design.DesignSHA256
+	}
+	return sealObservedChain(changed, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, designSHA)
+}
+
+// DesignObjection is the sealed record of an applier that would not apply
+// the design as written (docs/INVESTIGATING_DESIGNER.md §7). It stands in
+// the round directory where the candidate would have been.
+type DesignObjection struct {
+	SchemaVersion   int       `json:"schema_version"`
+	Stage           int       `json:"stage"`
+	DeliveryID      string    `json:"delivery_id"`
+	InputSHA256     string    `json:"input_sha256"`
+	ConfigSHA256    string    `json:"config_sha256"`
+	ToolSHA         string    `json:"tool_sha"`
+	BaseSHA         string    `json:"base_sha"`
+	DesignSHA256    string    `json:"design_sha256,omitempty"`
+	Reason          string    `json:"reason"`
+	Section         string    `json:"section"`
+	RaisedAt        time.Time `json:"raised_at"`
+	ObjectionSHA256 string    `json:"objection_sha256"`
+}
+
+// maxObjectionBytes bounds the applier's revise-design.json.
+const maxObjectionBytes = 16 * 1024
+
+var objectionSections = map[string]bool{"cause": true, "approach": true, "files": true, "verification": true, "blast_radius": true, "not_doing": true}
+
+// sealDesignObjection turns the applier's revise-design.json into a sealed
+// record next to where the candidate would go, and moves the applier's file
+// with it so a later seal of the same round cannot find it twice.
+func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA string, stage int, design *investigate.Design) (bool, error) {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, errors.New("the applier's objection could not be read")
+	}
+	// The applier wrote this file; read it the way the implementer's report
+	// is read — a regular file, bounded — so a pipe or a link cannot hang or
+	// bloat the card.
+	raw, err := worker.ReadBoundedRegularFile(path, int64(maxObjectionBytes))
+	if err != nil {
+		return false, errors.New("the applier's objection could not be read")
+	}
+	var objection struct {
+		Reason  string `json:"reason"`
+		Section string `json:"section"`
+	}
+	if err := json.Unmarshal(raw, &objection); err != nil || strings.TrimSpace(objection.Reason) == "" || len(objection.Reason) > 600 || !utf8.ValidString(objection.Reason) {
+		return false, errors.New("the applier's objection is not a readable reason")
+	}
+	if !objectionSections[objection.Section] {
+		objection.Section = "approach"
+	}
+	record := DesignObjection{
+		SchemaVersion: worker.ArtifactSchemaVersion, Stage: stage,
+		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256, ConfigSHA256: draft.ConfigSHA256, ToolSHA: draft.ToolSHA, BaseSHA: baseSHA,
+		Reason: strings.TrimSpace(objection.Reason), Section: objection.Section, RaisedAt: time.Now().UTC(),
+	}
+	if design != nil {
+		record.DesignSHA256 = design.DesignSHA256
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256(encoded)
+	record.ObjectionSHA256 = hex.EncodeToString(sum[:])
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return false, errors.New("the objection record's directory could not be created")
+	}
+	if err := worker.WriteJSONFileExclusive(out, record, worker.MaxArtifactJSONBytes); err != nil {
+		return false, errors.New("the objection record could not be written")
+	}
+	if err := os.Rename(path, filepath.Join(filepath.Dir(out), "revise-design.json")); err != nil {
+		return false, errors.New("the applier's objection could not be moved into the round")
+	}
+	return true, nil
 }
 
 // readImplementerReport reads what the external implementer said it did, if it
@@ -111,6 +228,7 @@ func sealObservedChain(
 	repoRoot, baseRoot string,
 	config worker.Config,
 	ticketOutPath, sourceOutPath, outputPath string,
+	designSHA256 string,
 ) error {
 	consumer, err := config.ConsumerFor(draft.Repository)
 	if err != nil {
@@ -128,7 +246,12 @@ func sealObservedChain(
 	if err != nil {
 		return err
 	}
-	candidate, err := worker.CandidateFromObservedChanges(run.Stage, observed, source, request, config, run, time.Now().UTC())
+	var candidate worker.Candidate
+	if designSHA256 != "" {
+		candidate, err = worker.CandidateFromObservedChangesForDesign(run.Stage, observed, source, request, config, run, time.Now().UTC(), designSHA256)
+	} else {
+		candidate, err = worker.CandidateFromObservedChanges(run.Stage, observed, source, request, config, run, time.Now().UTC())
+	}
 	if err != nil {
 		return err
 	}

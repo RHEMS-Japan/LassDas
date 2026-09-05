@@ -15,6 +15,7 @@ import (
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/worker"
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 )
 
 func main() {
@@ -192,10 +193,12 @@ func runVerifyPublishGate(args []string) error {
 	candidatePath := flags.String("candidate", "", "")
 	decisionPath := flags.String("decision", "", "")
 	validationPath := flags.String("validation", "", "")
+	designPath := flags.String("design", "", "")
+	designDecisionPath := flags.String("design-decision", "", "")
 	var reviewPaths stringList
 	flags.Var(&reviewPaths, "review", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *decisionPath, *validationPath) ||
-		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 {
+		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 || (*designPath == "") != (*designDecisionPath == "") {
 		return errors.New("verify-publish-gate arguments are invalid")
 	}
 	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
@@ -220,6 +223,25 @@ func runVerifyPublishGate(args []string) error {
 	}
 	if err := worker.ValidatePublishGate(decision, validation, candidate, reviews, source, request, config); err != nil {
 		return errors.New("publish gate was rejected")
+	}
+	// A candidate that applied a design must carry the design it applied,
+	// and the design must be the one the design reviews approved.
+	if (candidate.DesignSHA256 != "") != (*designPath != "") {
+		return errors.New("publish gate was rejected: the candidate and the arguments disagree about a design")
+	}
+	if *designPath != "" {
+		design, err := investigate.ReadDesign(*designPath)
+		if err != nil {
+			return errors.New("design artifact could not be read")
+		}
+		summary, err := worker.ReadDesignDecisionSummary(*designDecisionPath)
+		if err != nil {
+			return err
+		}
+		if err := worker.ValidateDesignBinding(candidate, design, summary); err != nil {
+			fmt.Fprintf(os.Stderr, "worker: publish gate design binding: %v\n", err)
+			return errors.New("publish gate was rejected: design binding")
+		}
 	}
 	return nil
 }

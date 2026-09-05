@@ -524,6 +524,17 @@ func handleChainFailure(
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
 		case view.round < limit:
+			if plan, planErr := chainPlanFor(config, runDir, run, logger); planErr == nil && plan.Shape == runtime.ShapeDesign {
+				// A design-backed delivery: a reviewer who found the design
+				// itself wrong sends the run back to the designer; anything
+				// else is another application of the same design.
+				if reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath); err == nil && reviewsFlagDesignWrong(runDir, view.round, reviewers) {
+					// At the design-round limit this ends the run as
+					// nonconverged instead of returning the limit error every tick.
+					return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "a review found the design itself wrong", logger)
+				}
+				return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
+			}
 			return regenerateRound(ctx, hermes, config, run, view, logger)
 		default:
 			// The decide verb converts a final-round revise into nonconverged;
@@ -705,4 +716,30 @@ func consumerMaxStages(consumerConfigPath string) (int, error) {
 		return 0, errors.New("consumer config max_stages invalid")
 	}
 	return parsed.MaxStages, nil
+}
+
+// consumerReviewerIDs reads the configured reviewer ids leniently, the way
+// the runner names the sealed review files.
+func consumerReviewerIDs(consumerConfigPath string) ([]string, error) {
+	raw, err := os.ReadFile(consumerConfigPath)
+	if err != nil {
+		return nil, errors.New("consumer config unreadable")
+	}
+	var parsed struct {
+		Models struct {
+			Reviewers []struct {
+				ID string `json:"id"`
+			} `json:"reviewers"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, errors.New("consumer config invalid")
+	}
+	ids := make([]string, 0, len(parsed.Models.Reviewers))
+	for _, reviewer := range parsed.Models.Reviewers {
+		if reviewer.ID != "" {
+			ids = append(ids, reviewer.ID)
+		}
+	}
+	return ids, nil
 }
