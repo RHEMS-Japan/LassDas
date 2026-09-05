@@ -335,7 +335,7 @@ func TestInvestigateAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
 
 // A provider's refusal of one turn (finish_reason=content_filter) is asked
 // again once like an out-of-shape response; two in a row travel with the
-// refusal named, and a length cutoff is still not asked again.
+// refusal named. A length cutoff is asked again once with a wider allowance.
 func TestInvestigateAsksAgainOnceAfterAContentFilterVerdict(t *testing.T) {
 	probeList := `{"probe":{"probe":"repo.list"}}`
 	report := `{"report":{"questions":["What is there?"],"findings":[{"claim":"The listing was taken","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Nothing."}}`

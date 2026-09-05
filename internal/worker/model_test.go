@@ -509,3 +509,16 @@ func TestConverseTurnAsksAgainWithMoreRoomAfterACutOff(t *testing.T) {
 		t.Fatal("widenedOutputAllowance must double and stop at the ceiling")
 	}
 }
+
+// A widened re-ask that fails for another reason still names the cutoff
+// that caused it, so the caller's log and the requester's note keep the
+// cause.
+func TestConverseTurnKeepsTheCutoffWhenTheWiderAskFailsOtherwise(t *testing.T) {
+	api := &loopScriptAPI{answers: []string{lengthMarker + `{}`}}
+	invoker, _ := NewModelInvoker(api)
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") || !strings.Contains(err.Error(), "script exhausted") && !strings.Contains(err.Error(), "model invocation failed") {
+		t.Fatalf("cutoff then a transport failure: err = %v after %d requests, want the cutoff kept", err, len(api.requests))
+	}
+}

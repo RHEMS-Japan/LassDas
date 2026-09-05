@@ -141,6 +141,12 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	if errors.As(err, &exit) {
 		return exit.ExitCode(), nil
 	}
+	if errors.Is(err, exec.ErrWaitDelay) && command.ProcessState != nil {
+		// The step itself exited; a grandchild kept the captured stderr
+		// open past the wait delay. Before stderr was captured the fd was
+		// inherited and this was not a failure, and it still is not.
+		return command.ProcessState.ExitCode(), nil
+	}
 	return -1, fmt.Errorf("step %s could not run: %w", name, err)
 }
 

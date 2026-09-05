@@ -47,7 +47,7 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 		t.Fatalf("no trail was written for the cutoff: %v", readErr)
 	}
 	text := string(content)
-	if !strings.Contains(text, "出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "出し直しても同じ結果") {
+	if !strings.Contains(text, "出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "出し直しても同じ結果になる可能性") {
 		t.Fatalf("the trail does not name the cause in the requester's words: %q", text)
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
@@ -88,5 +88,60 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 	content, _ := os.ReadFile(pipeline.path("m1-trail.txt"))
 	if strings.Contains(string(content), "forged") {
 		t.Fatalf("the squatter survived: %q", content)
+	}
+}
+
+// The note says only what happened: a widened re-ask that was cut off
+// again, no re-ask because the allowance was already at the ceiling, or
+// neither when the worker's words say nothing more.
+func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
+	again := receptionCutoffNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
+	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") || strings.Contains(again, "最大値") {
+		t.Fatalf("cut off again: %q", again)
+	}
+	ceiling := receptionCutoffNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
+	if !strings.Contains(ceiling, "受付の確認") || !strings.Contains(ceiling, "聞き直しはできませんでした") || strings.Contains(ceiling, "1 回聞き直し") {
+		t.Fatalf("at the ceiling: %q", ceiling)
+	}
+	bare := receptionCutoffNote("受付の判定", "finish_reason=length")
+	if strings.Contains(bare, "聞き直し") || !strings.Contains(bare, "途切れた") {
+		t.Fatalf("bare marker: %q", bare)
+	}
+	if receptionCutoffNote("受付の判定", "worker: readiness assessment failed: model invocation failed") != "" {
+		t.Fatal("a note was rendered without a cutoff")
+	}
+	for _, note := range []string{again, ceiling, bare} {
+		if err := hook.ValidateTrailText(note); err != nil {
+			t.Fatalf("the report would refuse the note: %v", err)
+		}
+	}
+}
+
+// The stderr tail keeps the end of a long stream, where the worker's
+// refusal line is.
+func TestTailBufferKeepsTheEnd(t *testing.T) {
+	tail := &tailBuffer{limit: 16}
+	for _, chunk := range []string{"0123456789", "abcdefghij", "KLMNOPQRSTUV"} {
+		if _, err := tail.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tail.String() != "efghijKLMNOPQRSTUV"[2:] || len(tail.String()) != 16 {
+		t.Fatalf("tail = %q", tail.String())
+	}
+}
+
+// The terminal report attaches the note the way it attaches a delivery's
+// trail: loadTrail returns exactly what the reception wrote.
+func TestReceptionTrailIsWhatTheTerminalReportAttaches(t *testing.T) {
+	worker := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: finish_reason=length; asked again with the wider allowance and cut off again")
+	pipeline := receptionPipeline(t, worker)
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal := NewTerminal(pipeline.Config, nil, hook.DispatchEnvelope{}, 1, pipeline.Workspace, trailTestLogger{})
+	trail, err := terminal.loadTrail(hook.TerminalModelFailed)
+	if err != nil || !strings.Contains(trail, "1 回聞き直しましたが") {
+		t.Fatalf("loadTrail() = %q, %v", trail, err)
 	}
 }

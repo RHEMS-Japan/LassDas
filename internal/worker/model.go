@@ -449,11 +449,17 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // the allowance ended a live run as model_failed that the next attempt
 // passed (2026-09-05). At the ceiling there is no room to give, so the
 // cutoff travels at once. A second of either kind, or any other error,
-// travels named. Every direct model call in the reception and the
-// investigating designer's loop goes through here.
+// travels named; an error after the widened re-ask still carries the
+// cutoff that caused it, so the caller's log names the cutoff whatever
+// ended the turn. The widened allowance lives for this turn only: a
+// conversation whose every answer is long pays one cut-off request per
+// turn, and the tokens of a discarded turn are billed but not recorded
+// (the spend line is read from the gateway, not summed here). Every direct
+// model call in the reception and the investigating designer's loop goes
+// through here.
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	malformed := 0
-	widened := false
+	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
 		if err == nil {
@@ -461,30 +467,40 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		}
 		switch {
 		case errors.Is(err, errModelResponseTruncated):
-			if widened {
+			if cutoff != nil {
 				return "", InvocationUsage{}, fmt.Errorf("%w; asked again with the wider allowance and cut off again", err)
 			}
 			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
 				return "", InvocationUsage{}, fmt.Errorf("%w; the allowance is already at the ceiling of %d tokens", err, MaxConfiguredOutputTokens)
 			}
-			widened = true
+			cutoff = err
 			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
 			continue
 		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
 			if malformed >= malformedTurnRetries {
-				return response, usage, err
+				return "", InvocationUsage{}, afterCutoff(cutoff, err)
 			}
 			malformed++
 		default:
-			return response, usage, err
+			return "", InvocationUsage{}, afterCutoff(cutoff, err)
 		}
 		select {
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
-			return "", InvocationUsage{}, fmt.Errorf("model invocation failed: %w", ctx.Err())
+			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("model invocation failed: %w", ctx.Err()))
 		case <-time.After(malformedTurnDelay):
 		}
 	}
+}
+
+// afterCutoff keeps the cutoff that led to a widened re-ask in the error
+// that ends the turn, so it is still named (and still errModelResponseTruncated)
+// when the re-ask failed for another reason.
+func afterCutoff(cutoff, err error) error {
+	if cutoff == nil {
+		return err
+	}
+	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
 }
 
 // widenedOutputAllowance doubles an output allowance, stopping at the

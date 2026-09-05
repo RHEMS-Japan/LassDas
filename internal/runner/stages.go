@@ -545,7 +545,6 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-		p.noteReceptionCutoff("受付の判断")
 		return Outcome{Code: hook.TerminalModelFailed}, err
 	}
 	readinessOutcome, err := p.readJSONField(relPath(p.Workspace, decision), "outcome")
