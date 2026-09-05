@@ -280,6 +280,11 @@ func TestPendingEnvelopeFallsBackToTheLedgerCopyForThisDeliveryOnly(t *testing.T
 	if envelope, err := pendingEnvelope(broken, state.RunOverview{DeliveryID: deliveryID, EnvelopeJSON: string(stored)}); err != nil || envelope.DeliveryID != deliveryID {
 		t.Fatalf("unreadable file, ledger copy: %+v, %v", envelope, err)
 	}
+	// A resumed run's record sits beside the envelope in the row; the
+	// envelope handed to the terminal carries it, as Pull's does.
+	if envelope, err := pendingEnvelope(t.TempDir(), state.RunOverview{DeliveryID: deliveryID, EnvelopeJSON: string(stored), ClarificationJSON: `{"protocol":"x"}`}); err != nil || envelope.ClarificationJSON != `{"protocol":"x"}` {
+		t.Fatalf("ledger copy with a clarification: %+v, %v", envelope, err)
+	}
 	other, _ := json.Marshal(hook.DispatchEnvelope{DeliveryID: "delivery_" + strings.Repeat("cd", 16)})
 	if _, err := pendingEnvelope(t.TempDir(), state.RunOverview{DeliveryID: deliveryID, EnvelopeJSON: string(other)}); err == nil {
 		t.Fatal("an envelope naming another delivery was accepted")
