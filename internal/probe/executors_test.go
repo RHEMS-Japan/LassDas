@@ -392,7 +392,7 @@ func TestHTTPProbeRotationClosesOnlyTheRotatedHost(t *testing.T) {
 	}
 	var asked []string
 	session := &Session{Catalog: catalog, Recorder: recorder,
-		Jar: []Cookie{{Name: "console_session", Value: "original-value-0001", Domain: "console.example.invalid", Path: "/"}},
+		Jar:       []Cookie{{Name: "console_session", Value: "original-value-0001", Domain: "console.example.invalid", Path: "/"}},
 		httpHooks: httpTestHooks{allowLoopback: true, port: port, tlsConfig: &tls.Config{InsecureSkipVerify: true}}} // #nosec G402 -- test server certificate
 	session.lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
 		asked = append(asked, host)
