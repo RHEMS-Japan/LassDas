@@ -213,6 +213,19 @@ fabricated workflow link.
   never stored), and a read-only base copy no agent is pointed at bounds
   what a change started from.
 
+- **Adopted answers are preserved by the runner, not by a job of the
+  instance repository.** The workflow rendered a resumed run's adopted
+  answers (`worker preserve-answers`) and committed the record to the
+  instance repository's knowledge tree. The pod reads a copy of that tree
+  on its state volume (`knowledge_root`), so a commit would never reach
+  it; instead `Terminal.Report` writes the record under
+  `knowledge_root/<answer_knowledge.to>/<ticket key>.md` once the terminal
+  report has sealed, whatever the terminal code, replacing an older
+  revision of the same ticket through a rename. The reception reads that
+  directory on the next ticket (`worker.LoadPreservedAnswers`), so a point
+  the requester settled is not asked again. Failures are logged for the
+  operator and never fail the run.
+
 ## The observation session
 
 The consoles show a login page to a browser with no session, so the

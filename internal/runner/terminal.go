@@ -66,13 +66,19 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	if err != nil {
 		return err
 	}
-	return t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
+	if err := t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
 		report.IssuedAt = issuedAt
 		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
 			return hook.Result{}, fmt.Errorf("terminal report shape invalid: %w", err)
 		}
 		return t.services.Report.ProcessTerminalReport(ctx, report), nil
-	})
+	}); err != nil {
+		return err
+	}
+	// The run is closed; what the requester decided along the way is kept
+	// for the next one, whatever code this report carried.
+	t.preserveAnswers()
+	return nil
 }
 
 // ReportDigest is the digest the store would seal for this outcome — the
