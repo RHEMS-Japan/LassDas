@@ -683,12 +683,13 @@ func (s *LocalStore) resolveRunRoute(ctx context.Context, route hook.ReportRoute
 
 // ClaimOwner returns the owner identity the run was claimed under — the
 // repository, workflow and engine revision written into the run row at
-// claim. A terminal report or question is bound to that identity, not to
-// whatever engine happens to run when the run ends: a run claimed under one
-// revision and reported under the next was refused as terminal_report_conflict
-// for ever (live 2026-09-05). found is false when no run row exists.
-func (s *LocalStore) ClaimOwner(ctx context.Context, runID string, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
-	if route.Validate() != nil || runID == "" || len(runID) > 200 {
+// claim, for the run route.ExpectedRunID names. A terminal report or question
+// is bound to that identity, not to whatever engine happens to run when the
+// run ends: a run claimed under one revision and reported under the next was
+// refused as terminal_report_conflict for ever (live 2026-09-05). found is
+// false when no run row exists or the row carries no claim.
+func (s *LocalStore) ClaimOwner(ctx context.Context, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
+	if route.Validate() != nil {
 		return hook.PullOwner{}, false, localFailure(hook.FailureRejected, "invalid_claim_owner_lookup")
 	}
 	txn, err := s.beginRead(ctx)
@@ -696,7 +697,7 @@ func (s *LocalStore) ClaimOwner(ctx context.Context, runID string, route hook.Re
 		return hook.PullOwner{}, false, localFailure(hook.FailureRetryable, "claim_owner_read_failed")
 	}
 	defer txn.rollback()
-	runRow, err := txn.getItem(makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), runID))
+	runRow, err := txn.getItem(makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), route.ExpectedRunID))
 	if err != nil {
 		return hook.PullOwner{}, false, localFailure(hook.FailureRetryable, "claim_owner_read_failed")
 	}

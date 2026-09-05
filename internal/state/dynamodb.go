@@ -710,11 +710,11 @@ var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,8}
 
 // ClaimOwner is LocalStore.ClaimOwner for the DynamoDB store: the owner
 // identity the run row was written with at claim.
-func (s *DynamoStore) ClaimOwner(ctx context.Context, runID string, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
-	if route.Validate() != nil || runID == "" || len(runID) > 200 {
+func (s *DynamoStore) ClaimOwner(ctx context.Context, route hook.ReportRouteConfig) (hook.PullOwner, bool, error) {
+	if route.Validate() != nil {
 		return hook.PullOwner{}, false, hook.NewExternalFailure("dynamodb", hook.FailureRejected, "invalid_claim_owner_lookup")
 	}
-	runKey := makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), runID)
+	runKey := makeKey("run", route.SpaceKey, strconv.FormatInt(route.ProjectID, 10), route.ExpectedRunID)
 	output, err := s.api.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.table), Key: map[string]types.AttributeValue{"pk": stringValue(runKey)}, ConsistentRead: aws.Bool(true),
 	})

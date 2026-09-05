@@ -69,7 +69,10 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	if err != nil {
 		return err
 	}
-	owner := t.owner(ctx)
+	owner, err := t.owner(ctx)
+	if err != nil {
+		return err
+	}
 	evidence := outcome.Evidence
 	report := hook.TerminalReportRequest{
 		Protocol:   hook.TerminalReportProtocolVersion,
@@ -99,23 +102,27 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 // run is not always the engine that claimed it — a release in between
 // changes Identity.EngineSHA — and the store refuses a terminal report or
 // question whose owner differs from the claim (terminal_report_conflict,
-// live 2026-09-05). When the row cannot be read the current identity is
-// the fallback, which is exact for a run claimed by this engine.
-func (t *Terminal) owner(ctx context.Context) hook.PullOwner {
+// live 2026-09-05). A row that cannot be read is an error, not a reason to
+// report under the current identity: that would recreate the refusal, and
+// an owner that changed between attempts would turn a retry into a conflict.
+// The run stays claimed and the next tick drives it again. Only a run with
+// no claim row (or no store, in tests) reports under the current identity,
+// which the store then judges on its own.
+func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
 	fallback := t.config.Owner(t.hermesRunID)
 	if t.services == nil || t.services.Store == nil {
-		return fallback
+		return fallback, nil
 	}
 	route := t.services.Route
 	route.ExpectedRunID = t.envelope.Snapshot.RunID
-	claimed, found, err := t.services.Store.ClaimOwner(ctx, t.envelope.Snapshot.RunID, route)
-	if err != nil || !found {
-		if err != nil {
-			t.logger.Error("claim owner unreadable; reporting under the current identity", "run", t.envelope.Snapshot.RunID, "error", err.Error())
-		}
-		return fallback
+	claimed, found, err := t.services.Store.ClaimOwner(ctx, route)
+	if err != nil {
+		return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", err)
 	}
-	return claimed
+	if !found {
+		return fallback, nil
+	}
+	return claimed, nil
 }
 
 // loadTrail reads the delivery trail when the run composed one. The
@@ -157,7 +164,10 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 	if err != nil {
 		return err
 	}
-	owner := t.owner(ctx)
+	owner, err := t.owner(ctx)
+	if err != nil {
+		return err
+	}
 	// The schedule is sealed once, exactly as cmd/questioner computed it
 	// once and retried the same record: recomputing per retry could change
 	// the record digest across a day boundary and turn an idempotent

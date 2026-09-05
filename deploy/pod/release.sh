@@ -27,6 +27,9 @@
 #                     (a bind of those into Docker revokes the caller's own
 #                     file access until restart)
 # Optional:
+#   RELEASE_ALLOW_INFLIGHT=1  release although the board shows executing runs, or
+#                     cannot be read (only when the release is the fix)
+#   RELEASE_BOARD_PATH board file inside the pod (default: /data/status/board.json)
 #   STATEFULSET       (default: lassdas)
 #   CONFIGMAP         (default: lassdas-config)
 #   CONTAINER         container to update (default: the StatefulSet's first)
@@ -89,30 +92,46 @@ say "live configuration ($KUBE_CONTEXT / $KUBE_NAMESPACE)"
 container="${CONTAINER:-$(kc get "statefulset/$statefulset" -o jsonpath='{.spec.template.spec.containers[0].name}')}"
 
 # ---- 2b. no run in flight --------------------------------------------------
-# A restart interrupts the cards of every run in flight; crash recovery
-# resumes them, but a release is not the moment to prove it. Refuse while the
-# board shows a run outside done / failed / stopped. RELEASE_ALLOW_INFLIGHT=1
-# overrides for the one legitimate case: the release *is* the fix for a run
-# that cannot advance (first used 2026-09-05, when the run needed the
-# engine's own fix to end).
-if [[ "$apply" == "--apply" && "${RELEASE_ALLOW_INFLIGHT:-0}" != "1" ]]; then
-  pod="$(kc get pod -l "app=$statefulset" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [[ -n "$pod" ]]; then
-    inflight="$(kc exec "$pod" -c "$container" -- python3 -c '
-import json
-d = json.load(open("'"${RELEASE_BOARD_PATH:-/data/status/board.json}"'"))
-for r in d.get("runs", []):
-    if r.get("step") not in ("done", "failed", "stopped"):
-        print(r.get("issue_key"), r.get("step"))
-' 2>/dev/null || true)"
-    if [[ -n "$inflight" ]]; then
-      echo "runs in flight on the board; refusing to release while they run (RELEASE_ALLOW_INFLIGHT=1 overrides when this release is the fix for a stuck run):" >&2
-      echo "$inflight" >&2
-      exit 2
-    fi
+# A restart interrupts the cards of every run whose step is executing;
+# crash recovery resumes them, but a release is not the moment to prove it.
+# Runs that are waiting — for an answer (question), for a Go (confirm) or
+# for their first card (intake) — and runs that ended do not block. The
+# board must be readable and say so explicitly: a failure to read it is a
+# refusal, not a pass. RELEASE_ALLOW_INFLIGHT=1 overrides both for the one
+# legitimate case: the release *is* the fix for a run that cannot advance
+# (first needed 2026-09-05, when the run needed the engine's own fix to end).
+refuse_inflight() {
+  [[ "${RELEASE_ALLOW_INFLIGHT:-0}" == "1" ]] && { echo "RELEASE_ALLOW_INFLIGHT=1: not checking the board for runs in flight" >&2; return 0; }
+  local pod verdict
+  pod="$(kc get pod -l "app=$statefulset" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')" || pod=""
+  if [[ -z "$pod" ]]; then
+    echo "no running pod of statefulset/$statefulset to read the board from; refusing (RELEASE_ALLOW_INFLIGHT=1 overrides)" >&2
+    exit 2
   fi
-fi
+  verdict="$(kc exec "$pod" -c "$container" -- python3 -c '
+import json, sys
+path = sys.argv[1]
+quiet = {"done", "failed", "stopped", "question", "confirm", "intake"}
+d = json.load(open(path))
+running = [str(r.get("issue_key")) + " " + str(r.get("step")) for r in (d.get("runs") or []) if r.get("step") not in quiet]
+print("BOARD-READ-OK")
+print("\n".join(running))
+' "${RELEASE_BOARD_PATH:-/data/status/board.json}")" || verdict=""
+  if [[ "$verdict" != BOARD-READ-OK* ]]; then
+    echo "could not read the board in $pod (${RELEASE_BOARD_PATH:-/data/status/board.json}); refusing (RELEASE_ALLOW_INFLIGHT=1 overrides)" >&2
+    exit 2
+  fi
+  local running="${verdict#BOARD-READ-OK}"
+  running="${running#$'\n'}"
+  if [[ -n "$running" ]]; then
+    echo "runs with an executing step on the board; refusing to release while they run (RELEASE_ALLOW_INFLIGHT=1 overrides when this release is the fix for a stuck run):" >&2
+    echo "$running" >&2
+    exit 2
+  fi
+}
+
 [[ -n "$container" ]] || { echo "could not read the container name from statefulset/$statefulset" >&2; exit 1; }
+if [[ "$apply" == "--apply" ]]; then refuse_inflight; fi
 kc get "statefulset/$statefulset" -o jsonpath='{.spec.template.spec.containers[*].name}' | tr ' ' '\n' | grep -qx "$container" \
   || { echo "statefulset/$statefulset has no container named $container" >&2; exit 1; }
 current="$(kc get configmap "$configmap" -o jsonpath='{.data.runtime\.json}')"
@@ -208,6 +227,7 @@ fi
 # consumer config and knowledge, which a whole-object apply would drop. If
 # the image update fails, the key is put back so pins and binaries never
 # stay crossed.
+refuse_inflight   # again: the build took minutes, a run may have started
 say "patch configmap/$configmap (runtime.json only)"
 patch_new="$(mktemp)"; patch_old="$(mktemp)"
 python3 -c 'import json,sys; print(json.dumps({"data": {"runtime.json": sys.argv[1]}}))' "$updated" > "$patch_new"

@@ -338,13 +338,19 @@ kernel's user can read.
 
 ## Release discipline: the regression set
 
-A release with runs in flight is refused by `deploy/pod/release.sh`
-(`RELEASE_ALLOW_INFLIGHT=1` overrides it for the release that fixes a stuck
-run). Independently of that guard, a run is ended under the identity it was
-claimed with: the terminal report and the question record take their owner
-— repository, workflow and engine revision — from the ledger's run row, not
-from the engine that happens to be running, so a run that outlives a
-release still reaches `terminal`.
+A release while a run's step is executing is refused by
+`deploy/pod/release.sh`: it reads the board in the running pod, before the
+build and again before the apply, and refuses when a run is outside done /
+failed / stopped / question / confirm / intake (waiting for an answer, a Go
+or a first card does not block) — or when the board cannot be read at all.
+`RELEASE_ALLOW_INFLIGHT=1` overrides both for the release that fixes a
+stuck run. Independently of that guard, a run is ended under the identity
+it was claimed with: the terminal report and the question record take
+their owner — repository, workflow and engine revision — from the ledger's
+run row (`ClaimOwner`), not from the engine that happens to be running, so
+a run that outlives a release still reaches `terminal`. A row that cannot
+be read defers the report to the next tick rather than reporting under the
+current identity; only a run with no claim row reports under it.
 
 Every engine change goes out through `deploy/pod/release.sh`, and the
 script refuses to build until `go test ./...` passes. The test suite is
