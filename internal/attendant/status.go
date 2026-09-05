@@ -187,6 +187,9 @@ func (s *RunStatus) placeAt(step, stage, title, detail string) {
 func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.BoardTask) {
 	view := chainViewFor(tasks, run.DeliveryID)
 	status.Round = view.round
+	if placeDesignStage(status, view) {
+		return
+	}
 	if view.round == 0 {
 		status.place("intake", "受付処理中", "作業の準備をしています")
 		return
@@ -442,4 +445,41 @@ func placeResolvedOutcome(status *RunStatus, phase, verdict string) {
 	default:
 		status.place("done", "運用担当者が確認済み", "ステージングの反映状態は運用担当者の確認どおり・本番反映は運用手順で行います")
 	}
+}
+
+// placeDesignStage shows the investigating designer's stages while any of
+// the newest design round's cards is still open: 調査 while the investigate
+// card runs, 設計 while its reviews and decision run. Once the design round
+// is done the implementation cards take over as before.
+func placeDesignStage(status *RunStatus, view chainView) bool {
+	if view.designRound == 0 {
+		return false
+	}
+	detail := fmt.Sprintf("設計 %d 巡目", view.designRound)
+	open := false
+	investigating := false
+	blocked := false
+	for stage, card := range view.designCards {
+		if card.Status == "done" {
+			continue
+		}
+		open = true
+		if failedCardStatuses[card.Status] {
+			blocked = true
+		}
+		if stage == runtime.StageInvestigate {
+			investigating = true
+		}
+	}
+	switch {
+	case !open:
+		return false
+	case blocked:
+		status.place("design", "工程の復旧処理中", detail)
+	case investigating:
+		status.place("investigate", "調査中（稼働環境とリポジトリを読み取りだけで計っています）", detail)
+	default:
+		status.place("design", "設計中・設計レビュー中", detail)
+	}
+	return true
 }

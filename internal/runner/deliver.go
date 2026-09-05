@@ -225,6 +225,15 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 				"ステージング画面の機械確認が合格しませんでした。本番反映は行えません（合格の証拠が封印された場合のみ昇格できます）。")
 		}
 	}
+	// A design that promised a measurement is judged by it as well: the
+	// probe runs against the deployed environment and the value must sit
+	// under the threshold (docs/INVESTIGATING_DESIGNER.md §4.3).
+	if checked, pass, detail, err := p.measurementVerification(ctx, stageDir, "staging"); err != nil {
+		return err
+	} else if checked && !pass {
+		return p.sealCourtesyObservation(ctx, stageDir, "staging",
+			"ステージングでの計測が設計書の閾値を満たしませんでした（"+detail+"）。本番反映は行えません。")
+	}
 	if !p.exists(DeliverDeltaFile) {
 		if code, err := p.controller(ctx, "promotion-delta", append([]string{"promotion-delta"},
 			p.deliverCommon(stageDir, "--out", p.path(DeliverDeltaFile))...)); err != nil {

@@ -86,3 +86,34 @@ func TestDesignObjectionRecorded(t *testing.T) {
 		t.Error("objection of another round reported")
 	}
 }
+
+func TestPlaceDesignStageShowsInvestigationAndDesign(t *testing.T) {
+	view := chainViewFor([]runtime.BoardTask{
+		{ID: "t1", Status: "in_progress", IdempotencyKey: "delivery-1:investigate:d1"},
+		{ID: "t2", Status: "todo", IdempotencyKey: "delivery-1:design-review-a:d1"},
+	}, "delivery-1")
+	var status RunStatus
+	if !placeDesignStage(&status, view) || status.Step != "investigate" {
+		t.Errorf("investigating: %+v", status)
+	}
+	view = chainViewFor([]runtime.BoardTask{
+		{ID: "t1", Status: "done", IdempotencyKey: "delivery-1:investigate:d1"},
+		{ID: "t2", Status: "in_progress", IdempotencyKey: "delivery-1:design-review-a:d1"},
+	}, "delivery-1")
+	status = RunStatus{}
+	if !placeDesignStage(&status, view) || status.Step != "design" {
+		t.Errorf("designing: %+v", status)
+	}
+	view = chainViewFor([]runtime.BoardTask{
+		{ID: "t1", Status: "done", IdempotencyKey: "delivery-1:investigate:d1"},
+		{ID: "t2", Status: "done", IdempotencyKey: "delivery-1:design-decide:d1"},
+		{ID: "t3", Status: "todo", IdempotencyKey: "delivery-1:apply:r1"},
+	}, "delivery-1")
+	status = RunStatus{}
+	if placeDesignStage(&status, view) {
+		t.Error("a finished design round still shows as design")
+	}
+	if placeDesignStage(&status, chainViewFor(nil, "delivery-1")) {
+		t.Error("no design round shows as design")
+	}
+}

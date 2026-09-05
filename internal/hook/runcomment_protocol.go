@@ -18,6 +18,12 @@ const (
 	// readiness gate passes and before the first card dispatches: what the
 	// automation understood and how to stop it. A notice, not a gate.
 	RunCommentPlan RunCommentKind = "plan"
+	// RunCommentInvestigation carries the investigating designer's sealed
+	// report to the requester, measurements attached; RunCommentDesign the
+	// approved design's summary before any code is written
+	// (docs/INVESTIGATING_DESIGNER.md §4.4).
+	RunCommentInvestigation RunCommentKind = "investigation"
+	RunCommentDesign        RunCommentKind = "design"
 	// RunCommentE2E is the debug role's post-merge staging observation:
 	// what the browser saw on the deployed staging page, sealed once per
 	// run after the human merge and the staging deployment.

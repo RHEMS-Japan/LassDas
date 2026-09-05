@@ -407,6 +407,7 @@ func advanceClaimedRun(
 	if _, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, view.existingKeys(run.DeliveryID), run.DeliveryID, run.RunID, run.Summary, rounds); err != nil {
 		return err
 	}
+	postDesignComments(ctx, config, services, run, view, plan, logger)
 	stages := runtime.ChainStagesFor(config.Chain, plan)
 	last := stages[len(stages)-1]
 	if task, ok := view.card(last.Name); ok && task.Status == "done" {

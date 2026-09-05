@@ -1007,9 +1007,18 @@ func runComposeTrail(args []string) error {
 	historyDir := flags.String("history", "", "")
 	validationPath := flags.String("validation", "", "")
 	trailClarificationPath := flags.String("clarification", "", "")
+	trailDesignPath := flags.String("design", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *historyDir, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("compose-trail arguments are invalid")
+	}
+	designSummary := ""
+	if *trailDesignPath != "" {
+		design, err := investigate.ReadDesign(*trailDesignPath)
+		if err != nil || !design.DigestMatches() {
+			return errors.New("compose-trail design is invalid")
+		}
+		designSummary = design.Summary()
 	}
 	config, err := worker.LoadConfig(*configPath)
 	if err != nil {
@@ -1032,7 +1041,7 @@ func runComposeTrail(args []string) error {
 			validationPassed = true
 		}
 	}
-	trail := worker.ComposeTrail(stages, clarification, validationPassed)
+	trail := worker.ComposeTrailWithDesign(stages, clarification, validationPassed, designSummary)
 	if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
 		return errors.New("trail could not be written")
 	}

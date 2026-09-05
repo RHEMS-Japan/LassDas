@@ -106,7 +106,7 @@ func runLedgerScenario(t *testing.T, store ledgerStore) []string {
 	rcBegin := hook.RunCommentBeginRequest{
 		Route: testTerminalRoute(t), Kind: hook.RunCommentAck, Qualifier: "",
 		ContentSHA256: strings.Repeat("e", 64), LeaseToken: tokenA,
-		StartedAt: testQueuedAt.Add(8 * time.Second),
+		StartedAt:  testQueuedAt.Add(8 * time.Second),
 		LeaseUntil: testQueuedAt.Add(8 * time.Second).Add(testTerminalRoute(t).LeaseDuration),
 	}
 	_, cb, err := store.BeginRunComment(ctx, rcBegin)

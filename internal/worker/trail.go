@@ -149,8 +149,24 @@ func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailS
 // and the validation outcome as the requester-facing record. The result is
 // deterministic and bounded by MaxTrailBytes.
 func ComposeTrail(stages []trailStage, clarification *ClarificationContext, validationPassed bool) string {
+	return ComposeTrailWithDesign(stages, clarification, validationPassed, "")
+}
+
+// trailDesignRunes bounds the design summary a trail carries; the trail's
+// own cap still applies to the whole text.
+const trailDesignRunes = 900
+
+// ComposeTrailWithDesign is ComposeTrail with the approved design's summary
+// (cause, approach, files, verification) placed first when the change
+// applied one, so the PR body and the report say what was decided before
+// the code was written.
+func ComposeTrailWithDesign(stages []trailStage, clarification *ClarificationContext, validationPassed bool, designSummary string) string {
 	var builder strings.Builder
 	final := stages[len(stages)-1]
+	if summary := strings.TrimSpace(designSummary); summary != "" {
+		builder.WriteString("### 設計の要約 (実装前にレビュー済み)\n")
+		builder.WriteString(trailClip(summary, trailDesignRunes) + "\n\n")
+	}
 
 	fmt.Fprintf(&builder, "### 実装とレビューの経過 (%d 周で%s)\n", len(stages), trailOutcomeLabel(final.Decision.Outcome))
 	for _, stage := range stages {

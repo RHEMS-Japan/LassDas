@@ -781,6 +781,17 @@ func (s *QuestionTickService) ReleaseReportPosted(ctx context.Context, runID str
 
 // PostStagingReport / PostReleaseReport post the v2 delivery summaries
 // exactly once per run, on the same pinned-run route as the E2E comment.
+// PostInvestigationComment posts the investigating designer's report once
+// per run, measurements attached.
+func (s *QuestionTickService) PostInvestigationComment(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
+	return s.postTerminalRunComment(ctx, RunCommentInvestigation, "question_tick_investigation_state", runID, deliveryID, content, attachmentIDs)
+}
+
+// PostDesignComment posts the approved design's summary once per run.
+func (s *QuestionTickService) PostDesignComment(ctx context.Context, runID, deliveryID, content string) bool {
+	return s.postTerminalRunComment(ctx, RunCommentDesign, "question_tick_design_state", runID, deliveryID, content, nil)
+}
+
 func (s *QuestionTickService) PostStagingReport(ctx context.Context, runID, deliveryID, content string, attachmentIDs []int64) bool {
 	return s.postTerminalRunComment(ctx, RunCommentStagingReport, "question_tick_stg_report_state", runID, deliveryID, content, attachmentIDs)
 }

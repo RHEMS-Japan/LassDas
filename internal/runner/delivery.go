@@ -119,6 +119,9 @@ func (p *Pipeline) EnsureTrail(ctx context.Context) error {
 		"--history", p.path("history"), "--validation", p.path("validation.json"),
 	}
 	trailArgs = append(trailArgs, p.clarificationArgs()...)
+	if design := p.approvedDesignPath(); design != "" {
+		trailArgs = append(trailArgs, "--design", design)
+	}
 	trailArgs = append(trailArgs, "--out", trailPath)
 	if code, err := p.worker(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 		// The workflow wrote this exact fixed line on compose failure, and it
