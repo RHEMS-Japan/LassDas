@@ -149,6 +149,8 @@ done
 say "toolchain present in the image"
 docker run --rm --platform linux/arm64 --entrypoint go "$tag" version
 docker run --rm --platform linux/arm64 --entrypoint node "$tag" --version
+docker run --rm --platform linux/arm64 --entrypoint kubectl "$tag" version --client
+docker run --rm --platform linux/arm64 --entrypoint aws "$tag" --version
 
 # ---- 7. runtime.json with the new identity --------------------------------
 # A pin is written only for a stage binary the live configuration names:

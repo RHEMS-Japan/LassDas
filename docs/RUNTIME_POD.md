@@ -174,13 +174,6 @@ fabricated workflow link.
   without moving the reception. `LASSDAS_IMPLEMENTER_MAX_TURNS` (default
   200) caps the implementer's tool-calling iterations; the reviewers are
   capped at 40 in their profiles.
-  The design-review judges (`lassdas-design-review-a` / `-b`) reuse the
-  candidate reviewers' model and key by default; `LASSDAS_DESIGN_REVIEW_A_MODEL`
-  / `LASSDAS_DESIGN_REVIEW_A_KEY` (and the `_B_` pair) override them, so the
-  design's reviewer A can be a heavy model of another vendor than the
-  designer's (docs/INVESTIGATING_DESIGNER.md §11) while the candidate
-  reviews keep theirs. When the gateway issues keys per model, the `_KEY`
-  override is what lets the design judge present that model's key.
 - **Budget hold**: right before the reception starts, the attendant asks
   the gateway for one token under every role's key (the reception's
   direct calls from the consumer configuration, the three agent roles
@@ -325,16 +318,22 @@ under their own UID (#23) the exposure is bounded by what the identities
 allow, which is nothing writable and nothing secret.
 
 The image ships the two clients the exec probes run — `kubectl` and the
-AWS CLI, pinned by version and checksum in the Dockerfile — and nothing
-that holds a credential of its own. An exec probe inherits only `PATH`,
-`HOME` and the identity pointers (`KUBECONFIG`, `AWS_PROFILE`,
-`AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_REGION`,
-`AWS_DEFAULT_REGION`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`;
-`internal/probe` `ExecEnvironmentNames`), so the consumer points
-`KUBECONFIG` at a kubeconfig whose token is the ServiceAccount's projected
-token file and lets the cluster's pod-identity webhook set the two `AWS_`
-role pointers from the ServiceAccount's role annotation. Neither variable
-carries a secret value; both name a file the kernel's user can read.
+AWS CLI, pinned by version and checksum in the Dockerfile (about 290 MB
+together) — and nothing that holds a credential of its own. An exec probe
+inherits only `PATH`, `HOME` and the identity pointers (`KUBECONFIG`,
+`AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`,
+`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_ROLE_ARN`,
+`AWS_WEB_IDENTITY_TOKEN_FILE`; `internal/probe` `ExecEnvironmentNames`).
+The consumer points `KUBECONFIG` at a kubeconfig whose token is the
+ServiceAccount's projected token file. For AWS there are two shapes, and
+they do not mix: either the cluster's pod-identity webhook sets
+`AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` from the ServiceAccount's
+role annotation and the catalogue's `aws` argv names **no** `--profile`
+(an explicit `--profile` makes the AWS CLI ignore those two variables), or
+the catalogue names `--profile <readonly>` and that profile itself carries
+`role_arn` and `web_identity_token_file` in the file `AWS_CONFIG_FILE`
+points at. Neither variable carries a secret value; each names a file the
+kernel's user can read.
 
 ## Release discipline: the regression set
 
