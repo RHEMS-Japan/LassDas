@@ -350,6 +350,13 @@ type ConsumerConfig struct {
 	// browser without one, and a promise about wording in another language
 	// could never be seen. Optional.
 	ObservationLanguage string `json:"observation_language,omitempty"`
+	// Design is the destination's say over the design stage the reception
+	// decides on for every change request (whether a change may skip the
+	// design, and which words in a ticket mean the running system has to be
+	// measured first). Optional: absent means design on for every change
+	// request, because the skip needs a trigger vocabulary and the framework
+	// holds no default one.
+	Design *DesignConfig `json:"design,omitempty"`
 	// GitHub is the destination repository's observed delivery contract:
 	// branches, merge settings, the exact workflows and required jobs, and
 	// the staging digest-commit policy. These are the customer's observed
@@ -463,6 +470,82 @@ func (c ConsumerConfig) DeliveryTargetBranch() string {
 		return c.DeliveryBranch
 	}
 	return c.IntegrationBranch
+}
+
+const (
+	// DesignDefaultOn is the recommended setting: every change request gets
+	// a design unless the reception can show all four skip conditions hold.
+	DesignDefaultOn = "on"
+	// DesignDefaultOff turns the design stage off for the destination's
+	// change requests regardless of those conditions.
+	DesignDefaultOff = "off"
+
+	maxDesignTriggerWords    = 64
+	maxDesignTriggerWordSize = 64
+)
+
+// DesignConfig is a destination's design-stage policy. Every key is optional
+// and absent means the safe reading: design on, no trigger vocabulary (so
+// the skip can never fire), investigation reports reviewed.
+type DesignConfig struct {
+	// Default is "on" or "off"; absent reads as "on".
+	Default string `json:"default,omitempty"`
+	// TriggerWords are the words in a ticket that mean the running system
+	// has to be observed before a fix is designed (in the requesters' own
+	// language: slowness, intermittence, production, logs, root cause,
+	// investigation). The framework holds no default list, and an empty
+	// list means the skip condition about them can never hold.
+	TriggerWords []string `json:"trigger_words,omitempty"`
+	// ReviewInvestigation says whether an investigation-only report gets a
+	// grounding review before it is posted; absent reads as true.
+	ReviewInvestigation *bool `json:"review_investigation,omitempty"`
+}
+
+func (d *DesignConfig) validate() error {
+	if d == nil {
+		return nil
+	}
+	switch d.Default {
+	case "", DesignDefaultOn, DesignDefaultOff:
+	default:
+		return errors.New("design default must be on or off")
+	}
+	if len(d.TriggerWords) > maxDesignTriggerWords {
+		return errors.New("design trigger words are invalid")
+	}
+	seen := make(map[string]struct{}, len(d.TriggerWords))
+	for _, word := range d.TriggerWords {
+		if validatePlainText(word, maxDesignTriggerWordSize, false) != nil {
+			return errors.New("design trigger word is invalid")
+		}
+		folded := strings.ToLower(word)
+		if _, exists := seen[folded]; exists {
+			return errors.New("design trigger words contain duplicates")
+		}
+		seen[folded] = struct{}{}
+	}
+	return nil
+}
+
+// DesignEnabled reports whether change requests to this destination get a
+// design stage by default. Absent configuration means yes.
+func (c ConsumerConfig) DesignEnabled() bool {
+	return c.Design == nil || c.Design.Default != DesignDefaultOff
+}
+
+// DesignTriggerWords is the destination's trigger vocabulary, nil when none
+// is configured.
+func (c ConsumerConfig) DesignTriggerWords() []string {
+	if c.Design == nil {
+		return nil
+	}
+	return append([]string(nil), c.Design.TriggerWords...)
+}
+
+// ReviewsInvestigation reports whether an investigation-only report is
+// reviewed for its grounding before it is posted. Absent means yes.
+func (c ConsumerConfig) ReviewsInvestigation() bool {
+	return c.Design == nil || c.Design.ReviewInvestigation == nil || *c.Design.ReviewInvestigation
 }
 
 type ModeConfig struct {
@@ -682,6 +765,9 @@ func (c ConsumerConfig) validate() error {
 	}
 	if c.ObservationLanguage != "" && !languageTagPattern.MatchString(c.ObservationLanguage) {
 		return errors.New("consumer observation language is invalid")
+	}
+	if err := c.Design.validate(); err != nil {
+		return err
 	}
 	if !validWorkflowFilename(c.StagingWorkflow) || !validWorkflowFilename(c.ProductionWorkflow) || c.StagingWorkflow == c.ProductionWorkflow {
 		return errors.New("consumer workflows are invalid")
