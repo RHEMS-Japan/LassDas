@@ -25,6 +25,13 @@ var (
 // sqlStatementProblem names why a statement is refused before it is sent.
 // The catalogue already required a single SELECT without a separator.
 func sqlStatementProblem(statement string) string {
+	// Quoted identifiers, comments, dollar quoting and Unicode escapes can
+	// spell a forbidden name so that no regular expression sees it. A read
+	// statement needs none of them.
+	if strings.ContainsAny(statement, "\"$\\") || strings.Contains(statement, "/*") || strings.Contains(statement, "--") ||
+		strings.Contains(strings.ToUpper(statement), "U&") || strings.Contains(strings.ToUpper(statement), "E'") {
+		return "quoted identifiers, comments, dollar quoting and escape strings are not allowed"
+	}
 	if m := sqlForbiddenFunction.FindStringSubmatch(statement); m != nil {
 		return fmt.Sprintf("function %s is not allowed", strings.ToLower(m[1]))
 	}

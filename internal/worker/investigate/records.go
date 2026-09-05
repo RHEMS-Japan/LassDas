@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/probe"
@@ -276,9 +277,12 @@ func validateInvestigationText(questions []string, findings []Finding, unknowns 
 	return nil
 }
 
+// validText accepts one line of prose: no control characters (a newline
+// would let a claim start a Markdown heading in DESIGN.md), trimmed, bounded.
 func validText(value string, limit int) bool {
 	trimmed := strings.TrimSpace(value)
-	return trimmed != "" && trimmed == value && utf8.ValidString(value) && len(value) <= limit && !strings.ContainsAny(value, "\x00\r")
+	return trimmed != "" && trimmed == value && utf8.ValidString(value) && len(value) <= limit &&
+		strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) < 0
 }
 
 // Verification forms a design may promise.
@@ -384,6 +388,11 @@ func (d Design) ValidateBinding(identity Identity, investigation Investigation) 
 		!sha256Pattern.MatchString(d.InvestigationSHA256) {
 		return errors.New("design is not bound to this round's investigation")
 	}
+	// The investigation handed in must be the sealed one, not an edited copy
+	// that kept the fingerprint: re-derive it like every other parent record.
+	if digest, err := investigationDigest(investigation); err != nil || digest != investigation.InvestigationSHA256 {
+		return errors.New("design's investigation does not verify")
+	}
 	if err := identity.validate(); err != nil {
 		return err
 	}
@@ -399,8 +408,8 @@ func (d Design) ValidateBinding(identity Identity, investigation Investigation) 
 			return fmt.Errorf("design cause cites %s, which no measured finding of the investigation carries", id)
 		}
 	}
-	if len(d.Alternatives) > maxAlternatives || len(d.BlastRadius) == 0 || len(d.BlastRadius) > maxBlastRadius || len(d.NotDoing) > maxNotDoing {
-		return errors.New("design lists are out of bounds")
+	if len(d.Alternatives) < 1 || len(d.Alternatives) > maxAlternatives || len(d.BlastRadius) == 0 || len(d.BlastRadius) > maxBlastRadius || len(d.NotDoing) > maxNotDoing {
+		return errors.New("design lists are out of bounds (one to three alternatives, at least one blast radius item)")
 	}
 	for _, list := range [][]string{d.Alternatives, d.BlastRadius, d.NotDoing} {
 		for _, item := range list {
@@ -425,6 +434,9 @@ func (d Design) ValidateBinding(identity Identity, investigation Investigation) 
 // Validate re-derives the binding to the investigation, the file set, the
 // cause's evidence, the verification and the fingerprint.
 func (d Design) Validate(identity Identity, investigation Investigation, bounds Bounds) error {
+	if bounds.MaxFiles < 1 || bounds.MaxFiles > 64 {
+		return errors.New("design bounds are invalid")
+	}
 	if err := d.ValidateBinding(identity, investigation); err != nil {
 		return err
 	}
@@ -505,7 +517,7 @@ func validateVerificationShape(v Verification) error {
 			return errors.New("wording verification carries measurement fields")
 		}
 		if !strings.HasPrefix(v.Path, "/") || !validText(v.Path, maxShortText) || !validText(v.ExpectedText, maxShortText) ||
-			(v.AbsentText != "" && !validText(v.AbsentText, maxShortText)) {
+			utf8.RuneCountInString(v.ExpectedText) < 2 || (v.AbsentText != "" && !validText(v.AbsentText, maxShortText)) {
 			return errors.New("wording verification is invalid")
 		}
 		return nil
@@ -532,7 +544,7 @@ func validateVerificationShape(v Verification) error {
 func validateVerificationBounds(v Verification, files []FileChange, bounds Bounds) error {
 	switch v.Form {
 	case VerificationWording:
-		return wordingCheck(v, files, bounds.RepoRoot)
+		return wordingCheckWithRoot(v, files, bounds.RepoRoot)
 	case VerificationMeasurement:
 		spec, ok := bounds.Catalog.Lookup(v.Probe)
 		if !ok {
@@ -554,16 +566,30 @@ func validateVerificationBounds(v Verification, files []FileChange, bounds Bound
 // stand at the baseline: the promised wording must not be there yet, and
 // the wording promised to disappear must be present somewhere.
 func wordingCheck(v Verification, files []FileChange, root string) error {
-	if root == "" {
-		return nil
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("baseline working copy: %w", err)
 	}
 	absentFound := v.AbsentText == ""
 	for _, file := range files {
-		content, err := os.ReadFile(filepath.Join(root, file.Path))
+		full := filepath.Join(root, file.Path)
+		info, err := os.Lstat(full)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue // a file the change creates
 			}
+			return fmt.Errorf("design file %q: %w", file.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			// A symbolic link would let the check read outside the working
+			// copy and report what it found through the objection.
+			return fmt.Errorf("design file %q is not a regular file", file.Path)
+		}
+		if resolved, err := filepath.EvalSymlinks(full); err != nil || !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
+			return fmt.Errorf("design file %q leaves the working copy", file.Path)
+		}
+		content, err := os.ReadFile(full)
+		if err != nil {
 			return fmt.Errorf("design file %q: %w", file.Path, err)
 		}
 		if strings.Contains(string(content), v.ExpectedText) {
@@ -654,4 +680,13 @@ func Write(path string, record any) error {
 		return err
 	}
 	return os.WriteFile(path, append(encoded, '\n'), 0o600)
+}
+
+// wordingCheckWithRoot refuses to skip the check: a wording promise without
+// a working copy to check against is not verifiable at design time.
+func wordingCheckWithRoot(v Verification, files []FileChange, root string) error {
+	if root == "" {
+		return errors.New("wording verification needs the baseline working copy to check against")
+	}
+	return wordingCheck(v, files, root)
 }
