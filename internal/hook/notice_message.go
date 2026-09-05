@@ -36,6 +36,54 @@ type PlanFacts struct {
 	Rationale   string
 	TargetFiles []string
 	Assumptions []string
+	// NeedsDesign and DesignReason are the reception's sealed design
+	// decision (readiness decision.json: needs_design, design_reason). An
+	// empty reason means the run's decision did not say - a decision sealed
+	// before the design stage existed - and the line is left out rather
+	// than guessed.
+	NeedsDesign  bool
+	DesignReason string
+}
+
+// designReasonPhrases are the requester-facing sentences for the machine
+// codes the reception seals as design_reason (internal/worker's
+// DesignReason* constants; a worker test pins that every code has a phrase
+// here). The codes are strings on purpose - this package cannot import the
+// worker, which imports it.
+var designReasonPhrases = map[string]string{
+	"approach_in_ticket":     "方針が本文にあるため設計を省略",
+	"investigation":          "調査の依頼のため設計は行わない",
+	"design_default_off":     "この納品先の設定で設計工程を使わないため設計を省略",
+	"approach_not_in_ticket": "本文に「どう直すか」が書かれていないため",
+	"target_files_over_two":  "触る予定のファイルが 3 つ以上のため",
+	"trigger_words_unset":    "設計を省略できる語彙が納品先に設定されていないため（安全側）",
+	"trigger_word":           "本文に稼働環境の観測を示す語があるため",
+	"proposer":               "受付の起案役が設計を要すると判断したため",
+	"checker_disagreed":      "受付の確認役が設計を要すると判断したため（起案役と不一致）",
+}
+
+// DesignReasonPhrase is the requester-facing sentence for one design_reason
+// code, and whether the code is one this package knows.
+func DesignReasonPhrase(reason string) (string, bool) {
+	phrase, known := designReasonPhrases[reason]
+	return phrase, known
+}
+
+// DesignDecisionLine renders the reception's design decision as the one line
+// the plan notice carries: what was decided and why, in the requester's
+// terms. It reports the sealed judgment; what the chain does with it is the
+// runtime's business. An unknown code still renders, naming the code, so a
+// newer engine's reason is never silently dropped.
+func DesignDecisionLine(needsDesign bool, reason string) string {
+	verdict := "設計なし"
+	if needsDesign {
+		verdict = "設計あり"
+	}
+	phrase, known := DesignReasonPhrase(reason)
+	if !known {
+		phrase = "理由コード " + reason
+	}
+	return verdict + ": " + phrase
 }
 
 const (
@@ -64,6 +112,9 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	}
 	if rationale := truncatePlanText(facts.Rationale); rationale != "" {
 		builder.WriteString("\n方針: " + rationale + "\n")
+	}
+	if reason := strings.TrimSpace(facts.DesignReason); reason != "" {
+		builder.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
 	}
 	writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
