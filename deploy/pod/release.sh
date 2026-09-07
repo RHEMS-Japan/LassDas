@@ -197,8 +197,9 @@ docker run --rm --platform linux/arm64 --entrypoint node "$tag" --version
 docker run --rm --platform linux/arm64 --entrypoint kubectl "$tag" version --client
 docker run --rm --platform linux/arm64 --entrypoint aws "$tag" --version
 say "launcher keeps its file capabilities in the image"
-docker run --rm --platform linux/arm64 --entrypoint getcap "$tag" /usr/local/bin/agentexec | grep -q cap_setuid \
-  || { echo "agentexec lost its file capabilities in the image (no cap_setuid): agents could not run as their own user" >&2; exit 1; }
+launcher_caps="$(docker run --rm --platform linux/arm64 --entrypoint getcap "$tag" /usr/local/bin/agentexec)"
+grep -q cap_setuid <<<"$launcher_caps" && grep -q cap_kill <<<"$launcher_caps" \
+  || { echo "agentexec lost its file capabilities in the image ($launcher_caps): agents could not run, or be stopped, as their own user" >&2; exit 1; }
 
 # ---- 7. runtime.json with the new identity --------------------------------
 # A pin is written only for a stage binary the live configuration names:

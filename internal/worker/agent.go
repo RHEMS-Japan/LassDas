@@ -209,6 +209,14 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		if command.Process == nil {
 			return nil
 		}
+		if launcher != "" {
+			// The agent user's processes are out of this user's reach: the
+			// launcher is asked to stop, kills the agent's own process group,
+			// and the agent dies with the launcher in any case (the
+			// parent-death signal); WaitDelay below kills a launcher that
+			// does not answer.
+			return syscall.Kill(command.Process.Pid, syscall.SIGTERM)
+		}
 		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
 	// Bounds how long a stopped run may go on holding its output open.

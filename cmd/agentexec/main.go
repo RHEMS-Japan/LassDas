@@ -24,7 +24,9 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -153,8 +155,7 @@ func parse(args []string) (invocation, error) {
 }
 
 // launch lends the workspace to the agent user, runs the command as that
-// user and returns the workspace afterwards. The command shares this
-// process's group, so the engine's group signal reaches the agent too.
+// user and returns the workspace afterwards.
 func launch(inv invocation, stdout, stderr io.Writer) int {
 	info, err := os.Stat(inv.workspace)
 	if err != nil || !info.IsDir() {
@@ -183,17 +184,49 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 	command.Stdin = nil
 	command.Stdout = stdout
 	command.Stderr = stderr
-	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: inv.uid, Gid: inv.gid, Groups: []uint32{inv.gid}}}
-	if err := command.Run(); err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return exit.ExitCode()
-		}
+	// The agent user's processes are out of the engine's reach (a signal
+	// from one user does not reach another's), so stopping is this
+	// launcher's job: the agent and its tools form their own process
+	// group, which the launcher kills (cap_kill) when the engine asks it
+	// to stop, and the kernel kills the agent when this launcher dies for
+	// any reason (the parent-death signal, sent with the launcher's
+	// capabilities). The thread that starts the child is the one whose
+	// death that signal follows, so it is pinned for the launcher's life.
+	runtime.LockOSThread()
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: inv.uid, Gid: inv.gid, Groups: []uint32{inv.gid}},
+		Setpgid:    true,
+	}
+	dieWithParent(command.SysProcAttr)
+	if err := command.Start(); err != nil {
 		if errors.Is(err, syscall.EPERM) || strings.Contains(err.Error(), "operation not permitted") {
 			fmt.Fprintln(stderr, "agentexec: cannot switch to the agent user: the launcher lacks its capabilities")
 		} else {
 			fmt.Fprintln(stderr, "agentexec:", err)
 		}
+		return exitLauncher
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(stop)
+	select {
+	case err = <-done:
+	case received := <-stop:
+		fmt.Fprintf(stderr, "agentexec: stopping the agent (%s)\n", received)
+		if killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); killErr != nil {
+			fmt.Fprintln(stderr, "agentexec: the agent's process group could not be signalled:", killErr)
+		}
+		<-done
+		return exitLauncher
+	}
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		fmt.Fprintln(stderr, "agentexec:", err)
 		return exitLauncher
 	}
 	return 0

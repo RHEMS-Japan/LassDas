@@ -345,6 +345,22 @@ if [ -d "$STATE/runs" ]; then
       "$LASSDAS_AGENT_LAUNCHER" --reclaim "$LEFT" || echo "note: $LEFT not reclaimed" >&2
     done
 fi
+# The engine's own home is closed to the agent user too (what an agent
+# reads from it, the worker copies into the home made for its launch).
+chmod 0700 "$HOME" 2>/dev/null || true
+# Runs made before this engine closed its records (0644 files, 0755
+# directories) are closed the same way once per boot: 0711 run directories
+# (the agent user enters its clone, cannot list), 0600 files and 0700
+# directories inside — the lent trees, the agents' homes and the MCP
+# description an agent reads (agent-mcp.json) aside.
+if [ -d "$STATE/runs" ]; then
+  LENT_TREES="( -path $STATE/runs/*/target-repo -o -path $STATE/runs/*/target-base -o -path $STATE/runs/*/validation-target -o -path $STATE/runs/*/agent-home )"
+  find "$STATE/runs" -mindepth 1 -maxdepth 1 -type d -user "$(id -un)" -exec chmod 0711 {} + 2>/dev/null || true
+  # shellcheck disable=SC2086 -- the expression is word-split on purpose
+  find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type f -not -name agent-mcp.json -perm /077 -exec chmod 0600 {} + 2>/dev/null || true
+  # shellcheck disable=SC2086
+  find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type d -perm /077 -exec chmod 0700 {} + 2>/dev/null || true
+fi
 # Then what the agent user must not open: the kept jar, the seed mount,
 # the kubeconfig and the token or key files it names, the AWS identity
 # files, a mounted service-account token, and whatever the operator lists
@@ -352,27 +368,40 @@ fi
 # tightened to 0600 first; a file the agent user can still read refuses
 # the boot, and the message names the mode to set. Secret volumes need
 # defaultMode: 0440 (the kubelet writes projected tokens 0640 by itself).
-GUARDED_FILES="$LASSDAS_E2E_SESSION_STATE_FILE:${LASSDAS_E2E_SESSION_FILE:-}:${KUBECONFIG:-}:${AWS_WEB_IDENTITY_TOKEN_FILE:-}:${AWS_SHARED_CREDENTIALS_FILE:-}:${AWS_CONFIG_FILE:-}:/var/run/secrets/kubernetes.io/serviceaccount/token:${LASSDAS_GUARDED_FILES:-}"
+GUARDED_LIST="$(printf '%s\n' "$LASSDAS_E2E_SESSION_STATE_FILE" "${LASSDAS_E2E_SESSION_FILE:-}" "${KUBECONFIG:-}" "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" "${AWS_SHARED_CREDENTIALS_FILE:-}" "${AWS_CONFIG_FILE:-}" /var/run/secrets/kubernetes.io/serviceaccount/token; printf '%s\n' "${LASSDAS_GUARDED_FILES:-}" | tr ':' '\n')"
 if [ -n "${KUBECONFIG:-}" ] && [ -r "$KUBECONFIG" ]; then
-  for NAMED_FILE in $(grep -oE '(tokenFile|token-file|client-key): *[^ ]+' "$KUBECONFIG" | sed -E 's/^[^:]+: *//'); do
-    GUARDED_FILES="$GUARDED_FILES:$NAMED_FILE"
-  done
+  # The files the kubeconfig names, quoted or not, taken relative to its
+  # own directory when relative (as the client takes them).
+  KUBECONFIG_DIR="$(dirname "$KUBECONFIG")"
+  while IFS= read -r NAMED_FILE; do
+    [ -n "$NAMED_FILE" ] || continue
+    case "$NAMED_FILE" in /*) ;; *) NAMED_FILE="$KUBECONFIG_DIR/$NAMED_FILE" ;; esac
+    [ -e "$NAMED_FILE" ] || echo "note: $KUBECONFIG names $NAMED_FILE, which does not exist" >&2
+    GUARDED_LIST="$GUARDED_LIST
+$NAMED_FILE"
+  done <<EOF
+$(sed -nE 's/^[[:space:]]*(tokenFile|token-file|client-key):[[:space:]]*"?([^"]*[^"[:space:]])"?[[:space:]]*$/\2/p' "$KUBECONFIG")
+EOF
 fi
 BOOT_REFUSED=""
-for GUARDED in $(printf '%s' "$GUARDED_FILES" | tr ':' '\n' | sort -u); do
-  [ -e "$GUARDED" ] || continue
-  if [ -O "$GUARDED" ]; then chmod go-rwx "$GUARDED" 2>/dev/null || true; fi
+while IFS= read -r GUARDED; do
+  [ -n "$GUARDED" ] && [ -e "$GUARDED" ] || continue
+  if [ -O "$GUARDED" ] && [ -n "$(find "$GUARDED" -maxdepth 0 -perm /077 2>/dev/null)" ]; then
+    chmod go-rwx "$GUARDED" 2>/dev/null && echo "agent separation: tightened $GUARDED to this user alone (0600)"
+  fi
   if "$LASSDAS_AGENT_LAUNCHER" --check "$GUARDED"; then
     echo "agent separation: $GUARDED is closed to the agent user"
   else
     CHECK_RC=$?
     case $CHECK_RC in
-      3) echo "REFUSING TO START: the agent user can read $GUARDED (a secret volume needs defaultMode: 0440; a file of the engine's user needs 0600)" >&2; BOOT_REFUSED=1 ;;
+      3) echo "REFUSING TO START: the agent user can read $GUARDED (a secret volume needs defaultMode: 0440 with the pod's fsGroup; a file of the engine's user needs 0600)" >&2; BOOT_REFUSED=1 ;;
       2) echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2; BOOT_REFUSED=1 ;;
       *) echo "note: agent separation check of $GUARDED returned $CHECK_RC" >&2 ;;
     esac
   fi
-done
+done <<EOF
+$(printf '%s\n' "$GUARDED_LIST" | sort -u)
+EOF
 [ -z "$BOOT_REFUSED" ] || exit 1
 
 attendant --config "$LASSDAS_RUNTIME_CONFIG" --interval 60s &
