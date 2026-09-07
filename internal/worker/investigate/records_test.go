@@ -285,13 +285,17 @@ func TestInvestigationRefusalsNameTheLineAndTheRule(t *testing.T) {
 		next      string
 		want      string
 	}{
-		"long claim":       {[]string{"q"}, []Finding{{Claim: long, Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim is 601 bytes (limit 600)"},
-		"too much cited":   {[]string{"q"}, []Finding{{Claim: "c", Evidence: []string{"m-0001", "m-0002", "m-0003", "m-0004", "m-0005", "m-0006", "m-0007", "m-0008", "m-0009"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1 cites 9 measurement ids (limit 8)"},
-		"newline in claim": {[]string{"q"}, []Finding{{Claim: "a\nb", Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim has a control character"},
-		"padded question":  {[]string{" q"}, nil, nil, "n", "question 1 has leading or trailing whitespace"},
-		"long unknown":     {[]string{"q"}, nil, []string{strings.Repeat("u", 301)}, "n", "unknown 1 is 301 bytes (limit 300)"},
-		"empty next":       {[]string{"q"}, nil, nil, " ", "next step is empty"},
-		"no question":      {nil, nil, nil, "n", "has no question"},
+		"long claim":         {[]string{"q"}, []Finding{{Claim: long, Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim is 601 bytes (limit 600)"},
+		"too much cited":     {[]string{"q"}, []Finding{{Claim: "c", Evidence: []string{"m-0001", "m-0002", "m-0003", "m-0004", "m-0005", "m-0006", "m-0007", "m-0008", "m-0009"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1 cites 9 measurement ids (limit 8)"},
+		"newline in claim":   {[]string{"q"}, []Finding{{Claim: "a\nb", Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim has a control character"},
+		"padded question":    {[]string{" q"}, nil, nil, "n", "question 1 has leading or trailing whitespace"},
+		"long unknown":       {[]string{"q"}, nil, []string{strings.Repeat("u", 301)}, "n", "unknown 1 is 301 bytes (limit 300)"},
+		"empty next":         {[]string{"q"}, nil, nil, " ", "next step is empty"},
+		"no question":        {nil, nil, nil, "n", "has no question"},
+		"too many questions": {make([]string, 9), nil, nil, "n", "has 9 questions (limit 8)"},
+		"too many findings":  {[]string{"q"}, make([]Finding, 21), nil, "n", "has 21 findings (limit 20)"},
+		"too many unknowns":  {[]string{"q"}, nil, make([]string, 21), "n", "has 21 unknowns (limit 20)"},
+		"bad utf-8":          {[]string{"q\xff"}, nil, nil, "n", "question 1 is not valid UTF-8"},
 	}
 	for name, tc := range cases {
 		err := validateInvestigationText(tc.questions, tc.findings, tc.unknowns, tc.next, nil)

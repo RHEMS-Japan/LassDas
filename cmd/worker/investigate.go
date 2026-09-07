@@ -111,7 +111,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 	started := time.Now()
 	result, err := invoker.Investigate(roundCtx, *config.Models.Designer, input, started)
 	if errors.Is(err, worker.ErrInvestigationIncomplete) {
-		return writeIncomplete(*outDir, result.Incomplete, result.LastAnswer, result.LastObjection)
+		return writeIncomplete(*outDir, result.Incomplete, result.LastRefusedAnswer, result.LastRefusedObjection)
 	}
 	if err != nil {
 		return err
@@ -230,16 +230,18 @@ func observationJar(seed, state string) []probe.Cookie {
 // sealed and, when the contract refused the role's answers, the last
 // refused answer and the objection — the conversation itself is not kept,
 // and without these an operator could not see what the role got wrong.
-func writeIncomplete(outDir, reason, lastAnswer, lastObjection string) error {
+func writeIncomplete(outDir, reason, lastRefusedAnswer, lastRefusedObjection string) error {
 	record := map[string]string{"reason": reason}
-	if lastAnswer != "" {
-		record["last_answer"] = lastAnswer
+	if lastRefusedAnswer != "" {
+		record["last_refused_answer"] = lastRefusedAnswer
 	}
-	if lastObjection != "" {
-		record["last_objection"] = lastObjection
+	if lastRefusedObjection != "" {
+		record["last_refused_objection"] = lastRefusedObjection
 	}
 	encoded, _ := json.Marshal(record)
-	if err := os.WriteFile(filepath.Join(outDir, incompleteFile), append(encoded, '\n'), 0o644); err != nil {
+	// The record may quote what the model saw of the measurements; it is
+	// kept as the measurements and the sealed records are.
+	if err := os.WriteFile(filepath.Join(outDir, incompleteFile), append(encoded, '\n'), 0o600); err != nil {
 		return err
 	}
 	return fmt.Errorf("investigation incomplete: %s", reason)

@@ -23,8 +23,11 @@ func TestWriteIncompleteKeepsTheLastAnswerAndObjection(t *testing.T) {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["reason"] == "" || record["last_answer"] != `{"report":{}}` || !strings.Contains(record["last_objection"], "limit 600") {
+	if record["reason"] == "" || record["last_refused_answer"] != `{"report":{}}` || !strings.Contains(record["last_refused_objection"], "limit 600") {
 		t.Fatalf("incomplete record = %v", record)
+	}
+	if info, err := os.Stat(filepath.Join(dir, incompleteFile)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("incomplete record mode = %v, %v; want 0600", info, err)
 	}
 	if err := writeIncomplete(t.TempDir(), "budget spent", "", ""); err == nil {
 		t.Fatal("writeIncomplete must return the incomplete error")

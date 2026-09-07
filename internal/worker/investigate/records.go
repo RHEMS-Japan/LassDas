@@ -309,9 +309,7 @@ func textProblem(value string, limit int) string {
 // validText accepts one line of prose: no control characters (a newline
 // would let a claim start a Markdown heading in DESIGN.md), trimmed, bounded.
 func validText(value string, limit int) bool {
-	trimmed := strings.TrimSpace(value)
-	return trimmed != "" && trimmed == value && utf8.ValidString(value) && len(value) <= limit &&
-		strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) < 0
+	return textProblem(value, limit) == ""
 }
 
 // Verification forms a design may promise.
