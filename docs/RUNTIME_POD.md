@@ -396,8 +396,9 @@ lists the designer and the judges as their own seats.
 The implementer, the candidate reviewers, the design judges and the
 applier are programs that read repository content; a prompt-injected one
 must not be able to read the operator's console session. The image has
-two users: `lassdas` (uid 1000), which runs the attendant, the runner and
-the worker, and `agent` (uid 2000), which runs every agent. The engine is
+the engine's user, `lassdas` (uid 1000), which runs the attendant, the
+runner and the worker, and a pool of agent users (uid 2000 to 2063), one
+of which runs each agent launch. The engine is
 unprivileged; the one program installed with file capabilities
 (`cap_setuid`, `cap_setgid`, `cap_chown`, `cap_kill`) is `/usr/local/bin/agentexec`,
 executable by the engine's user alone (`0750 root:lassdas`). The worker
@@ -429,9 +430,25 @@ implement|apply`, and the runner hands the rendered instruction to `worker
 run-instruction`, which starts the agent as above (the consumer's
 `agents.implementer` and `agents.applier` name the launches). No card
 runs an agent as the kanban's native worker under the engine's user any
-more. All agents share one user: what one agent can read while it runs —
-its own home and workspace — a concurrent agent could read too; a
-finished run's home and workspace are taken back and closed.
+more. The consumer's launch definitions are what runs: on the pod,
+`agents.implementer` (and `agents.applier` for the design mode) is
+`hermes --profile <the profile> -z` with `secret_env` mapping the
+profile's `api_key_env` to the pod's key variable, and its
+`timeout_seconds` now applies inside the card's wall (the implement card
+allows 90 minutes; a shorter agent timeout is the tighter of the two).
+
+Each launch runs as its own user: the image carries a pool of agent users
+(`agent`, `agent1` … `agent63`, uid 2000 to 2063, one group), the worker
+takes the first free one for the launch's life (a lock file under the
+state directory, freed when the worker lets go or dies), and the top of a
+lent workspace and home is closed to everyone but that user (0700). Two
+agents running at once are therefore different users: neither reads the
+other's workspace, home or process environment (its keys). What stays
+visible across users is what the kernel shows everyone — a process's
+command line, which for these agents carries the prompt — and a finished
+run's home is taken back and removed, its workspace taken back and kept
+closed. The launcher lends and returns trees under the runs directory
+alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint).
 
 Stopping an agent: a signal from the engine's user does not reach the
 agent user's processes, so the worker stops a run by sending the launcher
@@ -439,8 +456,10 @@ agent user's processes, so the worker stops a run by sending the launcher
 process group (the agent and every tool it started) and returns the
 workspace. The agent also dies with the launcher whatever killed it — the
 kernel sends it the parent-death signal with the launcher's capabilities
-— so a card's wall (the kanban's kill of the direct command) and the
-worker's timeout end the agent, not only the launcher. The engine's own
+— and a launcher whose engine died without a word (a card's wall kills
+the engine's process group, which the launcher is not in) notices within
+seconds that it was orphaned and stops its agent — so a card's wall and
+the worker's timeout end the agent, not only the launcher. The engine's own
 home is closed by the entrypoint (0700), and records of runs made before
 this engine closed its records are closed once per boot (0711 run
 directories, 0600 files and 0700 directories inside; the lent trees, the
@@ -519,7 +538,7 @@ means adding a row here and the test it names.
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
 | A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
-| An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable; the implement and apply cards run natively by the kanban under the engine's user; a profile directory the agent user could not write; a launcher check that ran a probe the agent user could not execute; a closed directory lent before its contents; an agent the engine could not stop, a signal from one user not reaching another's) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/worker` `TestRunInstructionRunsTheAgentOnTheRenderedInstruction`; `internal/runner` `TestChainImplementRunsTheInstructionThroughTheWorker`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`, `TestLendingOrdersADirectoryAfterItsContents`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check and the container verification in the release script | review of the sign-in change, 2026-09-03; reviews of the launcher and a container run, 2026-09-07 |
+| An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable; the implement and apply cards run natively by the kanban under the engine's user; a profile directory the agent user could not write; a launcher check that ran a probe the agent user could not execute; a closed directory lent before its contents; an agent the engine could not stop, a signal from one user not reaching another's; two agents of one user reading each other's keys; a boot reclaim whose find could end the boot) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/worker` `TestRunInstructionRunsTheAgentOnTheRenderedInstruction`; `internal/runner` `TestChainImplementRunsTheInstructionThroughTheWorker`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`, `TestLendingOrdersADirectoryAfterItsContents`, `TestParseKeepsToTheTreeRoot`; `internal/worker` `TestAgentUsersAreDistinctWhileHeld`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check and the container verification in the release script | review of the sign-in change, 2026-09-03; reviews of the launcher and a container run, 2026-09-07 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

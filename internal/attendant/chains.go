@@ -379,7 +379,41 @@ func chainPlanFor(config runtime.Config, runDir string, run state.RunOverview, l
 		logger.Error("the decision asks for the investigating designer but the pod has no design profiles", "run", run.RunID, "shape", string(plan.Shape))
 		return runtime.ChainPlan{}, errors.New("the pod has no profiles for the investigating designer's cards")
 	}
+	if plan.Shape == runtime.ShapeDesign {
+		// The design shape ends in the applier's card, which runs the
+		// consumer's agents.applier launch; without one the run would pay
+		// for the investigation, the design and two judges and then die
+		// at the apply card. Refused here, before any card exists.
+		hasApplier, err := consumerHasApplier(config.ConsumerConfigPath)
+		if err != nil {
+			return runtime.ChainPlan{}, err
+		}
+		if !hasApplier {
+			logger.Error("the decision asks for a design but the consumer configures no applier launch (agents.applier)", "run", run.RunID)
+			return runtime.ChainPlan{}, errors.New("the design shape needs the applier's launch (agents.applier)")
+		}
+	}
 	return plan, nil
+}
+
+// consumerHasApplier reads, leniently, whether the consumer configuration
+// gives the applier a launch.
+func consumerHasApplier(consumerConfigPath string) (bool, error) {
+	raw, err := os.ReadFile(consumerConfigPath)
+	if err != nil {
+		return false, errors.New("consumer config unreadable")
+	}
+	var parsed struct {
+		Agents struct {
+			Applier *struct {
+				Command string `json:"command"`
+			} `json:"applier"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false, errors.New("consumer config invalid")
+	}
+	return parsed.Agents.Applier != nil && parsed.Agents.Applier.Command != "", nil
 }
 
 // advanceClaimedRun keeps one in-flight chain honest: heal missing cards,

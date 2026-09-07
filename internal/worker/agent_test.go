@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -457,6 +458,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 		}
 	}
 	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
 	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"; cat "$HOME/.hermes/profiles/stand-in/config.yaml" "$HOME/.claude/RULES.md"`)
 	config := fixtureAgentConfig("author", name)
@@ -472,18 +474,24 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
-	if len(lines) != 4 || lines[0] != "--reclaim "+root || !strings.HasPrefix(lines[1], "--workspace "+root+" --home ") {
+	// The first free agent user of an empty pool; the launch names it.
+	launchPrefix := "--uid 2000 --workspace " + root + " --home "
+	if len(lines) != 4 || lines[0] != "--reclaim "+root || !strings.HasPrefix(lines[1], launchPrefix) {
 		t.Fatalf("launcher calls = %q", lines)
 	}
-	home := strings.TrimPrefix(lines[1], "--workspace "+root+" --home ")
+	home := strings.TrimPrefix(lines[1], launchPrefix)
 	home = home[:strings.Index(home, " -- ")]
 	// The home is made for this launch, beside the workspace, and seeded
-	// with what the program reads; both come back when the run ends.
+	// with what the program reads; both come back when the run ends, and
+	// the home is removed.
 	if !strings.HasPrefix(home, filepath.Join(filepath.Dir(root), "agent-home", "author-")) {
 		t.Fatalf("agent home = %q, want one made under the run directory", home)
 	}
 	if !strings.HasSuffix(lines[1], " -- "+name+" --profile stand-in do the thing") || lines[2] != "--reclaim "+home || lines[3] != "--reclaim "+root {
 		t.Fatalf("launcher calls = %q", lines)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the launch home was kept: %v", err)
 	}
 	for _, want := range []string{"agent ran in", "HOME=" + home, "model: stand-in", "the rule"} {
 		if !strings.Contains(outcome.Transcript, want) {
@@ -529,5 +537,32 @@ func TestAgentEnvironmentNeverCarriesTheSessionJar(t *testing.T) {
 	}
 	if !strings.Contains(joined, "HOME=/data/agent-home") || !strings.Contains(joined, "AGENT_TOKEN=credential") {
 		t.Fatalf("the agent environment lacks its home or its own credential: %q", environment)
+	}
+}
+
+// Two agents running at once are different users: the pool hands out the
+// first free user and frees it when the holder lets go (or dies).
+func TestAgentUsersAreDistinctWhileHeld(t *testing.T) {
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	first, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.uid != agentUIDBase || second.uid != agentUIDBase+1 {
+		t.Fatalf("users = %d, %d; want %d and %d", first.uid, second.uid, agentUIDBase, agentUIDBase+1)
+	}
+	first.release()
+	third, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.release()
+	defer second.release()
+	if third.uid != agentUIDBase {
+		t.Fatalf("a released user was not reused: got %d", third.uid)
 	}
 }

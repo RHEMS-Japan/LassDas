@@ -248,7 +248,12 @@ if ! kc set image "statefulset/$statefulset" "$container=$digest"; then
   exit 1
 fi
 rm -f "$patch_new" "$patch_old"
-kc rollout status "statefulset/$statefulset" --timeout=300s
+if ! kc rollout status "statefulset/$statefulset" --timeout=300s; then
+  echo "the rollout did not complete; if the pod refused to boot, the previous container's log says what to set:" >&2
+  kc logs "statefulset/$statefulset" -c "$container" --previous 2>/dev/null | grep -E 'REFUSING TO START|agent separation' >&2 || true
+  echo "the ConfigMap already carries the new pins: the way back is the previous image and the previous ConfigMap, set by hand" >&2
+  exit 1
+fi
 say "launcher switches users in the pod"
 launcher_rc=0
 kc exec "statefulset/$statefulset" -c "$container" -- /usr/local/bin/agentexec --check /etc/passwd || launcher_rc=$?

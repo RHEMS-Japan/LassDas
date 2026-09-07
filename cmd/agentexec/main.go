@@ -30,7 +30,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// orphanCheckInterval is how often a running launcher looks whether the
+// engine that started it is still its parent.
+var orphanCheckInterval = 2 * time.Second
 
 const (
 	defaultAgentUID = 2000
@@ -151,7 +156,34 @@ func parse(args []string) (invocation, error) {
 	if inv.uid == uint32(os.Getuid()) || inv.uid == 0 {
 		return invocation{}, fmt.Errorf("the agent user %d would not be a separate user", inv.uid)
 	}
+	if root := os.Getenv(treeRootEnv); root != "" {
+		// The blast radius of a chown: only trees under the runs directory
+		// are lent or returned, whatever path a caller names.
+		for _, dir := range []string{inv.workspace, inv.home, inv.reclaim} {
+			if dir != "" && !within(root, dir) {
+				return invocation{}, fmt.Errorf("%s is outside %s, the only tree this launcher lends or returns", dir, root)
+			}
+		}
+	}
 	return inv, nil
+}
+
+// treeRootEnv names the directory under which the launcher lends and
+// returns trees; set by the entrypoint to the runs directory.
+const treeRootEnv = "LASSDAS_AGENT_TREE_ROOT"
+
+// within reports whether dir is root or under it, by cleaned absolute paths
+// (symlinks are not followed anywhere in this program).
+func within(root, dir string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	return absDir == absRoot || strings.HasPrefix(absDir, absRoot+string(filepath.Separator))
 }
 
 // launch lends the workspace to the agent user, runs the command as that
@@ -211,25 +243,40 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer signal.Stop(stop)
-	select {
-	case err = <-done:
-	case received := <-stop:
-		fmt.Fprintf(stderr, "agentexec: stopping the agent (%s)\n", received)
-		if killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); killErr != nil {
-			fmt.Fprintln(stderr, "agentexec: the agent's process group could not be signalled:", killErr)
+	// The engine that started this launcher may die without a word (a
+	// card's wall kills the engine's process group, which this launcher is
+	// not in); an orphaned launcher stops its agent rather than leaving it
+	// running with its keys.
+	parent := os.Getppid()
+	orphanWatch := time.NewTicker(orphanCheckInterval)
+	defer orphanWatch.Stop()
+	reason := ""
+	for reason == "" {
+		select {
+		case err = <-done:
+			if err != nil {
+				var exit *exec.ExitError
+				if errors.As(err, &exit) {
+					return exit.ExitCode()
+				}
+				fmt.Fprintln(stderr, "agentexec:", err)
+				return exitLauncher
+			}
+			return 0
+		case received := <-stop:
+			reason = received.String()
+		case <-orphanWatch.C:
+			if os.Getppid() != parent {
+				reason = "the engine that started this launcher is gone"
+			}
 		}
-		<-done
-		return exitLauncher
 	}
-	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			return exit.ExitCode()
-		}
-		fmt.Fprintln(stderr, "agentexec:", err)
-		return exitLauncher
+	fmt.Fprintf(stderr, "agentexec: stopping the agent (%s)\n", reason)
+	if killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); killErr != nil {
+		fmt.Fprintln(stderr, "agentexec: the agent's process group could not be signalled:", killErr)
 	}
-	return 0
+	<-done
+	return exitLauncher
 }
 
 // agentEnv is the handed environment with the agent's own home; the
@@ -266,6 +313,14 @@ func ensureHome(home string, uid, gid uint32) error {
 // (the launcher holds no cap_dac_read_search). Symlinks are changed, not
 // followed.
 func lendTree(root string, uid, gid uint32) error {
+	// The top of a lent tree is closed to everyone but its user: agents
+	// are different users of one group, and one must not read another's
+	// workspace or home. Closed while this user still owns it (a chmod
+	// needs the owner), and it stays closed after the return (its owner,
+	// the engine, reads it all the same).
+	if err := os.Chmod(root, 0o700); err != nil {
+		return err
+	}
 	paths, err := treeDeepestFirst(root)
 	if err != nil {
 		return err

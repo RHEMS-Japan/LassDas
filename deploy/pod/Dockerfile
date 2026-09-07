@@ -100,8 +100,13 @@ RUN chmod 0755 /usr/local/bin/lassdas-entrypoint
 
 # Non-root. UID separation for agents (docs/RUNTIME_POD.md Phase-3 gate)
 # is layered on top: agents run as 'agent', the engine as 'lassdas'.
+# The agent users are a pool: agent (2000) and agent1 … agent63 (2001 to
+# 2063), all in the agent group. Each launch of an agent takes one for its
+# life (internal/worker, acquireAgentUser), so two agents running at once
+# are different users and cannot read each other's processes.
 RUN useradd --create-home --uid 1000 lassdas \
-    && useradd --create-home --uid 2000 agent
+    && useradd --create-home --uid 2000 agent \
+    && for i in $(seq 1 63); do useradd --no-create-home --uid $((2000 + i)) --gid agent --shell /usr/sbin/nologin "agent$i"; done
 # Agents run as the agent user (docs/RUNTIME_POD.md, "Agents under their
 # own user"): the launcher is the one program with file capabilities, and
 # only the engine's user may execute it. The pod must not set

@@ -95,3 +95,22 @@ func TestLendingOrdersADirectoryAfterItsContents(t *testing.T) {
 		t.Fatalf("lendTree: %v", err)
 	}
 }
+
+// With a tree root set, the launcher lends and returns nothing outside it,
+// whatever path it is given.
+func TestParseKeepsToTheTreeRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(treeRootEnv, root)
+	inside := filepath.Join(root, "delivery_1", "target-repo")
+	if _, err := parse([]string{"--reclaim", inside}); err != nil {
+		t.Fatalf("a path under the root was refused: %v", err)
+	}
+	for _, outside := range []string{"/usr/local/bin", filepath.Join(root, "..", "elsewhere"), root + "-sibling"} {
+		if _, err := parse([]string{"--reclaim", outside}); err == nil || !strings.Contains(err.Error(), "outside") {
+			t.Fatalf("%s: err = %v, want a refusal", outside, err)
+		}
+	}
+	if _, err := parse([]string{"--workspace", inside, "--home", "/tmp/elsewhere", "--", "true"}); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("a home outside the root was accepted: %v", err)
+	}
+}

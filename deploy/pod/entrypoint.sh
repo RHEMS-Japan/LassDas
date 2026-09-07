@@ -324,6 +324,8 @@ liveness() { touch "$STATE/heartbeat"; }
 # to the agent user by their modes — checked below, before anything else
 # starts.
 export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
+# The launcher lends and returns trees under the runs directory alone.
+export LASSDAS_AGENT_TREE_ROOT="${LASSDAS_AGENT_TREE_ROOT:-$STATE/runs}"
 # Boot check, fail-closed. First the launcher itself: without its file
 # capabilities (or under allowPrivilegeEscalation: false) it cannot switch
 # users, no agent could start, and a pod that is up but fails every run
@@ -339,9 +341,12 @@ fi
 # workspace, a lent home) comes back to this user before any card runs,
 # or the next dispatch of that run could neither clear nor read its tree.
 if [ -d "$STATE/runs" ]; then
-  { find "$STATE/runs" -mindepth 2 -maxdepth 2 ! -user "$(id -un)" 2>/dev/null
-    find "$STATE/runs" -mindepth 3 -maxdepth 3 -path '*/agent-home/*' ! -user "$(id -un)" 2>/dev/null; } \
-  | while read -r LEFT; do
+  # A directory the agent user closed (0700) makes find exit non-zero
+  # after listing it; that must not end the boot (it is what the reclaim
+  # below is for), hence the || true on each.
+  { find "$STATE/runs" -mindepth 2 -maxdepth 2 ! -user "$(id -un)" 2>/dev/null || true
+    find "$STATE/runs" -mindepth 3 -maxdepth 3 -path '*/agent-home/*' ! -user "$(id -un)" 2>/dev/null || true; } \
+  | while IFS= read -r LEFT; do
       "$LASSDAS_AGENT_LAUNCHER" --reclaim "$LEFT" || echo "note: $LEFT not reclaimed" >&2
     done
 fi

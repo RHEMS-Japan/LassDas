@@ -199,9 +199,9 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 	return nil
 }
 
-// chainSealAndReview seals what the implement card's native agent left in
-// the working copy, then runs the first configured reviewer on it. Sealing
-// lives here rather than on its own card because the kanban has no
+// chainSealAndReview seals what the implement card's agent left in the
+// working copy, then runs the first configured reviewer on it. Sealing lives
+// here rather than on its own card because the kanban has no
 // completion hook on a native worker; the first judge's card is the first
 // deterministic moment after the implementer finished.
 func (p *Pipeline) chainSealAndReview(ctx context.Context, reviewers []string, index int, repoRoot, baseRoot, baseSHA string) error {

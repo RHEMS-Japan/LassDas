@@ -33,3 +33,25 @@ func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 		}
 	}
 }
+
+// A design-shape run needs the applier's launch; the attendant sees the
+// gap before creating any card.
+func TestConsumerHasApplierReadsTheLaunch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "consumer.json")
+	for content, want := range map[string]bool{
+		`{"agents":{"implementer":{"command":"hermes"}}}`:                                false,
+		`{"agents":{"implementer":{"command":"hermes"},"applier":{"command":"hermes"}}}`: true,
+		`{"agents":{"applier":{}}}`:                                                      false,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := consumerHasApplier(path)
+		if err != nil || got != want {
+			t.Fatalf("%s: got %v, %v; want %v", content, got, err, want)
+		}
+	}
+	if _, err := consumerHasApplier(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Fatal("an unreadable configuration passed")
+	}
+}

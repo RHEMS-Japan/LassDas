@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -163,6 +164,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	}
 	launcher := agentLauncher()
 	agentHome := os.Getenv("HOME")
+	var user *agentUser
 	if launcher != "" {
 		// A launch that died with the pod left the tree to the agent user;
 		// it comes back before it is lent again.
@@ -171,6 +173,11 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		if err != nil {
 			return AgentOutcome{}, "", err
 		}
+		user, err = acquireAgentUser()
+		if err != nil {
+			return AgentOutcome{}, "", err
+		}
+		defer user.release()
 	}
 	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
@@ -189,10 +196,16 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		// "Agents under their own user"); both come back here too, for an
 		// agent the engine killed together with the launcher, and so the
 		// engine can read what the agent left in its home.
-		arguments = append([]string{"--workspace", root, "--home", agentHome, "--", config.Command}, arguments...)
+		arguments = append([]string{"--uid", strconv.Itoa(int(user.uid)), "--workspace", root, "--home", agentHome, "--", config.Command}, arguments...)
 		program = launcher
 		defer reclaimWorkspace(launcher, root)
-		defer reclaimWorkspace(launcher, agentHome)
+		defer func() {
+			// The home made for this launch is taken back and removed: the
+			// run record holds the transcript, and nothing of a launch is
+			// left for the next one to read.
+			reclaimWorkspace(launcher, agentHome)
+			_ = os.RemoveAll(agentHome)
+		}()
 	}
 	command := exec.CommandContext(runContext, program, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
 	command.Dir = root
@@ -411,6 +424,58 @@ func reclaimWorkspace(launcher, root string) {
 	if output, err := exec.Command(launcher, "--reclaim", root).CombinedOutput(); err != nil { // #nosec G204 -- the configured launcher.
 		fmt.Fprintf(os.Stderr, "worker: workspace not reclaimed: %v: %s\n", err, strings.TrimSpace(string(output)))
 	}
+}
+
+// The agent users the image carries: agent and agent1 … agent63, uid 2000
+// to 2063, all in the agent group. A launch holds one for its life, so two
+// agents running at once are different users: neither can read the other's
+// processes (their environment, their keys), workspace or home. The pool
+// is a directory of lock files under the state directory; a lock dies with
+// the worker that holds it, so a crash frees the user.
+const (
+	agentUIDBase  = 2000
+	agentUIDCount = 64
+)
+
+type agentUser struct {
+	uid  uint32
+	lock *os.File
+}
+
+func (u *agentUser) release() {
+	if u != nil && u.lock != nil {
+		_ = u.lock.Close()
+	}
+}
+
+// acquireAgentUser takes the first free agent user, or fails closed when
+// every one is in use.
+func acquireAgentUser() (*agentUser, error) {
+	dir := filepath.Join(agentPoolRoot(), "agent-uids")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, errors.New("the agent user pool is unavailable")
+	}
+	for i := 0; i < agentUIDCount; i++ {
+		uid := agentUIDBase + i
+		file, err := os.OpenFile(filepath.Join(dir, strconv.Itoa(uid)), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, errors.New("the agent user pool is unavailable")
+		}
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return &agentUser{uid: uint32(uid), lock: file}, nil
+		}
+		_ = file.Close()
+	}
+	return nil, errors.New("every agent user is in use")
+}
+
+// agentPoolRoot is where the pool's lock files live: the state directory
+// of the pod, a temporary directory elsewhere.
+func agentPoolRoot() string {
+	if state := os.Getenv("LASSDAS_STATE_DIR"); state != "" {
+		return state
+	}
+	return os.TempDir()
 }
 
 // ReclaimWorkspace returns a tree to this user when a launcher is
