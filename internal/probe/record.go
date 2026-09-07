@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -119,6 +121,30 @@ func (r *Recorder) Append(measurement Measurement) (Measurement, error) {
 	r.chain = measurement.ChainSHA256
 	return measurement, nil
 }
+
+// Lookup returns one recorded measurement by id, with its stored output,
+// after verifying the chain up to it. The record is the source: a model
+// that reads on beyond its excerpt reads exactly what was stored.
+func (r *Recorder) Lookup(id string) (Measurement, error) {
+	index := 0
+	if recordedIDPattern.MatchString(id) {
+		index, _ = strconv.Atoi(id[2:])
+	}
+	if index < 1 || index > r.count {
+		return Measurement{}, fmt.Errorf("%w: %q is not a recorded measurement id", ErrReadRefused, id)
+	}
+	measurements, err := ReadPrefix(r.path, index)
+	if err != nil {
+		return Measurement{}, err
+	}
+	if len(measurements) < index {
+		return Measurement{}, fmt.Errorf("%w: only %d of %d lines present", ErrChainBroken, len(measurements), index)
+	}
+	return measurements[index-1], nil
+}
+
+// recordedIDPattern is the id shape Append assigns (measurementID).
+var recordedIDPattern = regexp.MustCompile(`^m-[0-9]{4}$`)
 
 // chainValue links one line to everything before it.
 func chainValue(previous, line string) string {

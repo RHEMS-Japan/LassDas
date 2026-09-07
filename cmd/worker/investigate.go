@@ -129,8 +129,9 @@ func runInvestigate(ctx context.Context, args []string) error {
 	}
 	usage, _ := json.Marshal(struct {
 		Turns int                    `json:"turns"`
+		Reads int                    `json:"reads"`
 		Usage worker.InvocationUsage `json:"usage"`
-	}{Turns: result.Turns, Usage: result.Usage})
+	}{Turns: result.Turns, Reads: result.Reads, Usage: result.Usage})
 	if err := os.WriteFile(filepath.Join(*outDir, "invocation.json"), append(usage, '\n'), 0o644); err != nil {
 		return err
 	}

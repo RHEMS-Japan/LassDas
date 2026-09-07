@@ -372,3 +372,109 @@ func TestInvestigateAsksAgainOnceAfterAContentFilterVerdict(t *testing.T) {
 		t.Fatalf("two length cutoffs: err = %v after %d requests, want the cutoff named after 2", err, len(api.requests))
 	}
 }
+
+// An output longer than the excerpt is read on: the role asks for the next
+// window at the excerpt's end, then at each next_offset, and the windows
+// together with the excerpt are the stored output; a bad offset is
+// objected to, and the read budget ends the paging honestly.
+func TestInvestigateReadsBeyondTheExcerpt(t *testing.T) {
+	input, path := investigationFixture(t, 10)
+	long := strings.Repeat("line of the event list\n", 200) // 4600 bytes, excerpt is 1 KiB
+	if err := os.WriteFile(filepath.Join(input.Bounds.RepoRoot, "web", "events.txt"), []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input.Session.Limits.MaxReads = 3
+	report := `{"report":{"questions":["How long is the list?"],"findings":[{"claim":"The list has 200 lines","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Nothing."}}`
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.read","args":{"path":"web/events.txt"}}}`,
+		`{"read":{"id":"m-0001","offset":1024}}`,
+		`{"read":{"id":"m-0001","offset":99999}}`, // outside the record: objected, not counted as a window
+		`{"read":{"id":"m-0001","offset":2048}}`,
+		`{"read":{"id":"m-0001","offset":3072}}`, // the fourth request: over the read budget of 3
+		report,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("Investigate() error = %v (%s)", err, result.Incomplete)
+	}
+	// Two windows shown; the refused offset counted too; the request over
+	// the budget was not (nothing was looked up for it).
+	if result.Reads != 2 || input.Session.Reads != 3 {
+		t.Fatalf("reads = %d shown, %d counted; want 2 windows shown and the refused request counted", result.Reads, input.Session.Reads)
+	}
+	if len(api.requests) != 6 {
+		t.Fatalf("requests = %d, want one per answer", len(api.requests))
+	}
+	// The window messages carry the stored bytes from the offset on.
+	messages := api.requests[2].Messages
+	last := messages[len(messages)-1].Content
+	if !strings.Contains(last, `"offset":1024`) || !strings.Contains(last, `"next_offset":2048`) || !strings.Contains(last, `"remaining":2552`) || !strings.Contains(last, `"stored_bytes":4600`) {
+		t.Fatalf("the first window was not shown as recorded: %s", last[:200])
+	}
+	objection := api.requests[3].Messages
+	if !strings.Contains(objection[len(objection)-1].Content, "outside the stored output") {
+		t.Fatalf("a bad offset was not objected to: %s", objection[len(objection)-1].Content[:200])
+	}
+	exhausted := api.requests[5].Messages
+	if !strings.Contains(exhausted[len(exhausted)-1].Content, "read budget is spent") {
+		t.Fatalf("the read budget was not announced: %s", exhausted[len(exhausted)-1].Content[:200])
+	}
+	measurements, err := probe.ReadPrefix(path, 1)
+	if err != nil || len(measurements) != 1 || measurements[0].OutputBytes != 4600 {
+		t.Fatalf("the read did not stay off the record: %+v, %v", measurements, err)
+	}
+}
+
+// A read is one of the four shapes; combined with another, or malformed,
+// it is refused like any other out-of-contract answer.
+func TestDecodeTurnAnswerAcceptsARead(t *testing.T) {
+	if answer, err := decodeTurnAnswer([]byte(`{"read":{"id":"m-0002","offset":0}}`), ModeInvestigation); err != nil || answer.Read == nil || answer.Read.ID != "m-0002" {
+		t.Fatalf("a read was not accepted: %+v, %v", answer, err)
+	}
+	if _, err := decodeTurnAnswer([]byte(`{"read":{"id":"m-0002","offset":0},"probe":{"probe":"repo.list"}}`), ModeInvestigation); err == nil {
+		t.Fatal("a read combined with a probe was accepted")
+	}
+	if answer, err := decodeTurnAnswer([]byte(`{"read":{"id":"m-0002","offset":0}}`), ModeDesign); err != nil || answer.Read == nil {
+		t.Fatalf("a read after the seal was refused: %v", err)
+	}
+}
+
+// Windows count toward the conversation's excerpt budget and are withdrawn
+// like excerpts, named by the measurement id and the window's offset so
+// the id alone stays citable.
+func TestInvestigationWithdrawsOldWindowsOverTheBudget(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	input.ExcerptBudget = 1200 // one excerpt (1 KiB) plus a little
+	if err := os.WriteFile(filepath.Join(input.Bounds.RepoRoot, "web", "events.txt"), []byte(strings.Repeat("y", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.read","args":{"path":"web/events.txt"}}}`,
+		`{"read":{"id":"m-0001","offset":1024}}`,
+		`{"read":{"id":"m-0001","offset":2048}}`,
+		`{"report":{"questions":["q"],"findings":[{"claim":"3000 bytes","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	messages := api.requests[3].Messages
+	var withdrawn struct {
+		ID        string `json:"measurement_id"`
+		Offset    int    `json:"window_offset"`
+		Withdrawn bool   `json:"window_withdrawn"`
+		Head      string `json:"head"`
+	}
+	// The excerpt (message 3) and the first window (message 5) were withdrawn
+	// once the second window arrived; the latest window stays.
+	if !strings.Contains(messages[3].Content, `"excerpt_withdrawn":true`) {
+		t.Errorf("the excerpt was not withdrawn: %s", messages[3].Content[:120])
+	}
+	if err := json.Unmarshal([]byte(messages[5].Content), &withdrawn); err != nil || !withdrawn.Withdrawn || withdrawn.ID != "m-0001" || withdrawn.Offset != 1024 || !strings.HasPrefix(withdrawn.Head, "yyyy") {
+		t.Errorf("the first window was not withdrawn by id and offset: %s (%v)", messages[5].Content[:160], err)
+	}
+	if !strings.Contains(messages[7].Content, `"offset":2048`) || !strings.Contains(messages[7].Content, `"text":"yyyy`) {
+		t.Errorf("the latest window was withdrawn too: %s", messages[7].Content[:120])
+	}
+}
