@@ -409,7 +409,8 @@ func investigationSystemPrompt(mode string) string {
 	if mode == ModeDesign {
 		design = `
 After the report is sealed you will be asked for the design: {"design":{"cause":"one sentence","cause_evidence":["m-0001"],"approach":"one sentence","alternatives":["not taken"],"files":[{"path":"exact path","changes":["what changes there"]}],"verification":{"form":"wording","path":"/page","expected_text":"…","absent_text":"…"} or {"form":"measurement","probe":"id","args":{},"metric":"time_total","threshold":3.0},"blast_radius":["…"],"not_doing":["…"]}}
-cause_evidence must cite ids that your measured findings cite. files must stay inside the allowed prefixes and be the smallest set. A wording promise must not already be true in the current files.`
+cause_evidence must cite ids that your measured findings cite. files must stay inside the allowed prefixes and be the smallest set. A wording promise must not already be true in the current files.
+Design record limits (the kernel refuses a design outside them and tells you which line and why): cause and approach are one line of at most 600 bytes; every alternative, blast_radius item, not_doing item and change note is one line of at most 300 bytes — no newline, no leading or trailing whitespace; 1 to 3 alternatives, 1 to 12 blast_radius items, at most 12 not_doing items, 1 to 12 change notes per file; cause_evidence cites 1 to 8 measurement ids.`
 	}
 	return strings.TrimSpace(`
 You are the investigating designer under an immutable automation contract. You measure the live system and the repository through one tool and then write what you found.

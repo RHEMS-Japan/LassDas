@@ -423,25 +423,39 @@ func (d Design) ValidateBinding(identity Identity, investigation Investigation) 
 	if err := identity.validate(); err != nil {
 		return err
 	}
-	if !validText(d.Cause, maxLongText) || !validText(d.Approach, maxLongText) {
-		return errors.New("design cause or approach is invalid")
+	if problem := textProblem(d.Cause, maxLongText); problem != "" {
+		return fmt.Errorf("design cause %s", problem)
+	}
+	if problem := textProblem(d.Approach, maxLongText); problem != "" {
+		return fmt.Errorf("design approach %s", problem)
 	}
 	measured := investigation.MeasuredEvidence()
-	if len(d.CauseEvidence) == 0 || len(d.CauseEvidence) > maxCauseEvidence {
+	if len(d.CauseEvidence) == 0 {
 		return errors.New("design cause cites no measurement")
+	}
+	if len(d.CauseEvidence) > maxCauseEvidence {
+		return fmt.Errorf("design cause cites %d measurement ids (limit %d)", len(d.CauseEvidence), maxCauseEvidence)
 	}
 	for _, id := range d.CauseEvidence {
 		if !measured[id] {
 			return fmt.Errorf("design cause cites %s, which no measured finding of the investigation carries", id)
 		}
 	}
-	if len(d.Alternatives) < 1 || len(d.Alternatives) > maxAlternatives || len(d.BlastRadius) == 0 || len(d.BlastRadius) > maxBlastRadius || len(d.NotDoing) > maxNotDoing {
-		return errors.New("design lists are out of bounds (one to three alternatives, at least one blast radius item)")
+	switch {
+	case len(d.Alternatives) < 1 || len(d.Alternatives) > maxAlternatives:
+		return fmt.Errorf("design has %d alternatives (one to %d)", len(d.Alternatives), maxAlternatives)
+	case len(d.BlastRadius) == 0 || len(d.BlastRadius) > maxBlastRadius:
+		return fmt.Errorf("design has %d blast radius items (one to %d)", len(d.BlastRadius), maxBlastRadius)
+	case len(d.NotDoing) > maxNotDoing:
+		return fmt.Errorf("design has %d not_doing items (limit %d)", len(d.NotDoing), maxNotDoing)
 	}
-	for _, list := range [][]string{d.Alternatives, d.BlastRadius, d.NotDoing} {
-		for _, item := range list {
-			if !validText(item, maxShortText) {
-				return errors.New("design list item is invalid")
+	for _, list := range []struct {
+		name  string
+		items []string
+	}{{"alternative", d.Alternatives}, {"blast radius item", d.BlastRadius}, {"not_doing item", d.NotDoing}} {
+		for index, item := range list.items {
+			if problem := textProblem(item, maxShortText); problem != "" {
+				return fmt.Errorf("design %s %d %s", list.name, index+1, problem)
 			}
 		}
 	}
@@ -503,12 +517,15 @@ func validateFileShape(files []FileChange) error {
 			return fmt.Errorf("design file path %q is invalid", file.Path)
 		}
 		seen[file.Path] = true
-		if len(file.Changes) == 0 || len(file.Changes) > maxChangeNotes {
-			return fmt.Errorf("design file %q lists no changes or too many", file.Path)
+		if len(file.Changes) == 0 {
+			return fmt.Errorf("design file %q lists no changes", file.Path)
 		}
-		for _, change := range file.Changes {
-			if !validText(change, maxShortText) {
-				return fmt.Errorf("design file %q has an invalid change note", file.Path)
+		if len(file.Changes) > maxChangeNotes {
+			return fmt.Errorf("design file %q lists %d changes (limit %d)", file.Path, len(file.Changes), maxChangeNotes)
+		}
+		for index, change := range file.Changes {
+			if problem := textProblem(change, maxShortText); problem != "" {
+				return fmt.Errorf("design file %q change %d %s", file.Path, index+1, problem)
 			}
 		}
 	}
