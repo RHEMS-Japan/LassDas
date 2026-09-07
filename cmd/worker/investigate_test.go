@@ -10,7 +10,7 @@ import (
 
 // An incomplete round records why, and what the role last answered and was
 // told, so the operator can see what kept being refused.
-func TestWriteIncompleteKeepsTheLastAnswerAndObjection(t *testing.T) {
+func TestWriteIncompleteKeepsTheLastRefusedAnswerAndObjection(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeIncomplete(dir, "the model's report kept failing the checks", `{"report":{}}`, "investigation finding 1: claim is 700 bytes (limit 600)"); err == nil {
 		t.Fatal("writeIncomplete must return the incomplete error")
