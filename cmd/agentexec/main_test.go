@@ -114,3 +114,28 @@ func TestParseKeepsToTheTreeRoot(t *testing.T) {
 		t.Fatalf("a home outside the root was accepted: %v", err)
 	}
 }
+
+// The launcher switches to pool users only, in their own group: a foreign
+// group would hand the agent whatever that group may read.
+func TestParseKeepsToThePoolUsers(t *testing.T) {
+	for _, args := range [][]string{
+		{"--uid", "3000", "--reclaim", "/w"},
+		{"--uid", "1999", "--reclaim", "/w"},
+		{"--gid", "1000", "--reclaim", "/w"},
+	} {
+		if _, err := parse(args); err == nil {
+			t.Fatalf("%v was accepted", args)
+		}
+	}
+	inv, err := parse([]string{"--uid", "2063", "--reclaim", "/w"})
+	if err != nil || inv.uid != 2063 || inv.gid != 2000 {
+		t.Fatalf("the last pool user was refused: %v (%+v)", err, inv)
+	}
+	// The tree root reaches the launcher but not the agent.
+	env := agentEnv([]string{"PATH=/bin", treeRootEnv + "=/data/runs"}, "/h", 2001)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, treeRootEnv+"=") {
+			t.Fatalf("the tree root reached the agent: %v", env)
+		}
+	}
+}

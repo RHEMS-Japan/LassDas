@@ -39,6 +39,8 @@ import (
 var orphanCheckInterval = 2 * time.Second
 
 const (
+	// The pool of agent users the image carries (agent, agent1 … agent63).
+	agentUserCount  = 64
 	defaultAgentUID = 2000
 	defaultAgentGID = 2000
 	// exitLauncher says the launcher itself could not do its job (no
@@ -157,6 +159,14 @@ func parse(args []string) (invocation, error) {
 	if inv.uid == uint32(os.Getuid()) || inv.uid == 0 {
 		return invocation{}, fmt.Errorf("the agent user %d would not be a separate user", inv.uid)
 	}
+	// Only the pool's users, and only their group: a group of the engine's
+	// (or any other) would open what that group can read to the agent.
+	if inv.uid < defaultAgentUID || inv.uid >= defaultAgentUID+agentUserCount {
+		return invocation{}, fmt.Errorf("the agent user %d is outside the pool (%d to %d)", inv.uid, defaultAgentUID, defaultAgentUID+agentUserCount-1)
+	}
+	if inv.gid != defaultAgentGID {
+		return invocation{}, fmt.Errorf("the agent group must be %d", defaultAgentGID)
+	}
 	if root := os.Getenv(treeRootEnv); root != "" {
 		// The blast radius of a chown: only trees under the runs directory
 		// are lent or returned, whatever path a caller names.
@@ -206,6 +216,12 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 		return exitLauncher
 	}
 	defer lock.Close()
+	// The user is this launch's alone from here on; whatever a previous
+	// holder left running as it (a crash freed the user before its
+	// launcher noticed) is stopped before anything is lent to it.
+	if left := stopUser(inv.uid); left > 0 {
+		fmt.Fprintf(stderr, "agentexec: %d process(es) of the agent user were still running and were stopped before the lend\n", left)
+	}
 	if err := ensureHome(inv.home, inv.uid, inv.gid); err != nil {
 		fmt.Fprintln(stderr, "agentexec: agent home:", err)
 		return exitLauncher
@@ -304,7 +320,7 @@ func agentEnv(environ []string, home string, uid uint32) []string {
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
-		case "HOME", "USER", "LOGNAME":
+		case "HOME", "USER", "LOGNAME", treeRootEnv:
 			continue
 		}
 		out = append(out, entry)

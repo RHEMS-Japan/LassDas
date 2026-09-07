@@ -437,7 +437,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	record := filepath.Join(t.TempDir(), "launcher.log")
 	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + record + "\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\necho \"HOME=$HOME\"\nexec \"$@\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + record + "\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\necho \"HOME=$HOME\"\necho \"TREE=$LASSDAS_AGENT_TREE_ROOT\"\nexec \"$@\"\n"
 	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -458,9 +458,10 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 		}
 	}
 	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
 	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
-	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"; cat "$HOME/.hermes/profiles/stand-in/config.yaml" "$HOME/.claude/RULES.md"`)
+	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"; echo "TMPDIR=$TMPDIR"; test -d "$TMPDIR" && echo "tmpdir exists"; cat "$HOME/.hermes/profiles/stand-in/config.yaml" "$HOME/.claude/RULES.md"`)
 	config := fixtureAgentConfig("author", name)
 	config.Args = []string{"--profile", "stand-in"}
 	config.Profile = "stand-in"
@@ -493,7 +494,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the launch home was kept: %v", err)
 	}
-	for _, want := range []string{"agent ran in", "HOME=" + home, "model: stand-in", "the rule"} {
+	for _, want := range []string{"agent ran in", "HOME=" + home, "TREE=" + filepath.Dir(root), "TMPDIR=" + filepath.Join(home, "tmp"), "tmpdir exists", "model: stand-in", "the rule"} {
 		if !strings.Contains(outcome.Transcript, want) {
 			t.Fatalf("the agent did not run through the launcher with its seeded home: %q lacks %q", outcome.Transcript, want)
 		}

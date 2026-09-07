@@ -440,11 +440,16 @@ allows 90 minutes; a shorter agent timeout is the tighter of the two).
 Each launch runs as its own user: the image carries a pool of agent users
 (`agent`, `agent1` … `agent63`, uid 2000 to 2063, one group), the worker
 takes the first free one for the launch's life (a lock file under the
-state directory, freed when the worker lets go or dies; the kanban
+state directory — the pool refuses to live anywhere else — freed when the
+worker lets go or dies; the launcher accepts those users and their group
+alone, and stops whatever a previous holder of the user left running
+before it lends anything; the kanban
 dispatches at most eight cards at once by default, far below the pool,
 and a launch that finds every user taken fails closed), sets `USER` and
 `LOGNAME` to that user's own name, and the top of a
-lent workspace and home is closed to everyone but that user (0700). Two
+lent workspace and home is closed to everyone but that user (0700); the
+agent's temporary files go to a `tmp` inside its home (`TMPDIR`), not to
+the `/tmp` every user shares. Two
 agents running at once are therefore different users: neither reads the
 other's workspace, home or process environment (its keys). What stays
 visible across users is what the kernel shows everyone — a process's

@@ -175,6 +175,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		}
 		user, err = acquireAgentUser()
 		if err != nil {
+			_ = os.RemoveAll(agentHome)
 			return AgentOutcome{}, "", err
 		}
 		defer user.release()
@@ -182,6 +183,15 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
 		return AgentOutcome{}, "", err
+	}
+	if launcher != "" {
+		// The agent's temporary files live in its own home, not in the
+		// /tmp every user shares; the tree root reaches the launcher (which
+		// keeps it from the agent) so its bounds hold at the launch too.
+		environment = append(environment, "TMPDIR="+filepath.Join(agentHome, "tmp"))
+		if root := os.Getenv(AgentTreeRootEnv); root != "" {
+			environment = append(environment, AgentTreeRootEnv+"="+root)
+		}
 	}
 
 	runContext, cancel := context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
@@ -204,7 +214,9 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 			// run record holds the transcript, and nothing of a launch is
 			// left for the next one to read.
 			reclaimWorkspace(launcher, agentHome)
-			_ = os.RemoveAll(agentHome)
+			if err := os.RemoveAll(agentHome); err != nil {
+				fmt.Fprintf(os.Stderr, "worker: launch home not removed: %v\n", err)
+			}
 		}()
 	}
 	command := exec.CommandContext(runContext, program, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
@@ -415,6 +427,10 @@ func validatedWorkspace(workspace string) (string, error) {
 // as this process does, at its home — the runner mode outside the pod.
 const AgentLauncherEnv = "LASSDAS_AGENT_LAUNCHER"
 
+// AgentTreeRootEnv names the directory under which the launcher lends and
+// returns trees; the worker hands it to the launcher at every launch.
+const AgentTreeRootEnv = "LASSDAS_AGENT_TREE_ROOT"
+
 func agentLauncher() string { return os.Getenv(AgentLauncherEnv) }
 
 // reclaimWorkspace asks the launcher to return a workspace to this user.
@@ -451,7 +467,11 @@ func (u *agentUser) release() {
 // acquireAgentUser takes the first free agent user, or fails closed when
 // every one is in use.
 func acquireAgentUser() (*agentUser, error) {
-	dir := filepath.Join(agentPoolRoot(), "agent-uids")
+	root, err := agentPoolRoot()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, "agent-uids")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, errors.New("the agent user pool is unavailable")
 	}
@@ -470,12 +490,13 @@ func acquireAgentUser() (*agentUser, error) {
 }
 
 // agentPoolRoot is where the pool's lock files live: the state directory
-// of the pod, a temporary directory elsewhere.
-func agentPoolRoot() string {
+// of the pod, and nowhere else — a shared temporary directory would let
+// an agent plant the lock files first.
+func agentPoolRoot() (string, error) {
 	if state := os.Getenv("LASSDAS_STATE_DIR"); state != "" {
-		return state
+		return state, nil
 	}
-	return os.TempDir()
+	return "", errors.New("the agent user pool needs LASSDAS_STATE_DIR")
 }
 
 // ReclaimWorkspace returns a tree to this user when a launcher is
@@ -509,6 +530,9 @@ func prepareAgentHome(config AgentConfig, root string) (string, error) {
 	}
 	home, err := os.MkdirTemp(base, config.ID+"-")
 	if err != nil {
+		return "", errors.New("agent home could not be prepared")
+	}
+	if err := os.Mkdir(filepath.Join(home, "tmp"), 0o700); err != nil {
 		return "", errors.New("agent home could not be prepared")
 	}
 	seeds := append([]string(nil), agentHomeSeeds...)
