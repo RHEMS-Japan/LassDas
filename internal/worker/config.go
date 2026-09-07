@@ -94,6 +94,12 @@ func (c Config) maxRunStage() int {
 type AgentSet struct {
 	Implementer AgentConfig `json:"implementer"`
 	Reviewer    AgentConfig `json:"reviewer"`
+	// Applier, when present, is the launch of the light implementer that
+	// copies an approved design (docs/INVESTIGATING_DESIGNER.md §7). A
+	// design-backed delivery without it fails at its apply card, closed.
+	// A pointer so an absent applier leaves the configuration's canonical
+	// form — and every digest bound to it — exactly as it was.
+	Applier *AgentConfig `json:"applier,omitempty"`
 	// ReviewerAgents, when present, gives a reviewer endpoint its own launch
 	// definition — its own profile, its own credential source — instead of
 	// the shared Reviewer one. A reviewer without an entry keeps the shared
@@ -116,6 +122,9 @@ type ReviewerAgent struct {
 	Agent      AgentConfig `json:"agent"`
 }
 
+// applierConfigured reports whether the consumer gave the applier a launch.
+func (a AgentSet) applierConfigured() bool { return a.Applier != nil }
+
 func (a AgentSet) validate() error {
 	if err := a.Implementer.validate(); err != nil {
 		return fmt.Errorf("implementer agent: %w", err)
@@ -128,6 +137,15 @@ func (a AgentSet) validate() error {
 		return errors.New("agent ids must differ")
 	}
 	ids[a.Reviewer.ID] = struct{}{}
+	if a.applierConfigured() {
+		if err := a.Applier.validate(); err != nil {
+			return fmt.Errorf("applier agent: %w", err)
+		}
+		if _, exists := ids[a.Applier.ID]; exists {
+			return errors.New("agent ids must differ")
+		}
+		ids[a.Applier.ID] = struct{}{}
+	}
 	if len(a.ReviewerAgents) > 4 {
 		return errors.New("reviewer agents are invalid")
 	}
@@ -175,6 +193,9 @@ func (a AgentSet) validate() error {
 		ids[entry.Agent.ID] = struct{}{}
 	}
 	launchable := []AgentConfig{a.Implementer}
+	if a.applierConfigured() {
+		launchable = append(launchable, *a.Applier)
+	}
 	if len(a.ReviewerAgents) == 0 {
 		launchable = append(launchable, a.Reviewer)
 	}

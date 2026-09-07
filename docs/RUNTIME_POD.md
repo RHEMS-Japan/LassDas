@@ -401,16 +401,34 @@ the worker, and `agent` (uid 2000), which runs every agent. The engine is
 unprivileged; the one program installed with file capabilities
 (`cap_setuid`, `cap_setgid`, `cap_chown`) is `/usr/local/bin/agentexec`,
 executable by the engine's user alone (`0750 root:lassdas`). The worker
-starts each agent through it (`LASSDAS_AGENT_LAUNCHER`,
-`LASSDAS_AGENT_HOME`, both set by the entrypoint): the launcher lends the
-workspace to the agent user (chown, without following symlinks), starts
-the agent under that user with the environment the worker composed — the
-launch definition's own variables, the path, a locale and the agent's home
-— and returns the workspace when the agent exits; the worker asks for it
-back once more afterwards, for an agent it killed together with the
-launcher. The agent's home (`$STATE/agent-home`) carries the engine's
-copies of the agent profiles (readable, rewritten every boot) and belongs
-to the agent user from the first run on, so Hermes keeps its state there.
+starts each agent through it (`LASSDAS_AGENT_LAUNCHER`, set by the
+entrypoint): the launcher lends the workspace to the agent user (chown,
+deepest first, without following symlinks), starts the agent under that
+user with the environment the worker composed — the launch definition's
+own variables, the path, a locale and the agent's home — and returns the
+workspace when the agent exits; the worker asks for it back once more
+afterwards, for an agent it killed together with the launcher, and takes
+it back before lending it, for a launch that died with the pod. The home
+is made for each launch (`agent-home/<id>-…` in the run directory) and
+seeded from the engine's home with what the agent's program reads there —
+its Hermes profile (`config.yaml`, written every boot), the knowledge
+rules the worker placed, a reviewer program's configuration — so nothing
+an agent wrote into an earlier home reaches the next launch and two
+agents running at once never share one; the launcher lends the whole
+directory (Hermes keeps its state beside its profile), and the worker
+takes it back when the run ends, so the engine can read what was left. At
+boot the entrypoint takes back whatever a pod that died mid-run left to
+the agent user under the runs directory.
+
+In the cards orchestration every card that runs an agent is a direct
+command: the implement and apply cards run `runner chain-stage --stage
+implement|apply`, and the runner hands the rendered instruction to `worker
+run-instruction`, which starts the agent as above (the consumer's
+`agents.implementer` and `agents.applier` name the launches). No card
+runs an agent as the kanban's native worker under the engine's user any
+more. All agents share one user: what one agent can read while it runs —
+its own home and workspace — a concurrent agent could read too; a
+finished run's home and workspace are taken back and closed.
 
 What stays closed to the agent user by mode: the kept jar
 (`$STATE/e2e-session`, 0700/0600), the engine's secrets (`$STATE/secrets`,
@@ -438,6 +456,14 @@ cannot read or write, and the launcher holds no `cap_fsetid`, so the
 chown back clears any set-user-id bit an agent left behind. The launcher
 is not among the pinned stage binaries; it runs nothing of its own
 choosing and only the engine's user can start it.
+Verify a built image before it ships, from a container run as the
+engine's user: `agentexec --check /etc/shadow` exits 0 (closed),
+`agentexec --check /etc/passwd` exits 3 (readable), and
+`agentexec --workspace "$(mktemp -d)" --home "$(mktemp -d)" -- id` prints
+the agent user; the check's probe is the system shell run as that user,
+because the launcher itself is not executable by it. The release script
+asserts the first in the image and the second in the pod after the
+rollout.
 
 ## Release discipline: the regression set
 
@@ -466,7 +492,7 @@ means adding a row here and the test it names.
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
 | A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
-| An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check | review of the sign-in change, 2026-09-03; review of the launcher, 2026-09-07 |
+| An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable; the implement and apply cards run natively by the kanban under the engine's user; a profile directory the agent user could not write; a launcher check that ran a probe the agent user could not execute; a closed directory lent before its contents) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/worker` `TestRunInstructionRunsTheAgentOnTheRenderedInstruction`; `internal/runner` `TestChainImplementRunsTheInstructionThroughTheWorker`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`, `TestLendingOrdersADirectoryAfterItsContents`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check and the container verification in the release script | review of the sign-in change, 2026-09-03; reviews of the launcher and a container run, 2026-09-07 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

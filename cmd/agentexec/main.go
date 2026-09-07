@@ -13,8 +13,8 @@
 //	agentexec [--uid N] [--gid N] --workspace DIR --home DIR -- COMMAND [ARGS...]
 //	agentexec --reclaim DIR          returns a workspace to the engine user
 //	agentexec --check PATH           exit 0 when the agent user cannot open PATH,
-//	                                 3 when it can, 2 when the launcher cannot switch users
-//	agentexec --probe PATH           (internal) the child of --check
+//	                                 3 when it can, 4 when PATH is missing,
+//	                                 2 when the launcher cannot switch users
 package main
 
 import (
@@ -47,7 +47,6 @@ type invocation struct {
 	home      string
 	reclaim   string
 	check     string
-	probe     string
 	command   []string
 }
 
@@ -62,8 +61,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitLauncher
 	}
 	switch {
-	case inv.probe != "":
-		return probe(inv.probe)
 	case inv.check != "":
 		return check(inv, stderr)
 	case inv.reclaim != "":
@@ -130,8 +127,6 @@ func parse(args []string) (invocation, error) {
 			inv.reclaim, err = value()
 		case "--check":
 			inv.check, err = value()
-		case "--probe":
-			inv.probe, err = value()
 		default:
 			return invocation{}, fmt.Errorf("unknown argument %q", arg)
 		}
@@ -140,7 +135,7 @@ func parse(args []string) (invocation, error) {
 		}
 	}
 	modes := 0
-	for _, set := range []bool{inv.reclaim != "", inv.check != "", inv.probe != "", len(inv.command) > 0} {
+	for _, set := range []bool{inv.reclaim != "", inv.check != "", len(inv.command) > 0} {
 		if set {
 			modes++
 		}
@@ -170,8 +165,11 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agentexec: agent home:", err)
 		return exitLauncher
 	}
-	if err := chownTree(inv.workspace, inv.uid, inv.gid); err != nil {
+	if err := lendTree(inv.workspace, inv.uid, inv.gid); err != nil {
 		fmt.Fprintln(stderr, "agentexec: workspace:", err)
+		if back := chownTree(inv.workspace, uint32(os.Getuid()), uint32(os.Getgid())); back != nil {
+			fmt.Fprintln(stderr, "agentexec: workspace not returned:", back)
+		}
 		return exitLauncher
 	}
 	defer func() {
@@ -224,62 +222,106 @@ func ensureHome(home string, uid, gid uint32) error {
 	if err != nil || !info.IsDir() {
 		return errors.New("not a directory")
 	}
-	for _, dir := range []string{home, filepath.Join(home, ".hermes")} {
-		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
-			if err := os.Lchown(dir, int(uid), int(gid)); err != nil {
-				return err
-			}
+	// The whole home: the agent's program keeps its state under it (a
+	// Hermes profile makes directories of its own beside its config).
+	return lendTree(home, uid, gid)
+}
+
+// lendTree gives every entry under root to the agent user, deepest first:
+// a directory is changed after its contents were listed, because a
+// directory the agent user owns and others cannot read would end the walk
+// (the launcher holds no cap_dac_read_search). Symlinks are changed, not
+// followed.
+func lendTree(root string, uid, gid uint32) error {
+	paths, err := treeDeepestFirst(root)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := os.Lchown(path, int(uid), int(gid)); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// chownTree changes the owner of every entry under root without following
-// symbolic links, so a link inside a workspace cannot reach outside it.
-func chownTree(root string, uid, gid uint32) error {
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+// treeDeepestFirst lists root and everything under it, every directory
+// after its contents.
+func treeDeepestFirst(root string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		return os.Lchown(path, int(uid), int(gid))
+		paths = append(paths, path)
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(paths)-1; i < j; i, j = i+1, j-1 {
+		paths[i], paths[j] = paths[j], paths[i]
+	}
+	return paths, nil
+}
+
+// chownTree returns every entry under root to the given user, a directory
+// before its contents, so a directory the agent user closed opens again
+// for the listing. Symlinks are changed, not followed.
+func chownTree(root string, uid, gid uint32) error {
+	// Best effort to the end: a tree half returned is worse than one
+	// returned with its failures listed.
+	var failures []error
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			failures = append(failures, err)
+			return nil
+		}
+		if err := os.Lchown(path, int(uid), int(gid)); err != nil {
+			failures = append(failures, err)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		failures = append(failures, walkErr)
+	}
+	return errors.Join(failures...)
 }
 
 // check asks a child running as the agent user to open the path; the
-// child's exit says what the agent user can do.
+// child's exit says what the agent user can do. The child is the system
+// shell, not this program: the launcher is executable by the engine's
+// user alone, so the agent user could not run a probe built into it. A
+// control run first proves the switch and the shell work, so a failing
+// probe means "closed" and never "could not look". The children get a
+// bare environment: the engine's variables are not theirs to see.
 func check(inv invocation, stderr io.Writer) int {
-	self, err := os.Executable()
-	if err != nil {
+	if _, err := os.Lstat(inv.check); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return exitMissing
+		}
 		fmt.Fprintln(stderr, "agentexec:", err)
 		return exitLauncher
 	}
-	command := exec.Command(self, "--probe", inv.check) // #nosec G204 -- this program itself.
-	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: inv.uid, Gid: inv.gid, Groups: []uint32{inv.gid}}}
-	err = command.Run()
+	credential := &syscall.Credential{Uid: inv.uid, Gid: inv.gid, Groups: []uint32{inv.gid}}
+	control := exec.Command("/bin/sh", "-c", "exit 0")
+	control.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
+	control.Env = []string{"PATH=/usr/bin:/bin"}
+	if err := control.Run(); err != nil {
+		fmt.Fprintln(stderr, "agentexec: cannot switch to the agent user: the launcher lacks its capabilities")
+		return exitLauncher
+	}
+	probe := exec.Command("/bin/sh", "-c", `exec 3<"$1"`, "agentexec-probe", inv.check)
+	probe.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
+	probe.Env = []string{"PATH=/usr/bin:/bin"}
+	err := probe.Run()
 	if err == nil {
-		return 0
+		return exitReadable
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return exit.ExitCode()
-	}
-	fmt.Fprintln(stderr, "agentexec: cannot switch to the agent user: the launcher lacks its capabilities")
-	return exitLauncher
-}
-
-// probe is the child of check: it runs as the agent user and reports
-// whether the path opens.
-func probe(path string) int {
-	file, err := os.Open(path)
-	if err == nil {
-		_ = file.Close()
-		return exitReadable
-	}
-	if errors.Is(err, fs.ErrPermission) {
 		return 0
 	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return exitMissing
-	}
-	return 0
+	fmt.Fprintln(stderr, "agentexec:", err)
+	return exitLauncher
 }

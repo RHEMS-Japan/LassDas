@@ -196,6 +196,9 @@ docker run --rm --platform linux/arm64 --entrypoint go "$tag" version
 docker run --rm --platform linux/arm64 --entrypoint node "$tag" --version
 docker run --rm --platform linux/arm64 --entrypoint kubectl "$tag" version --client
 docker run --rm --platform linux/arm64 --entrypoint aws "$tag" --version
+say "launcher keeps its file capabilities in the image"
+docker run --rm --platform linux/arm64 --entrypoint getcap "$tag" /usr/local/bin/agentexec | grep -q cap_setuid \
+  || { echo "agentexec lost its file capabilities in the image (no cap_setuid): agents could not run as their own user" >&2; exit 1; }
 
 # ---- 7. runtime.json with the new identity --------------------------------
 # A pin is written only for a stage binary the live configuration names:
@@ -245,6 +248,10 @@ if ! kc set image "statefulset/$statefulset" "$container=$digest"; then
 fi
 rm -f "$patch_new" "$patch_old"
 kc rollout status "statefulset/$statefulset" --timeout=300s
+say "launcher switches users in the pod"
+launcher_rc=0
+kc exec "statefulset/$statefulset" -c "$container" -- /usr/local/bin/agentexec --check /etc/passwd || launcher_rc=$?
+[[ "$launcher_rc" == "3" ]] || { echo "agentexec --check /etc/passwd returned $launcher_rc in the pod, want 3 (readable): the launcher cannot switch users there (file capabilities dropped at exec?)" >&2; exit 1; }
 
 # ---- 9. the pod's own verdict is the only acceptance --------------------
 say "pod identity check"

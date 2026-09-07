@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,5 +57,41 @@ func TestRunWithoutCapabilitiesFailsClosed(t *testing.T) {
 	}
 	if code := run([]string{"--check", workspace}, &out, &errs); code != exitLauncher {
 		t.Fatalf("--check without capabilities = %d, want %d", code, exitLauncher)
+	}
+}
+
+// Lending walks deepest first: a closed directory (0700) handed to the
+// agent user before its contents were listed would end the walk, and the
+// workspace would be half lent.
+func TestLendingOrdersADirectoryAfterItsContents(t *testing.T) {
+	root := t.TempDir()
+	closed := filepath.Join(root, "closed")
+	if err := os.Mkdir(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(closed, "file")
+	if err := os.WriteFile(inner, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := treeDeepestFirst(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := func(want string) int {
+		for i, path := range paths {
+			if path == want {
+				return i
+			}
+		}
+		t.Fatalf("%s not listed", want)
+		return -1
+	}
+	if !(index(inner) < index(closed) && index(closed) < index(root)) {
+		t.Fatalf("order = %v, want the file, then its directory, then the root", paths)
+	}
+	// Lending to this same user is a no-op chown that must still walk the
+	// closed directory.
+	if err := lendTree(root, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+		t.Fatalf("lendTree: %v", err)
 	}
 }

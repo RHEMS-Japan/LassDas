@@ -76,6 +76,8 @@ func run(ctx context.Context, args []string) error {
 		return runSealCandidate(args[1:])
 	case "implement-instruction":
 		return runImplementInstruction(args[1:])
+	case "run-instruction":
+		return runRunInstruction(ctx, args[1:])
 	case "review":
 		return runReview(ctx, args[1:])
 	case "agent-review":

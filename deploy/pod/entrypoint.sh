@@ -166,12 +166,17 @@ agent:
   max_turns: 40
 YAML
 
-# The implementer profile runs the native Hermes agent through the gateway
-# under its own virtual key. The shape (a named provider addressed as
-# custom:<name>, the model selected via model.provider/model.name) is the
-# one measured working on the pod (2026-08-24: OK-implementer /
-# OK-review-a / OK-review-b probes through all three identities); written
-# every boot like the other profiles, so a restart heals drift.
+# The implementer profile: a direct command like the reviews, so the
+# runner receives the card and the worker starts Hermes under the agent
+# user through the launcher (docs/RUNTIME_POD.md, "Agents under their own
+# user"); the kanban used to run this profile as a native worker under the
+# engine's user. The worker copies this profile into the home it makes for
+# each launch, so the model settings below are what the agent runs with.
+# The shape (a named provider addressed as custom:<name>, the model
+# selected via model.provider/model.name) is the one measured working on
+# the pod (2026-08-24: OK-implementer / OK-review-a / OK-review-b probes
+# through all three identities); written every boot like the other
+# profiles, so a restart heals drift.
 #
 # agent.max_turns is Hermes' cap on tool-calling iterations (its default is
 # 500). An implementer that stops making progress burns the whole budget:
@@ -181,6 +186,12 @@ YAML
 IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
 mkdir -p "$IMPLEMENTER_HOME"
 cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - implement
 model:
   provider: custom:lassdas-gateway
   name: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
@@ -227,12 +238,20 @@ agent:
 YAML
 done
 
-# The applier profile: a native agent like the implementer, but it copies
-# an approved design and stops on doubt (docs/INVESTIGATING_DESIGNER.md §7).
-# Forty turns is its whole budget: the design already decided everything.
+# The applier profile: a direct command like the implementer's, and the
+# agent copies an approved design and stops on doubt
+# (docs/INVESTIGATING_DESIGNER.md §7). Forty turns is its whole budget: the
+# design already decided everything. The consumer's agents.applier names
+# the launch the worker runs (hermes --profile lassdas-applier -z).
 APPLIER_HOME="$HOME/.hermes/profiles/lassdas-applier"
 mkdir -p "$APPLIER_HOME"
 cat > "$APPLIER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - apply
 model:
   provider: custom:lassdas-gateway
   name: ${LASSDAS_APPLIER_MODEL}
@@ -299,24 +318,12 @@ liveness() { touch "$STATE/heartbeat"; }
 
 # Agents run as the agent user (#23, docs/RUNTIME_POD.md "Agents under
 # their own user"): the worker starts every agent through the launcher,
-# which lends it the workspace and this home. The agent's Hermes profiles
-# are the engine's copies (readable, rewritten every boot); the top of the
-# home becomes the agent's on first use so Hermes can keep its own state
-# there. The kept jar, the seed mount, the identities the probes use, the
-# secrets and the run records stay closed to the agent user by their
-# modes — checked below, before anything else starts.
+# which lends it the workspace and a home made for that launch (seeded
+# from this user's profiles above). The kept jar, the seed mount, the
+# identities the probes use, the secrets and the run records stay closed
+# to the agent user by their modes — checked below, before anything else
+# starts.
 export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
-export LASSDAS_AGENT_HOME="${LASSDAS_AGENT_HOME:-$STATE/agent-home}"
-AGENT_PROFILES="$LASSDAS_AGENT_HOME/.hermes/profiles"
-mkdir -p "$AGENT_PROFILES" 2>/dev/null || true
-for AGENT_PROFILE in lassdas-implementer lassdas-review-a lassdas-review-b lassdas-applier lassdas-design-review-a lassdas-design-review-b; do
-  SOURCE="$HOME/.hermes/profiles/$AGENT_PROFILE/config.yaml"
-  [ -f "$SOURCE" ] || continue
-  mkdir -p "$AGENT_PROFILES/$AGENT_PROFILE" && chmod 0755 "$AGENT_PROFILES/$AGENT_PROFILE" \
-    && cp "$SOURCE" "$AGENT_PROFILES/$AGENT_PROFILE/config.yaml" && chmod 0644 "$AGENT_PROFILES/$AGENT_PROFILE/config.yaml" \
-    || echo "note: agent profile $AGENT_PROFILE could not be placed under $AGENT_PROFILES" >&2
-done
-chmod 0755 "$LASSDAS_AGENT_HOME" "$LASSDAS_AGENT_HOME/.hermes" "$AGENT_PROFILES" 2>/dev/null || true
 # Boot check, fail-closed. First the launcher itself: without its file
 # capabilities (or under allowPrivilegeEscalation: false) it cannot switch
 # users, no agent could start, and a pod that is up but fails every run
@@ -327,6 +334,16 @@ if "$LASSDAS_AGENT_LAUNCHER" --check /etc/passwd; then :; else
     echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2
     exit 1
   fi
+fi
+# What a launch left to the agent user when the pod died mid-run (a lent
+# workspace, a lent home) comes back to this user before any card runs,
+# or the next dispatch of that run could neither clear nor read its tree.
+if [ -d "$STATE/runs" ]; then
+  { find "$STATE/runs" -mindepth 2 -maxdepth 2 ! -user "$(id -un)" 2>/dev/null
+    find "$STATE/runs" -mindepth 3 -maxdepth 3 -path '*/agent-home/*' ! -user "$(id -un)" 2>/dev/null; } \
+  | while read -r LEFT; do
+      "$LASSDAS_AGENT_LAUNCHER" --reclaim "$LEFT" || echo "note: $LEFT not reclaimed" >&2
+    done
 fi
 # Then what the agent user must not open: the kept jar, the seed mount,
 # the kubeconfig and the token or key files it names, the AWS identity

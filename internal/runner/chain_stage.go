@@ -155,9 +155,48 @@ func (p *Pipeline) RunChainStage(ctx context.Context, stage string) error {
 		return p.chainValidate(ctx, reviewers)
 	case runtime.StagePublish:
 		return p.chainPublish(ctx, reviewers)
+	case runtime.StageImplement:
+		return p.chainRunInstruction(ctx, "implementer", repoRoot, baseSHA)
+	case runtime.StageApply:
+		return p.chainRunInstruction(ctx, "applier", repoRoot, baseSHA)
 	default:
 		return fmt.Errorf("chain stage %q is not runnable as a command", stage)
 	}
+}
+
+// chainRunInstruction runs the implementer or the applier on the
+// instruction the attendant rendered (INSTRUCTION.md). The card is a direct
+// command like the reviews, so the agent starts through the worker and its
+// launcher under the agent user instead of as the kanban's native worker
+// under the engine's user (issue #23); the seal of what it left stays with
+// the first review card, as before. The run record goes to the round the
+// seal will complete.
+func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, baseSHA string) error {
+	instruction := p.path("INSTRUCTION.md")
+	if _, err := os.Stat(instruction); err != nil {
+		return errors.New("no instruction to run")
+	}
+	round := p.currentRound()
+	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), round)
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return err
+	}
+	record := fmt.Sprintf("%s/%s-run.json", stageDir, role)
+	// A re-dispatched card writes its own record; the record is
+	// exclusive-create, so the earlier attempt's must go first.
+	if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	args := []string{
+		"run-instruction", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+		"--draft", p.path("ticket-draft.json"), "--role", role, "--instruction", instruction,
+		"--repo-root", repoRoot, "--base-sha", baseSHA, "--stage", strconv.Itoa(round),
+		"--knowledge-root", p.Config.KnowledgeRoot, "--out", record,
+	}
+	if code, err := p.worker(ctx, "run-instruction", args); err != nil || code != 0 {
+		return fmt.Errorf("the %s did not finish", role)
+	}
+	return nil
 }
 
 // chainSealAndReview seals what the implement card's native agent left in

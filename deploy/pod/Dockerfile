@@ -112,7 +112,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libcap2
     && chown root:lassdas /usr/local/bin/agentexec \
     && chmod 0750 /usr/local/bin/agentexec \
     && setcap cap_setuid,cap_setgid,cap_chown+ep /usr/local/bin/agentexec \
-    && getcap /usr/local/bin/agentexec
+    && getcap /usr/local/bin/agentexec | grep -q cap_setuid
 USER lassdas
 WORKDIR /home/lassdas
 

@@ -440,30 +440,60 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
+	// What the engine's home holds for the agent's program: its Hermes
+	// profile and the knowledge rules the worker placed.
+	engineHome := t.TempDir()
+	t.Setenv("HOME", engineHome)
+	for relative, content := range map[string]string{
+		".hermes/profiles/stand-in/config.yaml": "model: stand-in\n",
+		".claude/RULES.md":                      "the rule\n",
+	} {
+		target := filepath.Join(engineHome, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv(AgentLauncherEnv, launcher)
-	t.Setenv(AgentHomeEnv, home)
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
-	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"`)
-	outcome, _, err := runAgentProcess(context.Background(), fixtureAgentConfig("author", name), root, "do the thing")
+	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"; cat "$HOME/.hermes/profiles/stand-in/config.yaml" "$HOME/.claude/RULES.md"`)
+	config := fixtureAgentConfig("author", name)
+	config.Args = []string{"--profile", "stand-in"}
+	config.Profile = "stand-in"
+	config.Knowledge.Rules = []KnowledgePlacement{{From: "rules/RULES.md", To: ".claude/RULES.md"}}
+	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing")
 	if err != nil {
 		t.Fatalf("runAgentProcess() error = %v (%s)", err, outcome.Transcript)
-	}
-	if !strings.Contains(outcome.Transcript, "agent ran in") || !strings.Contains(outcome.Transcript, "HOME="+home) {
-		t.Fatalf("the agent did not run through the launcher with its own home: %q", outcome.Transcript)
 	}
 	logged, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
-	if len(lines) != 2 || !strings.HasPrefix(lines[0], "--workspace "+root+" --home "+home+" -- "+name+" ") || lines[1] != "--reclaim "+root {
+	if len(lines) != 4 || lines[0] != "--reclaim "+root || !strings.HasPrefix(lines[1], "--workspace "+root+" --home ") {
 		t.Fatalf("launcher calls = %q", lines)
 	}
-	// Half a configuration is no configuration: the agent runs as us, at home.
-	t.Setenv(AgentHomeEnv, "")
-	if launcher, home := agentLauncher(); launcher != "" || home != os.Getenv("HOME") {
-		t.Fatalf("half-set launcher accepted: %q %q", launcher, home)
+	home := strings.TrimPrefix(lines[1], "--workspace "+root+" --home ")
+	home = home[:strings.Index(home, " -- ")]
+	// The home is made for this launch, beside the workspace, and seeded
+	// with what the program reads; both come back when the run ends.
+	if !strings.HasPrefix(home, filepath.Join(filepath.Dir(root), "agent-home", "author-")) {
+		t.Fatalf("agent home = %q, want one made under the run directory", home)
+	}
+	if !strings.HasSuffix(lines[1], " -- "+name+" --profile stand-in do the thing") || lines[2] != "--reclaim "+home || lines[3] != "--reclaim "+root {
+		t.Fatalf("launcher calls = %q", lines)
+	}
+	for _, want := range []string{"agent ran in", "HOME=" + home, "model: stand-in", "the rule"} {
+		if !strings.Contains(outcome.Transcript, want) {
+			t.Fatalf("the agent did not run through the launcher with its seeded home: %q lacks %q", outcome.Transcript, want)
+		}
+	}
+	// Unset, the agent runs as us, at home.
+	t.Setenv(AgentLauncherEnv, "")
+	if agentLauncher() != "" {
+		t.Fatal("an unset launcher was reported set")
 	}
 }
 
