@@ -1062,8 +1062,9 @@ func (c ModelConfig) validate() error {
 		judgeModels := make(map[string]struct{}, len(c.DesignReviewers))
 		for _, judge := range c.DesignReviewers {
 			// A judge carries no candidate-review lens; one given is kept to
-			// the reviewer's shape, none is fine.
-			if err := judge.validate(judge.Lens != ""); err != nil {
+			// the reviewer's shape, none is fine, and a design lens is
+			// allowed either way (it applies when a caller passes no letter).
+			if err := judge.validateAs(judge.Lens != "", true); err != nil {
 				return fmt.Errorf("design reviewer: %w", err)
 			}
 			if _, exists := judgeIDs[judge.ID]; exists {
@@ -1173,7 +1174,11 @@ func ValidateModelEndpoint(m ModelEndpoint) error {
 	return m.validate(m.Lens != "")
 }
 
-func (m ModelEndpoint) validate(reviewer bool) error {
+func (m ModelEndpoint) validate(reviewer bool) error { return m.validateAs(reviewer, false) }
+
+// validateAs is validate with the design judge's allowance: a judge may
+// carry no candidate-review lens and still hold a design lens.
+func (m ModelEndpoint) validateAs(reviewer, judge bool) error {
 	if !identifierPattern.MatchString(m.ID) || m.Vendor == "" || m.Model == "" ||
 		strings.TrimSpace(m.Vendor) != m.Vendor || strings.TrimSpace(m.Model) != m.Model ||
 		strings.ContainsAny(m.Vendor+m.Model, "\r\n\x00") || m.MaxOutputTokens < 128 || m.MaxOutputTokens > MaxConfiguredOutputTokens {
@@ -1185,13 +1190,13 @@ func (m ModelEndpoint) validate(reviewer bool) error {
 	if !apiKeyEnvPattern.MatchString(m.APIKeyEnv) {
 		return errors.New("model api key environment name is invalid")
 	}
-	if reviewer && (m.Lens == "" || strings.TrimSpace(m.Lens) != m.Lens || len(m.Lens) > 512 || strings.ContainsAny(m.Lens, "\r\n\x00")) {
+	if reviewer && !validLens(m.Lens) {
 		return errors.New("reviewer lens is invalid")
 	}
 	if !reviewer && m.Lens != "" {
 		return errors.New("implementer lens must be empty")
 	}
-	if m.DesignLens != "" && (!reviewer || strings.TrimSpace(m.DesignLens) != m.DesignLens || len(m.DesignLens) > 512 || strings.ContainsAny(m.DesignLens, "\r\n\x00")) {
+	if m.DesignLens != "" && ((!reviewer && !judge) || !validLens(m.DesignLens)) {
 		return errors.New("reviewer design lens is invalid")
 	}
 	switch m.Effort {
@@ -1360,4 +1365,8 @@ func (c Config) validateProbes() error {
 // ProbeCatalog is the validated catalogue, built-ins included.
 func (c Config) ProbeCatalog() (probe.Catalog, error) {
 	return probe.NewCatalog(c.Probes)
+}
+
+func validLens(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value && len(value) <= 512 && !strings.ContainsAny(value, "\r\n\x00")
 }

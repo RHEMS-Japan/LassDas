@@ -601,6 +601,7 @@ func TestDesignJudgesMustCoverEveryReviewerOrNone(t *testing.T) {
 	valid := validTestConfig()
 	unlensed := judge("review-a", "Vendor B", "j", "K")
 	unlensed.Lens = ""
+	unlensed.DesignLens = "Judge the approach against the measurements."
 	valid.Models.DesignReviewers = []ModelEndpoint{unlensed, judge("review-b", "Vendor A", "k", "K2")}
 	valid.Agents.DesignReviewerAgents = []ReviewerAgent{
 		{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},

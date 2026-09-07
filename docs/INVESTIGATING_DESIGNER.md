@@ -242,7 +242,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | `internal/runner/deliver.go` | 計測形の確認 (§4.3): 反映後に関所が同じ probe を実行して閾値と比べ、写真係の判定と同じ場所 (`deliverVerification`) に載せる |
 | `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` (`report_protocol.go`) と streak の扱い (`investigated` だけが streak を切る) |
 | `internal/worker/artifact.go`, `impasse.go` | 確定記録 `DesignReview` / `DesignDecision` と検算、`design-impasse-question` |
-| 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design.review_investigation`, `design.staging_has_no_customer_content`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens` |
+| 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design.review_investigation`, `design.staging_has_no_customer_content`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens`, `models.design_reviewers[]` と `agents.design_reviewer_agents[]` (設計レビュー役を別建てにするとき、対で) |
 | 上限の置き場 (規則) | **巡数と役の定義** (`design.*`, `agents.*`, `models.*`) は消費側設定。**手数と壁時間** (`chain.investigate.max_probes` / `max_runtime_seconds`, `apply` の `MaxRuntimeSeconds`) は runtime.json の `chain` (既存のカードの壁と同じ場所)。Hermes エージェントの手数 (`agent.max_turns`) はプロファイルが持つ (既存のレビュー役と同じ)。同じ値を 2 か所に置かない |
 | docs | TRUST_MODEL.md の登場人物表に 3 行 (調査・設計役 / 写し役 / 画面確認)、RUNTIME_POD.md の住人と回帰表 |
 
@@ -276,7 +276,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 
 | 死因 | 固定するテスト | 固定する場所 (package・テスト名) |
 |---|---|---|
-| 設計レビュー役に候補レビュー役と違うモデルを設定しても、封緘記録が設定どおりのモデルを名乗らない / 調査・設計役と設計レビュー役の鍵が予算監視と費用報告から漏れる | 設計レビュー役の別建て設定と、記録・予算・費用の 3 経路 | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan` / `TestSpendListsTheDesignerAndTheDesignJudges`、`internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges` |
+| 設計レビュー役に候補レビュー役と違うモデルを設定しても、封緘記録が設定どおりのモデルを名乗らない / 調査・設計役と設計レビュー役の鍵が費用報告から漏れる / 設計レビュー役 (別建ての設定と Pod 側の身元) が予算監視から漏れる | 設計レビュー役の別建て設定と、記録・予算・費用の 3 経路 | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan` / `TestSpendListsTheDesignerAndTheDesignJudges`、`internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges` |
 | カタログ外の probe、正規表現に合わない穴、`;` や空白を含む値、リンクローカル宛の HTTP が実行される | probe 実行器: 実行せず拒否として記録 | `internal/probe` `TestCatalogRefusesOutOfShapeRequests` |
 | 複文・`EXPLAIN ANALYZE` の DML・副作用関数が `sql` probe を通る | 1 文しか送れない経路と名前の拒否 | `internal/probe` `TestSQLProbeSendsOneReadStatement` |
 | 出力に鍵の形が含まれたまま保存・添付される | 秘密走査: 保存せず拒否として記録。添付前の再走査 | `internal/probe` `TestSecretShapedOutputIsRefused` |

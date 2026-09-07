@@ -370,7 +370,7 @@ design judged by a heavier model or another vendor without moving the
 candidate reviews (design doc §11, decision 3) names the judges apart, in
 two places that must come together: `models.design_reviewers[]` gives
 each reviewer id the judge's endpoint (model, vendor, key variable; no
-`lens` needed), and `agents.design_reviewer_agents[]` its launch
+`lens` needed, a `design_lens` allowed), and `agents.design_reviewer_agents[]` its launch
 definition (a profile of its own, its own credential source). Both are
 all or none and name the reviewer ids of `models.reviewers`; the judges
 must come from two vendors, must not share a (base URL, model) pair, and
