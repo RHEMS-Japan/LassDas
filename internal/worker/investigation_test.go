@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/probe"
 	"automation.internal/ticket-ingress/internal/worker/investigate"
@@ -476,5 +477,39 @@ func TestInvestigationWithdrawsOldWindowsOverTheBudget(t *testing.T) {
 	}
 	if !strings.Contains(messages[7].Content, `"offset":2048`) || !strings.Contains(messages[7].Content, `"text":"yyyy`) {
 		t.Errorf("the latest window was withdrawn too: %s", messages[7].Content[:120])
+	}
+}
+
+// A report the contract keeps refusing ends the round with the last refused
+// answer and the objection in the result, and the objection names the
+// line and the rule.
+func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	long := `{"report":{"questions":["q"],"findings":[{"claim":"` + strings.Repeat("x", 601) + `","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`
+	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, long}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "claim is 601 bytes (limit 600)") {
+		t.Fatalf("err = %v, incomplete = %q; want the refusal to name the rule", err, result.Incomplete)
+	}
+	if result.LastRefusedAnswer != long || !strings.Contains(result.LastRefusedObjection, "finding 1: claim is 601 bytes (limit 600)") {
+		t.Fatalf("last refused answer/objection not kept: %d bytes / %q", len(result.LastRefusedAnswer), result.LastRefusedObjection)
+	}
+	messages := api.requests[2].Messages
+	if !strings.Contains(messages[len(messages)-1].Content, "finding 1: claim is 601 bytes (limit 600)") {
+		t.Fatalf("the role was not told the rule: %s", messages[len(messages)-1].Content[:200])
+	}
+	bounded := boundedAnswer(strings.Repeat("あ", 4000))
+	if len(bounded) > maxKeptAnswerBytes+len("…") || !strings.HasSuffix(bounded, "…") || !utf8.ValidString(bounded) {
+		t.Fatalf("a kept answer must be bounded on a character boundary: %d bytes", len(bounded))
+	}
+	// A refusal followed by an accepted answer is forgotten: a round that
+	// then ends on the probe budget records no refused answer.
+	input, _ = investigationFixture(t, 1)
+	api = &loopScriptAPI{answers: []string{long, `{"probe":{"probe":"repo.list"}}`, `{"probe":{"probe":"repo.list"}}`, `{"probe":{"probe":"repo.list"}}`}}
+	invoker, _ = NewModelInvoker(api)
+	result, err = invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "probe budget") || result.LastRefusedAnswer != "" || result.LastRefusedObjection != "" {
+		t.Fatalf("a budget ending kept a stale refusal: %q / %q (%v)", result.Incomplete, result.LastRefusedObjection, err)
 	}
 }

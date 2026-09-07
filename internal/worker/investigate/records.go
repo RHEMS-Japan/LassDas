@@ -219,25 +219,35 @@ func (r Investigation) MeasuredEvidence() map[string]bool {
 // they executed; nil skips the existence check (ValidateBinding, which has
 // no measurements file to read).
 func validateInvestigationText(questions []string, findings []Finding, unknowns []string, next string, usable map[string]bool) error {
-	if len(questions) == 0 || len(questions) > maxQuestions || len(findings) > maxFindings || len(unknowns) > maxUnknowns {
-		return errors.New("investigation has the wrong number of questions, findings or unknowns")
+	switch {
+	case len(questions) == 0:
+		return errors.New("investigation has no question")
+	case len(questions) > maxQuestions:
+		return fmt.Errorf("investigation has %d questions (limit %d)", len(questions), maxQuestions)
+	case len(findings) > maxFindings:
+		return fmt.Errorf("investigation has %d findings (limit %d)", len(findings), maxFindings)
+	case len(unknowns) > maxUnknowns:
+		return fmt.Errorf("investigation has %d unknowns (limit %d)", len(unknowns), maxUnknowns)
 	}
-	for _, question := range questions {
-		if !validText(question, maxShortText) {
-			return errors.New("investigation question is invalid")
+	for index, question := range questions {
+		if problem := textProblem(question, maxShortText); problem != "" {
+			return fmt.Errorf("investigation question %d %s", index+1, problem)
 		}
 	}
-	for _, unknown := range unknowns {
-		if !validText(unknown, maxShortText) {
-			return errors.New("investigation unknown is invalid")
+	for index, unknown := range unknowns {
+		if problem := textProblem(unknown, maxShortText); problem != "" {
+			return fmt.Errorf("investigation unknown %d %s", index+1, problem)
 		}
 	}
-	if !validText(next, maxLongText) {
-		return errors.New("investigation next step is invalid")
+	if problem := textProblem(next, maxLongText); problem != "" {
+		return fmt.Errorf("investigation next step %s", problem)
 	}
-	for _, finding := range findings {
-		if !validText(finding.Claim, maxLongText) || len(finding.Evidence) > maxFindingEvidence {
-			return errors.New("investigation finding is invalid")
+	for index, finding := range findings {
+		if problem := textProblem(finding.Claim, maxLongText); problem != "" {
+			return fmt.Errorf("investigation finding %d: claim %s", index+1, problem)
+		}
+		if len(finding.Evidence) > maxFindingEvidence {
+			return fmt.Errorf("investigation finding %d cites %d measurement ids (limit %d); split the finding", index+1, len(finding.Evidence), maxFindingEvidence)
 		}
 		for _, id := range finding.Evidence {
 			if !measurementIDPattern.MatchString(id) {
@@ -277,12 +287,29 @@ func validateInvestigationText(questions []string, findings []Finding, unknowns 
 	return nil
 }
 
+// textProblem says why one line of prose is refused, with the numbers the
+// writer needs to fix it — a role told only "invalid" re-sent the same
+// report three times (live 2026-09-07) — or "" when it passes validText.
+func textProblem(value string, limit int) string {
+	switch {
+	case strings.TrimSpace(value) == "":
+		return "is empty"
+	case strings.TrimSpace(value) != value:
+		return "has leading or trailing whitespace"
+	case !utf8.ValidString(value):
+		return "is not valid UTF-8"
+	case len(value) > limit:
+		return fmt.Sprintf("is %d bytes (limit %d)", len(value), limit)
+	case strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) >= 0:
+		return "has a control character (write one line, no newline or tab)"
+	}
+	return ""
+}
+
 // validText accepts one line of prose: no control characters (a newline
 // would let a claim start a Markdown heading in DESIGN.md), trimmed, bounded.
 func validText(value string, limit int) bool {
-	trimmed := strings.TrimSpace(value)
-	return trimmed != "" && trimmed == value && utf8.ValidString(value) && len(value) <= limit &&
-		strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) < 0
+	return textProblem(value, limit) == ""
 }
 
 // Verification forms a design may promise.

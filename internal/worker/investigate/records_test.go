@@ -84,7 +84,7 @@ func TestInvestigationRequiresMeasuredEvidence(t *testing.T) {
 		{"measured citing beyond the prefix", func(o *ModelInvestigationOutput) { o.Findings[0].Evidence = []string{"m-0004"} }, "not among the sealed"},
 		{"malformed id", func(o *ModelInvestigationOutput) { o.Findings[0].Evidence = []string{"measurement 1"} }, "malformed"},
 		{"unknown confidence", func(o *ModelInvestigationOutput) { o.Findings[0].Confidence = "certain" }, "measured or inferred"},
-		{"no questions", func(o *ModelInvestigationOutput) { o.Questions = nil }, "wrong number"},
+		{"no questions", func(o *ModelInvestigationOutput) { o.Questions = nil }, "has no question"},
 		{"empty next", func(o *ModelInvestigationOutput) { o.Next = "  " }, "next step"},
 	}
 	for _, tc := range refused {
@@ -271,5 +271,36 @@ func TestDesignRenderingIsDeterministic(t *testing.T) {
 	}
 	if _, err := DecodeModelDesignOutput([]byte(`{"cause":"x","extra":1}`)); err == nil {
 		t.Error("unknown field accepted")
+	}
+}
+
+// A refused report says which line broke which rule, with the numbers the
+// writer needs; "invalid" alone sent a live role around three times.
+func TestInvestigationRefusalsNameTheLineAndTheRule(t *testing.T) {
+	long := strings.Repeat("x", 601)
+	cases := map[string]struct {
+		questions []string
+		findings  []Finding
+		unknowns  []string
+		next      string
+		want      string
+	}{
+		"long claim":         {[]string{"q"}, []Finding{{Claim: long, Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim is 601 bytes (limit 600)"},
+		"too much cited":     {[]string{"q"}, []Finding{{Claim: "c", Evidence: []string{"m-0001", "m-0002", "m-0003", "m-0004", "m-0005", "m-0006", "m-0007", "m-0008", "m-0009"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1 cites 9 measurement ids (limit 8)"},
+		"newline in claim":   {[]string{"q"}, []Finding{{Claim: "a\nb", Evidence: []string{"m-0001"}, Confidence: ConfidenceMeasured}}, nil, "n", "finding 1: claim has a control character"},
+		"padded question":    {[]string{" q"}, nil, nil, "n", "question 1 has leading or trailing whitespace"},
+		"long unknown":       {[]string{"q"}, nil, []string{strings.Repeat("u", 301)}, "n", "unknown 1 is 301 bytes (limit 300)"},
+		"empty next":         {[]string{"q"}, nil, nil, " ", "next step is empty"},
+		"no question":        {nil, nil, nil, "n", "has no question"},
+		"too many questions": {make([]string, 9), nil, nil, "n", "has 9 questions (limit 8)"},
+		"too many findings":  {[]string{"q"}, make([]Finding, 21), nil, "n", "has 21 findings (limit 20)"},
+		"too many unknowns":  {[]string{"q"}, nil, make([]string, 21), "n", "has 21 unknowns (limit 20)"},
+		"bad utf-8":          {[]string{"q\xff"}, nil, nil, "n", "question 1 is not valid UTF-8"},
+	}
+	for name, tc := range cases {
+		err := validateInvestigationText(tc.questions, tc.findings, tc.unknowns, tc.next, nil)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
+		}
 	}
 }

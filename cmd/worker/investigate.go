@@ -77,7 +77,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 		return err
 	}
 	if carry.ElapsedSeconds >= investigationWallSeconds || carry.ProbesUsed >= probe.DefaultLimits.MaxProbes {
-		return writeIncomplete(*outDir, "the request's investigation budget was spent in earlier rounds")
+		return writeIncomplete(*outDir, "the request's investigation budget was spent in earlier rounds", "", "")
 	}
 	consumer, err := config.ConsumerFor(draft.Repository)
 	if err != nil {
@@ -111,7 +111,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 	started := time.Now()
 	result, err := invoker.Investigate(roundCtx, *config.Models.Designer, input, started)
 	if errors.Is(err, worker.ErrInvestigationIncomplete) {
-		return writeIncomplete(*outDir, result.Incomplete)
+		return writeIncomplete(*outDir, result.Incomplete, result.LastRefusedAnswer, result.LastRefusedObjection)
 	}
 	if err != nil {
 		return err
@@ -226,9 +226,22 @@ func observationJar(seed, state string) []probe.Cookie {
 }
 
 // writeIncomplete records why the round sealed nothing and fails the card.
-func writeIncomplete(outDir, reason string) error {
-	encoded, _ := json.Marshal(map[string]string{"reason": reason})
-	if err := os.WriteFile(filepath.Join(outDir, incompleteFile), append(encoded, '\n'), 0o644); err != nil {
+// writeIncomplete leaves the round's honest ending: why no record was
+// sealed and, when the contract refused the role's answers, the last
+// refused answer and the objection — the conversation itself is not kept,
+// and without these an operator could not see what the role got wrong.
+func writeIncomplete(outDir, reason, lastRefusedAnswer, lastRefusedObjection string) error {
+	record := map[string]string{"reason": reason}
+	if lastRefusedAnswer != "" {
+		record["last_refused_answer"] = lastRefusedAnswer
+	}
+	if lastRefusedObjection != "" {
+		record["last_refused_objection"] = lastRefusedObjection
+	}
+	encoded, _ := json.Marshal(record)
+	// The record may quote what the model saw of the measurements; it is
+	// kept as the measurements and the sealed records are.
+	if err := os.WriteFile(filepath.Join(outDir, incompleteFile), append(encoded, '\n'), 0o600); err != nil {
 		return err
 	}
 	return fmt.Errorf("investigation incomplete: %s", reason)
