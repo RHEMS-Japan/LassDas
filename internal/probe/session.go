@@ -45,9 +45,10 @@ type Session struct {
 	// Jar is the observation session, attached read-only to http probes
 	// that declare it. Its values are also refused in any output.
 	Jar []Cookie
-	// Used counts requests so far, including those this session refused;
-	// Bytes counts stored output. Both carry over from earlier rounds.
-	// Reads counts the windows shown beyond the excerpts (Read).
+	// Used counts requests so far, including those this session refused,
+	// and carries over from earlier rounds; Bytes counts the output this
+	// round stored; Reads counts the read requests this round made (Read),
+	// refusals included.
 	Used  int
 	Bytes int
 	Reads int
@@ -126,7 +127,7 @@ func (s *Session) Read(id string, offset int) (Window, error) {
 		return Window{}, fmt.Errorf("%w: offset %d is outside the stored output of %s (%d bytes)", ErrReadRefused, offset, id, len(measurement.Output))
 	}
 	if !utf8.RuneStart(measurement.Output[offset]) {
-		return Window{}, fmt.Errorf("%w: offset %d of %s is inside a character; start at excerpt_bytes or a next_offset", ErrReadRefused, offset, id)
+		return Window{}, fmt.Errorf("%w: offset %d of %s is inside a character; start at this record's excerpt_bytes (%d) or a next_offset", ErrReadRefused, offset, id, measurement.ExcerptBytes)
 	}
 	end := characterBoundary(measurement.Output, offset+limits.ExcerptBytes)
 	if end <= offset {
