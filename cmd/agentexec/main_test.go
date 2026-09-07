@@ -35,7 +35,7 @@ func TestParseInsistsOnOneModeAndASeparateUser(t *testing.T) {
 
 // The agent sees its own home and user names, never the engine's.
 func TestAgentEnvReplacesTheHome(t *testing.T) {
-	env := agentEnv([]string{"HOME=/home/engine", "USER=engine", "PATH=/bin", "MODEL_KEY=k"}, "/data/agent-home")
+	env := agentEnv([]string{"HOME=/home/engine", "USER=engine", "PATH=/bin", "MODEL_KEY=k"}, "/data/agent-home", 2000)
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "/home/engine") || strings.Contains(joined, "USER=engine") || !strings.Contains(joined, "HOME=/data/agent-home") || !strings.Contains(joined, "USER=agent") || !strings.Contains(joined, "MODEL_KEY=k") {
 		t.Fatalf("env = %q", env)

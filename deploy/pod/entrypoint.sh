@@ -324,8 +324,11 @@ liveness() { touch "$STATE/heartbeat"; }
 # to the agent user by their modes — checked below, before anything else
 # starts.
 export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
-# The launcher lends and returns trees under the runs directory alone.
-export LASSDAS_AGENT_TREE_ROOT="${LASSDAS_AGENT_TREE_ROOT:-$STATE/runs}"
+# The launcher lends and returns trees under the runs directory alone —
+# the one the runtime configuration names (chain.runs_root), so a runs
+# directory placed elsewhere is not refused at every launch.
+RUNS_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("chain", {}).get("runs_root", ""))' "$LASSDAS_RUNTIME_CONFIG" 2>/dev/null || true)"
+export LASSDAS_AGENT_TREE_ROOT="${LASSDAS_AGENT_TREE_ROOT:-${RUNS_ROOT:-$STATE/runs}}"
 # Boot check, fail-closed. First the launcher itself: without its file
 # capabilities (or under allowPrivilegeEscalation: false) it cannot switch
 # users, no agent could start, and a pod that is up but fails every run

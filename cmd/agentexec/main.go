@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -229,7 +230,7 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 	}()
 	command := exec.Command(inv.command[0], inv.command[1:]...) // #nosec G204 -- the engine's validated launch definition.
 	command.Dir = inv.workspace
-	command.Env = agentEnv(os.Environ(), inv.home)
+	command.Env = agentEnv(os.Environ(), inv.home, inv.uid)
 	command.Stdin = nil
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -298,7 +299,7 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 
 // agentEnv is the handed environment with the agent's own home; the
 // engine's home and user names must not leak into the agent's view.
-func agentEnv(environ []string, home string) []string {
+func agentEnv(environ []string, home string, uid uint32) []string {
 	out := make([]string, 0, len(environ)+3)
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
@@ -308,7 +309,18 @@ func agentEnv(environ []string, home string) []string {
 		}
 		out = append(out, entry)
 	}
-	return append(out, "HOME="+home, "USER=agent", "LOGNAME=agent")
+	name := agentUserName(uid)
+	return append(out, "HOME="+home, "USER="+name, "LOGNAME="+name)
+}
+
+// agentUserName is the pool user's own name (agent, agent1 …): a tool
+// that keys a cache or a socket by $USER must not collide with another
+// launch's, so the name is the launch's user, not a shared word.
+func agentUserName(uid uint32) string {
+	if account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil && account.Username != "" {
+		return account.Username
+	}
+	return "agent" + strconv.FormatUint(uint64(uid), 10)
 }
 
 // ensureHome gives the agent user its home and the top of its .hermes

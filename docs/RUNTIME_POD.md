@@ -440,7 +440,10 @@ allows 90 minutes; a shorter agent timeout is the tighter of the two).
 Each launch runs as its own user: the image carries a pool of agent users
 (`agent`, `agent1` … `agent63`, uid 2000 to 2063, one group), the worker
 takes the first free one for the launch's life (a lock file under the
-state directory, freed when the worker lets go or dies), and the top of a
+state directory, freed when the worker lets go or dies; the kanban
+dispatches at most eight cards at once by default, far below the pool,
+and a launch that finds every user taken fails closed), sets `USER` and
+`LOGNAME` to that user's own name, and the top of a
 lent workspace and home is closed to everyone but that user (0700). Two
 agents running at once are therefore different users: neither reads the
 other's workspace, home or process environment (its keys). What stays
@@ -448,7 +451,8 @@ visible across users is what the kernel shows everyone — a process's
 command line, which for these agents carries the prompt — and a finished
 run's home is taken back and removed, its workspace taken back and kept
 closed. The launcher lends and returns trees under the runs directory
-alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint).
+alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint from the runtime
+configuration's `chain.runs_root`).
 
 Stopping an agent: a signal from the engine's user does not reach the
 agent user's processes, so the worker stops a run by sending the launcher
