@@ -476,7 +476,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
 	// The first free agent user of an empty pool; the launch names it.
-	launchPrefix := "--uid 2000 --workspace " + root + " --home "
+	launchPrefix := "--uid 2001 --workspace " + root + " --home "
 	if len(lines) != 4 || lines[0] != "--reclaim "+root || !strings.HasPrefix(lines[1], launchPrefix) {
 		t.Fatalf("launcher calls = %q", lines)
 	}

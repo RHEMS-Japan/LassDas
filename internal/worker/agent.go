@@ -442,15 +442,17 @@ func reclaimWorkspace(launcher, root string) {
 	}
 }
 
-// The agent users the image carries: agent and agent1 … agent63, uid 2000
-// to 2063, all in the agent group. A launch holds one for its life, so two
-// agents running at once are different users: neither can read the other's
-// processes (their environment, their keys), workspace or home. The pool
-// is a directory of lock files under the state directory; a lock dies with
-// the worker that holds it, so a crash frees the user.
+// The agent users the image carries: agent1 … agent63, uid 2001 to 2063,
+// all in the agent group (agent, uid 2000, is the boot check's probe user
+// and runs no launch, so a launch returning its tree never stops a
+// probe). A launch holds one for its life, so two agents running at once
+// are different users: neither can read the other's processes (their
+// environment, their keys), workspace or home. The pool is a directory of
+// lock files under the state directory; a lock dies with the worker that
+// holds it, so a crash frees the user.
 const (
-	agentUIDBase  = 2000
-	agentUIDCount = 64
+	agentUIDBase  = 2001
+	agentUIDCount = 63
 )
 
 type agentUser struct {

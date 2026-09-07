@@ -39,7 +39,8 @@ import (
 var orphanCheckInterval = 2 * time.Second
 
 const (
-	// The pool of agent users the image carries (agent, agent1 … agent63).
+	// The pool of agent users the image carries (agent, agent1 … agent63;
+	// agent itself is the check's probe user, the launches take the rest).
 	agentUserCount  = 64
 	defaultAgentUID = 2000
 	defaultAgentGID = 2000
@@ -210,7 +211,7 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 	// two chowns crossing leave it half each. The lock lives beside the
 	// workspace and is held from the lend to the return; a launch that
 	// finds it held waits, up to lendLockWait.
-	lock, err := lendLock(inv.workspace)
+	lock, err := lendLock(inv.workspace, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "agentexec: workspace:", err)
 		return exitLauncher
@@ -358,16 +359,21 @@ var lendLockWait = 2 * time.Minute
 
 // lendLock takes the workspace's lend lock, a file beside the workspace,
 // waiting for an earlier launch that still holds it.
-func lendLock(workspace string) (*os.File, error) {
+func lendLock(workspace string, stderr io.Writer) (*os.File, error) {
 	path := filepath.Join(filepath.Dir(workspace), ".agent-lend.lock")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, errors.New("the lend lock could not be opened")
 	}
 	deadline := time.Now().Add(lendLockWait)
+	waiting := false
 	for {
 		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 			return file, nil
+		}
+		if !waiting {
+			waiting = true
+			fmt.Fprintln(stderr, "agentexec: waiting for the workspace's earlier launch to return it")
 		}
 		if time.Now().After(deadline) {
 			_ = file.Close()
