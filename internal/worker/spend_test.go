@@ -305,3 +305,20 @@ func TestComposeSpendTextFoldsRolesOfASharedKey(t *testing.T) {
 		t.Errorf("a named role should replace the raw key name:\n%s", text)
 	}
 }
+
+// The designer and the design judges bill their own keys, so the spend
+// report lists them under their own seats.
+func TestSpendListsTheDesignerAndTheDesignJudges(t *testing.T) {
+	config := spendTestConfig()
+	config.Models.Designer = &ModelEndpoint{ID: "designer", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "DESIGNER_KEY"}
+	config.Models.DesignReviewers = []ModelEndpoint{{ID: "review-a", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "JUDGE_A_KEY"}}
+	envs := SpendKeyEnvs(config)
+	joined := strings.Join(envs, " ")
+	if !strings.Contains(joined, "DESIGNER_KEY") || !strings.Contains(joined, "JUDGE_A_KEY") {
+		t.Fatalf("keys = %v, want the designer's and the judge's", envs)
+	}
+	roles := RolesByKeyEnv(config)
+	if strings.Join(roles["DESIGNER_KEY"], ",") != "調査・設計" || strings.Join(roles["JUDGE_A_KEY"], ",") != "設計レビュー review-a" {
+		t.Fatalf("roles = %v", roles)
+	}
+}

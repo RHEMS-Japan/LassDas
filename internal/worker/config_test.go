@@ -528,3 +528,59 @@ func testConsumerGitHubContract() ConsumerGitHubContract {
 		},
 	}
 }
+
+// Design judges and their launches are all or none, name configured
+// reviewers, and come from two vendors; a partial set would silently judge
+// under the candidate reviewer.
+func TestDesignJudgesMustCoverEveryReviewerOrNone(t *testing.T) {
+	judge := func(id, vendor, model, key string) ModelEndpoint {
+		return ModelEndpoint{ID: id, Vendor: vendor, Model: model, BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: key, Lens: "evidence", MaxOutputTokens: 8192}
+	}
+	cases := map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"one judge only": {func(c *Config) { c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K")} }, "cover every reviewer"},
+		"unknown id": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-c", "Vendor A", "k", "K2")}
+		}, "not configured"},
+		"one vendor": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-b", "Vendor B", "k", "K2")}
+		}, "two vendors"},
+		"duplicate ids": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-a", "Vendor A", "k", "K2")}
+		}, "duplicates"},
+		"one agent only": {func(c *Config) {
+			c.Agents.DesignReviewerAgents = []ReviewerAgent{{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-agent", Command: "judge", TimeoutSeconds: 900}}}
+		}, "cover every reviewer"},
+		"agent for an unknown reviewer": {func(c *Config) {
+			c.Agents.DesignReviewerAgents = []ReviewerAgent{
+				{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},
+				{ReviewerID: "review-x", Agent: AgentConfig{ID: "judge-x-agent", Command: "judge-x", TimeoutSeconds: 900}},
+			}
+		}, "not configured"},
+		"agent id taken": {func(c *Config) {
+			c.Agents.DesignReviewerAgents = []ReviewerAgent{
+				{ReviewerID: "review-a", Agent: AgentConfig{ID: "author-agent", Command: "judge-a", TimeoutSeconds: 900}},
+				{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
+			}
+		}, "agent ids must differ"},
+	}
+	for name, tc := range cases {
+		config := validTestConfig()
+		tc.mutate(&config)
+		err := config.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
+		}
+	}
+	valid := validTestConfig()
+	valid.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-b", "Vendor A", "k", "K2")}
+	valid.Agents.DesignReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},
+		{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("a full set of judges was refused: %v", err)
+	}
+}

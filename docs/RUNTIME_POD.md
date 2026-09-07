@@ -362,6 +362,22 @@ the catalogue names `--profile <readonly>` and that profile itself carries
 points at. Neither variable carries a secret value; each names a file the
 kernel's user can read.
 
+### The design judges' own endpoints and launches
+
+A design (or an investigation report) is judged by the reviewer of the
+same letter as the candidate review by default. A consumer that wants the
+design judged by a heavier model or another vendor without moving the
+candidate reviews (design doc §11, decision 3) names the judges apart:
+`models.design_reviewers[]` gives each reviewer id its own endpoint
+(model, vendor, key variable, `design_lens`), and
+`agents.design_reviewer_agents[]` its own launch definition (a profile of
+its own, its own credential source). Both are all or none, and both name
+the reviewer ids of `models.reviewers`. `agent-design-review` launches the
+judge's definition and seals the `DesignReview` with the model that ran;
+the decision gate compares the reviews against the judges. The budget hold
+probes the designer's key and every judge's key under their own labels,
+and the spend report lists them as their own seats.
+
 ## Release discipline: the regression set
 
 A release while a run's step is executing is refused by
@@ -388,6 +404,7 @@ means adding a row here and the test it names.
 
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
+| A design judge configured with a model the record does not name; a designer or judge key outside the budget hold and the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges` | review of #43, 2026-09-05 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

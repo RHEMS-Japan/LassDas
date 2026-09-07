@@ -146,6 +146,16 @@ func RolesByKeyEnv(config Config) map[string][]string {
 	}
 	add(config.Models.Readiness.Assessor, "受付")
 	add(config.Models.Readiness.Checker, "受付")
+	if config.Models.Designer != nil {
+		add(*config.Models.Designer, "調査・設計")
+	}
+	for index, judge := range config.Models.DesignReviewers {
+		name := judge.ID
+		if name == "" {
+			name = "review-" + string(rune('a'+index))
+		}
+		add(judge, "設計レビュー "+name)
+	}
 	for env, list := range roles {
 		roles[env] = dedupeStrings(list)
 	}
@@ -182,6 +192,12 @@ func spendEndpoints(config Config) []ModelEndpoint {
 	endpoints := []ModelEndpoint{config.Models.Implementer}
 	endpoints = append(endpoints, config.Models.Reviewers...)
 	endpoints = append(endpoints, config.Models.Readiness.Assessor, config.Models.Readiness.Checker)
+	// The investigating designer's roles bill their own keys (#45): the
+	// designer and the design judges, when configured.
+	if config.Models.Designer != nil {
+		endpoints = append(endpoints, *config.Models.Designer)
+	}
+	endpoints = append(endpoints, config.Models.DesignReviewers...)
 	return endpoints
 }
 

@@ -78,6 +78,9 @@ func roleProbes(models worker.ModelConfig, getenv func(string) string) []modelPr
 	if models.Designer != nil {
 		add("調査・設計役", models.Designer.BaseURL, models.Designer.Model, models.Designer.APIKeyEnv)
 	}
+	for _, judge := range models.DesignReviewers {
+		add("設計レビュー役 ("+judge.ID+")", judge.BaseURL, judge.Model, judge.APIKeyEnv)
+	}
 	gateway := getenv("LASSDAS_GATEWAY_BASE_URL")
 	add("実装役", gateway, getenv("LASSDAS_IMPLEMENTER_MODEL"), "LASSDAS_IMPLEMENTER_KEY")
 	add("レビュー役 A", gateway, getenv("LASSDAS_REVIEW_A_MODEL"), "LASSDAS_REVIEW_A_KEY")
