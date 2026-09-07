@@ -262,12 +262,14 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 			return entry.Agent, nil
 		}
 	}
+	for _, entry := range a.DesignReviewerAgents {
+		if entry.Agent.ID == id {
+			return entry.Agent, nil
+		}
+	}
 	return AgentConfig{}, errors.New("agent run names an agent that is not configured")
 }
 
-// ReviewerAgentFor picks the launch definition for one reviewer endpoint:
-// its own entry when the configuration carries one, the shared reviewer
-// agent otherwise.
 // DesignReviewerAgentFor picks the launch definition for one design judge:
 // its own when the configuration gives it one, else the candidate
 // reviewer's of the same id.
@@ -280,6 +282,9 @@ func (a AgentSet) DesignReviewerAgentFor(reviewerID string) AgentConfig {
 	return a.ReviewerAgentFor(reviewerID)
 }
 
+// ReviewerAgentFor picks the launch definition for one reviewer endpoint:
+// its own entry when the configuration carries one, the shared reviewer
+// agent otherwise.
 func (a AgentSet) ReviewerAgentFor(reviewerID string) AgentConfig {
 	for _, entry := range a.ReviewerAgents {
 		if entry.ReviewerID == reviewerID {
