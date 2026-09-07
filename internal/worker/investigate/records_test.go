@@ -191,9 +191,17 @@ func TestDesignValidation(t *testing.T) {
 		{"measurement threshold zero", func(o *ModelDesignOutput) {
 			o.Verification = Verification{Form: VerificationMeasurement, Probe: "http.timing", Args: map[string]string{"path": "/page"}, Metric: "time_total"}
 		}, "threshold"},
-		{"empty blast radius", func(o *ModelDesignOutput) { o.BlastRadius = nil }, "out of bounds"},
-		{"no alternatives", func(o *ModelDesignOutput) { o.Alternatives = nil }, "out of bounds"},
-		{"newline in cause", func(o *ModelDesignOutput) { o.Cause = "line one\n# heading" }, "invalid"},
+		{"empty blast radius", func(o *ModelDesignOutput) { o.BlastRadius = nil }, "has 0 blast radius items (one to 12)"},
+		{"no alternatives", func(o *ModelDesignOutput) { o.Alternatives = nil }, "has 0 alternatives (one to 3)"},
+		{"newline in cause", func(o *ModelDesignOutput) { o.Cause = "line one\n# heading" }, "design cause has a control character"},
+		{"long approach", func(o *ModelDesignOutput) { o.Approach = strings.Repeat("a", 601) }, "design approach is 601 bytes (limit 600)"},
+		{"too much cause evidence", func(o *ModelDesignOutput) {
+			o.CauseEvidence = []string{"m-0002", "m-0002", "m-0002", "m-0002", "m-0002", "m-0002", "m-0002", "m-0002", "m-0002"}
+		}, "design cause cites 9 measurement ids (limit 8)"},
+		{"long alternative", func(o *ModelDesignOutput) { o.Alternatives = []string{strings.Repeat("b", 301)} }, "design alternative 1 is 301 bytes (limit 300)"},
+		{"padded not_doing item", func(o *ModelDesignOutput) { o.NotDoing = []string{" x"} }, "design not_doing item 1 has leading or trailing whitespace"},
+		{"too many change notes", func(o *ModelDesignOutput) { o.Files[0].Changes = make([]string, 13) }, "lists 13 changes (limit 12)"},
+		{"empty change note", func(o *ModelDesignOutput) { o.Files[0].Changes = []string{""} }, "change 1 is empty"},
 		{"one-character wording", func(o *ModelDesignOutput) { o.Verification.ExpectedText = "Q" }, "wording verification is invalid"},
 	}
 	for _, tc := range refused {
