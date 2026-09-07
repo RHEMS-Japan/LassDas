@@ -428,3 +428,63 @@ func TestChangedFilesUnderToleratesDeclaredByproducts(t *testing.T) {
 		t.Fatalf("changed = %v", changed)
 	}
 }
+
+// With the launcher configured, the worker runs the agent through it —
+// workspace, agent home and the command after "--" — and asks it to return
+// the workspace afterwards; the agent's home is the agent's, not ours.
+func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	record := filepath.Join(t.TempDir(), "launcher.log")
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + record + "\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\necho \"HOME=$HOME\"\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentHomeEnv, home)
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"`)
+	outcome, _, err := runAgentProcess(context.Background(), fixtureAgentConfig("author", name), root, "do the thing")
+	if err != nil {
+		t.Fatalf("runAgentProcess() error = %v (%s)", err, outcome.Transcript)
+	}
+	if !strings.Contains(outcome.Transcript, "agent ran in") || !strings.Contains(outcome.Transcript, "HOME="+home) {
+		t.Fatalf("the agent did not run through the launcher with its own home: %q", outcome.Transcript)
+	}
+	logged, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "--workspace "+root+" --home "+home+" -- "+name+" ") || lines[1] != "--reclaim "+root {
+		t.Fatalf("launcher calls = %q", lines)
+	}
+	// Half a configuration is no configuration: the agent runs as us, at home.
+	t.Setenv(AgentHomeEnv, "")
+	if launcher, home := agentLauncher(); launcher != "" || home != os.Getenv("HOME") {
+		t.Fatalf("half-set launcher accepted: %q %q", launcher, home)
+	}
+}
+
+// The session jar paths and every other variable of this process never
+// reach an agent: its environment is the launch definition's alone.
+func TestAgentEnvironmentNeverCarriesTheSessionJar(t *testing.T) {
+	t.Setenv("LASSDAS_E2E_SESSION_FILE", "/etc/lassdas-e2e/session.json")
+	t.Setenv("LASSDAS_E2E_SESSION_STATE_FILE", "/data/e2e-session/session.json")
+	t.Setenv("TARGET_GITHUB_TOKEN", "should-not-leak")
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	environment, err := agentEnvironment(fixtureAgentConfig("author", "fixture-agent"), "/data/agent-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(environment, "\n")
+	for _, forbidden := range []string{"E2E_SESSION", "TARGET_GITHUB_TOKEN", "should-not-leak", "/home/"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("the agent environment carries %q: %q", forbidden, environment)
+		}
+	}
+	if !strings.Contains(joined, "HOME=/data/agent-home") || !strings.Contains(joined, "AGENT_TOKEN=credential") {
+		t.Fatalf("the agent environment lacks its home or its own credential: %q", environment)
+	}
+}

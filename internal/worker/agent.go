@@ -159,7 +159,8 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	if err != nil {
 		return AgentOutcome{}, "", err
 	}
-	environment, err := agentEnvironment(config)
+	launcher, agentHome := agentLauncher()
+	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
 		return AgentOutcome{}, "", err
 	}
@@ -168,7 +169,16 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	defer cancel()
 
 	arguments := append(append([]string(nil), config.Args...), prompt)
-	command := exec.CommandContext(runContext, config.Command, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
+	program := config.Command
+	if launcher != "" {
+		// The agent runs as the agent user: the launcher lends it the
+		// workspace and its own home, and takes the workspace back when
+		// it exits (docs/RUNTIME_POD.md, "Agents under their own user").
+		arguments = append([]string{"--workspace", root, "--home", agentHome, "--", config.Command}, arguments...)
+		program = launcher
+		defer reclaimWorkspace(launcher, root)
+	}
+	command := exec.CommandContext(runContext, program, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
 	command.Dir = root
 	command.Env = environment
 	var transcript bytes.Buffer
@@ -357,13 +367,44 @@ func validatedWorkspace(workspace string) (string, error) {
 	return root, nil
 }
 
-// agentEnvironment builds the child environment from nothing: only PATH, HOME
-// and the configured values, so the agent cannot read this process's other
-// credentials.
-func agentEnvironment(config AgentConfig) ([]string, error) {
+// The agent's environment is built from nothing (agentEnvironment): only
+// PATH, a home, a locale and the configured values, so the agent cannot
+// read this process's other credentials — nor the session jar paths, the
+// tracker key or the destination token, which a prompt-injected agent
+// would otherwise read.
+//
+// AgentLauncherEnv and AgentHomeEnv name the launcher that runs agents as
+// the agent user and the home that user gets; the pod entrypoint sets
+// both. Unset, agents run as this process (tests, a workflow runner).
+const (
+	AgentLauncherEnv = "LASSDAS_AGENT_LAUNCHER"
+	AgentHomeEnv     = "LASSDAS_AGENT_HOME"
+)
+
+// agentLauncher returns the launcher and the agent home when both are
+// configured; either alone is ignored, so a half-set pair cannot run an
+// agent under this process with a foreign home.
+func agentLauncher() (string, string) {
+	launcher, home := os.Getenv(AgentLauncherEnv), os.Getenv(AgentHomeEnv)
+	if launcher == "" || home == "" {
+		return "", os.Getenv("HOME")
+	}
+	return launcher, home
+}
+
+// reclaimWorkspace asks the launcher to return a workspace to this user.
+// The launcher does it itself when the agent exits; this covers an agent
+// the engine killed together with the launcher (the process group).
+func reclaimWorkspace(launcher, root string) {
+	if output, err := exec.Command(launcher, "--reclaim", root).CombinedOutput(); err != nil { // #nosec G204 -- the configured launcher.
+		fmt.Fprintf(os.Stderr, "worker: workspace not reclaimed: %v: %s\n", err, strings.TrimSpace(string(output)))
+	}
+}
+
+func agentEnvironment(config AgentConfig, home string) ([]string, error) {
 	environment := []string{
 		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
+		"HOME=" + home,
 		"LANG=C.UTF-8",
 	}
 	for name, value := range config.Env {

@@ -202,11 +202,10 @@ fabricated workflow link.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
-  first. Residual: the runner process's exec image remains readable via
-  /proc by same-UID processes, and an agent holds a same-UID shell. The
-  workflow's job isolation had no equivalent exposure. **Phase-3 gate:
-  the image runs agents under a separate UID (or an equivalent boundary)
-  before real deliveries.**
+  first. The agents run as a separate user (below), so the runner's exec
+  image and the state volume's owner-only files are closed to them; what
+  remains readable to an agent is the workspace it was lent and the
+  world-readable parts of the image.
 - The **model workspace** is shaped exactly as the workflow's sealed-tar
   rebuild: synthetic single-commit git history, no remote, no credential
   (the clone token travels through a one-shot `GIT_ASKPASS` helper and is
@@ -286,7 +285,8 @@ engine keeps signing in with never expires on its own, so the person who
 made the seed is not asked to log in again for as long as tickets keep
 coming (a fortnight without one, and the identity provider's session
 lapses by itself). The kept jar is a console session on the pod's state
-volume, owner-only, readable by whatever runs as the engine's user.
+volume, owner-only, readable by the engine's user alone: the agents run
+as another user (below) and never see the jar paths in their environment.
 
 Before the reception, right after the budget probe, the attendant signs
 in through every destination's staging entry, once per destination per
@@ -391,6 +391,41 @@ the designer's key and every judge's key under their own labels (a judge
 sharing the reviewer's key folds into that probe), and the spend report
 lists the designer and the judges as their own seats.
 
+## Agents under their own user
+
+The implementer, the candidate reviewers, the design judges and the
+applier are programs that read repository content; a prompt-injected one
+must not be able to read the operator's console session. The image has
+two users: `lassdas` (uid 1000), which runs the attendant, the runner and
+the worker, and `agent` (uid 2000), which runs every agent. The engine is
+unprivileged; the one program installed with file capabilities
+(`cap_setuid`, `cap_setgid`, `cap_chown`) is `/usr/local/bin/agentexec`,
+executable by the engine's user alone (`0750 root:lassdas`). The worker
+starts each agent through it (`LASSDAS_AGENT_LAUNCHER`,
+`LASSDAS_AGENT_HOME`, both set by the entrypoint): the launcher lends the
+workspace to the agent user (chown, without following symlinks), starts
+the agent under that user with the environment the worker composed — the
+launch definition's own variables, the path, a locale and the agent's home
+— and returns the workspace when the agent exits; the worker asks for it
+back once more afterwards, for an agent it killed together with the
+launcher. The agent's home (`$STATE/agent-home`) carries the engine's
+copies of the agent profiles (readable, rewritten every boot) and belongs
+to the agent user from the first run on, so Hermes keeps its state there.
+
+What stays closed to the agent user by mode: the kept jar
+(`$STATE/e2e-session`, 0700/0600), the engine's secrets (`$STATE/secrets`,
+0660 to the engine's group, which the agent user is not in), the sealed
+run records (0600) and the engine's own home. The seed mount is a
+Kubernetes secret; its `defaultMode` must be `0440` (readable through the
+pod's `fsGroup`), because the default 0644 is readable by every user. The
+entrypoint checks both on every boot with `agentexec --check`: a readable
+kept jar refuses the boot; a readable seed or a launcher without its
+capabilities (a container with `allowPrivilegeEscalation: false` drops
+file capabilities at exec) is reported loudly, and in the latter case no
+agent starts — the worker fails closed rather than running an agent as
+the engine's user. The launcher is not among the pinned stage binaries; it
+runs nothing of its own choosing and only the engine's user can start it.
+
 ## Release discipline: the regression set
 
 A release while a run's step is executing is refused by
@@ -418,6 +453,7 @@ means adding a row here and the test it names.
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
 | A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
+| An agent that could read the operator's session jar or seed (same user as the engine; the jar paths in every card's environment) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`; the entrypoint's boot check | review of the sign-in change, 2026-09-03 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

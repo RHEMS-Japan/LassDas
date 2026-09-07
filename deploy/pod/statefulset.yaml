@@ -57,9 +57,18 @@ spec:
               value: /etc/lassdas/runtime.json
             - name: BACKLOG_DOMAIN
               value: <space>.backlog.com
+            - name: LASSDAS_E2E_SESSION_FILE
+              value: /etc/lassdas-e2e/session.json
+          # No securityContext here on purpose: the agent launcher relies on
+          # file capabilities, which allowPrivilegeEscalation: false would
+          # drop at exec (docs/RUNTIME_POD.md, "Agents under their own user").
           volumeMounts:
             - { name: state, mountPath: /data }
             - { name: config, mountPath: /etc/lassdas/config, readOnly: true }
+            # The operator's observation seed (optional). 0440 with the
+            # pod's fsGroup keeps it readable by the engine's user alone;
+            # the default 0644 would let the agent user read it too.
+            - { name: e2e-session, mountPath: /etc/lassdas-e2e, readOnly: true }
           livenessProbe:
             exec:
               command:
@@ -74,6 +83,8 @@ spec:
       volumes:
         - name: config
           configMap: { name: lassdas-config }
+        - name: e2e-session
+          secret: { secretName: lassdas-e2e-session, optional: true, defaultMode: 0440 }
   volumeClaimTemplates:
     - metadata:
         name: state

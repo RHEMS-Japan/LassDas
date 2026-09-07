@@ -13,6 +13,7 @@ RUN test -n "$ENGINE_SHA" && \
     CGO_ENABLED=0 go build -trimpath -o /out/controller ./cmd/controller && \
     CGO_ENABLED=0 go build -trimpath -o /out/browsercheck ./cmd/browsercheck && \
     CGO_ENABLED=0 go build -trimpath -o /out/statusboard ./cmd/statusboard && \
+    CGO_ENABLED=0 go build -trimpath -o /out/agentexec ./cmd/agentexec && \
     (cd /out && sha256sum worker controller browsercheck > tool-pins.txt)
 
 # ---- Stage 2: runtime ----------------------------------------------------
@@ -92,7 +93,7 @@ RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
 COPY --from=engine /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
-COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /usr/local/bin/
+COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /out/agentexec /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
 COPY deploy/pod/entrypoint.sh /usr/local/bin/lassdas-entrypoint
 RUN chmod 0755 /usr/local/bin/lassdas-entrypoint
@@ -101,6 +102,17 @@ RUN chmod 0755 /usr/local/bin/lassdas-entrypoint
 # is layered on top: agents run as 'agent', the engine as 'lassdas'.
 RUN useradd --create-home --uid 1000 lassdas \
     && useradd --create-home --uid 2000 agent
+# Agents run as the agent user (docs/RUNTIME_POD.md, "Agents under their
+# own user"): the launcher is the one program with file capabilities, and
+# only the engine's user may execute it. The pod must not set
+# allowPrivilegeEscalation: false on the container, or the capabilities are
+# dropped at exec and the launcher fails closed (agents do not start).
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && chown root:lassdas /usr/local/bin/agentexec \
+    && chmod 0750 /usr/local/bin/agentexec \
+    && setcap cap_setuid,cap_setgid,cap_chown+ep /usr/local/bin/agentexec \
+    && getcap /usr/local/bin/agentexec
 USER lassdas
 WORKDIR /home/lassdas
 
