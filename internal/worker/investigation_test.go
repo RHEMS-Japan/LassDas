@@ -478,3 +478,27 @@ func TestInvestigationWithdrawsOldWindowsOverTheBudget(t *testing.T) {
 		t.Errorf("the latest window was withdrawn too: %s", messages[7].Content[:120])
 	}
 }
+
+// A report the contract keeps refusing ends the round with the last refused
+// answer and the objection in the result, and the objection names the
+// line and the rule.
+func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	long := `{"report":{"questions":["q"],"findings":[{"claim":"` + strings.Repeat("x", 601) + `","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`
+	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, long}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "claim is 601 bytes (limit 600)") {
+		t.Fatalf("err = %v, incomplete = %q; want the refusal to name the rule", err, result.Incomplete)
+	}
+	if result.LastAnswer != long || !strings.Contains(result.LastObjection, "finding 1: claim is 601 bytes (limit 600)") {
+		t.Fatalf("last answer/objection not kept: %q / %q", result.LastAnswer[:40], result.LastObjection)
+	}
+	messages := api.requests[2].Messages
+	if !strings.Contains(messages[len(messages)-1].Content, "finding 1: claim is 601 bytes (limit 600)") {
+		t.Fatalf("the role was not told the rule: %s", messages[len(messages)-1].Content[:200])
+	}
+	if boundedAnswer(strings.Repeat("あ", 4000)) == strings.Repeat("あ", 4000) || !strings.HasSuffix(boundedAnswer(strings.Repeat("あ", 4000)), "…") {
+		t.Fatal("a kept answer must be bounded")
+	}
+}

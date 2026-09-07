@@ -77,7 +77,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 		return err
 	}
 	if carry.ElapsedSeconds >= investigationWallSeconds || carry.ProbesUsed >= probe.DefaultLimits.MaxProbes {
-		return writeIncomplete(*outDir, "the request's investigation budget was spent in earlier rounds")
+		return writeIncomplete(*outDir, "the request's investigation budget was spent in earlier rounds", "", "")
 	}
 	consumer, err := config.ConsumerFor(draft.Repository)
 	if err != nil {
@@ -111,7 +111,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 	started := time.Now()
 	result, err := invoker.Investigate(roundCtx, *config.Models.Designer, input, started)
 	if errors.Is(err, worker.ErrInvestigationIncomplete) {
-		return writeIncomplete(*outDir, result.Incomplete)
+		return writeIncomplete(*outDir, result.Incomplete, result.LastAnswer, result.LastObjection)
 	}
 	if err != nil {
 		return err
@@ -226,8 +226,19 @@ func observationJar(seed, state string) []probe.Cookie {
 }
 
 // writeIncomplete records why the round sealed nothing and fails the card.
-func writeIncomplete(outDir, reason string) error {
-	encoded, _ := json.Marshal(map[string]string{"reason": reason})
+// writeIncomplete leaves the round's honest ending: why no record was
+// sealed and, when the contract refused the role's answers, the last
+// refused answer and the objection — the conversation itself is not kept,
+// and without these an operator could not see what the role got wrong.
+func writeIncomplete(outDir, reason, lastAnswer, lastObjection string) error {
+	record := map[string]string{"reason": reason}
+	if lastAnswer != "" {
+		record["last_answer"] = lastAnswer
+	}
+	if lastObjection != "" {
+		record["last_objection"] = lastObjection
+	}
+	encoded, _ := json.Marshal(record)
 	if err := os.WriteFile(filepath.Join(outDir, incompleteFile), append(encoded, '\n'), 0o644); err != nil {
 		return err
 	}
