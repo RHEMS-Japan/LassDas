@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Limits bound one request's investigation.
@@ -15,12 +16,17 @@ type Limits struct {
 	MaxProbes int
 	// MaxTotalBytes bounds the stored output across the request.
 	MaxTotalBytes int
-	// ExcerptBytes is how much of one output the model is shown.
+	// ExcerptBytes is how much of one output the model is shown at a
+	// time: the excerpt a measurement returns, and each window Read shows.
 	ExcerptBytes int
+	// MaxReads counts the windows the model asks for beyond the excerpts
+	// (Read). Reads run no probe and store nothing; the cap only keeps a
+	// round from paging for ever.
+	MaxReads int
 }
 
 // DefaultLimits are the design's numbers (§3.1, §3.2).
-var DefaultLimits = Limits{MaxProbes: 60, MaxTotalBytes: 16 * 1024 * 1024, ExcerptBytes: 32 * 1024}
+var DefaultLimits = Limits{MaxProbes: 60, MaxTotalBytes: 16 * 1024 * 1024, ExcerptBytes: 32 * 1024, MaxReads: 120}
 
 // Session executes requests for one investigation round and records every
 // outcome. It holds what the model must never hold: the environment for
@@ -41,8 +47,10 @@ type Session struct {
 	Jar []Cookie
 	// Used counts requests so far, including those this session refused;
 	// Bytes counts stored output. Both carry over from earlier rounds.
+	// Reads counts the windows shown beyond the excerpts (Read).
 	Used  int
 	Bytes int
+	Reads int
 
 	connector sqlConnector
 	lookup    resolver
@@ -55,6 +63,70 @@ type Session struct {
 
 // ErrBudgetExhausted ends the round honestly when the probe budget is spent.
 var ErrBudgetExhausted = errors.New("probe budget exhausted")
+
+// ErrReadBudgetExhausted tells the model no more windows will be shown.
+var ErrReadBudgetExhausted = errors.New("read budget exhausted")
+
+// Window is one stretch of a recorded output beyond the excerpt the model
+// was shown: what the model asked to read, cut on a character boundary, and
+// where the record continues.
+type Window struct {
+	ID          string `json:"id"`
+	Offset      int    `json:"offset"`
+	Bytes       int    `json:"bytes"`
+	NextOffset  int    `json:"next_offset"`
+	StoredBytes int    `json:"stored_bytes"`
+	Remaining   int    `json:"remaining"`
+	Text        string `json:"text"`
+}
+
+// Read shows the model the window of a recorded output that starts at
+// offset, ExcerptBytes long at most. A measurement's excerpt is the prefix
+// of exactly what is stored, so a role that needs the rest — an event list
+// longer than the excerpt, live 2026-09-07: three rounds could not converge
+// on a count the reviewer read from the full record — pages through the
+// same stored bytes instead of re-running the probe. Nothing is executed
+// or recorded; the budget only bounds the paging.
+func (s *Session) Read(id string, offset int) (Window, error) {
+	if s.Recorder == nil {
+		return Window{}, errors.New("session has no recorder")
+	}
+	limits := s.Limits
+	if limits.ExcerptBytes <= 0 {
+		limits.ExcerptBytes = DefaultLimits.ExcerptBytes
+	}
+	if limits.MaxReads <= 0 {
+		limits.MaxReads = DefaultLimits.MaxReads
+	}
+	if s.Reads >= limits.MaxReads {
+		return Window{}, ErrReadBudgetExhausted
+	}
+	s.Reads++
+	measurement, err := s.Recorder.Lookup(id)
+	if err != nil {
+		return Window{}, err
+	}
+	if measurement.Refused {
+		return Window{}, fmt.Errorf("refused: measurement %s was refused; nothing is stored", id)
+	}
+	if offset < 0 || offset >= len(measurement.Output) {
+		return Window{}, fmt.Errorf("refused: offset %d is outside the stored output of %s (%d bytes)", offset, id, len(measurement.Output))
+	}
+	end := offset + limits.ExcerptBytes
+	if end > len(measurement.Output) {
+		end = len(measurement.Output)
+	}
+	// Cut on a character boundary so the next window starts where this
+	// one ended and no character is lost between the two.
+	for end < len(measurement.Output) && end > offset && !utf8.RuneStart(measurement.Output[end]) {
+		end--
+	}
+	text := measurement.Output[offset:end]
+	return Window{
+		ID: id, Offset: offset, Bytes: len(text), NextOffset: end,
+		StoredBytes: len(measurement.Output), Remaining: len(measurement.Output) - end, Text: text,
+	}, nil
+}
 
 // Outcome is what the model is told: the recorded measurement (without its
 // full output) and the excerpt it may read.

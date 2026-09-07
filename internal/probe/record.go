@@ -120,6 +120,24 @@ func (r *Recorder) Append(measurement Measurement) (Measurement, error) {
 	return measurement, nil
 }
 
+// Lookup returns one recorded measurement by id, with its stored output,
+// after verifying the chain up to it. The record is the source: a model
+// that reads on beyond its excerpt reads exactly what was stored.
+func (r *Recorder) Lookup(id string) (Measurement, error) {
+	var index int
+	if _, err := fmt.Sscanf(id, "m-%04d", &index); err != nil || measurementID(index) != id || index < 1 || index > r.count {
+		return Measurement{}, fmt.Errorf("refused: %q is not a recorded measurement id", id)
+	}
+	measurements, err := ReadPrefix(r.path, index)
+	if err != nil {
+		return Measurement{}, err
+	}
+	if len(measurements) < index {
+		return Measurement{}, fmt.Errorf("%w: only %d of %d lines present", ErrChainBroken, len(measurements), index)
+	}
+	return measurements[index-1], nil
+}
+
 // chainValue links one line to everything before it.
 func chainValue(previous, line string) string {
 	return digestHex([]byte(previous + line))
