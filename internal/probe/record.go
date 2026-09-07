@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -124,9 +126,12 @@ func (r *Recorder) Append(measurement Measurement) (Measurement, error) {
 // after verifying the chain up to it. The record is the source: a model
 // that reads on beyond its excerpt reads exactly what was stored.
 func (r *Recorder) Lookup(id string) (Measurement, error) {
-	var index int
-	if _, err := fmt.Sscanf(id, "m-%04d", &index); err != nil || measurementID(index) != id || index < 1 || index > r.count {
-		return Measurement{}, fmt.Errorf("refused: %q is not a recorded measurement id", id)
+	index := 0
+	if recordedIDPattern.MatchString(id) {
+		index, _ = strconv.Atoi(id[2:])
+	}
+	if index < 1 || index > r.count {
+		return Measurement{}, fmt.Errorf("%w: %q is not a recorded measurement id", ErrReadRefused, id)
 	}
 	measurements, err := ReadPrefix(r.path, index)
 	if err != nil {
@@ -137,6 +142,9 @@ func (r *Recorder) Lookup(id string) (Measurement, error) {
 	}
 	return measurements[index-1], nil
 }
+
+// recordedIDPattern is the id shape Append assigns (measurementID).
+var recordedIDPattern = regexp.MustCompile(`^m-[0-9]{4}$`)
 
 // chainValue links one line to everything before it.
 func chainValue(previous, line string) string {

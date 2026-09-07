@@ -439,3 +439,42 @@ func TestDecodeTurnAnswerAcceptsARead(t *testing.T) {
 		t.Fatalf("a read after the seal was refused: %v", err)
 	}
 }
+
+// Windows count toward the conversation's excerpt budget and are withdrawn
+// like excerpts, named by the measurement id and the window's offset so
+// the id alone stays citable.
+func TestInvestigationWithdrawsOldWindowsOverTheBudget(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	input.ExcerptBudget = 1200 // one excerpt (1 KiB) plus a little
+	if err := os.WriteFile(filepath.Join(input.Bounds.RepoRoot, "web", "events.txt"), []byte(strings.Repeat("y", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.read","args":{"path":"web/events.txt"}}}`,
+		`{"read":{"id":"m-0001","offset":1024}}`,
+		`{"read":{"id":"m-0001","offset":2048}}`,
+		`{"report":{"questions":["q"],"findings":[{"claim":"3000 bytes","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	messages := api.requests[3].Messages
+	var withdrawn struct {
+		ID        string `json:"measurement_id"`
+		Offset    int    `json:"window_offset"`
+		Withdrawn bool   `json:"window_withdrawn"`
+		Head      string `json:"head"`
+	}
+	// The excerpt (message 3) and the first window (message 5) were withdrawn
+	// once the second window arrived; the latest window stays.
+	if !strings.Contains(messages[3].Content, `"excerpt_withdrawn":true`) {
+		t.Errorf("the excerpt was not withdrawn: %s", messages[3].Content[:120])
+	}
+	if err := json.Unmarshal([]byte(messages[5].Content), &withdrawn); err != nil || !withdrawn.Withdrawn || withdrawn.ID != "m-0001" || withdrawn.Offset != 1024 || !strings.HasPrefix(withdrawn.Head, "yyyy") {
+		t.Errorf("the first window was not withdrawn by id and offset: %s (%v)", messages[5].Content[:160], err)
+	}
+	if !strings.Contains(messages[7].Content, `"offset":2048`) || !strings.Contains(messages[7].Content, `"text":"yyyy`) {
+		t.Errorf("the latest window was withdrawn too: %s", messages[7].Content[:120])
+	}
+}
