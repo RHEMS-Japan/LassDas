@@ -164,3 +164,26 @@ func TestRoleProbesNameTheDesignerAndTheDesignJudges(t *testing.T) {
 		t.Fatalf("designer roles not probed under their own labels: %+v", probes)
 	}
 }
+
+// The judges' pod identities are probed under their own labels when the
+// entrypoint gives them their own model and key variable, and collapse
+// into the candidate reviewer's probe when they share it.
+func TestRoleProbesNameTheDesignJudgesPodIdentities(t *testing.T) {
+	env := map[string]string{
+		"LASSDAS_GATEWAY_BASE_URL": "https://gw/api/v1", "LASSDAS_IMPLEMENTER_MODEL": "opus",
+		"LASSDAS_REVIEW_A_MODEL": "opus", "LASSDAS_REVIEW_B_MODEL": "sol",
+		"LASSDAS_DESIGN_REVIEW_A_MODEL": "opus-heavy", "LASSDAS_DESIGN_REVIEW_A_KEY_VAR": "LASSDAS_DESIGN_REVIEW_A_KEY",
+		"LASSDAS_DESIGN_REVIEW_B_MODEL": "sol", "LASSDAS_DESIGN_REVIEW_B_KEY_VAR": "LASSDAS_REVIEW_B_KEY",
+	}
+	probes := roleProbes(worker.ModelConfig{}, func(key string) string { return env[key] })
+	roles := map[string]string{}
+	for _, probe := range probes {
+		roles[probe.KeyEnv] = probe.Role
+	}
+	if roles["LASSDAS_DESIGN_REVIEW_A_KEY"] != "設計レビュー役 A" {
+		t.Fatalf("judge A not probed under its own key: %+v", probes)
+	}
+	if roles["LASSDAS_REVIEW_B_KEY"] != "レビュー役 B / 設計レビュー役 B" {
+		t.Fatalf("judge B sharing the reviewer's key was not folded into its probe: %+v", probes)
+	}
+}

@@ -812,6 +812,13 @@ func (c Config) Validate() error {
 			return errors.New("design reviewer agent names a reviewer that is not configured")
 		}
 	}
+	// The endpoints and the launches come together: the model that runs is
+	// the launch's profile, so judge endpoints alone would seal a model
+	// that did not run, and judge launches alone would run under the
+	// candidate reviewers' declared endpoints.
+	if (len(c.Models.DesignReviewers) > 0) != (len(c.Agents.DesignReviewerAgents) > 0) {
+		return errors.New("design reviewers and design reviewer agents must be configured together")
+	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")
 	}
@@ -1052,8 +1059,11 @@ func (c ModelConfig) validate() error {
 		}
 		judgeIDs := make(map[string]struct{}, len(c.DesignReviewers))
 		judgeVendors := make(map[string]struct{}, len(c.DesignReviewers))
+		judgeModels := make(map[string]struct{}, len(c.DesignReviewers))
 		for _, judge := range c.DesignReviewers {
-			if err := judge.validate(true); err != nil {
+			// A judge carries no candidate-review lens; one given is kept to
+			// the reviewer's shape, none is fine.
+			if err := judge.validate(judge.Lens != ""); err != nil {
 				return fmt.Errorf("design reviewer: %w", err)
 			}
 			if _, exists := judgeIDs[judge.ID]; exists {
@@ -1064,6 +1074,14 @@ func (c ModelConfig) validate() error {
 			if _, known := reviewerIDs[judge.ID]; !known {
 				return errors.New("design reviewer names a reviewer that is not configured")
 			}
+			// No two judges on one (base URL, model): with two judges this is
+			// also what keeps the designer's own model to one judge at most —
+			// the same self-judgment bound the candidate reviewers carry.
+			modelKey := strings.ToLower(judge.BaseURL + "\x00" + judge.Model)
+			if _, exists := judgeModels[modelKey]; exists {
+				return errors.New("design reviewer models contain duplicates")
+			}
+			judgeModels[modelKey] = struct{}{}
 		}
 		if len(judgeVendors) < 2 {
 			return errors.New("design reviewers must use at least two vendors")

@@ -387,3 +387,34 @@ func TestDesignReviewPromptWithdrawsExcerptsToFitTheBudget(t *testing.T) {
 		t.Fatal("the instruction does not point at the measurements file or does not end in the answer-rules boundary")
 	}
 }
+
+// A judge with its own launch definition runs the design review — the
+// shared reviewer agent must not fire — and the sealed review and run
+// record name the judge and its model.
+func TestAgentDesignReviewRunsTheJudgesOwnLaunch(t *testing.T) {
+	fixture := newDesignFixture(t, `echo "the candidate reviewer must not judge designs"; exit 1`,
+		func(binaries string, config *worker.Config) {
+			writeStandInAgent(t, binaries, "stand-in-judge-a", passVerdict)
+			writeStandInAgent(t, binaries, "stand-in-judge-b", passVerdict)
+			config.Models.DesignReviewers = []worker.ModelEndpoint{
+				{ID: "review-a", Vendor: "Vendor B", Model: "judge-b-heavy", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "TEST_MODEL_KEY_B", MaxOutputTokens: 8192},
+				{ID: "review-b", Vendor: "Vendor A", Model: "judge-a-heavy", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "TEST_MODEL_KEY_A", MaxOutputTokens: 8192},
+			}
+			config.Agents.DesignReviewerAgents = []worker.ReviewerAgent{
+				{ReviewerID: "review-a", Agent: worker.AgentConfig{ID: "judge-a-agent", Command: "stand-in-judge-a", TimeoutSeconds: 900}},
+				{ReviewerID: "review-b", Agent: worker.AgentConfig{ID: "judge-b-agent", Command: "stand-in-judge-b", TimeoutSeconds: 900}},
+			}
+		})
+	if err := fixture.review(t, "design-review-a", "review-a", true); err != nil {
+		t.Fatal(err)
+	}
+	review := fixture.readReview(t, "design-review-a")
+	if review.Verdict != investigate.VerdictPass || review.ReviewerID != "review-a" || review.Model != "judge-b-heavy" || review.Vendor != "Vendor B" {
+		t.Fatalf("the sealed review does not name the judge that ran: %+v", review)
+	}
+	var record worker.AgentRun
+	readAgentArtifact(t, fixture.path("design-review-a-run.json"), worker.MaxArtifactJSONBytes, &record)
+	if record.AgentID != "judge-a-agent" || record.Command != "stand-in-judge-a" {
+		t.Fatalf("the judge's own launch did not run the review: %+v", record)
+	}
+}

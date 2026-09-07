@@ -565,6 +565,29 @@ func TestDesignJudgesMustCoverEveryReviewerOrNone(t *testing.T) {
 				{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
 			}
 		}, "agent ids must differ"},
+		"endpoints without launches": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-b", "Vendor A", "k", "K2")}
+		}, "configured together"},
+		"launches without endpoints": {func(c *Config) {
+			c.Agents.DesignReviewerAgents = []ReviewerAgent{
+				{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},
+				{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
+			}
+		}, "configured together"},
+		"same model twice under two vendor names": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "same", "K"), judge("review-b", "Vendor A", "same", "K2")}
+		}, "models contain duplicates"},
+		"both judges on the designer's model": {func(c *Config) {
+			c.Models.Designer = &ModelEndpoint{ID: "designer", Vendor: "Vendor C", Model: "designer-model", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "DK", MaxOutputTokens: 8192}
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "designer-model", "K"), judge("review-b", "Vendor A", "designer-model", "K2")}
+		}, "models contain duplicates"},
+		"judges sharing a program without profiles": {func(c *Config) {
+			c.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-b", "Vendor A", "k", "K2")}
+			c.Agents.DesignReviewerAgents = []ReviewerAgent{
+				{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge", TimeoutSeconds: 900}},
+				{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge", TimeoutSeconds: 900}},
+			}
+		}, "distinct profiles"},
 	}
 	for name, tc := range cases {
 		config := validTestConfig()
@@ -574,13 +597,37 @@ func TestDesignJudgesMustCoverEveryReviewerOrNone(t *testing.T) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
 		}
 	}
+	// A judge without a lens is fine: the lens is the candidate review's.
 	valid := validTestConfig()
-	valid.Models.DesignReviewers = []ModelEndpoint{judge("review-a", "Vendor B", "j", "K"), judge("review-b", "Vendor A", "k", "K2")}
+	unlensed := judge("review-a", "Vendor B", "j", "K")
+	unlensed.Lens = ""
+	valid.Models.DesignReviewers = []ModelEndpoint{unlensed, judge("review-b", "Vendor A", "k", "K2")}
 	valid.Agents.DesignReviewerAgents = []ReviewerAgent{
 		{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},
 		{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("a full set of judges was refused: %v", err)
+	}
+}
+
+// A judge reached through a host its vendor is not pinned to is refused
+// like any other endpoint.
+func TestDesignJudgesRespectTheVendorHosts(t *testing.T) {
+	config := validTestConfig()
+	config.Models.VendorHosts = map[string][]string{"vendor a": {"gateway.example.com"}, "vendor b": {"gateway.example.com"}}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("vendor hosts on the base config: %v", err)
+	}
+	config.Models.DesignReviewers = []ModelEndpoint{
+		{ID: "review-a", Vendor: "Vendor B", Model: "j", BaseURL: "https://elsewhere.example.com/api/v1", APIKeyEnv: "K", MaxOutputTokens: 8192},
+		{ID: "review-b", Vendor: "Vendor A", Model: "k", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "K2", MaxOutputTokens: 8192},
+	}
+	config.Agents.DesignReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge-a", TimeoutSeconds: 900}},
+		{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge-b", TimeoutSeconds: 900}},
+	}
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "review-a") {
+		t.Fatalf("a judge outside its vendor's hosts was accepted: %v", err)
 	}
 }

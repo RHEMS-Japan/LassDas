@@ -116,6 +116,15 @@ export LASSDAS_REVIEW_B_MODEL="${LASSDAS_REVIEW_B_MODEL:-openai/gpt-5.6-sol-pro}
 # Defaults follow the implementer and the second reviewer's vendor.
 export LASSDAS_DESIGNER_MODEL="${LASSDAS_DESIGNER_MODEL:-${LASSDAS_IMPLEMENTER_MODEL}}"
 export LASSDAS_APPLIER_MODEL="${LASSDAS_APPLIER_MODEL:-${LASSDAS_REVIEW_B_MODEL}}"
+# The design judges (docs/INVESTIGATING_DESIGNER.md §11, decision 3): by
+# default the candidate reviewers' models and keys; a heavier judge or
+# another vendor for designs is set here without moving the candidate
+# reviews. The key variables name the variable the judge's profile reads
+# (default: the candidate reviewer's key).
+export LASSDAS_DESIGN_REVIEW_A_MODEL="${LASSDAS_DESIGN_REVIEW_A_MODEL:-${LASSDAS_REVIEW_A_MODEL}}"
+export LASSDAS_DESIGN_REVIEW_B_MODEL="${LASSDAS_DESIGN_REVIEW_B_MODEL:-${LASSDAS_REVIEW_B_MODEL}}"
+export LASSDAS_DESIGN_REVIEW_A_KEY_VAR="${LASSDAS_DESIGN_REVIEW_A_KEY_VAR:-LASSDAS_REVIEW_A_KEY}"
+export LASSDAS_DESIGN_REVIEW_B_KEY_VAR="${LASSDAS_DESIGN_REVIEW_B_KEY_VAR:-LASSDAS_REVIEW_B_KEY}"
 
 REVIEW_A_HOME="$HOME/.hermes/profiles/lassdas-review-a"
 mkdir -p "$REVIEW_A_HOME"
@@ -188,14 +197,15 @@ YAML
 # judges the sealed design (or the investigation report) instead of a
 # candidate. worker.command is fixed per profile, which is why these are
 # profiles of their own and not the review profiles reused.
-for DESIGN_REVIEW in a:LASSDAS_REVIEW_A_MODEL:LASSDAS_REVIEW_A_KEY:anthropic/claude-opus-5 b:LASSDAS_REVIEW_B_MODEL:LASSDAS_REVIEW_B_KEY:openai/gpt-5.6-sol-pro; do
+for DESIGN_REVIEW in a:LASSDAS_DESIGN_REVIEW_A_MODEL:LASSDAS_DESIGN_REVIEW_A_KEY_VAR:anthropic/claude-opus-5 b:LASSDAS_DESIGN_REVIEW_B_MODEL:LASSDAS_DESIGN_REVIEW_B_KEY_VAR:openai/gpt-5.6-sol-pro; do
   DR_LETTER="${DESIGN_REVIEW%%:*}"
   DR_REST="${DESIGN_REVIEW#*:}"
   DR_MODEL_VAR="${DR_REST%%:*}"
   DR_REST="${DR_REST#*:}"
-  DR_KEY_VAR="${DR_REST%%:*}"
+  DR_KEY_VAR_VAR="${DR_REST%%:*}"
   DR_DEFAULT="${DR_REST#*:}"
   eval "DR_MODEL=\${${DR_MODEL_VAR}:-${DR_DEFAULT}}"
+  eval "DR_KEY_VAR=\${${DR_KEY_VAR_VAR}}"
   DR_HOME="$HOME/.hermes/profiles/lassdas-design-review-${DR_LETTER}"
   mkdir -p "$DR_HOME"
   cat > "$DR_HOME/config.yaml" <<YAML
