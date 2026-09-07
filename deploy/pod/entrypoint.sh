@@ -18,6 +18,10 @@
 set -euo pipefail
 
 STATE="${LASSDAS_STATE_DIR:-/data}"
+# The worker's agent user pool lives under the state directory and refuses
+# to live anywhere else: the variable is exported so the pool sees the
+# same directory whether or not the manifest set it.
+export LASSDAS_STATE_DIR="$STATE"
 export LASSDAS_RUNTIME_CONFIG="${LASSDAS_RUNTIME_CONFIG:-/etc/lassdas/runtime.json}"
 export HERMES_KANBAN_BOARD="${HERMES_KANBAN_BOARD:-lassdas}"
 export HERMES_KANBAN_DB="${HERMES_KANBAN_DB:-$STATE/kanban.db}"
