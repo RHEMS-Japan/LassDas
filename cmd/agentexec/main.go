@@ -75,6 +75,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case inv.check != "":
 		return check(inv, stderr)
 	case inv.reclaim != "":
+		// A return waits for a launch that still holds the tree, like a
+		// lend does; a lock that cannot be had in time does not stop the
+		// return (its direction, back to this user, is the safe one).
+		if lock, err := lendLock(inv.reclaim, stderr); err == nil {
+			defer lock.Close()
+		} else {
+			fmt.Fprintln(stderr, "agentexec: reclaim:", err, "— returning anyway")
+		}
 		if err := chownTree(inv.reclaim, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
 			fmt.Fprintln(stderr, "agentexec: reclaim:", err)
 			return exitLauncher
@@ -421,17 +429,24 @@ func processesOf(uid uint32) []int {
 		if err != nil {
 			continue
 		}
+		// A zombie is already dead and cannot be stopped; listing it would
+		// only make the sweep wait for nothing.
+		zombie := false
+		var real uint64 = ^uint64(0)
 		for _, line := range strings.Split(string(status), "\n") {
-			if !strings.HasPrefix(line, "Uid:") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				if real, err := strconv.ParseUint(fields[1], 10, 32); err == nil && uint32(real) == uid {
-					pids = append(pids, pid)
+			switch {
+			case strings.HasPrefix(line, "State:"):
+				zombie = strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(line, "State:")), "Z")
+			case strings.HasPrefix(line, "Uid:"):
+				if fields := strings.Fields(line); len(fields) >= 2 {
+					if parsed, err := strconv.ParseUint(fields[1], 10, 32); err == nil {
+						real = parsed
+					}
 				}
 			}
-			break
+		}
+		if !zombie && real == uint64(uid) {
+			pids = append(pids, pid)
 		}
 	}
 	return pids

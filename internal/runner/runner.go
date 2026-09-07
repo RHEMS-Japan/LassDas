@@ -228,6 +228,11 @@ func (p *Pipeline) Prepare() error {
 		return err
 	}
 	for _, entry := range entries {
+		if entry.Name() == ".agent-lend.lock" {
+			// The launcher's lend lock beside the workspace stays: an
+			// earlier launch may still hold it while returning the tree.
+			continue
+		}
 		if err := forceRemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {
 			return err
 		}
