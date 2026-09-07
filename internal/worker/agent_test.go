@@ -479,9 +479,22 @@ func TestAgentEnvironmentNeverCarriesTheSessionJar(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(environment, "\n")
-	for _, forbidden := range []string{"E2E_SESSION", "TARGET_GITHUB_TOKEN", "should-not-leak", "/home/"} {
+	for _, forbidden := range []string{"E2E_SESSION", "TARGET_GITHUB_TOKEN", "should-not-leak", "HOME=" + os.Getenv("HOME")} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("the agent environment carries %q: %q", forbidden, environment)
+		}
+	}
+	// Exactly the launch definition's variables plus PATH, HOME and LANG.
+	names := map[string]bool{}
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		names[name] = true
+	}
+	for name := range names {
+		switch name {
+		case "PATH", "HOME", "LANG", "AGENT_ENDPOINT", "AGENT_TOKEN":
+		default:
+			t.Fatalf("the agent environment carries a variable of this process: %s", name)
 		}
 	}
 	if !strings.Contains(joined, "HOME=/data/agent-home") || !strings.Contains(joined, "AGENT_TOKEN=credential") {
