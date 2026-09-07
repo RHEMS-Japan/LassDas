@@ -453,8 +453,13 @@ alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint).
 Stopping an agent: a signal from the engine's user does not reach the
 agent user's processes, so the worker stops a run by sending the launcher
 `SIGTERM`; the launcher holds `cap_kill` for this, kills the agent's own
-process group (the agent and every tool it started) and returns the
-workspace. The agent also dies with the launcher whatever killed it — the
+process group, then every process still running as that launch's user (a
+tool that left the group with `setsid` included — the user is this
+launch's alone), and only then returns the workspace; the same sweep
+precedes every return. A workspace is lent to one launch at a time: the
+launcher holds a lock beside it from the lend to the return, and a launch
+that finds it held waits up to two minutes, so a timed-out card's
+re-dispatch does not lend a tree its earlier launch is still returning. The agent also dies with the launcher whatever killed it — the
 kernel sends it the parent-death signal with the launcher's capabilities
 — and a launcher whose engine died without a word (a card's wall kills
 the engine's process group, which the launcher is not in) notices within

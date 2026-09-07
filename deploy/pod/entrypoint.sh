@@ -359,12 +359,18 @@ chmod 0700 "$HOME" 2>/dev/null || true
 # directories inside — the lent trees, the agents' homes and the MCP
 # description an agent reads (agent-mcp.json) aside.
 if [ -d "$STATE/runs" ]; then
+  # The patterns are find's, not the shell's: globbing is off while the
+  # expression is split into words, or a runs directory with two runs
+  # would expand the pattern into paths and break the expression.
   LENT_TREES="( -path $STATE/runs/*/target-repo -o -path $STATE/runs/*/target-base -o -path $STATE/runs/*/validation-target -o -path $STATE/runs/*/agent-home )"
   find "$STATE/runs" -mindepth 1 -maxdepth 1 -type d -user "$(id -un)" -exec chmod 0711 {} + 2>/dev/null || true
-  # shellcheck disable=SC2086 -- the expression is word-split on purpose
+  set -f
+  # The expression is word-split on purpose.
+  # shellcheck disable=SC2086
   find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type f -not -name agent-mcp.json -perm /077 -exec chmod 0600 {} + 2>/dev/null || true
   # shellcheck disable=SC2086
   find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type d -perm /077 -exec chmod 0700 {} + 2>/dev/null || true
+  set +f
 fi
 # Then what the agent user must not open: the kept jar, the seed mount,
 # the kubeconfig and the token or key files it names, the AWS identity

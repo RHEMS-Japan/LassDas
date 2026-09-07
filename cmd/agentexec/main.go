@@ -194,6 +194,17 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agentexec: workspace is not a directory")
 		return exitLauncher
 	}
+	// One launch at a time per workspace: a timed-out card is dispatched
+	// again while the earlier launch may still be returning the tree, and
+	// two chowns crossing leave it half each. The lock lives beside the
+	// workspace and is held from the lend to the return; a launch that
+	// finds it held waits, up to lendLockWait.
+	lock, err := lendLock(inv.workspace)
+	if err != nil {
+		fmt.Fprintln(stderr, "agentexec: workspace:", err)
+		return exitLauncher
+	}
+	defer lock.Close()
 	if err := ensureHome(inv.home, inv.uid, inv.gid); err != nil {
 		fmt.Fprintln(stderr, "agentexec: agent home:", err)
 		return exitLauncher
@@ -206,6 +217,12 @@ func launch(inv invocation, stdout, stderr io.Writer) int {
 		return exitLauncher
 	}
 	defer func() {
+		// Nothing of the agent's user may still be running when the tree
+		// comes back: a tool that left the process group (setsid) would
+		// keep writing to a tree the engine believes it owns again.
+		if left := stopUser(inv.uid); left > 0 {
+			fmt.Fprintf(stderr, "agentexec: %d process(es) of the agent user were still running and were stopped\n", left)
+		}
 		if err := chownTree(inv.workspace, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
 			fmt.Fprintln(stderr, "agentexec: workspace not returned:", err)
 		}
@@ -305,6 +322,85 @@ func ensureHome(home string, uid, gid uint32) error {
 	// The whole home: the agent's program keeps its state under it (a
 	// Hermes profile makes directories of its own beside its config).
 	return lendTree(home, uid, gid)
+}
+
+// lendLockWait bounds how long a launch waits for the workspace's earlier
+// launch to return it.
+var lendLockWait = 2 * time.Minute
+
+// lendLock takes the workspace's lend lock, a file beside the workspace,
+// waiting for an earlier launch that still holds it.
+func lendLock(workspace string) (*os.File, error) {
+	path := filepath.Join(filepath.Dir(workspace), ".agent-lend.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, errors.New("the lend lock could not be opened")
+	}
+	deadline := time.Now().Add(lendLockWait)
+	for {
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return file, nil
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, errors.New("still lent to an earlier launch that has not returned it")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// stopUser kills every process running as the agent user — the agent, its
+// tools, and whatever left the process group — until none is left or the
+// attempts run out; it reports how many it had to stop. Each launch has a
+// user of its own, so these can only be this launch's processes.
+func stopUser(uid uint32) int {
+	stopped := 0
+	for attempt := 0; attempt < 10; attempt++ {
+		pids := processesOf(uid)
+		if len(pids) == 0 {
+			return stopped
+		}
+		for _, pid := range pids {
+			if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
+				stopped++
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return stopped
+}
+
+// processesOf lists the processes whose real user is uid, from /proc
+// (none on a system without it).
+func processesOf(uid uint32) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 1 || pid == os.Getpid() {
+			continue
+		}
+		status, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status"))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(status), "\n") {
+			if !strings.HasPrefix(line, "Uid:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if real, err := strconv.ParseUint(fields[1], 10, 32); err == nil && uint32(real) == uid {
+					pids = append(pids, pid)
+				}
+			}
+			break
+		}
+	}
+	return pids
 }
 
 // lendTree gives every entry under root to the agent user, deepest first:
