@@ -295,7 +295,7 @@ func TestChangedFilesUnderRejectsARenameLeavingTheScope(t *testing.T) {
 // Configuration must not be able to shadow the variables this process sets:
 // which duplicate wins would be up to the operating system.
 func TestAgentConfigRejectsReservedEnvironmentNames(t *testing.T) {
-	for _, name := range []string{"PATH", "HOME", "LANG"} {
+	for _, name := range []string{"PATH", "HOME", "LANG", "TMPDIR"} {
 		config := fixtureAgentConfig("author-agent", "fixture-agent")
 		config.Env = map[string]string{name: "/tmp/shadow"}
 		if err := config.validate(); err == nil {
