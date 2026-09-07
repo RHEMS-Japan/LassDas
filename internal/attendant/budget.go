@@ -78,10 +78,23 @@ func roleProbes(models worker.ModelConfig, getenv func(string) string) []modelPr
 	if models.Designer != nil {
 		add("調査・設計役", models.Designer.BaseURL, models.Designer.Model, models.Designer.APIKeyEnv)
 	}
+	for _, judge := range models.DesignReviewers {
+		add("設計レビュー役 ("+judge.ID+")", judge.BaseURL, judge.Model, judge.APIKeyEnv)
+	}
 	gateway := getenv("LASSDAS_GATEWAY_BASE_URL")
 	add("実装役", gateway, getenv("LASSDAS_IMPLEMENTER_MODEL"), "LASSDAS_IMPLEMENTER_KEY")
 	add("レビュー役 A", gateway, getenv("LASSDAS_REVIEW_A_MODEL"), "LASSDAS_REVIEW_A_KEY")
 	add("レビュー役 B", gateway, getenv("LASSDAS_REVIEW_B_MODEL"), "LASSDAS_REVIEW_B_KEY")
+	// The design judges' pod identities: their own model and key variable
+	// when the entrypoint gives them one, else the candidate reviewer's
+	// (then the probe collapses into that reviewer's).
+	for _, letter := range []string{"A", "B"} {
+		keyVar := getenv("LASSDAS_DESIGN_REVIEW_" + letter + "_KEY_VAR")
+		if keyVar == "" {
+			keyVar = "LASSDAS_REVIEW_" + letter + "_KEY"
+		}
+		add("設計レビュー役 "+letter, gateway, getenv("LASSDAS_DESIGN_REVIEW_"+letter+"_MODEL"), keyVar)
+	}
 	// The applier is a pod role like the implementer; a pod without the
 	// design profiles exports no model for it and the probe is skipped.
 	add("写し役", gateway, getenv("LASSDAS_APPLIER_MODEL"), "LASSDAS_APPLIER_KEY")

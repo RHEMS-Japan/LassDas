@@ -362,6 +362,35 @@ the catalogue names `--profile <readonly>` and that profile itself carries
 points at. Neither variable carries a secret value; each names a file the
 kernel's user can read.
 
+### The design judges' own endpoints and launches
+
+A design (or an investigation report) is judged by the reviewer of the
+same letter as the candidate review by default. A consumer that wants the
+design judged by a heavier model or another vendor without moving the
+candidate reviews (design doc §11, decision 3) names the judges apart, in
+two places that must come together: `models.design_reviewers[]` gives
+each reviewer id the judge's endpoint (model, vendor, key variable; no
+`lens` needed, a `design_lens` allowed), and `agents.design_reviewer_agents[]` its launch
+definition (a profile of its own, its own credential source). Both are
+all or none and name the reviewer ids of `models.reviewers`; the judges
+must come from two vendors, must not share a (base URL, model) pair, and
+at most one of them may run the designer's own model. `agent-design-review`
+launches the judge's definition and seals the `DesignReview` with the
+judge's model; the decision gate compares the reviews against the judges.
+The lens is chosen by letter in the pod (`--lens A` for the evidence,
+`--lens B` for the approach); a `design_lens` on an endpoint applies only
+when a caller passes no letter.
+
+On the pod the judge profiles (`lassdas-design-review-a/b`) are written
+every boot from `LASSDAS_DESIGN_REVIEW_A_MODEL` / `_B_MODEL` (default: the
+candidate reviewers' models) and `LASSDAS_DESIGN_REVIEW_A_KEY_VAR` /
+`_B_KEY_VAR` (the variable the profile reads its key from; default: the
+candidate reviewer's key variable), so a heavier judge is one variable
+away and the candidate reviews stay as they are. The budget hold probes
+the designer's key and every judge's key under their own labels (a judge
+sharing the reviewer's key folds into that probe), and the spend report
+lists the designer and the judges as their own seats.
+
 ## Release discipline: the regression set
 
 A release while a run's step is executing is refused by
@@ -388,6 +417,7 @@ means adding a row here and the test it names.
 
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
+| A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

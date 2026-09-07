@@ -42,16 +42,18 @@ const (
 // is refused for it.
 func ResolveDesignLens(config Config, reviewerID, selector, subject string) (string, error) {
 	position := -1
-	var endpoint ModelEndpoint
 	for index, candidate := range config.Models.Reviewers {
 		if candidate.ID == reviewerID {
-			position, endpoint = index, candidate
+			position = index
 			break
 		}
 	}
 	if position < 0 {
 		return "", errors.New("design reviewer is not configured")
 	}
+	// The lens comes from the judge that runs (its own design_lens when the
+	// design judges are configured), the position from the reviewer list.
+	endpoint, _ := config.Models.DesignReviewerFor(reviewerID)
 	var lens string
 	switch selector {
 	case DesignLensSelectorEvidence:
@@ -116,10 +118,10 @@ func AgentDesignReviewFromRun(
 	config Config,
 	reviewedAt time.Time,
 ) (investigate.DesignReview, error) {
-	if !configuredReviewer(endpoint, config.Models.Reviewers) {
+	if !configuredReviewer(endpoint, config.Models.DesignJudges()) {
 		return investigate.DesignReview{}, errors.New("design reviewer is not configured")
 	}
-	if run.Validate(config) != nil || run.AgentID != config.Agents.ReviewerAgentFor(endpoint.ID).ID {
+	if run.Validate(config) != nil || run.AgentID != config.Agents.DesignReviewerAgentFor(endpoint.ID).ID {
 		return investigate.DesignReview{}, errors.New("design review run is not the reviewer's own launch")
 	}
 	if run.DeliveryID != identity.DeliveryID || run.InputSHA256 != identity.InputSHA256 || run.ConfigSHA256 != identity.ConfigSHA256 ||
@@ -195,10 +197,5 @@ func ValidateDesignReviewSet(config Config, subject investigate.ReviewSubject, r
 }
 
 func reviewerByID(config Config, id string) (ModelEndpoint, bool) {
-	for _, endpoint := range config.Models.Reviewers {
-		if endpoint.ID == id {
-			return endpoint, true
-		}
-	}
-	return ModelEndpoint{}, false
+	return config.Models.DesignReviewerFor(id)
 }

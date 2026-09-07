@@ -190,3 +190,90 @@ func TestValidateDesignReviewSet(t *testing.T) {
 		t.Error("two reviews were accepted for a report")
 	}
 }
+
+// designJudgesConfig gives the design judges their own endpoints (a heavier
+// model of the other vendor for the evidence lens) and their own launches,
+// while the candidate reviewers keep theirs.
+func designJudgesConfig(t *testing.T) Config {
+	t.Helper()
+	config := validTestConfig()
+	config.Models.DesignReviewers = []ModelEndpoint{
+		{ID: "review-a", Vendor: "Vendor B", Model: "judge-b-heavy", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "TEST_JUDGE_KEY_B", Lens: "evidence", MaxOutputTokens: 8192},
+		{ID: "review-b", Vendor: "Vendor A", Model: "judge-a-heavy", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "TEST_JUDGE_KEY_A", Lens: "approach", MaxOutputTokens: 8192},
+	}
+	config.Agents.DesignReviewerAgents = []ReviewerAgent{
+		{ReviewerID: "review-a", Agent: AgentConfig{ID: "judge-a-agent", Command: "judge", Args: []string{"--profile", "judge-a"}, Profile: "judge-a", SecretEnv: map[string]string{"JUDGE_KEY": "TEST_JUDGE_KEY_B"}, TimeoutSeconds: 900}},
+		{ReviewerID: "review-b", Agent: AgentConfig{ID: "judge-b-agent", Command: "judge", Args: []string{"--profile", "judge-b"}, Profile: "judge-b", SecretEnv: map[string]string{"JUDGE_KEY": "TEST_JUDGE_KEY_A"}, TimeoutSeconds: 900}},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("design judges config: %v", err)
+	}
+	return config
+}
+
+// A design judge configured apart from the candidate reviewer is the one
+// that runs and the one the sealed review names; the candidate reviewer's
+// endpoint and launch are refused for a design review, and the decision
+// gate judges the set against the judges.
+func TestDesignReviewRecordsTheJudgeThatRan(t *testing.T) {
+	config := designJudgesConfig(t)
+	identity := designReviewIdentity(t, config)
+	subject := investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)}
+	transcript := "I read the records.\n" + ReviewAnswerRulesTail + "\n" + `{"verdict":"pass","findings":[]}`
+	judge, _ := config.Models.DesignReviewerFor("review-b")
+	if judge.Model != "judge-a-heavy" || config.Agents.DesignReviewerAgentFor("review-b").ID != "judge-b-agent" {
+		t.Fatalf("the judge of review-b is not the configured one: %+v / %s", judge, config.Agents.DesignReviewerAgentFor("review-b").ID)
+	}
+	own := sealedDesignReviewRun(t, config.Agents.DesignReviewerAgentFor("review-b"), identity, 1, transcript)
+	review, err := AgentDesignReviewFromRun(judge, DesignLensApproach, own, identity, subject, config, testInvocationTime)
+	if err != nil {
+		t.Fatalf("the judge's own launch was refused: %v", err)
+	}
+	if review.Model != "judge-a-heavy" || review.Vendor != "Vendor A" || review.ReviewerID != "review-b" {
+		t.Fatalf("the sealed review does not name the judge that ran: %+v", review)
+	}
+	// The candidate reviewer's endpoint is not a design judge here.
+	if _, err := AgentDesignReviewFromRun(config.Models.Reviewers[1], DesignLensApproach, own, identity, subject, config, testInvocationTime); err == nil {
+		t.Fatal("the candidate reviewer's endpoint was accepted as a design judge")
+	}
+	// Nor is a run under the candidate reviewer's launch.
+	shared := sealedDesignReviewRun(t, config.Agents.Reviewer, identity, 1, transcript)
+	if _, err := AgentDesignReviewFromRun(judge, DesignLensApproach, shared, identity, subject, config, testInvocationTime); err == nil {
+		t.Fatal("a run under the candidate reviewer's launch was accepted as the judge's")
+	}
+	// The decision gate accepts a set naming the judges and refuses one
+	// naming the candidate reviewers' models.
+	other, _ := config.Models.DesignReviewerFor("review-a")
+	otherRun := sealedDesignReviewRun(t, config.Agents.DesignReviewerAgentFor("review-a"), identity, 1, transcript)
+	otherReview, err := AgentDesignReviewFromRun(other, DesignLensEvidence, otherRun, identity, subject, config, testInvocationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDesignReviewSet(config, subject, []investigate.DesignReview{otherReview, review}); err != nil {
+		t.Fatalf("a set from the judges was refused: %v", err)
+	}
+	stale := review
+	stale.Model = config.Models.Reviewers[1].Model
+	if err := ValidateDesignReviewSet(config, subject, []investigate.DesignReview{otherReview, stale}); err == nil {
+		t.Fatal("a review naming the candidate reviewer's model passed as a judge's")
+	}
+	// Without judges, the candidate reviewers judge as before.
+	plain := validTestConfig()
+	if endpoint, _ := plain.Models.DesignReviewerFor("review-b"); endpoint != plain.Models.Reviewers[1] || plain.Agents.DesignReviewerAgentFor("review-b").ID != plain.Agents.Reviewer.ID {
+		t.Fatal("without design judges the candidate reviewer must apply")
+	}
+}
+
+// The judges' own lens applies when they carry one; the position still
+// comes from the reviewer list.
+func TestResolveDesignLensReadsTheJudgesOwnLens(t *testing.T) {
+	config := designJudgesConfig(t)
+	config.Models.DesignReviewers[1].DesignLens = "設計の判定: 手戻りの少なさ"
+	lens, err := ResolveDesignLens(config, "review-b", "", investigate.SubjectDesign)
+	if err != nil || lens != "設計の判定: 手戻りの少なさ" {
+		t.Fatalf("lens = %q, %v", lens, err)
+	}
+	if lens, err := ResolveDesignLens(config, "review-a", "", investigate.SubjectDesign); err != nil || lens != DesignLensEvidence {
+		t.Fatalf("first position without a lens: %q, %v", lens, err)
+	}
+}

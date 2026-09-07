@@ -100,6 +100,11 @@ type AgentSet struct {
 	// definition, which is what keeps existing configurations meaning what
 	// they meant.
 	ReviewerAgents []ReviewerAgent `json:"reviewer_agents,omitempty"`
+	// DesignReviewerAgents, when present, give the design judges their own
+	// launch definitions (a profile of their own, their own credential
+	// source), one per reviewer id, all or none. Unset, a design review is
+	// launched as the candidate review of the same id.
+	DesignReviewerAgents []ReviewerAgent `json:"design_reviewer_agents,omitempty"`
 }
 
 // ReviewerAgent binds one reviewer endpoint to the launch that runs its
@@ -149,11 +154,34 @@ func (a AgentSet) validate() error {
 	// bindings present the shared reviewer definition is unreachable
 	// (bindings are all or none, checked at the config level) and must not
 	// force a phantom identity into the separation.
+	if len(a.DesignReviewerAgents) > 4 {
+		return errors.New("design reviewer agents are invalid")
+	}
+	judges := make(map[string]struct{}, len(a.DesignReviewerAgents))
+	for _, entry := range a.DesignReviewerAgents {
+		if !identifierPattern.MatchString(entry.ReviewerID) {
+			return errors.New("design reviewer agent reviewer id is invalid")
+		}
+		if _, exists := judges[entry.ReviewerID]; exists {
+			return errors.New("design reviewer agent reviewer ids contain duplicates")
+		}
+		judges[entry.ReviewerID] = struct{}{}
+		if err := entry.Agent.validate(); err != nil {
+			return fmt.Errorf("design reviewer agent %s: %w", entry.ReviewerID, err)
+		}
+		if _, exists := ids[entry.Agent.ID]; exists {
+			return errors.New("agent ids must differ")
+		}
+		ids[entry.Agent.ID] = struct{}{}
+	}
 	launchable := []AgentConfig{a.Implementer}
 	if len(a.ReviewerAgents) == 0 {
 		launchable = append(launchable, a.Reviewer)
 	}
 	for _, entry := range a.ReviewerAgents {
+		launchable = append(launchable, entry.Agent)
+	}
+	for _, entry := range a.DesignReviewerAgents {
 		launchable = append(launchable, entry.Agent)
 	}
 	for i := 0; i < len(launchable); i++ {
@@ -234,7 +262,24 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 			return entry.Agent, nil
 		}
 	}
+	for _, entry := range a.DesignReviewerAgents {
+		if entry.Agent.ID == id {
+			return entry.Agent, nil
+		}
+	}
 	return AgentConfig{}, errors.New("agent run names an agent that is not configured")
+}
+
+// DesignReviewerAgentFor picks the launch definition for one design judge:
+// its own when the configuration gives it one, else the candidate
+// reviewer's of the same id.
+func (a AgentSet) DesignReviewerAgentFor(reviewerID string) AgentConfig {
+	for _, entry := range a.DesignReviewerAgents {
+		if entry.ReviewerID == reviewerID {
+			return entry.Agent
+		}
+	}
+	return a.ReviewerAgentFor(reviewerID)
 }
 
 // ReviewerAgentFor picks the launch definition for one reviewer endpoint:
@@ -594,6 +639,13 @@ type ModelConfig struct {
 	// (base URL, model): a design judged only by its own author's model
 	// family would be self-judgment.
 	Designer *ModelEndpoint `json:"designer,omitempty"`
+	// DesignReviewers, when present, are the design judges' endpoints: one
+	// per reviewer id in Reviewers, all or none, so a design (or an
+	// investigation report) can be judged by a heavier model or another
+	// vendor than the candidate reviews use without moving those (design
+	// doc §11, decision 3). The sealed DesignReview records the judge that
+	// ran. Unset, the candidate reviewers judge designs as before.
+	DesignReviewers []ModelEndpoint `json:"design_reviewers,omitempty"`
 	// VendorHosts, when present, pins every declared vendor name to the hosts
 	// its endpoints may be reached through. The different-vendor rules below
 	// otherwise trust the vendor string as written: a config could call two
@@ -618,6 +670,32 @@ type ReadinessModels struct {
 // framework never holds a provider credential itself: BaseURL says where the
 // consumer's gateway listens and APIKeyEnv names the environment variable the
 // consumer injects the key through.
+// DesignReviewerFor returns the endpoint that judges designs and
+// investigation reports for reviewer id: the design judge when one is
+// configured, else the candidate reviewer of that id.
+func (m ModelConfig) DesignReviewerFor(id string) (ModelEndpoint, bool) {
+	for _, judge := range m.DesignReviewers {
+		if judge.ID == id {
+			return judge, true
+		}
+	}
+	for _, reviewer := range m.Reviewers {
+		if reviewer.ID == id {
+			return reviewer, true
+		}
+	}
+	return ModelEndpoint{}, false
+}
+
+// DesignJudges lists the endpoints that judge designs: the design judges
+// when configured, else the candidate reviewers.
+func (m ModelConfig) DesignJudges() []ModelEndpoint {
+	if len(m.DesignReviewers) > 0 {
+		return m.DesignReviewers
+	}
+	return m.Reviewers
+}
+
 type ModelEndpoint struct {
 	ID               string `json:"id"`
 	Vendor           string `json:"vendor"`
@@ -718,6 +796,28 @@ func (c Config) Validate() error {
 		if !known {
 			return errors.New("reviewer agent names a reviewer that is not configured")
 		}
+	}
+	if len(c.Agents.DesignReviewerAgents) > 0 && len(c.Agents.DesignReviewerAgents) != len(c.Models.Reviewers) {
+		return errors.New("design reviewer agents must cover every reviewer or none")
+	}
+	for _, entry := range c.Agents.DesignReviewerAgents {
+		known := false
+		for _, reviewer := range c.Models.Reviewers {
+			if reviewer.ID == entry.ReviewerID {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return errors.New("design reviewer agent names a reviewer that is not configured")
+		}
+	}
+	// The endpoints and the launches come together: the model that runs is
+	// the launch's profile, so judge endpoints alone would seal a model
+	// that did not run, and judge launches alone would run under the
+	// candidate reviewers' declared endpoints.
+	if (len(c.Models.DesignReviewers) > 0) != (len(c.Agents.DesignReviewerAgents) > 0) {
+		return errors.New("design reviewers and design reviewer agents must be configured together")
 	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")
@@ -900,6 +1000,7 @@ func (c ModelConfig) validate() error {
 	models := make(map[string]struct{}, len(c.Reviewers))
 	implementerModelKey := strings.ToLower(c.Implementer.BaseURL + "\x00" + c.Implementer.Model)
 	sharedWithImplementer := 0
+	reviewerIDs := make(map[string]struct{}, len(c.Reviewers))
 	for _, reviewer := range c.Reviewers {
 		if err := reviewer.validate(true); err != nil {
 			return fmt.Errorf("reviewer: %w", err)
@@ -908,6 +1009,7 @@ func (c ModelConfig) validate() error {
 			return errors.New("reviewer ids contain duplicates")
 		}
 		ids[reviewer.ID] = struct{}{}
+		reviewerIDs[reviewer.ID] = struct{}{}
 		vendors[strings.ToLower(reviewer.Vendor)] = struct{}{}
 		modelKey := strings.ToLower(reviewer.BaseURL + "\x00" + reviewer.Model)
 		// One reviewer may run the implementer's own endpoint and model under
@@ -948,6 +1050,44 @@ func (c ModelConfig) validate() error {
 			return errors.New("at most one reviewer may share the designer endpoint and model")
 		}
 	}
+	if len(c.DesignReviewers) > 0 {
+		// All or none, and the same ids: a design judge stands in for the
+		// reviewer of the same letter, so a missing one would silently be
+		// the candidate reviewer, and a stray id would judge nothing.
+		if len(c.DesignReviewers) != len(c.Reviewers) {
+			return errors.New("design reviewers must cover every reviewer or none")
+		}
+		judgeIDs := make(map[string]struct{}, len(c.DesignReviewers))
+		judgeVendors := make(map[string]struct{}, len(c.DesignReviewers))
+		judgeModels := make(map[string]struct{}, len(c.DesignReviewers))
+		for _, judge := range c.DesignReviewers {
+			// A judge carries no candidate-review lens; one given is kept to
+			// the reviewer's shape, none is fine, and a design lens is
+			// allowed either way (it applies when a caller passes no letter).
+			if err := judge.validateAs(judge.Lens != "", true); err != nil {
+				return fmt.Errorf("design reviewer: %w", err)
+			}
+			if _, exists := judgeIDs[judge.ID]; exists {
+				return errors.New("design reviewer ids contain duplicates")
+			}
+			judgeIDs[judge.ID] = struct{}{}
+			judgeVendors[strings.ToLower(judge.Vendor)] = struct{}{}
+			if _, known := reviewerIDs[judge.ID]; !known {
+				return errors.New("design reviewer names a reviewer that is not configured")
+			}
+			// No two judges on one (base URL, model): with two judges this is
+			// also what keeps the designer's own model to one judge at most —
+			// the same self-judgment bound the candidate reviewers carry.
+			modelKey := strings.ToLower(judge.BaseURL + "\x00" + judge.Model)
+			if _, exists := judgeModels[modelKey]; exists {
+				return errors.New("design reviewer models contain duplicates")
+			}
+			judgeModels[modelKey] = struct{}{}
+		}
+		if len(judgeVendors) < 2 {
+			return errors.New("design reviewers must use at least two vendors")
+		}
+	}
 	if err := c.Readiness.Assessor.validate(false); err != nil {
 		return fmt.Errorf("readiness assessor: %w", err)
 	}
@@ -968,6 +1108,7 @@ func (c ModelConfig) validate() error {
 			return err
 		}
 		endpoints := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
+		endpoints = append(endpoints, c.DesignReviewers...)
 		for _, endpoint := range endpoints {
 			if err := vendorHostMatch(c.VendorHosts, endpoint); err != nil {
 				return fmt.Errorf("%s: %w", endpoint.ID, err)
@@ -1033,7 +1174,11 @@ func ValidateModelEndpoint(m ModelEndpoint) error {
 	return m.validate(m.Lens != "")
 }
 
-func (m ModelEndpoint) validate(reviewer bool) error {
+func (m ModelEndpoint) validate(reviewer bool) error { return m.validateAs(reviewer, false) }
+
+// validateAs is validate with the design judge's allowance: a judge may
+// carry no candidate-review lens and still hold a design lens.
+func (m ModelEndpoint) validateAs(reviewer, judge bool) error {
 	if !identifierPattern.MatchString(m.ID) || m.Vendor == "" || m.Model == "" ||
 		strings.TrimSpace(m.Vendor) != m.Vendor || strings.TrimSpace(m.Model) != m.Model ||
 		strings.ContainsAny(m.Vendor+m.Model, "\r\n\x00") || m.MaxOutputTokens < 128 || m.MaxOutputTokens > MaxConfiguredOutputTokens {
@@ -1045,13 +1190,13 @@ func (m ModelEndpoint) validate(reviewer bool) error {
 	if !apiKeyEnvPattern.MatchString(m.APIKeyEnv) {
 		return errors.New("model api key environment name is invalid")
 	}
-	if reviewer && (m.Lens == "" || strings.TrimSpace(m.Lens) != m.Lens || len(m.Lens) > 512 || strings.ContainsAny(m.Lens, "\r\n\x00")) {
+	if reviewer && !validLens(m.Lens) {
 		return errors.New("reviewer lens is invalid")
 	}
 	if !reviewer && m.Lens != "" {
 		return errors.New("implementer lens must be empty")
 	}
-	if m.DesignLens != "" && (!reviewer || strings.TrimSpace(m.DesignLens) != m.DesignLens || len(m.DesignLens) > 512 || strings.ContainsAny(m.DesignLens, "\r\n\x00")) {
+	if m.DesignLens != "" && ((!reviewer && !judge) || !validLens(m.DesignLens)) {
 		return errors.New("reviewer design lens is invalid")
 	}
 	switch m.Effort {
@@ -1220,4 +1365,8 @@ func (c Config) validateProbes() error {
 // ProbeCatalog is the validated catalogue, built-ins included.
 func (c Config) ProbeCatalog() (probe.Catalog, error) {
 	return probe.NewCatalog(c.Probes)
+}
+
+func validLens(value string) bool {
+	return value != "" && strings.TrimSpace(value) == value && len(value) <= 512 && !strings.ContainsAny(value, "\r\n\x00")
 }

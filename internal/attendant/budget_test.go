@@ -140,3 +140,50 @@ func TestCheckBudgetsHoldsOnceThrottlesAndClears(t *testing.T) {
 		t.Fatal("the hold file must be removed once the budget is back")
 	}
 }
+
+// The investigating designer's roles are probed under their own labels:
+// a designer key or a design judge's key that runs out is named, not left
+// to die as an unexplained model failure on the investigate card.
+func TestRoleProbesNameTheDesignerAndTheDesignJudges(t *testing.T) {
+	models := worker.ModelConfig{
+		Implementer: worker.ModelEndpoint{Model: "gemini", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_RECEPTION"},
+		Readiness: worker.ReadinessModels{
+			Assessor: worker.ModelEndpoint{Model: "gemini", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_RECEPTION"},
+			Checker:  worker.ModelEndpoint{Model: "deepseek", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_REVIEW"},
+		},
+		Reviewers:       []worker.ModelEndpoint{{ID: "review-a", Model: "deepseek", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_REVIEW"}},
+		Designer:        &worker.ModelEndpoint{ID: "designer", Model: "opus", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_DESIGNER"},
+		DesignReviewers: []worker.ModelEndpoint{{ID: "review-a", Model: "sol-pro", BaseURL: "https://gw/api/v1", APIKeyEnv: "K_JUDGE"}},
+	}
+	probes := roleProbes(models, func(string) string { return "" })
+	roles := map[string]string{}
+	for _, probe := range probes {
+		roles[probe.KeyEnv] = probe.Role
+	}
+	if roles["K_DESIGNER"] != "調査・設計役" || roles["K_JUDGE"] != "設計レビュー役 (review-a)" {
+		t.Fatalf("designer roles not probed under their own labels: %+v", probes)
+	}
+}
+
+// The judges' pod identities are probed under their own labels when the
+// entrypoint gives them their own model and key variable, and collapse
+// into the candidate reviewer's probe when they share it.
+func TestRoleProbesNameTheDesignJudgesPodIdentities(t *testing.T) {
+	env := map[string]string{
+		"LASSDAS_GATEWAY_BASE_URL": "https://gw/api/v1", "LASSDAS_IMPLEMENTER_MODEL": "opus",
+		"LASSDAS_REVIEW_A_MODEL": "opus", "LASSDAS_REVIEW_B_MODEL": "sol",
+		"LASSDAS_DESIGN_REVIEW_A_MODEL": "opus-heavy", "LASSDAS_DESIGN_REVIEW_A_KEY_VAR": "LASSDAS_DESIGN_REVIEW_A_KEY",
+		"LASSDAS_DESIGN_REVIEW_B_MODEL": "sol", "LASSDAS_DESIGN_REVIEW_B_KEY_VAR": "LASSDAS_REVIEW_B_KEY",
+	}
+	probes := roleProbes(worker.ModelConfig{}, func(key string) string { return env[key] })
+	roles := map[string]string{}
+	for _, probe := range probes {
+		roles[probe.KeyEnv] = probe.Role
+	}
+	if roles["LASSDAS_DESIGN_REVIEW_A_KEY"] != "設計レビュー役 A" {
+		t.Fatalf("judge A not probed under its own key: %+v", probes)
+	}
+	if roles["LASSDAS_REVIEW_B_KEY"] != "レビュー役 B / 設計レビュー役 B" {
+		t.Fatalf("judge B sharing the reviewer's key was not folded into its probe: %+v", probes)
+	}
+}

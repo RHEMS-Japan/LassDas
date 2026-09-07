@@ -52,7 +52,9 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	endpoint, ok := configuredEndpoint(config, *reviewerID, true)
+	// The design judge of this id: its own endpoint and launch when the
+	// configuration gives it one, else the candidate reviewer's (#45).
+	endpoint, ok := config.Models.DesignReviewerFor(*reviewerID)
 	if !ok {
 		return errors.New("reviewer is not configured")
 	}
@@ -60,7 +62,7 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	agent := config.Agents.ReviewerAgentFor(endpoint.ID)
+	agent := config.Agents.DesignReviewerAgentFor(endpoint.ID)
 	previous, err := readPreviousDesignFindings(findingsPaths)
 	if err != nil {
 		return err
