@@ -39,6 +39,10 @@ spec:
           effect: NoSchedule
       nodeSelector:
         lassdas: "true"
+      # The probes' identity is the projected token the spec mounts on
+      # purpose; the default token would be one more file the agent user
+      # could read (docs/RUNTIME_POD.md, "Agents under their own user").
+      automountServiceAccountToken: false
       securityContext:
         fsGroup: 1000
       containers:
@@ -67,7 +71,8 @@ spec:
             - { name: config, mountPath: /etc/lassdas/config, readOnly: true }
             # The operator's observation seed (optional). 0440 with the
             # pod's fsGroup keeps it readable by the engine's user alone;
-            # the default 0644 would let the agent user read it too.
+            # with the default 0644 the agent user could read it, and the
+            # entrypoint refuses to boot.
             - { name: e2e-session, mountPath: /etc/lassdas-e2e, readOnly: true }
           livenessProbe:
             exec:

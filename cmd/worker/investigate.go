@@ -123,7 +123,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 		if err := investigate.Write(filepath.Join(*outDir, "design.json"), *result.Design); err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(*outDir, "DESIGN.md"), []byte(investigate.RenderDesign(*result.Design, result.Investigation)), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(*outDir, "DESIGN.md"), []byte(investigate.RenderDesign(*result.Design, result.Investigation)), 0o600); err != nil {
 			return err
 		}
 	}
@@ -132,14 +132,14 @@ func runInvestigate(ctx context.Context, args []string) error {
 		Reads int                    `json:"reads"`
 		Usage worker.InvocationUsage `json:"usage"`
 	}{Turns: result.Turns, Reads: result.Reads, Usage: result.Usage})
-	if err := os.WriteFile(filepath.Join(*outDir, "invocation.json"), append(usage, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(*outDir, "invocation.json"), append(usage, '\n'), 0o600); err != nil {
 		return err
 	}
 	// The report seals the budget spent up to the report; the design phase
 	// spends more wall time after it. The round file carries the whole
 	// round's spend so the next round is charged for all of it.
 	spent, _ := json.Marshal(roundSpend{ProbesUsed: session.Used, ElapsedSeconds: carry.ElapsedSeconds + int(time.Since(started).Seconds())})
-	return os.WriteFile(filepath.Join(*outDir, "round.json"), append(spent, '\n'), 0o644)
+	return os.WriteFile(filepath.Join(*outDir, "round.json"), append(spent, '\n'), 0o600)
 }
 
 // roundSpend is the whole round's budget use, report and design phases

@@ -414,17 +414,30 @@ to the agent user from the first run on, so Hermes keeps its state there.
 
 What stays closed to the agent user by mode: the kept jar
 (`$STATE/e2e-session`, 0700/0600), the engine's secrets (`$STATE/secrets`,
-0660 to the engine's group, which the agent user is not in), the sealed
-run records (0600) and the engine's own home. The seed mount is a
-Kubernetes secret; its `defaultMode` must be `0440` (readable through the
-pod's `fsGroup`), because the default 0644 is readable by every user. The
-entrypoint checks both on every boot with `agentexec --check`: a readable
-kept jar refuses the boot; a readable seed or a launcher without its
-capabilities (a container with `allowPrivilegeEscalation: false` drops
-file capabilities at exec) is reported loudly, and in the latter case no
-agent starts — the worker fails closed rather than running an agent as
-the engine's user. The launcher is not among the pinned stage binaries; it
-runs nothing of its own choosing and only the engine's user can start it.
+0600 to the engine's user), the run directories' own records (the sealed
+records, the holds and resolutions, the instruction and the investigation
+rounds: 0600, in run directories the agent user can enter but not list,
+0711) and the engine's own home. The identities the probes use stay
+closed the same way: the kubeconfig and the token or key file it names,
+the AWS web-identity token and any credentials file, and a mounted
+service-account token — the kubelet writes a projected token 0640 to the
+pod's `fsGroup`; a Secret volume needs `defaultMode: 0440` (readable
+through the `fsGroup`), because its default 0644 is readable by every
+user. The entrypoint checks all of them on every boot with `agentexec
+--check`, after tightening to 0600 any of them the engine's user owns
+(the kubeconfig on the state volume, for one); an operator lists further
+files in `LASSDAS_GUARDED_FILES` (colon-separated). A file the agent user
+can read refuses the boot, as does a launcher without its capabilities (a
+container with `allowPrivilegeEscalation: false` drops file capabilities
+at exec): a pod that does not start is the fail-closed answer, and the
+message names the mode to set. Two kernel-side facts the lending relies
+on, stated so an operator does not remove them: a hard link from the
+workspace to a file outside it cannot widen the chown, because
+`fs.protected_hardlinks` (on by default) refuses linking a file one
+cannot read or write, and the launcher holds no `cap_fsetid`, so the
+chown back clears any set-user-id bit an agent left behind. The launcher
+is not among the pinned stage binaries; it runs nothing of its own
+choosing and only the engine's user can start it.
 
 ## Release discipline: the regression set
 
@@ -453,7 +466,7 @@ means adding a row here and the test it names.
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
 | A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
-| An agent that could read the operator's session jar or seed (same user as the engine; the jar paths in every card's environment) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`; the entrypoint's boot check | review of the sign-in change, 2026-09-03 |
+| An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check | review of the sign-in change, 2026-09-03; review of the launcher, 2026-09-07 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

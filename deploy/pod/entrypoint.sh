@@ -297,14 +297,14 @@ hermes kanban init
 
 liveness() { touch "$STATE/heartbeat"; }
 
-attendant --config "$LASSDAS_RUNTIME_CONFIG" --interval 60s &
 # Agents run as the agent user (#23, docs/RUNTIME_POD.md "Agents under
 # their own user"): the worker starts every agent through the launcher,
 # which lends it the workspace and this home. The agent's Hermes profiles
 # are the engine's copies (readable, rewritten every boot); the top of the
 # home becomes the agent's on first use so Hermes can keep its own state
-# there. The kept jar, the seed mount, the secrets and the sealed run
-# records stay closed to the agent user by their modes.
+# there. The kept jar, the seed mount, the identities the probes use, the
+# secrets and the run records stay closed to the agent user by their
+# modes — checked below, before anything else starts.
 export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
 export LASSDAS_AGENT_HOME="${LASSDAS_AGENT_HOME:-$STATE/agent-home}"
 AGENT_PROFILES="$LASSDAS_AGENT_HOME/.hermes/profiles"
@@ -317,27 +317,48 @@ for AGENT_PROFILE in lassdas-implementer lassdas-review-a lassdas-review-b lassd
     || echo "note: agent profile $AGENT_PROFILE could not be placed under $AGENT_PROFILES" >&2
 done
 chmod 0755 "$LASSDAS_AGENT_HOME" "$LASSDAS_AGENT_HOME/.hermes" "$AGENT_PROFILES" 2>/dev/null || true
-# Boot check: what the agent user must not open. The kept jar is the
-# engine's own file (0600) and a readable one refuses the boot; the seed is
-# a mount whose mode the manifest sets (defaultMode 0440), so a readable
-# seed is reported loudly for the operator to fix the manifest.
-for GUARDED in "$LASSDAS_E2E_SESSION_STATE_FILE" "${LASSDAS_E2E_SESSION_FILE:-}"; do
-  [ -n "$GUARDED" ] && [ -e "$GUARDED" ] || continue
+# Boot check, fail-closed. First the launcher itself: without its file
+# capabilities (or under allowPrivilegeEscalation: false) it cannot switch
+# users, no agent could start, and a pod that is up but fails every run
+# is worse than one that does not start.
+if "$LASSDAS_AGENT_LAUNCHER" --check /etc/passwd; then :; else
+  CAP_RC=$?
+  if [ "$CAP_RC" -eq 2 ]; then
+    echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2
+    exit 1
+  fi
+fi
+# Then what the agent user must not open: the kept jar, the seed mount,
+# the kubeconfig and the token or key files it names, the AWS identity
+# files, a mounted service-account token, and whatever the operator lists
+# in LASSDAS_GUARDED_FILES (colon-separated). A file this user owns is
+# tightened to 0600 first; a file the agent user can still read refuses
+# the boot, and the message names the mode to set. Secret volumes need
+# defaultMode: 0440 (the kubelet writes projected tokens 0640 by itself).
+GUARDED_FILES="$LASSDAS_E2E_SESSION_STATE_FILE:${LASSDAS_E2E_SESSION_FILE:-}:${KUBECONFIG:-}:${AWS_WEB_IDENTITY_TOKEN_FILE:-}:${AWS_SHARED_CREDENTIALS_FILE:-}:${AWS_CONFIG_FILE:-}:/var/run/secrets/kubernetes.io/serviceaccount/token:${LASSDAS_GUARDED_FILES:-}"
+if [ -n "${KUBECONFIG:-}" ] && [ -r "$KUBECONFIG" ]; then
+  for NAMED_FILE in $(grep -oE '(tokenFile|token-file|client-key): *[^ ]+' "$KUBECONFIG" | sed -E 's/^[^:]+: *//'); do
+    GUARDED_FILES="$GUARDED_FILES:$NAMED_FILE"
+  done
+fi
+BOOT_REFUSED=""
+for GUARDED in $(printf '%s' "$GUARDED_FILES" | tr ':' '\n' | sort -u); do
+  [ -e "$GUARDED" ] || continue
+  if [ -O "$GUARDED" ]; then chmod go-rwx "$GUARDED" 2>/dev/null || true; fi
   if "$LASSDAS_AGENT_LAUNCHER" --check "$GUARDED"; then
     echo "agent separation: $GUARDED is closed to the agent user"
   else
     CHECK_RC=$?
     case $CHECK_RC in
-      3) if [ "$GUARDED" = "$LASSDAS_E2E_SESSION_STATE_FILE" ]; then
-           echo "REFUSING TO START: the agent user can read the kept session jar $GUARDED" >&2; exit 1
-         else
-           echo "WARNING: the agent user can read the seed mount $GUARDED; set defaultMode: 0440 on the secret volume (deploy/pod/statefulset.yaml)" >&2
-         fi ;;
-      2) echo "WARNING: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing or allowPrivilegeEscalation: false); agents will not start" >&2 ;;
+      3) echo "REFUSING TO START: the agent user can read $GUARDED (a secret volume needs defaultMode: 0440; a file of the engine's user needs 0600)" >&2; BOOT_REFUSED=1 ;;
+      2) echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2; BOOT_REFUSED=1 ;;
       *) echo "note: agent separation check of $GUARDED returned $CHECK_RC" >&2 ;;
     esac
   fi
 done
+[ -z "$BOOT_REFUSED" ] || exit 1
+
+attendant --config "$LASSDAS_RUNTIME_CONFIG" --interval 60s &
 
 ATTENDANT=$!
 

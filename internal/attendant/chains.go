@@ -248,7 +248,7 @@ func startQueuedRun(
 		}
 	}
 	runDir := runDirectory(config, run.DeliveryID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := os.MkdirAll(runDir, 0o711); err != nil {
 		return err
 	}
 	now := time.Now().UTC()

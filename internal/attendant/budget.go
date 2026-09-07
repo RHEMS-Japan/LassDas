@@ -230,7 +230,7 @@ func checkBudgets(ctx context.Context, config runtime.Config, backlog operatorCo
 	}
 	encoded, err := json.Marshal(budgetHold{Roles: exhausted, At: time.Now().UTC()})
 	if err == nil {
-		err = os.WriteFile(holdPath, encoded, 0o644)
+		err = os.WriteFile(holdPath, encoded, 0o600)
 	}
 	if err != nil {
 		logger.Error("budget hold: record failed", "run", run.RunID, "error", err.Error())
