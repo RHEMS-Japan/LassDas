@@ -62,11 +62,12 @@ type AgentConfig struct {
 
 var agentEnvNamePattern = envNamePattern
 
-// reservedEnvName rejects the variables this process sets itself. Letting
-// configuration shadow them would hand the outcome to whichever duplicate the
-// operating system happens to prefer.
+// reservedEnvName rejects the variables this process sets itself (TMPDIR
+// among them: the agent's temporary files stay in its own home). Letting
+// configuration shadow them would hand the outcome to whichever duplicate
+// the operating system happens to prefer.
 func reservedEnvName(name string) bool {
-	return name == "PATH" || name == "HOME" || name == "LANG"
+	return name == "PATH" || name == "HOME" || name == "LANG" || name == "TMPDIR"
 }
 
 func (a AgentConfig) validate() error {

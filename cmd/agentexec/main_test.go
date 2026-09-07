@@ -12,8 +12,8 @@ import (
 // The launcher does exactly one thing per call, names the agent user it
 // would switch to, and refuses to run anything as the caller itself.
 func TestParseInsistsOnOneModeAndASeparateUser(t *testing.T) {
-	inv, err := parse([]string{"--workspace", "/w", "--home", "/h", "--", "hermes", "--profile", "x"})
-	if err != nil || inv.workspace != "/w" || inv.home != "/h" || strings.Join(inv.command, " ") != "hermes --profile x" || inv.uid != defaultAgentUID {
+	inv, err := parse([]string{"--uid", "2001", "--workspace", "/w", "--home", "/h", "--", "hermes", "--profile", "x"})
+	if err != nil || inv.workspace != "/w" || inv.home != "/h" || strings.Join(inv.command, " ") != "hermes --profile x" || inv.uid != defaultAgentUID+1 {
 		t.Fatalf("parse = %+v, %v", inv, err)
 	}
 	for name, args := range map[string][]string{
@@ -110,7 +110,7 @@ func TestParseKeepsToTheTreeRoot(t *testing.T) {
 			t.Fatalf("%s: err = %v, want a refusal", outside, err)
 		}
 	}
-	if _, err := parse([]string{"--workspace", inside, "--home", "/tmp/elsewhere", "--", "true"}); err == nil || !strings.Contains(err.Error(), "outside") {
+	if _, err := parse([]string{"--uid", "2001", "--workspace", inside, "--home", "/tmp/elsewhere", "--", "true"}); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("a home outside the root was accepted: %v", err)
 	}
 }
@@ -130,6 +130,13 @@ func TestParseKeepsToThePoolUsers(t *testing.T) {
 	inv, err := parse([]string{"--uid", "2063", "--reclaim", "/w"})
 	if err != nil || inv.uid != 2063 || inv.gid != 2000 {
 		t.Fatalf("the last pool user was refused: %v (%+v)", err, inv)
+	}
+	// The probe's user checks, and never launches.
+	if _, err := parse([]string{"--uid", "2000", "--workspace", "/w", "--home", "/h", "--", "true"}); err == nil || !strings.Contains(err.Error(), "probe") {
+		t.Fatalf("a launch as the probe's user was accepted: %v", err)
+	}
+	if _, err := parse([]string{"--uid", "2000", "--check", "/etc/passwd"}); err != nil {
+		t.Fatalf("a check as the probe's user was refused: %v", err)
 	}
 	// The tree root reaches the launcher but not the agent.
 	env := agentEnv([]string{"PATH=/bin", treeRootEnv + "=/data/runs"}, "/h", 2001)

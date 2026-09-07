@@ -176,6 +176,12 @@ func parse(args []string) (invocation, error) {
 	if inv.gid != defaultAgentGID {
 		return invocation{}, fmt.Errorf("the agent group must be %d", defaultAgentGID)
 	}
+	if len(inv.command) > 0 && inv.uid == defaultAgentUID {
+		// The probe's user runs no launch, so a launch returning its tree
+		// never stops a probe; the worker's pool starts above it, and this
+		// keeps it so whatever names the launcher.
+		return invocation{}, fmt.Errorf("the agent user %d is the check's probe user and runs no launch", defaultAgentUID)
+	}
 	if root := os.Getenv(treeRootEnv); root != "" {
 		// The blast radius of a chown: only trees under the runs directory
 		// are lent or returned, whatever path a caller names.
