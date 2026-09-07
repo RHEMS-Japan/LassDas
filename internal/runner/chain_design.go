@@ -132,7 +132,7 @@ func (p *Pipeline) chainInvestigate(ctx context.Context, repoRoot, baseSHA strin
 			return nil
 		}
 	}
-	if err := os.MkdirAll(roundDir, 0o755); err != nil {
+	if err := os.MkdirAll(roundDir, 0o700); err != nil {
 		return err
 	}
 	args := []string{
@@ -274,7 +274,7 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 		return errors.New("the approved design's rendering is missing")
 	}
 	instruction := applyInstructionPreamble + string(design) + applyInstructionRules + p.previousApplyFindings()
-	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o644)
+	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
 
 // maxPreviousFindingsBytes bounds the findings section of the instruction.

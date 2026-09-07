@@ -32,7 +32,7 @@ func sealBoardOutcome(runDir, phase, verdict, note string) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(runDir, boardOutcomeFile), encoded, 0o644)
+	_ = os.WriteFile(filepath.Join(runDir, boardOutcomeFile), encoded, 0o600)
 }
 
 func readBoardOutcome(runDir string) (boardOutcome, bool) {

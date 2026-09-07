@@ -196,6 +196,10 @@ docker run --rm --platform linux/arm64 --entrypoint go "$tag" version
 docker run --rm --platform linux/arm64 --entrypoint node "$tag" --version
 docker run --rm --platform linux/arm64 --entrypoint kubectl "$tag" version --client
 docker run --rm --platform linux/arm64 --entrypoint aws "$tag" --version
+say "launcher keeps its file capabilities in the image"
+launcher_caps="$(docker run --rm --platform linux/arm64 --entrypoint getcap "$tag" /usr/local/bin/agentexec)"
+grep -q cap_setuid <<<"$launcher_caps" && grep -q cap_kill <<<"$launcher_caps" \
+  || { echo "agentexec lost its file capabilities in the image ($launcher_caps): agents could not run, or be stopped, as their own user" >&2; exit 1; }
 
 # ---- 7. runtime.json with the new identity --------------------------------
 # A pin is written only for a stage binary the live configuration names:
@@ -244,7 +248,16 @@ if ! kc set image "statefulset/$statefulset" "$container=$digest"; then
   exit 1
 fi
 rm -f "$patch_new" "$patch_old"
-kc rollout status "statefulset/$statefulset" --timeout=300s
+if ! kc rollout status "statefulset/$statefulset" --timeout=300s; then
+  echo "the rollout did not complete; if the pod refused to boot, the previous container's log says what to set:" >&2
+  kc logs "statefulset/$statefulset" -c "$container" --previous 2>/dev/null | grep -E 'REFUSING TO START|agent separation' >&2 || true
+  echo "the ConfigMap already carries the new pins: the way back is the previous image and the previous ConfigMap, set by hand" >&2
+  exit 1
+fi
+say "launcher switches users in the pod"
+launcher_rc=0
+kc exec "statefulset/$statefulset" -c "$container" -- /usr/local/bin/agentexec --check /etc/passwd || launcher_rc=$?
+[[ "$launcher_rc" == "3" ]] || { echo "agentexec --check /etc/passwd returned $launcher_rc in the pod, want 3 (readable): the launcher cannot switch users there (file capabilities dropped at exec?)" >&2; exit 1; }
 
 # ---- 9. the pod's own verdict is the only acceptance --------------------
 say "pod identity check"

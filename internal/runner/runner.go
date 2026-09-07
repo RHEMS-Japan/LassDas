@@ -27,6 +27,7 @@ import (
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Pipeline drives one claimed envelope through the stages.
@@ -219,11 +220,19 @@ func (p *Pipeline) readJSONField(name string, keys ...string) (string, error) {
 // previous attempt's artifacts (a stale clarification.json alone would
 // hand model stages answers this run never adopted).
 func (p *Pipeline) Prepare() error {
+	// A launch that died with the pod may have left the tree to the agent
+	// user; it comes back before anything here is cleared or read.
+	worker.ReclaimWorkspace(p.Workspace)
 	entries, err := os.ReadDir(p.Workspace)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
+		if entry.Name() == ".agent-lend.lock" {
+			// The launcher's lend lock beside the workspace stays: an
+			// earlier launch may still hold it while returning the tree.
+			continue
+		}
 		if err := forceRemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {
 			return err
 		}

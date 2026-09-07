@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -159,16 +162,64 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	if err != nil {
 		return AgentOutcome{}, "", err
 	}
-	environment, err := agentEnvironment(config)
+	launcher := agentLauncher()
+	agentHome := os.Getenv("HOME")
+	var user *agentUser
+	if launcher != "" {
+		// A launch that died with the pod left the tree to the agent user;
+		// it comes back before it is lent again.
+		reclaimWorkspace(launcher, root)
+		agentHome, err = prepareAgentHome(config, root)
+		if err != nil {
+			return AgentOutcome{}, "", err
+		}
+		user, err = acquireAgentUser()
+		if err != nil {
+			_ = os.RemoveAll(agentHome)
+			return AgentOutcome{}, "", err
+		}
+		defer user.release()
+	}
+	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
 		return AgentOutcome{}, "", err
+	}
+	if launcher != "" {
+		// The agent's temporary files live in its own home, not in the
+		// /tmp every user shares; the tree root reaches the launcher (which
+		// keeps it from the agent) so its bounds hold at the launch too.
+		environment = append(environment, "TMPDIR="+filepath.Join(agentHome, "tmp"))
+		if root := os.Getenv(AgentTreeRootEnv); root != "" {
+			environment = append(environment, AgentTreeRootEnv+"="+root)
+		}
 	}
 
 	runContext, cancel := context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	defer cancel()
 
 	arguments := append(append([]string(nil), config.Args...), prompt)
-	command := exec.CommandContext(runContext, config.Command, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
+	program := config.Command
+	if launcher != "" {
+		// The agent runs as the agent user: the launcher lends it the
+		// workspace and the home made for this launch, and takes the
+		// workspace back when the agent exits (docs/RUNTIME_POD.md,
+		// "Agents under their own user"); both come back here too, for an
+		// agent the engine killed together with the launcher, and so the
+		// engine can read what the agent left in its home.
+		arguments = append([]string{"--uid", strconv.Itoa(int(user.uid)), "--workspace", root, "--home", agentHome, "--", config.Command}, arguments...)
+		program = launcher
+		defer reclaimWorkspace(launcher, root)
+		defer func() {
+			// The home made for this launch is taken back and removed: the
+			// run record holds the transcript, and nothing of a launch is
+			// left for the next one to read.
+			reclaimWorkspace(launcher, agentHome)
+			if err := os.RemoveAll(agentHome); err != nil {
+				fmt.Fprintf(os.Stderr, "worker: launch home not removed: %v\n", err)
+			}
+		}()
+	}
+	command := exec.CommandContext(runContext, program, arguments...) // #nosec G204 -- command and arguments come from validated configuration.
 	command.Dir = root
 	command.Env = environment
 	var transcript bytes.Buffer
@@ -182,6 +233,14 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return nil
+		}
+		if launcher != "" {
+			// The agent user's processes are out of this user's reach: the
+			// launcher is asked to stop, kills the agent's own process group,
+			// and the agent dies with the launcher in any case (the
+			// parent-death signal); WaitDelay below kills a launcher that
+			// does not answer.
+			return syscall.Kill(command.Process.Pid, syscall.SIGTERM)
 		}
 		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
@@ -357,13 +416,171 @@ func validatedWorkspace(workspace string) (string, error) {
 	return root, nil
 }
 
-// agentEnvironment builds the child environment from nothing: only PATH, HOME
-// and the configured values, so the agent cannot read this process's other
-// credentials.
-func agentEnvironment(config AgentConfig) ([]string, error) {
+// The agent's environment is built from nothing (agentEnvironment): only
+// PATH, a home, a locale and the configured values, so the agent cannot
+// read this process's other credentials — nor the session jar paths, the
+// tracker key or the destination token, which a prompt-injected agent
+// would otherwise read.
+//
+// AgentLauncherEnv names the launcher that runs agents as the agent user
+// (docs/RUNTIME_POD.md, "Agents under their own user"). Unset, agents run
+// as this process does, at its home — the runner mode outside the pod.
+const AgentLauncherEnv = "LASSDAS_AGENT_LAUNCHER"
+
+// AgentTreeRootEnv names the directory under which the launcher lends and
+// returns trees; the worker hands it to the launcher at every launch.
+const AgentTreeRootEnv = "LASSDAS_AGENT_TREE_ROOT"
+
+func agentLauncher() string { return os.Getenv(AgentLauncherEnv) }
+
+// reclaimWorkspace asks the launcher to return a workspace to this user.
+// The launcher does it itself when the agent exits; this covers an agent
+// the engine killed together with the launcher (the process group).
+func reclaimWorkspace(launcher, root string) {
+	if output, err := exec.Command(launcher, "--reclaim", root).CombinedOutput(); err != nil { // #nosec G204 -- the configured launcher.
+		fmt.Fprintf(os.Stderr, "worker: workspace not reclaimed: %v: %s\n", err, strings.TrimSpace(string(output)))
+	}
+}
+
+// The agent users the image carries: agent1 … agent63, uid 2001 to 2063,
+// all in the agent group (agent, uid 2000, is the boot check's probe user
+// and runs no launch, so a launch returning its tree never stops a
+// probe). A launch holds one for its life, so two agents running at once
+// are different users: neither can read the other's processes (their
+// environment, their keys), workspace or home. The pool is a directory of
+// lock files under the state directory; a lock dies with the worker that
+// holds it, so a crash frees the user.
+const (
+	agentUIDBase  = 2001
+	agentUIDCount = 63
+)
+
+type agentUser struct {
+	uid  uint32
+	lock *os.File
+}
+
+func (u *agentUser) release() {
+	if u != nil && u.lock != nil {
+		_ = u.lock.Close()
+	}
+}
+
+// acquireAgentUser takes the first free agent user, or fails closed when
+// every one is in use.
+func acquireAgentUser() (*agentUser, error) {
+	root, err := agentPoolRoot()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, "agent-uids")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, errors.New("the agent user pool is unavailable")
+	}
+	for i := 0; i < agentUIDCount; i++ {
+		uid := agentUIDBase + i
+		file, err := os.OpenFile(filepath.Join(dir, strconv.Itoa(uid)), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, errors.New("the agent user pool is unavailable")
+		}
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return &agentUser{uid: uint32(uid), lock: file}, nil
+		}
+		_ = file.Close()
+	}
+	return nil, errors.New("every agent user is in use")
+}
+
+// agentPoolRoot is where the pool's lock files live: the state directory
+// of the pod, and nowhere else — a shared temporary directory would let
+// an agent plant the lock files first.
+func agentPoolRoot() (string, error) {
+	if state := os.Getenv("LASSDAS_STATE_DIR"); state != "" {
+		return state, nil
+	}
+	return "", errors.New("the agent user pool needs LASSDAS_STATE_DIR")
+}
+
+// ReclaimWorkspace returns a tree to this user when a launcher is
+// configured — for a caller about to clean or read a workspace that a
+// launch which died with the pod may have left to the agent user. Without
+// a launcher there is nothing to return.
+func ReclaimWorkspace(root string) {
+	if launcher := agentLauncher(); launcher != "" {
+		reclaimWorkspace(launcher, root)
+	}
+}
+
+// agentHomeSeeds are the files of this user's home an agent's program
+// reads from its own: a reviewer program's configuration the runner wrote.
+// The Hermes profile and the knowledge rules are added per agent.
+var agentHomeSeeds = []string{".codex/config.toml"}
+
+// prepareAgentHome makes the home one launch gets under the agent user: a
+// fresh directory beside the workspace (`agent-home/<id>-…` in the run
+// directory), seeded from this user's home with what the agent's program
+// reads there — its Hermes profile (config.yaml), the knowledge rules the
+// worker placed, a reviewer program's configuration. Nothing an agent
+// wrote into an earlier home reaches the next launch, and two agents
+// running at once never share one. The launcher lends the directory to
+// the agent user; the worker takes it back when the run ends, so the
+// engine can read what was left and the next dispatch can clear it.
+func prepareAgentHome(config AgentConfig, root string) (string, error) {
+	base := filepath.Join(filepath.Dir(root), "agent-home")
+	if err := os.MkdirAll(base, 0o711); err != nil {
+		return "", errors.New("agent home could not be prepared")
+	}
+	home, err := os.MkdirTemp(base, config.ID+"-")
+	if err != nil {
+		return "", errors.New("agent home could not be prepared")
+	}
+	if err := os.Mkdir(filepath.Join(home, "tmp"), 0o700); err != nil {
+		return "", errors.New("agent home could not be prepared")
+	}
+	seeds := append([]string(nil), agentHomeSeeds...)
+	if config.Profile != "" {
+		seeds = append(seeds, path.Join(".hermes", "profiles", config.Profile, "config.yaml"))
+	}
+	for _, rule := range config.Knowledge.Rules {
+		seeds = append(seeds, rule.To)
+	}
+	engineHome := os.Getenv("HOME")
+	for _, relative := range seeds {
+		if err := copyHomeSeed(engineHome, home, relative); err != nil {
+			return "", err
+		}
+	}
+	return home, nil
+}
+
+// copyHomeSeed copies one file of the engine's home into the agent's,
+// readable to the agent user; a seed that does not exist is not an error
+// (the program does not read it then).
+func copyHomeSeed(engineHome, agentHome, relative string) error {
+	if !validAgentHomePath(relative) {
+		return errors.New("agent home seed path is invalid")
+	}
+	content, err := os.ReadFile(filepath.Join(engineHome, filepath.FromSlash(relative)))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return errors.New("agent home seed could not be read")
+	}
+	target := filepath.Join(agentHome, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return errors.New("agent home could not be prepared")
+	}
+	if err := os.WriteFile(target, content, 0o644); err != nil {
+		return errors.New("agent home could not be prepared")
+	}
+	return nil
+}
+
+func agentEnvironment(config AgentConfig, home string) ([]string, error) {
 	environment := []string{
 		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
+		"HOME=" + home,
 		"LANG=C.UTF-8",
 	}
 	for name, value := range config.Env {

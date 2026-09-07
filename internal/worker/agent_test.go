@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -426,5 +427,143 @@ func TestChangedFilesUnderToleratesDeclaredByproducts(t *testing.T) {
 	}
 	if len(changed) != 1 || changed[0] != "client/src/label.ts" {
 		t.Fatalf("changed = %v", changed)
+	}
+}
+
+// With the launcher configured, the worker runs the agent through it —
+// workspace, agent home and the command after "--" — and asks it to return
+// the workspace afterwards; the agent's home is the agent's, not ours.
+func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	record := filepath.Join(t.TempDir(), "launcher.log")
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + record + "\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\necho \"HOME=$HOME\"\necho \"TREE=$LASSDAS_AGENT_TREE_ROOT\"\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// What the engine's home holds for the agent's program: its Hermes
+	// profile and the knowledge rules the worker placed.
+	engineHome := t.TempDir()
+	t.Setenv("HOME", engineHome)
+	for relative, content := range map[string]string{
+		".hermes/profiles/stand-in/config.yaml": "model: stand-in\n",
+		".claude/RULES.md":                      "the rule\n",
+	} {
+		target := filepath.Join(engineHome, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `echo "agent ran in $(pwd)"; echo "TMPDIR=$TMPDIR"; test -d "$TMPDIR" && echo "tmpdir exists"; cat "$HOME/.hermes/profiles/stand-in/config.yaml" "$HOME/.claude/RULES.md"`)
+	config := fixtureAgentConfig("author", name)
+	config.Args = []string{"--profile", "stand-in"}
+	config.Profile = "stand-in"
+	config.Knowledge.Rules = []KnowledgePlacement{{From: "rules/RULES.md", To: ".claude/RULES.md"}}
+	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing")
+	if err != nil {
+		t.Fatalf("runAgentProcess() error = %v (%s)", err, outcome.Transcript)
+	}
+	logged, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
+	// The first free agent user of an empty pool; the launch names it.
+	launchPrefix := "--uid 2001 --workspace " + root + " --home "
+	if len(lines) != 4 || lines[0] != "--reclaim "+root || !strings.HasPrefix(lines[1], launchPrefix) {
+		t.Fatalf("launcher calls = %q", lines)
+	}
+	home := strings.TrimPrefix(lines[1], launchPrefix)
+	home = home[:strings.Index(home, " -- ")]
+	// The home is made for this launch, beside the workspace, and seeded
+	// with what the program reads; both come back when the run ends, and
+	// the home is removed.
+	if !strings.HasPrefix(home, filepath.Join(filepath.Dir(root), "agent-home", "author-")) {
+		t.Fatalf("agent home = %q, want one made under the run directory", home)
+	}
+	if !strings.HasSuffix(lines[1], " -- "+name+" --profile stand-in do the thing") || lines[2] != "--reclaim "+home || lines[3] != "--reclaim "+root {
+		t.Fatalf("launcher calls = %q", lines)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the launch home was kept: %v", err)
+	}
+	for _, want := range []string{"agent ran in", "HOME=" + home, "TREE=" + filepath.Dir(root), "TMPDIR=" + filepath.Join(home, "tmp"), "tmpdir exists", "model: stand-in", "the rule"} {
+		if !strings.Contains(outcome.Transcript, want) {
+			t.Fatalf("the agent did not run through the launcher with its seeded home: %q lacks %q", outcome.Transcript, want)
+		}
+	}
+	// Unset, the agent runs as us, at home.
+	t.Setenv(AgentLauncherEnv, "")
+	if agentLauncher() != "" {
+		t.Fatal("an unset launcher was reported set")
+	}
+}
+
+// The session jar paths and every other variable of this process never
+// reach an agent: its environment is the launch definition's alone.
+func TestAgentEnvironmentNeverCarriesTheSessionJar(t *testing.T) {
+	t.Setenv("LASSDAS_E2E_SESSION_FILE", "/etc/lassdas-e2e/session.json")
+	t.Setenv("LASSDAS_E2E_SESSION_STATE_FILE", "/data/e2e-session/session.json")
+	t.Setenv("TARGET_GITHUB_TOKEN", "should-not-leak")
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	environment, err := agentEnvironment(fixtureAgentConfig("author", "fixture-agent"), "/data/agent-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(environment, "\n")
+	for _, forbidden := range []string{"E2E_SESSION", "TARGET_GITHUB_TOKEN", "should-not-leak", "HOME=" + os.Getenv("HOME")} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("the agent environment carries %q: %q", forbidden, environment)
+		}
+	}
+	// Exactly the launch definition's variables plus PATH, HOME and LANG.
+	names := map[string]bool{}
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		names[name] = true
+	}
+	for name := range names {
+		switch name {
+		case "PATH", "HOME", "LANG", "AGENT_ENDPOINT", "AGENT_TOKEN":
+		default:
+			t.Fatalf("the agent environment carries a variable of this process: %s", name)
+		}
+	}
+	if !strings.Contains(joined, "HOME=/data/agent-home") || !strings.Contains(joined, "AGENT_TOKEN=credential") {
+		t.Fatalf("the agent environment lacks its home or its own credential: %q", environment)
+	}
+}
+
+// Two agents running at once are different users: the pool hands out the
+// first free user and frees it when the holder lets go (or dies).
+func TestAgentUsersAreDistinctWhileHeld(t *testing.T) {
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	first, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.uid != agentUIDBase || second.uid != agentUIDBase+1 {
+		t.Fatalf("users = %d, %d; want %d and %d", first.uid, second.uid, agentUIDBase, agentUIDBase+1)
+	}
+	first.release()
+	third, err := acquireAgentUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.release()
+	defer second.release()
+	if third.uid != agentUIDBase {
+		t.Fatalf("a released user was not reused: got %d", third.uid)
 	}
 }

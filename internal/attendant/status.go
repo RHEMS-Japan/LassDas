@@ -410,7 +410,7 @@ func WriteBoardStatus(dir string, snapshot BoardSnapshot) error {
 		})
 	}
 	if len(events) > 0 {
-		file, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		file, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return err
 		}
@@ -434,7 +434,7 @@ func WriteBoardStatus(dir string, snapshot BoardSnapshot) error {
 		return err
 	}
 	temp := filepath.Join(dir, "board.json.tmp")
-	if err := os.WriteFile(temp, encoded, 0o644); err != nil {
+	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(temp, filepath.Join(dir, "board.json"))

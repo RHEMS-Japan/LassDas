@@ -48,6 +48,10 @@ spec asks for it. Or the operator mints a token of bounded lifetime
 (`kubectl create token lassdas-investigator -n <ns> --duration=…`), writes
 it into a kubeconfig, mounts that kubeconfig as a Secret for the kernel (as
 the observation session's seed is mounted), and renews it before it expires.
+Whichever way, the files stay closed to the agent user (docs/RUNTIME_POD.md,
+"Agents under their own user"): a projected token is written 0640 to the
+pod's `fsGroup` by the kubelet, a Secret volume needs `defaultMode: 0440`,
+and the entrypoint refuses to boot when the agent user can read any of them.
 The AWS role is assumed by the kernel's own source identity (the pod's role
 or the operator's profile); the trust policy that names who may assume it is
 the consumer's and is not part of these files. Until the agents run under a

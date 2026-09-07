@@ -166,12 +166,17 @@ agent:
   max_turns: 40
 YAML
 
-# The implementer profile runs the native Hermes agent through the gateway
-# under its own virtual key. The shape (a named provider addressed as
-# custom:<name>, the model selected via model.provider/model.name) is the
-# one measured working on the pod (2026-08-24: OK-implementer /
-# OK-review-a / OK-review-b probes through all three identities); written
-# every boot like the other profiles, so a restart heals drift.
+# The implementer profile: a direct command like the reviews, so the
+# runner receives the card and the worker starts Hermes under the agent
+# user through the launcher (docs/RUNTIME_POD.md, "Agents under their own
+# user"); the kanban used to run this profile as a native worker under the
+# engine's user. The worker copies this profile into the home it makes for
+# each launch, so the model settings below are what the agent runs with.
+# The shape (a named provider addressed as custom:<name>, the model
+# selected via model.provider/model.name) is the one measured working on
+# the pod (2026-08-24: OK-implementer / OK-review-a / OK-review-b probes
+# through all three identities); written every boot like the other
+# profiles, so a restart heals drift.
 #
 # agent.max_turns is Hermes' cap on tool-calling iterations (its default is
 # 500). An implementer that stops making progress burns the whole budget:
@@ -181,6 +186,12 @@ YAML
 IMPLEMENTER_HOME="$HOME/.hermes/profiles/lassdas-implementer"
 mkdir -p "$IMPLEMENTER_HOME"
 cat > "$IMPLEMENTER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - implement
 model:
   provider: custom:lassdas-gateway
   name: ${LASSDAS_IMPLEMENTER_MODEL:-anthropic/claude-opus-5}
@@ -227,12 +238,20 @@ agent:
 YAML
 done
 
-# The applier profile: a native agent like the implementer, but it copies
-# an approved design and stops on doubt (docs/INVESTIGATING_DESIGNER.md §7).
-# Forty turns is its whole budget: the design already decided everything.
+# The applier profile: a direct command like the implementer's, and the
+# agent copies an approved design and stops on doubt
+# (docs/INVESTIGATING_DESIGNER.md §7). Forty turns is its whole budget: the
+# design already decided everything. The consumer's agents.applier names
+# the launch the worker runs (hermes --profile lassdas-applier -z).
 APPLIER_HOME="$HOME/.hermes/profiles/lassdas-applier"
 mkdir -p "$APPLIER_HOME"
 cat > "$APPLIER_HOME/config.yaml" <<YAML
+worker:
+  command:
+    - /usr/local/bin/runner
+    - chain-stage
+    - --stage
+    - apply
 model:
   provider: custom:lassdas-gateway
   name: ${LASSDAS_APPLIER_MODEL}
@@ -297,7 +316,110 @@ hermes kanban init
 
 liveness() { touch "$STATE/heartbeat"; }
 
+# Agents run as the agent user (#23, docs/RUNTIME_POD.md "Agents under
+# their own user"): the worker starts every agent through the launcher,
+# which lends it the workspace and a home made for that launch (seeded
+# from this user's profiles above). The kept jar, the seed mount, the
+# identities the probes use, the secrets and the run records stay closed
+# to the agent user by their modes — checked below, before anything else
+# starts.
+export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
+# The launcher lends and returns trees under the runs directory alone —
+# the one the runtime configuration names (chain.runs_root), so a runs
+# directory placed elsewhere is not refused at every launch.
+RUNS_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("chain", {}).get("runs_root", ""))' "$LASSDAS_RUNTIME_CONFIG" 2>/dev/null || true)"
+export LASSDAS_AGENT_TREE_ROOT="${LASSDAS_AGENT_TREE_ROOT:-${RUNS_ROOT:-$STATE/runs}}"
+# Boot check, fail-closed. First the launcher itself: without its file
+# capabilities (or under allowPrivilegeEscalation: false) it cannot switch
+# users, no agent could start, and a pod that is up but fails every run
+# is worse than one that does not start.
+if "$LASSDAS_AGENT_LAUNCHER" --check /etc/passwd; then :; else
+  CAP_RC=$?
+  if [ "$CAP_RC" -eq 2 ]; then
+    echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2
+    exit 1
+  fi
+fi
+# What a launch left to the agent user when the pod died mid-run (a lent
+# workspace, a lent home) comes back to this user before any card runs,
+# or the next dispatch of that run could neither clear nor read its tree.
+if [ -d "$STATE/runs" ]; then
+  # A directory the agent user closed (0700) makes find exit non-zero
+  # after listing it; that must not end the boot (it is what the reclaim
+  # below is for), hence the || true on each.
+  { find "$STATE/runs" -mindepth 2 -maxdepth 2 ! -user "$(id -un)" 2>/dev/null || true
+    find "$STATE/runs" -mindepth 3 -maxdepth 3 -path '*/agent-home/*' ! -user "$(id -un)" 2>/dev/null || true; } \
+  | while IFS= read -r LEFT; do
+      "$LASSDAS_AGENT_LAUNCHER" --reclaim "$LEFT" || echo "note: $LEFT not reclaimed" >&2
+    done
+fi
+# The engine's own home is closed to the agent user too (what an agent
+# reads from it, the worker copies into the home made for its launch).
+chmod 0700 "$HOME" 2>/dev/null || true
+# Runs made before this engine closed its records (0644 files, 0755
+# directories) are closed the same way once per boot: 0711 run directories
+# (the agent user enters its clone, cannot list), 0600 files and 0700
+# directories inside — the lent trees, the agents' homes and the MCP
+# description an agent reads (agent-mcp.json) aside.
+if [ -d "$STATE/runs" ]; then
+  # The patterns are find's, not the shell's: globbing is off while the
+  # expression is split into words, or a runs directory with two runs
+  # would expand the pattern into paths and break the expression.
+  LENT_TREES="( -path $STATE/runs/*/target-repo -o -path $STATE/runs/*/target-base -o -path $STATE/runs/*/validation-target -o -path $STATE/runs/*/agent-home )"
+  find "$STATE/runs" -mindepth 1 -maxdepth 1 -type d -user "$(id -un)" -exec chmod 0711 {} + 2>/dev/null || true
+  set -f
+  # The expression is word-split on purpose.
+  # shellcheck disable=SC2086
+  find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type f -not -name agent-mcp.json -perm /077 -exec chmod 0600 {} + 2>/dev/null || true
+  # shellcheck disable=SC2086
+  find "$STATE/runs" -mindepth 2 $LENT_TREES -prune -o -user "$(id -un)" -type d -perm /077 -exec chmod 0700 {} + 2>/dev/null || true
+  set +f
+fi
+# Then what the agent user must not open: the kept jar, the seed mount,
+# the kubeconfig and the token or key files it names, the AWS identity
+# files, a mounted service-account token, and whatever the operator lists
+# in LASSDAS_GUARDED_FILES (colon-separated). A file this user owns is
+# tightened to 0600 first; a file the agent user can still read refuses
+# the boot, and the message names the mode to set. Secret volumes need
+# defaultMode: 0440 (the kubelet writes projected tokens 0640 by itself).
+GUARDED_LIST="$(printf '%s\n' "$LASSDAS_E2E_SESSION_STATE_FILE" "${LASSDAS_E2E_SESSION_FILE:-}" "${KUBECONFIG:-}" "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" "${AWS_SHARED_CREDENTIALS_FILE:-}" "${AWS_CONFIG_FILE:-}" /var/run/secrets/kubernetes.io/serviceaccount/token; printf '%s\n' "${LASSDAS_GUARDED_FILES:-}" | tr ':' '\n')"
+if [ -n "${KUBECONFIG:-}" ] && [ -r "$KUBECONFIG" ]; then
+  # The files the kubeconfig names, quoted or not, taken relative to its
+  # own directory when relative (as the client takes them).
+  KUBECONFIG_DIR="$(dirname "$KUBECONFIG")"
+  while IFS= read -r NAMED_FILE; do
+    [ -n "$NAMED_FILE" ] || continue
+    case "$NAMED_FILE" in /*) ;; *) NAMED_FILE="$KUBECONFIG_DIR/$NAMED_FILE" ;; esac
+    [ -e "$NAMED_FILE" ] || echo "note: $KUBECONFIG names $NAMED_FILE, which does not exist" >&2
+    GUARDED_LIST="$GUARDED_LIST
+$NAMED_FILE"
+  done <<EOF
+$(sed -nE 's/^[[:space:]]*(tokenFile|token-file|client-key):[[:space:]]*"?([^"]*[^"[:space:]])"?[[:space:]]*$/\2/p' "$KUBECONFIG")
+EOF
+fi
+BOOT_REFUSED=""
+while IFS= read -r GUARDED; do
+  [ -n "$GUARDED" ] && [ -e "$GUARDED" ] || continue
+  if [ -O "$GUARDED" ] && [ -n "$(find "$GUARDED" -maxdepth 0 -perm /077 2>/dev/null)" ]; then
+    chmod go-rwx "$GUARDED" 2>/dev/null && echo "agent separation: tightened $GUARDED to this user alone (0600)"
+  fi
+  if "$LASSDAS_AGENT_LAUNCHER" --check "$GUARDED"; then
+    echo "agent separation: $GUARDED is closed to the agent user"
+  else
+    CHECK_RC=$?
+    case $CHECK_RC in
+      3) echo "REFUSING TO START: the agent user can read $GUARDED (a secret volume needs defaultMode: 0440 with the pod's fsGroup; a file of the engine's user needs 0600)" >&2; BOOT_REFUSED=1 ;;
+      2) echo "REFUSING TO START: $LASSDAS_AGENT_LAUNCHER cannot switch users (file capabilities missing, or allowPrivilegeEscalation: false on the container)" >&2; BOOT_REFUSED=1 ;;
+      *) echo "note: agent separation check of $GUARDED returned $CHECK_RC" >&2 ;;
+    esac
+  fi
+done <<EOF
+$(printf '%s\n' "$GUARDED_LIST" | sort -u)
+EOF
+[ -z "$BOOT_REFUSED" ] || exit 1
+
 attendant --config "$LASSDAS_RUNTIME_CONFIG" --interval 60s &
+
 ATTENDANT=$!
 
 dispatch_loop() {

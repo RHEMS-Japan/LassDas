@@ -15,16 +15,17 @@ import (
 	"automation.internal/ticket-ingress/internal/worker/investigate"
 )
 
-// runSealCandidate seals a change an externally-launched implementer left in
-// the working copy. The M2 orchestration starts the implementing agent itself
-// (a Hermes-native worker); what this command owns is the observation: which
-// files changed is read from git, checked against the writable scope, and
-// sealed into the same artifacts a kernel-launched implement run produces, so
+// runSealCandidate seals a change an implementer launched elsewhere left in
+// the working copy. In the cards orchestration the implement card runs the
+// agent through `run-instruction` (which records its own launch facts in
+// <role>-run.json); what this command owns is the observation: which files
+// changed is read from git, checked against the writable scope, and sealed
+// into the same artifacts a kernel-launched implement run produces, so
 // everything downstream — reviews, validation, the publish gate — is
-// unchanged. Launch facts nobody here observed (command, prompt, exit) are
-// pinned to sentinels in the run record instead of being taken on faith; the
-// optional report file is the implementer's own account and lands in the
-// transcript, where it is treated exactly like an agent's stdout.
+// unchanged. Launch facts this command did not observe (command, prompt,
+// exit) are pinned to sentinels in its run record instead of being taken on
+// faith; the optional report file is the implementer's own account and lands
+// in the transcript, where it is treated exactly like an agent's stdout.
 func runSealCandidate(args []string) error {
 	flags := commandFlags("seal-candidate")
 	configPath := flags.String("config", "", "")

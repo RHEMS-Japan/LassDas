@@ -124,10 +124,10 @@ func holdForStreak(ctx context.Context, tracker runtime.TrackerConfig, backlog o
 		"comment_id": confirmation.CommentID, "user_id": confirmation.UserID, "at": time.Now().UTC(),
 	})
 	if err == nil {
-		err = os.MkdirAll(runDir, 0o755)
+		err = os.MkdirAll(runDir, 0o711)
 	}
 	if err == nil {
-		err = os.WriteFile(filepath.Join(runDir, streakResolutionFile), encoded, 0o644)
+		err = os.WriteFile(filepath.Join(runDir, streakResolutionFile), encoded, 0o600)
 	}
 	if err != nil {
 		logger.Error("failure streak: resolution record failed", "run", streak.Newest.RunID, "error", err.Error())
@@ -164,8 +164,8 @@ func recordStreakCheck(runDir string, now time.Time) {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := os.MkdirAll(runDir, 0o711); err != nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(runDir, streakCheckFile), encoded, 0o644)
+	_ = os.WriteFile(filepath.Join(runDir, streakCheckFile), encoded, 0o600)
 }

@@ -123,7 +123,7 @@ func resolveAttention(ctx context.Context, tracker runtime.TrackerConfig, backlo
 		logger.Error("deliver attention: resolution encode failed", "run", run.RunID, "error", err.Error())
 		return
 	}
-	if err := os.WriteFile(filepath.Join(runDir, deliverResolutionFile), encoded, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(runDir, deliverResolutionFile), encoded, 0o600); err != nil {
 		logger.Error("deliver attention: resolution write failed", "run", run.RunID, "error", err.Error())
 		return
 	}

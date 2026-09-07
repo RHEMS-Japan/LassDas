@@ -368,7 +368,9 @@ func (p *Pipeline) writeAgentConfigs() error {
   }
 }
 `
-	if err := os.WriteFile(p.path("agent-mcp.json"), []byte(mcp), 0o600); err != nil {
+	// The agent reads this from its working copy (../agent-mcp.json) under
+	// its own user; it names servers and the variables they read, no value.
+	if err := os.WriteFile(p.path("agent-mcp.json"), []byte(mcp), 0o644); err != nil {
 		return err
 	}
 

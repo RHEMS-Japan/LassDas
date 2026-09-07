@@ -151,7 +151,7 @@ func run() error {
 			// flood costs this process no more than accept + header parse.
 			if ring {
 				_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<10))
-				if err := os.WriteFile(filepath.Join(statusDir, "wakeup"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(statusDir, "wakeup"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o600); err != nil {
 					logger.Error("bell write failed", "error", err.Error())
 				}
 			}
@@ -612,7 +612,7 @@ func (s *boardServer) journalAction(record actRecord) {
 	if err != nil {
 		return
 	}
-	file, err := os.OpenFile(filepath.Join(s.statusDir, "actions.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(filepath.Join(s.statusDir, "actions.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		s.logger.Error("action journal failed", "error", err.Error())
 		return
