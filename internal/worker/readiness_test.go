@@ -495,3 +495,38 @@ func TestCheckReadinessDropsAHallucinatedQuestionID(t *testing.T) {
 		t.Fatalf("the hallucinated id was not dropped to set-level: %+v", check.Reasons)
 	}
 }
+
+// The reception measures nothing: a question whose choices carry latencies
+// and record numbers, or an assumption that cites a record, is refused as
+// invented — the live case handed the requester three made-up records to
+// choose from and preserved the choice as an answer.
+func TestReadinessRefusesFabricatedMeasurements(t *testing.T) {
+	needsDesign := true
+	question := func(label string) ModelReadinessOutput {
+		return ModelReadinessOutput{
+			Decision: ReadinessOutcomeClarification,
+			Questions: []ReadinessQuestion{{
+				ID: "Q1", Dimension: "acceptance_criterion", Question: "Which basis should the guide use?", WhyBlocking: "The threshold differs by basis.",
+				Choices: []ReadinessChoice{{ID: "a", Label: label, Effect: "The guide states that basis."}, {ID: "b", Label: "Through the public entry point", Effect: "The guide states that basis."}},
+			}},
+			RequestKind: "change", NeedsDesign: &needsDesign,
+		}
+	}
+	for _, invented := range []string{
+		"Inside the cluster (HTTP 200, under 50ms, 記録番号: REC-2026-HEALTH-INT01)",
+		"Inside the cluster, record number: m-0007",
+		"Inside the cluster (REC-2026-HEALTH-INT01)",
+	} {
+		if err := validateModelReadinessOutput(question(invented)); err == nil || !strings.Contains(err.Error(), "never made") {
+			t.Fatalf("%q: err = %v, want a refusal", invented, err)
+		}
+	}
+	if err := validateModelReadinessOutput(question("From inside the cluster")); err != nil {
+		t.Fatalf("a basis described in words was refused: %v", err)
+	}
+	withAssumption := question("From inside the cluster")
+	withAssumption.Assumptions = []ReadinessAssumption{{Kind: "non_user_visible_implementation", Statement: "The guide cites 記録番号: REC-2026-HEALTH-EXT01.", Evidence: "ticket"}}
+	if err := validateModelReadinessOutput(withAssumption); err == nil || !strings.Contains(err.Error(), "never made") {
+		t.Fatalf("an assumption citing an invented record was accepted: %v", err)
+	}
+}

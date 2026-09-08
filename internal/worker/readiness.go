@@ -425,6 +425,37 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 	}
 }
 
+// fabricatedEvidencePattern matches what only a measurement could have
+// produced: a record number with a value after it, or an identifier shaped
+// like a measurement record. The reception measures nothing, so any of
+// these in its questions, choices or assumptions is invented (2026-09-08,
+// live: three choices each carried a latency and a "record number" the
+// investigation had not yet made, and the chosen one was preserved as the
+// requester's answer).
+var fabricatedEvidencePattern = regexp.MustCompile(`記録番号[:：]\s*\S|\bREC-[A-Za-z0-9][A-Za-z0-9-]*|\bm-[0-9]{4}\b|record (?:number|id)[:：]\s*\S`)
+
+// refuseFabricatedEvidence rejects an assessment that presents measured
+// values or measurement records the reception could not have obtained.
+func refuseFabricatedEvidence(output ModelReadinessOutput) error {
+	for _, question := range output.Questions {
+		texts := []string{question.Question, question.WhyBlocking}
+		for _, choice := range question.Choices {
+			texts = append(texts, choice.Label, choice.Effect)
+		}
+		for _, text := range texts {
+			if fabricatedEvidencePattern.MatchString(text) {
+				return fmt.Errorf("readiness question %s cites a measurement record the reception never made", question.ID)
+			}
+		}
+	}
+	for _, assumption := range output.Assumptions {
+		if fabricatedEvidencePattern.MatchString(assumption.Statement) || fabricatedEvidencePattern.MatchString(assumption.Evidence) {
+			return errors.New("readiness assumption cites a measurement record the reception never made")
+		}
+	}
+	return nil
+}
+
 func validateModelReadinessOutput(output ModelReadinessOutput) error {
 	switch output.Decision {
 	case ReadinessOutcomeReady:
@@ -450,6 +481,9 @@ func validateModelReadinessOutput(output ModelReadinessOutput) error {
 		return errors.New("readiness questions exceed the limit")
 	}
 	if err := validateClarificationQuestions(output.Questions); err != nil {
+		return err
+	}
+	if err := refuseFabricatedEvidence(output); err != nil {
 		return err
 	}
 	// Sixteen, not eight: a requester who bakes decided behavior into the
@@ -1224,6 +1258,7 @@ Ask a question only when all four conditions hold: (1) two or more permitted ans
 Also decide, from the ticket text alone, whether the change needs a design before code. ` + designPromptRules + `
 approach_in_ticket is true only when the ticket text states how the change is to be made, and approach_excerpt must then quote that whole statement verbatim from the ticket request in USER_DATA_JSON - the full sentence or clause, never a fragment of a few words, never the ticket's title alone, never a paraphrase, never text from anywhere else; the engine checks that the quote is really there and drops the claim otherwise. When the ticket says only what should be different, approach_in_ticket is false and approach_excerpt is an empty string.
 Every question must offer 2 to 4 mutually exclusive choices, and each effect must state the user-visible result of choosing it. Free-text answers are not accepted. If a blocking ambiguity cannot be expressed as 2 to 4 bounded choices, do not ask; return decision unresolvable so an operator can rework the ticket.
+You measure nothing. A question, a choice or an assumption must not present a measured value (a latency, a count, a rate), a threshold derived from one, or a measurement record number as if it existed; such choices are refused as invented. When the ambiguity is which basis a later measurement should use, describe the basis in words (for example: from inside the cluster, through the public entry point) and leave every number and record number to the investigation stage.
 Never ask about variable names, styling technique, component structure, test implementation, anything derivable from the provided source, optional improvements, or preferences that do not change the user-visible outcome. Record such autonomous choices as assumptions with their evidence instead of asking.
 Never ask for API keys, passwords, private keys, tokens, cookies, or any other credential or secret, and never instruct anyone to post one. If required credentials appear to be missing, return decision unresolvable; that is an operator configuration failure, not a requester question.
 Ask at most 3 questions. Record at most 16 assumptions, keeping the ones with the highest behavioral impact. If satisfying the ticket would require new CI/CD, release machinery, credentials, IAM, repository governance, or changes to files outside the writable_scope prefixes in USER_DATA_JSON, do not ask about it; return decision reject with reject_code out-of-scope.
@@ -1250,6 +1285,7 @@ Fail the assessment when any of these defects exists:
 - secret-request: the assessment asks for, or instructs anyone to post, a credential or secret of any kind.
 - scope-miss: the ticket requires machinery or file changes outside the writable_scope prefixes in USER_DATA_JSON, but the decision is not reject. The provided source files are a preliminary anchor, not the boundary; needing other files inside writable_scope is not a scope miss.
 - inconsistent-decision: the assessment contradicts itself, for example ready with questions, clarification_required without questions, or unresolvable with questions.
+- fabricated-evidence: a question, a choice or an assumption presents a measured value, a threshold derived from one, or a measurement record number that the assessor could not have obtained (the assessor measures nothing).
 Use verdict pass with an empty reasons array only when none of these defects exists. Do not fail for stylistic preferences or for questions you would merely have phrased differently.
 Attribution: set question_id when the defect is one question's own and its code is false-block, invalid-question, or unbounded-question. Under those three codes, questions you do not name are treated as approved by you - on the final attempt they go to the requester without another check - so never leave a defective question unnamed. Every other code condemns the assessment as a whole regardless of question_id; you may still set question_id there as a pointer to where the defect shows, but it does not narrow the failure.`, endpoint.Lens))
 }
