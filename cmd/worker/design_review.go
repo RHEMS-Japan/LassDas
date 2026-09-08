@@ -575,7 +575,11 @@ func designReviewUserData(input designReviewPromptInput, cited map[string]citati
 			}
 		case view.Cited:
 			view.ExcerptWithdrawn = measurement.Output != ""
-			stats.withdrawn++
+			if view.ExcerptWithdrawn {
+				stats.withdrawn++
+			} else {
+				stats.complete++ // an empty output is carried whole by having nothing to carry
+			}
 		default:
 			uncitedSeen++
 			if uncitedSeen <= uncitedTotal-fit.keepUncited {
