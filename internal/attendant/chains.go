@@ -589,6 +589,12 @@ func resubmitPendingTerminal(
 		return nil
 	}
 	code := hook.TerminalCode(run.TerminalCode)
+	// An incomplete end carries its reason and last objection again: the
+	// first submission's comment may be the one that failed (MINOR on #93).
+	var evidence map[string]string
+	if code == hook.TerminalInvestigationIncomplete {
+		evidence = incompleteEvidence(runDir, view.designRound)
+	}
 	switch code {
 	case hook.TerminalSuccess:
 		return reportChainSuccess(ctx, config, services, envelope, run, logger)
@@ -601,7 +607,7 @@ func resubmitPendingTerminal(
 		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
 		return nil
 	}
-	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return err
 	}
 	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))

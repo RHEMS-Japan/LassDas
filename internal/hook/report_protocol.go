@@ -248,8 +248,15 @@ type TerminalReportRequest struct {
 	// SpendText is what this run was billed, rendered for the requester.
 	// Empty when no reading was available — the report then simply omits the
 	// cost line rather than printing a zero that reads as "this was free".
-	SpendText string    `json:"spend_text,omitempty"`
-	IssuedAt  time.Time `json:"issued_at"`
+	SpendText string `json:"spend_text,omitempty"`
+	// IncompleteReason and IncompleteObjection carry, for an
+	// investigation_incomplete end, why the round sealed nothing and the
+	// last objection the contract raised against the role's answer, so the
+	// requester-facing text can say whether the budget ran out (narrowing
+	// the request helps) or the answers kept being refused (it does not).
+	IncompleteReason    string    `json:"incomplete_reason,omitempty"`
+	IncompleteObjection string    `json:"incomplete_objection,omitempty"`
+	IssuedAt            time.Time `json:"issued_at"`
 }
 
 // MaxTerminalTrailBytes bounds the requester-facing run record a terminal

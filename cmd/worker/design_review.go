@@ -279,6 +279,19 @@ type designReviewPromptInput struct {
 // reviewer is pointed at.
 const designReviewExcerptBytes = 2048
 
+// designVerificationVocabulary tells a design reviewer what the record's
+// verification can carry, so a demand for a check the record cannot express
+// (several items present at once, a document's whole content) is not raised
+// as a defect round after round: the record has one wording or one
+// measurement, and only the measurement is run by the kernel after apply.
+var designVerificationVocabulary = []string{
+	"",
+	"## 確認方法 (verification) の書式",
+	"- 確認方法は 2 形しか書けません: wording (path と、出る文言 expected_text 1 つ、消える文言 absent_text 1 つ) か measurement (catalogue の probe 1 つと metric と threshold)。",
+	"- measurement 形は反映後に関所が自動で計って判定します。wording 形は関所が反映後に自動で検査するものではなく、実装役への指示と受入時の表示確認の目安になります。",
+	"- 確認方法を理由に revise にするのは、この変更の成否を判定できる別の確認方法 (別の path・文言・probe・閾値) がこの書式の中で書けるときだけです (誤ったページや落ちない閾値は、正しいものが書けるので revise の理由になります)。書式で表せない検査 (複数の項目が揃うことの判定、文書全体の内容の検査など) を求めて revise にしないでください。それは設計の欠陥ではなく書式の限界です。",
+}
+
 // designReviewPrompt states what to judge, under which lens, and the exact
 // shape of the answer. The sealed records and the measurements travel as
 // USER_DATA_JSON - data to judge, never instructions. When the whole does
@@ -339,6 +352,11 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		"- ファイルは一切変更しないでください。読むだけです。コミットもしないでください。",
 		"- 稼働環境を計ることはできません (probe は打てません)。実測は USER_DATA_JSON と上のファイルにある記録だけです。無い実測を仮定しないでください。",
 		"- 好みの問題は指摘しないでください。根拠が無い・前提が誤っている・確認方法で判定できない・副作用を見落としている、というものだけを指摘してください。",
+	}
+	if input.subject.Kind == investigate.SubjectDesign {
+		tail = append(tail, designVerificationVocabulary...)
+	}
+	tail = append(tail,
 		"",
 		"## 調査の予算 (超えると失敗扱い)",
 		"- ツール実行は合計 30 回以内です。判定と直接関係しないファイルの通読はしないでください。",
@@ -348,11 +366,11 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		"## 答え方 (最後にこの形の JSON だけを出力する)",
 		`{"verdict":"pass","findings":[]}`,
 		"または",
-		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンの短い識別子","section":"` + strings.Join(sections, "|") + `","message":"何がどう問題かを一文で"}]}`,
+		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンの短い識別子","section":"`+strings.Join(sections, "|")+`","message":"何がどう問題かを一文で"}]}`,
 		"- verdict が pass のときは findings を空にしてください。revise のときは 1 件以上必要です。",
-		"- section は " + strings.Join(sections, " / ") + " のいずれかです。path や line は書きません。",
+		"- section は "+strings.Join(sections, " / ")+" のいずれかです。path や line は書きません。",
 		worker.ReviewAnswerRulesTail,
-	}
+	)
 	for keep := len(input.measurements); keep >= 0; keep-- {
 		data, err := designReviewUserData(input, keep)
 		if err != nil {

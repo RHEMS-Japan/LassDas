@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type TerminalBeginRequest struct {
@@ -244,7 +245,7 @@ func fixedTerminalComment(report TerminalReportRequest, reportDigest string) str
 		TerminalProductionVerificationFailed:   "本番デプロイは完了しましたが、利用者目線の表示確認に失敗しました。自動的な追加変更やロールバックは行っていません。",
 		TerminalInternalFailed:                 "自動処理中の内部エラーにより、本番環境への反映は完了していません。",
 		TerminalInvestigated:                   "調査のみの依頼として、稼働環境とリポジトリを読み取りだけで計った報告をこのチケットに掲示しました。コードの変更と Pull Request はなく、対象リポジトリと本番環境は変更していません。このチケットでの自動処理は終了しています。",
-		TerminalInvestigationIncomplete:        "調査に使える回数と時間の上限に達し、報告をまとめられなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞って再度起票すると、改めて調査します。",
+		TerminalInvestigationIncomplete:        incompleteMessage(report),
 		TerminalInvestigationNonconverged:      "調査報告が根拠のレビューを規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
 		TerminalDesignNonconverged:             "直し方の設計がレビューで規定回数内に合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 	}[report.Code]
@@ -309,8 +310,12 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 		facts.Operation = "このチケットに掲示した調査報告と添付の実測をご確認ください（対応は不要です）"
 		facts.Production = "未変更（コードの変更も Pull Request もありません）"
 	case TerminalInvestigationIncomplete:
-		facts.NextActor = "起票者"
-		facts.Operation = "調査の範囲を絞って再度起票すると、改めて調査します"
+		if incompleteAnswersRefused(report.IncompleteReason) {
+			facts.Operation = "起票者の操作は不要です（運用担当者が規則と答えを確認し、必要ならこのチケットでお知らせします）"
+		} else {
+			facts.NextActor = "起票者"
+			facts.Operation = "調査の範囲を絞って再度起票すると、改めて調査します"
+		}
 	case TerminalClarificationExpired:
 		facts.NextActor = "起票者"
 		facts.Operation = "再度依頼する場合は、確認事項への回答内容を反映した新しいチケットとして起票してください"
@@ -323,6 +328,58 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 		facts.Production = "不明（prod ブランチ反映済み、本番デプロイの完了は未確認）"
 	}
 	return facts
+}
+
+// incompleteMessage says why an investigation round sealed nothing. The
+// budget and the wall are the requester's lever (a narrower request fits);
+// a streak of answers the contract refused is not — narrowing changes
+// nothing, the operator reads the rule and the answer — so the comment
+// carries the last objection verbatim instead of the narrowing advice.
+// A report without a reason (an older engine's) keeps the budget text.
+func incompleteMessage(report TerminalReportRequest) string {
+	if !incompleteAnswersRefused(report.IncompleteReason) {
+		return "調査に使える回数と時間の上限に達し、報告をまとめられなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞って再度起票すると、改めて調査します。"
+	}
+	text := "AI が作った調査報告・設計が自動検査の規則に合わず、規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞っても同じ結果になるため、再起票は不要です。運用担当者が規則と答えを確認します。"
+	if objection := singleLineBounded(report.IncompleteObjection, maxIncompleteObjectionBytes); objection != "" {
+		text += "\n最後に拒否された点 (規則の原文): " + objection
+	}
+	return text
+}
+
+// maxIncompleteObjectionBytes bounds the objection a comment quotes.
+const maxIncompleteObjectionBytes = 600
+
+// incompleteAnswersRefused tells a round that ended on the role's answers
+// (refused by the contract, unreadable, or asking for what the round no
+// longer gives) from one that ran out of budget or time.
+func incompleteAnswersRefused(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	// The budget and wall reasons are fixed sentences the round writes
+	// itself; every other reason ends in text the model produced, so the
+	// match is on the prefix, never on a substring a model could plant.
+	for _, spent := range []string{"the probe budget is spent", "the read budget is spent", "the wall ended"} {
+		if strings.HasPrefix(reason, spent) {
+			return false
+		}
+	}
+	return true
+}
+
+// singleLineBounded folds a text onto one line and cuts it at a byte bound
+// on a character boundary.
+func singleLineBounded(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…"
 }
 
 func randomLeaseToken() (string, error) {

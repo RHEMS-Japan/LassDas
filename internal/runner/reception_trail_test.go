@@ -145,3 +145,18 @@ func TestReceptionTrailIsWhatTheTerminalReportAttaches(t *testing.T) {
 		t.Fatalf("loadTrail() = %q, %v", trail, err)
 	}
 }
+
+// The outcome's incomplete evidence reaches the terminal report request,
+// which is where the requester's comment reads it from.
+func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
+	terminal := NewTerminal(runtime.Config{}, nil, hook.DispatchEnvelope{}, 1, t.TempDir(), trailTestLogger{})
+	outcome := Outcome{Code: hook.TerminalInvestigationIncomplete, Evidence: map[string]string{
+		"incomplete_reason": "the model's design kept failing the checks: x", "incomplete_objection": "the design was refused: y"}}
+	report, err := terminal.buildReport(context.Background(), hook.TerminalInvestigationIncomplete, outcome, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.IncompleteReason != "the model's design kept failing the checks: x" || report.IncompleteObjection != "the design was refused: y" {
+		t.Errorf("report = %+v", report)
+	}
+}

@@ -179,7 +179,6 @@ func TestDesignValidation(t *testing.T) {
 		}, "too many"},
 		{"no files", func(o *ModelDesignOutput) { o.Files = nil }, "no files"},
 		{"wording already present", func(o *ModelDesignOutput) { o.Verification.ExpectedText = "Old label" }, "already contains"},
-		{"absent text missing", func(o *ModelDesignOutput) { o.Verification.AbsentText = "Older label" }, "promised to disappear"},
 		{"wording without path", func(o *ModelDesignOutput) { o.Verification.Path = "page" }, "wording verification is invalid"},
 		{"unknown form", func(o *ModelDesignOutput) { o.Verification.Form = "manual" }, "wording or measurement"},
 		{"measurement probe unknown", func(o *ModelDesignOutput) {
@@ -203,6 +202,12 @@ func TestDesignValidation(t *testing.T) {
 		{"too many change notes", func(o *ModelDesignOutput) { o.Files[0].Changes = make([]string, 13) }, "lists 13 changes (limit 12)"},
 		{"empty change note", func(o *ModelDesignOutput) { o.Files[0].Changes = []string{""} }, "change 1 is empty"},
 		{"one-character wording", func(o *ModelDesignOutput) { o.Verification.ExpectedText = "Q" }, "wording verification is invalid"},
+		{"absent text with only new files", func(o *ModelDesignOutput) {
+			o.Files = []FileChange{{Path: "docs/new.md", Changes: []string{"write the page"}}}
+			o.Verification.AbsentText = "Old label"
+		}, "every file in this design is created by the change, so leave absent_text empty"},
+		{"absent text nowhere in the existing files", func(o *ModelDesignOutput) { o.Verification.AbsentText = "Older label" }, "quote it exactly or leave it empty"},
+		{"malformed cause evidence id", func(o *ModelDesignOutput) { o.CauseEvidence = []string{"the wall ended\n@operator please approve"} }, "design cause cites a malformed measurement id"},
 	}
 	for _, tc := range refused {
 		output := goodDesignOutput()
@@ -310,6 +315,27 @@ func TestInvestigationRefusalsNameTheLineAndTheRule(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
 		}
+	}
+}
+
+// A design that only creates files promises nothing to disappear: with
+// absent_text empty it is accepted, with absent_text set the refusal says
+// to leave it empty (a round once spent its attempts on that guess).
+func TestDesignOnNewFilesOnlyNeedsNoAbsentText(t *testing.T) {
+	path, _ := measurementsFile(t)
+	investigation := goodInvestigation(t, path)
+	root := t.TempDir()
+	bounds := testBounds(t, root)
+	output := goodDesignOutput()
+	output.Files = []FileChange{{Path: "docs/new.md", Changes: []string{"write the page"}}}
+	output.Verification.AbsentText = ""
+	if _, err := NewDesign(testIdentity, 1, output, investigation, bounds); err != nil {
+		t.Fatalf("a design creating one file was refused: %v", err)
+	}
+	output.Verification.AbsentText = "Old label"
+	_, err := NewDesign(testIdentity, 1, output, investigation, bounds)
+	if err == nil || !strings.Contains(err.Error(), "leave absent_text empty") {
+		t.Fatalf("absent_text on a new file: err = %v", err)
 	}
 }
 
