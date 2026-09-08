@@ -111,3 +111,44 @@ func TestDesignCommentReusesThePlanStopSentence(t *testing.T) {
 		t.Errorf("design comment does not name its round: %s", content)
 	}
 }
+
+// A round that ended on refused answers must not tell the requester to
+// narrow the request (live: a design refused three times ended with the
+// budget text and the narrowing advice); it names the refusal instead. A
+// round that ran out of budget, and a report without a reason, keep the
+// narrowing advice.
+func TestIncompleteCommentNamesRefusedAnswers(t *testing.T) {
+	digest := strings.Repeat("0", 64)
+	refused := TerminalReportRequest{Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1",
+		IncompleteReason:    "the model's design kept failing the checks: no design file contains the wording promised to disappear",
+		IncompleteObjection: "the design was refused: design file \"docs/page.md\" change 12 is 304 bytes (limit 300)\nsecond line"}
+	comment := fixedTerminalComment(refused, digest)
+	for _, want := range []string{"記録の規則に合わず", "再起票は不要です", "最後に拒否された点 (規則の原文): the design was refused: design file \"docs/page.md\" change 12 is 304 bytes (limit 300) second line", "運用担当者が規則と答えを確認"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("refused comment lacks %q:\n%s", want, comment)
+		}
+	}
+	if strings.Contains(comment, "範囲を絞って再度起票") {
+		t.Errorf("refused comment still advises narrowing:\n%s", comment)
+	}
+	if facts := terminalCommentFacts(refused, digest); facts.NextActor != "運用担当者" || !strings.Contains(facts.Operation, "起票者の操作は不要") {
+		t.Errorf("refused facts: %+v", facts)
+	}
+	for name, report := range map[string]TerminalReportRequest{
+		"budget":    {Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1", IncompleteReason: "the probe budget is spent and the model asked for another measurement"},
+		"wall":      {Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1", IncompleteReason: "the wall ended the round before a record was sealed"},
+		"no reason": {Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1"},
+	} {
+		comment := fixedTerminalComment(report, digest)
+		if !strings.Contains(comment, "範囲を絞って再度起票") || strings.Contains(comment, "最後に拒否された点") {
+			t.Errorf("%s comment: %s", name, comment)
+		}
+		if facts := terminalCommentFacts(report, digest); facts.NextActor != "起票者" {
+			t.Errorf("%s facts: %+v", name, facts)
+		}
+	}
+	long := TerminalReportRequest{Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1", IncompleteReason: "the model's report kept failing the checks: x", IncompleteObjection: strings.Repeat("あ", 400)}
+	if comment := fixedTerminalComment(long, digest); !strings.Contains(comment, strings.Repeat("あ", 200)+"…") || strings.Contains(comment, strings.Repeat("あ", 201)) {
+		t.Errorf("long objection not cut on a character boundary at %d bytes", maxIncompleteObjectionBytes)
+	}
+}

@@ -127,6 +127,8 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 		PullRequestURL: evidence["pull_request_url"], CommitSHA: evidence["commit_sha"],
 		CommitURL: evidence["commit_url"], StagingEvidenceURL: evidence["staging_evidence_url"],
 		ProductionEvidenceURL: evidence["production_evidence_url"],
+		IncompleteReason:      evidence["incomplete_reason"],
+		IncompleteObjection:   evidence["incomplete_objection"],
 		TrailText:             trail,
 	}
 	if withSpend {
