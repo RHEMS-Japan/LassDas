@@ -103,3 +103,25 @@ func TestPublishFeatureRejectsAMalformedReleaseTree(t *testing.T) {
 		transport.done()
 	}
 }
+
+func TestFeatureRootFileScopeIsExact(t *testing.T) {
+	controller, transport := newTestController(t, nil, true)
+	spec := FeatureSpec{Branch: "automation/sample", CommitMessage: "sample", AllowedPathPrefixes: []string{"main.go", "cmd/"}, Files: []FileUpdate{{Path: "main.go", Content: []byte("package main\n"), ExpectedBlobSHA: shaA}}}
+	if _, err := validateFeatureSpec(spec, controller.contract); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"main.go.bak", "main.go/child", "other/main.go", ".github/workflows/ci.yml"} {
+		spec.Files[0].Path = name
+		if _, err := validateFeatureSpec(spec, controller.contract); err == nil {
+			t.Errorf("accepted %q", name)
+		}
+	}
+	for _, entry := range []string{"", ".", "..", "/main.go", "../main.go", ".env", "cmd/main.go", "main*", "main?", "[main]"} {
+		spec.AllowedPathPrefixes = []string{entry}
+		spec.Files[0].Path = "main.go"
+		if _, err := validateFeatureSpec(spec, controller.contract); err == nil {
+			t.Errorf("accepted invalid root entry %q", entry)
+		}
+	}
+	transport.done()
+}

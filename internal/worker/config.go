@@ -1239,7 +1239,10 @@ func validWorkflowFilename(value string) bool {
 }
 
 func validFilePrefix(value string) bool {
-	return strings.HasSuffix(value, "/") && validRelativePath(strings.TrimSuffix(value, "/"))
+	if strings.HasSuffix(value, "/") {
+		return validRelativePath(strings.TrimSuffix(value, "/"))
+	}
+	return validRelativePath(value) && !strings.Contains(value, "/") && !hasHiddenComponent(value)
 }
 
 // validRelativeDirectory additionally accepts "." because a repository whose
@@ -1351,7 +1354,9 @@ func (c ConsumerConfig) LoginURL(environment string) string {
 }
 
 func allowedPath(filename string, prefixes []string) bool {
-	return slices.ContainsFunc(prefixes, func(prefix string) bool { return strings.HasPrefix(filename, prefix) })
+	return slices.ContainsFunc(prefixes, func(prefix string) bool {
+		return filename == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(filename, prefix)
+	})
 }
 
 // validateProbes checks the investigating designer's catalogue the way the

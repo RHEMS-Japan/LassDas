@@ -312,3 +312,17 @@ func TestInvestigationRefusalsNameTheLineAndTheRule(t *testing.T) {
 		}
 	}
 }
+
+func TestDesignRootFileScopeIsExact(t *testing.T) {
+	bounds := Bounds{AllowedFilePrefixes: []string{"main.go", "cmd/"}, MaxFiles: 3}
+	for _, name := range []string{"main.go", "cmd/run.go"} {
+		if err := validateFileBounds([]FileChange{{Path: name}}, bounds); err != nil {
+			t.Errorf("rejected %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"main.go.bak", "main.go/child", "other/main.go", ".github/workflows/ci.yml"} {
+		if err := validateFileBounds([]FileChange{{Path: name}}, bounds); err == nil {
+			t.Errorf("accepted %q", name)
+		}
+	}
+}
