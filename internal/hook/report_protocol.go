@@ -99,15 +99,37 @@ const (
 // knows it. Nothing about a destination is inferred: a report naming a
 // repository absent from this list is refused.
 type ReportDestination struct {
+	Kind             string `json:"kind,omitempty"`
 	Repository       string `json:"repository"`
 	Delivery         string `json:"delivery"`
 	StagingOrigin    string `json:"staging_origin"`
 	ProductionOrigin string `json:"production_origin"`
 }
 
+// EffectiveKind treats existing report destinations as web destinations.
+func (d ReportDestination) EffectiveKind() string {
+	if d.Kind == "" {
+		return "web"
+	}
+	return d.Kind
+}
+
+// Validate checks the destination before the runtime opens its ledger.
+func (d ReportDestination) Validate() error { return d.validate() }
+
 func (d ReportDestination) validate() error {
 	if !repositoryPattern.MatchString(d.Repository) {
 		return errors.New("report destination repository is invalid")
+	}
+	switch d.EffectiveKind() {
+	case "cli":
+		if d.Delivery != DeliverPullRequest || d.StagingOrigin != "" || d.ProductionOrigin != "" {
+			return errors.New("cli report destination must stop at pull_request without origins")
+		}
+		return nil
+	case "web":
+	default:
+		return errors.New("report destination kind is invalid")
 	}
 	switch d.Delivery {
 	case DeliverPullRequest, DeliverIntegration, DeliverProduction:

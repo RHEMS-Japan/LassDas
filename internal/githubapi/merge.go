@@ -40,6 +40,9 @@ func (c *Controller) MergePromotionPullRequest(ctx context.Context, pull PullReq
 }
 
 func (c *Controller) mergePullRequest(parent context.Context, pull PullRequest, checks CheckEvidence, spec MergeSpec, wait WaitOptions, requireFeatureChecks bool, recordReflection MergeReflectionRecorder) (MergeResult, error) {
+	if c.contract.Kind == "cli" {
+		return MergeResult{}, invariant("cli_delivery_stops_at_pull_request")
+	}
 	if err := c.client.requireVerified(); err != nil {
 		return MergeResult{}, err
 	}

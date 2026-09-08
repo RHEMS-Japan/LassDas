@@ -234,16 +234,16 @@ func bindingContract(binding deliveryBinding) (githubapi.Contract, bool) {
 	return consumer.Contract(), true
 }
 
-// validBaseline checks the observed branch heads. The two delivery branches
-// must exist and be well-formed for every delivery; requiring them to carry
-// the same tree — nothing half-promoted — only guards deliveries that will
-// merge and promote, so a pull-request-only delivery does not demand it.
+// validBaseline checks the observed branch heads. CLI proposals carry only
+// their integration snapshot. Web deliveries retain both branches; matching
+// trees are required only when the delivery will merge and promote.
 func validBaseline(baseline githubapi.Baseline, consumer worker.ConsumerConfig) bool {
-	contract, known := consumer.Contract(), true
-	_ = known
-	if !known {
-		return false
+	contract := consumer.Contract()
+	if consumer.EffectiveKind() == "cli" {
+		return baseline.Integration.Branch == contract.IntegrationBranch && validObjectID(baseline.Integration.SHA) && validObjectID(baseline.Integration.TreeSHA) &&
+			baseline.Release == (githubapi.Snapshot{}) && baseline.MergeBaseSHA == "" && baseline.MergeBaseTreeSHA == ""
 	}
+
 	wellFormed := baseline.Integration.Branch == contract.IntegrationBranch && baseline.Release.Branch == contract.ReleaseBranch &&
 		validObjectID(baseline.Integration.SHA) && validObjectID(baseline.Integration.TreeSHA) &&
 		validObjectID(baseline.Release.SHA) && validObjectID(baseline.Release.TreeSHA) &&

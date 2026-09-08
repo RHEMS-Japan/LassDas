@@ -25,6 +25,9 @@ const (
 )
 
 func NewController(client *Client, contract Contract) (*Controller, error) {
+	if contract.Kind == "cli" {
+		return nil, invariant("cli_requires_proposal_controller")
+	}
 	if client == nil {
 		return nil, invariant("nil_client")
 	}
@@ -38,12 +41,13 @@ func NewController(client *Client, contract Contract) (*Controller, error) {
 // relies on. Such a run never merges, and its read-scoped token is not shown
 // the merge settings at all.
 func NewProposalController(client *Client, contract Contract) (*Controller, error) {
-	controller, err := NewController(client, contract)
-	if err != nil {
+	if client == nil {
+		return nil, invariant("nil_client")
+	}
+	if err := contract.validate(); err != nil {
 		return nil, err
 	}
-	controller.promotesChanges = false
-	return controller, nil
+	return &Controller{client: client, contract: contract}, nil
 }
 
 func (c *Controller) Verify(ctx context.Context) (VerifiedRepository, error) {
@@ -109,9 +113,13 @@ func (c *Controller) Verify(ctx context.Context) (VerifiedRepository, error) {
 		}
 		features = append(features, actual)
 	}
-	staging, err := c.verifyWorkflow(ctx, c.contract.StagingWorkflow)
-	if err != nil {
-		return VerifiedRepository{}, err
+	var staging Workflow
+	if c.contract.Kind != "cli" {
+		var err error
+		staging, err = c.verifyWorkflow(ctx, c.contract.StagingWorkflow)
+		if err != nil {
+			return VerifiedRepository{}, err
+		}
 	}
 	production := make([]Workflow, 0, len(c.contract.ProductionWorkflows))
 	for _, expected := range c.contract.ProductionWorkflows {
@@ -162,6 +170,9 @@ func (c *Controller) VerifyBaseline(ctx context.Context) (Baseline, error) {
 	integration, err := c.snapshotBranch(ctx, c.contract.IntegrationBranch)
 	if err != nil {
 		return Baseline{}, err
+	}
+	if c.contract.Kind == "cli" {
+		return Baseline{Integration: integration}, nil
 	}
 	release, err := c.snapshotBranch(ctx, c.contract.ReleaseBranch)
 	if err != nil {
@@ -554,6 +565,13 @@ func (c *Controller) getBaseTreeEntries(ctx context.Context, treeSHA string) (ma
 }
 
 func (c *Controller) validateBaseline(baseline Baseline) error {
+	if c.contract.Kind == "cli" {
+		if baseline.Integration.Branch != c.contract.IntegrationBranch || !validObjectID(baseline.Integration.SHA) || !validObjectID(baseline.Integration.TreeSHA) ||
+			baseline.Release != (Snapshot{}) || baseline.MergeBaseSHA != "" || baseline.MergeBaseTreeSHA != "" {
+			return invariant("invalid_baseline")
+		}
+		return nil
+	}
 	if baseline.Integration.Branch != c.contract.IntegrationBranch || baseline.Release.Branch != c.contract.ReleaseBranch ||
 		!validObjectID(baseline.Integration.SHA) || !validObjectID(baseline.Release.SHA) ||
 		!validObjectID(baseline.Integration.TreeSHA) || !validObjectID(baseline.Release.TreeSHA) ||
@@ -621,7 +639,8 @@ func validateFeatureSpec(spec FeatureSpec, contract Contract) ([]string, error) 
 		return nil, invariant("invalid_feature_file_set")
 	}
 	for _, prefix := range spec.AllowedPathPrefixes {
-		if err := validateRepositoryPath(prefix, true); err != nil {
+		directory := strings.HasSuffix(prefix, "/")
+		if err := validateRepositoryPath(prefix, directory); err != nil || (!directory && (strings.ContainsAny(prefix, "/ *?[]") || strings.HasPrefix(prefix, "."))) {
 			return nil, invariant("invalid_allowed_path_prefix")
 		}
 	}
@@ -634,7 +653,7 @@ func validateFeatureSpec(spec FeatureSpec, contract Contract) ([]string, error) 
 		}
 		allowed := false
 		for _, prefix := range spec.AllowedPathPrefixes {
-			if strings.HasPrefix(file.Path, prefix) {
+			if file.Path == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(file.Path, prefix) {
 				allowed = true
 				break
 			}
@@ -716,6 +735,9 @@ func (c *Controller) CreateFeaturePullRequest(ctx context.Context, feature Publi
 }
 
 func (c *Controller) CreatePromotionPullRequest(ctx context.Context, proof PromotionProof, digestPolicy DigestCommitPolicy, spec PullRequestSpec) (PullRequest, error) {
+	if c.contract.Kind == "cli" {
+		return PullRequest{}, invariant("cli_delivery_stops_at_pull_request")
+	}
 	if err := c.client.requireVerified(); err != nil {
 		return PullRequest{}, err
 	}
