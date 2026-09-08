@@ -1,0 +1,353 @@
+package initwizard
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"automation.internal/ticket-ingress/internal/localrun"
+	runtimeconfig "automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
+)
+
+func wizardFixture(t *testing.T) (*State, Secrets) {
+	t.Helper()
+	s := &State{Version: 1, Project: "sample-cli", Repository: "example/cli", RepositoryID: 1, DefaultBranch: "main", Branch: "develop", BaseSHA: strings.Repeat("a", 40), EngineRepository: "example/engine", EngineRepositoryID: 2, EngineSHA: strings.Repeat("b", 40), Image: "registry.example.com/engine@sha256:" + strings.Repeat("c", 64), DockerContext: "desktop-linux", BuildRecord: "https://example.com/build/1", Pins: map[string]string{"worker": strings.Repeat("d", 64), "controller": strings.Repeat("e", 64)}, Models: map[string]worker.ModelEndpoint{}, BaseURL: "https://models.example.com/v1", Completed: map[string]string{}, Checks: map[string]json.RawMessage{}, BoardPort: 9200, AutomationRunID: "run_20260908_" + strings.Repeat("a", 24)}
+	s.Mode = worker.ModeConfig{ID: "cli-change", AllowedFilePrefixes: []string{"main.go", "README.md"}, ForbiddenCandidateText: []string{"LassDas"}, MaxFiles: 8, MaxFileBytes: 393216, MaxTotalBytes: 1048576, MaxChangedLines: 3000, MaxChangedBytes: 196608, VerifyWorkingDirectory: ".", InstallCommand: []string{"go", "mod", "download"}, VerifyCommands: [][]string{{"go", "test", "./..."}}}
+	s.Tracker = runtimeconfig.TrackerConfig{Origin: "https://example.backlog.com", SpaceKey: "example", ProjectID: 1, ProjectKey: "EXAMPLE", AllowedCreatorID: 7, AllowedActivityType: 1, RequiredCategoryID: 9}
+	secrets := Secrets{"TARGET_GITHUB_TOKEN": "artificial-delivery-key", "BACKLOG_API_KEY": "artificial-bot-key", "LASSDAS_BOARD_USER": "operator", "LASSDAS_BOARD_PASS": "artificial-board-password", "LASSDAS_INTAKE_TARGET_KEY": "artificial-intake-key"}
+	for index, role := range append(append([]string{}, modelRoles...), "design-review-a", "design-review-b") {
+		endpoint := worker.ModelEndpoint{ID: role, Vendor: fmt.Sprintf("vendor-%d", index), Model: role + "-model", APIKeyEnv: keyName(role), BaseURL: s.BaseURL, MaxOutputTokens: 4096}
+		if strings.Contains(role, "review-") || role == "readiness-checker" {
+			endpoint.Lens = "Find concrete correctness and acceptance failures."
+		}
+		s.Models[role] = endpoint
+		secrets[keyName(role)] = "artificial-" + role + "-key"
+	}
+	return s, secrets
+}
+
+func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T) {
+	for _, separate := range []bool{false, true} {
+		s, secrets := wizardFixture(t)
+		s.SeparateDesignReviews = separate
+		config, runtime, env, err := Generate(s, secrets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.Consumers[0].EffectiveKind() != "cli" || config.Consumers[0].Delivery != worker.DeliverPullRequest || runtime.Orchestration != "cards" || config.Consumers[0].Design.Default != "on" || len(config.Consumers[0].Design.TriggerWords) != 0 || config.Agents.Applier == nil {
+			t.Fatal("generated path does not pass design -> applier -> PR")
+		}
+		if config.Models.Implementer.APIKeyEnv != "LASSDAS_INTAKE_TARGET_KEY" || config.Agents.Implementer.SecretEnv["LASSDAS_IMPLEMENTER_KEY"] != "LASSDAS_IMPLEMENTER_KEY" {
+			t.Fatal("target derivation shares the implementation identity")
+		}
+		if env["HERMES_KANBAN_BOARD"] != runtime.HermesBoard || len(config.Agents.ReviewerAgents) != 2 {
+			t.Fatal("runtime/profile identity mismatch")
+		}
+		if separate != (len(config.Models.DesignReviewers) == 2) || separate != (len(config.Agents.DesignReviewerAgents) == 2) {
+			t.Fatal("partial design review binding")
+		}
+		dir := t.TempDir()
+		if err := writeConfigs(dir, config, runtime); err != nil {
+			t.Fatal(err)
+		}
+		// Only the test copy points at host paths. Generated JSON remains a
+		// container configuration, as loaded by worker check-runtime there.
+		runtime.ConsumerConfigPath = filepath.Join(dir, "config", "consumer.json")
+		raw, _ := marshal(runtime)
+		path := filepath.Join(dir, "runtime-test.json")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtimeconfig.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range []string{"consumer.json", "runtime.json"} {
+			raw, _ := os.ReadFile(filepath.Join(dir, "config", file))
+			for _, value := range secrets {
+				if strings.Contains(string(raw), value) {
+					t.Fatalf("credential in %s", file)
+				}
+			}
+		}
+		secrets["LASSDAS_APPLIER_KEY"] = secrets["LASSDAS_IMPLEMENTER_KEY"]
+		if _, _, _, err := Generate(s, secrets); err == nil {
+			t.Fatal("duplicate role key accepted")
+		}
+	}
+}
+
+type fakeUI struct {
+	answers   map[string]string
+	approve   bool
+	messages  []string
+	questions []string
+}
+
+func (u *fakeUI) Ask(id, _, fallback string, _ bool) (string, error) {
+	u.questions = append(u.questions, id)
+	if answer, ok := u.answers[id]; ok {
+		return answer, nil
+	}
+	return fallback, nil
+}
+func (u *fakeUI) Confirm(string) (bool, error) { return u.approve, nil }
+func (u *fakeUI) Info(value string)            { u.messages = append(u.messages, value) }
+
+type fakeProcess struct{ commands [][]string }
+
+func (*fakeProcess) LookPath(name string) (string, error) { return "/bin/" + name, nil }
+func (p *fakeProcess) Run(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+	p.commands = append(p.commands, append([]string{}, args...))
+	return nil, nil
+}
+
+type fakeRuntime struct{ starts, stops int }
+
+func (r *fakeRuntime) Start(context.Context, *State, string) (json.RawMessage, error) {
+	r.starts++
+	return json.RawMessage(`{"state":"ready","agent_uid":2001}`), nil
+}
+func (r *fakeRuntime) Stop(context.Context, *State, string) error { r.stops++; return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func response(status int, data any) *http.Response {
+	raw, _ := json.Marshal(data)
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(string(raw))), Header: make(http.Header)}
+}
+
+func TestStartResumeKeepsRunningInstanceAndLocalrunAcceptsGeneratedEnvironment(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	dir := t.TempDir()
+	runtime := &fakeRuntime{}
+	w := Wizard{UI: &fakeUI{approve: true}, Runtime: runtime, Process: &fakeProcess{}}
+	if err := w.start(context.Background(), s, secrets, dir); err != nil {
+		t.Fatal(err)
+	}
+	s.Completed["runtime"] = "done"
+	if err := w.start(context.Background(), s, secrets, dir); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.starts != 2 || runtime.stops != 1 {
+		t.Fatalf("resume restarted the instance: %+v", runtime)
+	}
+	manager := localrun.Manager{Docker: noContainerDocker{}}
+	status, err := manager.Start(context.Background(), localrun.Instance{ID: s.Project, Dir: dir, Image: s.Image, EngineSHA: s.EngineSHA, DockerContext: s.DockerContext, BoardPort: s.BoardPort})
+	// The injected Docker deliberately stops after host validation. Its exact
+	// error proves generated env/config reached the Docker boundary.
+	if err == nil || !strings.Contains(err.Error(), "docker container failed") || status.State != "" {
+		t.Fatalf("localrun rejected generated input before Docker: %+v %v", status, err)
+	}
+	secrets["LASSDAS_APPLIER_KEY"] = "artificial-rotated-key"
+	if err := w.start(context.Background(), s, secrets, dir); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.stops != 2 {
+		t.Fatal("credential change was applied without stopping")
+	}
+}
+
+type noContainerDocker struct{}
+
+func (noContainerDocker) Run(context.Context, []string) ([]byte, error) {
+	return nil, errors.New("intentional offline boundary")
+}
+
+func TestSaveAndRedoPreserveCorrelationWithoutPuttingKeysInJournal(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.Smoke = json.RawMessage(`{"correlation":"same-request","issue_id":42}`)
+	for _, stage := range stages {
+		s.Completed[stage] = "done"
+	}
+	dir := t.TempDir()
+	if err := Save(dir, s, secrets); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "init.json"))
+	for _, value := range secrets {
+		if strings.Contains(string(raw), value) {
+			t.Fatal("credential in journal")
+		}
+	}
+	loaded, keys, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.Redo("models"); err != nil {
+		t.Fatal(err)
+	}
+	var smoke map[string]any
+	if err := json.Unmarshal(loaded.Smoke, &smoke); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Completed["tracker"] == "" || loaded.Completed["runtime"] != "" || smoke["issue_id"] != float64(42) || smoke["correlation"] != "same-request" || keys["TARGET_GITHUB_TOKEN"] != secrets["TARGET_GITHUB_TOKEN"] {
+		t.Fatal("redo lost external identity or saved keys")
+	}
+	info, _ := os.Stat(filepath.Join(dir, "runtime.env"))
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("credential permissions")
+	}
+	if err := os.Chmod(filepath.Join(dir, "runtime.env"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(dir); err == nil {
+		t.Fatal("readable credential file accepted")
+	}
+}
+
+func TestControlStateRemainsAvailableWhenCredentialsAreBroken(t *testing.T) {
+	for _, brokenMode := range []bool{false, true} {
+		t.Run(fmt.Sprint(brokenMode), func(t *testing.T) {
+			s, secrets := wizardFixture(t)
+			dir := t.TempDir()
+			if err := Save(dir, s, secrets); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "runtime.env")
+			if brokenMode {
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("invalid env line\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := Load(dir); err == nil {
+				t.Fatal("init accepted broken credentials")
+			}
+			control, err := LoadState(dir)
+			if err != nil || control.Project != s.Project || control.DockerContext != s.DockerContext || control.Image != s.Image {
+				t.Fatalf("cannot locate the owned runtime for stop: state=%+v err=%v", control, err)
+			}
+		})
+	}
+}
+
+func TestModelPreflightChecksEveryActualIdentityAndRejectsInvalidResponse(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	seen := map[string]bool{}
+	fail := false
+	w := Wizard{UI: &fakeUI{approve: true}, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		seen[req.Header.Get("Authorization")] = true
+		if req.URL.String() != s.BaseURL+"/chat/completions" {
+			t.Fatal("model used a different gateway")
+		}
+		answer := `{"status":"ready"}`
+		if fail {
+			answer = `{"status":"not-ready"}`
+		}
+		return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+	})}}}
+	if err := w.modelPreflight(context.Background(), s, secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 8 {
+		t.Fatalf("checked %d identities, want 8", len(seen))
+	}
+	fail = true
+	if err := w.modelPreflight(context.Background(), s, secrets); err == nil {
+		t.Fatal("arbitrary successful HTTP response counted as preflight")
+	}
+	for _, value := range secrets {
+		if strings.Contains(strings.Join(w.UI.(*fakeUI).messages, "\n"), value) {
+			t.Fatal("key leaked to UI")
+		}
+	}
+}
+
+func TestModelsResumeRepairsSavedDuplicateKeys(t *testing.T) {
+	for _, approve := range []bool{false, true} {
+		t.Run(fmt.Sprint(approve), func(t *testing.T) {
+			s, secrets := wizardFixture(t)
+			s.Completed["models"] = "previous-attempt"
+			replacements := map[string]string{}
+			for name, value := range secrets {
+				replacements[name] = value
+			}
+			secrets["LASSDAS_APPLIER_KEY"] = secrets["LASSDAS_IMPLEMENTER_KEY"]
+			dir := t.TempDir()
+			if err := Save(dir, s, secrets); err != nil {
+				t.Fatal(err)
+			}
+			s, secrets, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ui := &fakeUI{approve: approve, answers: replacements}
+			calls := 0
+			w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+			})}}}
+			err = w.models(context.Background(), s, secrets)
+			if approve {
+				if err != nil || calls != 8 || DistinctKeys(s, secrets) != nil || len(ui.questions) != 8 {
+					t.Fatalf("saved duplicate keys could not be repaired: err=%v calls=%d questions=%v", err, calls, ui.questions)
+				}
+			} else if err == nil || calls != 0 || len(ui.questions) != 0 {
+				t.Fatal("declined repair changed keys or called models")
+			}
+			for _, value := range secrets {
+				if strings.Contains(strings.Join(ui.messages, "\n"), value) {
+					t.Fatal("credential leaked during repair")
+				}
+			}
+		})
+	}
+}
+
+func TestTrackerCreateLostResponseReconcilesOnNextRun(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.Category = "自動処理"
+	s.StatusNames = [4]string{"処理中", "回答待ち", "納品済み", "要確認"}
+	created, posts, saves := false, 0, 0
+	w := Wizard{UI: &fakeUI{approve: true}, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("apiKey") != secrets["BACKLOG_API_KEY"] {
+			t.Fatal("wrong tracker identity")
+		}
+		switch req.URL.Path {
+		case "/api/v2/users/myself":
+			return response(200, NamedID{ID: 8}), nil
+		case "/api/v2/projects/EXAMPLE":
+			return response(200, map[string]any{"id": 1, "projectKey": "EXAMPLE"}), nil
+		case "/api/v2/projects/1/users":
+			return response(200, []NamedID{{ID: 7}, {ID: 8}}), nil
+		case "/api/v2/projects/1/categories":
+			if req.Method == "POST" {
+				posts++
+				created = true
+				return nil, errors.New("lost response containing artificial-bot-key")
+			}
+			if created {
+				return response(200, []NamedID{{ID: 9, Name: s.Category}}), nil
+			}
+			return response(200, []NamedID{}), nil
+		case "/api/v2/projects/1/statuses":
+			var states []NamedID
+			for i, name := range s.StatusNames {
+				states = append(states, NamedID{ID: int64(i + 10), Name: name})
+			}
+			return response(200, states), nil
+		}
+		t.Fatalf("unexpected tracker operation: %s %s", req.Method, req.URL.Path)
+		return nil, nil
+	})}}}
+	save := func() error { saves++; return nil }
+	if err := w.tracker(context.Background(), s, secrets, save); err == nil || strings.Contains(err.Error(), secrets["BACKLOG_API_KEY"]) {
+		t.Fatalf("lost response was not safely surfaced: %v", err)
+	}
+	if err := w.tracker(context.Background(), s, secrets, save); err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 || saves == 0 || s.Tracker.RequiredCategoryID != 9 || s.Tracker.AllowedCreatorID != 7 {
+		t.Fatal("resume duplicated category or changed allowed creator")
+	}
+}
