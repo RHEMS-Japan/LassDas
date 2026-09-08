@@ -433,7 +433,7 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
+	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "absent_text は任意です", "全部この変更で新しく作られるときは空でなければなりません", "任意の項目を必須として要求しないでください", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
 		if !strings.Contains(design, want) {
 			t.Errorf("design review prompt lacks %q", want)
 		}
@@ -452,5 +452,76 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 	}
 	if strings.Contains(investigation, "確認方法 (verification) の書式") {
 		t.Error("the investigation review prompt talks about a verification it does not judge")
+	}
+}
+
+// A measurement the judged records cite travels whole (up to 32 KiB) and
+// says so; an uncited one keeps the 2 KiB head. Live: a reviewer called a
+// line at byte 2,224 of a 2,299-byte cited record unmeasured, twice.
+func TestDesignReviewPromptCarriesCitedMeasurementsWhole(t *testing.T) {
+	body := strings.Repeat("x", 2900)
+	measurements := []probe.Measurement{
+		{ID: "m-0001", Probe: "repo.read", Output: body + "\nTAIL-ONE", OutputBytes: 2909},
+		{ID: "m-0002", Probe: "k8s.workloads", Output: body + "\nTAIL-TWO", OutputBytes: 2909},
+		{ID: "m-0003", Probe: "k8s.pods", Output: body + "\nTAIL-THREE", OutputBytes: 2911},
+	}
+	design := &investigate.Design{Round: 1, CauseEvidence: []string{"m-0002"},
+		Files: []investigate.FileChange{{Path: "docs/page.md", Changes: []string{"state the workload count (m-0003)"}}}}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensEvidence,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n"},
+		design:           design,
+		measurements:     measurements,
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"TAIL-TWO", "TAIL-THREE", `"id":"m-0002","probe":"k8s.workloads","exit_code":0,"output_bytes":2909,"cited":true`, "抜粋だけを根拠に「無い」と言わないでください"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(prompt, "TAIL-ONE") {
+		t.Error("an uncited measurement travelled whole")
+	}
+	if got := strings.Count(prompt, `"cited":true`); got != 2 {
+		t.Errorf("cited measurements = %d, want 2", got)
+	}
+	if got := strings.Count(prompt, `"excerpt_complete":true`); got != 2 {
+		t.Errorf("complete excerpts = %d, want the two cited ones", got)
+	}
+}
+
+// When the instruction is too large, uncited excerpts are withdrawn before
+// a cited record loses a byte; the report's own findings cite records too.
+func TestDesignReviewPromptWithdrawsUncitedExcerptsBeforeCitedRecords(t *testing.T) {
+	measurements := make([]probe.Measurement, 0, 60)
+	for index := 1; index <= 60; index++ {
+		measurements = append(measurements, probe.Measurement{
+			ID: fmt.Sprintf("m-%04d", index), Probe: "repo.read", Args: map[string]string{"path": "web/page.tmpl"},
+			Output: strings.Repeat("あ", 2048) + fmt.Sprintf("\nTAIL-%04d", index), OutputBytes: 6154,
+		})
+	}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject: investigate.ReviewSubject{Kind: investigate.SubjectInvestigation, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:    worker.DesignLensEvidence,
+		investigation: investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n",
+			Findings: []investigate.Finding{{Claim: "the oldest record carries the value", Evidence: []string{"m-0001"}, Confidence: investigate.ConfidenceMeasured}}},
+		measurements:     measurements,
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Fatalf("prompt bytes = %d", len(prompt))
+	}
+	if !strings.Contains(prompt, "TAIL-0001") {
+		t.Error("the cited oldest record lost its tail while uncited excerpts were still there")
+	}
+	if withdrawn := strings.Count(prompt, `"excerpt_withdrawn":true`); withdrawn == 0 || strings.Contains(prompt, `"id":"m-0001","probe":"repo.read","args":{"path":"web/page.tmpl"},"exit_code":0,"output_bytes":6154,"excerpt_withdrawn":true`) {
+		t.Errorf("withdrawn = %d; the cited record must not be among them", withdrawn)
 	}
 }
