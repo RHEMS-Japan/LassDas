@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // validRuntimeConfigMap is a complete runtime.json in map form, so each test
@@ -45,6 +47,22 @@ func validRuntimeConfigMap() map[string]any {
 
 func writeRuntimeConfig(t *testing.T, config map[string]any) string {
 	t.Helper()
+	if config["consumer_config_path"] == "/etc/lassdas/config/m1-consumer.json" {
+		fixture, err := worker.LoadConfig("../../config/m1-consumer.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.Consumers = fixture.Consumers[:1]
+		encoded, err := json.Marshal(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filename := filepath.Join(t.TempDir(), "consumer.json")
+		if err := os.WriteFile(filename, encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+		config["consumer_config_path"] = filename
+	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -232,5 +250,114 @@ func TestListBoardTasksReadsEveryAssignee(t *testing.T) {
 	records := calls(t, callLog)
 	if len(records) != 1 || strings.Contains(records[0], "--assignee") {
 		t.Fatalf("board listing was assignee-scoped: %v", records)
+	}
+}
+
+func cliRuntimeConfigMap(t *testing.T) map[string]any {
+	t.Helper()
+	consumers, err := worker.LoadConfig("../../config/m1-consumer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers.Consumers = consumers.Consumers[:1]
+	original := consumers.Consumers[0]
+	consumers.Consumers[0] = worker.ConsumerConfig{Kind: "cli", Repository: original.Repository, RepositoryID: original.RepositoryID, Delivery: worker.DeliverPullRequest, IntegrationBranch: "develop", GitHub: worker.ConsumerGitHubContract{DefaultBranch: "main"}, Mode: original.Mode}
+	encoded, err := json.Marshal(consumers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(filename, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw := validRuntimeConfigMap()
+	raw["ledger_path"] = filepath.Join(t.TempDir(), "ledger.db")
+	raw["consumer_config_path"] = filename
+	raw["report_destinations"] = []any{map[string]any{"kind": "cli", "repository": original.Repository, "delivery": "pull_request"}}
+	return raw
+}
+
+func TestCLIConfigAndBootBindConsumerToReportDestination(t *testing.T) {
+	t.Setenv("BACKLOG_API_KEY", "test-key")
+	config, err := Load(writeRuntimeConfig(t, cliRuntimeConfigMap(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := BuildServices(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if services.Route.Destinations[0].EffectiveKind() != "cli" {
+		t.Fatal("CLI report route was not wired")
+	}
+	if err := services.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"kind", "repository", "delivery"} {
+		t.Run(field, func(t *testing.T) {
+			raw := cliRuntimeConfigMap(t)
+			destination := raw["report_destinations"].([]any)[0].(map[string]any)
+			switch field {
+			case "kind":
+				destination["kind"] = "web"
+				destination["staging_origin"] = "https://stg.example.com"
+				destination["production_origin"] = "https://example.com"
+			case "repository":
+				destination[field] = "example/other"
+			case "delivery":
+				destination[field] = "integration"
+			}
+			if _, err := Load(writeRuntimeConfig(t, raw)); err == nil {
+				t.Fatal("accepted consumer/report mismatch")
+			}
+		})
+	}
+	for _, field := range []string{"e2e_profile", "e2e_enabled_after", "e2e_max_runtime_seconds", "deliver"} {
+		t.Run(field, func(t *testing.T) {
+			raw := cliRuntimeConfigMap(t)
+			chain := map[string]any{}
+			switch field {
+			case "e2e_profile":
+				chain[field] = "observer"
+			case "e2e_enabled_after":
+				chain[field] = "2026-09-08T00:00:00Z"
+			case "e2e_max_runtime_seconds":
+				chain[field] = 1
+			case "deliver":
+				chain[field] = map[string]any{"go_wait_seconds": 1}
+			}
+			raw["chain"] = chain
+			if _, err := Load(writeRuntimeConfig(t, raw)); err == nil {
+				t.Fatal("accepted CLI web stage settings")
+			}
+		})
+	}
+}
+
+func TestBootRechecksConsumerBeforeCreatingState(t *testing.T) {
+	raw := cliRuntimeConfigMap(t)
+	config, err := Load(writeRuntimeConfig(t, raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers, err := worker.LoadConfig(config.ConsumerConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers.Consumers[0].Repository = "example/other"
+	encoded, err := json.Marshal(consumers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ConsumerConfigPath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildServices(config, nil); err == nil {
+		t.Fatal("boot accepted a replaced consumer destination")
+	}
+	for _, path := range []string{config.LedgerPath, filepath.Join(filepath.Dir(config.LedgerPath), "route.key")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("mismatched boot created %s", path)
+		}
 	}
 }

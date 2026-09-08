@@ -50,6 +50,7 @@ func (c Config) validate() error {
 }
 
 type Contract struct {
+	Kind                string `json:"kind,omitempty"`
 	IntegrationBranch   string
 	ReleaseBranch       string
 	DefaultBranch       string
@@ -62,6 +63,21 @@ type Contract struct {
 func (c Contract) validate() error {
 	if err := validateBranch(c.IntegrationBranch); err != nil {
 		return fmt.Errorf("integration branch: %w", err)
+	}
+	switch c.Kind {
+	case "cli":
+		if err := validateBranch(c.DefaultBranch); err != nil {
+			return fmt.Errorf("default branch: %w", err)
+		}
+		staging := c.StagingWorkflow
+		if c.ReleaseBranch != "" || c.MergeSettings != (MergeSettings{}) || len(c.FeatureWorkflows) != 0 ||
+			len(c.ProductionWorkflows) != 0 || staging.ID != 0 || staging.Name != "" || staging.Path != "" || staging.State != "" || len(staging.RequiredJobs) != 0 {
+			return invariant("cli_contract_contains_web_delivery")
+		}
+		return nil
+	case "", "web":
+	default:
+		return invariant("invalid_consumer_kind")
 	}
 	if err := validateBranch(c.ReleaseBranch); err != nil {
 		return fmt.Errorf("release branch: %w", err)

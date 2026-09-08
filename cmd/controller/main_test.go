@@ -481,3 +481,38 @@ func rawResponse(status int, body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
+
+func TestCLIBaselineArtifactRetainsOnlyTheIntegrationSnapshot(t *testing.T) {
+	config, err := worker.LoadConfig("../../config/m1-consumer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := config.Consumers[0]
+	consumer := worker.ConsumerConfig{Kind: "cli", Repository: original.Repository, RepositoryID: original.RepositoryID, Delivery: worker.DeliverPullRequest, IntegrationBranch: "develop", GitHub: worker.ConsumerGitHubContract{DefaultBranch: "main"}, Mode: original.Mode}
+	config.Consumers[0] = consumer
+	baseline := githubapi.Baseline{Integration: githubapi.Snapshot{Branch: "develop", SHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}}
+	artifact, err := newBaselineArtifact(config, consumer, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := artifact.validate(config); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*githubapi.Baseline){
+		func(b *githubapi.Baseline) { b.Integration.SHA = "bad" }, func(b *githubapi.Baseline) { b.Integration.TreeSHA = "bad" }, func(b *githubapi.Baseline) { b.Integration.Branch = "main" },
+		func(b *githubapi.Baseline) {
+			b.Release = githubapi.Snapshot{Branch: "prod", SHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}
+		},
+		func(b *githubapi.Baseline) { b.MergeBaseSHA = strings.Repeat("a", 40) },
+	} {
+		b := baseline
+		mutate(&b)
+		a, err := newBaselineArtifact(config, consumer, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.validate(config); err == nil {
+			t.Fatalf("accepted invalid sealed baseline: %+v", b)
+		}
+	}
+}

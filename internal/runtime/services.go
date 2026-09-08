@@ -36,6 +36,9 @@ type Services struct {
 // key arrives via BACKLOG_API_KEY — the one secret this constitution needs
 // beyond the model keys the agent contract already handles.
 func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
+	if err := config.ValidateDestinations(); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
