@@ -8,6 +8,16 @@ ledger, dispatch, stages — inside one host, with the
 dispatcher. Code comments across `internal/runtime`, `internal/runner`,
 `internal/state` and the two commands reference this file.
 
+## ローカルでの CLI 向け起動
+
+`lassdas init` は、この本体を Apple Silicon の Docker Desktop で動かす。手順は [LOCAL_INIT.md](LOCAL_INIT.md)、契約と受入条件は [INIT.md](INIT.md) にある。
+
+固定 digest の同じイメージ、`orchestration: cards`、既存の起動プログラムと起動時検査を使う。台帳・kanban・作業場所は専用の named volume に置き、非秘密の `config/` だけを `/etc/lassdas/config` に読み取り専用で mount する。ホストの HOME・納品先 repo・Docker socket は本体に渡さない。
+
+`HERMES_KANBAN_BOARD` は runtime の板名と一致させる。ローカルの納品用鍵、板の鍵、route key も既存の守るファイル一覧に含める。板はホストの loopback に公開し、匿名アクセスの拒否と認証成功を起動時に確かめる。
+
+`lassdas run stop` は対象のコンテナだけを停止し、台帳と作業記録を保持する。ローカル起動のために Pod の release、共有 workflow、レジストリや権限を変更する必要はない。
+
 ## Processes
 
 | Process | Source | Role |

@@ -6,7 +6,7 @@
 
 **トラッカー・GitHub・モデルの鍵は、利用者が外で取得して入力する。** init が取得先と必要な権限を案内し、入力後に検査する。資格情報の発行や権限変更の自動化は不要。
 
-本書は設計であり、以下の init、run、`kind: cli` は未実装。現行コードの事実、今回の実測、実装後の受入を分ける。用語は [TRUST_MODEL.md](TRUST_MODEL.md)、本体は [RUNTIME_POD.md](RUNTIME_POD.md)、設計工程は [INVESTIGATING_DESIGNER.md](INVESTIGATING_DESIGNER.md) に従う。
+本書は設計時点の契約と実測を記録する。実装の進行は §9 の issue、利用手順は [LOCAL_INIT.md](LOCAL_INIT.md) を参照。実装と実サービスでの受入は区別する。用語は [TRUST_MODEL.md](TRUST_MODEL.md)、本体は [RUNTIME_POD.md](RUNTIME_POD.md)、設計工程は [INVESTIGATING_DESIGNER.md](INVESTIGATING_DESIGNER.md) に従う。
 
 変更履歴: v0.1 (2026-09-08) 初版。独立評価 2 系統は 47/100 と 61/100、重複を除くブロッカー 3 件。→ v0.2 (同日) 外部取得した鍵の入力、本人の鍵による動作確認、イメージ内検証、秘密保護、生成設定と鍵の対応、CLI の契約と編集範囲、実測と受入の区別を反映。本版の独立評価後に板の名前・検証入口・鍵の対応を補い、1 回の再評価で 92/100 と 93/100、両方ブロッカー 0。設計を review 段階へ進めた。
 
@@ -242,7 +242,7 @@ POST 前に相関 ID と予定内容を台帳へ保存し、依頼へ照合用�
 | D: 動作確認 | 本人の一時鍵、相関 ID、二重起票防止、待機再開、PR 機械照合 | A/B/C。段階 2 |
 | E: 文書 | README の入手/起動、RUNTIME_POD のローカル方式、TICKET_AUTHORING の CLI と自由文 | 段階 1 で入手/起動を納品、段階 2 で確認手順を追記 |
 
-本設計の issue は未起票。関連は調査・設計役 (issue #18、上記設計書) と [別ユーザでの役の実行](RUNTIME_POD.md) (issue #23)。承認後に A〜E のリンクを追記。1 変更=1 PR、独立レビュー、既存 CI、squash の順。設計判断や共有 image に効く変更は独立レビュー 2 系統。
+実装 issue は A: #76、B: #77、C: #78、D: #79、E: #80。関連は調査・設計役 (issue #18、上記設計書) と [別ユーザでの役の実行](RUNTIME_POD.md) (issue #23)。導入手順は [LOCAL_INIT.md](LOCAL_INIT.md)。1 変更=1 PR、独立レビュー、既存 CI、squash の順。設計判断や共有 image に効く変更は独立レビュー 2 系統。
 
 ## 10. 段階導入と受入 (DoD)
 
