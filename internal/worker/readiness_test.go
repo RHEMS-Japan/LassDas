@@ -549,6 +549,15 @@ func TestReadinessRefusesFabricatedMeasurements(t *testing.T) {
 	if err := refuseFabricatedEvidence(question("The rec-room label stays"), ticket); err != nil {
 		t.Fatalf("a lowercase word was taken for a record: %v", err)
 	}
+	// The identifier ends where the identifier ends: a bracket or a
+	// sentence continuing after it (Japanese has no space to stop at) is
+	// not part of it.
+	if err := refuseFabricatedEvidence(question("（記録番号: REC-77）とする"), "基準は 記録番号：REC-77。"); err != nil {
+		t.Fatalf("a bracketed quote of the ticket's record was refused: %v", err)
+	}
+	if err := refuseFabricatedEvidence(question("Record ID: REC-77, then compare"), "Compare with record REC-77 from last week."); err != nil {
+		t.Fatalf("a record followed by a comma was refused: %v", err)
+	}
 	withAssumption := question("From inside the cluster")
 	withAssumption.Assumptions = []ReadinessAssumption{{Kind: "non_user_visible_implementation", Statement: "The guide cites 記録番号: REC-2026-HEALTH-EXT01.", Evidence: "ticket"}}
 	if err := refuseFabricatedEvidence(withAssumption, ticket); err == nil || !strings.Contains(err.Error(), "never made") {

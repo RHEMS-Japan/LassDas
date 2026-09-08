@@ -434,7 +434,7 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 // live: three choices each carried a latency and a "record number" the
 // investigation had not yet made, and the chosen one was preserved as the
 // requester's answer).
-var fabricatedEvidencePattern = regexp.MustCompile(`(?:記録番号|(?i:record (?:number|id)))[:：]\s*(\S+)|(\bREC-[A-Za-z0-9][A-Za-z0-9-]*)|(\bm-[0-9]{4,}\b)`)
+var fabricatedEvidencePattern = regexp.MustCompile(`(?:記録番号|(?i:record (?:number|id)))[:：]\s*([A-Za-z0-9][A-Za-z0-9_-]*)|(\bREC-[A-Za-z0-9][A-Za-z0-9-]*)|(\bm-[0-9]{4,}\b)`)
 
 // refuseFabricatedEvidence rejects a fresh assessment that presents measured
 // values or measurement records the reception could not have obtained. A
