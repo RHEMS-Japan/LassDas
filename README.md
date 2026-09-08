@@ -86,14 +86,20 @@ AWS 資格情報は通常の解決順 (環境変数 / プロファイル)。実�
 
 ## 導入 (新しいプロジェクトへ)
 
-```
-git clone <この repo> && cd <clone>
-./setup.sh
+シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で `lassdas init` から始める。ソース版には Git と Go (`go.mod` の版) も必要。
+
+```sh
+# エンジンのソースでビルド
+go build -o lassdas ./cmd/lassdas
+
+# 納品先の Git リポジトリへ移動して起動
+cd /path/to/consumer
+/path/to/engine/lassdas init --project sample-cli
 ```
 
-対話ウィザードが、インスタンス repo・受け口 (クラウド)・トラッカー接続・動作確認までを一気に組み上げる。全段冪等で、中断しても同じコマンドで続きから再開する。詳しい前提と各段の中身は [docs/TICKET_AUTHORING.md](docs/TICKET_AUTHORING.md) と `cmd/setup` を参照。
+GitHub・トラッカー・モデルの鍵は、それぞれのサービスで外から取得して入力する。init は納品先の検証、設定生成、本体起動、本人名義の動作確認を順に進め、最初の PR と工程の記録が一致して完了になる。中断後は同じコマンドで再開する。
 
-前提: `gh` / `go` / `git` と、対象クラウドの資格情報。トラッカー側は 2 種類のキーを聞かれる — **bot ユーザーのキー** (運転用・一般メンバーでよい) と、**プロジェクト管理者のキー** (ボード列と webhook の作成にだけ使い、どこにも保存されない・任意)。管理者キーを渡さない場合は bot 自身をプロジェクト管理者にしておく必要がある。権限不足なら明示エラーで止まり、直してから同じコマンドで続きから再開できる。
+イメージの入手情報、必要な権限、起動・停止と再開は [ローカル導入手順](docs/LOCAL_INIT.md) を参照。CLI の自然文の依頼例は [チケットの書き方](docs/TICKET_AUTHORING.md#cli-アプリへの依頼) にある。
 
 ## 現在の状態
 
