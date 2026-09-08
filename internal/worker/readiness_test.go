@@ -533,10 +533,21 @@ func TestReadinessRefusesFabricatedMeasurements(t *testing.T) {
 	if err := refuseFabricatedEvidence(question("From inside the cluster"), ticket); err != nil {
 		t.Fatalf("a basis described in words was refused: %v", err)
 	}
-	// A record the ticket itself names is the requester's, not invented.
+	// A record the ticket itself names is the requester's, not invented —
+	// whatever the width of the colon; and a ticket that names one record
+	// does not license another.
 	quoted := "Use the requester's own record 記録番号: REC-77 as the baseline"
-	if err := refuseFabricatedEvidence(question(quoted), "The baseline is 記録番号: REC-77 from last week."); err != nil {
+	if err := refuseFabricatedEvidence(question(quoted), "The baseline is 記録番号：REC-77 from last week."); err != nil {
 		t.Fatalf("a record quoted from the ticket was refused: %v", err)
+	}
+	if err := refuseFabricatedEvidence(question("Inside the cluster (記録番号: REC-2026-HEALTH-INT01)"), "The baseline is 記録番号: REC-77."); err == nil {
+		t.Fatal("a ticket naming one record licensed another")
+	}
+	if err := refuseFabricatedEvidence(question("Inside the cluster, record number: m-9999"), "Compare with record number: m-0007."); err == nil {
+		t.Fatal("a ticket naming one record number licensed another")
+	}
+	if err := refuseFabricatedEvidence(question("The rec-room label stays"), ticket); err != nil {
+		t.Fatalf("a lowercase word was taken for a record: %v", err)
 	}
 	withAssumption := question("From inside the cluster")
 	withAssumption.Assumptions = []ReadinessAssumption{{Kind: "non_user_visible_implementation", Statement: "The guide cites 記録番号: REC-2026-HEALTH-EXT01.", Evidence: "ticket"}}

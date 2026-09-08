@@ -32,8 +32,10 @@ const (
 	// readinessPromptVersion is sealed into every assessment and check so run
 	// evidence records which prompt contract produced the judgment. Version 9
 	// added the design decision (request kind, quoted approach, needs_design)
-	// to both contracts; an assessment or check sealed under an older
-	// contract is refused, because it carries no answer to re-derive from.
+	// to both contracts; version 10 forbids invented measurements (the
+	// assessor measures nothing; the checker names fabricated-evidence). An
+	// assessment or check sealed under an older contract is refused, because
+	// it carries no answer to re-derive from.
 	readinessPromptVersion = 10
 
 	// ReadinessDecisionSchemaVersion is the sealed decision's own schema
@@ -432,18 +434,21 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 // live: three choices each carried a latency and a "record number" the
 // investigation had not yet made, and the chosen one was preserved as the
 // requester's answer).
-var fabricatedEvidencePattern = regexp.MustCompile(`(?i)記録番号[:：]\s*\S|\bREC-[A-Za-z0-9][A-Za-z0-9-]*|\bm-[0-9]{4,}\b|record (?:number|id)[:：]\s*\S`)
+var fabricatedEvidencePattern = regexp.MustCompile(`(?:記録番号|(?i:record (?:number|id)))[:：]\s*(\S+)|(\bREC-[A-Za-z0-9][A-Za-z0-9-]*)|(\bm-[0-9]{4,}\b)`)
 
 // refuseFabricatedEvidence rejects a fresh assessment that presents measured
 // values or measurement records the reception could not have obtained. A
-// record the ticket itself names is the requester's, not invented, and is
-// let through verbatim. This runs where a model's answer is accepted, not
-// where a sealed assessment is read back: a record sealed before this rule
+// record the ticket itself names is the requester's, not invented: the
+// identifier (the token after the label, or the bare id) must appear in the
+// ticket's own text — the label and the width of its colon do not count.
+// This runs where a model's answer is accepted, not where a sealed
+// assessment is read back, so a record sealed with the ticket's own quote
 // stays readable.
 func refuseFabricatedEvidence(output ModelReadinessOutput, ticketText string) error {
 	invented := func(text string) bool {
-		for _, match := range fabricatedEvidencePattern.FindAllString(text, -1) {
-			if !strings.Contains(ticketText, match) {
+		for _, match := range fabricatedEvidencePattern.FindAllStringSubmatch(text, -1) {
+			identifier := match[1] + match[2] + match[3]
+			if identifier == "" || !strings.Contains(ticketText, identifier) {
 				return true
 			}
 		}
@@ -468,10 +473,11 @@ func refuseFabricatedEvidence(output ModelReadinessOutput, ticketText string) er
 	return nil
 }
 
-// ticketTextOf is the ticket as the requester wrote it, for the quotes an
-// assessment may carry.
+// ticketTextOf is the ticket as the requester wrote it — the summary, the
+// request and the expected, absent and verification texts — for the
+// identifiers an assessment may quote from it.
 func ticketTextOf(request TicketRequest) string {
-	return request.Summary + "\n" + request.Request
+	return strings.Join([]string{request.Summary, request.Request, request.ExpectedText, request.AbsentText, request.VerificationPath}, "\n")
 }
 
 func validateModelReadinessOutput(output ModelReadinessOutput) error {

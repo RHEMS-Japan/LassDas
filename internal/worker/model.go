@@ -207,6 +207,9 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d attempts", status, attempt+1))
 			}
 			if status == http.StatusTooManyRequests {
+				if retryAfter != nil {
+					return nil, safeModelError(fmt.Sprintf("model invocation failed with status 429 and a Retry-After of %s, longer than a turn waits", *retryAfter))
+				}
 				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (a limit that a wait does not lift)")
 			}
 			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", status))
