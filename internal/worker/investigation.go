@@ -404,6 +404,12 @@ func strconvQuote(value string) string {
 	return string(encoded)
 }
 
+// previousRoundRule tells the role how a previous round's finding is
+// answered. A finding that a claim is unmeasured has three honest answers;
+// swapping the cited id for another record of the same probe is not one of
+// them (live: two rounds were spent on exactly that).
+const previousRoundRule = "Resolve or refute every previous finding, one by one. A finding that a claim is unmeasured is answered in one of three ways: quote the record that carries the value (its id and the exact line; read past the excerpt with read if the line lies beyond it), measure it with a catalogue probe, or drop the claim or mark it unknown. Citing another record of the same probe resolves nothing."
+
 func investigationSystemPrompt(mode string) string {
 	design := ""
 	if mode == ModeDesign {
@@ -452,6 +458,7 @@ func investigationTaskPrompt(input InvestigationInput) string {
 	}
 	if len(input.Previous) > 0 {
 		task["previous_round"] = json.RawMessage(input.Previous)
+		task["previous_round_rule"] = previousRoundRule
 	}
 	encoded, _ := json.Marshal(task)
 	return "USER_DATA_JSON=" + string(encoded)

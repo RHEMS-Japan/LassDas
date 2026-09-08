@@ -529,3 +529,20 @@ func TestInvestigationSystemPromptStatesTheAbsentTextRule(t *testing.T) {
 		t.Error("the investigation-only instruction talks about a design it never asks for")
 	}
 }
+
+// A round that carries the previous round's findings also carries the rule
+// on how each is answered (quote the line, measure, or drop the claim); a
+// first round carries neither.
+func TestInvestigationTaskPromptCarriesThePreviousRoundRule(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	if prompt := investigationTaskPrompt(input); strings.Contains(prompt, "previous_round_rule") {
+		t.Errorf("a first round carries the previous-round rule: %s", prompt)
+	}
+	input.Previous = []byte(`{"findings":[{"code":"unmeasured","section":"files","message":"m-0002 does not carry the workload line"}]}`)
+	prompt := investigationTaskPrompt(input)
+	for _, want := range []string{`"previous_round":{"findings"`, `"previous_round_rule":"Resolve or refute every previous finding`, "quote the record that carries the value", "Citing another record of the same probe resolves nothing."} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("revise round lacks %q", want)
+		}
+	}
+}
