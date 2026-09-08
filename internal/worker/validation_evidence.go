@@ -197,11 +197,22 @@ type ObservedTool struct {
 }
 
 func observedToolVersion(ctx context.Context, directory string, environment []string, binary, expected string, allowV bool) (string, error) {
-	output, err := runCredentialFreeCommand(ctx, directory, environment, ToolVersionCommandTimeout, 256, []string{binary, "--version"})
+	arguments := []string{binary, "--version"}
+	if binary == "go" {
+		arguments = []string{binary, "version"}
+	}
+	output, err := runCredentialFreeCommand(ctx, directory, environment, ToolVersionCommandTimeout, 256, arguments)
 	if err != nil {
 		return "", err
 	}
 	value := strings.TrimSpace(string(output))
+	if binary == "go" {
+		fields := strings.Fields(value)
+		if len(fields) != 4 || fields[0] != "go" || fields[1] != "version" || !strings.HasPrefix(fields[2], "go") || strings.ContainsAny(value, "\r\n\x00") {
+			return "", errors.New("go version is invalid")
+		}
+		value = strings.TrimPrefix(fields[2], "go")
+	}
 	if allowV {
 		value = strings.TrimPrefix(value, "v")
 	}

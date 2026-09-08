@@ -100,6 +100,10 @@ func run(ctx context.Context, args []string) error {
 		return runApply(args[1:], true)
 	case "run-validation":
 		return runValidation(ctx, args[1:])
+	case "check-consumer":
+		return runCheckConsumer(ctx, args[1:])
+	case "check-runtime":
+		return runCheckRuntime(args[1:])
 	case "verify-validation":
 		return runVerifyValidation(args[1:])
 	case "verify-publish-gate":
