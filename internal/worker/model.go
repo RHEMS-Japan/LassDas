@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,11 +124,13 @@ type ChatCompletionsAPI interface {
 // GatewayClient posts chat completions to endpoint.BaseURL with the API key
 // named by endpoint.APIKeyEnv. It fails closed on any transport surprise and
 // never retries a transport failure. A gateway answer that says "not now" —
-// 429, 502, 503 or 504, the upstream busy or timed out — is posted again
-// after a pause, up to gatewayRetryAttempts times, because a design run
-// makes dozens of calls and one such answer ended a live run outright
-// (2026-09-08: a 504 on the fourth call of an investigation). Every other
-// status fails closed at once. Three kinds of answer are asked again by
+// 502, 503 or 504 (the upstream busy or timed out), or a 429 that names a
+// Retry-After (a rate window) — is posted again after a pause, up to three
+// times, because a design run makes dozens of calls and one such answer
+// ended a live run outright (2026-09-08: a 504 on the fourth call of an
+// investigation). The retries live inside the turn's own deadline, so only
+// a "not now" that arrives early benefits. A 429 without Retry-After (a
+// limit no wait lifts) and every other status fail closed at once. Three kinds of answer are asked again by
 // the caller that owns the unchanged conversation: one the contract cannot
 // read (converseJSON, at most modelAnswerAttempts times), one the gateway
 // returned out of shape (converseTurn, once) and one the provider cut off
@@ -187,7 +190,7 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		return nil, safeModelError("model request could not be encoded")
 	}
 	for attempt := 0; ; attempt++ {
-		body, status, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
+		body, status, retryAfter, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
 		if err != nil {
 			return nil, err
 		}
@@ -198,28 +201,56 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			}
 			return &response, nil
 		}
-		if !retryableGatewayStatus(status) || attempt >= len(gatewayRetryPauses) {
+		pause, again := gatewayPause(status, retryAfter, attempt)
+		if !again {
 			if attempt > 0 {
 				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d attempts", status, attempt+1))
 			}
+			if status == http.StatusTooManyRequests {
+				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (a limit that a wait does not lift)")
+			}
 			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", status))
 		}
-		pause := gatewayRetryPauses[attempt]
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
+		timer := time.NewTimer(pause)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d; the wait before asking again was cancelled", status))
-		case <-time.After(pause):
+		case <-timer.C:
 		}
 	}
 }
 
-// post sends one chat completion and returns the body and status; a
-// transport failure is returned as the marked error with its cause.
-func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encoded []byte) ([]byte, int, error) {
+// maxRetryAfter caps how long a 429's Retry-After is honoured: a gateway
+// names seconds for a rate window, and anything longer is not a moment
+// that passes within one turn.
+const maxRetryAfter = 60 * time.Second
+
+// gatewayPause decides whether a status is asked again and after how long:
+// 502/503/504 wait the fixed pauses; a 429 is asked again only when the
+// gateway names a Retry-After (a rate window) — a 429 without one is a
+// limit no wait lifts (an exhausted balance, for one) and fails closed.
+func gatewayPause(status int, retryAfter *time.Duration, attempt int) (time.Duration, bool) {
+	if !retryableGatewayStatus(status) || attempt >= len(gatewayRetryPauses) {
+		return 0, false
+	}
+	if status == http.StatusTooManyRequests {
+		if retryAfter == nil || *retryAfter > maxRetryAfter {
+			return 0, false
+		}
+		return *retryAfter, true
+	}
+	return gatewayRetryPauses[attempt], true
+}
+
+// post sends one chat completion and returns the body, the status and the
+// Retry-After the gateway named (nil when none; zero seconds means "now");
+// a transport failure is returned as the marked error with its cause.
+func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encoded []byte) ([]byte, int, *time.Duration, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, 0, safeModelError("model request could not be built")
+		return nil, 0, nil, safeModelError("model request could not be built")
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+apiKey)
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -232,16 +263,21 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		// key travels in a header, never in the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, 0, safeModelError("model invocation failed: " + urlErr.Err.Error())
+			return nil, 0, nil, safeModelError("model invocation failed: " + urlErr.Err.Error())
 		}
-		return nil, 0, safeModelError("model invocation failed")
+		return nil, 0, nil, safeModelError("model invocation failed")
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
 	if err != nil || len(body) > maxTransportResponseBytes {
-		return nil, 0, safeModelError("model response could not be read")
+		return nil, 0, nil, safeModelError("model response could not be read")
 	}
-	return body, httpResponse.StatusCode, nil
+	var retryAfter *time.Duration
+	if seconds, err := strconv.Atoi(strings.TrimSpace(httpResponse.Header.Get("Retry-After"))); err == nil && seconds >= 0 {
+		wait := time.Duration(seconds) * time.Second
+		retryAfter = &wait
+	}
+	return body, httpResponse.StatusCode, retryAfter, nil
 }
 
 type InvocationUsage struct {

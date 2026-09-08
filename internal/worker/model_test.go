@@ -574,3 +574,56 @@ func TestGatewayClientAsksAgainAfterAGatewayTimeout(t *testing.T) {
 		t.Fatalf("forbidden: err=%v requests=%d", err, requests)
 	}
 }
+
+// A 429 is asked again only when the gateway names a Retry-After — a rate
+// window — and a 429 without one (a limit no wait lifts) fails closed at
+// once; a wait is cut short by the caller's deadline.
+func TestGatewayClientRetriesA429OnlyWithRetryAfter(t *testing.T) {
+	t.Setenv("TEST_MODEL_API_KEY", "test-key-value")
+	requests := 0
+	windowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "rate window", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"gen-3","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{}"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`))
+	}))
+	defer windowed.Close()
+	client, _ := NewGatewayClient(windowed.Client())
+	response, err := client.ChatCompletions(context.Background(), gatewayTestEndpoint(windowed.URL, "TEST_MODEL_API_KEY"), ChatRequest{Model: "vendor/model-a"})
+	if err != nil || response.ID != "gen-3" || requests != 2 {
+		t.Fatalf("429 with Retry-After: response=%v err=%v requests=%d", response, err, requests)
+	}
+
+	requests = 0
+	exhausted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "balance exhausted", http.StatusTooManyRequests)
+	}))
+	defer exhausted.Close()
+	client, _ = NewGatewayClient(exhausted.Client())
+	_, err = client.ChatCompletions(context.Background(), gatewayTestEndpoint(exhausted.URL, "TEST_MODEL_API_KEY"), ChatRequest{Model: "vendor/model-a"})
+	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "no Retry-After") || requests != 1 {
+		t.Fatalf("429 without Retry-After: err=%v requests=%d", err, requests)
+	}
+
+	saved := gatewayRetryPauses
+	gatewayRetryPauses = []time.Duration{10 * time.Second}
+	t.Cleanup(func() { gatewayRetryPauses = saved })
+	requests = 0
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "upstream timed out", http.StatusGatewayTimeout)
+	}))
+	defer slow.Close()
+	client, _ = NewGatewayClient(slow.Client())
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = client.ChatCompletions(ctx, gatewayTestEndpoint(slow.URL, "TEST_MODEL_API_KEY"), ChatRequest{Model: "vendor/model-a"})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") || requests != 1 || time.Since(started) > 5*time.Second {
+		t.Fatalf("cancelled wait: err=%v requests=%d elapsed=%s", err, requests, time.Since(started))
+	}
+}

@@ -34,7 +34,7 @@ const (
 	// added the design decision (request kind, quoted approach, needs_design)
 	// to both contracts; an assessment or check sealed under an older
 	// contract is refused, because it carries no answer to re-derive from.
-	readinessPromptVersion = 9
+	readinessPromptVersion = 10
 
 	// ReadinessDecisionSchemaVersion is the sealed decision's own schema
 	// version, separate from ArtifactSchemaVersion because the decision is the
@@ -432,28 +432,46 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 // live: three choices each carried a latency and a "record number" the
 // investigation had not yet made, and the chosen one was preserved as the
 // requester's answer).
-var fabricatedEvidencePattern = regexp.MustCompile(`記録番号[:：]\s*\S|\bREC-[A-Za-z0-9][A-Za-z0-9-]*|\bm-[0-9]{4}\b|record (?:number|id)[:：]\s*\S`)
+var fabricatedEvidencePattern = regexp.MustCompile(`(?i)記録番号[:：]\s*\S|\bREC-[A-Za-z0-9][A-Za-z0-9-]*|\bm-[0-9]{4,}\b|record (?:number|id)[:：]\s*\S`)
 
-// refuseFabricatedEvidence rejects an assessment that presents measured
-// values or measurement records the reception could not have obtained.
-func refuseFabricatedEvidence(output ModelReadinessOutput) error {
+// refuseFabricatedEvidence rejects a fresh assessment that presents measured
+// values or measurement records the reception could not have obtained. A
+// record the ticket itself names is the requester's, not invented, and is
+// let through verbatim. This runs where a model's answer is accepted, not
+// where a sealed assessment is read back: a record sealed before this rule
+// stays readable.
+func refuseFabricatedEvidence(output ModelReadinessOutput, ticketText string) error {
+	invented := func(text string) bool {
+		for _, match := range fabricatedEvidencePattern.FindAllString(text, -1) {
+			if !strings.Contains(ticketText, match) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, question := range output.Questions {
 		texts := []string{question.Question, question.WhyBlocking}
 		for _, choice := range question.Choices {
 			texts = append(texts, choice.Label, choice.Effect)
 		}
 		for _, text := range texts {
-			if fabricatedEvidencePattern.MatchString(text) {
+			if invented(text) {
 				return fmt.Errorf("readiness question %s cites a measurement record the reception never made", question.ID)
 			}
 		}
 	}
 	for _, assumption := range output.Assumptions {
-		if fabricatedEvidencePattern.MatchString(assumption.Statement) || fabricatedEvidencePattern.MatchString(assumption.Evidence) {
+		if invented(assumption.Statement) || invented(assumption.Evidence) {
 			return errors.New("readiness assumption cites a measurement record the reception never made")
 		}
 	}
 	return nil
+}
+
+// ticketTextOf is the ticket as the requester wrote it, for the quotes an
+// assessment may carry.
+func ticketTextOf(request TicketRequest) string {
+	return request.Summary + "\n" + request.Request
 }
 
 func validateModelReadinessOutput(output ModelReadinessOutput) error {
@@ -481,9 +499,6 @@ func validateModelReadinessOutput(output ModelReadinessOutput) error {
 		return errors.New("readiness questions exceed the limit")
 	}
 	if err := validateClarificationQuestions(output.Questions); err != nil {
-		return err
-	}
-	if err := refuseFabricatedEvidence(output); err != nil {
 		return err
 	}
 	// Sixteen, not eight: a requester who bakes decided behavior into the
@@ -586,6 +601,9 @@ func NewReadinessAssessment(attempt int, output ModelReadinessOutput, clarificat
 	design := judgeAssessmentDesign(output, request, consumer)
 	output = design.applyTo(output)
 	if err := validateModelReadinessOutput(output); err != nil {
+		return ReadinessAssessment{}, err
+	}
+	if err := refuseFabricatedEvidence(output, ticketTextOf(request)); err != nil {
 		return ReadinessAssessment{}, err
 	}
 	assessment := ReadinessAssessment{
@@ -1238,7 +1256,7 @@ func readinessJSONSchema() string {
 }
 
 func readinessCheckJSONSchema() string {
-	return `{"type":"object","additionalProperties":false,"required":["verdict","reasons","request_kind","needs_design"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"reasons":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["code","message","question_id"],"properties":{"code":{"type":"string","enum":["false-ready","false-block","invalid-question","unbounded-question","secret-request","scope-miss","inconsistent-decision"]},"message":{"type":"string"},"question_id":{"type":"string","pattern":"^(Q[1-3])?$"}}}},"request_kind":{"type":"string","enum":["change","investigation"]},"needs_design":{"type":"boolean"}}}`
+	return `{"type":"object","additionalProperties":false,"required":["verdict","reasons","request_kind","needs_design"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"reasons":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["code","message","question_id"],"properties":{"code":{"type":"string","enum":["false-ready","false-block","invalid-question","unbounded-question","secret-request","scope-miss","inconsistent-decision","fabricated-evidence"]},"message":{"type":"string"},"question_id":{"type":"string","pattern":"^(Q[1-3])?$"}}}},"request_kind":{"type":"string","enum":["change","investigation"]},"needs_design":{"type":"boolean"}}}`
 }
 
 // designPromptRules is the design half of both reception prompts: the same
