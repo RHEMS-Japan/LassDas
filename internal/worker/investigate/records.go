@@ -621,6 +621,7 @@ func wordingCheck(v Verification, files []FileChange, root string) error {
 		return fmt.Errorf("baseline working copy: %w", err)
 	}
 	absentFound := v.AbsentText == ""
+	anyExists := false
 	for _, file := range files {
 		full := filepath.Join(root, file.Path)
 		info, err := os.Lstat(full)
@@ -630,6 +631,7 @@ func wordingCheck(v Verification, files []FileChange, root string) error {
 			}
 			return fmt.Errorf("design file %q: %w", file.Path, err)
 		}
+		anyExists = true
 		if !info.Mode().IsRegular() {
 			// A symbolic link would let the check read outside the working
 			// copy and report what it found through the objection.
@@ -650,7 +652,14 @@ func wordingCheck(v Verification, files []FileChange, root string) error {
 		}
 	}
 	if !absentFound {
-		return errors.New("no design file contains the wording promised to disappear")
+		// The refusal names the rule and the way out: absent_text is
+		// wording a design file carries at the baseline. A design that only
+		// creates files has nothing to make disappear (the round that first
+		// hit this spent its attempts guessing).
+		if !anyExists {
+			return errors.New("no design file contains the wording promised to disappear: absent_text names wording a design file carries at the baseline, and every file in this design is created by the change, so leave absent_text empty")
+		}
+		return errors.New("no design file contains the wording promised to disappear: absent_text names wording a design file carries at the baseline; quote it exactly or leave it empty")
 	}
 	return nil
 }
