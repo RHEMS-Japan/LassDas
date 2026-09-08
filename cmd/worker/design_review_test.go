@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -433,7 +434,7 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
+	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "absent_text は任意です", "全部この変更で新しく作られるときは空でなければなりません", "任意の項目を必須として要求しないでください", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
 		if !strings.Contains(design, want) {
 			t.Errorf("design review prompt lacks %q", want)
 		}
@@ -452,5 +453,138 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 	}
 	if strings.Contains(investigation, "確認方法 (verification) の書式") {
 		t.Error("the investigation review prompt talks about a verification it does not judge")
+	}
+}
+
+// A measurement the judged records cite travels whole (up to 32 KiB) and
+// says so; an uncited one keeps the 2 KiB head. Live: a reviewer called a
+// line at byte 2,224 of a 2,299-byte cited record unmeasured, twice.
+func TestDesignReviewPromptCarriesCitedMeasurementsWhole(t *testing.T) {
+	body := strings.Repeat("x", 2900)
+	measurements := []probe.Measurement{
+		{ID: "m-0001", Probe: "repo.read", Output: body + "\nTAIL-ONE", OutputBytes: 2909},
+		{ID: "m-0002", Probe: "k8s.workloads", Output: body + "\nTAIL-TWO", OutputBytes: 2909},
+		{ID: "m-0003", Probe: "k8s.pods", Output: body + "\nTAIL-THREE", OutputBytes: 2911},
+	}
+	design := &investigate.Design{Round: 1, CauseEvidence: []string{"m-0002"},
+		Files: []investigate.FileChange{{Path: "docs/page.md", Changes: []string{"state the workload count (m-0003)"}}}}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensEvidence,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n"},
+		design:           design,
+		measurements:     measurements,
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"TAIL-TWO", "TAIL-THREE", `"id":"m-0002","probe":"k8s.workloads","exit_code":0,"output_bytes":2909,"cited":true`, "抜粋だけを根拠に「無い」と言わないでください"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(prompt, "TAIL-ONE") {
+		t.Error("an uncited measurement travelled whole")
+	}
+	if got := strings.Count(prompt, `"cited":true`); got != 2 {
+		t.Errorf("cited measurements = %d, want 2", got)
+	}
+	if got := strings.Count(prompt, `"excerpt_complete":true`); got != 2 {
+		t.Errorf("complete excerpts = %d, want the two cited ones", got)
+	}
+}
+
+// When the instruction is too large, uncited excerpts are withdrawn before
+// a cited record loses a byte; the report's own findings cite records too.
+func TestDesignReviewPromptWithdrawsUncitedExcerptsBeforeCitedRecords(t *testing.T) {
+	measurements := make([]probe.Measurement, 0, 60)
+	for index := 1; index <= 60; index++ {
+		measurements = append(measurements, probe.Measurement{
+			ID: fmt.Sprintf("m-%04d", index), Probe: "repo.read", Args: map[string]string{"path": "web/page.tmpl"},
+			Output: strings.Repeat("あ", 2048) + fmt.Sprintf("\nTAIL-%04d", index), OutputBytes: 6154,
+		})
+	}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject: investigate.ReviewSubject{Kind: investigate.SubjectInvestigation, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:    worker.DesignLensEvidence,
+		investigation: investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n",
+			Findings: []investigate.Finding{{Claim: "the oldest record carries the value", Evidence: []string{"m-0001"}, Confidence: investigate.ConfidenceMeasured}}},
+		measurements:     measurements,
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Fatalf("prompt bytes = %d", len(prompt))
+	}
+	if !strings.Contains(prompt, "TAIL-0001") {
+		t.Error("the cited oldest record lost its tail while uncited excerpts were still there")
+	}
+	oldest := regexp.MustCompile(`\{"id":"m-0001"(?:[^{}]|\{[^{}]*\})*\}`).FindString(prompt)
+	if withdrawn := strings.Count(prompt, `"excerpt_withdrawn":true`); withdrawn == 0 || oldest == "" || !strings.Contains(oldest, `"cited":true,"cited_by":"report"`) || strings.Contains(oldest, `"excerpt_withdrawn":true`) {
+		t.Errorf("withdrawn = %d; the cited record's view = %s", withdrawn, oldest)
+	}
+}
+
+// Every text field of the design is scanned for the ids it cites.
+func TestDesignReviewCitationsCoverEveryDesignField(t *testing.T) {
+	design := &investigate.Design{Round: 1, CauseEvidence: []string{"m-0001"}, Cause: "the label (m-0002)", Approach: "replace it (m-0003)",
+		Alternatives: []string{"leave it (m-0004)"}, BlastRadius: []string{"the header (m-0005)"}, NotDoing: []string{"the route (m-0006)"},
+		Verification: investigate.Verification{Form: investigate.VerificationWording, Path: "/page", ExpectedText: "New (m-0007)", AbsentText: "Old (m-0008)"},
+		Files:        []investigate.FileChange{{Path: "web/page.tmpl", Changes: []string{"replace the label (m-0009)"}}}}
+	cited := citedMeasurementIDs(designReviewPromptInput{subject: investigate.ReviewSubject{Kind: investigate.SubjectDesign}, design: design,
+		investigation: investigate.Investigation{Findings: []investigate.Finding{{Claim: "c", Evidence: []string{"m-0001", "m-0010"}}}}})
+	for index := 1; index <= 9; index++ {
+		if id := fmt.Sprintf("m-%04d", index); cited[id] != citedByJudged {
+			t.Errorf("%s cited by the design = %v", id, cited[id])
+		}
+	}
+	if cited["m-0010"] != citedByReport || cited["m-0011"] != citedByNone {
+		t.Errorf("report tier = %v, uncited = %v", cited["m-0010"], cited["m-0011"])
+	}
+	report := citedMeasurementIDs(designReviewPromptInput{subject: investigate.ReviewSubject{Kind: investigate.SubjectInvestigation},
+		investigation: investigate.Investigation{Findings: []investigate.Finding{{Claim: "c", Evidence: []string{"m-0010"}}}}})
+	if report["m-0010"] != citedByJudged {
+		t.Errorf("a judged report's own evidence = %v", report["m-0010"])
+	}
+}
+
+// The kernel makes a design's cause_evidence a subset of the report's
+// findings' evidence, so a report with many findings over long records
+// must not drag the design's own records down to the 2 KiB excerpt: the
+// report's tier shrinks first and the design's citations stay whole (live:
+// 20 findings × 3 KB would have reproduced the unmeasured verdict).
+func TestDesignReviewPromptKeepsTheDesignsOwnRecordsWholeUnderALongReport(t *testing.T) {
+	measurements := make([]probe.Measurement, 0, 20)
+	findings := make([]investigate.Finding, 0, 20)
+	for index := 1; index <= 20; index++ {
+		id := fmt.Sprintf("m-%04d", index)
+		measurements = append(measurements, probe.Measurement{ID: id, Probe: "k8s.workloads", Output: strings.Repeat("x", 3000) + "\nTAIL-" + id, OutputBytes: 3012})
+		findings = append(findings, investigate.Finding{Claim: "finding " + id, Evidence: []string{id}, Confidence: investigate.ConfidenceMeasured})
+	}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensEvidence,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n", Findings: findings},
+		design:           &investigate.Design{Round: 1, CauseEvidence: []string{"m-0020"}},
+		measurements:     measurements,
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Fatalf("prompt bytes = %d", len(prompt))
+	}
+	if !strings.Contains(prompt, "TAIL-m-0020") {
+		t.Error("the design's own record lost its tail")
+	}
+	if strings.Count(prompt, "TAIL-m-") >= 20 {
+		t.Error("nothing shrank, so the budget was not the pressure this test needs")
+	}
+	if !strings.Contains(prompt, "を渡したものは 1 件、先頭 32 KiB だけ渡したものは 0 件、指示の予算のため先頭 2 KiB の抜粋に落としたものは 19 件、抜粋なし (excerpt_withdrawn: true) は 0 件です") {
+		t.Errorf("the head does not state what the data carries:\n%s", prompt[:1400])
 	}
 }
