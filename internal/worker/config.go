@@ -278,6 +278,9 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 	case a.Reviewer.ID:
 		return a.Reviewer, nil
 	}
+	if a.Applier != nil && a.Applier.ID == id {
+		return *a.Applier, nil
+	}
 	for _, entry := range a.ReviewerAgents {
 		if entry.Agent.ID == id {
 			return entry.Agent, nil
