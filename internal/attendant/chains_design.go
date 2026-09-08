@@ -272,7 +272,7 @@ func latestIncompleteRound(runDir string) int {
 	latest := 0
 	for _, entry := range entries {
 		var round int
-		if _, err := fmt.Sscanf(entry.Name(), "design-%d", &round); err != nil || round <= latest {
+		if _, err := fmt.Sscanf(entry.Name(), "design-%d", &round); err != nil || round <= latest || entry.Name() != fmt.Sprintf("design-%d", round) {
 			continue
 		}
 		if incompleteRecordExists(runDir, round) {
