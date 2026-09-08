@@ -513,3 +513,19 @@ func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
 		t.Fatalf("a budget ending kept a stale refusal: %q / %q (%v)", result.Incomplete, result.LastRefusedObjection, err)
 	}
 }
+
+// The design instruction states what absent_text is and when to leave it
+// empty, the rule the kernel's wording check refuses on (a live round
+// spent its attempts on that guess); the investigation-only instruction
+// carries no design section.
+func TestInvestigationSystemPromptStatesTheAbsentTextRule(t *testing.T) {
+	design := investigationSystemPrompt(ModeDesign)
+	for _, want := range []string{"absent_text is wording one of the design files carries now", "leave it empty when every file in the design is new"} {
+		if !strings.Contains(design, want) {
+			t.Errorf("design instruction lacks %q", want)
+		}
+	}
+	if strings.Contains(investigationSystemPrompt(ModeInvestigation), "absent_text is wording") {
+		t.Error("the investigation-only instruction talks about a design it never asks for")
+	}
+}

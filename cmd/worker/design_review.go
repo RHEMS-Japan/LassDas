@@ -289,7 +289,7 @@ var designVerificationVocabulary = []string{
 	"## 確認方法 (verification) の書式",
 	"- 確認方法は 2 形しか書けません: wording (path と、出る文言 expected_text 1 つ、消える文言 absent_text 1 つ) か measurement (catalogue の probe 1 つと metric と threshold)。",
 	"- measurement 形は反映後に関所が自動で計って判定します。wording 形は関所が反映後に自動で検査するものではなく、実装役への指示と受入時の表示確認の目安になります。",
-	"- 確認方法を理由に revise にするのは、この書式の中でより強い確認方法 (別の文言、別の計測) が書けるときだけです。書式で表せない検査 (複数の項目が揃うことの判定、文書全体の内容の検査など) を求めて revise にしないでください。それは設計の欠陥ではなく書式の限界です。",
+	"- 確認方法を理由に revise にするのは、この変更の成否を判定できる別の確認方法 (別の path・文言・probe・閾値) がこの書式の中で書けるときだけです (誤ったページや落ちない閾値は、正しいものが書けるので revise の理由になります)。書式で表せない検査 (複数の項目が揃うことの判定、文書全体の内容の検査など) を求めて revise にしないでください。それは設計の欠陥ではなく書式の限界です。",
 }
 
 // designReviewPrompt states what to judge, under which lens, and the exact

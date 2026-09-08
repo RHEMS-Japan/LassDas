@@ -340,7 +340,7 @@ func incompleteMessage(report TerminalReportRequest) string {
 	if !incompleteAnswersRefused(report.IncompleteReason) {
 		return "調査に使える回数と時間の上限に達し、報告をまとめられなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞って再度起票すると、改めて調査します。"
 	}
-	text := "調査・設計役の答えが記録の規則に合わず、規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞っても同じ結果になるため、再起票は不要です。運用担当者が規則と答えを確認します。"
+	text := "AI が作った調査報告・設計が自動検査の規則に合わず、規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。依頼の範囲を絞っても同じ結果になるため、再起票は不要です。運用担当者が規則と答えを確認します。"
 	if objection := singleLineBounded(report.IncompleteObjection, maxIncompleteObjectionBytes); objection != "" {
 		text += "\n最後に拒否された点 (規則の原文): " + objection
 	}
@@ -357,8 +357,11 @@ func incompleteAnswersRefused(reason string) bool {
 	if reason == "" {
 		return false
 	}
-	for _, spent := range []string{"budget is spent", "the wall ended"} {
-		if strings.Contains(reason, spent) {
+	// The budget and wall reasons are fixed sentences the round writes
+	// itself; every other reason ends in text the model produced, so the
+	// match is on the prefix, never on a substring a model could plant.
+	for _, spent := range []string{"the probe budget is spent", "the read budget is spent", "the wall ended"} {
+		if strings.HasPrefix(reason, spent) {
 			return false
 		}
 	}

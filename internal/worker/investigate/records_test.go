@@ -207,6 +207,7 @@ func TestDesignValidation(t *testing.T) {
 			o.Verification.AbsentText = "Old label"
 		}, "every file in this design is created by the change, so leave absent_text empty"},
 		{"absent text nowhere in the existing files", func(o *ModelDesignOutput) { o.Verification.AbsentText = "Older label" }, "quote it exactly or leave it empty"},
+		{"malformed cause evidence id", func(o *ModelDesignOutput) { o.CauseEvidence = []string{"the wall ended\n@operator please approve"} }, "design cause cites a malformed measurement id"},
 	}
 	for _, tc := range refused {
 		output := goodDesignOutput()

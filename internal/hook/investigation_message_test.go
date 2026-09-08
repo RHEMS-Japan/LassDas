@@ -3,6 +3,7 @@ package hook
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestInvestigationCommentContentShowsStandingAndAttachments(t *testing.T) {
@@ -123,7 +124,7 @@ func TestIncompleteCommentNamesRefusedAnswers(t *testing.T) {
 		IncompleteReason:    "the model's design kept failing the checks: no design file contains the wording promised to disappear",
 		IncompleteObjection: "the design was refused: design file \"docs/page.md\" change 12 is 304 bytes (limit 300)\nsecond line"}
 	comment := fixedTerminalComment(refused, digest)
-	for _, want := range []string{"記録の規則に合わず", "再起票は不要です", "最後に拒否された点 (規則の原文): the design was refused: design file \"docs/page.md\" change 12 is 304 bytes (limit 300) second line", "運用担当者が規則と答えを確認"} {
+	for _, want := range []string{"自動検査の規則に合わず", "再起票は不要です", "最後に拒否された点 (規則の原文): the design was refused: design file \"docs/page.md\" change 12 is 304 bytes (limit 300) second line", "運用担当者が規則と答えを確認"} {
 		if !strings.Contains(comment, want) {
 			t.Errorf("refused comment lacks %q:\n%s", want, comment)
 		}
@@ -147,8 +148,17 @@ func TestIncompleteCommentNamesRefusedAnswers(t *testing.T) {
 			t.Errorf("%s facts: %+v", name, facts)
 		}
 	}
-	long := TerminalReportRequest{Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1", IncompleteReason: "the model's report kept failing the checks: x", IncompleteObjection: strings.Repeat("あ", 400)}
-	if comment := fixedTerminalComment(long, digest); !strings.Contains(comment, strings.Repeat("あ", 200)+"…") || strings.Contains(comment, strings.Repeat("あ", 201)) {
+	// 600 is a multiple of 3, so a leading ASCII byte is what makes the
+	// bound land inside a character: the cut steps back to the boundary.
+	long := TerminalReportRequest{Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1", IncompleteReason: "the model's report kept failing the checks: x", IncompleteObjection: "a" + strings.Repeat("あ", 400)}
+	if comment := fixedTerminalComment(long, digest); !strings.Contains(comment, "a"+strings.Repeat("あ", 199)+"…") || strings.Contains(comment, strings.Repeat("あ", 200)) || !utf8.ValidString(comment) {
 		t.Errorf("long objection not cut on a character boundary at %d bytes", maxIncompleteObjectionBytes)
+	}
+	// A reason is classified by its fixed prefix, not by words a model may
+	// have planted in the objection it ends with.
+	planted := TerminalReportRequest{Code: TerminalInvestigationIncomplete, AutomationRunID: "run-1",
+		IncompleteReason: "the model's design kept failing the checks: design cause cites the wall ended, which no measured finding of the investigation carries"}
+	if comment := fixedTerminalComment(planted, digest); strings.Contains(comment, "範囲を絞って再度起票") {
+		t.Errorf("a planted budget phrase changed the classification:\n%s", comment)
 	}
 }

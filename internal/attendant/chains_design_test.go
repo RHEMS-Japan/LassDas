@@ -308,3 +308,32 @@ func TestInterruptedObjectionTransitionIsResumedNotHealed(t *testing.T) {
 		t.Errorf("resumed transition created %v", created)
 	}
 }
+
+// The round's incomplete.json is what the terminal report carries to the
+// requester: both keys are read from a record shaped like the worker's,
+// and a missing or broken record yields no evidence rather than an error.
+func TestIncompleteEvidenceReadsTheRoundRecord(t *testing.T) {
+	runDir := t.TempDir()
+	dir := filepath.Join(runDir, "history", "design-2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := `{"last_refused_answer":"{\"design\":{}}","last_refused_objection":"the design was refused: design file \"docs/x.md\" change 12 is 304 bytes (limit 300)","reason":"the model's design kept failing the checks: no design file contains the wording promised to disappear"}`
+	if err := os.WriteFile(filepath.Join(dir, "incomplete.json"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evidence := incompleteEvidence(runDir, 2)
+	if evidence["incomplete_reason"] != "the model's design kept failing the checks: no design file contains the wording promised to disappear" ||
+		evidence["incomplete_objection"] != `the design was refused: design file "docs/x.md" change 12 is 304 bytes (limit 300)` {
+		t.Errorf("evidence = %v", evidence)
+	}
+	if got := incompleteEvidence(runDir, 1); len(got) != 0 {
+		t.Errorf("a missing record gave evidence: %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "incomplete.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := incompleteEvidence(runDir, 2); len(got) != 0 {
+		t.Errorf("a broken record gave evidence: %v", got)
+	}
+}

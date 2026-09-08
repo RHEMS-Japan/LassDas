@@ -437,6 +437,12 @@ func (d Design) ValidateBinding(identity Identity, investigation Investigation) 
 		return fmt.Errorf("design cause cites %d measurement ids (limit %d)", len(d.CauseEvidence), maxCauseEvidence)
 	}
 	for _, id := range d.CauseEvidence {
+		if !measurementIDPattern.MatchString(id) {
+			// Refused by shape before the id is echoed: an objection quotes
+			// the id, and the requester's terminal comment quotes the last
+			// objection, so a free-form id must not travel that far.
+			return errors.New("design cause cites a malformed measurement id")
+		}
 		if !measured[id] {
 			return fmt.Errorf("design cause cites %s, which no measured finding of the investigation carries", id)
 		}
