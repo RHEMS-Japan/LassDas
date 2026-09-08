@@ -418,3 +418,39 @@ func TestAgentDesignReviewRunsTheJudgesOwnLaunch(t *testing.T) {
 		t.Fatalf("the judge's own launch did not run the review: %+v", record)
 	}
 }
+
+// The design reviewer is told what the record's verification can carry, so
+// it does not demand a check the record cannot express; the investigation
+// reviewer, judging a report with no verification, is not.
+func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
+	design, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensApproach,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n"},
+		design:           &investigate.Design{Round: 1},
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
+		if !strings.Contains(design, want) {
+			t.Errorf("design review prompt lacks %q", want)
+		}
+	}
+	if !strings.HasSuffix(design, worker.ReviewAnswerRulesTail) {
+		t.Error("the vocabulary displaced the answer-rules boundary")
+	}
+	investigation, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectInvestigation, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensEvidence,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n"},
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(investigation, "確認方法 (verification) の書式") {
+		t.Error("the investigation review prompt talks about a verification it does not judge")
+	}
+}
