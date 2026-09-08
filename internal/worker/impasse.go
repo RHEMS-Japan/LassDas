@@ -129,6 +129,9 @@ func (i *ModelInvoker) AskImpasse(
 		if len(decoded.Questions) > MaxReadinessQuestions {
 			return errors.New("impasse questions exceed the limit")
 		}
+		if err := refuseFabricatedEvidence(ModelReadinessOutput{Questions: decoded.Questions}, ticketTextOf(request)); err != nil {
+			return err
+		}
 		if err := validateClarificationQuestions(decoded.Questions); err != nil {
 			return err
 		}

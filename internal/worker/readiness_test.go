@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -493,5 +494,97 @@ func TestCheckReadinessDropsAHallucinatedQuestionID(t *testing.T) {
 	}
 	if len(check.Reasons) != 1 || check.Reasons[0].QuestionID != "" {
 		t.Fatalf("the hallucinated id was not dropped to set-level: %+v", check.Reasons)
+	}
+}
+
+// The reception measures nothing: a question whose choices carry latencies
+// and record numbers, or an assumption that cites a record, is refused as
+// invented — the live case handed the requester three made-up records to
+// choose from and preserved the choice as an answer.
+func TestReadinessRefusesFabricatedMeasurements(t *testing.T) {
+	needsDesign := true
+	question := func(label string) ModelReadinessOutput {
+		return ModelReadinessOutput{
+			Decision: ReadinessOutcomeClarification,
+			Questions: []ReadinessQuestion{{
+				ID: "Q1", Dimension: "acceptance_criterion", Question: "Which basis should the guide use?", WhyBlocking: "The threshold differs by basis.",
+				Choices: []ReadinessChoice{{ID: "a", Label: label, Effect: "The guide states that basis."}, {ID: "b", Label: "Through the public entry point", Effect: "The guide states that basis."}},
+			}},
+			RequestKind: "change", NeedsDesign: &needsDesign,
+		}
+	}
+	ticket := "Write the guide with the measured thresholds and their record numbers."
+	for _, invented := range []string{
+		"Inside the cluster (HTTP 200, under 50ms, 記録番号: REC-2026-HEALTH-INT01)",
+		"Inside the cluster, record number: m-0007",
+		"Inside the cluster, Record ID: m-12345",
+		"Inside the cluster (REC-2026-HEALTH-INT01)",
+	} {
+		if err := refuseFabricatedEvidence(question(invented), ticket); err == nil || !strings.Contains(err.Error(), "never made") {
+			t.Fatalf("%q: err = %v, want a refusal", invented, err)
+		}
+		// A sealed assessment is read back through the output validation,
+		// which does not carry this rule: a record sealed before it stays
+		// readable.
+		if err := validateModelReadinessOutput(question(invented)); err != nil {
+			t.Fatalf("%q: the read-back validation refused it: %v", invented, err)
+		}
+	}
+	if err := refuseFabricatedEvidence(question("From inside the cluster"), ticket); err != nil {
+		t.Fatalf("a basis described in words was refused: %v", err)
+	}
+	// A record the ticket itself names is the requester's, not invented —
+	// whatever the width of the colon; and a ticket that names one record
+	// does not license another.
+	quoted := "Use the requester's own record 記録番号: REC-77 as the baseline"
+	if err := refuseFabricatedEvidence(question(quoted), "The baseline is 記録番号：REC-77 from last week."); err != nil {
+		t.Fatalf("a record quoted from the ticket was refused: %v", err)
+	}
+	if err := refuseFabricatedEvidence(question("Inside the cluster (記録番号: REC-2026-HEALTH-INT01)"), "The baseline is 記録番号: REC-77."); err == nil {
+		t.Fatal("a ticket naming one record licensed another")
+	}
+	if err := refuseFabricatedEvidence(question("Inside the cluster, record number: m-9999"), "Compare with record number: m-0007."); err == nil {
+		t.Fatal("a ticket naming one record number licensed another")
+	}
+	if err := refuseFabricatedEvidence(question("The rec-room label stays"), ticket); err != nil {
+		t.Fatalf("a lowercase word was taken for a record: %v", err)
+	}
+	// The identifier ends where the identifier ends: a bracket or a
+	// sentence continuing after it (Japanese has no space to stop at) is
+	// not part of it.
+	if err := refuseFabricatedEvidence(question("（記録番号: REC-77）とする"), "基準は 記録番号：REC-77。"); err != nil {
+		t.Fatalf("a bracketed quote of the ticket's record was refused: %v", err)
+	}
+	if err := refuseFabricatedEvidence(question("Record ID: REC-77, then compare"), "Compare with record REC-77 from last week."); err != nil {
+		t.Fatalf("a record followed by a comma was refused: %v", err)
+	}
+	withAssumption := question("From inside the cluster")
+	withAssumption.Assumptions = []ReadinessAssumption{{Kind: "non_user_visible_implementation", Statement: "The guide cites 記録番号: REC-2026-HEALTH-EXT01.", Evidence: "ticket"}}
+	if err := refuseFabricatedEvidence(withAssumption, ticket); err == nil || !strings.Contains(err.Error(), "never made") {
+		t.Fatalf("an assumption citing an invented record was accepted: %v", err)
+	}
+}
+
+// The checker answers under a strict schema: every defect code its prompt
+// names must be in the schema's enum, or the prompt asks for an answer the
+// checker cannot give.
+func TestCheckerPromptCodesAreInItsSchema(t *testing.T) {
+	prompt := readinessCheckSystemPrompt(ModelEndpoint{Lens: "test"})
+	schema := readinessCheckJSONSchema()
+	codes := regexp.MustCompile(`(?m)^- ([a-z]+(?:-[a-z]+)+):`).FindAllStringSubmatch(prompt, -1)
+	if len(codes) < 7 {
+		t.Fatalf("the prompt names %d codes; expected the defect list", len(codes))
+	}
+	enum := regexp.MustCompile(`"code":\{"type":"string","enum":\[([^\]]*)\]`).FindStringSubmatch(schema)
+	if enum == nil {
+		t.Fatal("the checker schema carries no code enum")
+	}
+	for _, code := range codes {
+		if !strings.Contains(enum[1], `"`+code[1]+`"`) {
+			t.Fatalf("the prompt names defect code %q, which the schema enum %s does not allow", code[1], enum[1])
+		}
+	}
+	if !strings.Contains(enum[1], `"fabricated-evidence"`) {
+		t.Fatal("the schema enum lacks fabricated-evidence")
 	}
 }

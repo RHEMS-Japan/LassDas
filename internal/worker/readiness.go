@@ -32,9 +32,11 @@ const (
 	// readinessPromptVersion is sealed into every assessment and check so run
 	// evidence records which prompt contract produced the judgment. Version 9
 	// added the design decision (request kind, quoted approach, needs_design)
-	// to both contracts; an assessment or check sealed under an older
-	// contract is refused, because it carries no answer to re-derive from.
-	readinessPromptVersion = 9
+	// to both contracts; version 10 forbids invented measurements (the
+	// assessor measures nothing; the checker names fabricated-evidence). An
+	// assessment or check sealed under an older contract is refused, because
+	// it carries no answer to re-derive from.
+	readinessPromptVersion = 10
 
 	// ReadinessDecisionSchemaVersion is the sealed decision's own schema
 	// version, separate from ArtifactSchemaVersion because the decision is the
@@ -425,6 +427,59 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 	}
 }
 
+// fabricatedEvidencePattern matches what only a measurement could have
+// produced: a record number with a value after it, or an identifier shaped
+// like a measurement record. The reception measures nothing, so any of
+// these in its questions, choices or assumptions is invented (2026-09-08,
+// live: three choices each carried a latency and a "record number" the
+// investigation had not yet made, and the chosen one was preserved as the
+// requester's answer).
+var fabricatedEvidencePattern = regexp.MustCompile(`(?:記録番号|(?i:record (?:number|id)))[:：]\s*([A-Za-z0-9][A-Za-z0-9_-]*)|(\bREC-[A-Za-z0-9][A-Za-z0-9-]*)|(\bm-[0-9]{4,}\b)`)
+
+// refuseFabricatedEvidence rejects a fresh assessment that presents measured
+// values or measurement records the reception could not have obtained. A
+// record the ticket itself names is the requester's, not invented: the
+// identifier (the token after the label, or the bare id) must appear in the
+// ticket's own text — the label and the width of its colon do not count.
+// This runs where a model's answer is accepted, not where a sealed
+// assessment is read back, so a record sealed with the ticket's own quote
+// stays readable.
+func refuseFabricatedEvidence(output ModelReadinessOutput, ticketText string) error {
+	invented := func(text string) bool {
+		for _, match := range fabricatedEvidencePattern.FindAllStringSubmatch(text, -1) {
+			identifier := match[1] + match[2] + match[3]
+			if identifier == "" || !strings.Contains(ticketText, identifier) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, question := range output.Questions {
+		texts := []string{question.Question, question.WhyBlocking}
+		for _, choice := range question.Choices {
+			texts = append(texts, choice.Label, choice.Effect)
+		}
+		for _, text := range texts {
+			if invented(text) {
+				return fmt.Errorf("readiness question %s cites a measurement record the reception never made", question.ID)
+			}
+		}
+	}
+	for _, assumption := range output.Assumptions {
+		if invented(assumption.Statement) || invented(assumption.Evidence) {
+			return errors.New("readiness assumption cites a measurement record the reception never made")
+		}
+	}
+	return nil
+}
+
+// ticketTextOf is the ticket as the requester wrote it — the summary, the
+// request and the expected, absent and verification texts — for the
+// identifiers an assessment may quote from it.
+func ticketTextOf(request TicketRequest) string {
+	return strings.Join([]string{request.Summary, request.Request, request.ExpectedText, request.AbsentText, request.VerificationPath}, "\n")
+}
+
 func validateModelReadinessOutput(output ModelReadinessOutput) error {
 	switch output.Decision {
 	case ReadinessOutcomeReady:
@@ -552,6 +607,9 @@ func NewReadinessAssessment(attempt int, output ModelReadinessOutput, clarificat
 	design := judgeAssessmentDesign(output, request, consumer)
 	output = design.applyTo(output)
 	if err := validateModelReadinessOutput(output); err != nil {
+		return ReadinessAssessment{}, err
+	}
+	if err := refuseFabricatedEvidence(output, ticketTextOf(request)); err != nil {
 		return ReadinessAssessment{}, err
 	}
 	assessment := ReadinessAssessment{
@@ -1204,7 +1262,7 @@ func readinessJSONSchema() string {
 }
 
 func readinessCheckJSONSchema() string {
-	return `{"type":"object","additionalProperties":false,"required":["verdict","reasons","request_kind","needs_design"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"reasons":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["code","message","question_id"],"properties":{"code":{"type":"string","enum":["false-ready","false-block","invalid-question","unbounded-question","secret-request","scope-miss","inconsistent-decision"]},"message":{"type":"string"},"question_id":{"type":"string","pattern":"^(Q[1-3])?$"}}}},"request_kind":{"type":"string","enum":["change","investigation"]},"needs_design":{"type":"boolean"}}}`
+	return `{"type":"object","additionalProperties":false,"required":["verdict","reasons","request_kind","needs_design"],"properties":{"verdict":{"type":"string","enum":["pass","fail"]},"reasons":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["code","message","question_id"],"properties":{"code":{"type":"string","enum":["false-ready","false-block","invalid-question","unbounded-question","secret-request","scope-miss","inconsistent-decision","fabricated-evidence"]},"message":{"type":"string"},"question_id":{"type":"string","pattern":"^(Q[1-3])?$"}}}},"request_kind":{"type":"string","enum":["change","investigation"]},"needs_design":{"type":"boolean"}}}`
 }
 
 // designPromptRules is the design half of both reception prompts: the same
@@ -1224,6 +1282,7 @@ Ask a question only when all four conditions hold: (1) two or more permitted ans
 Also decide, from the ticket text alone, whether the change needs a design before code. ` + designPromptRules + `
 approach_in_ticket is true only when the ticket text states how the change is to be made, and approach_excerpt must then quote that whole statement verbatim from the ticket request in USER_DATA_JSON - the full sentence or clause, never a fragment of a few words, never the ticket's title alone, never a paraphrase, never text from anywhere else; the engine checks that the quote is really there and drops the claim otherwise. When the ticket says only what should be different, approach_in_ticket is false and approach_excerpt is an empty string.
 Every question must offer 2 to 4 mutually exclusive choices, and each effect must state the user-visible result of choosing it. Free-text answers are not accepted. If a blocking ambiguity cannot be expressed as 2 to 4 bounded choices, do not ask; return decision unresolvable so an operator can rework the ticket.
+You measure nothing. A question, a choice or an assumption must not present a measured value (a latency, a count, a rate), a threshold derived from one, or a measurement record number as if it existed; such choices are refused as invented. When the ambiguity is which basis a later measurement should use, describe the basis in words (for example: from inside the cluster, through the public entry point) and leave every number and record number to the investigation stage.
 Never ask about variable names, styling technique, component structure, test implementation, anything derivable from the provided source, optional improvements, or preferences that do not change the user-visible outcome. Record such autonomous choices as assumptions with their evidence instead of asking.
 Never ask for API keys, passwords, private keys, tokens, cookies, or any other credential or secret, and never instruct anyone to post one. If required credentials appear to be missing, return decision unresolvable; that is an operator configuration failure, not a requester question.
 Ask at most 3 questions. Record at most 16 assumptions, keeping the ones with the highest behavioral impact. If satisfying the ticket would require new CI/CD, release machinery, credentials, IAM, repository governance, or changes to files outside the writable_scope prefixes in USER_DATA_JSON, do not ask about it; return decision reject with reject_code out-of-scope.
@@ -1250,6 +1309,7 @@ Fail the assessment when any of these defects exists:
 - secret-request: the assessment asks for, or instructs anyone to post, a credential or secret of any kind.
 - scope-miss: the ticket requires machinery or file changes outside the writable_scope prefixes in USER_DATA_JSON, but the decision is not reject. The provided source files are a preliminary anchor, not the boundary; needing other files inside writable_scope is not a scope miss.
 - inconsistent-decision: the assessment contradicts itself, for example ready with questions, clarification_required without questions, or unresolvable with questions.
+- fabricated-evidence: a question, a choice or an assumption presents a measured value, a threshold derived from one, or a measurement record number that the assessor could not have obtained (the assessor measures nothing).
 Use verdict pass with an empty reasons array only when none of these defects exists. Do not fail for stylistic preferences or for questions you would merely have phrased differently.
 Attribution: set question_id when the defect is one question's own and its code is false-block, invalid-question, or unbounded-question. Under those three codes, questions you do not name are treated as approved by you - on the final attempt they go to the requester without another check - so never leave a defective question unnamed. Every other code condemns the assessment as a whole regardless of question_id; you may still set question_id there as a pointer to where the defect shows, but it does not narrow the failure.`, endpoint.Lens))
 }
