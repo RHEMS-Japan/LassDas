@@ -1,7 +1,9 @@
 package attendant
 
 import (
+	"automation.internal/ticket-ingress/internal/runner"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -327,8 +329,15 @@ func TestIncompleteEvidenceReadsTheRoundRecord(t *testing.T) {
 		evidence["incomplete_objection"] != `the design was refused: design file "docs/x.md" change 12 is 304 bytes (limit 300)` {
 		t.Errorf("evidence = %v", evidence)
 	}
-	if got := incompleteEvidence(runDir, 1); len(got) != 0 {
-		t.Errorf("a missing record gave evidence: %v", got)
+	// A round the board no longer names falls back to the newest record.
+	if got := incompleteEvidence(runDir, 1); got["incomplete_objection"] == "" {
+		t.Errorf("the newest record was not found without the board: %v", got)
+	}
+	if got := incompleteEvidence(runDir, 0); got["incomplete_reason"] == "" {
+		t.Errorf("a view without cards found no record: %v", got)
+	}
+	if got := incompleteEvidence(t.TempDir(), 2); len(got) != 0 {
+		t.Errorf("a run without records gave evidence: %v", got)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "incomplete.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
@@ -336,4 +345,79 @@ func TestIncompleteEvidenceReadsTheRoundRecord(t *testing.T) {
 	if got := incompleteEvidence(runDir, 2); len(got) != 0 {
 		t.Errorf("a broken record gave evidence: %v", got)
 	}
+}
+
+// The refusal reaches the ticket through both paths that end an
+// incomplete run: the design chain's failure handler and a resubmission of
+// a pending terminal report. Dropping either wiring posts the budget text.
+func TestIncompleteRunPostsTheRefusalThroughBothPaths(t *testing.T) {
+	record := `{"last_refused_answer":"{}","last_refused_objection":"the design was refused: no design file contains the wording promised to disappear: absent_text names wording a design file carries at the baseline","reason":"the model's design kept failing the checks: no design file contains the wording promised to disappear"}`
+	assertRefusalPosted := func(t *testing.T, posted []string) {
+		t.Helper()
+		if len(posted) != 1 {
+			t.Fatalf("comments posted = %d, want one: %q", len(posted), posted)
+		}
+		if !strings.Contains(posted[0], "最後に拒否された点 (規則の原文): the design was refused: no design file contains the wording promised to disappear") ||
+			!strings.Contains(posted[0], "自動検査の規則に合わず") || strings.Contains(posted[0], "範囲を絞って再度起票") {
+			t.Fatalf("the posted comment does not name the refusal:\n%s", posted[0])
+		}
+	}
+	t.Run("design chain failure", func(t *testing.T) {
+		fixture := newPendingFixture(t, "")
+		runDir := runDirectory(fixture.config, fixture.deliveryID)
+		if err := os.MkdirAll(filepath.Join(runDir, "history", "design-1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "history", "design-1", "incomplete.json"), []byte(record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var envelope hook.DispatchEnvelope
+		if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		terminal := runner.NewTerminal(fixture.config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &pendingTestLogger{})
+		digest, err := terminal.ReportDigest(context.Background(), hook.TerminalInvestigationIncomplete, runner.Outcome{Code: hook.TerminalInvestigationIncomplete}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.store.expected = digest
+		hermes, _ := fakeBoard(t)
+		card := runtime.BoardTask{ID: "t_i1", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, runtime.StageInvestigate, 1)}
+		view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
+		run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+		handled, err := handleDesignChainFailure(context.Background(), fixture.config, fixture.services, hermes, envelope, run, view,
+			runtime.ChainPlan{Shape: runtime.ShapeDesign}, runtime.StageInvestigate, &recordingLogger{})
+		if !handled || err != nil {
+			t.Fatalf("handled=%v err=%v", handled, err)
+		}
+		assertRefusalPosted(t, fixture.comments.posted)
+	})
+	t.Run("pending terminal resubmission", func(t *testing.T) {
+		fixture := newPendingFixture(t, "")
+		fixture.writeRunDir(t, "")
+		runDir := runDirectory(fixture.config, fixture.deliveryID)
+		if err := os.MkdirAll(filepath.Join(runDir, "history", "design-1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "history", "design-1", "incomplete.json"), []byte(record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var envelope hook.DispatchEnvelope
+		if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		terminal := runner.NewTerminal(fixture.config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &pendingTestLogger{})
+		digest, err := terminal.ReportDigest(context.Background(), hook.TerminalInvestigationIncomplete, runner.Outcome{Code: hook.TerminalInvestigationIncomplete}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.store.expected = digest
+		fixture.run.TerminalCode = string(hook.TerminalInvestigationIncomplete)
+		fixture.run.TerminalReportSHA256 = digest
+		// No cards on the board: the record is found under history/ alone.
+		if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), &pendingTestLogger{}); err != nil {
+			t.Fatal(err)
+		}
+		assertRefusalPosted(t, fixture.comments.posted)
+	})
 }

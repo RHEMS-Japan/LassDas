@@ -236,8 +236,18 @@ func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, co
 // without a reason (the fixed text then speaks of the budget, as before);
 // the run still ends.
 func incompleteEvidence(runDir string, designRound int) map[string]string {
-	name := fmt.Sprintf("history/design-%d/incomplete.json", designRound)
 	evidence := map[string]string{}
+	round := designRound
+	if round < 1 || !incompleteRecordExists(runDir, round) {
+		// The board may no longer name the round (a resubmission after the
+		// cards were archived, or a view built without them): the newest
+		// round that left a record is the one that ended the run.
+		round = latestIncompleteRound(runDir)
+	}
+	if round < 1 {
+		return evidence
+	}
+	name := fmt.Sprintf("history/design-%d/incomplete.json", round)
 	if reason, err := readField(runDir, name, "reason"); err == nil && reason != "" {
 		evidence["incomplete_reason"] = reason
 	}
@@ -245,6 +255,31 @@ func incompleteEvidence(runDir string, designRound int) map[string]string {
 		evidence["incomplete_objection"] = objection
 	}
 	return evidence
+}
+
+func incompleteRecordExists(runDir string, round int) bool {
+	info, err := os.Stat(filepath.Join(runDir, "history", fmt.Sprintf("design-%d", round), "incomplete.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// latestIncompleteRound is the highest design round under history/ that
+// left an incomplete.json, 0 when none did.
+func latestIncompleteRound(runDir string) int {
+	entries, err := os.ReadDir(filepath.Join(runDir, "history"))
+	if err != nil {
+		return 0
+	}
+	latest := 0
+	for _, entry := range entries {
+		var round int
+		if _, err := fmt.Sscanf(entry.Name(), "design-%d", &round); err != nil || round <= latest {
+			continue
+		}
+		if incompleteRecordExists(runDir, round) {
+			latest = round
+		}
+	}
+	return latest
 }
 
 // nextDesignRoundOrEnd starts the next design round, or — when the rounds
