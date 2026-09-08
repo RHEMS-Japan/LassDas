@@ -13,6 +13,9 @@ import (
 var digestLinePattern = regexp.MustCompile(`^digest: sha256:[0-9a-f]{64}$`)
 
 func (c *Controller) WaitForPullRequestChecks(parent context.Context, pull PullRequest, requirements CheckRequirements, wait WaitOptions) (CheckEvidence, error) {
+	if c.contract.Kind == "cli" {
+		return CheckEvidence{}, invariant("cli_delivery_stops_at_pull_request")
+	}
 	if err := c.client.requireVerified(); err != nil {
 		return CheckEvidence{}, err
 	}
@@ -445,6 +448,9 @@ func (c *Controller) readRequiredStatuses(ctx context.Context, sha string, requi
 }
 
 func (c *Controller) AwaitStaging(parent context.Context, merge MergeResult, wait WaitOptions, digestPolicy DigestCommitPolicy) (DeploymentResult, error) {
+	if c.contract.Kind == "cli" {
+		return DeploymentResult{}, invariant("cli_delivery_stops_at_pull_request")
+	}
 	if err := c.client.requireVerified(); err != nil {
 		return DeploymentResult{}, err
 	}
@@ -471,6 +477,9 @@ func (c *Controller) AwaitStaging(parent context.Context, merge MergeResult, wai
 }
 
 func (c *Controller) AwaitProduction(parent context.Context, merge MergeResult, wait WaitOptions, digestPolicy DigestCommitPolicy) (DeploymentResult, error) {
+	if c.contract.Kind == "cli" {
+		return DeploymentResult{}, invariant("cli_delivery_stops_at_pull_request")
+	}
 	if err := c.client.requireVerified(); err != nil {
 		return DeploymentResult{}, err
 	}

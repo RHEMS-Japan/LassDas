@@ -383,6 +383,8 @@ func (d Delivery) ReachesIntegration() bool {
 func (d Delivery) ReachesProduction() bool { return d == DeliverProduction }
 
 type ConsumerConfig struct {
+	// Kind is web when omitted; cli proposes pull requests without web delivery.
+	Kind         string `json:"kind,omitempty"`
 	Repository   string `json:"repository"`
 	RepositoryID int64  `json:"repository_id"`
 	// Description says in one line what this destination is, in the
@@ -423,8 +425,9 @@ type ConsumerConfig struct {
 	// request, because the skip needs a trigger vocabulary and the framework
 	// holds no default one.
 	Design *DesignConfig `json:"design,omitempty"`
-	// GitHub is the destination repository's observed delivery contract:
-	// branches, merge settings, the exact workflows and required jobs, and
+	// GitHub is the destination repository's observed delivery contract.
+	// CLI destinations pin its default branch; web destinations also pin
+	// merge settings, the exact workflows and required jobs, and
 	// the staging digest-commit policy. These are the customer's observed
 	// values, so they live here in configuration — an engine binary carries
 	// no customer name (a fixed in-code contract table used to, which is
@@ -475,6 +478,9 @@ type ConsumerDigestCommit struct {
 }
 
 func (w ConsumerWorkflow) contract() githubapi.WorkflowContract {
+	if w.ID == 0 && w.Name == "" && w.Path == "" && len(w.RequiredJobs) == 0 {
+		return githubapi.WorkflowContract{}
+	}
 	return githubapi.WorkflowContract{
 		ID: w.ID, Name: w.Name, Path: w.Path, State: "active",
 		RequiredJobs: append([]string(nil), w.RequiredJobs...),
@@ -494,6 +500,7 @@ func (c ConsumerConfig) Contract() githubapi.Contract {
 	}
 	settings := c.GitHub.MergeSettings
 	return githubapi.Contract{
+		Kind:              c.Kind,
 		IntegrationBranch: c.IntegrationBranch,
 		ReleaseBranch:     c.ReleaseBranch,
 		DefaultBranch:     c.GitHub.DefaultBranch,
@@ -854,12 +861,27 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// EffectiveKind preserves the web contract for configurations predating kind.
+func (c ConsumerConfig) EffectiveKind() string {
+	if c.Kind == "" {
+		return "web"
+	}
+	return c.Kind
+}
+
 func (c ConsumerConfig) validate() error {
 	if !repositoryPattern.MatchString(c.Repository) || c.RepositoryID <= 0 {
 		return errors.New("consumer repository is invalid")
 	}
 	if c.Description != "" && validatePlainText(c.Description, 256, false) != nil {
 		return errors.New("consumer description is invalid")
+	}
+	switch c.EffectiveKind() {
+	case "cli":
+		return c.validateCLI()
+	case "web":
+	default:
+		return errors.New("consumer kind is invalid")
 	}
 	if !validBranch(c.IntegrationBranch) || !validBranch(c.ReleaseBranch) || c.IntegrationBranch == c.ReleaseBranch {
 		return errors.New("consumer branches are invalid")
@@ -919,6 +941,29 @@ func (c ConsumerConfig) validate() error {
 		return err
 	}
 	return nil
+}
+
+// validateCLI retains the shared repository, branch, verification and writable
+// scope contract while refusing settings for stages a CLI never runs.
+func (c ConsumerConfig) validateCLI() error {
+	if c.Delivery != DeliverPullRequest {
+		return errors.New("cli consumer delivery must be pull_request")
+	}
+	if !validBranch(c.IntegrationBranch) || (c.DeliveryBranch != "" && !validBranch(c.DeliveryBranch)) {
+		return errors.New("consumer branches are invalid")
+	}
+	if c.ReleaseBranch != "" || c.StagingOrigin != "" || c.ProductionOrigin != "" ||
+		c.StagingLoginURL != "" || c.ProductionLoginURL != "" || c.ObservationLanguage != "" ||
+		c.StagingWorkflow != "" || c.ProductionWorkflow != "" || c.GitHub.StagingDigestCommit != nil {
+		return errors.New("cli consumer cannot configure web observation or release")
+	}
+	if err := c.Contract().Validate(); err != nil {
+		return fmt.Errorf("consumer github contract: %w", err)
+	}
+	if err := c.Design.validate(); err != nil {
+		return err
+	}
+	return c.Mode.validate()
 }
 
 func (c ModeConfig) validate() error {

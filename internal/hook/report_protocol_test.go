@@ -247,3 +247,49 @@ func TestSuccessfulTerminalReportRequiresAllEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestCLITerminalReportStopsAtThePullRequest(t *testing.T) {
+	config := terminalTestConfig()
+	config.Destinations = []ReportDestination{{Kind: "cli", Repository: "example/target", Delivery: DeliverPullRequest}}
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	request := terminalTestRequest(TerminalSuccess)
+	request.CommitSHA = ""
+	request.CommitURL = ""
+	request.StagingEvidenceURL = ""
+	request.ProductionEvidenceURL = ""
+	if err := request.ValidateRoute(config); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*TerminalReportRequest){
+		"missing PR": func(r *TerminalReportRequest) { r.PullRequestURL = "" },
+		"foreign PR": func(r *TerminalReportRequest) { r.PullRequestURL = "https://github.com/example/other/pull/42" },
+		"commit": func(r *TerminalReportRequest) {
+			r.CommitSHA = strings.Repeat("3", 40)
+			r.CommitURL = "https://github.com/example/target/commit/" + r.CommitSHA
+		},
+		"deployment": func(r *TerminalReportRequest) { r.StagingEvidenceURL = "https://staging.example.com/ready" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := request
+			mutate(&r)
+			if err := r.ValidateRoute(config); err == nil {
+				t.Fatal("accepted invalid CLI terminal evidence")
+			}
+		})
+	}
+	for _, mutate := range []func(*ReportDestination){
+		func(d *ReportDestination) { d.Kind = "native" },
+		func(d *ReportDestination) { d.Delivery = DeliverProduction },
+		func(d *ReportDestination) { d.StagingOrigin = "https://stg.example.com" },
+		func(d *ReportDestination) { d.ProductionOrigin = "https://example.com" },
+	} {
+		d := config.Destinations[0]
+		mutate(&d)
+		if err := d.Validate(); err == nil {
+			t.Fatalf("accepted incompatible destination: %+v", d)
+		}
+	}
+}

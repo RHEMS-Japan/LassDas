@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Config is the runtime.json the operator mounts next to the engine. It
@@ -357,7 +358,41 @@ func Load(path string) (Config, error) {
 	if err := config.validateOrchestration(); err != nil {
 		return Config{}, err
 	}
+	if err := config.ValidateDestinations(); err != nil {
+		return Config{}, err
+	}
 	return config, nil
+}
+
+// ValidateDestinations binds the report path to the same consumers the worker
+// will execute. It is repeated at boot before creating local state, so replacing
+// either JSON file cannot silently change the destination or delivery stage.
+func (c Config) ValidateDestinations() error {
+	if len(c.ReportDestinations) == 0 || len(c.ReportDestinations) > 8 {
+		return errors.New("runtime config: report destinations are invalid")
+	}
+	consumers, err := worker.LoadConfig(c.ConsumerConfigPath)
+	if err != nil {
+		return fmt.Errorf("runtime config: consumer configuration: %w", err)
+	}
+	if len(consumers.Consumers) != len(c.ReportDestinations) {
+		return errors.New("runtime config: consumer and report destinations differ")
+	}
+	seen := make(map[string]bool, len(c.ReportDestinations))
+	for _, destination := range c.ReportDestinations {
+		if err := destination.Validate(); err != nil {
+			return fmt.Errorf("runtime config: %w", err)
+		}
+		consumer, err := consumers.ConsumerFor(destination.Repository)
+		if err != nil || seen[destination.Repository] || consumer.EffectiveKind() != destination.EffectiveKind() || string(consumer.Delivery) != destination.Delivery {
+			return errors.New("runtime config: consumer and report repository, kind or delivery differ")
+		}
+		seen[destination.Repository] = true
+		if consumer.EffectiveKind() == "cli" && (c.Chain.E2EProfile != "" || c.Chain.E2EEnabledAfter != "" || c.Chain.E2EMaxRuntimeSeconds != 0 || c.Chain.Deliver != (DeliverConfig{})) {
+			return errors.New("runtime config: cli consumers cannot configure observation or delivery continuation")
+		}
+	}
+	return nil
 }
 
 // validateOrchestration checks the execution-mode selection: the runner mode
