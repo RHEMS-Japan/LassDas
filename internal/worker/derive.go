@@ -54,8 +54,18 @@ func ReadCandidateListing(repoRoot, baseSHA string, consumer ConsumerConfig, con
 		if !strings.HasPrefix(base, root+string(os.PathSeparator)) {
 			return CandidateListing{}, errors.New("allowed prefix escapes the source root")
 		}
-		if info, statErr := os.Lstat(base); statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		info, statErr := os.Lstat(base)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
 			// A prefix that is absent in this revision contributes nothing.
+			continue
+		}
+		if !strings.HasSuffix(prefix, "/") {
+			if info.Mode().IsRegular() {
+				paths = append(paths, prefix)
+			}
+			continue
+		}
+		if !info.IsDir() {
 			continue
 		}
 		walkErr := filepath.WalkDir(base, func(name string, entry fs.DirEntry, err error) error {

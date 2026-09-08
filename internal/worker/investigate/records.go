@@ -551,7 +551,7 @@ func withinPrefixes(path string, prefixes []string) bool {
 		return false
 	}
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(path, prefix) {
+		if path == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(path, prefix) {
 			return true
 		}
 	}

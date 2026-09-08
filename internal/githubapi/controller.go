@@ -621,7 +621,8 @@ func validateFeatureSpec(spec FeatureSpec, contract Contract) ([]string, error) 
 		return nil, invariant("invalid_feature_file_set")
 	}
 	for _, prefix := range spec.AllowedPathPrefixes {
-		if err := validateRepositoryPath(prefix, true); err != nil {
+		directory := strings.HasSuffix(prefix, "/")
+		if err := validateRepositoryPath(prefix, directory); err != nil || (!directory && (strings.ContainsAny(prefix, "/ *?[]") || strings.HasPrefix(prefix, "."))) {
 			return nil, invariant("invalid_allowed_path_prefix")
 		}
 	}
@@ -634,7 +635,7 @@ func validateFeatureSpec(spec FeatureSpec, contract Contract) ([]string, error) 
 		}
 		allowed := false
 		for _, prefix := range spec.AllowedPathPrefixes {
-			if strings.HasPrefix(file.Path, prefix) {
+			if file.Path == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(file.Path, prefix) {
 				allowed = true
 				break
 			}
