@@ -283,6 +283,12 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 		return errors.New("the approved design's rendering is missing")
 	}
 	root := p.path("target-repo")
+	if !filepath.IsAbs(root) {
+		// The section's whole point is an absolute path; a relative one
+		// would print "write with absolute paths" above a list of relative
+		// ones, which is the failure this exists to remove.
+		return errors.New("the working copy has no absolute path to give the applier")
+	}
 	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) + applyInstructionRules + p.previousApplyFindings()
 	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
@@ -389,7 +395,10 @@ The files this design changes, written as the paths to give your tools:
 // and the seal is what holds the change to the design either way.
 func (p *Pipeline) designedFiles(round int) []string {
 	design, err := investigate.ReadDesign(filepath.Join(p.designRoundDir(round), "design.json"))
-	if err != nil {
+	if err != nil || !design.DigestMatches() {
+		// A record that does not match its own digest names nothing: the
+		// section falls back to the root alone, and the seal still holds
+		// the change to the design.
 		return nil
 	}
 	paths := make([]string, 0, len(design.Files))

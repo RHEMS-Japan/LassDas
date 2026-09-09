@@ -149,11 +149,6 @@ func TestChainImplementRunsTheInstructionThroughTheWorker(t *testing.T) {
 	}
 }
 
-// The applier's card carries the approved design and where the design round's
-// objection record goes, so the run-instruction command can seal an objection
-// the applier wrote at the root of its working copy (issue #103). The
-// implementer's card, and an applier card of a run that never designed, carry
-// neither.
 // The implementer's instruction is rendered with the working copy's
 // absolute path: the command refuses a root that is not absolute, and
 // without the argument the card fails at render time rather than writing
@@ -180,6 +175,11 @@ func TestTheImplementInstructionCardCarriesTheWorkingCopyRoot(t *testing.T) {
 	}
 }
 
+// The applier's card carries the approved design and where the design round's
+// objection record goes, so the run-instruction command can seal an objection
+// the applier wrote at the root of its working copy (issue #103). The
+// implementer's card, and an applier card of a run that never designed, carry
+// neither.
 func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) {
 	pipeline := chainStagePipeline(t)
 	record := filepath.Join(t.TempDir(), "worker.log")

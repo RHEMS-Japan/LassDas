@@ -234,7 +234,12 @@ func TestTheApplyInstructionNamesTheWorkingCopyAbsolutely(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A sealed design, so the section can list its files as finished paths.
-	design := investigate.Design{Files: []investigate.FileChange{{Path: "docs/OPERATIONS.md"}, {Path: "client/src/label.ts"}}}
+	design, err := investigate.SealDesignDigest(investigate.Design{
+		Files: []investigate.FileChange{{Path: "docs/OPERATIONS.md"}, {Path: "client/src/label.ts"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw, err := json.Marshal(design)
 	if err != nil {
 		t.Fatal(err)
@@ -262,5 +267,69 @@ func TestTheApplyInstructionNamesTheWorkingCopyAbsolutely(t *testing.T) {
 		if !containsString(string(instruction), want) {
 			t.Errorf("the instruction lacks %q", want)
 		}
+	}
+}
+
+// A working copy with no absolute path is refused where the instruction is
+// rendered: printing "write with absolute paths" above a list of relative
+// ones is the failure this section exists to remove.
+func TestTheApplyInstructionRefusesAWorkingCopyThatIsNotAbsolute(t *testing.T) {
+	absolute := t.TempDir()
+	relative, err := filepath.Rel(mustGetwd(t), absolute)
+	if err != nil {
+		t.Skip("the temporary directory has no relative form here")
+	}
+	p := &Pipeline{Workspace: relative}
+	if err := os.MkdirAll(p.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "DESIGN.md"), []byte("# Design — round 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Everything the rendering needs is in place, so only the root's shape
+	// can refuse it.
+	if err := p.RenderApplyInstruction(nil, 1); err == nil {
+		t.Fatal("a relative working copy was accepted")
+	} else if !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("refused for another reason: %v", err)
+	}
+}
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return working
+}
+
+// A design record that does not match its own digest names nothing: the
+// section falls back to the root alone rather than listing paths from a
+// record the readers would refuse.
+func TestTheApplyInstructionIgnoresADesignThatDoesNotMatchItsDigest(t *testing.T) {
+	p := &Pipeline{Workspace: t.TempDir()}
+	if err := os.MkdirAll(p.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "DESIGN.md"), []byte("# Design\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(investigate.Design{Files: []investigate.FileChange{{Path: "docs/TAMPERED.md"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "design.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RenderApplyInstruction(nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	instruction, _ := os.ReadFile(p.path("INSTRUCTION.md"))
+	if containsString(string(instruction), "docs/TAMPERED.md") {
+		t.Error("paths from an unsealed record reached the instruction")
+	}
+	if !containsString(string(instruction), p.path("target-repo")) {
+		t.Error("the section lost the root as well")
 	}
 }

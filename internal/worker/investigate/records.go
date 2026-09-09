@@ -502,6 +502,19 @@ func (d Design) Validate(identity Identity, investigation Investigation, bounds 
 }
 
 // DigestMatches re-derives the design's fingerprint from its content.
+// SealDesignDigest stamps a design with its own digest. The engine seals a
+// design when it writes one; a caller that assembles a Design directly
+// (a test, a fixture) uses this so the record it wrote is one the readers
+// accept.
+func SealDesignDigest(d Design) (Design, error) {
+	digest, err := designDigest(d)
+	if err != nil {
+		return Design{}, err
+	}
+	d.DesignSHA256 = digest
+	return d, nil
+}
+
 func (d Design) DigestMatches() bool {
 	digest, err := designDigest(d)
 	return err == nil && digest == d.DesignSHA256 && sha256Pattern.MatchString(d.DesignSHA256)
