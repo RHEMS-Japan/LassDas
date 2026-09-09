@@ -335,15 +335,28 @@ func TestConfirmTreeMatchesCandidateChecksASubmittedNewFile(t *testing.T) {
 // whole card, losing both the finding and that signal.
 func TestTheCandidateReviewersLabelIsNormalisedAsItIsRead(t *testing.T) {
 	transcript := `見た結果です。
-{"verdict":"revise","findings":[{"code":"design-wrong-設計誤り","path":"client/src/label.ts","line":3,"message":"設計の前提が実装と合っていません。"}]}`
+{"verdict":"revise","findings":[{"code":"欠けた-null-検査","path":"client/src/label.ts","line":3,"message":"呼び出し前に null を見ていません。"}]}`
 	output, err := DecodeAgentReviewOutput(transcript)
 	if err != nil {
 		t.Fatalf("DecodeAgentReviewOutput: %v", err)
 	}
-	if len(output.Findings) != 1 || output.Findings[0].Code != "design-wrong" {
+	if len(output.Findings) != 1 || output.Findings[0].Code != "null" {
 		t.Fatalf("findings = %+v", output.Findings)
 	}
 	if output.Findings[0].Path != "client/src/label.ts" || output.Findings[0].Line != 3 {
 		t.Errorf("the rest of the finding did not survive: %+v", output.Findings[0])
+	}
+
+	// The signal that sends a delivery back to its design is written, never
+	// manufactured: a label that only normalises onto it carries the
+	// finding without the signal, because "design-wrong-ではない" says the
+	// opposite of what firing would mean. Written exactly, it fires.
+	rewritten, err := DecodeAgentReviewOutput(`{"verdict":"revise","findings":[{"code":"design-wrong-ではない","path":"client/src/label.ts","line":1,"message":"設計自体は妥当です。"}]}`)
+	if err != nil || len(rewritten.Findings) != 1 || rewritten.Findings[0].Code != "design-wrong-unclear" {
+		t.Fatalf("a label that normalises onto the signal: %+v (%v)", rewritten.Findings, err)
+	}
+	written, err := DecodeAgentReviewOutput(`{"verdict":"revise","findings":[{"code":"design-wrong","path":"client/src/label.ts","line":1,"message":"設計の前提が実装と合っていません。"}]}`)
+	if err != nil || len(written.Findings) != 1 || written.Findings[0].Code != "design-wrong" {
+		t.Fatalf("the signal written exactly: %+v (%v)", written.Findings, err)
 	}
 }

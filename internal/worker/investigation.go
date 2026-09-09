@@ -435,7 +435,7 @@ cause_evidence must cite ids that your measured findings cite. files must stay i
 
 Three rules the reviewers apply to every design, so apply them yourself before you answer:
 - A claim that something does not exist — no runbook says this, nothing documents that, there is no such setting — needs a record that searched for it, not a record that listed names. Cite the search, or write the claim as unknown.
-- Every record you made is either used in the design or accounted for: a measurement you took and then ignored is a measurement the design should have used, or a fact the design should say it is deliberately setting aside.
+- Every record you made is either used in the design or accounted for in words: cite it in cause_evidence, or name what it showed in a finding or an unknown of the report, or say in cause or approach why it does not bear on the change. A measurement taken and then left unmentioned reads as one you forgot.
 - When the request asks for values backed by measurement, the design carries the ids that hold them: list those records in cause_evidence and quote the value in cause or approach. The verification has no field for a record id — do not invent one, and do not put an id where a probe or a wording belongs.
 ` + investigate.VerificationRules + `
 Design record limits (the kernel refuses a design outside them and tells you which line and why): cause and approach are one line of at most 600 bytes; every alternative, blast_radius item, not_doing item and change note is one line of at most 300 bytes — no newline, no leading or trailing whitespace; 1 to 3 alternatives, 1 to 12 blast_radius items, at most 12 not_doing items, 1 to 12 change notes per file; cause_evidence cites 1 to 8 measurement ids.`

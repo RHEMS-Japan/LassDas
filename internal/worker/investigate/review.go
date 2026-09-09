@@ -277,6 +277,14 @@ func (r DesignReview) Validate(identity Identity, subject ReviewSubject) error {
 // something the code could not carry. A label that would start with a digit
 // keeps its text behind a "finding-" prefix rather than losing the digits.
 func NormalizeFindingCode(code string) string {
+	if codePattern.MatchString(code) {
+		// A label the shape already accepts is left exactly as it is: this
+		// is a rescue for labels that would otherwise lose the whole
+		// review, not a rewrite of labels that work today (a label like
+		// "design--wrong" means what it means, and must not become another
+		// label's meaning).
+		return code
+	}
 	lowered := strings.ToLower(strings.TrimSpace(code))
 	var b strings.Builder
 	for _, r := range lowered {
@@ -308,8 +316,21 @@ func NormalizeFindingCode(code string) string {
 	if !codePattern.MatchString(trimmed) {
 		return "finding"
 	}
+	if reservedFindingCodes[trimmed] {
+		// A label that carries machine meaning has to be written, not
+		// manufactured. "design-wrong-ではない" normalises to exactly
+		// "design-wrong", and firing on that would archive an
+		// implementation round and spend a design round on a reviewer
+		// saying the opposite. The finding still travels; only the signal
+		// is withheld.
+		return trimmed + "-unclear"
+	}
 	return trimmed
 }
+
+// reservedFindingCodes are the labels a stage compares by equality, so
+// normalisation must never produce one that the reviewer did not write.
+var reservedFindingCodes = map[string]bool{"design-wrong": true}
 
 func collapseHyphens(value string) string {
 	var b strings.Builder

@@ -785,8 +785,16 @@ func TestTheDesignContractStatesWhatTheReviewersKeepRejecting(t *testing.T) {
 			t.Errorf("the design contract lacks %q", want)
 		}
 	}
-	// The investigation-only contract is unchanged: it writes no design.
-	if report := investigationSystemPrompt(ModeInvestigation, false); strings.Contains(report, "Every record you made is either used in the design") {
-		t.Error("the investigation-only contract carries a design rule")
+	// The investigation-only contract is unchanged: it writes no design, so
+	// none of the three reach it.
+	report := investigationSystemPrompt(ModeInvestigation, false)
+	for _, rule := range []string{
+		"needs a record that searched for it",
+		"Every record you made is either used in the design",
+		"The verification has no field for a record id",
+	} {
+		if strings.Contains(report, rule) {
+			t.Errorf("the investigation-only contract carries a design rule: %q", rule)
+		}
 	}
 }
