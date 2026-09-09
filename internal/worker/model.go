@@ -3,10 +3,12 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -252,11 +254,32 @@ const statusOverloaded = 529
 // turn asks that one again on a count of its own, and asking again here as
 // well would multiply five-minute calls (converseTurn).
 func transientTransportFailure(err error) bool {
-	if err == nil || spentItsAllowance(err) {
+	if err == nil || spentItsAllowance(err) || settledTransportFailure(err) {
 		return false
 	}
 	var safe *SafeModelError
 	return errors.As(err, &safe) && strings.HasPrefix(safe.Error(), TransportFailedPhrase)
+}
+
+// settledTransportFailure reports whether a failure to reach the gateway is
+// one that waiting cannot change: the address is wrong, the name does not
+// exist, or the certificate does not verify. Asking again costs the caller
+// four attempts and forty seconds for an answer that was already final, and
+// the person fixing the setting pays that on every try (measured, review of
+// #125). The last two are matched on the transport's own words because Go
+// gives them no type; they are Go's words, never a requester's.
+func settledTransportFailure(err error) bool {
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) && dns.IsNotFound {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "unsupported protocol scheme") ||
+		strings.Contains(message, "server gave HTTP response to HTTPS client")
 }
 
 func NewGatewayClient(client *http.Client) (*GatewayClient, error) {

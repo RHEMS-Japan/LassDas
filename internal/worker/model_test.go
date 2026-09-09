@@ -1132,3 +1132,40 @@ func TestTheWaitBetweenAttemptsEndsWhenTheCallerGivesUp(t *testing.T) {
 		t.Fatal("a wait that finished reported that it did not")
 	}
 }
+
+// A setting that is wrong is wrong on every attempt. Asking again costs the
+// person fixing it four attempts and forty seconds per try, and nothing
+// measured which transport failures are worth asking again at all —
+// returning true for every one of them left the tests green (review of #125).
+func TestASettingThatIsWrongIsNotAskedAgain(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	quickenTurnPauses(t)
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer secure.Close()
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plain.Close()
+	// A default client does not trust the test server's certificate.
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, baseURL := range map[string]string{
+		"a certificate that does not verify": secure.URL,
+		"a scheme nothing speaks":            "gopher://127.0.0.1:1",
+		"a name that does not exist":         "http://lassdas-no-such-host.invalid",
+		"plain http behind an https address": strings.Replace(plain.URL, "http://", "https://", 1),
+	} {
+		_, callErr := client.ChatCompletions(context.Background(),
+			ModelEndpoint{Model: "m", BaseURL: baseURL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+		if callErr == nil {
+			t.Fatalf("%s reported an answer", name)
+		}
+		if strings.Contains(callErr.Error(), AttemptsExhaustedPhrase) {
+			t.Errorf("%s was asked again: %q", name, callErr.Error())
+		}
+	}
+}
