@@ -14,7 +14,7 @@ func TestDecodeModelDeriveOutputNamesEachRefusal(t *testing.T) {
 	if _, err := DecodeModelDeriveOutput([]byte(`{"files": ["a.ts"], "rationale": "r", "extra": 1}`)); err == nil || !strings.Contains(err.Error(), "not the demanded strict json") {
 		t.Fatalf("unknown field: %v", err)
 	}
-	if _, err := DecodeModelDeriveOutput([]byte(`{"files": [], "rationale": "r"}`)); err == nil || !strings.Contains(err.Error(), "names no files") {
+	if _, err := DecodeModelDeriveOutput([]byte(`{"files": [], "rationale": "r"}`)); err == nil || !strings.Contains(err.Error(), NoTargetFileChosen) {
 		t.Fatalf("empty file list: %v", err)
 	}
 	output, err := DecodeModelDeriveOutput([]byte(`{"files": ["ui/dashboard/src/lib/currency.ts"], "rationale": "r"}`))

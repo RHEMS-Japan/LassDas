@@ -576,3 +576,69 @@ func TestApplyCandidateRejectsCreatedFileThroughSymlinkedDirectory(t *testing.T)
 		t.Fatal("the escape write reached outside the root")
 	}
 }
+
+// A target the change is to create has no before-side. The snapshot used to
+// refuse the run for it, so a request to create a file died one step after
+// the file choice, with the reason only in the log.
+func TestASnapshotRecordsATargetThatDoesNotExistYet(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "README.md"), []byte("# hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A file this run creates: absent from the base, inside the tree.
+	created, err := newFileTarget(root, "docs/NEW.md")
+	if err != nil || !created {
+		t.Fatalf("an absent target: created=%v err=%v", created, err)
+	}
+	// One that exists is not a file to create.
+	if created, err := newFileTarget(root, "docs/README.md"); err == nil || created {
+		t.Fatalf("an existing target: created=%v err=%v", created, err)
+	}
+	// A component in the way, or a symbolic link, is still a refusal.
+	if err := os.WriteFile(filepath.Join(root, "docs", "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := newFileTarget(root, "docs/blocker/NEW.md"); err == nil || created {
+		t.Fatalf("a file in the path: created=%v err=%v", created, err)
+	}
+	if err := os.Symlink(filepath.Join(root, "docs"), filepath.Join(root, "link")); err == nil {
+		if created, err := newFileTarget(root, "link/NEW.md"); err == nil || created {
+			t.Fatalf("a symbolic link in the path: created=%v err=%v", created, err)
+		}
+	}
+	// The reader itself records it: a request naming a file the change is to
+	// create returns a snapshot with an empty before-side, where it used to
+	// refuse the run one step after the file was chosen.
+	config := validTestConfig()
+	request := TicketRequest{
+		SchemaVersion: 1, DeliveryID: "delivery_0123456789abcdef0123456789abcdef",
+		InputSHA256: strings.Repeat("1", 64), ToolSHA: strings.Repeat("2", 40),
+		IssueKey: "TICKET-9", RunID: "run_20260806_general",
+		Repository: config.Consumers[0].Repository, Mode: config.Consumers[0].Mode.ID,
+		Summary:     "Add a retry route for notifications",
+		TargetFiles: []string{"client/src/routes/retry.ts"},
+		Request:     "client/src/routes/retry.ts を新しく作ってください。",
+	}
+	configSHA, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ConfigSHA256 = configSHA
+	snapshot, err := ReadSourceSnapshot(root, strings.Repeat("b", 40), request, config)
+	if err != nil {
+		t.Fatalf("ReadSourceSnapshot for a file to create: %v", err)
+	}
+	if len(snapshot.Files) != 1 || !snapshot.Files[0].Created || snapshot.Files[0].Content != "" {
+		t.Fatalf("snapshot = %+v", snapshot.Files)
+	}
+
+	// And a hidden or escaping path is refused whatever the tree looks like.
+	for _, refused := range []string{"docs/.hidden.md", "../escape.md", "/etc/passwd"} {
+		if created, err := newFileTarget(root, refused); err == nil || created {
+			t.Errorf("%q: created=%v err=%v", refused, created, err)
+		}
+	}
+}

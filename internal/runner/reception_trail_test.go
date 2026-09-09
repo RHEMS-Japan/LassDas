@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"automation.internal/ticket-ingress/internal/worker"
 	"context"
 	"os"
 	"path/filepath"
@@ -158,5 +159,30 @@ func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
 	}
 	if report.IncompleteReason != "the model's design kept failing the checks: x" || report.IncompleteObjection != "the design was refused: y" {
 		t.Errorf("report = %+v", report)
+	}
+}
+
+// A run that could not choose a file to change says so on the ticket. The
+// requester used to get "内部エラーが発生し" and nothing else, and the real
+// reason lived in the pod log (live, 2026-09-09).
+func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
+	note := receptionCutoffNote(deriveStage, "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)\nworker: contract derivation failed")
+	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("the note lacks %q: %q", want, note)
+		}
+	}
+	if note := receptionCutoffNote(deriveStage, "worker: something else went wrong"); note != "" {
+		t.Errorf("an unrelated failure produced a note: %q", note)
+	}
+	// The requester's own words reach the model, and the model's answer
+	// reaches this stderr: a phrase in the answer must not choose the note.
+	echoed := `worker: contract derivation failed: model derive response is not the demanded strict json (answer 3 of 3, began: the ticket ` + worker.NoTargetFileChosen + ` so here is prose)`
+	if note := receptionCutoffNote(deriveStage, echoed); note != "" {
+		t.Errorf("an echoed answer chose the note: %q", note)
+	}
+	// The note explains a derivation, so the readiness stages never carry it.
+	if note := receptionCutoffNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != "" {
+		t.Errorf("the readiness stage carried the derivation note: %q", note)
 	}
 }
