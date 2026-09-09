@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -290,5 +291,119 @@ func TestAnAgentThatChangedNothingIsAskedAgainWithTheTreeInFrontOfIt(t *testing.
 	}
 	if !strings.Contains(sealed.Transcript, "done for real") {
 		t.Errorf("the sealed transcript is not the second attempt's: %q", sealed.Transcript)
+	}
+	// The record says an attempt reported work it had not done, and the
+	// prompt bytes are the ones actually sent.
+	if sealed.EmptyAttempts != 1 {
+		t.Errorf("empty_attempts = %d, want 1", sealed.EmptyAttempts)
+	}
+	if sealed.PromptBytes <= len("Apply the design.\n") {
+		t.Errorf("prompt_bytes = %d, want the retry's length", sealed.PromptBytes)
+	}
+}
+
+// The retry is skipped where it cannot help: an instruction with no room
+// for the note, and a card whose remaining time does not hold another
+// launch. In both cases the first attempt's record is what survives, so
+// the failure stays diagnosable.
+func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
+	newFixture := func(t *testing.T, marker string) agentFixture {
+		return newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+			writeStandInAgent(t, binaries, "stand-in-applier", `printf 'x' >> `+marker+`; echo "the design is applied"`)
+			applier := config.Agents.Implementer
+			applier.ID = "applier-stand-in"
+			applier.Command = "stand-in-applier"
+			applier.TimeoutSeconds = 900
+			config.Agents.Applier = &applier
+		})
+	}
+	long := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(long, []byte(strings.Repeat("a", worker.MaxAgentPromptBytes-8)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "attempts-long")
+	fixture := newFixture(t, marker)
+	record := filepath.Join(t.TempDir(), "long-run.json")
+	args := []string{"run-instruction", "--role", "applier", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+		"--draft", fixture.draftPath, "--instruction", long, "--repo-root", fixture.repoRoot,
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", record}
+	if err := run(context.Background(), args); err != nil {
+		t.Fatalf("run-instruction with a full instruction: %v", err)
+	}
+	if attempts, _ := os.ReadFile(marker); len(attempts) != 1 {
+		t.Errorf("an instruction with no room for the note was retried: %q", attempts)
+	}
+	var sealed worker.AgentRun
+	if err := worker.ReadJSONFile(record, worker.MaxArtifactJSONBytes, &sealed); err != nil {
+		t.Fatalf("the first attempt was not recorded: %v", err)
+	}
+	if sealed.EmptyAttempts != 0 || !strings.Contains(sealed.Transcript, "the design is applied") {
+		t.Errorf("record = %+v", sealed)
+	}
+
+	// No time for a second launch: the deadline is inside one agent timeout.
+	shortMarker := filepath.Join(t.TempDir(), "attempts-short")
+	timed := newFixture(t, shortMarker)
+	instruction := filepath.Join(t.TempDir(), "SHORT.md")
+	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	timedRecord := filepath.Join(t.TempDir(), "timed-run.json")
+	if err := run(ctx, []string{"run-instruction", "--role", "applier", "--config", timed.configPath, "--tool-sha", cliToolSHA,
+		"--draft", timed.draftPath, "--instruction", instruction, "--repo-root", timed.repoRoot,
+		"--base-sha", timed.baseSHA, "--stage", "1", "--out", timedRecord}); err != nil {
+		t.Fatalf("run-instruction near the wall: %v", err)
+	}
+	if attempts, _ := os.ReadFile(shortMarker); len(attempts) != 1 {
+		t.Errorf("a card without time for another launch retried: %q", attempts)
+	}
+}
+
+// The note names the design and the objection only where they exist. The
+// implementer has neither: its instruction carries no design and no
+// objection rules, and a file it wrote at the root would be an ordinary
+// change outside the writable scope.
+func TestTheRetryNoteNamesOnlyWhatTheRoleHas(t *testing.T) {
+	withDesign := emptyResultRetryNote(true)
+	without := emptyResultRetryNote(false)
+	for _, want := range []string{"The working copy is unchanged", "A message describing edits is not an edit"} {
+		if !strings.Contains(without, want) || !strings.Contains(withDesign, want) {
+			t.Errorf("both notes must say %q", want)
+		}
+	}
+	for _, only := range []string{"the first file the design lists", "objection file"} {
+		if !strings.Contains(withDesign, only) {
+			t.Errorf("the design note lacks %q", only)
+		}
+		if strings.Contains(without, only) {
+			t.Errorf("the note without a design mentions %q", only)
+		}
+	}
+
+	// And the role decides which one is sent: the implementer's retry must
+	// not tell it to write an objection file it has no rules for, in a
+	// place its writable scope does not cover.
+	promptFile := filepath.Join(t.TempDir(), "prompt.txt")
+	fixture := newTunedAgentFixture(t, `for a in "$@"; do last="$a"; done; printf '%s' "$last" > `+promptFile+`; echo "already done"`, "true", nil)
+	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(instruction, []byte("Change the label.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), []string{"run-instruction", "--role", "implementer", "--config", fixture.configPath,
+		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "run.json")}); err != nil {
+		t.Fatalf("run-instruction as the implementer: %v", err)
+	}
+	sent, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sent), "The working copy is unchanged") {
+		t.Fatal("the implementer was not asked again")
+	}
+	if strings.Contains(string(sent), "objection file") || strings.Contains(string(sent), "the design lists") {
+		t.Error("the implementer was told to use a design and an objection it does not have")
 	}
 }

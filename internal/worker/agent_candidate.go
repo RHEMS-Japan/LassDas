@@ -30,16 +30,21 @@ type AgentRun struct {
 	BaseSHA       string `json:"base_sha"`
 	// Kind is empty for a run this program started and observed end to end,
 	// AgentRunKindExternal for one it only sealed the results of.
-	Kind         string    `json:"kind,omitempty"`
-	AgentID      string    `json:"agent_id"`
-	Command      string    `json:"command"`
-	PromptBytes  int       `json:"prompt_bytes"`
-	ExitCode     int       `json:"exit_code"`
-	DurationMs   int64     `json:"duration_ms"`
-	ChangedFiles []string  `json:"changed_files"`
-	Transcript   string    `json:"transcript"`
-	RanAt        time.Time `json:"ran_at"`
-	RunSHA256    string    `json:"run_sha256"`
+	Kind         string   `json:"kind,omitempty"`
+	AgentID      string   `json:"agent_id"`
+	Command      string   `json:"command"`
+	PromptBytes  int      `json:"prompt_bytes"`
+	ExitCode     int      `json:"exit_code"`
+	DurationMs   int64    `json:"duration_ms"`
+	ChangedFiles []string `json:"changed_files"`
+	Transcript   string   `json:"transcript"`
+	// EmptyAttempts counts the launches before this one that ended with a
+	// report of work and an unchanged working copy. Zero for the ordinary
+	// run, so existing records keep their digests; a non-zero value is the
+	// record of a model that said it had written and had not.
+	EmptyAttempts int       `json:"empty_attempts,omitempty"`
+	RanAt         time.Time `json:"ran_at"`
+	RunSHA256     string    `json:"run_sha256"`
 }
 
 // SealAgentRun computes the digest that binds a run record to its contents.
