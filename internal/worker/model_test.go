@@ -628,47 +628,79 @@ func TestGatewayClientRetriesA429OnlyWithRetryAfter(t *testing.T) {
 	}
 }
 
-// A model call that runs out of its allowance is asked once more. Such a
-// call leaves nothing behind — no answer, no usage, no cost — and the stage
-// that asked ends the delivery: a live reception died this way after
-// thirteen runs that did not. The second attempt is skipped when the
-// caller's own context is finished, because nobody is waiting any more.
-func TestAModelCallThatRunsOutOfItsAllowanceIsAskedOnceMore(t *testing.T) {
+// A call that spends its whole allowance is classified as a turn the
+// provider ended with its own error, so the ladder the turn already runs
+// asks it again: the bound on one turn does not change, and the re-ask is
+// logged with every other one. A live reception died on a spent allowance
+// after thirteen runs that did not.
+func TestASpentAllowanceJoinsTheProvidersRetryLadder(t *testing.T) {
 	var calls int
-	slow := &timeoutChatAPI{fail: 1, calls: &calls}
-	invoker := &ModelInvoker{api: slow}
-	output, err := invoker.chatWithinTimeout(context.Background(), ModelEndpoint{}, ChatRequest{})
-	if err != nil || output == nil {
-		t.Fatalf("the second attempt did not answer: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("calls = %d, want two", calls)
-	}
-
-	// Twice is the limit.
-	calls = 0
-	always := &timeoutChatAPI{fail: 5, calls: &calls}
-	if _, err := (&ModelInvoker{api: always}).chatWithinTimeout(context.Background(), ModelEndpoint{}, ChatRequest{}); err == nil {
-		t.Fatal("an allowance that always runs out was reported as an answer")
-	}
-	if calls != modelTimeoutAttempts {
-		t.Fatalf("calls = %d, want %d", calls, modelTimeoutAttempts)
-	}
-
-	// A caller that has given up is not asked again on its behalf.
-	calls = 0
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := (&ModelInvoker{api: &timeoutChatAPI{fail: 5, calls: &calls}}).chatWithinTimeout(cancelled, ModelEndpoint{}, ChatRequest{}); err == nil {
-		t.Fatal("a finished caller got an answer")
+	invoker := &ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &calls}}
+	_, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if err == nil || !errors.Is(err, errModelResponseUpstream) {
+		t.Fatalf("a spent allowance was classified as %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("calls = %d, want one", calls)
+		t.Fatalf("calls = %d, want one: the ladder does the asking", calls)
+	}
+	// A caller that has given up gets the failure itself, not a class that
+	// invites another attempt.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err = (&ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &calls}}).converseTurnOnce(cancelled, ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if err == nil || errors.Is(err, errModelResponseUpstream) {
+		t.Fatalf("a finished caller was invited to ask again: %v", err)
+	}
+}
+
+// The retry has to fire on what the real transport returns, not on what a
+// test double invents: the first version of this guard matched a bare
+// context error, the transport collapses its cause into a message, and the
+// retry never fired in production (review of #121). This test asks a real
+// server that never answers, through the real client, and counts requests.
+func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
+	t.Setenv("TEST_MODEL_API_KEY", "test-credential")
+	var requests int
+	never := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		time.Sleep(2 * time.Second)
+	}))
+	defer never.Close()
+
+	// The client's own timeout is the clock that ends the call here, which
+	// is the second of the two clocks production runs.
+	client, err := NewGatewayClient(&http.Client{Timeout: 150 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := gatewayTestEndpoint(never.URL, "TEST_MODEL_API_KEY")
+	_, callErr := client.ChatCompletions(context.Background(), endpoint, ChatRequest{Model: endpoint.Model})
+	if callErr == nil {
+		t.Fatal("the call answered")
+	}
+	if !spentItsAllowance(callErr) {
+		t.Fatalf("a spent allowance was not recognised: %v (%T)", callErr, callErr)
+	}
+	if strings.Contains(callErr.Error(), never.URL) {
+		t.Errorf("the error carries the address: %v", callErr)
+	}
+
+	// And through the turn: the spent allowance is classified as the
+	// provider's own error, so the ladder asks again — four calls for one
+	// turn, the same bound a provider error has always had.
+	requests = 0
+	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), endpoint,
+		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if turnErr == nil {
+		t.Fatal("the turn reported an answer")
+	}
+	if requests != len(gatewayRetryPauses)+1 {
+		t.Fatalf("requests = %d, want %d", requests, len(gatewayRetryPauses)+1)
 	}
 }
 
 // timeoutChatAPI reports the invocation allowance as spent for its first
-// fail calls, then answers.
+// fail calls, in the shape the real transport returns, then answers.
 type timeoutChatAPI struct {
 	fail  int
 	calls *int
@@ -677,7 +709,7 @@ type timeoutChatAPI struct {
 func (t *timeoutChatAPI) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	*t.calls++
 	if *t.calls <= t.fail {
-		return nil, context.DeadlineExceeded
+		return nil, safeModelErrorFor("model invocation failed: context deadline exceeded", context.DeadlineExceeded)
 	}
 	return &ChatResponse{
 		Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "{}"}, FinishReason: "stop"}},

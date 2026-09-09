@@ -190,11 +190,30 @@ func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
 // ChatCompletionsAPI implementation may echo anything - and lets only
 // the marked error itself travel, because which failure it was (a
 // timeout, a refused connection, an HTTP status) decides the remedy.
-type SafeModelError struct{ message string }
+type SafeModelError struct {
+	message string
+	// cause is the error this one stands for, kept unexported and reachable
+	// only through errors.Is/As: the message is still the only text that
+	// travels, and a caller can ask what kind of failure it was without
+	// reading anything the transport wrote.
+	cause error
+}
 
 func (e *SafeModelError) Error() string { return e.message }
 
+// Unwrap lets a caller ask what the failure was — a spent allowance, a
+// refused connection — without the upstream text reaching a prompt or a
+// record. Without it, every failure looks the same to errors.Is, and a
+// remedy that depends on the kind (asking again after a timeout) can never
+// fire (review of #121: measured false in production, true only against a
+// test double).
+func (e *SafeModelError) Unwrap() error { return e.cause }
+
 func safeModelError(message string) error { return &SafeModelError{message: message} }
+
+func safeModelErrorFor(message string, cause error) error {
+	return &SafeModelError{message: message, cause: cause}
+}
 
 func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	if g == nil || g.client == nil || ctx == nil {
@@ -285,7 +304,7 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		// key travels in a header, never in the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, 0, nil, safeModelError("model invocation failed: " + urlErr.Err.Error())
+			return nil, 0, nil, safeModelErrorFor("model invocation failed: "+urlErr.Err.Error(), urlErr.Err)
 		}
 		return nil, 0, nil, safeModelError("model invocation failed")
 	}
@@ -337,31 +356,17 @@ func NewModelInvoker(api ChatCompletionsAPI) (*ModelInvoker, error) {
 	return &ModelInvoker{api: api}, nil
 }
 
-// chatWithinTimeout makes one model call under ModelInvocationTimeout and,
-// when that allowance runs out, makes one more. A call that hits the
-// allowance leaves nothing behind — no answer, no usage, no cost — and the
-// stage that asked ends the delivery: a live reception died this way after
-// thirteen runs that did not (2026-09-09). The second call is skipped when
-// the caller's own context is finished, since nothing would be waiting for
-// the answer.
-func (i *ModelInvoker) chatWithinTimeout(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
-	for attempt := 1; ; attempt++ {
-		invocationContext, cancel := context.WithTimeout(ctx, ModelInvocationTimeout)
-		output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
-		cancel()
-		if err == nil || attempt == modelTimeoutAttempts {
-			return output, err
-		}
-		if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-			return output, err
-		}
+// spentItsAllowance reports whether a failed call ran out of time rather
+// than failing for a reason asking again cannot fix. Two clocks can end it:
+// the invocation context, and the HTTP client's own timeout, whose error
+// says so in words rather than through context.DeadlineExceeded.
+func spentItsAllowance(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
-
-// modelTimeoutAttempts is how many times one question is asked when the
-// allowance runs out. Two: the second costs the same allowance again, and
-// the delivery it saves costs the whole reception.
-const modelTimeoutAttempts = 2
 
 func (i *ModelInvoker) GenerateCandidate(
 	ctx context.Context,
@@ -685,13 +690,26 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		}
 	}
 	started := time.Now()
-	output, err := i.chatWithinTimeout(ctx, endpoint, request)
+	invocationContext, cancel := context.WithTimeout(ctx, ModelInvocationTimeout)
+	output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
+	cancel()
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		// The marked error itself travels, never the wrapper around it: a
 		// wrapping implementation could smuggle upstream text around the
 		// mark, and the mark's own message is by definition the
 		// transport's.
+		if spentItsAllowance(err) && ctx.Err() == nil {
+			// A call that spends its whole allowance leaves nothing — no
+			// answer, no usage, no cost — so it is asked again on the
+			// ladder the turn already runs for a provider's own error,
+			// rather than on a second ladder of its own: the bound on one
+			// turn stays what the comment above converseTurn says, and the
+			// re-ask is logged there like every other one. A live reception
+			// died on a spent allowance after thirteen runs that did not
+			// (2026-09-09).
+			return "", InvocationUsage{}, fmt.Errorf("%w (the call spent its allowance)", errModelResponseUpstream)
+		}
 		var safe *SafeModelError
 		if errors.As(err, &safe) {
 			return "", InvocationUsage{}, safe
