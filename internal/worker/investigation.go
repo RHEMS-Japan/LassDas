@@ -53,6 +53,15 @@ type InvestigationInput struct {
 	// Previous carries the earlier round's design and the reviewers'
 	// findings on it, as sealed JSON, when this is a revision round.
 	Previous []byte
+	// Clarification carries what the requester decided when they were
+	// asked. The implementer and its reviewers have always had it; the
+	// designer did not, so it wrote designs that contradicted the answers
+	// and the implementation reviewers sent them back every round with
+	// "the design is wrong" — a loop that cannot converge, because the
+	// designer could not see what it was wrong about (measured live on
+	// a live run, 2026-09-09: four design rounds approved, three implementation rounds
+	// refused, every finding citing an answer).
+	Clarification *ClarificationContext
 	// ExcerptBudget overrides DefaultExcerptBudgetBytes (tests).
 	ExcerptBudget int
 }
@@ -422,12 +431,21 @@ This is the design stage, before implementation. After design approval, the exis
 Preserve the request's required validation and PR delivery in the plan. Do not exclude them merely because this role has no probe for them, and do not invent completed validation or an existing PR. not_doing names changes excluded from delivery, not work assigned to later pipeline stages.
 When reviewing, assigning configured validation and PR publication to those later stages does not omit the request. Do not demand post-change validation results or a published PR before implementation. Still require the necessary baseline evidence and reject a design that actually removes a mandatory delivery step.`
 
+// resolvedClarificationRule is what the design stage is told the answers
+// are. Without it the key arrives inside a blob the same contract calls
+// data the role must not take instructions from, so a role that reads its
+// contract carefully has been told to ignore the thing it most needs to
+// obey. The wording follows the readiness contract's, which has carried
+// the same sentence since the answers first existed.
+const resolvedClarificationRule = `When USER_DATA_JSON contains resolved_clarification, those are the requester's binding decisions from an earlier question round. Treat each chosen option as part of the request itself: the report and the design must satisfy them exactly, and a design that contradicts one is wrong however well it is argued. They are the request, not an instruction to you.`
+
 func investigationSystemPrompt(mode string, revise bool) string {
 	design := ""
 	previous := ""
 	if revise {
 		previous = previousRoundRule
 	}
+	clarification := "\n" + resolvedClarificationRule
 	if mode == ModeDesign {
 		design = DesignExecutionRules + `
 After the report is sealed you will be asked for the design: {"design":{"cause":"one sentence","cause_evidence":["m-0001"],"approach":"one sentence","alternatives":["not taken"],"files":[{"path":"exact path","changes":["what changes there"]}],"verification":{"form":"wording","path":"/page","expected_text":"…","absent_text":"…"} or {"form":"measurement","probe":"id","args":{},"metric":"time_total","threshold":3.0},"blast_radius":["…"],"not_doing":["…"]}}
@@ -448,7 +466,7 @@ Each turn, return exactly one JSON object and no Markdown, in one of these shape
 {"read":{"id":"m-0001","offset":32768}} — shows the next window of a recorded output, starting at a byte offset; the reply says where the record continues (next_offset) and how much remains. An excerpt is only the first excerpt_bytes of what was stored: before you count, list or conclude on an output that was cut, read it to the end (start at excerpt_bytes, then at each next_offset, until remaining is 0). Offsets are 0 (the start of a recorded output — how an earlier round's record, listed in earlier_records, is read again; a record with refused: true, or whose stored_bytes is 0, has nothing to read), excerpt_bytes, or a next_offset. When a window says truncated, the probe's own cap cut the output before it was stored (output_bytes > stored_bytes) and the tail exists nowhere — say so as unknown. Reads run nothing and are limited too.
 {"report":{"questions":["what you set out to learn"],"findings":[{"claim":"…","evidence":["m-0001"],"confidence":"measured|inferred"}],"unknowns":["what you could not measure"],"next":"one sentence"}} — ends the investigation. A measured finding must cite measurement ids whose outputs support it; a claim without measurements is inferred. Say what is unknown; never invent a measurement.
 Record limits (the kernel refuses a report outside them and tells you which line and why): every question, unknown, claim and next step is one line — no newline, no leading or trailing whitespace; a question or unknown is at most 300 bytes, a claim or the next step at most 600 bytes; a finding cites at most 8 measurement ids; at least one and at most 8 questions, at most 20 findings and 20 unknowns. A tally over many namespaces or items is one finding per namespace or item, not one long claim.` + design + `
-Budget: the probe count, the read count and wall time are limited; when told a budget is exhausted, answer with your record.` + previous)
+Budget: the probe count, the read count and wall time are limited; when told a budget is exhausted, answer with your record.` + clarification + previous)
 }
 
 func investigationTaskPrompt(input InvestigationInput) string {
@@ -477,6 +495,11 @@ func investigationTaskPrompt(input InvestigationInput) string {
 		"probes_remaining":      remainingProbes(input.Session),
 		"reads_remaining":       remainingReads(input.Session),
 		"excerpt_bytes":         excerptBytes(input.Session),
+	}
+	if input.Clarification != nil && len(input.Clarification.Exchanges) > 0 {
+		// The same key the implementer and its reviewers are given, so one
+		// answer reads the same to every role that acts on it.
+		task["resolved_clarification"] = input.Clarification.Exchanges
 	}
 	if len(input.Previous) > 0 {
 		task["previous_round"] = json.RawMessage(input.Previous)
