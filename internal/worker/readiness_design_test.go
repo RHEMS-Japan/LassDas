@@ -428,8 +428,8 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 			t.Fatalf("the checker prompt lacks %q", want)
 		}
 	}
-	if readinessPromptVersion != 10 {
-		t.Fatalf("prompt version = %d, want 10 (the design contract was 9; 10 forbids invented measurements)", readinessPromptVersion)
+	if readinessPromptVersion != 11 {
+		t.Fatalf("prompt version = %d, want 11 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements)", readinessPromptVersion)
 	}
 }
 
