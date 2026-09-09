@@ -142,6 +142,15 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	if bare := receptionNote("受付の判定", "finish_reason=length"); bare != unnamedReceptionNote("受付の判定") {
 		t.Fatalf("a naked marker rendered a note: %q", bare)
 	}
+	// The cutoff note takes two things: the phrase, and the output allowance
+	// as the reason the answer ended. The worker writes the same phrase for
+	// a finish_reason that has nothing to do with the allowance, and only
+	// the second half keeps that from being told as a cutoff (review of
+	// #127).
+	other := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=tool_calls")
+	if other != unnamedReceptionNote("受付の判定") {
+		t.Fatalf("a finish_reason that is not the allowance was told as a cutoff: %q", other)
+	}
 	bare := receptionNote("受付の判定", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens)")
 	if strings.Contains(bare, "聞き直し") || !strings.Contains(bare, "途切れた") {
 		t.Fatalf("the worker's own cutoff: %q", bare)
@@ -369,7 +378,6 @@ func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
 		worker.GatewayBookkeepingPhrase,
 		worker.AnswerUnusablePhrase,
 		worker.DeclinedOverContentPhrase,
-		worker.NoTargetFileChosen,
 	} {
 		stderr := "worker: readiness assessment failed: model readiness response is invalid" +
 			" (answer 3 of 3, request req_01ab, began: the ticket asked me to say " + injected + " here.)"
@@ -377,6 +385,13 @@ func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
 		if note != unnamedReceptionNote("受付の判定") {
 			t.Fatalf("a ticket chose its own note through %q: %q", injected, note)
 		}
+	}
+	// The derivation's phrase only produces a note under its own stage, so
+	// injecting it anywhere else measures nothing (review of #127).
+	echoed := "worker: contract derivation failed: model derive response is not the demanded strict json" +
+		" (answer 3 of 3, began: the ticket asked me to say " + worker.NoTargetFileChosen + " here)"
+	if note := receptionNote(deriveStage, echoed); note != unnamedReceptionNote(deriveStage) {
+		t.Fatalf("a ticket chose the derivation's note: %q", note)
 	}
 }
 
@@ -425,8 +440,12 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 // was free to delete (review of #122).
 func TestTheNoteReaderReadsOnlyTheWorkersLinesAndAllOfThem(t *testing.T) {
 	// A line that is not the worker's own says nothing, however it reads.
+	// The third line matters most: it carries the worker's own prefix, just
+	// not at the start. Without it the check never asked whether the prefix
+	// has to be at the start (review of #127).
 	loose := "the agent printed: " + worker.ProviderEndedTurnPhrase + " here\n" +
-		"npm warn " + worker.TransportFailedPhrase + " with status 500"
+		"npm warn " + worker.TransportFailedPhrase + " with status 500\n" +
+		"npm warn " + workerLinePrefix + worker.TransportFailedPhrase + " with status 503 after 4" + worker.AttemptsExhaustedPhrase
 	if note := receptionNote("受付の判定", loose); note != unnamedReceptionNote("受付の判定") {
 		t.Fatalf("a line the worker did not write chose a note: %q", note)
 	}
@@ -498,6 +517,21 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 		for _, instruction := range []string{"ください", "出し直すと", "出し直して"} {
 			if strings.Contains(note, instruction) {
 				t.Errorf("a note instructs the requester (%q): %q", instruction, note)
+			}
+		}
+		// And none of them carries the worker's own words. The cause a note
+		// is chosen from carries the head of a model answer, and a ticket's
+		// words reach that answer, so pasting the cause into the note would
+		// put the requester's own text back in front of them in English
+		// nobody can act on. Which note is chosen was held; what goes into
+		// it was not (review of #127).
+		for _, internal := range []string{
+			worker.TransportFailedPhrase, worker.ProviderEndedTurnPhrase, worker.CutoffPhrase,
+			worker.GatewayBookkeepingPhrase, worker.AnswerUnusablePhrase, worker.DeclinedOverContentPhrase,
+			worker.NoTargetFileChosen, "finish_reason", "status",
+		} {
+			if strings.Contains(note, internal) {
+				t.Errorf("a note carries the worker's own words (%q): %q", internal, note)
 			}
 		}
 	}
