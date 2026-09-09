@@ -99,8 +99,47 @@ func TestDesignObjectionRecorded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(runDir, "history", "stage-1", "review-b.json"), []byte(`{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"}) || reviewsFlagDesignWrong(runDir, 2, []string{"review-a", "review-b"}) {
-		t.Error("design-wrong finding not read from the sealed reviews")
+	flagged, err := reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"})
+	if err != nil || !flagged {
+		t.Errorf("design-wrong finding not read from the sealed reviews: %v, %v", flagged, err)
+	}
+	// A review that has not been sealed yet is not an answer: at this point
+	// a round can legitimately have one review and not the other.
+	if flagged, err := reviewsFlagDesignWrong(runDir, 2, []string{"review-a", "review-b"}); err != nil || flagged {
+		t.Errorf("an absent review was read as an answer: %v, %v", flagged, err)
+	}
+}
+
+// A review that is there and cannot be read is not an absent review. Read as
+// "no design-wrong", it sent the delivery back to the applier with a design a
+// reviewer may have called wrong, and wrote nothing anywhere (audit,
+// 2026-09-09). It counts as design-wrong, and says why.
+func TestAnUnreadableSealedReviewCountsAsRejectingTheDesign(t *testing.T) {
+	for _, content := range []string{`{"findings":[`, ``, `not json at all`} {
+		runDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(runDir, "history", "stage-1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "history", "stage-1", "review-a.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		flagged, err := reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"})
+		if !flagged {
+			t.Errorf("%q was read as a review that found nothing wrong", content)
+		}
+		if err == nil {
+			t.Errorf("%q gave no reason to record", content)
+		}
+	}
+	// And one that cannot be opened at all, rather than one that opens and
+	// does not parse: a directory standing where the review should be.
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "history", "stage-1", "review-a.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flagged, err := reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"})
+	if !flagged || err == nil {
+		t.Errorf("a review that could not be opened: %v, %v", flagged, err)
 	}
 }
 

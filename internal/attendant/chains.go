@@ -717,7 +717,19 @@ func handleChainFailure(
 				// A design-backed delivery: a reviewer who found the design
 				// itself wrong sends the run back to the designer; anything
 				// else is another application of the same design.
-				if reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath); err == nil && reviewsFlagDesignWrong(runDir, view.round, reviewers) {
+				reviewers, reviewersErr := consumerReviewerIDs(config.ConsumerConfigPath)
+				designWrong := false
+				if reviewersErr == nil {
+					var readErr error
+					designWrong, readErr = reviewsFlagDesignWrong(runDir, view.round, reviewers)
+					if readErr != nil {
+						// Counted as design-wrong above; say so, because the
+						// alternative is a decision nobody can account for.
+						logger.Error("sealed review unreadable, treating the design as rejected",
+							"delivery_id", run.DeliveryID, "round", view.round, "error", readErr.Error())
+					}
+				}
+				if designWrong {
 					// At the design-round limit this ends the run as
 					// nonconverged instead of returning the limit error every tick.
 					return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "a review found the design itself wrong", logger)

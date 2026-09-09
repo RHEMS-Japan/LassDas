@@ -180,27 +180,41 @@ func designObjectionRecorded(runDir string, designRound int) (bool, error) {
 // implementation round carries the finding code design-wrong: the reviewer
 // judged that the design itself does not hold, which sends the delivery back
 // to the designer rather than to another implementation round.
-func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) bool {
+//
+// A review that is not there yet is not an answer, and is skipped: at the
+// point this is asked, a round can legitimately have sealed one review and
+// not the other. A review that IS there and cannot be read is a different
+// thing, and answering false for it inverted the decision — the delivery
+// went back to the applier with a design a reviewer may have called wrong,
+// and nothing was written anywhere (found in an audit, 2026-09-09). Such a
+// review now counts as design-wrong: the two mistakes are a wasted design
+// round against an implementation built on a rejected design, and the
+// second is worse. The reason is returned so the caller can record it.
+func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) (bool, error) {
 	for _, reviewer := range reviewers {
-		raw, err := os.ReadFile(filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json"))
-		if err != nil {
+		path := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json")
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return true, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
 		}
 		var review struct {
 			Findings []struct {
 				Code string `json:"code"`
 			} `json:"findings"`
 		}
-		if json.Unmarshal(raw, &review) != nil {
-			continue
+		if err := json.Unmarshal(raw, &review); err != nil {
+			return true, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
 		}
 		for _, finding := range review.Findings {
 			if finding.Code == "design-wrong" {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // regenerateDesignBackedRound starts the next implementation round of a
