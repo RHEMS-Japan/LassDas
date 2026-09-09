@@ -185,6 +185,15 @@ func unreadableReviewsStopReason(round int) string {
 		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。", round)
 }
 
+// unreadableReviewsOutcome is how a run ends when its sealed reviews could
+// not be read: the code and the sentence together, because the code decides
+// which comment the requester reads and whether the failure counts toward
+// the hold on new work. It is internal rather than a model failure — no
+// model was asked anything here.
+func unreadableReviewsOutcome(round int) (hook.TerminalCode, string) {
+	return hook.TerminalInternalFailed, unreadableReviewsStopReason(round)
+}
+
 // designWrongForRound answers, for one implementation round, whether the
 // delivery goes back to the designer. An error means the reviews could not
 // be read at all, which is not an answer to that question: it is a reason to

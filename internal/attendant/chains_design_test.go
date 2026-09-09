@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"automation.internal/ticket-ingress/internal/backlog"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -637,7 +641,13 @@ func TestWhereAnImplementationRoundGoesNext(t *testing.T) {
 // no file and no error text: those are the operator's, and the requester's
 // question is only whether their own ticket is at fault.
 func TestTheReasonAStoppedRunCarriesNamesNothingInternal(t *testing.T) {
-	reason := unreadableReviewsStopReason(2)
+	code, reason := unreadableReviewsOutcome(2)
+	// Not a model failure: no model was asked anything on this path, and the
+	// code decides both the comment the requester reads and whether the
+	// failure counts toward the hold on new work.
+	if code != hook.TerminalInternalFailed {
+		t.Fatalf("the run ends as %s", code)
+	}
 	if !strings.Contains(reason, "2 巡目") || !strings.Contains(reason, "依頼の内容とは別のところ") {
 		t.Fatalf("the reason does not say what happened: %q", reason)
 	}
@@ -647,3 +657,127 @@ func TestTheReasonAStoppedRunCarriesNamesNothingInternal(t *testing.T) {
 		}
 	}
 }
+
+// Where an implementation round goes is decided in handleChainFailure, and
+// nothing measured it: disabling the branch that stops a run, changing the
+// code it stops with, or deleting the sentence its requester is told, all
+// left every test green (review of #123). This drives the real function
+// against a board and watches what it does with the cards and the run.
+func TestAFailedRoundGoesWhereTheReviewsSay(t *testing.T) {
+	const designWrong = `{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`
+	const otherFindings = `{"verdict":"revise","findings":[{"code":"style","message":"a smaller thing"}]}`
+	for name, c := range map[string]struct {
+		reviewA, reviewB  string
+		wantNewDesign     bool
+		wantNextImplement bool
+		wantStopped       bool
+	}{
+		"a reviewer found the design wrong": {reviewA: otherFindings, reviewB: designWrong, wantNewDesign: true},
+		// The re-apply route needs a sealed design this fixture does not
+		// build, and says so — which is itself the proof it took that route
+		// rather than stopping or opening a new design round.
+		"the reviews found other things": {reviewA: otherFindings, reviewB: otherFindings, wantNextImplement: true},
+		"a review will not parse":        {reviewA: `{"findings":[`, reviewB: otherFindings, wantStopped: true},
+		"a review was removed":           {reviewB: otherFindings, wantStopped: true},
+	} {
+		config, runDir := designRunConfigWithReviewers(t)
+		stage1 := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(stage1, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// A sealed revise decision is what brings a round here at all.
+		if err := os.WriteFile(filepath.Join(stage1, "decision.json"), []byte(`{"outcome":"revise"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for file, body := range map[string]string{"review-a.json": c.reviewA, "review-b.json": c.reviewB} {
+			if body == "" {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(stage1, file), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hermes, callLog := fakeBoard(t)
+		envelope := hook.DispatchEnvelope{DeliveryID: "delivery-1", Snapshot: hook.TicketSnapshot{IssueID: 4242}}
+		logger := &recordingLogger{}
+		err := handleChainFailure(context.Background(), config, quietServices(t), hermes, envelope,
+			state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, failedValidateBoard(), runtime.StageValidate, logger)
+		_, created := boardCalls(t, callLog)
+		newDesign := containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageInvestigate, 2))
+		nextImplement := containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageApply, 2)) ||
+			(err != nil && strings.Contains(err.Error(), "no approved design to re-apply"))
+		reason, _ := os.ReadFile(filepath.Join(runDir, "delivery-stop-reason.txt"))
+		stopped := len(reason) > 0
+		if newDesign != c.wantNewDesign || nextImplement != c.wantNextImplement || stopped != c.wantStopped {
+			t.Errorf("%s: new design=%v next implement=%v stopped=%v (err=%v)", name, newDesign, nextImplement, stopped, err)
+		}
+		if c.wantStopped {
+			if !strings.Contains(string(reason), "レビュー結果を読めなかった") {
+				t.Errorf("%s: the requester was told %q", name, reason)
+			}
+			if len(logger.lines) == 0 {
+				t.Errorf("%s: the run stopped without saying why anywhere", name)
+			}
+		}
+	}
+}
+
+// designRunConfigWithReviewers is designRunConfig with the two reviewers the
+// cards orchestration runs, which is what the sealed reviews are named for.
+func designRunConfigWithReviewers(t *testing.T) (runtime.Config, string) {
+	t.Helper()
+	config, runDir := designRunConfig(t, 3)
+	if err := os.WriteFile(config.ConsumerConfigPath, []byte(`{"max_stages":3,"design_max_rounds":3,`+
+		`"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},`+
+		`"agents":{"applier":{"command":"true","timeout_seconds":60}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The shape comes from the readiness decision: this is the delivery the
+	// investigating designer produced a design for.
+	readiness := filepath.Join(runDir, "history", "readiness")
+	if err := os.MkdirAll(readiness, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(readiness, "decision.json"),
+		[]byte(`{"outcome":"ready","request_kind":"change","needs_design":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return config, runDir
+}
+
+// failedValidateBoard is a design-backed delivery whose validate card failed
+// on its first implementation round: the one shape that reaches the question
+// of where the round goes next.
+func failedValidateBoard() chainView {
+	card := func(id, stage, status string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey("delivery-1", stage, round)}
+	}
+	return chainViewFor([]runtime.BoardTask{
+		card("t_i1", runtime.StageInvestigate, "done", 1), card("t_a1", runtime.StageDesignReviewA, "done", 1),
+		card("t_b1", runtime.StageDesignReviewB, "done", 1), card("t_d1", runtime.StageDesignDecide, "done", 1),
+		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "done", 1),
+		card("t_rb", runtime.StageReviewB, "done", 1), card("t_v", runtime.StageValidate, "blocked", 1),
+		card("t_p", runtime.StagePublish, "todo", 1),
+	}, "delivery-1")
+}
+
+// quietServices is the services a chain needs to answer "the requester has
+// not asked us to stop": a real Backlog client whose transport answers every
+// comment lookup with none.
+func quietServices(t *testing.T) *runtime.Services {
+	t.Helper()
+	client, err := backlog.NewClient(backlog.Config{
+		SpaceKey: "space", APIKey: "k", Origin: "https://space.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20,
+	}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader("[]"))}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &runtime.Services{Backlog: client}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

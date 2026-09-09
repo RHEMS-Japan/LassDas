@@ -732,8 +732,7 @@ func handleChainFailure(
 				// delivery's remaining design rounds re-reading it.
 				logger.Error("the sealed reviews could not be read",
 					"delivery_id", run.DeliveryID, "round", view.round, "error", readErr.Error())
-				code = hook.TerminalInternalFailed
-				stopReason = unreadableReviewsStopReason(view.round)
+				code, stopReason = unreadableReviewsOutcome(view.round)
 			case designWrong:
 				// At the design-round limit this ends the run as
 				// nonconverged instead of returning the limit error every tick.
