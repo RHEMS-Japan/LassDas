@@ -1156,7 +1156,6 @@ func TestASettingThatIsWrongIsNotAskedAgain(t *testing.T) {
 	for name, baseURL := range map[string]string{
 		"a certificate that does not verify": secure.URL,
 		"a scheme nothing speaks":            "gopher://127.0.0.1:1",
-		"a name that does not exist":         "http://lassdas-no-such-host.invalid",
 		"plain http behind an https address": strings.Replace(plain.URL, "http://", "https://", 1),
 	} {
 		_, callErr := client.ChatCompletions(context.Background(),
@@ -1167,5 +1166,113 @@ func TestASettingThatIsWrongIsNotAskedAgain(t *testing.T) {
 		if strings.Contains(callErr.Error(), AttemptsExhaustedPhrase) {
 			t.Errorf("%s was asked again: %q", name, callErr.Error())
 		}
+	}
+}
+
+// The guard must not refuse the retries this change exists for. Sizing it
+// wrongly disabled every retry under a production-sized allowance with every
+// test still green (review of #125), so this measures it there: a five
+// minute allowance, a gateway that answers 503 quickly, four attempts.
+func TestTheGuardStillLetsAQuickFailureBeAskedAgain(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	quickenTurnPauses(t)
+	calls := 0
+	quick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer quick.Close()
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ModelInvocationTimeout)
+	defer cancel()
+	if _, callErr := client.ChatCompletions(ctx,
+		ModelEndpoint{Model: "m", BaseURL: quick.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"}); callErr == nil {
+		t.Fatal("a 503 reported an answer")
+	}
+	if want := len(gatewayRetryPauses) + 1; calls != want {
+		t.Fatalf("calls = %d, want %d: the guard refused a retry the call had time for", calls, want)
+	}
+}
+
+// The same guard on the other path: a gateway that cannot be reached, and is
+// slow about saying so. Only the status path was measured (review of #125).
+func TestASlowUnreachableGatewayDoesNotSpendTheWholeAllowance(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	quickenTurnPauses(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := 0
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted++
+			time.Sleep(120 * time.Millisecond)
+			_ = conn.Close()
+		}
+	}()
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, callErr := client.ChatCompletions(ctx,
+		ModelEndpoint{Model: "m", BaseURL: "http://" + listener.Addr().String(), APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	if callErr == nil {
+		t.Fatal("an unreachable gateway reported an answer")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the call spent the whole allowance: %d connections", accepted)
+	}
+}
+
+// When the caller gives up during the wait, what travels is the failure that
+// prompted the wait, not a sentence about the wait. Discarding it left every
+// test green (review of #125).
+func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	saved := gatewayRetryPauses
+	gatewayRetryPauses = []time.Duration{5 * time.Second}
+	t.Cleanup(func() { gatewayRetryPauses = saved })
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+	_, callErr := client.ChatCompletions(ctx,
+		ModelEndpoint{Model: "m", BaseURL: "http://" + listener.Addr().String(), APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	if callErr == nil {
+		t.Fatal("a dropped connection reported an answer")
+	}
+	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) || strings.Contains(callErr.Error(), "cancelled") {
+		t.Fatalf("the failure that prompted the wait did not travel: %q", callErr.Error())
 	}
 }

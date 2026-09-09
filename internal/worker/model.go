@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -154,8 +153,9 @@ const (
 	// SpentAllowancePhrase names the failure the turn asks again for; with
 	// TransportFailedPhrase it begins errModelAllowanceSpent.
 	SpentAllowancePhrase = "the call spent its allowance without answering"
-	// AttemptsExhaustedPhrase appears in the one transport failure that
-	// comes after the gateway's own retries were spent.
+	// AttemptsExhaustedPhrase appears in every transport failure that comes
+	// after the gateway's own retries were spent — a status it kept
+	// answering, and a gateway that could not be reached at all.
 	AttemptsExhaustedPhrase = " attempts"
 	// LimitNotLiftedPhrase and RetryAfterTooLongPhrase appear in the two
 	// failures a gateway gives for a limit that waiting does not lift (an
@@ -235,8 +235,9 @@ func retryableGatewayStatus(code int) bool {
 	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
 		// A gateway's own 500 and 408, and the 529 an overloaded provider
 		// answers with, are moments that pass in the same way its 502 is.
-		// One of them ended a whole investigating round, which spends up to
-		// sixty calls, on its first occurrence.
+		// One of them ended a whole investigating round on its first
+		// occurrence; an investigation spends up to sixty probe calls
+		// across its rounds.
 		http.StatusInternalServerError, http.StatusRequestTimeout, statusOverloaded:
 		return true
 	}
@@ -273,10 +274,10 @@ func settledTransportFailure(err error) bool {
 	if errors.As(err, &verification) {
 		return true
 	}
-	var dns *net.DNSError
-	if errors.As(err, &dns) && dns.IsNotFound {
-		return true
-	}
+	// A name that does not resolve is deliberately not here: the pod's own
+	// resolver restarts, and a name that exists answers NXDOMAIN for a
+	// moment while it does (review of #125). Treating that as settled would
+	// turn the transient this change exists to survive into a hard failure.
 	message := err.Error()
 	return strings.Contains(message, "unsupported protocol scheme") ||
 		strings.Contains(message, "server gave HTTP response to HTTPS client")
@@ -337,7 +338,13 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		return nil, safeModelError("model request could not be encoded")
 	}
 	for attempt := 0; ; attempt++ {
+		// How long the attempt took is what sizes the guard below: another
+		// one of the same length is what the call would be paying for. A
+		// fixed assumption let a round trip slower than the assumption slip
+		// through and spend the whole allowance anyway (review of #125).
+		startedAttempt := time.Now()
 		body, status, retryAfter, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
+		lastAttempt := time.Since(startedAttempt)
 		if err != nil {
 			// A gateway that answered a status gets the ladder below; one
 			// that could not be reached at all gets the same ladder here,
@@ -346,7 +353,7 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 				return nil, err
 			}
 			pause, again := gatewayPause(http.StatusServiceUnavailable, nil, attempt)
-			if again && !roomForAnotherAttempt(ctx, pause) {
+			if again && !roomForAnotherAttempt(ctx, pause, lastAttempt) {
 				// The attempts themselves are slow: another one would spend
 				// the call's whole allowance, and the failure would reach the
 				// caller as a spent allowance rather than as what actually
@@ -378,7 +385,7 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return &response, nil
 		}
 		pause, again := gatewayPause(status, retryAfter, attempt)
-		if again && !roomForAnotherAttempt(ctx, pause) {
+		if again && !roomForAnotherAttempt(ctx, pause, lastAttempt) {
 			// The same guard the unreachable branch uses, for the same
 			// reason: a status that is slow to arrive would otherwise spend
 			// the call's whole allowance between attempts, and the failure
@@ -424,19 +431,13 @@ func pauseBeforeAskingAgain(ctx context.Context, pause time.Duration) bool {
 // caller as a spent allowance — which the turn asks again, so one slow
 // status becomes two allowances instead of one immediate failure (measured,
 // review of #125). A call with no deadline of its own is not bounded here.
-func roomForAnotherAttempt(ctx context.Context, pause time.Duration) bool {
+func roomForAnotherAttempt(ctx context.Context, pause, lastAttempt time.Duration) bool {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return true
 	}
-	return time.Until(deadline) > pause+minimumAttemptAllowance
+	return time.Until(deadline) > pause+lastAttempt
 }
-
-// minimumAttemptAllowance is how much of the call's allowance another
-// attempt is assumed to need. A tenth of ModelInvocationTimeout: enough that
-// a gateway which answers at all can answer, small enough that the guard
-// does not refuse a retry the call has time for.
-const minimumAttemptAllowance = ModelInvocationTimeout / 10
 
 // maxRetryAfter caps how long a 429's Retry-After is honoured: a gateway
 // names seconds for a rate window, and anything longer is not a moment
