@@ -123,7 +123,7 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		// written first, so a wall that fires during the second attempt
 		// leaves the first one's evidence behind.
 		retry := prompt + emptyResultRetryNote(haltFile != "")
-		if len(retry) <= worker.MaxAgentPromptBytes && enoughTimeLeft(ctx, agent) {
+		if len(retry) <= worker.MaxAgentPromptBytes && firstAttemptWasQuick(outcome, agent) {
 			first, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), 0))
 			if sealErr == nil {
 				_ = worker.WriteJSONFileExclusive(*runOutPath, first, worker.MaxArtifactJSONBytes)
@@ -136,9 +136,14 @@ func runRunInstruction(ctx context.Context, args []string) error {
 				// which stays on disk until the write below succeeds.
 				outcome, halted, runErr = second, secondHalted, secondErr
 				prompt = retry
-				_ = os.Remove(*runOutPath)
 			}
 		}
+	}
+	if emptyAttempts > 0 {
+		// The first attempt's record is on disk; the write below is
+		// exclusive-create, so it goes whether or not the second launch
+		// replaced it.
+		_ = os.Remove(*runOutPath)
 	}
 	run, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), emptyAttempts))
 	if sealErr == nil {
@@ -177,15 +182,25 @@ func agentRunOf(outcome worker.AgentOutcome, draft worker.TicketDraft, baseSHA s
 	}
 }
 
-// enoughTimeLeft reports whether the card's remaining time still holds a
-// whole agent launch. Without this the second attempt can be cut off by the
-// card's wall, and the wall fires before any record is written.
-func enoughTimeLeft(ctx context.Context, agent worker.AgentConfig) bool {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return true
+// retryTimeShare is the part of an agent's own timeout a first attempt may
+// spend and still leave room for a second one inside the card's wall. A
+// variable so a test can move the cutoff without sleeping through a third
+// of the smallest timeout the configuration allows.
+var retryTimeShare = 3
+
+// firstAttemptWasQuick reports whether the launch that changed nothing
+// finished fast enough that another one fits. The card's wall is enforced
+// by the board, which kills this process and passes it no deadline, so the
+// only measured budget here is the agent's own timeout: an attempt that
+// reported work without doing any is fast by nature (twenty-seven seconds
+// against a nine-hundred-second timeout, live 2026-09-09), while one that
+// spent most of its time and produced nothing would push a second launch
+// into the wall.
+func firstAttemptWasQuick(outcome worker.AgentOutcome, agent worker.AgentConfig) bool {
+	if agent.TimeoutSeconds <= 0 {
+		return false
 	}
-	return time.Until(deadline) > time.Duration(agent.TimeoutSeconds)*time.Second
+	return outcome.Duration < time.Duration(agent.TimeoutSeconds)*time.Second/time.Duration(retryTimeShare)
 }
 
 // emptyResultRetryNote is appended when an agent reported success without

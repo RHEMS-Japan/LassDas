@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -341,23 +340,43 @@ func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
 		t.Errorf("record = %+v", sealed)
 	}
 
-	// No time for a second launch: the deadline is inside one agent timeout.
-	shortMarker := filepath.Join(t.TempDir(), "attempts-short")
-	timed := newFixture(t, shortMarker)
+	// A first attempt that spent most of its own timeout is not retried: a
+	// second launch would run into the card's wall, which kills this
+	// process without writing anything.
+	slowMarker := filepath.Join(t.TempDir(), "attempts-slow")
+	defer func(share int) { retryTimeShare = share }(retryTimeShare)
+	retryTimeShare = 60 // a sixtieth of the minimum timeout: one second
+	slow := newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+		writeStandInAgent(t, binaries, "stand-in-applier", `printf 'x' >> `+slowMarker+`; sleep 2; echo "the design is applied"`)
+		applier := config.Agents.Implementer
+		applier.ID = "applier-stand-in"
+		applier.Command = "stand-in-applier"
+		applier.TimeoutSeconds = 60
+		config.Agents.Applier = &applier
+	})
 	instruction := filepath.Join(t.TempDir(), "SHORT.md")
 	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	timedRecord := filepath.Join(t.TempDir(), "timed-run.json")
-	if err := run(ctx, []string{"run-instruction", "--role", "applier", "--config", timed.configPath, "--tool-sha", cliToolSHA,
-		"--draft", timed.draftPath, "--instruction", instruction, "--repo-root", timed.repoRoot,
-		"--base-sha", timed.baseSHA, "--stage", "1", "--out", timedRecord}); err != nil {
-		t.Fatalf("run-instruction near the wall: %v", err)
+	slowRecord := filepath.Join(t.TempDir(), "slow-run.json")
+	if err := run(context.Background(), []string{"run-instruction", "--role", "applier", "--config", slow.configPath, "--tool-sha", cliToolSHA,
+		"--draft", slow.draftPath, "--instruction", instruction, "--repo-root", slow.repoRoot,
+		"--base-sha", slow.baseSHA, "--stage", "1", "--out", slowRecord}); err != nil {
+		t.Fatalf("run-instruction after a slow attempt: %v", err)
 	}
-	if attempts, _ := os.ReadFile(shortMarker); len(attempts) != 1 {
-		t.Errorf("a card without time for another launch retried: %q", attempts)
+	if attempts, _ := os.ReadFile(slowMarker); len(attempts) != 1 {
+		t.Errorf("a slow first attempt was retried: %q", attempts)
+	}
+	var slowRun worker.AgentRun
+	if err := worker.ReadJSONFile(slowRecord, worker.MaxArtifactJSONBytes, &slowRun); err != nil {
+		t.Fatalf("the slow attempt was not recorded: %v", err)
+	}
+
+	// The record is written even when the retry is skipped after the first
+	// attempt was already sealed: an exclusive write over its own leftover
+	// would otherwise fail in silence.
+	if slowRun.EmptyAttempts != 0 || !strings.Contains(slowRun.Transcript, "the design is applied") {
+		t.Errorf("record = %+v", slowRun)
 	}
 }
 
