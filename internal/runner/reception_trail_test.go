@@ -481,3 +481,20 @@ func TestARecordTheGateCouldNotAcceptAlsoLeavesAReason(t *testing.T) {
 		t.Fatalf("the trail would be refused by the report: %v", err)
 	}
 }
+
+// Two of the three stage names begin with 受付の, so a note that prefixes
+// them with 受付の again reads as 受付の 受付の判定 (review of #122). The
+// notes a requester sees most are exactly these two.
+func TestNoNoteRepeatsTheStagesOwnPrefix(t *testing.T) {
+	for _, stage := range []string{"受付の判定", "受付の確認", deriveStage} {
+		for _, note := range []string{
+			unnamedReceptionNote(stage),
+			receptionNote(stage, "worker: readiness assessment failed: "+worker.TransportFailedPhrase+" with status 401"),
+			receptionNote(stage, "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens)"),
+		} {
+			if strings.Contains(note, "受付の "+stage) {
+				t.Errorf("the note repeats the stage's own prefix: %q", note)
+			}
+		}
+	}
+}

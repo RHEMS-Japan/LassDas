@@ -164,7 +164,11 @@ func unnamedReceptionNote(stage string) string {
 	// happen before any call) nor that the ticket is blameless (a model may
 	// refuse an answer over what the ticket asks for). Both were claimed
 	// here and both are sometimes false (review of #122).
-	return "受付の " + stage + " が完了しなかったため、自動処理を止めました。" +
+	// "受付処理 (<工程>)" rather than "受付の <工程>": two of the three stage
+	// names already begin with 受付の, and this is the note a requester sees
+	// most (review of #122). Not "受付の AI" either — this note is reached by
+	// failures that never called a model.
+	return "受付処理 (" + stage + ") が完了しなかったため、自動処理を止めました。" +
 		"理由はこの記録からは特定できていません。運用担当者が実行記録で確認します。\n"
 }
 
@@ -223,7 +227,7 @@ func noFileChosenNote(stage string) string {
 // #122). Best-effort, like the note above: an unwritable trail must not
 // change the outcome.
 func (p *Pipeline) noteReceptionRecord(stage string) {
-	note := "受付の " + stage + " の記録を読めなかったため、自動処理を止めました。" +
+	note := "受付処理 (" + stage + ") の記録を読めなかったため、自動処理を止めました。" +
 		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
 	if err := p.writeReceptionTrail(note); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
