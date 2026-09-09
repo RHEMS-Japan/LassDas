@@ -323,7 +323,7 @@ func runAwaitMergedStaging(ctx context.Context, args []string, getenv func(strin
 	}
 	deployment, err := runtime.controller.AwaitStaging(ctx, merge, waitOptions(), runtime.consumer.StagingDigestCommitPolicy())
 	if err != nil {
-		return failFrom("staging_wait_failed", err)
+		return failFrom(deploymentFailureCode(err, StagingDeploymentAbsentCode, "staging_wait_failed"), err)
 	}
 	record := struct {
 		SchemaVersion int       `json:"schema_version"`
@@ -512,10 +512,7 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 		// A destination that created no run at all for this commit is not a
 		// deployment that failed: nothing was started. The runner tells its
 		// requester the two apart, so the code has to.
-		if githubapi.IsInvariant(err, githubapi.WorkflowRunAbsentCode) {
-			return failFrom(StagingDeploymentAbsentCode, err)
-		}
-		return failFrom("staging_deployment_failed", err)
+		return failFrom(deploymentFailureCode(err, StagingDeploymentAbsentCode, "staging_deployment_failed"), err)
 	}
 	if !validStagingDeployment(deployment, merge.Binding) {
 		return fail("staging_deployment_result_invalid")
@@ -755,7 +752,7 @@ func runAwaitProduction(ctx context.Context, args []string, getenv func(string) 
 	}
 	deployment, err := runtime.controller.AwaitProduction(ctx, merge.Payload.Merge, waitOptions(), productionDigestPolicy())
 	if err != nil {
-		return failFrom("production_deployment_failed", err)
+		return failFrom(deploymentFailureCode(err, ProductionDeploymentAbsentCode, "production_deployment_failed"), err)
 	}
 	if !validProductionDeployment(deployment, merge.Binding) {
 		return fail("production_deployment_result_invalid")

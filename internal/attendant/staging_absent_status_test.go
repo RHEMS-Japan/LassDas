@@ -18,3 +18,18 @@ func TestADeployThatNeverStartedWaitsForAnOperator(t *testing.T) {
 		t.Fatalf("step title = %q: the generic failure title says the wrong thing", status.StepTitle)
 	}
 }
+
+// A merge that deployed nothing must never open the promotion. The gate
+// reads only the verdict, so widening it by one word would let a delivery
+// nothing verified reach production — and the whole suite stayed green
+// when that was tried (review of #134).
+func TestADeployThatNeverStartedCannotOpenThePromotion(t *testing.T) {
+	for _, verdict := range []string{"deploy_absent", "deploy_failed", "merge_unverified", "observe_blocked", "observe_failed", "checks_failed"} {
+		if promotableStagingVerdict(verdict) {
+			t.Errorf("verdict %q opens the promotion", verdict)
+		}
+	}
+	if !promotableStagingVerdict("pass") {
+		t.Error("a passing staging report no longer opens the promotion")
+	}
+}

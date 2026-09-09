@@ -137,3 +137,21 @@ func controllerGitHubConfig(token string, consumer worker.ConsumerConfig) github
 // It is a fixed code because the runner keys the requester's wording off it:
 // the change is in the integration branch, and nothing deployed it.
 const StagingDeploymentAbsentCode = "staging_deployment_absent"
+
+// ProductionDeploymentAbsentCode is the same fact on the promotion: the
+// merge landed on the release branch and no run was created for it. The
+// production phase carries the higher-stakes version of the same sentence,
+// and its contract names several workflows — a guard workflow among them is
+// exactly the kind that is filtered on paths (review of #134).
+const ProductionDeploymentAbsentCode = "production_deployment_absent"
+
+// deploymentFailureCode says which fixed code a deployment wait's failure
+// ends with: the destination creating no run at all is a different fact
+// from a deployment that ran and did not finish, and the runner tells them
+// apart for a requester only if the verb does.
+func deploymentFailureCode(err error, absent, failed string) string {
+	if githubapi.IsInvariant(err, githubapi.WorkflowRunAbsentCode) {
+		return absent
+	}
+	return failed
+}

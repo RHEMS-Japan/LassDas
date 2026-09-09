@@ -94,9 +94,13 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 	case "deploy_failed":
 		builder.WriteString("【ステージング反映が未確認】マージ後、ステージングの自動デプロイの完了を確認できませんでした。\n\n")
 	case "deploy_absent":
-		builder.WriteString("【ステージングのブランチに反映済み・自動デプロイは動いていません】変更はステージングのブランチに入りましたが、" +
-			"このリポジトリの自動デプロイは今回のマージでは 1 度も起動しませんでした。" +
-			"動いていないため、画面での確認は行っていません。本番反映も行いません。\n\n")
+		// What was watched and what was seen, and nothing beyond it. The
+		// merge landed; whether the branch still carries it was not re-read
+		// at the end, and only the one configured deployment was watched,
+		// so neither is claimed here (review of #134).
+		builder.WriteString("【ステージングへのマージ後、デプロイの実行が作られませんでした】" +
+			"設定されたステージングのデプロイ処理が、このマージに対して実行を 1 つも作りませんでした。" +
+			"デプロイが動いていないため、画面での確認は行っていません。本番反映も行いません。\n\n")
 	case "measure_failed":
 		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、設計書が約束した計測が閾値を満たしませんでした。本番反映は行えません。\n\n")
 	case "observe_failed":
@@ -163,9 +167,9 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		// Nothing is broken and nothing is pending: the change is in the
 		// branch, and whether it needs deploying at all is the operator's
 		// to say. The requester has nothing to do either way.
-		facts.State = "ステージングのブランチに反映済み・自動デプロイは起動せず"
+		facts.State = "ステージングへマージ済み・デプロイの実行なし"
 		facts.NextActor = "運用担当者"
-		facts.Operation = "このリポジトリの自動デプロイが今回の変更を対象にしているかを確認します"
+		facts.Operation = "設定されたステージングのデプロイ処理が今回の変更を対象にしているかを確認します"
 		facts.NextEvent = "以後の自動通知はありません"
 		facts.Production = "未変更（本番反映は行われません）"
 	case report.Verdict == "deploy_failed" || report.Verdict == "merge_unverified":
@@ -269,6 +273,9 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		builder.WriteString("【本番反映完了】Go を受けて本番に反映し、本番の画面を自動確認しました。結果: 合格です。\n\n")
 	case "promotion_failed":
 		builder.WriteString("【本番反映できず】Go を受けましたが、本番反映の準備が関所で止まりました。ステージングが確認時点から進んだ場合は、再確認からやり直す必要があります。\n\n")
+	case "deploy_absent":
+		builder.WriteString("【prod へのマージ後、デプロイの実行が作られませんでした】" +
+			"設定された本番のデプロイ処理が、この反映に対して実行を 1 つも作りませんでした。\n\n")
 	case "deploy_failed":
 		builder.WriteString("【本番反映が未確認】本番ブランチへの反映は行われましたが、本番の自動デプロイの完了を確認できませんでした。\n\n")
 	case "measure_failed":

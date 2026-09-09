@@ -11,11 +11,11 @@ import (
 func TestTheReportForADeployThatNeverStartedSaysBothHalves(t *testing.T) {
 	content := DeliverStagingContent("run-1", DeliverStagingReport{
 		Verdict: "deploy_absent",
-		Detail:  "変更はステージングのブランチに入りましたが、このリポジトリの自動デプロイは今回のマージでは 1 度も起動しませんでした。",
+		Detail:  "設定されたステージングのデプロイ処理が、このマージに対して実行を 1 つも作りませんでした。",
 	})
 	for _, want := range []string{
-		"ステージングのブランチに反映済み",
-		"1 度も起動しませんでした",
+		"デプロイの実行が作られませんでした",
+		"実行を 1 つも作りませんでした",
 		"画面での確認は行っていません",
 		"本番反映も行いません",
 		"運用担当者",
@@ -24,7 +24,10 @@ func TestTheReportForADeployThatNeverStartedSaysBothHalves(t *testing.T) {
 			t.Errorf("the report lacks %q:\n%s", want, content)
 		}
 	}
-	for _, forbidden := range []string{"確認できませんでした", "「Go」"} {
+	// The claims an earlier wording made that were never measured: only one
+	// configured deployment was watched, and whether the branch still
+	// carries the change was not re-read at the end.
+	for _, forbidden := range []string{"確認できませんでした", "「Go」", "このリポジトリの自動デプロイ", "ブランチに入りました"} {
 		if strings.Contains(content, forbidden) {
 			t.Errorf("the report says %q, which is not what happened:\n%s", forbidden, content)
 		}
