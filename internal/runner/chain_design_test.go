@@ -94,7 +94,7 @@ func TestDesignRoundsAreCountedFromSealedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	instruction, _ := os.ReadFile(p.path("INSTRUCTION.md"))
-	for _, want := range []string{"You apply an approved design", "# Design — round 2", "revise-design.json", "Change only the files the design lists", "the root of this repository", "1 to 600 bytes", "There is no person on this run", "write the first change early", "remove anything you created", "blast_radius|not_doing", "Decide before you edit", "a message that describes edits you did not make"} {
+	for _, want := range []string{"You apply an approved design", "# Design — round 2", "revise-design.json", "Change only the files the design lists", "at the root of the working copy named above", "1 to 600 bytes", "There is no person on this run", "write the first change early", "remove anything you created", "blast_radius|not_doing", "Decide before you edit", "a message that describes edits you did not make"} {
 		if !containsString(string(instruction), want) {
 			t.Errorf("instruction lacks %q", want)
 		}
@@ -216,5 +216,36 @@ func TestChainDesignReviewPassesTheTicketAndTheObjection(t *testing.T) {
 	second := string(logged)
 	if !strings.Contains(second, "--previous-objection "+filepath.Join(pipeline.designRoundDir(1), "objection.json")) || !strings.Contains(second, "--ticket ") {
 		t.Fatalf("round 2 argv = %q; want the objection and the ticket", second)
+	}
+}
+
+// The applier's instruction names the working copy by its absolute path and
+// asks for absolute writes. The agent's file tools resolve a relative path
+// against its own home: a live applier reported creating the design's file
+// twice, and both landed in the home while the working copy stayed empty.
+func TestTheApplyInstructionNamesTheWorkingCopyAbsolutely(t *testing.T) {
+	p := &Pipeline{Workspace: t.TempDir()}
+	if err := os.MkdirAll(p.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "DESIGN.md"), []byte("# Design — round 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RenderApplyInstruction(nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	instruction, _ := os.ReadFile(p.path("INSTRUCTION.md"))
+	root := p.path("target-repo")
+	for _, want := range []string{
+		"## Where the working copy is",
+		root,
+		root + "/docs/EXAMPLE.md",
+		"A relative path does not land in the working copy",
+		"the seal reads the working tree at the absolute path named above",
+		"at the root of the working copy named above (its absolute path)",
+	} {
+		if !containsString(string(instruction), want) {
+			t.Errorf("the instruction lacks %q", want)
+		}
 	}
 }

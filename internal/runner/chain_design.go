@@ -281,7 +281,7 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 	if err != nil {
 		return errors.New("the approved design's rendering is missing")
 	}
-	instruction := applyInstructionPreamble + string(design) + applyInstructionRules + p.previousApplyFindings()
+	instruction := applyInstructionPreamble + string(design) + workingCopySection(p.path("target-repo")) + applyInstructionRules + p.previousApplyFindings()
 	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
 
@@ -345,6 +345,30 @@ the complete list of what changes.
 
 `
 
+// workingCopySection names the working copy by its absolute path and asks
+// for absolute paths in every write. The agent's file tools resolve a
+// relative path against its home, not the directory the launch gives it:
+// a live applier reported creating docs/OPERATIONS_HEALTHCHECK.md twice,
+// and both files landed in the agent's home while the working copy stayed
+// empty (measured four ways, 2026-09-09). The design lists repository-
+// relative paths, so the instruction has to carry the root they hang from.
+func workingCopySection(root string) string {
+	return `
+
+---
+
+## Where the working copy is
+
+` + root + `
+
+The design lists paths relative to that directory. Write with absolute
+paths: join the root above to each path the design names, so
+` + "`docs/EXAMPLE.md`" + ` is written as ` + "`" + root + `/docs/EXAMPLE.md` + "`" + `.
+A relative path does not land in the working copy, and a change that is
+not in the working copy did not happen.
+`
+}
+
 const applyInstructionRules = `
 ---
 
@@ -352,12 +376,12 @@ const applyInstructionRules = `
 
 - Change only the files the design lists, in the way it says. Any other change makes the seal refuse the result: no file of your own, no notes, no scratch or temporary file left behind — remove anything you created while working before you finish.
 - Decide before you edit whether the design can be followed as written: an objection is only accepted from a working copy you have not otherwise changed, so read what you need to judge that first.
-- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` in the working directory (the root of this repository) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
+- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` at the root of the working copy named above (its absolute path) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
 - There is no person on this run. Nobody answers a question, approves a step or fills in a blank; a question you would have asked is an objection (above), not a comment left in the code.
 - Write the files with your tools. What counts is the working copy, not your answer: a message that describes edits you did not make ends the delivery as a failure, and the engine will tell you the tree is unchanged.
 - Your tool calls are counted and capped. Open only the files the design names, write the first change early, and do not survey the repository or run its whole test suite first: a run that spends its turns reading ends with nothing written and nothing sealed.
 - Never add automation, CI/CD, release, credential, IAM, repository-governance or deployment machinery. Never claim to have run a command or observed a deployment.
-- Do not commit; the seal reads the working tree.
+- Do not commit; the seal reads the working tree at the absolute path named above.
 `
 
 // approvedDesignPath is the design the current implementation round applies:

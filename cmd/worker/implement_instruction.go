@@ -23,8 +23,9 @@ func runImplementInstruction(args []string) error {
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	outputPath := flags.String("out", "", "")
+	repoRoot := flags.String("repo-root", "", "")
 	if !parseFlags(flags, args) ||
-		!allPresent(*configPath, *toolSHA, *draftPath, *outputPath) ||
+		!allPresent(*configPath, *toolSHA, *draftPath, *outputPath, *repoRoot) ||
 		!worker.ValidToolSHA(*toolSHA) {
 		return errors.New("implement-instruction arguments are invalid")
 	}
@@ -52,7 +53,7 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
