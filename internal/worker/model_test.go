@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -765,9 +766,9 @@ func (d *dialTimeoutChatAPI) ChatCompletions(context.Context, ModelEndpoint, Cha
 // server that never answers, through the real client, and counts requests.
 func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	t.Setenv("TEST_MODEL_API_KEY", "test-credential")
-	var requests int
+	var requests atomic.Int64
 	never := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
+		requests.Add(1)
 		time.Sleep(2 * time.Second)
 	}))
 	defer never.Close()
@@ -796,14 +797,14 @@ func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	// so raising that constant fails here instead of passing quietly: it is
 	// what holds a turn of spent allowances to 10 min 2 s.
 	quickenTurnPauses(t)
-	requests = 0
+	requests.Store(0)
 	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), endpoint,
 		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if !errors.Is(turnErr, errModelAllowanceSpent) {
 		t.Fatalf("the turn ended as %v", turnErr)
 	}
-	if requests != 2 {
-		t.Fatalf("requests = %d, want 2", requests)
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
 	}
 }
 
@@ -984,9 +985,9 @@ func TestAMomentThatPassesIsAskedAgainHoweverItArrived(t *testing.T) {
 func TestASpentAllowanceIsNotAskedAgainByTheTransport(t *testing.T) {
 	t.Setenv("LASSDAS_TEST_KEY", "k")
 	quickenTurnPauses(t)
-	calls := 0
+	var calls atomic.Int64
 	silent := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		calls++
+		calls.Add(1)
 		time.Sleep(2 * time.Second)
 	}))
 	defer silent.Close()
@@ -998,8 +999,8 @@ func TestASpentAllowanceIsNotAskedAgainByTheTransport(t *testing.T) {
 		ModelEndpoint{Model: "m", BaseURL: silent.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"}); callErr == nil {
 		t.Fatal("a silent gateway reported an answer")
 	}
-	if calls != 1 {
-		t.Fatalf("calls = %d, want one: the turn does the asking", calls)
+	if calls.Load() != 1 {
+		t.Fatalf("calls = %d, want one: the turn does the asking", calls.Load())
 	}
 }
 
@@ -1014,14 +1015,14 @@ func TestADroppedConnectionIsAskedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	accepted := make(chan struct{}, 16)
+	var accepted atomic.Int64
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			accepted <- struct{}{}
+			accepted.Add(1)
 			_ = conn.Close()
 		}
 	}()
@@ -1037,13 +1038,11 @@ func TestADroppedConnectionIsAskedAgain(t *testing.T) {
 	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
 		t.Fatalf("the failure lost the phrase the runner reads: %v", callErr)
 	}
-	close(accepted)
-	calls := 0
-	for range accepted {
-		calls++
-	}
-	if want := len(gatewayRetryPauses) + 1; calls != want {
-		t.Fatalf("connections = %d, want %d", calls, want)
+	// Counted with an atomic rather than a channel the body closes: the
+	// accept loop is still running here, and closing a channel it may be
+	// sending on races, and can panic (review of #128).
+	if want := int64(len(gatewayRetryPauses) + 1); accepted.Load() != want {
+		t.Fatalf("connections = %d, want %d", accepted.Load(), want)
 	}
 }
 
@@ -1264,6 +1263,11 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	// The cancel is tied to the connection being closed rather than to a
+	// stopwatch: a fixed delay sometimes landed inside the request instead
+	// of inside the wait, and the test failed for the wrong reason (seen
+	// under -race).
+	dropped := make(chan struct{}, 4)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -1271,6 +1275,10 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 				return
 			}
 			_ = conn.Close()
+			select {
+			case dropped <- struct{}{}:
+			default:
+			}
 		}
 	}()
 	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
@@ -1279,7 +1287,9 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		<-dropped
+		// The request has already failed, so the retry is entering its wait.
+		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 	defer cancel()
