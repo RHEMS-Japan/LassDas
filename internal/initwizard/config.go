@@ -37,7 +37,15 @@ func Consumer(s *State) worker.ConsumerConfig {
 
 func agent(role string, timeout int) worker.AgentConfig {
 	profile := "lassdas-" + role
-	return worker.AgentConfig{ID: role, Command: "hermes", Args: []string{"--profile", profile, "-z"}, Profile: profile, SecretEnv: map[string]string{keyName(role): keyName(role)}, TimeoutSeconds: timeout}
+	return worker.AgentConfig{
+		ID: role, Command: "sh",
+		// Hermes one-shot tools need the working copy explicitly. The worker
+		// appends its prompt as an argument, never as part of the shell script.
+		Args:           []string{"-c", `export TERMINAL_CWD="$PWD"; exec hermes "$@"`, "hermes", "--profile", profile, "-z"},
+		Profile:        profile,
+		SecretEnv:      map[string]string{keyName(role): keyName(role)},
+		TimeoutSeconds: timeout,
+	}
 }
 
 // Generate uses the same answers for direct endpoints, agent identities and
