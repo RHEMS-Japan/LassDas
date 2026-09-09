@@ -323,12 +323,27 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 				return nil, err
 			}
 			pause, again := gatewayPause(http.StatusServiceUnavailable, nil, attempt)
+			if again && !roomForAnotherAttempt(ctx, pause) {
+				// The attempts themselves are slow: another one would spend
+				// the call's whole allowance, and the failure would reach the
+				// caller as a spent allowance rather than as what actually
+				// happened — which the turn then asks again, doubling it
+				// (measured, review of #125).
+				again = false
+			}
 			if !again {
-				return nil, fmt.Errorf("%w after %d%s", err, attempt+1, AttemptsExhaustedPhrase)
+				// Wrapped safely rather than with fmt.Errorf: converseTurnOnce
+				// keeps only the innermost safe error, so a wrapper's words
+				// are dropped and the requester is told nothing was asked
+				// again after four attempts and forty seconds (measured,
+				// review of #125).
+				return nil, safeModelErrorFor(fmt.Sprintf("%s after %d%s", err.Error(), attempt+1, AttemptsExhaustedPhrase), err)
 			}
 			fmt.Fprintf(os.Stderr, "worker: the gateway could not be reached; asking again in %s (retry %d of %d)\n", pause, attempt+1, len(gatewayRetryPauses))
-			if waitErr := pauseBeforeAskingAgain(ctx, pause); waitErr != nil {
-				return nil, waitErr
+			if !pauseBeforeAskingAgain(ctx, pause) {
+				// The caller gave up during the wait. The failure that
+				// prompted it is what happened, so that is what travels.
+				return nil, err
 			}
 			continue
 		}
@@ -340,6 +355,14 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return &response, nil
 		}
 		pause, again := gatewayPause(status, retryAfter, attempt)
+		if again && !roomForAnotherAttempt(ctx, pause) {
+			// The same guard the unreachable branch uses, for the same
+			// reason: a status that is slow to arrive would otherwise spend
+			// the call's whole allowance between attempts, and the failure
+			// would reach the turn as a spent allowance with the status
+			// lost (measured, review of #125).
+			again = false
+		}
 		if !again {
 			if attempt > 0 {
 				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
@@ -353,27 +376,44 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
 		}
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
-		timer := time.NewTimer(pause)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !pauseBeforeAskingAgain(ctx, pause) {
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
-		case <-timer.C:
 		}
 	}
 }
 
-// pauseBeforeAskingAgain waits, or reports that the caller gave up first.
-func pauseBeforeAskingAgain(ctx context.Context, pause time.Duration) error {
+// pauseBeforeAskingAgain waits, and reports whether the wait finished rather
+// than the caller giving up first.
+func pauseBeforeAskingAgain(ctx context.Context, pause time.Duration) bool {
 	timer := time.NewTimer(pause)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return safeModelError(TransportFailedPhrase + "; the wait before asking again was cancelled")
+		return false
 	case <-timer.C:
-		return nil
+		return true
 	}
 }
+
+// roomForAnotherAttempt reports whether the call has enough of its allowance
+// left to wait and then try once more. Without it, attempts that are slow to
+// fail spend the whole allowance between them, and the call reaches its
+// caller as a spent allowance — which the turn asks again, so one slow
+// status becomes two allowances instead of one immediate failure (measured,
+// review of #125). A call with no deadline of its own is not bounded here.
+func roomForAnotherAttempt(ctx context.Context, pause time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) > pause+minimumAttemptAllowance
+}
+
+// minimumAttemptAllowance is how much of the call's allowance another
+// attempt is assumed to need. A tenth of ModelInvocationTimeout: enough that
+// a gateway which answers at all can answer, small enough that the guard
+// does not refuse a retry the call has time for.
+const minimumAttemptAllowance = ModelInvocationTimeout / 10
 
 // maxRetryAfter caps how long a 429's Retry-After is honoured: a gateway
 // names seconds for a rate window, and anything longer is not a moment

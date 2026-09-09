@@ -620,7 +620,15 @@ func TestGatewayClientRetriesA429OnlyWithRetryAfter(t *testing.T) {
 	}))
 	defer slow.Close()
 	client, _ = NewGatewayClient(slow.Client())
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Cancelled rather than given a short deadline: a call whose remaining
+	// allowance cannot fit another attempt no longer enters the wait at all
+	// (roomForAnotherAttempt), so a deadline shorter than the pause would
+	// now measure that guard instead of this one.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
 	defer cancel()
 	started := time.Now()
 	_, err = client.ChatCompletions(ctx, gatewayTestEndpoint(slow.URL, "TEST_MODEL_API_KEY"), ChatRequest{Model: "vendor/model-a"})
@@ -928,9 +936,12 @@ func TestAMomentThatPassesIsAskedAgainHoweverItArrived(t *testing.T) {
 	for status, wantCalls := range map[int]int{
 		http.StatusInternalServerError: len(gatewayRetryPauses) + 1,
 		http.StatusRequestTimeout:      len(gatewayRetryPauses) + 1,
-		statusOverloaded:               len(gatewayRetryPauses) + 1,
-		http.StatusUnauthorized:        1,
-		http.StatusNotFound:            1,
+		// Written out: keyed off the constant, moving it to any other status
+		// passed (measured, review of #125). 529 is the number a provider
+		// over capacity answers with.
+		529:                     len(gatewayRetryPauses) + 1,
+		http.StatusUnauthorized: 1,
+		http.StatusNotFound:     1,
 	} {
 		calls := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1031,5 +1042,93 @@ func TestADroppedConnectionIsAskedAgain(t *testing.T) {
 	}
 	if want := len(gatewayRetryPauses) + 1; calls != want {
 		t.Fatalf("connections = %d, want %d", calls, want)
+	}
+}
+
+// After four attempts and forty seconds, the requester must not be told that
+// nothing was asked again. converseTurnOnce keeps only the innermost safe
+// error, so a wrapper's words never reach them (measured, review of #125).
+func TestTheFailureSaysHowManyAttemptsItTook(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	quickenTurnPauses(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoker := &ModelInvoker{api: client}
+	_, _, turnErr := invoker.converseTurnOnce(context.Background(),
+		ModelEndpoint{Model: "m", BaseURL: "http://" + listener.Addr().String(), APIKeyEnv: "LASSDAS_TEST_KEY"},
+		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if turnErr == nil {
+		t.Fatal("a dropped connection reported an answer")
+	}
+	if !strings.HasPrefix(turnErr.Error(), TransportFailedPhrase) || !strings.Contains(turnErr.Error(), AttemptsExhaustedPhrase) {
+		t.Fatalf("the turn's failure does not say what happened: %q", turnErr.Error())
+	}
+}
+
+// A status that is slow to arrive must not spend the call's whole allowance
+// between attempts: the call would reach the turn as a spent allowance, and
+// the turn asks that again, so one slow status becomes two allowances
+// instead of one (measured, review of #125).
+func TestASlowStatusDoesNotSpendTheWholeAllowance(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	quickenTurnPauses(t)
+	calls := 0
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		time.Sleep(120 * time.Millisecond)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer slow.Close()
+	client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, callErr := client.ChatCompletions(ctx,
+		ModelEndpoint{Model: "m", BaseURL: slow.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	if callErr == nil {
+		t.Fatal("a slow gateway reported an answer")
+	}
+	// It stops while the allowance still has room to report what happened,
+	// rather than running the allowance out and losing the status.
+	if !strings.Contains(callErr.Error(), "500") {
+		t.Fatalf("the failure lost the status: %q", callErr.Error())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the call spent the whole allowance: %d attempts", calls)
+	}
+}
+
+// The wait between attempts ends when the caller gives up, rather than
+// running to its end. Nothing measured it (review of #125).
+func TestTheWaitBetweenAttemptsEndsWhenTheCallerGivesUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if pauseBeforeAskingAgain(ctx, 2*time.Second) {
+		t.Fatal("the wait reported that it finished")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("the wait ran on for %s after the caller gave up", elapsed)
+	}
+	if !pauseBeforeAskingAgain(context.Background(), time.Millisecond) {
+		t.Fatal("a wait that finished reported that it did not")
 	}
 }
