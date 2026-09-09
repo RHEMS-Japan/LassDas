@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -77,13 +78,19 @@ func IsDesignStage(stage string) bool {
 }
 
 // knownStage reports whether a stage name is one the chain runs.
-func knownStage(stage string) bool {
-	switch stage {
-	case StageImplement, StageReviewA, StageReviewB, StageValidate, StagePublish,
-		StageInvestigate, StageDesignReviewA, StageDesignReviewB, StageDesignDecide, StageApply:
-		return true
+// AllStages is every stage a chain can run. It is one list because two
+// copies of it drift: anything that must cover every stage takes it from
+// here rather than restating the names, so a stage added without being
+// covered fails rather than passing quietly.
+func AllStages() []string {
+	return []string{
+		StageImplement, StageReviewA, StageReviewB, StageValidate, StagePublish,
+		StageInvestigate, StageDesignReviewA, StageDesignReviewB, StageDesignDecide, StageApply,
 	}
-	return false
+}
+
+func knownStage(stage string) bool {
+	return slices.Contains(AllStages(), stage)
 }
 
 // ChainStage is one step of the chain: which profile runs it and how long

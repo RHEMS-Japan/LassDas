@@ -512,7 +512,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の判定")
-			return Outcome{Code: hook.TerminalModelFailed}, err
+			return receptionModelFailure("AI による受付の判定"), err
 		}
 		checkArgs := []string{
 			"check-readiness", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
@@ -523,20 +523,20 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の確認")
-			return Outcome{Code: hook.TerminalModelFailed}, err
+			return receptionModelFailure("AI による受付の確認"), err
 		}
 		readinessArgs = append(readinessArgs, "--assessment", assessment, "--check", check)
 		verdict, err := p.readJSONField(relPath(p.Workspace, check), "verdict")
 		if err != nil {
 			p.noteReceptionRecord("受付の確認")
-			return Outcome{Code: hook.TerminalModelFailed}, err
+			return receptionModelFailure("受付の確認の記録の読み取り"), err
 		}
 		// The workflow's jq -er 'select(pass|fail)' hard-failed the step on
 		// anything else; a malformed verdict is a model failure, not "try
 		// again".
 		if verdict != "pass" && verdict != "fail" {
 			p.noteReceptionRecord("受付の確認")
-			return Outcome{Code: hook.TerminalModelFailed}, nil
+			return receptionModelFailure("受付の確認の記録の読み取り"), nil
 		}
 		if verdict == "pass" || attempt == 3 {
 			break
@@ -549,13 +549,17 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-		p.noteReceptionRecord("受付の判定のまとめ")
-		return Outcome{Code: hook.TerminalModelFailed}, err
+		// A model verb that failed, so the note is the one that reads the
+		// cause: the record note would say the record could not be read
+		// under a headline saying the AI could not finish, and both land in
+		// the same comment (review of #132).
+		p.noteReceptionCutoff("受付の判定のまとめ")
+		return receptionModelFailure("AI による受付の判定のまとめ"), err
 	}
 	readinessOutcome, err := p.readJSONField(relPath(p.Workspace, decision), "outcome")
 	if err != nil {
 		p.noteReceptionRecord("受付の判定のまとめ")
-		return Outcome{Code: hook.TerminalModelFailed}, err
+		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), err
 	}
 	switch readinessOutcome {
 	case "ready":
@@ -571,7 +575,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		// decision file this pipeline cannot read is a model failure, not a
 		// legitimate readiness stop.
 		p.noteReceptionRecord("受付の判定のまとめ")
-		return Outcome{Code: hook.TerminalModelFailed}, nil
+		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), nil
 	}
 }
 
@@ -693,4 +697,15 @@ func relPath(base, full string) string {
 		return full
 	}
 	return rel
+}
+
+// receptionModelFailure is a reception stage ending as a model failure with
+// the step named for its requester. Reception generates and reviews nothing,
+// so the generic sentence about "generating or reviewing the work" is not
+// merely vague there — it is false.
+func receptionModelFailure(step string) Outcome {
+	if len(step) > hook.MaxFailedStepBytes {
+		return Outcome{Code: hook.TerminalModelFailed}
+	}
+	return Outcome{Code: hook.TerminalModelFailed, Evidence: map[string]string{"failed_step": step}}
 }

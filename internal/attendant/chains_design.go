@@ -156,6 +156,15 @@ func handleDesignChainFailure(
 	if err != nil {
 		repository = ""
 	}
+	if code == hook.TerminalModelFailed {
+		// Nothing else fills evidence on this code: the incomplete arm is
+		// the only other writer and it ends as a different code.
+		// No design stage takes a round-dependent name, so the round here
+		// is only ever unused; passing the implementation round would be a
+		// trap the day one does.
+		evidence = failedStepEvidence(runDir, stageName, 0)
+
+	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return true, err
 	}

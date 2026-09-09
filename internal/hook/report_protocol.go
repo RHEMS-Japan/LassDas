@@ -254,14 +254,32 @@ type TerminalReportRequest struct {
 	// last objection the contract raised against the role's answer, so the
 	// requester-facing text can say whether the budget ran out (narrowing
 	// the request helps) or the answers kept being refused (it does not).
-	IncompleteReason    string    `json:"incomplete_reason,omitempty"`
-	IncompleteObjection string    `json:"incomplete_objection,omitempty"`
-	IssuedAt            time.Time `json:"issued_at"`
+	IncompleteReason    string `json:"incomplete_reason,omitempty"`
+	IncompleteObjection string `json:"incomplete_objection,omitempty"`
+	// FailedStep names, in the requester's words, the step of the work that
+	// could not be completed. A model_failed end is the most common way a
+	// run stops, and without this the requester and the operator are both
+	// told only that "generation or review" failed — which step it was lived
+	// in the container log alone, and a release erases that (a live run, 2026-09-09:
+	// the cause was gone before it was read). No count is
+	// written here on purpose: three successive attempts to state one in a
+	// comment were wrong, and the list lives in runtime.AllStages.
+	// Empty means an older engine's report, which keeps the older sentence.
+	FailedStep string    `json:"failed_step,omitempty"`
+	IssuedAt   time.Time `json:"issued_at"`
 }
 
 // MaxTerminalTrailBytes bounds the requester-facing run record a terminal
 // report may carry. It matches the composer's bound on the worker side.
 const MaxTerminalTrailBytes = 6 * 1024
+
+// MaxFailedStepBytes bounds the step name a model_failed report carries. The
+// names are a fixed short vocabulary; the bound is what stops anything else
+// from arriving in their place. It is exported because the side that builds
+// the name has to hold itself to it: a name past the bound fails the shape
+// check, and a report that fails the shape check never reaches the
+// requester at all — the run retries for ever instead of ending.
+const MaxFailedStepBytes = 120
 
 // ValidateTrailText holds the trail to the same plain-text discipline as
 // every other requester-facing string: bounded, valid UTF-8, newlines only.
@@ -299,6 +317,12 @@ func (r TerminalReportRequest) ValidateShape() error {
 	}
 	if err := ValidateTrailText(r.TrailText); err != nil {
 		return err
+	}
+	// The step name is requester-facing text on the same footing as every
+	// other such string: one bounded plain line, never a path or a log.
+	if len(r.FailedStep) > MaxFailedStepBytes || !utf8.ValidString(r.FailedStep) ||
+		strings.ContainsAny(r.FailedStep, "\x00\r\n") {
+		return errors.New("terminal report failed step is invalid")
 	}
 	if (r.CommitSHA == "") != (r.CommitURL == "") || (r.CommitSHA != "" && !commitPattern.MatchString(r.CommitSHA)) {
 		return errors.New("terminal report commit binding is invalid")

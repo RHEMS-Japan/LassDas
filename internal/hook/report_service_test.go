@@ -125,7 +125,7 @@ func TestTerminalReportServicePostsOnlyFixedCommentAndCompletesOutbox(t *testing
 
 func TestProductionVerificationFailureCommentStatesThatProductionWasDeployed(t *testing.T) {
 	report := terminalTestRequest(TerminalProductionVerificationFailed)
-	comment := fixedTerminalComment(report, strings.Repeat("f", 64))
+	comment := TerminalCommentContent(report, strings.Repeat("f", 64))
 	for _, expected := range []string{
 		string(TerminalProductionVerificationFailed), "本番デプロイは完了しました", report.PullRequestURL,
 		report.CommitURL, report.StagingEvidenceURL,
@@ -141,7 +141,7 @@ func TestProductionVerificationFailureCommentStatesThatProductionWasDeployed(t *
 
 func TestProductionDeploymentUnverifiedCommentStatesThatProdWasMerged(t *testing.T) {
 	report := terminalTestRequest(TerminalProductionDeploymentUnverified)
-	comment := fixedTerminalComment(report, strings.Repeat("f", 64))
+	comment := TerminalCommentContent(report, strings.Repeat("f", 64))
 	for _, expected := range []string{
 		string(TerminalProductionDeploymentUnverified), "prodブランチへの反映は完了しました",
 		report.PullRequestURL, report.CommitURL, report.StagingEvidenceURL,
@@ -223,7 +223,7 @@ func TestTerminalReportNeverCopiesTicketOrDependencyErrorsIntoCommentOrResult(t 
 	if strings.Contains(result.Code, sentinel) || strings.Contains(logs.String(), sentinel) {
 		t.Fatalf("dependency error leaked: result=%+v logs=%q", result, logs.String())
 	}
-	comment := fixedTerminalComment(terminalTestRequest(TerminalInternalFailed), strings.Repeat("f", 64))
+	comment := TerminalCommentContent(terminalTestRequest(TerminalInternalFailed), strings.Repeat("f", 64))
 	if strings.Contains(comment, sentinel) {
 		t.Fatalf("fixed comment copied untrusted text: %q", comment)
 	}
@@ -249,7 +249,7 @@ func TestEveryFiniteTerminalCodeHasADedicatedUserFacingMessage(t *testing.T) {
 		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
 		TerminalProductionVerificationFailed, TerminalInternalFailed,
 	} {
-		comment := fixedTerminalComment(terminalTestRequest(code), strings.Repeat("f", 64))
+		comment := TerminalCommentContent(terminalTestRequest(code), strings.Repeat("f", 64))
 		if strings.Contains(comment, fallback) {
 			t.Fatalf("code %q fell back to the generic message", code)
 		}

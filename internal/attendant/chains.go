@@ -323,6 +323,7 @@ func startQueuedRun(
 		if outcome.Code == "" {
 			outcome.Code = hook.TerminalInternalFailed
 		}
+
 		return terminal.Report(ctx, outcome.Code, outcome, pipeline.Repository())
 	}
 	// Readiness passed. Post the implementation-plan notice — a notice, not
@@ -592,8 +593,14 @@ func resubmitPendingTerminal(
 	// An incomplete end carries its reason and last objection again: the
 	// first submission's comment may be the one that failed (MINOR on #93).
 	var evidence map[string]string
-	if code == hook.TerminalInvestigationIncomplete {
+	switch code {
+	case hook.TerminalInvestigationIncomplete:
 		evidence = incompleteEvidence(runDir, view.designRound)
+	case hook.TerminalModelFailed:
+		// The same hazard, one code along: the step this run ended on is
+		// not in the run row, and the board that named it is gone by now.
+		// The first attempt wrote it down for exactly this.
+		evidence = runner.RecordedFailedStep(runDir)
 	}
 	switch code {
 	case hook.TerminalSuccess:
@@ -768,7 +775,12 @@ func handleChainFailure(
 	if err != nil {
 		repository = ""
 	}
-	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+	var evidence map[string]string
+	if code == hook.TerminalModelFailed {
+		evidence = failedStepEvidence(runDir, stageName, view.round)
+
+	}
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return err
 	}
 	logger.Info("chain terminalized", "run", run.RunID, "stage", stageName, "code", string(code))

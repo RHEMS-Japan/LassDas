@@ -148,7 +148,7 @@ func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, repor
 		return s.reportResult(DecisionInternal, "terminal_report_state_invalid", report.DeliveryID)
 	}
 
-	comment := fixedTerminalComment(report, reportDigest)
+	comment := TerminalCommentContent(report, reportDigest)
 	// Backlog's comment API has no idempotency key. The lease serializes live
 	// writers, and this lookup repairs the ambiguous case where a previous
 	// POST succeeded but the terminal store update did not: the posted
@@ -228,7 +228,11 @@ func successMessage(report TerminalReportRequest) string {
 	return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。マージと以後の反映は人が行います。本番環境は変更していません。"
 }
 
-func fixedTerminalComment(report TerminalReportRequest, reportDigest string) string {
+// TerminalCommentContent is the comment a finished run leaves on its
+// ticket. Exported like every other comment this package builds: the
+// wording is the product, and the one builder that was not reachable from
+// outside was the one nothing outside could hold to its sentences.
+func TerminalCommentContent(report TerminalReportRequest, reportDigest string) string {
 	message := map[TerminalCode]string{
 		TerminalSuccess:                        successMessage(report),
 		TerminalInputRejected:                  "入力が許可された形式または範囲に一致しなかったため、変更していません。",
@@ -237,7 +241,7 @@ func fixedTerminalComment(report TerminalReportRequest, reportDigest string) str
 		TerminalReadinessUnresolved:            "着手可否の自動判定が規定回数内に確定しなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。同じチケットの再投入は不要です。",
 		TerminalClarificationExpired:           "確認事項への回答が期限までに得られなかったため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。再度依頼する場合は、確認事項への回答内容を反映した新しいチケットとして起票してください。",
 		TerminalCancelled:                      "起票者による中止の指示を確認したため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。",
-		TerminalModelFailed:                    "AIによる成果物の生成またはレビューを完了できなかったため、本番環境には反映していません。",
+		TerminalModelFailed:                    modelFailedMessage(report),
 		TerminalNonconverged:                   "自動レビューが最大回数内に収束しなかったため、本番環境には反映していません。",
 		TerminalValidationFailed:               "生成した変更が検証を通過しなかったため、本番環境には反映していません。",
 		TerminalReleaseFailed:                  "既存のリリース経路で処理を完了できなかったため、本番環境への反映は完了していません。",
@@ -349,6 +353,24 @@ func incompleteMessage(report TerminalReportRequest) string {
 
 // maxIncompleteObjectionBytes bounds the objection a comment quotes.
 const maxIncompleteObjectionBytes = 600
+
+// modelFailedMessage says which step of the work could not be completed.
+// model_failed is the most common way a run ends, and the sentence without
+// the step is the same for every one of them: the requester cannot tell a
+// stop before anything was written from one after the change was already
+// made and reviewed, and the operator has to go to the container log to
+// find out — which the next release erases. A report that carries no step
+// is an older engine's, and keeps the older sentence.
+func modelFailedMessage(report TerminalReportRequest) string {
+	step := singleLineBounded(report.FailedStep, MaxFailedStepBytes)
+	if step == "" {
+		return "AIによる成果物の生成またはレビューを完了できなかったため、本番環境には反映していません。"
+	}
+	// The step carries "AI による" itself where a model actually ran. Three
+	// of the steps ask no model anything, and a frame that asserts one made
+	// the sentence a specific false claim about them.
+	return step + "を完了できなかったため、本番環境には反映していません。"
+}
 
 // incompleteAnswersRefused tells a round that ended on the role's answers
 // (refused by the contract, unreadable, or asking for what the round no

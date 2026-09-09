@@ -66,6 +66,11 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	if err != nil {
 		return err
 	}
+	// Whatever the step was, written down here rather than at each caller.
+	// Three callers each wrote it themselves and two of the three were free
+	// to delete with every test still green — twice, on the same asymmetry
+	// (review of #132). Every report goes through this one line.
+	recordFailedStep(t.workspace, outcome.Evidence)
 	if err := t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
 		report.IssuedAt = issuedAt
 		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
@@ -129,6 +134,7 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 		ProductionEvidenceURL: evidence["production_evidence_url"],
 		IncompleteReason:      evidence["incomplete_reason"],
 		IncompleteObjection:   evidence["incomplete_objection"],
+		FailedStep:            evidence["failed_step"],
 		TrailText:             trail,
 	}
 	if withSpend {
