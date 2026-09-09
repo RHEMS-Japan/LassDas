@@ -111,6 +111,23 @@ cat /etc/lassdas/tool-pins.txt`
 	return nil
 }
 
+// Keep the fresh clone root-owned until Git finishes its ownership checks.
+// The credential-free verifier receives the repository and output directory last.
+const prepareConsumerClone = `set -eu
+mkdir /work/repo`
+
+const cloneConsumer = `set -eu
+printf '#!/bin/sh\ncase "$1" in *Username*) printf "x-access-token\\n";; *) cat /auth/token;; esac\n' >/tmp/git-askpass
+chmod 700 /tmp/git-askpass
+export GIT_ASKPASS=/tmp/git-askpass GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+git -c init.templateDir= init /work/repo >/dev/null
+git -C /work/repo -c credential.helper= -c core.hooksPath=/dev/null fetch --depth=1 "https://github.com/$1.git" "$2" >/dev/null 2>&1
+git -C /work/repo -c core.hooksPath=/dev/null checkout --detach "$2" >/dev/null 2>&1
+test "$(git -C /work/repo rev-parse HEAD)" = "$2"
+chown -R 1000:1000 /work/repo
+chown 1000:1000 /work`
+
 // checkConsumer separates cloning (the delivery key only) from verification
 // (no credentials). Only a fresh disposable named volume joins those steps.
 func (w *Wizard) checkConsumer(ctx context.Context, s *State, secrets Secrets, dir string) error {
@@ -151,25 +168,12 @@ func (w *Wizard) checkConsumer(ctx context.Context, s *State, secrets Secrets, d
 	if err = atomicWrite(filepath.Join(authDir, "token"), []byte(secrets["TARGET_GITHUB_TOKEN"]), 0600); err != nil {
 		return err
 	}
-	const prep = `set -eu
-mkdir /work/repo
-chown 1000:1000 /work /work/repo`
-	if _, err = w.docker(ctx, s, "run", "--rm", "--network", "none", "--user", "0", "--mount", "type=volume,src="+volume+",dst=/work", "--entrypoint", "/bin/sh", s.Image, "-c", prep); err != nil {
+	if _, err = w.docker(ctx, s, "run", "--rm", "--network", "none", "--user", "0", "--mount", "type=volume,src="+volume+",dst=/work", "--entrypoint", "/bin/sh", s.Image, "-c", prepareConsumerClone); err != nil {
 		return err
 	}
 	// Clone runs as root solely to read the host's 0600 token. No repository
 	// code executes here; credentials are not available in the following check.
-	const clone = `set -eu
-printf '#!/bin/sh\ncase "$1" in *Username*) printf "x-access-token\\n";; *) cat /auth/token;; esac\n' >/tmp/git-askpass
-chmod 700 /tmp/git-askpass
-export GIT_ASKPASS=/tmp/git-askpass GIT_TERMINAL_PROMPT=0
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-git -c init.templateDir= init /work/repo >/dev/null
-git -C /work/repo -c credential.helper= -c core.hooksPath=/dev/null fetch --depth=1 "https://github.com/$1.git" "$2" >/dev/null 2>&1
-git -C /work/repo -c core.hooksPath=/dev/null checkout --detach "$2" >/dev/null 2>&1
-test "$(git -C /work/repo rev-parse HEAD)" = "$2"
-chown -R 1000:1000 /work/repo`
-	if _, err = w.docker(ctx, s, "run", "--rm", "--user", "0", "--mount", "type=volume,src="+volume+",dst=/work", "--mount", "type=bind,src="+authDir+",dst=/auth,readonly", "--entrypoint", "/bin/sh", s.Image, "-c", clone, "clone", s.Repository, s.BaseSHA); err != nil {
+	if _, err = w.docker(ctx, s, "run", "--rm", "--user", "0", "--mount", "type=volume,src="+volume+",dst=/work", "--mount", "type=bind,src="+authDir+",dst=/auth,readonly", "--entrypoint", "/bin/sh", s.Image, "-c", cloneConsumer, "clone", s.Repository, s.BaseSHA); err != nil {
 		return errors.New("確定 SHA の clone に失敗しました。納品用 GitHub 鍵の read 権限と枝を確認してください")
 	}
 	if err = os.RemoveAll(authDir); err != nil {
