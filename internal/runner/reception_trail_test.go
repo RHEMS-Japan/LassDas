@@ -588,3 +588,64 @@ func TestTheNoteNamesTheStageThatActuallyStopped(t *testing.T) {
 		t.Fatalf("the note names the wrong stage: %q", text)
 	}
 }
+
+// Every place the reception writes a note is a place a requester would
+// otherwise get the failure class and nothing else. Five of the eight could
+// be deleted outright with nothing failing (review of #127), so each is
+// driven here: the gate reaches the exit, and a trail is there.
+func TestEveryReceptionExitLeavesANote(t *testing.T) {
+	for name, c := range map[string]struct {
+		// what the readiness stages write, and which subcommand fails
+		failing string
+		files   map[string]string
+		stage   string
+	}{
+		"the check's verdict cannot be read": {
+			files: map[string]string{"history/readiness/check-1.json": `{`},
+			stage: "受付の確認",
+		},
+		"the decision could not be made": {
+			failing: "decide-readiness",
+			files:   map[string]string{"history/readiness/check-1.json": `{"verdict":"pass"}`},
+			stage:   "受付の判定のまとめ",
+		},
+		"the decision cannot be read": {
+			files: map[string]string{
+				"history/readiness/check-1.json":  `{"verdict":"pass"}`,
+				"history/readiness/decision.json": `{`,
+			},
+			stage: "受付の判定のまとめ",
+		},
+		"the decision says something unknown": {
+			files: map[string]string{
+				"history/readiness/check-1.json":  `{"verdict":"pass"}`,
+				"history/readiness/decision.json": `{"outcome":"something else"}`,
+			},
+			stage: "受付の判定のまとめ",
+		},
+	} {
+		failing := c.failing
+		if failing == "" {
+			failing = "no-such-subcommand"
+		}
+		pipeline := receptionPipeline(t, receptionStubWorker(t, failing, ""))
+		for path, body := range c.files {
+			full := pipeline.path(path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		outcome, _ := pipeline.readinessGate(context.Background())
+		if outcome.Code != hook.TerminalModelFailed {
+			t.Errorf("%s: readinessGate() = %+v; want model_failed", name, outcome)
+			continue
+		}
+		text := readReceptionTrail(t, pipeline)
+		if !strings.Contains(text, c.stage) {
+			t.Errorf("%s: the note does not name %q: %q", name, c.stage, text)
+		}
+	}
+}
