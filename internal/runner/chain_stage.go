@@ -104,6 +104,7 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 	}
 	args := []string{
 		"implement-instruction", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+		"--repo-root", p.path("target-repo"),
 		"--draft", p.path("ticket-draft.json"),
 	}
 	if round > 1 {

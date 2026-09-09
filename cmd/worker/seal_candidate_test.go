@@ -124,6 +124,7 @@ func TestImplementInstructionRendersTheKernelPrompt(t *testing.T) {
 	if err := run(context.Background(), []string{
 		"implement-instruction", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
 		"--draft", fixture.draftPath, "--previous-findings", previous, "--out", out,
+		"--repo-root", fixture.repoRoot,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,8 @@ func TestImplementInstructionRendersTheKernelPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"## 依頼", "## 守ること", "from-first-reviewer"} {
+	for _, expected := range []string{"## 依頼", "## 守ること", "from-first-reviewer",
+		"## 作業コピーの場所", fixture.repoRoot, fixture.repoRoot + "/docs/EXAMPLE.md"} {
 		if !strings.Contains(string(content), expected) {
 			t.Fatalf("the rendered instruction lacks %q: %q", expected, content)
 		}

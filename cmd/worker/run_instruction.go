@@ -232,6 +232,10 @@ Nothing you described exists.
 Only the working copy counts. A message describing edits is not an edit;
 the seal reads the tree. Make the changes now with your tools, one file at
 a time.
+
+Write with the absolute paths under "Where the working copy is" above. A
+relative path lands in your own home, not in the working copy, and that
+is the most common reason a change reported as done is not there.
 `
 	if withDesign {
 		note += `

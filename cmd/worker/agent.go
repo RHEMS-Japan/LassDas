@@ -68,7 +68,7 @@ func runImplement(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -473,9 +473,16 @@ func implementPrompt(
 	agent worker.AgentConfig,
 	clarification *worker.ClarificationContext,
 	findings []worker.ModelFinding,
+	repoRoot string,
 ) (string, error) {
 	sections := []string{
 		"あなたはこのリポジトリで、依頼された変更を実装します。",
+		"",
+		"## 作業コピーの場所",
+		"",
+		repoRoot,
+		"",
+		"依頼と設計はリポジトリからの相対パスで書かれています。**書き込みは絶対パスで行ってください**: 上の場所と相対パスをつないで、`docs/EXAMPLE.md` なら `" + repoRoot + "/docs/EXAMPLE.md` と書きます。相対パスは作業コピーに届かず、作業コピーに無い変更は無かったことになります。",
 		"",
 		"## 依頼 (" + draft.IssueKey + ")",
 		"",

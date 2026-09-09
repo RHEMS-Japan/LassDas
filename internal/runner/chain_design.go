@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"context"
 	"encoding/json"
 	"errors"
@@ -281,7 +282,14 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 	if err != nil {
 		return errors.New("the approved design's rendering is missing")
 	}
-	instruction := applyInstructionPreamble + string(design) + applyInstructionRules + p.previousApplyFindings()
+	root := p.path("target-repo")
+	if !filepath.IsAbs(root) {
+		// The section's whole point is an absolute path; a relative one
+		// would print "write with absolute paths" above a list of relative
+		// ones, which is the failure this exists to remove.
+		return errors.New("the working copy has no absolute path to give the applier")
+	}
+	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) + applyInstructionRules + p.previousApplyFindings()
 	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
 
@@ -345,6 +353,61 @@ the complete list of what changes.
 
 `
 
+// workingCopySection names the working copy by its absolute path and asks
+// for absolute paths in every write. The agent's file tools resolve a
+// relative path against its home, not the directory the launch gives it:
+// a live applier reported creating docs/OPERATIONS_HEALTHCHECK.md twice,
+// and both files landed in the agent's home while the working copy stayed
+// empty (measured four ways, 2026-09-09). The design lists repository-
+// relative paths, so the instruction has to carry the root they hang from.
+func workingCopySection(root string, files []string) string {
+	section := `
+
+---
+
+## Where the working copy is
+
+` + root + `
+
+Write with absolute paths. A relative path does not land in the working
+copy — it lands in your own home — and a change that is not in the
+working copy did not happen. This path is where files live and is never
+written inside a file.
+`
+	if len(files) == 0 {
+		return section
+	}
+	// The join is done here rather than asked for: the failure this section
+	// exists to fix was a path resolved wrongly, so the instruction hands
+	// over the finished paths instead of a rule for making them. The design
+	// still lists them relative — that is what the seal compares against.
+	section += `
+The files this design changes, written as the paths to give your tools:
+`
+	for _, file := range files {
+		section += "\n- " + root + "/" + file
+	}
+	return section + "\n"
+}
+
+// designedFiles are the paths the approved design names, in its order.
+// Empty when the design cannot be read: the section still names the root,
+// and the seal is what holds the change to the design either way.
+func (p *Pipeline) designedFiles(round int) []string {
+	design, err := investigate.ReadDesign(filepath.Join(p.designRoundDir(round), "design.json"))
+	if err != nil || !design.DigestMatches() {
+		// A record that does not match its own digest names nothing: the
+		// section falls back to the root alone, and the seal still holds
+		// the change to the design.
+		return nil
+	}
+	paths := make([]string, 0, len(design.Files))
+	for _, file := range design.Files {
+		paths = append(paths, file.Path)
+	}
+	return paths
+}
+
 const applyInstructionRules = `
 ---
 
@@ -352,12 +415,12 @@ const applyInstructionRules = `
 
 - Change only the files the design lists, in the way it says. Any other change makes the seal refuse the result: no file of your own, no notes, no scratch or temporary file left behind — remove anything you created while working before you finish.
 - Decide before you edit whether the design can be followed as written: an objection is only accepted from a working copy you have not otherwise changed, so read what you need to judge that first.
-- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` in the working directory (the root of this repository) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
+- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` at the root of the working copy named above (its absolute path) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
 - There is no person on this run. Nobody answers a question, approves a step or fills in a blank; a question you would have asked is an objection (above), not a comment left in the code.
 - Write the files with your tools. What counts is the working copy, not your answer: a message that describes edits you did not make ends the delivery as a failure, and the engine will tell you the tree is unchanged.
 - Your tool calls are counted and capped. Open only the files the design names, write the first change early, and do not survey the repository or run its whole test suite first: a run that spends its turns reading ends with nothing written and nothing sealed.
 - Never add automation, CI/CD, release, credential, IAM, repository-governance or deployment machinery. Never claim to have run a command or observed a deployment.
-- Do not commit; the seal reads the working tree.
+- Do not commit; the seal reads the working tree at the absolute path named above.
 `
 
 // approvedDesignPath is the design the current implementation round applies:

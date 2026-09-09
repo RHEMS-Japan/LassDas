@@ -149,6 +149,32 @@ func TestChainImplementRunsTheInstructionThroughTheWorker(t *testing.T) {
 	}
 }
 
+// The implementer's instruction is rendered with the working copy's
+// absolute path: the command refuses a root that is not absolute, and
+// without the argument the card fails at render time rather than writing
+// into the agent's home.
+func TestTheImplementInstructionCardCarriesTheWorkingCopyRoot(t *testing.T) {
+	pipeline := chainStagePipeline(t)
+	record := filepath.Join(t.TempDir(), "worker.log")
+	fake := filepath.Join(t.TempDir(), "fake-worker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+record+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.WorkerBin = fake
+	consumer := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(consumer, []byte(`{"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"consumers":[{}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.ConsumerConfigPath = consumer
+	if err := pipeline.RenderImplementInstruction(context.Background(), 1); err != nil {
+		t.Fatalf("RenderImplementInstruction: %v", err)
+	}
+	logged, _ := os.ReadFile(record)
+	if !strings.Contains(string(logged), "--repo-root "+pipeline.path("target-repo")) {
+		t.Fatalf("the card does not carry the working copy root: %q", strings.TrimSpace(string(logged)))
+	}
+}
+
 // The applier's card carries the approved design and where the design round's
 // objection record goes, so the run-instruction command can seal an objection
 // the applier wrote at the root of its working copy (issue #103). The
