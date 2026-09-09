@@ -593,7 +593,13 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // makes at most 6 calls (3 provider errors, 1 cutoff, 1 malformed, 1
 // final) with 42 s of pauses between them; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
-// round's wall (the context) is what ends a turn that keeps failing; an error after the widened re-ask still carries the
+// round's wall (the context) is what ends a turn that keeps failing. A call
+// that spends that whole allowance is classified upstream, so a turn whose
+// every call runs out costs 4 x ModelInvocationTimeout plus 40 s, 20 min
+// 40 s at the present five minutes; the stage's own budget
+// (ChainStage.MaxRuntimeSeconds, 40 min for the investigation, 6 h for the
+// reception) is what stops it, and one that keeps failing now fails late
+// instead of at once; an error after the widened re-ask still carries the
 // cutoff that caused it, so the caller's log names the cutoff whatever
 // ended the turn. The widened allowance lives for this turn only: a
 // conversation whose every answer is long pays one cut-off request per
