@@ -337,6 +337,32 @@ func NewModelInvoker(api ChatCompletionsAPI) (*ModelInvoker, error) {
 	return &ModelInvoker{api: api}, nil
 }
 
+// chatWithinTimeout makes one model call under ModelInvocationTimeout and,
+// when that allowance runs out, makes one more. A call that hits the
+// allowance leaves nothing behind — no answer, no usage, no cost — and the
+// stage that asked ends the delivery: a live reception died this way after
+// thirteen runs that did not (2026-09-09). The second call is skipped when
+// the caller's own context is finished, since nothing would be waiting for
+// the answer.
+func (i *ModelInvoker) chatWithinTimeout(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
+	for attempt := 1; ; attempt++ {
+		invocationContext, cancel := context.WithTimeout(ctx, ModelInvocationTimeout)
+		output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
+		cancel()
+		if err == nil || attempt == modelTimeoutAttempts {
+			return output, err
+		}
+		if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			return output, err
+		}
+	}
+}
+
+// modelTimeoutAttempts is how many times one question is asked when the
+// allowance runs out. Two: the second costs the same allowance again, and
+// the delivery it saves costs the whole reception.
+const modelTimeoutAttempts = 2
+
 func (i *ModelInvoker) GenerateCandidate(
 	ctx context.Context,
 	stage int,
@@ -659,9 +685,7 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		}
 	}
 	started := time.Now()
-	invocationContext, cancel := context.WithTimeout(ctx, ModelInvocationTimeout)
-	defer cancel()
-	output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
+	output, err := i.chatWithinTimeout(ctx, endpoint, request)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		// The marked error itself travels, never the wrapper around it: a

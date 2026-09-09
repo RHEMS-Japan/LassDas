@@ -627,3 +627,60 @@ func TestGatewayClientRetriesA429OnlyWithRetryAfter(t *testing.T) {
 		t.Fatalf("cancelled wait: err=%v requests=%d elapsed=%s", err, requests, time.Since(started))
 	}
 }
+
+// A model call that runs out of its allowance is asked once more. Such a
+// call leaves nothing behind — no answer, no usage, no cost — and the stage
+// that asked ends the delivery: a live reception died this way after
+// thirteen runs that did not. The second attempt is skipped when the
+// caller's own context is finished, because nobody is waiting any more.
+func TestAModelCallThatRunsOutOfItsAllowanceIsAskedOnceMore(t *testing.T) {
+	var calls int
+	slow := &timeoutChatAPI{fail: 1, calls: &calls}
+	invoker := &ModelInvoker{api: slow}
+	output, err := invoker.chatWithinTimeout(context.Background(), ModelEndpoint{}, ChatRequest{})
+	if err != nil || output == nil {
+		t.Fatalf("the second attempt did not answer: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want two", calls)
+	}
+
+	// Twice is the limit.
+	calls = 0
+	always := &timeoutChatAPI{fail: 5, calls: &calls}
+	if _, err := (&ModelInvoker{api: always}).chatWithinTimeout(context.Background(), ModelEndpoint{}, ChatRequest{}); err == nil {
+		t.Fatal("an allowance that always runs out was reported as an answer")
+	}
+	if calls != modelTimeoutAttempts {
+		t.Fatalf("calls = %d, want %d", calls, modelTimeoutAttempts)
+	}
+
+	// A caller that has given up is not asked again on its behalf.
+	calls = 0
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&ModelInvoker{api: &timeoutChatAPI{fail: 5, calls: &calls}}).chatWithinTimeout(cancelled, ModelEndpoint{}, ChatRequest{}); err == nil {
+		t.Fatal("a finished caller got an answer")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want one", calls)
+	}
+}
+
+// timeoutChatAPI reports the invocation allowance as spent for its first
+// fail calls, then answers.
+type timeoutChatAPI struct {
+	fail  int
+	calls *int
+}
+
+func (t *timeoutChatAPI) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
+	*t.calls++
+	if *t.calls <= t.fail {
+		return nil, context.DeadlineExceeded
+	}
+	return &ChatResponse{
+		Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "{}"}, FinishReason: "stop"}},
+		Usage:   &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}, nil
+}
