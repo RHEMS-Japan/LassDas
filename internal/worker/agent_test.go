@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/probe"
 	"context"
 	"errors"
 	"os"
@@ -768,5 +769,16 @@ func TestALaunchRefusesAStandInItDidNotDraw(t *testing.T) {
 	}
 	if outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read it", nil, NewAgentHomeToken()); err != nil {
 		t.Fatalf("a token this run drew: %v (%s)", err, outcome.Transcript)
+	}
+}
+
+// A file copied into a launch's home may be as large as a round is allowed
+// to store, or a run that measured to its budget would fail every design
+// review before the agent started. The bound is derived from the budget so
+// that raising one raises the other.
+func TestTheHomeFileBoundClearsTheMeasurementBudget(t *testing.T) {
+	if MaxAgentHomeFileBytes <= probe.DefaultLimits.MaxTotalBytes {
+		t.Fatalf("a home file is bounded at %d, which a round may exceed by storing its %d byte budget",
+			MaxAgentHomeFileBytes, probe.DefaultLimits.MaxTotalBytes)
 	}
 }

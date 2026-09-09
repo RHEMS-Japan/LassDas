@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/probe"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -191,10 +192,12 @@ func NewAgentHomeToken() string {
 
 // MaxAgentHomeFileBytes bounds a file copied into a launch's home. The
 // records file a design reviewer reads is the largest of them, and a round
-// may store up to the measurement budget (sixteen mebibytes), so the bound
-// sits above it: a bound below it would fail every review of a run that
-// measured to its budget, before the agent even started (review of #101).
-const MaxAgentHomeFileBytes = 32 * 1024 * 1024
+// may store up to the measurement budget, so the bound is derived from that
+// budget rather than written down beside it: a bound below the budget fails
+// every review of a run that measured to it, before the agent even starts
+// (review of #101). The factor covers what JSON encoding adds to stored
+// output.
+var MaxAgentHomeFileBytes = 2 * probe.DefaultLimits.MaxTotalBytes
 
 // AgentHomePathReserve is the room a prompt using an agent home token
 // leaves for the real path: the placeholder is short and the home is a
@@ -246,8 +249,8 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	// arrive inside the data a prompt carries (a record of a repository
 	// that contains this text), and that must not inflate the launch.
 	if homeToken != "" && !agentHomeTokenPattern.MatchString(homeToken) {
-		// Only a token of the shape this run draws may be replaced: a
-		// fixed marker would
+		// Only a token of the shape this run draws may be replaced: a fixed
+		// marker would
 		// also match text the prompt merely carries (a record of a
 		// repository whose source defines one), and rewriting that hands
 		// the reviewer an excerpt its sealed record does not match.
@@ -651,7 +654,7 @@ func copyHomeFiles(agentHome string, files map[string]string) error {
 		if !validAgentHomePath(relative) {
 			return errors.New("agent home file path is invalid")
 		}
-		content, err := ReadBoundedRegularFile(source, MaxAgentHomeFileBytes)
+		content, err := ReadBoundedRegularFile(source, int64(MaxAgentHomeFileBytes))
 		if err != nil {
 			return errors.New("agent home file could not be read")
 		}
