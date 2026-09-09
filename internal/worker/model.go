@@ -93,28 +93,77 @@ type ChatChoice struct {
 // (live 2026-09-05: one such response ended an 18-probe investigation as
 // model_failed). Each carries the detail that failed, as counts only.
 var (
-	errModelResponseMetadata = errors.New("model response metadata is invalid")
-	errModelResponseContent  = errors.New("model response content is invalid")
+	errModelResponseMetadata = errors.New(GatewayBookkeepingPhrase)
+	errModelResponseContent  = errors.New(AnswerUnusablePhrase)
 	// errModelResponseRefused is the provider declining one turn
 	// (finish_reason=content_filter): asked again once like the two above.
-	errModelResponseRefused = errors.New("model declined to answer the turn")
+	errModelResponseRefused = errors.New(DeclinedOverContentPhrase)
 	// errModelResponseTruncated marks a turn the provider ended at the output
 	// allowance (finish_reason=length): converseTurn asks the same turn once
 	// more with the allowance widened, below the configuration ceiling.
-	errModelResponseTruncated = errors.New("model response ended before a complete answer")
+	errModelResponseTruncated = errors.New(CutoffPhrase)
 	// errModelResponseUpstream marks a turn the provider ended with an error
 	// of its own (finish_reason=error): converseTurn asks the same turn
 	// again after the gateway pauses, up to their count (live 2026-09-09:
 	// one such answer ended a design round's investigation as model_failed
 	// on its first call).
-	errModelResponseUpstream = errors.New("the provider ended the turn with an error")
+	errModelResponseUpstream = errors.New(ProviderEndedTurnPhrase)
 	// errModelAllowanceSpent marks a call that ran out of its own time
 	// without answering: no answer, no usage, no cost, and five minutes
 	// gone. converseTurn asks again once — not for the provider's whole
 	// ladder, because three more would spend most of a round on one
-	// question. Its text keeps the transport's prefix, so what reads these
-	// failures for the requester still recognises it.
-	errModelAllowanceSpent = errors.New("model invocation failed: the call spent its allowance without answering")
+	// question. Its text begins with TransportFailedPhrase, so what reads
+	// these failures for the requester still recognises it.
+	errModelAllowanceSpent = errors.New(TransportFailedPhrase + ": " + SpentAllowancePhrase)
+)
+
+// These are the phrases a reception failure carries out to the runner, which
+// has only the step's stderr to tell the requester why their ticket stopped.
+// They are the error texts above and the transport's own prefix, named here
+// so the two packages cannot drift apart silently: a note keyed off a phrase
+// no error still writes would leave the requester with nothing, which is the
+// state this pair was built to end (live 2026-09-09: a ticket whose comment
+// said model_failed and no more, with the cause only in the pod log).
+const (
+	// GatewayBookkeepingPhrase begins the failure of a turn whose answer
+	// carried no usable accounting: no usage block, numbers that do not add
+	// up, or a request id outside its pattern. It says nothing about the
+	// answer itself — that is AnswerUnusablePhrase — and it is a gateway's
+	// transient, so the ticket is worth sending again. It was named for the
+	// answer's shape and told its requester the opposite (review of #122).
+	GatewayBookkeepingPhrase = "model response metadata is invalid"
+	// AnswerUnusablePhrase begins the failure of a turn whose answer could
+	// not be used: empty, past the size limit, or not one assistant message.
+	AnswerUnusablePhrase = "model response content is invalid"
+	// DeclinedOverContentPhrase begins the failure of a turn the model
+	// declined over what it was asked. The ticket's own words are in that
+	// question, so this is the one reception failure whose cause is most
+	// likely the ticket itself.
+	DeclinedOverContentPhrase = "model declined to answer the turn"
+	// ProviderEndedTurnPhrase begins the failure of a turn the provider
+	// ended with an error of its own, after converseTurn asked again.
+	ProviderEndedTurnPhrase = "the provider ended the turn with an error"
+	// TransportFailedPhrase begins every failure the transport itself
+	// reports: it could not reach the gateway, or the gateway answered with
+	// a status that asking again does not lift, or the call spent its whole
+	// allowance without an answer. It says nothing about whether anything
+	// was asked again — the three phrases below are what separate those.
+	TransportFailedPhrase = "model invocation failed"
+	// SpentAllowancePhrase names the failure the turn asks again for; with
+	// TransportFailedPhrase it begins errModelAllowanceSpent.
+	SpentAllowancePhrase = "the call spent its allowance without answering"
+	// AttemptsExhaustedPhrase appears in the one transport failure that
+	// comes after the gateway's own retries were spent.
+	AttemptsExhaustedPhrase = " attempts"
+	// LimitNotLiftedPhrase and RetryAfterTooLongPhrase appear in the two
+	// failures a gateway gives for a limit that waiting does not lift (an
+	// exhausted balance among them). Telling a requester to send the same
+	// ticket again is wrong for both.
+	LimitNotLiftedPhrase    = "a limit that a wait does not lift"
+	RetryAfterTooLongPhrase = "longer than a turn waits"
+	// CutoffPhrase begins the failure of a turn the provider ended at the
+	// output allowance.
+	CutoffPhrase = "model response ended before a complete answer"
 )
 
 // allowanceTurnRetries is how many times one turn asks again after a call
@@ -256,22 +305,22 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		pause, again := gatewayPause(status, retryAfter, attempt)
 		if !again {
 			if attempt > 0 {
-				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d attempts", status, attempt+1))
+				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
 			}
 			if status == http.StatusTooManyRequests {
 				if retryAfter != nil {
-					return nil, safeModelError(fmt.Sprintf("model invocation failed with status 429 and a Retry-After of %s, longer than a turn waits", *retryAfter))
+					return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s", *retryAfter, RetryAfterTooLongPhrase))
 				}
-				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (a limit that a wait does not lift)")
+				return nil, safeModelError(TransportFailedPhrase + " with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")")
 			}
-			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", status))
+			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
 		}
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
 		timer := time.NewTimer(pause)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d; the wait before asking again was cancelled", status))
+			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
 		case <-timer.C:
 		}
 	}
@@ -318,9 +367,9 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		// key travels in a header, never in the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, 0, nil, safeModelErrorFor("model invocation failed: "+urlErr.Err.Error(), urlErr.Err)
+			return nil, 0, nil, safeModelErrorFor(TransportFailedPhrase+": "+urlErr.Err.Error(), urlErr.Err)
 		}
-		return nil, 0, nil, safeModelError("model invocation failed")
+		return nil, 0, nil, safeModelError(TransportFailedPhrase)
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
@@ -681,7 +730,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
 			timer.Stop()
-			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("model invocation failed: %w", ctx.Err()))
+			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err()))
 		case <-timer.C:
 		}
 	}
@@ -752,10 +801,10 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		if errors.As(err, &safe) {
 			return "", InvocationUsage{}, safe
 		}
-		return "", InvocationUsage{}, errors.New("model invocation failed")
+		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
 	}
 	if output == nil {
-		return "", InvocationUsage{}, errors.New("model invocation failed")
+		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
 	}
 	// The provider's own error inside a 200 is judged before the usage and
 	// content checks: such an answer may carry no usage and no content, and
@@ -797,8 +846,12 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
-		return "", InvocationUsage{}, errors.New(
-			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
+		// Named by the same constant so the phrase cannot drift, but not
+		// wrapped: wrapping made errors.Is(err, errModelResponseTruncated)
+		// true for a finish_reason that has nothing to do with the output
+		// allowance, and the turn then paid a second call with the allowance
+		// doubled (measured, review of #122).
+		return "", InvocationUsage{}, errors.New(CutoffPhrase + ": finish_reason=" + output.Choices[0].FinishReason)
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {

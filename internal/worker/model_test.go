@@ -815,3 +815,101 @@ func (t *timeoutChatAPI) ChatCompletions(ctx context.Context, endpoint ModelEndp
 		Usage:   &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 	}, nil
 }
+
+// The runner tells a requester why their ticket stopped by reading the
+// phrase a failure begins with. A failure whose text no longer begins with
+// the phrase the runner keys off leaves the requester with the last-resort
+// note instead of the reason, and nothing else would say so.
+func TestTheFailuresTheRunnerReadsBeginWithThePhrasesItKeysOff(t *testing.T) {
+	for _, pair := range []struct {
+		err    error
+		phrase string
+	}{
+		{errModelAllowanceSpent, TransportFailedPhrase},
+		{errModelResponseUpstream, ProviderEndedTurnPhrase},
+		{errModelResponseMetadata, GatewayBookkeepingPhrase},
+		{errModelResponseContent, AnswerUnusablePhrase},
+		{errModelResponseRefused, DeclinedOverContentPhrase},
+		{errModelResponseTruncated, CutoffPhrase},
+	} {
+		if !strings.HasPrefix(pair.err.Error(), pair.phrase) {
+			t.Errorf("%q does not begin with %q", pair.err.Error(), pair.phrase)
+		}
+	}
+}
+
+// The failures the transport itself reports must all begin with the phrase
+// the runner keys off, or a reception that stopped on one of them drops its
+// requester to the last-resort note. Ten of these were written out by hand,
+// and rewording any of them was free (review of #122). Driven through a
+// real server so the check is on what the transport returns, not on a list
+// kept in a test.
+func TestEveryTransportFailureCarriesThePhraseTheRunnerReads(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	for _, status := range []int{400, 401, 403, 404, 429, 500, 502} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		restore := gatewayRetryPauses
+		gatewayRetryPauses = make([]time.Duration, len(restore))
+		_, callErr := client.ChatCompletions(context.Background(),
+			ModelEndpoint{Model: "m", BaseURL: server.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+		gatewayRetryPauses = restore
+		server.Close()
+		if callErr == nil {
+			t.Fatalf("status %d reported an answer", status)
+		}
+		if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
+			t.Errorf("status %d: %q does not begin with %q", status, callErr.Error(), TransportFailedPhrase)
+		}
+	}
+	// And the one that never reaches a server.
+	client, err := NewGatewayClient(&http.Client{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.ChatCompletions(context.Background(),
+		ModelEndpoint{Model: "m", BaseURL: "http://127.0.0.1:1", APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	if callErr == nil || !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
+		t.Errorf("a connection that did not open: %v", callErr)
+	}
+}
+
+// A finish_reason the engine does not know is not a cutoff, so the turn
+// must not pay a second call with the allowance doubled for it. Wrapping
+// its failure in errModelResponseTruncated did exactly that (measured,
+// review of #122): the phrase is shared with the cutoff, the identity is
+// not.
+func TestAnUnknownFinishReasonIsNotAskedAgainAsACutoff(t *testing.T) {
+	for _, reason := range []string{"tool_calls", "length_exceeded"} {
+		var seen []int32
+		invoker := &ModelInvoker{api: &finishReasonChatAPI{reason: reason, allowances: &seen}}
+		_, _, err := invoker.converseTurn(context.Background(),
+			ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+		if err == nil {
+			t.Fatalf("%s reported an answer", reason)
+		}
+		if len(seen) != 1 {
+			t.Errorf("%s: allowances = %v, want one call at the allowance it was given", reason, seen)
+		}
+	}
+}
+
+// finishReasonChatAPI always ends the turn with the given finish_reason and
+// records the output allowance each call was made with.
+type finishReasonChatAPI struct {
+	reason     string
+	allowances *[]int32
+}
+
+func (f *finishReasonChatAPI) ChatCompletions(_ context.Context, endpoint ModelEndpoint, _ ChatRequest) (*ChatResponse, error) {
+	*f.allowances = append(*f.allowances, endpoint.MaxOutputTokens)
+	return &ChatResponse{
+		Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "{}"}, FinishReason: f.reason}},
+		Usage:   &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}, nil
+}
