@@ -671,8 +671,10 @@ func TestATurnOfSpentAllowancesAsksAgainOnceNotThreeTimes(t *testing.T) {
 	if err == nil || !errors.Is(err, errModelAllowanceSpent) {
 		t.Fatalf("the turn ended as %v", err)
 	}
-	if want := allowanceTurnRetries + 1; calls != want {
-		t.Fatalf("calls = %d, want %d", calls, want)
+	// Written out for the same reason as the turn test above: the cost of
+	// this number is 5 minutes a call, so it must not drift silently.
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
 	}
 	// The failure must say what happened. Naming the provider's errors here
 	// would send whoever reads it after a provider that never answered.
@@ -779,9 +781,11 @@ func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 		t.Errorf("the error carries the address: %v", callErr)
 	}
 
-	// And through the turn: the spent allowance is classified as the
-	// provider's own error, so the ladder asks again — four calls for one
-	// turn, the same bound a provider error has always had.
+	// And through the turn: the spent allowance has a count of its own, so
+	// the ladder asks once more and stops — two calls for one turn. The
+	// number is written out rather than derived from allowanceTurnRetries,
+	// so raising that constant fails here instead of passing quietly: it is
+	// what holds a turn of spent allowances to 10 min 2 s.
 	quickenTurnPauses(t)
 	requests = 0
 	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), endpoint,
@@ -789,8 +793,8 @@ func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	if !errors.Is(turnErr, errModelAllowanceSpent) {
 		t.Fatalf("the turn ended as %v", turnErr)
 	}
-	if want := allowanceTurnRetries + 1; requests != want {
-		t.Fatalf("requests = %d, want %d", requests, want)
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
 
