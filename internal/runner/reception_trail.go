@@ -33,11 +33,9 @@ const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 // the way it attaches a delivery's trail. Best-effort: an unwritable trail
 // must not change the outcome.
 func (p *Pipeline) noteReceptionCutoff(stage string) {
-	note := receptionNote(stage, p.lastStepStderr)
-	if note == "" {
-		return
-	}
-	if err := p.writeReceptionTrail(note); err != nil {
+	// receptionNote always has something to say — its last resort is a note
+	// of its own — so there is no empty case to skip (review of #126).
+	if err := p.writeReceptionTrail(receptionNote(stage, p.lastStepStderr)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
 }
@@ -47,6 +45,15 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
+// Four things here are deliberately not measured, on the line the review of
+// #127 drew: a change to any of them puts nothing in front of a requester,
+// and none has a failure behind it. Trimming a line's own leading space;
+// treating a line with only one separator as carrying a cause; writing the
+// note when the removal before it failed (which cannot happen — where the
+// removal fails the write fails too, measured); and the note's file mode.
+// The first two now are measured after all, because they turned out to be
+// what keeps a ticket's words out of the choice.
+//
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
 
@@ -202,6 +209,15 @@ func noFileChosenNote(stage string) string {
 		"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
 }
 
+// unreadableRecordNote is what a requester is told when a reception stage
+// ended over a record rather than over an answer. It is the note five of
+// the eight exits use, so it is a function rather than a literal: the
+// checks that hold what a note may carry take it from here.
+func unreadableRecordNote(stage string) string {
+	return "受付処理 (" + stage + ") の記録を読めなかったため、自動処理を止めました。" +
+		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
+}
+
 // noteReceptionRecord leaves the requester a reason for a reception stage
 // that ended over a record the pipeline could not read or could not accept.
 // No model is involved in reading a record, so the notes above have nothing
@@ -210,9 +226,7 @@ func noFileChosenNote(stage string) string {
 // #122). Best-effort, like the note above: an unwritable trail must not
 // change the outcome.
 func (p *Pipeline) noteReceptionRecord(stage string) {
-	note := "受付処理 (" + stage + ") の記録を読めなかったため、自動処理を止めました。" +
-		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
-	if err := p.writeReceptionTrail(note); err != nil {
+	if err := p.writeReceptionTrail(unreadableRecordNote(stage)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
 }
@@ -222,6 +236,11 @@ func (p *Pipeline) noteReceptionRecord(stage string) {
 // and only the file this run wrote is trusted (trailWritten).
 func (p *Pipeline) writeReceptionTrail(note string) error {
 	trailPath := p.path("m1-trail.txt")
+	// Returning here rather than writing anyway is a shape, not a behaviour:
+	// in both cases the removal can fail — something not empty standing at
+	// the path, a parent that cannot be written — the write fails too
+	// (measured, review of #127). It stays because reporting the first
+	// failure is clearer than reporting the second.
 	if err := os.Remove(trailPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
