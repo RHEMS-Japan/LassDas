@@ -88,8 +88,8 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 	if err := os.WriteFile(pipeline.path("m1-trail.txt"), []byte("forged\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatal(err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	content, _ := os.ReadFile(pipeline.path("m1-trail.txt"))
 	if strings.Contains(string(content), "forged") {
@@ -150,8 +150,8 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 func TestReceptionTrailIsWhatTheTerminalReportAttaches(t *testing.T) {
 	worker := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); asked again with the wider allowance and cut off again")
 	pipeline := receptionPipeline(t, worker)
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatal(err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	terminal := NewTerminal(pipeline.Config, nil, hook.DispatchEnvelope{}, 1, pipeline.Workspace, trailTestLogger{})
 	trail, err := terminal.loadTrail(hook.TerminalModelFailed)
@@ -227,8 +227,8 @@ func TestTheTransportsOwnFailureAlsoReachesTheRequester(t *testing.T) {
 	stub := receptionStubWorker(t, "assess-readiness",
 		"worker: readiness assessment failed: model invocation failed: context deadline exceeded")
 	pipeline := receptionPipeline(t, stub)
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatalf("readinessGate() = %v", err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	// Nothing was asked again here, so the note must not say it was, nor
 	// that sending the same ticket again is worth doing.
@@ -244,8 +244,8 @@ func TestAnUnnamedReceptionFailureStillLeavesANote(t *testing.T) {
 	stub := receptionStubWorker(t, "assess-readiness",
 		"worker: readiness assessment failed: source snapshot could not be created")
 	pipeline := receptionPipeline(t, stub)
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatalf("readinessGate() = %v", err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	text := readReceptionTrail(t, pipeline)
 	if !strings.Contains(text, "完了しなかった") || !strings.Contains(text, "受付の判定") {
@@ -272,8 +272,8 @@ func TestATicketCannotChooseTheNoteItsRequesterIsShown(t *testing.T) {
 	stub := receptionStubWorker(t, "assess-readiness",
 		"worker: readiness assessment failed: source snapshot could not be created: the answer began: the provider ended the turn with an error")
 	pipeline := receptionPipeline(t, stub)
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatalf("readinessGate() = %v", err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	if text := readReceptionTrail(t, pipeline); strings.Contains(text, "応答を得られませんでした") {
 		t.Fatalf("the ticket's own words chose the note: %q", text)
@@ -300,8 +300,8 @@ func TestASpentAllowanceReachesTheRequesterToo(t *testing.T) {
 	stub := receptionStubWorker(t, "assess-readiness",
 		"worker: readiness assessment failed: model invocation failed: the call spent its allowance without answering after 2 such calls")
 	pipeline := receptionPipeline(t, stub)
-	if _, err := pipeline.readinessGate(context.Background()); err != nil {
-		t.Fatalf("readinessGate() = %v", err)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	if text := readReceptionTrail(t, pipeline); !strings.Contains(text, "応答を得られませんでした") {
 		t.Fatalf("a spent allowance left no reason: %q", text)
