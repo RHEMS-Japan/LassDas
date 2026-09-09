@@ -358,6 +358,7 @@ func evidenceNote(stats evidenceStats) string {
 var designVerificationVocabulary = []string{
 	"",
 	"## 確認方法 (verification) の書式",
+	investigate.VerificationRules,
 	"- 確認方法は 2 形しか書けません: wording (path、出る文言 expected_text 1 つ、任意で消える文言 absent_text 1 つ) か measurement (catalogue の probe 1 つと metric と threshold)。absent_text は任意です。設計ファイルが全部この変更で新しく作られるときは空でなければなりません (関所が拒否します)。書式の任意の項目を必須として要求しないでください。",
 	"- measurement 形は反映後に関所が自動で計って判定します。wording 形は関所が反映後に自動で検査するものではなく、実装役への指示と受入時の表示確認の目安になります。",
 	"- 確認方法を理由に revise にするのは、この変更の成否を判定できる別の確認方法 (別の path・文言・probe・閾値) がこの書式の中で書けるときだけです (誤ったページや落ちない閾値は、正しいものが書けるので revise の理由になります)。書式で表せない検査 (複数の項目が揃うことの判定、文書全体の内容の検査など) を求めて revise にしないでください。それは設計の欠陥ではなく書式の限界です。",

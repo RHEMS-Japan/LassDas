@@ -318,6 +318,14 @@ const (
 	VerificationMeasurement = "measurement"
 )
 
+// VerificationRules is shared by the designer and its reviewers so that a
+// revision asks for a promise the existing validator can actually accept.
+const VerificationRules = `Verification rules:
+- wording.path starts with /. expected_text is the text to add, not already present in the baseline design files. absent_text is optional: leave it empty when no existing text is removed, including an addition to an existing file; when nonempty, it must quote text present in a baseline design file.
+- measurement.metric is exactly one of time_total, status, bytes, rows, value. output_bytes and match are not supported metrics. threshold is positive and the comparison is value <= threshold, never >=.
+- A measurement must use a declared probe whose output supplies the chosen metric: HTTP output supplies time_total/status/bytes; rows/value refer to SQL output. A repo.read or repo.grep record's output_bytes is metadata, not a verification metric or a match count. For a text addition, use wording with the expected text instead of inventing a measurement metric.
+- wording describes the acceptance promise; it does not claim an automatic post-change content check. A finding about verification must propose a correction within these supported forms.`
+
 // Verification says how the change will be judged after deployment: by the
 // screen check (wording) or by re-running a probe against a threshold.
 type Verification struct {
@@ -584,7 +592,7 @@ func validateVerificationShape(v Verification) error {
 		switch v.Metric {
 		case "time_total", "status", "bytes", "rows", "value":
 		default:
-			return errors.New("verification metric is unknown")
+			return errors.New("verification metric is unknown: use time_total, status, bytes, rows or value; for a text addition use wording")
 		}
 		if v.Threshold <= 0 {
 			return errors.New("verification threshold must be positive")

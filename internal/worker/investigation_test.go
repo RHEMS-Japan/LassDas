@@ -534,14 +534,58 @@ func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
 // spent its attempts on that guess); the investigation-only instruction
 // carries no design section.
 func TestInvestigationSystemPromptStatesTheAbsentTextRule(t *testing.T) {
-	design := investigationSystemPrompt(ModeDesign, false)
-	for _, want := range []string{"absent_text is wording one of the design files carries now", "leave it empty when every file in the design is new"} {
-		if !strings.Contains(design, want) {
-			t.Errorf("design instruction lacks %q", want)
+	for _, revise := range []bool{false, true} {
+		design := investigationSystemPrompt(ModeDesign, revise)
+		if !strings.Contains(design, investigate.VerificationRules) {
+			t.Errorf("design instruction lacks the shared verification contract (revise=%v)", revise)
 		}
 	}
-	if strings.Contains(investigationSystemPrompt(ModeInvestigation, false), "absent_text is wording") {
+	if strings.Contains(investigationSystemPrompt(ModeInvestigation, false), investigate.VerificationRules) {
 		t.Error("the investigation-only instruction talks about a design it never asks for")
+	}
+}
+
+// The refusal must tell the designer how to recover from the unsupported
+// metric a reviewer suggested. The supported wording form must seal for an
+// addition to an existing file without promising to remove existing text.
+func TestInvestigateCorrectsUnknownMetricToAdditiveWording(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	input.Mode = ModeDesign
+	input.Request.Request = "Append New label and preserve the existing text"
+	var answer struct {
+		Design investigate.ModelDesignOutput `json:"design"`
+	}
+	if err := json.Unmarshal([]byte(designAnswer), &answer); err != nil {
+		t.Fatal(err)
+	}
+	answer.Design.Approach = "Append the requested label"
+	answer.Design.Files[0].Changes = []string{"append New label, preserving existing text"}
+	answer.Design.Verification.AbsentText = ""
+	corrected, _ := json.Marshal(answer)
+	answer.Design.Verification = investigate.Verification{Form: investigate.VerificationMeasurement, Probe: "repo.grep", Args: map[string]string{"path": "web/page.tmpl", "pattern": "New label"}, Metric: "output_bytes", Threshold: 1}
+	refused, _ := json.Marshal(answer)
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.list"}}`,
+		`{"probe":{"probe":"repo.read","args":{"path":"web/page.tmpl"}}}`,
+		reportAnswer, string(refused), string(corrected),
+	}}
+	invoker, err := NewModelInvoker(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{ID: "designer", Vendor: "v", Model: "m", BaseURL: "https://gateway.example.invalid", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil || result.Design == nil || result.Turns != 5 {
+		t.Fatalf("recovery: result=%+v err=%v", result, err)
+	}
+	if err := result.Design.Validate(input.Identity, result.Investigation, input.Bounds); err != nil {
+		t.Fatalf("additive wording does not satisfy the real validator: %v", err)
+	}
+	request := api.requests[len(api.requests)-1]
+	objection := request.Messages[len(request.Messages)-1].Content
+	for _, want := range []string{"verification metric is unknown", "time_total, status, bytes, rows or value", "for a text addition use wording"} {
+		if !strings.Contains(objection, want) {
+			t.Errorf("refusal omits the recovery rule %q: %s", want, objection)
+		}
 	}
 }
 

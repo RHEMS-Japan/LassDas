@@ -439,6 +439,9 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 			t.Errorf("design review prompt lacks %q", want)
 		}
 	}
+	if !strings.Contains(design, investigate.VerificationRules) {
+		t.Error("the reviewer does not receive the designer's supported verification contract")
+	}
 	if !strings.HasSuffix(design, worker.ReviewAnswerRulesTail) {
 		t.Error("the vocabulary displaced the answer-rules boundary")
 	}
