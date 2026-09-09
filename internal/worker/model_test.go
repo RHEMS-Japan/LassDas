@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -766,12 +767,7 @@ func (d *dialTimeoutChatAPI) ChatCompletions(context.Context, ModelEndpoint, Cha
 // server that never answers, through the real client, and counts requests.
 func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	t.Setenv("TEST_MODEL_API_KEY", "test-credential")
-	var requests atomic.Int64
-	never := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		time.Sleep(2 * time.Second)
-	}))
-	defer never.Close()
+	never, requestsToNever := silentGateway(t)
 
 	// The client's own timeout is the clock that ends the call here, which
 	// is the second of the two clocks production runs.
@@ -796,16 +792,52 @@ func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	// number is written out rather than derived from allowanceTurnRetries,
 	// so raising that constant fails here instead of passing quietly: it is
 	// what holds a turn of spent allowances to 10 min 2 s.
+	//
+	// A second server rather than resetting the first one's counter: the
+	// client gives up on its own clock while the handler is still held, so
+	// a request dispatched late lands its count on whichever side of a
+	// reset the scheduler chooses. Measured: starving the first handler put
+	// its count after the reset and the turn read three (review of #129).
 	quickenTurnPauses(t)
-	requests.Store(0)
-	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), endpoint,
+	turnServer, requestsToTurn := silentGateway(t)
+	turnEndpoint := gatewayTestEndpoint(turnServer.URL, "TEST_MODEL_API_KEY")
+	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), turnEndpoint,
 		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if !errors.Is(turnErr, errModelAllowanceSpent) {
 		t.Fatalf("the turn ended as %v", turnErr)
 	}
-	if requests.Load() != 2 {
-		t.Fatalf("requests = %d, want 2", requests.Load())
+	if asked := requestsToTurn(); asked != 2 {
+		t.Fatalf("requests = %d, want 2", asked)
 	}
+	if asked := requestsToNever(); asked != 1 {
+		t.Fatalf("the first call asked %d times, want one", asked)
+	}
+}
+
+// silentGateway is a server that never answers, and a way to read how many
+// requests reached it that cannot run early. The count is read after the
+// held handlers are released and the server is closed, because httptest's
+// Close waits for the requests still in flight: without that the number is
+// whatever had arrived by the time the client's own clock ran out, and a
+// transport asking four times reads as one (review of #129).
+func silentGateway(t *testing.T) (*httptest.Server, func() int64) {
+	t.Helper()
+	var requests atomic.Int64
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+		<-release
+	}))
+	var once sync.Once
+	settle := func() int64 {
+		once.Do(func() {
+			close(release)
+			server.Close()
+		})
+		return requests.Load()
+	}
+	t.Cleanup(func() { settle() })
+	return server, settle
 }
 
 // timeoutChatAPI reports the invocation allowance as spent for its first
@@ -985,12 +1017,7 @@ func TestAMomentThatPassesIsAskedAgainHoweverItArrived(t *testing.T) {
 func TestASpentAllowanceIsNotAskedAgainByTheTransport(t *testing.T) {
 	t.Setenv("LASSDAS_TEST_KEY", "k")
 	quickenTurnPauses(t)
-	var calls atomic.Int64
-	silent := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		calls.Add(1)
-		time.Sleep(2 * time.Second)
-	}))
-	defer silent.Close()
+	silent, callsToSilent := silentGateway(t)
 	client, err := NewGatewayClient(&http.Client{Timeout: 150 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -999,8 +1026,12 @@ func TestASpentAllowanceIsNotAskedAgainByTheTransport(t *testing.T) {
 		ModelEndpoint{Model: "m", BaseURL: silent.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"}); callErr == nil {
 		t.Fatal("a silent gateway reported an answer")
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("calls = %d, want one: the turn does the asking", calls.Load())
+	// Read after the held handlers are released and the server closed: the
+	// client gives up on its own clock, so a count taken here would be
+	// whatever had arrived by then. Measured before this: a transport
+	// mutated to ask four times passed this assertion (review of #129).
+	if calls := callsToSilent(); calls != 1 {
+		t.Fatalf("calls = %d, want one: the turn does the asking", calls)
 	}
 }
 
@@ -1040,9 +1071,14 @@ func TestADroppedConnectionIsAskedAgain(t *testing.T) {
 	}
 	// Counted with an atomic rather than a channel the body closes: the
 	// accept loop is still running here, and closing a channel it may be
-	// sending on races, and can panic (review of #128).
-	if want := int64(len(gatewayRetryPauses) + 1); accepted.Load() != want {
-		t.Fatalf("connections = %d, want %d", accepted.Load(), want)
+	// sending on races, and can panic (review of #128). The listener is
+	// closed first so the loop has stopped before the count is read, and
+	// the count is taken once: reading twice prints a later sample than the
+	// one that failed the comparison (review of #129).
+	_ = listener.Close()
+	connections := accepted.Load()
+	if want := int64(len(gatewayRetryPauses) + 1); connections != want {
+		t.Fatalf("connections = %d, want %d", connections, want)
 	}
 }
 
@@ -1287,23 +1323,53 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		<-dropped
+		select {
+		case <-dropped:
+		case <-time.After(time.Second):
+			// Nothing was dropped, so the wait this test is about never
+			// started. Cancelling anyway keeps the test from running to the
+			// full pause and passing for the wrong reason.
+		}
 		// The request has already failed, so the retry is entering its wait.
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 	defer cancel()
+	started := time.Now()
 	_, callErr := client.ChatCompletions(ctx,
 		ModelEndpoint{Model: "m", BaseURL: "http://" + listener.Addr().String(), APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	elapsed := time.Since(started)
 	if callErr == nil {
 		t.Fatal("a dropped connection reported an answer")
+	}
+	// The premise, measured: the call ended because the caller gave up
+	// during the wait, not because the ladder ran out. Without this the
+	// test passes with the cancellation removed entirely — it just takes
+	// the whole pause and returns the same cause (review of #129).
+	if elapsed >= gatewayRetryPauses[0] {
+		t.Fatalf("the wait was not interrupted: the call took %s, as long as the pause itself", elapsed)
 	}
 	// The cause itself. Checking that the wait's own word is absent, or that
 	// the message is merely longer than the phrase, are both stand-ins for
 	// "the cause survived" and neither is the thing: a differently worded
-	// generic message passes both (review of #125). The listener closes
-	// every connection, so the cause is always EOF.
-	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) || !strings.Contains(callErr.Error(), "EOF") {
+	// generic message passes both (review of #125).
+	//
+	// net/http spells this one physical event — a connection closed with no
+	// answer — three ways, depending on whether the request had been
+	// registered when the close was seen. An earlier version of this demanded
+	// the literal "EOF" and failed on the other two about four times in a
+	// hundred (review of #129 measured 6/150 on both sides of the change
+	// that was supposed to fix it). The set is the specification; a fourth
+	// spelling should fail here so it is added deliberately.
+	dropSpellings := []string{"EOF", "server closed idle connection", "connection reset by peer"}
+	spelled := false
+	for _, spelling := range dropSpellings {
+		if strings.Contains(callErr.Error(), spelling) {
+			spelled = true
+			break
+		}
+	}
+	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) || !spelled {
 		t.Fatalf("the failure that prompted the wait did not travel: %q", callErr.Error())
 	}
 }
