@@ -134,7 +134,19 @@ func receptionCauseNote(stage, stderr string) string {
 			return "受付の AI (" + stage + ") への問い合わせが通りませんでした。" +
 				"設定か接続の問題である可能性があり、同じ依頼を出し直しても同じ結果になることがあります。" +
 				"運用担当者が原因を確認します。\n"
-		case strings.HasPrefix(cause, worker.ShapeRefusedPhrase):
+		// The model declined over what it was asked. The ticket's own words
+		// are in that question, so this is the one reception failure worth
+		// telling its requester to look at their own wording for.
+		case strings.HasPrefix(cause, worker.DeclinedOverContentPhrase):
+			return "受付の AI (" + stage + ") が、依頼文の内容を理由に答えを断りました。" +
+				"聞き直しても同じでした。依頼文の書き方を変えて出し直すと通る場合があります。\n"
+		// The gateway's accounting, not the answer: a transient worth
+		// sending the same ticket again for. Told as the opposite before
+		// (review of #122).
+		case strings.HasPrefix(cause, worker.GatewayBookkeepingPhrase):
+			return "受付の AI (" + stage + ") との通信の記録が壊れていたため、答えを受け取れませんでした。" +
+				"聞き直しても同じでした。一時的なことが多いため、同じ依頼をそのまま出し直すと通る場合があります。\n"
+		case strings.HasPrefix(cause, worker.AnswerUnusablePhrase):
 			return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
 				"聞き直しても同じでした。同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。" +
 				"運用担当者が受付の設定を確認します。\n"

@@ -827,7 +827,10 @@ func TestTheFailuresTheRunnerReadsBeginWithThePhrasesItKeysOff(t *testing.T) {
 	}{
 		{errModelAllowanceSpent, TransportFailedPhrase},
 		{errModelResponseUpstream, ProviderEndedTurnPhrase},
-		{errModelResponseMetadata, ShapeRefusedPhrase},
+		{errModelResponseMetadata, GatewayBookkeepingPhrase},
+		{errModelResponseContent, AnswerUnusablePhrase},
+		{errModelResponseRefused, DeclinedOverContentPhrase},
+		{errModelResponseTruncated, CutoffPhrase},
 	} {
 		if !strings.HasPrefix(pair.err.Error(), pair.phrase) {
 			t.Errorf("%q does not begin with %q", pair.err.Error(), pair.phrase)
@@ -874,4 +877,39 @@ func TestEveryTransportFailureCarriesThePhraseTheRunnerReads(t *testing.T) {
 	if callErr == nil || !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
 		t.Errorf("a connection that did not open: %v", callErr)
 	}
+}
+
+// A finish_reason the engine does not know is not a cutoff, so the turn
+// must not pay a second call with the allowance doubled for it. Wrapping
+// its failure in errModelResponseTruncated did exactly that (measured,
+// review of #122): the phrase is shared with the cutoff, the identity is
+// not.
+func TestAnUnknownFinishReasonIsNotAskedAgainAsACutoff(t *testing.T) {
+	for _, reason := range []string{"tool_calls", "length_exceeded"} {
+		var seen []int32
+		invoker := &ModelInvoker{api: &finishReasonChatAPI{reason: reason, allowances: &seen}}
+		_, _, err := invoker.converseTurn(context.Background(),
+			ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+		if err == nil {
+			t.Fatalf("%s reported an answer", reason)
+		}
+		if len(seen) != 1 {
+			t.Errorf("%s: allowances = %v, want one call at the allowance it was given", reason, seen)
+		}
+	}
+}
+
+// finishReasonChatAPI always ends the turn with the given finish_reason and
+// records the output allowance each call was made with.
+type finishReasonChatAPI struct {
+	reason     string
+	allowances *[]int32
+}
+
+func (f *finishReasonChatAPI) ChatCompletions(_ context.Context, endpoint ModelEndpoint, _ ChatRequest) (*ChatResponse, error) {
+	*f.allowances = append(*f.allowances, endpoint.MaxOutputTokens)
+	return &ChatResponse{
+		Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "{}"}, FinishReason: f.reason}},
+		Usage:   &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}, nil
 }

@@ -93,11 +93,11 @@ type ChatChoice struct {
 // (live 2026-09-05: one such response ended an 18-probe investigation as
 // model_failed). Each carries the detail that failed, as counts only.
 var (
-	errModelResponseMetadata = errors.New(ShapeRefusedPhrase)
-	errModelResponseContent  = errors.New("model response content is invalid")
+	errModelResponseMetadata = errors.New(GatewayBookkeepingPhrase)
+	errModelResponseContent  = errors.New(AnswerUnusablePhrase)
 	// errModelResponseRefused is the provider declining one turn
 	// (finish_reason=content_filter): asked again once like the two above.
-	errModelResponseRefused = errors.New("model declined to answer the turn")
+	errModelResponseRefused = errors.New(DeclinedOverContentPhrase)
 	// errModelResponseTruncated marks a turn the provider ended at the output
 	// allowance (finish_reason=length): converseTurn asks the same turn once
 	// more with the allowance widened, below the configuration ceiling.
@@ -125,9 +125,21 @@ var (
 // state this pair was built to end (live 2026-09-09: a ticket whose comment
 // said model_failed and no more, with the cause only in the pod log).
 const (
-	// ShapeRefusedPhrase begins the failure of a turn whose answer never
-	// arrived in the shape the contract asks for.
-	ShapeRefusedPhrase = "model response metadata is invalid"
+	// GatewayBookkeepingPhrase begins the failure of a turn whose answer
+	// carried no usable accounting: no usage block, numbers that do not add
+	// up, or a request id outside its pattern. It says nothing about the
+	// answer itself — that is AnswerUnusablePhrase — and it is a gateway's
+	// transient, so the ticket is worth sending again. It was named for the
+	// answer's shape and told its requester the opposite (review of #122).
+	GatewayBookkeepingPhrase = "model response metadata is invalid"
+	// AnswerUnusablePhrase begins the failure of a turn whose answer could
+	// not be used: empty, past the size limit, or not one assistant message.
+	AnswerUnusablePhrase = "model response content is invalid"
+	// DeclinedOverContentPhrase begins the failure of a turn the model
+	// declined over what it was asked. The ticket's own words are in that
+	// question, so this is the one reception failure whose cause is most
+	// likely the ticket itself.
+	DeclinedOverContentPhrase = "model declined to answer the turn"
 	// ProviderEndedTurnPhrase begins the failure of a turn the provider
 	// ended with an error of its own, after converseTurn asked again.
 	ProviderEndedTurnPhrase = "the provider ended the turn with an error"
@@ -834,8 +846,12 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
-		return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s",
-			errModelResponseTruncated, output.Choices[0].FinishReason)
+		// Named by the same constant so the phrase cannot drift, but not
+		// wrapped: wrapping made errors.Is(err, errModelResponseTruncated)
+		// true for a finish_reason that has nothing to do with the output
+		// allowance, and the turn then paid a second call with the allowance
+		// doubled (measured, review of #122).
+		return "", InvocationUsage{}, errors.New(CutoffPhrase + ": finish_reason=" + output.Choices[0].FinishReason)
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {

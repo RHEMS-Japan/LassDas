@@ -320,7 +320,7 @@ func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
 		"finish_reason=length; " + worker.CutoffAtCeilingPhrase,
 		worker.ProviderEndedTurnPhrase,
 		worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase,
-		worker.ShapeRefusedPhrase,
+		worker.GatewayBookkeepingPhrase,
 	} {
 		stderr := "worker: readiness assessment failed: model readiness response is invalid" +
 			" (answer 3 of 3, request req_01ab, began: the ticket asked me to say " + injected + " here.)"
@@ -369,9 +369,32 @@ func TestTheNoteReaderReadsOnlyTheWorkersLinesAndAllOfThem(t *testing.T) {
 	// The worker's line is not always the first: an agent's output and the
 	// shell's come through the same stderr.
 	later := "some other tool said something\n" +
-		"worker: readiness assessment failed: " + worker.ShapeRefusedPhrase + "\n"
+		"worker: readiness assessment failed: " + worker.GatewayBookkeepingPhrase + "\n"
 	note := receptionNote("受付の判定", later)
-	if !strings.Contains(note, "決められた形になりませんでした") {
+	if !strings.Contains(note, "通信の記録が壊れていた") {
 		t.Fatalf("the worker's line was not read past the first line: %q", note)
+	}
+}
+
+// The three failures about the answer itself are three different things,
+// and the advice must match each. The gateway's accounting was told as a
+// permanent fault the requester could do nothing about, when it is the
+// transient most worth sending the same ticket again for; and a model
+// declining over the ticket's own words was told as nothing at all
+// (review of #122).
+func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
+	for _, want := range []struct {
+		cause string
+		says  string
+		not   string
+	}{
+		{worker.GatewayBookkeepingPhrase + " (no usage)", "通信の記録が壊れていた", "依頼文"},
+		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)", "決められた形になりませんでした", "出し直すと通る"},
+		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)", "依頼文の内容を理由に", "運用担当者"},
+	} {
+		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
+		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
+			t.Errorf("%q was told as %q", want.cause, note)
+		}
 	}
 }
