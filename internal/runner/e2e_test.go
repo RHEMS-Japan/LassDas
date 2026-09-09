@@ -268,3 +268,41 @@ func TestE2EVerificationComposesTheTarget(t *testing.T) {
 		t.Fatalf("verification = %q %q %q, %v", target, expected, absent, err)
 	}
 }
+
+// The pull-request destinations end here rather than at the staging report,
+// so the distinction has to reach this path too: a merge that landed with no
+// deployment created is not a merge whose completion could not be confirmed.
+func TestTheE2ECheckSeparatesADeployThatNeverStarted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{"the destination created no run", "controller: staging_deployment_absent", "実行を 1 つも作りませんでした"},
+		{"the merge itself could not be confirmed", "controller: feature_merge_wait_failed", "マージまたはステージング反映の完了を確認できませんでした"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipeline := e2ePipeline(t)
+			sealRounds(t, pipeline, 1)
+			if err := os.WriteFile(pipeline.path("feature-pr.json"), []byte(`{"payload":{"pull_request":{"Number":41}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(t.TempDir(), "controller.sh")
+			body := "#!/bin/sh\nprintf '%s\\n' \"" + tc.stderr + "\" >&2\nexit 1\n"
+			if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			pipeline.Config.ControllerBin = script
+			if err := pipeline.RunE2ECheck(context.Background()); err != nil {
+				t.Fatalf("RunE2ECheck() error = %v", err)
+			}
+			sealed, err := os.ReadFile(pipeline.path(E2EResultFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(sealed), tc.want) {
+				t.Fatalf("the sealed result does not say what happened (%q):\n%s", tc.want, sealed)
+			}
+		})
+	}
+}
