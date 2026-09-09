@@ -1155,6 +1155,14 @@ func TestASettingThatIsWrongIsNotAskedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A name that does not resolve is deliberately absent from the settled
+	// list: the pod's own resolver restarts. Putting it back passed every
+	// test (review of #125), so it is measured the other way below.
+	if _, callErr := client.ChatCompletions(context.Background(),
+		ModelEndpoint{Model: "m", BaseURL: "http://lassdas-no-such-host.invalid", APIKeyEnv: "LASSDAS_TEST_KEY"},
+		ChatRequest{Model: "m"}); callErr == nil || !strings.Contains(callErr.Error(), AttemptsExhaustedPhrase) {
+		t.Fatalf("a name that does not resolve was not asked again: %v", callErr)
+	}
 	for name, baseURL := range map[string]string{
 		"a certificate that does not verify": secure.URL,
 		"a scheme nothing speaks":            "gopher://127.0.0.1:1",
@@ -1274,7 +1282,30 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 	if callErr == nil {
 		t.Fatal("a dropped connection reported an answer")
 	}
-	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) || strings.Contains(callErr.Error(), "cancelled") {
+	// The cause itself, not merely the absence of a sentence about the wait:
+	// dropping the cause entirely passed this before (review of #125).
+	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) ||
+		strings.Contains(callErr.Error(), "cancelled") ||
+		len(callErr.Error()) <= len(TransportFailedPhrase) {
 		t.Fatalf("the failure that prompted the wait did not travel: %q", callErr.Error())
+	}
+}
+
+// The wait counts against the allowance too, so the guard must include it:
+// dropping the term left every test green (review of #125). A call with just
+// enough left for another attempt but not for the wait before it must stop.
+func TestTheGuardCountsTheWaitAsWellAsTheAttempt(t *testing.T) {
+	restore := gatewayRetryPauses
+	gatewayRetryPauses = []time.Duration{time.Second}
+	t.Cleanup(func() { gatewayRetryPauses = restore })
+	ctx, cancel := context.WithTimeout(context.Background(), 1050*time.Millisecond)
+	defer cancel()
+	// The call has room for another attempt of a tenth of a second, but not
+	// for that attempt behind a one-second wait.
+	if roomForAnotherAttempt(ctx, gatewayRetryPauses[0], 100*time.Millisecond) {
+		t.Fatal("the guard counted the attempt without the wait before it")
+	}
+	if !roomForAnotherAttempt(ctx, 0, 100*time.Millisecond) {
+		t.Fatal("the guard refused an attempt the call had time for")
 	}
 }
