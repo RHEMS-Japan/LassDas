@@ -33,11 +33,9 @@ const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 // the way it attaches a delivery's trail. Best-effort: an unwritable trail
 // must not change the outcome.
 func (p *Pipeline) noteReceptionCutoff(stage string) {
-	note := receptionNote(stage, p.lastStepStderr)
-	if note == "" {
-		return
-	}
-	if err := p.writeReceptionTrail(note); err != nil {
+	// receptionNote always has something to say — its last resort is a note
+	// of its own — so there is no empty case to skip (review of #126).
+	if err := p.writeReceptionTrail(receptionNote(stage, p.lastStepStderr)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
 }

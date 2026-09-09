@@ -111,8 +111,10 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 	if outcome, err := linked.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
+	// Errorf, not Fatalf: the assertion below reads the same breakage in
+	// words a person can act on, and stopping here hid it (review of #126).
 	if info, err := os.Lstat(linked.path("m1-trail.txt")); err != nil || info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("the trail path is still a symlink: %v %v", info, err)
+		t.Errorf("the trail path is still a symlink: %v %v", info, err)
 	}
 	if content, _ := os.ReadFile(outside); string(content) != "untouched\n" {
 		t.Fatalf("the note was written outside the workspace: %q", content)
@@ -124,7 +126,8 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 // neither when the worker's words say nothing more.
 func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	again := receptionNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
-	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") || strings.Contains(again, "最大値") {
+	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") ||
+		!strings.Contains(again, "運用担当者が受付モデルの出力上限を確認します") || strings.Contains(again, "最大値") {
 		t.Fatalf("cut off again: %q", again)
 	}
 	ceiling := receptionNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
@@ -202,7 +205,10 @@ func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
 // reason lived in the pod log (live, 2026-09-09).
 func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 	note := receptionNote(deriveStage, "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)")
-	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前"} {
+	// The advice is the third sentence and was the only part not required:
+	// this is the one reception failure a requester can fix themselves, so
+	// losing it leaves them told they are stuck and not how (review of #126).
+	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前", "書き足せば通る見込み"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the note lacks %q: %q", want, note)
 		}
@@ -279,6 +285,11 @@ func TestAnUnnamedReceptionFailureStillLeavesANote(t *testing.T) {
 	// It must claim neither that a model answered nor that the ticket is
 	// blameless: a reception failure can happen before any model call, and
 	// a model can refuse over what the ticket asks for.
+	for _, says := range []string{"理由はこの記録からは特定できていません", "運用担当者が実行記録で確認します"} {
+		if !strings.Contains(text, says) {
+			t.Errorf("the last-resort note lost %q: %q", says, text)
+		}
+	}
 	for _, claim := range []string{"AI", "依頼の内容ではなく"} {
 		if strings.Contains(text, claim) {
 			t.Fatalf("the last-resort note claims %q: %q", claim, text)
@@ -339,13 +350,26 @@ func TestASpentAllowanceReachesTheRequesterToo(t *testing.T) {
 // the cutoff marker was shown the cutoff note, and could pick which of its
 // three forms it was shown.
 func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
+	// Every phrase the reader keys off, and the combinations each note needs.
+	// Three of them were missing, so turning those three position checks into
+	// "anywhere on the line" left every test green (review of #126).
 	for _, injected := range []string{
 		"finish_reason=length",
-		"finish_reason=length; " + worker.CutoffAskedAgainPhrase,
-		"finish_reason=length; " + worker.CutoffAtCeilingPhrase,
+		worker.CutoffPhrase + ": finish_reason=length",
+		worker.CutoffPhrase + ": finish_reason=length; " + worker.CutoffAskedAgainPhrase,
+		worker.CutoffPhrase + ": finish_reason=length; " + worker.CutoffAtCeilingPhrase,
 		worker.ProviderEndedTurnPhrase,
+		worker.TransportFailedPhrase,
 		worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase,
+		worker.TransportFailedPhrase + " with status 503 after 4" + worker.AttemptsExhaustedPhrase,
+		worker.TransportFailedPhrase + " with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
+		worker.LimitNotLiftedPhrase,
+		worker.RetryAfterTooLongPhrase,
+		worker.AttemptsExhaustedPhrase,
 		worker.GatewayBookkeepingPhrase,
+		worker.AnswerUnusablePhrase,
+		worker.DeclinedOverContentPhrase,
+		worker.NoTargetFileChosen,
 	} {
 		stderr := "worker: readiness assessment failed: model readiness response is invalid" +
 			" (answer 3 of 3, request req_01ab, began: the ticket asked me to say " + injected + " here.)"
@@ -375,13 +399,13 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls",
 			[]string{"聞き直した上での結果", "もう一度動かせば通る見込み"}, "利用の上限"},
 		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
-			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "動かせば通る見込み"},
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase,
-			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "動かせば通る見込み"},
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed with status 401",
-			[]string{"問い合わせが通りませんでした", "設定か接続の問題"}, "動かせば通る見込み"},
+			[]string{"問い合わせが通りませんでした", "設定か接続の問題", "運用担当者が原因を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed: dial tcp: connection refused",
-			[]string{"問い合わせが通りませんでした", "設定か接続の問題"}, "聞き直した上での結果"},
+			[]string{"問い合わせが通りませんでした", "設定か接続の問題", "運用担当者が原因を確認します"}, "聞き直した上での結果"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
 		for _, says := range want.says {
@@ -429,11 +453,11 @@ func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 		not   string
 	}{
 		{worker.GatewayBookkeepingPhrase + " (no usage)",
-			[]string{"通信の記録が壊れていた", "もう一度動かせば通る見込み"}, "依頼文"},
+			[]string{"通信の記録が壊れていた", "聞き直しても同じでした", "もう一度動かせば通る見込み"}, "依頼文"},
 		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)",
-			[]string{"決められた形になりませんでした", "動かし直しても同じ結果"}, "動かせば通る見込み"},
+			[]string{"決められた形になりませんでした", "聞き直しても同じでした", "動かし直しても同じ結果", "運用担当者が受付の設定を確認します"}, "動かせば通る見込み"},
 		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)",
-			[]string{"依頼文の内容を理由に", "書き方を変えれば通る見込み"}, "運用担当者"},
+			[]string{"依頼文の内容を理由に", "聞き直しても同じでした", "書き方を変えれば通る見込み"}, "運用担当者"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
 		for _, says := range want.says {
@@ -522,8 +546,10 @@ func TestARecordTheGateCouldNotAcceptAlsoLeavesAReason(t *testing.T) {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	text := readReceptionTrail(t, pipeline)
-	if !strings.Contains(text, "記録を読めなかった") || !strings.Contains(text, "受付の確認") {
-		t.Fatalf("a record the gate could not accept left no reason: %q", text)
+	for _, says := range []string{"記録を読めなかった", "受付の確認", "依頼の内容とは別のところで止まっています", "運用担当者が記録を確認します"} {
+		if !strings.Contains(text, says) {
+			t.Errorf("a record the gate could not accept left out %q: %q", says, text)
+		}
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
 		t.Fatalf("the trail would be refused by the report: %v", err)
@@ -544,5 +570,21 @@ func TestNoNoteRepeatsTheStagesOwnPrefix(t *testing.T) {
 				t.Errorf("the note repeats the stage's own prefix: %q", note)
 			}
 		}
+	}
+}
+
+// The requester is told which stage stopped, and the two model stages are
+// separate. Only the first was measured, so the second could name the first
+// and nothing would say so (review of #126).
+func TestTheNoteNamesTheStageThatActuallyStopped(t *testing.T) {
+	stub := receptionStubWorker(t, "check-readiness",
+		"worker: readiness check failed: "+worker.DeclinedOverContentPhrase+" (finish_reason=content_filter)")
+	pipeline := receptionPipeline(t, stub)
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
+	}
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "受付の確認") || strings.Contains(text, "受付の判定") {
+		t.Fatalf("the note names the wrong stage: %q", text)
 	}
 }
