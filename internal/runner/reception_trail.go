@@ -78,20 +78,35 @@ func receptionCauseNote(stage, cause string) string {
 	// provider's own error, and the one gateway status that comes
 	// after its retries were spent. Only these three may tell a
 	// requester that sending the same ticket again is worth doing.
-	case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase) && !limitThatWaitingDoesNotLift(cause),
-		strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
-		strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase) &&
-			!limitThatWaitingDoesNotLift(cause):
+	case !limitReported(cause) &&
+		(strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase) ||
+			strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase) ||
+			(strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase))):
 		return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
 			"何度か聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
 			"同じ依頼をもう一度動かせば通る見込みです。\n"
-	// A limit that waiting does not lift. An exhausted balance is one
-	// of these, and telling its requester to send the ticket again
-	// would send them round the same wall with nobody looking at the
-	// balance.
-	case strings.HasPrefix(cause, worker.TransportFailedPhrase) && limitThatWaitingDoesNotLift(cause):
+	// A limit no wait lifts — a 429 the gateway sent with no time to wait
+	// for. An exhausted balance is one of these, and telling its requester
+	// to send the ticket again would send them round the same wall with
+	// nobody looking at the balance.
+	//
+	// Either of the worker's own openings may carry it: a limit is a limit
+	// whoever reported it, and requiring only the transport's opening left
+	// the provider's own ending with no arm at all once it stopped being
+	// told as congestion. Keyed on the phrase ALONE it would be worse than
+	// either: a ticket whose own words reach the head of an answer could
+	// then choose this note for itself (caught by the test that exists for
+	// exactly that).
+	case reportedByTheTransportOrTheProvider(cause) && strings.Contains(cause, worker.LimitNotLiftedPhrase):
 		return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
 			"時間をおいて動かし直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
+	// A limit with a time on it, longer than the turn is willing to wait.
+	// This one DOES lift: saying it does not would send the requester away
+	// from a ticket that goes through in a few minutes (review of #133).
+	case reportedByTheTransportOrTheProvider(cause) && strings.Contains(cause, worker.RetryAfterTooLongPhrase):
+		return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
+			"待つよう指定された時間が自動処理の待てる長さを超えていたため、待たずに止めています。" +
+			"しばらく時間をおいてから同じ依頼を動かし直すと通る見込みです。\n"
 	// Everything else the transport reports: a status that is not
 	// retried at all (a setting or a credential), a connection that
 	// did not open, a wait that was cut short. Nothing was asked
@@ -120,16 +135,30 @@ func receptionCauseNote(stage, cause string) string {
 	return ""
 }
 
-// limitThatWaitingDoesNotLift reports whether the transport said the wall is
-// one that time does not move. It is one definition rather than a condition
-// written twice because it decides, on its own, which of two opposite things
-// a requester is told: that the same ticket is worth sending again, or that
-// it will meet the same wall until someone looks at the balance. A cause can
-// carry both this and the count of attempts — nothing in the worker emits
-// that pair today, but which arm answered it used to depend only on which
-// was written first, and the wrong one tells an exhausted balance to try
-// again (found by the review of #131).
-func limitThatWaitingDoesNotLift(cause string) bool {
+// limitReported reports whether the transport said this was a limit, of
+// either kind. It exists because a limit and a count of attempts arrive
+// together on the ordinary path — a 429 is asked again, so the one that
+// ends the call is usually not the first — and whichever arm is written
+// first would otherwise answer. The wrong one tells an exhausted balance
+// that running the same ticket again is worth doing.
+//
+// That pairing is what the worker emits, held by
+// internal/worker TestALimitStaysALimitAfterTheFirstAnswer rather than
+// asserted here: a sentence in this file about what another package writes
+// is the shape that has already been wrong three times.
+//
+// The two kinds are told apart below rather than here: one lifts with time
+// and one does not, and a requester acts differently on each.
+// reportedByTheTransportOrTheProvider reports whether the cause opens with
+// one of the two things the worker itself writes. It is what keeps a note
+// from being chosen by words that came from the ticket: the cause can carry
+// the head of a model answer, and a ticket's words reach that answer.
+func reportedByTheTransportOrTheProvider(cause string) bool {
+	return strings.HasPrefix(cause, worker.TransportFailedPhrase) ||
+		strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase)
+}
+
+func limitReported(cause string) bool {
 	return strings.Contains(cause, worker.LimitNotLiftedPhrase) ||
 		strings.Contains(cause, worker.RetryAfterTooLongPhrase)
 }

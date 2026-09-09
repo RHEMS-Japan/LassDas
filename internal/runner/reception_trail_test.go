@@ -52,7 +52,9 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 	text := string(content)
 	// 答えが長すぎて names the cause; without it the note says an output was
 	// cut off and never says by what (review of #131).
-	if !strings.Contains(text, "答えが長すぎて出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
+	if !strings.Contains(text, "答えが長すぎて出力の上限で途切れた") || !strings.Contains(text, "自動処理を止めました") ||
+		!strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") ||
+		!strings.Contains(text, "それでも途切れました") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
 		t.Fatalf("the trail does not name the cause in the requester's words: %q", text)
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
@@ -130,12 +132,19 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 // neither when the worker's words say nothing more.
 func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	again := receptionNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
+	// 「〜しましたが」 promises an outcome; without 「それでも途切れました」 the
+	// sentence hands the contrast to the advice that follows and says
+	// nothing about what the second ask did (review of #133).
 	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") ||
+		!strings.Contains(again, "それでも途切れました") ||
 		!strings.Contains(again, "運用担当者が受付モデルの出力上限を確認します") || strings.Contains(again, "最大値") {
 		t.Fatalf("cut off again: %q", again)
 	}
 	ceiling := receptionNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
-	if !strings.Contains(ceiling, "受付の確認") || !strings.Contains(ceiling, "聞き直しはできませんでした") || strings.Contains(ceiling, "1 回聞き直し") {
+	// And the reason it could not: without 「上限は既に最大値だったため、」 the
+	// note says a re-ask was impossible and never says why.
+	if !strings.Contains(ceiling, "受付の確認") || !strings.Contains(ceiling, "上限は既に最大値だったため") ||
+		!strings.Contains(ceiling, "聞き直しはできませんでした") || strings.Contains(ceiling, "1 回聞き直し") {
 		t.Fatalf("at the ceiling: %q", ceiling)
 	}
 	// The worker never writes a naked marker: the cutoff always travels as
@@ -223,7 +232,8 @@ func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 	// losing it leaves them told they are stuck and not how (review of #126).
 	// The worked example is the whole remedy: without it the note asks for
 	// "変更するファイルの位置" and shows none (review of #131).
-	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前",
+	for _, want := range []string{"変更するファイルを決められなかった", "自動処理を止めました", "契約の導出",
+		"依頼に書かれたファイルがリポジトリに見つからず", "新しく作るファイルの名前",
 		"例: docs/ の下に新しく作るなら、その相対パス", "書き足せば通る見込み"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the note lacks %q: %q", want, note)
@@ -431,12 +441,20 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 		// exhausted balance round the same wall.
 		{worker.TransportFailedPhrase + ": status 429 after 3" + worker.AttemptsExhaustedPhrase + " (" + worker.LimitNotLiftedPhrase + ")",
 			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "もう一度動かせば通る見込み"},
+		// The provider's own ending carries no count, so its arm had no
+		// guard at all: a limit arriving that way was told as congestion
+		// (review of #133).
+		{worker.ProviderEndedTurnPhrase + " (" + worker.LimitNotLiftedPhrase + ")",
+			[]string{"利用の上限", "運用担当者が利用枠を確認します"}, "一時的な混雑"},
 		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " (" + worker.RetryAfterTooLongPhrase + ")",
-			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "もう一度動かせば通る見込み"},
+			[]string{"利用の上限", "しばらく時間をおいてから"}, "一時的な混雑"},
 		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
 			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
+		// A limit with a time on it lifts. Saying it does not would send the
+		// requester away from a ticket that goes through in a few minutes.
 		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase,
-			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
+			[]string{"利用の上限", "自動処理の待てる長さを超えて", "しばらく時間をおいてから同じ依頼を動かし直すと通る見込み"},
+			"時間をおいて動かし直しても同じ結果"},
 		{"model invocation failed with status 401",
 			[]string{"問い合わせが通りませんでした", "設定か接続の問題",
 				"同じ依頼を動かし直しても同じ結果になることがあります", "運用担当者が原因を確認します"}, "動かせば通る見込み"},
@@ -496,7 +514,7 @@ func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 		// transport note carries, and the same one nothing measured: it is
 		// what makes "asking again will work" follow "asking again did not".
 		{worker.GatewayBookkeepingPhrase + " (no usage)",
-			[]string{"通信の記録が壊れていた", "聞き直しても同じでした", "一時的なことが多いため", "もう一度動かせば通る見込み"}, "依頼文"},
+			[]string{"通信の記録が壊れていた", "答えを受け取れませんでした", "聞き直しても同じでした", "一時的なことが多いため", "もう一度動かせば通る見込み"}, "依頼文"},
 		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)",
 			[]string{"決められた形になりませんでした", "聞き直しても同じでした", "動かし直しても同じ結果", "運用担当者が受付の設定を確認します"}, "動かせば通る見込み"},
 		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)",
@@ -556,6 +574,21 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 			if strings.Contains(note, instruction) {
 				t.Errorf("a note instructs the requester (%q): %q", instruction, note)
 			}
+		}
+		// A note that opens a bracket closes it. The stage name sits inside
+		// one, and the joining words around it were free to delete: losing
+		// 「) に問い合わせましたが、」 left the stage name running into the next
+		// sentence with the bracket never closed, and nothing failed
+		// (review of #133).
+		if strings.Count(note, "(") != strings.Count(note, ")") {
+			t.Errorf("a note leaves a bracket open: %q", note)
+		}
+		// Every note says the run stopped or says what to expect instead.
+		// 「自動処理を止めました。」 was free to delete from three of them, and
+		// without it the requester is never told the run ended.
+		if !strings.Contains(note, "自動処理を止めました") && !strings.Contains(note, "見込みです") &&
+			!strings.Contains(note, "確認します") {
+			t.Errorf("a note never says the run stopped nor what to expect: %q", note)
 		}
 		// And none of them carries the worker's own words. The cause a note
 		// is chosen from carries the head of a model answer, and a ticket's
