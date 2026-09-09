@@ -124,6 +124,9 @@ func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T
 		if env["HERMES_KANBAN_BOARD"] != runtime.HermesBoard || len(config.Agents.ReviewerAgents) != 2 {
 			t.Fatal("runtime/profile identity mismatch")
 		}
+		if env["LASSDAS_BOARD_AUTH"] != "local" || env["LASSDAS_BOARD_USER"] != "" || env["LASSDAS_BOARD_PASS"] != "" {
+			t.Fatal("local init must generate a board without authentication credentials")
+		}
 		if separate != (len(config.Models.DesignReviewers) == 2) || separate != (len(config.Agents.DesignReviewerAgents) == 2) {
 			t.Fatal("partial design review binding")
 		}
@@ -216,6 +219,9 @@ func TestStartResumeKeepsRunningInstanceAndLocalrunAcceptsGeneratedEnvironment(t
 	}
 	if runtime.starts != 2 || runtime.stops != 1 {
 		t.Fatalf("resume restarted the instance: %+v", runtime)
+	}
+	if secrets["LASSDAS_BOARD_USER"] != "" || secrets["LASSDAS_BOARD_PASS"] != "" || secrets["LASSDAS_BOARD_AUTH"] != "local" {
+		t.Fatal("resume would restore obsolete board credentials")
 	}
 	manager := localrun.Manager{Docker: noContainerDocker{}}
 	status, err := manager.Start(context.Background(), localrun.Instance{ID: s.Project, Dir: dir, Image: s.Image, EngineSHA: s.EngineSHA, DockerContext: s.DockerContext, BoardPort: s.BoardPort})

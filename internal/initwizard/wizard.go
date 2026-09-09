@@ -577,14 +577,6 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 	if err := w.modelKeys(s, secrets, false); err != nil {
 		return err
 	}
-	if secrets["LASSDAS_BOARD_PASS"] == "" {
-		password, err := randomHex(16)
-		if err != nil {
-			return err
-		}
-		secrets["LASSDAS_BOARD_PASS"] = password
-		secrets["LASSDAS_BOARD_USER"] = "operator"
-	}
 	repairKeys := func() error {
 		if err := w.confirm(s, "鍵を再入力して全身元を再検査します"); err != nil {
 			return err
@@ -678,6 +670,8 @@ func (w *Wizard) start(ctx context.Context, s *State, secrets Secrets, dir strin
 	if err = Save(dir, s, env); err != nil {
 		return err
 	}
+	delete(secrets, "LASSDAS_BOARD_USER")
+	delete(secrets, "LASSDAS_BOARD_PASS")
 	for key, value := range env {
 		secrets[key] = value
 	}
@@ -692,7 +686,7 @@ func (w *Wizard) start(ctx context.Context, s *State, secrets Secrets, dir strin
 		return errors.New("本体の起動検査記録がありません")
 	}
 	s.Checks["runtime"] = result
-	w.UI.Info(fmt.Sprintf("板: http://127.0.0.1:%d (user: operator、password は %s の LASSDAS_BOARD_PASS。画面・ログには出しません)", s.BoardPort, filepath.Join(dir, "runtime.env")))
+	w.UI.Info(fmt.Sprintf("板: http://127.0.0.1:%d (ローカル閲覧用・認証不要)", s.BoardPort))
 	return nil
 }
 

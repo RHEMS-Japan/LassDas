@@ -122,12 +122,17 @@ func prepare(i Instance) (prepared, error) {
 			return prepared{}, fmt.Errorf("runtime.env %s must match the local runtime configuration", key)
 		}
 	}
-	for _, key := range []string{"TARGET_GITHUB_TOKEN", "BACKLOG_API_KEY", "LASSDAS_GATEWAY_BASE_URL", "LASSDAS_BOARD_USER", "LASSDAS_IMPLEMENTER_KEY", "LASSDAS_REVIEW_A_KEY", "LASSDAS_REVIEW_B_KEY", "LASSDAS_DESIGNER_KEY", "LASSDAS_APPLIER_KEY", "LASSDAS_INTAKE_TARGET_KEY", "LASSDAS_READINESS_ASSESSOR_KEY", "LASSDAS_READINESS_CHECKER_KEY"} {
+	for _, key := range []string{"TARGET_GITHUB_TOKEN", "BACKLOG_API_KEY", "LASSDAS_GATEWAY_BASE_URL", "LASSDAS_IMPLEMENTER_KEY", "LASSDAS_REVIEW_A_KEY", "LASSDAS_REVIEW_B_KEY", "LASSDAS_DESIGNER_KEY", "LASSDAS_APPLIER_KEY", "LASSDAS_INTAKE_TARGET_KEY", "LASSDAS_READINESS_ASSESSOR_KEY", "LASSDAS_READINESS_CHECKER_KEY"} {
 		if strings.TrimSpace(env[key]) == "" {
 			return prepared{}, fmt.Errorf("runtime.env %s is required", key)
 		}
 	}
-	if strings.Contains(env["LASSDAS_BOARD_USER"], ":") || len(env["LASSDAS_BOARD_PASS"]) < 16 || strings.TrimSpace(env["LASSDAS_BOARD_PASS"]) != env["LASSDAS_BOARD_PASS"] {
+	switch env["LASSDAS_BOARD_AUTH"] {
+	case "", "basic", "local":
+	default:
+		return prepared{}, errors.New("board authentication mode must be basic or local")
+	}
+	if env["LASSDAS_BOARD_AUTH"] != "local" && (strings.TrimSpace(env["LASSDAS_BOARD_USER"]) == "" || strings.Contains(env["LASSDAS_BOARD_USER"], ":") || len(env["LASSDAS_BOARD_PASS"]) < 16 || strings.TrimSpace(env["LASSDAS_BOARD_PASS"]) != env["LASSDAS_BOARD_PASS"]) {
 		return prepared{}, errors.New("board user must not contain a colon and board password must have at least 16 characters without surrounding whitespace")
 	}
 	trio := 0
@@ -138,6 +143,9 @@ func prepare(i Instance) (prepared, error) {
 	}
 	if trio != 0 && trio != 3 {
 		return prepared{}, errors.New("optional board tracker settings must be provided together")
+	}
+	if env["LASSDAS_BOARD_AUTH"] == "local" && trio != 0 {
+		return prepared{}, errors.New("the local board is read-only and does not accept tracker action credentials")
 	}
 	for _, letter := range []string{"A", "B"} {
 		keyVar := "LASSDAS_DESIGN_REVIEW_" + letter + "_KEY_VAR"
@@ -191,7 +199,7 @@ func sensitive(key string) bool {
 func allowedEnvironment(key string) bool {
 	switch key {
 	case "LASSDAS_RUNTIME_CONFIG", "LASSDAS_STATE_DIR", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "LASSDAS_AGENT_TREE_ROOT", "LASSDAS_GUARDED_FILES",
-		"TARGET_GITHUB_TOKEN", "BACKLOG_API_KEY", "LASSDAS_GATEWAY_BASE_URL", "LASSDAS_BOARD_USER", "LASSDAS_BOARD_PASS",
+		"TARGET_GITHUB_TOKEN", "BACKLOG_API_KEY", "LASSDAS_GATEWAY_BASE_URL", "LASSDAS_BOARD_AUTH", "LASSDAS_BOARD_USER", "LASSDAS_BOARD_PASS",
 		"LASSDAS_BOARD_TRACKER_KEY", "LASSDAS_BOARD_TRACKER_ORIGIN", "LASSDAS_BOARD_TRACKER_SPACE", "LASSDAS_DESIGN_REVIEW_A_KEY_VAR", "LASSDAS_DESIGN_REVIEW_B_KEY_VAR":
 		return true
 	}

@@ -55,6 +55,9 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	for k, v := range secrets {
 		env[k] = v
 	}
+	delete(env, "LASSDAS_BOARD_USER")
+	delete(env, "LASSDAS_BOARD_PASS")
+	env["LASSDAS_BOARD_AUTH"] = "local"
 	for _, role := range allRoles(s) {
 		endpoint, ok := s.Models[role]
 		if !ok {
@@ -99,8 +102,8 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	for k, v := range map[string]string{"LASSDAS_RUNTIME_CONFIG": "/etc/lassdas/config/runtime.json", "LASSDAS_STATE_DIR": "/data", "HERMES_KANBAN_DB": "/data/kanban.db", "LASSDAS_AGENT_TREE_ROOT": "/data/runs", "HERMES_KANBAN_BOARD": board, "LASSDAS_GATEWAY_BASE_URL": s.BaseURL, "LASSDAS_GUARDED_FILES": "/data/secrets/target-token:/data/secrets/board-pass:/data/secrets/board-tracker-key:/data/route.key"} {
 		env[k] = v
 	}
-	if env["TARGET_GITHUB_TOKEN"] == "" || env["BACKLOG_API_KEY"] == "" || len(env["LASSDAS_BOARD_PASS"]) < 16 || env["LASSDAS_BOARD_USER"] == "" {
-		return config, runtime, nil, errors.New("本体の常用鍵または板の認証が未設定です")
+	if env["TARGET_GITHUB_TOKEN"] == "" || env["BACKLOG_API_KEY"] == "" {
+		return config, runtime, nil, errors.New("本体の常用鍵が未設定です")
 	}
 	return config, runtime, env, nil
 }

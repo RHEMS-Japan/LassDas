@@ -464,18 +464,17 @@ SERVE=$!
 # The status board: the requester-facing live view (and, when the
 # requester credential is mounted, the answer/Go/stop actions). Restarts
 # in place like the board UI backend — losing the viewer must never take
-# down a card mid-run. It refuses to start without adequate basic-auth
-# credentials (fail-closed), so the loop logs and retries rather than
-# exposing anything.
+# down a card mid-run. Basic authentication is required by default; the
+# explicit local mode serves a read-only board published to host loopback.
 statusboard_loop() {
   while true; do
     statusboard || echo "statusboard exited rc=$?" >&2
     sleep 5
   done
 }
-# Same gate the binary enforces (user + a password source): a partial
-# secret must not become a permanent 5-second crash loop.
-if [ -n "${LASSDAS_BOARD_USER:-}" ] && [ -n "${LASSDAS_BOARD_PASS_FILE:-}" ]; then
+# Local viewing is explicit; Basic mode needs both credential sources so
+# a partial secret does not become a permanent 5-second crash loop.
+if [ "${LASSDAS_BOARD_AUTH:-}" = local ] || { [ -n "${LASSDAS_BOARD_USER:-}" ] && [ -n "${LASSDAS_BOARD_PASS_FILE:-}" ]; }; then
   statusboard_loop &
   STATUSBOARD=$!
 elif [ -n "${LASSDAS_BOARD_USER:-}" ]; then

@@ -209,6 +209,38 @@ func TestStartChecksIsolationAndAuthenticationAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestLocalBoardStartsWithoutCredentialsAndRejectsAuthenticationPrompt(t *testing.T) {
+	for _, open := range []bool{true, false} {
+		t.Run(fmt.Sprintf("open=%t", open), func(t *testing.T) {
+			i := fixture(t)
+			path := filepath.Join(i.Dir, "runtime.env")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := []string{"LASSDAS_BOARD_AUTH=local"}
+			for _, line := range strings.Split(string(raw), "\n") {
+				if !strings.HasPrefix(line, "LASSDAS_BOARD_USER=") && !strings.HasPrefix(line, "LASSDAS_BOARD_PASS=") {
+					lines = append(lines, line)
+				}
+			}
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600); err != nil {
+				t.Fatal(err)
+			}
+			m, d, board := managerFor(t, i)
+			board.open = open
+			s, err := m.Start(context.Background(), i)
+			if open {
+				if err != nil || s.State != "ready" || !slices.Equal(board.wants, []string{"/healthz:false", "/:false", "/api/board:false"}) {
+					t.Fatalf("local board startup = %+v, %v, checks %v", s, err, board.wants)
+				}
+			} else if err == nil || s.State != "stopped" || d.c.State.Running {
+				t.Fatalf("board requiring authentication was accepted: %+v, %v", s, err)
+			}
+		})
+	}
+}
+
 func TestRestartRetainsVolumeAndChangedRunningConfigRequiresStop(t *testing.T) {
 	i := fixture(t)
 	m, d, _ := managerFor(t, i)

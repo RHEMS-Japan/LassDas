@@ -128,7 +128,10 @@ config = json.load(open('/etc/lassdas/config/runtime.json'))
 assert os.environ['HERMES_KANBAN_BOARD'] == config['hermes_board']
 assert os.environ['HERMES_KANBAN_DB'] == '/data/kanban.db'
 assert os.environ['LASSDAS_AGENT_TREE_ROOT'] == config['chain']['runs_root']
-for path in ['/data/secrets/target-token', '/data/secrets/board-pass', '/data/route.key'] + (['/data/secrets/board-tracker-key'] if os.environ.get('LASSDAS_BOARD_TRACKER_KEY') else []):
+secrets = ['/data/secrets/target-token', '/data/route.key']
+if os.environ.get('LASSDAS_BOARD_AUTH') != 'local': secrets.append('/data/secrets/board-pass')
+if os.environ.get('LASSDAS_BOARD_TRACKER_KEY'): secrets.append('/data/secrets/board-tracker-key')
+for path in secrets:
     st = os.lstat(path)
     assert stat.S_ISREG(st.st_mode) and st.st_uid == 1000 and st.st_mode & 0o077 == 0 and st.st_size > 0
     with open(path, 'rb') as secret: assert secret.read(1)

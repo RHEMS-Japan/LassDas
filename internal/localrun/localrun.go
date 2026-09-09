@@ -344,11 +344,17 @@ func (m Manager) ready(ctx context.Context, p prepared, c *container) error {
 		client = &copy
 	}
 	base := fmt.Sprintf("http://127.0.0.1:%d", p.instance.BoardPort)
-	for _, check := range []struct {
+	checks := []struct {
 		path string
 		auth bool
 		want int
-	}{{"/healthz", false, http.StatusOK}, {"/", false, http.StatusUnauthorized}, {"/", true, http.StatusOK}} {
+	}{{"/healthz", false, http.StatusOK}, {"/", false, http.StatusUnauthorized}, {"/", true, http.StatusOK}}
+	if p.env["LASSDAS_BOARD_AUTH"] == "local" {
+		checks[1].want = http.StatusOK
+		checks[2].path = "/api/board"
+		checks[2].auth = false
+	}
+	for _, check := range checks {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+check.path, nil)
 		if err != nil {
 			return errors.New("could not prepare board check")
