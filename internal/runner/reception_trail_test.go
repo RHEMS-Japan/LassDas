@@ -191,11 +191,14 @@ func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 	// The requester's own words reach the model, and the model's answer
 	// reaches this stderr: a phrase in the answer must not choose the note.
 	echoed := `worker: contract derivation failed: model derive response is not the demanded strict json (answer 3 of 3, began: the ticket ` + worker.NoTargetFileChosen + ` so here is prose)`
-	if note := receptionCutoffNote(deriveStage, echoed); note != "" {
+	if note := receptionNote(deriveStage, echoed); note != unnamedReceptionNote(deriveStage) {
 		t.Errorf("an echoed answer chose the note: %q", note)
 	}
 	// The note explains a derivation, so the readiness stages never carry it.
-	if note := receptionCutoffNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != "" {
+	// Both of these asked receptionCutoffNote, which stopped answering for
+	// anything but a cutoff when the reader was rebuilt, so both passed on
+	// an empty string and measured nothing (review of #122).
+	if note := receptionNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != unnamedReceptionNote("受付の判定") {
 		t.Errorf("the readiness stage carried the derivation note: %q", note)
 	}
 }

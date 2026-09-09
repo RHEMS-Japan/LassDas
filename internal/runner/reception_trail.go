@@ -69,82 +69,65 @@ func receptionErrorText(line string) string {
 	return strings.TrimLeft(cause, " ")
 }
 
-// receptionCauseOf returns the worker's own cause on the last line whose
-// cause begins with the given phrase, or "" when no line does. Everything
-// the notes read comes through here, so a phrase can only be matched where
-// the worker wrote it.
-func receptionCauseOf(stderr, phrase string) string {
-	found := ""
-	for _, line := range strings.Split(stderr, "\n") {
-		if cause := receptionErrorText(line); strings.HasPrefix(cause, phrase) {
-			found = cause
-		}
-	}
-	return found
-}
-
 // receptionCauseNote renders the requester-facing note for the reception
 // failures that are not about the shape of one answer: the model could not
 // be reached, or it never answered in the shape the contract asks for. Both
 // are told as what happened and what the requester can do, because those are
 // the two things the note is for.
 func receptionCauseNote(stage, cause string) string {
-	// The worker's own ending line is the last one it writes, and the lines
-	// before it can be its own re-ask notices. Reading forwards would let a
-	// transient the run recovered from decide the note ahead of what
-	// actually ended the stage; the cutoff reader already read backwards, so
-	// the two agree now (review of #122).
-	{
-		switch {
-		// Asked again and still nothing: the spent allowance, the
-		// provider's own error, and the one gateway status that comes
-		// after its retries were spent. Only these three may tell a
-		// requester that sending the same ticket again is worth doing.
-		case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase),
-			strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
-			strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
-			return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
-				"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
-				"同じ依頼をもう一度動かせば通る見込みです。\n"
-		// A limit that waiting does not lift. An exhausted balance is one
-		// of these, and telling its requester to send the ticket again
-		// would send them round the same wall with nobody looking at the
-		// balance.
-		case strings.HasPrefix(cause, worker.TransportFailedPhrase) &&
-			(strings.Contains(cause, worker.LimitNotLiftedPhrase) || strings.Contains(cause, worker.RetryAfterTooLongPhrase)):
-			return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
-				"時間をおいて動かし直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
-		// Everything else the transport reports: a status that is not
-		// retried at all (a setting or a credential), a connection that
-		// did not open, a wait that was cut short. Nothing was asked
-		// again, so nothing here promises that asking again would help.
-		case strings.HasPrefix(cause, worker.TransportFailedPhrase):
-			return "受付の AI (" + stage + ") への問い合わせが通りませんでした。" +
-				"設定か接続の問題である可能性があり、同じ依頼を動かし直しても同じ結果になることがあります。" +
-				"運用担当者が原因を確認します。\n"
-		// The model declined over what it was asked. The ticket's own words
-		// are in that question, so this is the one reception failure worth
-		// telling its requester to look at their own wording for.
-		case strings.HasPrefix(cause, worker.DeclinedOverContentPhrase):
-			return "受付の AI (" + stage + ") が、依頼文の内容を理由に答えを断りました。" +
-				"聞き直しても同じでした。依頼文の書き方を変えれば通る見込みです。\n"
-		// The gateway's accounting, not the answer: a transient worth
-		// sending the same ticket again for. Told as the opposite before
-		// (review of #122).
-		case strings.HasPrefix(cause, worker.GatewayBookkeepingPhrase):
-			return "受付の AI (" + stage + ") との通信の記録が壊れていたため、答えを受け取れませんでした。" +
-				"聞き直しても同じでした。一時的なことが多いため、同じ依頼をもう一度動かせば通る見込みです。\n"
-		case strings.HasPrefix(cause, worker.AnswerUnusablePhrase):
-			return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
-				"聞き直しても同じでした。同じ依頼を動かし直しても同じ結果になる可能性が高いです。" +
-				"運用担当者が受付の設定を確認します。\n"
-		}
+	switch {
+	// Asked again and still nothing: the spent allowance, the
+	// provider's own error, and the one gateway status that comes
+	// after its retries were spent. Only these three may tell a
+	// requester that sending the same ticket again is worth doing.
+	case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase),
+		strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
+		strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
+		return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
+			"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
+			"同じ依頼をもう一度動かせば通る見込みです。\n"
+	// A limit that waiting does not lift. An exhausted balance is one
+	// of these, and telling its requester to send the ticket again
+	// would send them round the same wall with nobody looking at the
+	// balance.
+	case strings.HasPrefix(cause, worker.TransportFailedPhrase) &&
+		(strings.Contains(cause, worker.LimitNotLiftedPhrase) || strings.Contains(cause, worker.RetryAfterTooLongPhrase)):
+		return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
+			"時間をおいて動かし直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
+	// Everything else the transport reports: a status that is not
+	// retried at all (a setting or a credential), a connection that
+	// did not open, a wait that was cut short. Nothing was asked
+	// again, so nothing here promises that asking again would help.
+	case strings.HasPrefix(cause, worker.TransportFailedPhrase):
+		return "受付の AI (" + stage + ") への問い合わせが通りませんでした。" +
+			"設定か接続の問題である可能性があり、同じ依頼を動かし直しても同じ結果になることがあります。" +
+			"運用担当者が原因を確認します。\n"
+	// The model declined over what it was asked. The ticket's own words
+	// are in that question, so this is the one reception failure worth
+	// telling its requester to look at their own wording for.
+	case strings.HasPrefix(cause, worker.DeclinedOverContentPhrase):
+		return "受付の AI (" + stage + ") が、依頼文の内容を理由に答えを断りました。" +
+			"聞き直しても同じでした。依頼文の書き方を変えれば通る見込みです。\n"
+	// The gateway's accounting, not the answer: a transient worth
+	// sending the same ticket again for. Told as the opposite before
+	// (review of #122).
+	case strings.HasPrefix(cause, worker.GatewayBookkeepingPhrase):
+		return "受付の AI (" + stage + ") との通信の記録が壊れていたため、答えを受け取れませんでした。" +
+			"聞き直しても同じでした。一時的なことが多いため、同じ依頼をもう一度動かせば通る見込みです。\n"
+	case strings.HasPrefix(cause, worker.AnswerUnusablePhrase):
+		return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
+			"聞き直しても同じでした。同じ依頼を動かし直しても同じ結果になる可能性が高いです。" +
+			"運用担当者が受付の設定を確認します。\n"
 	}
 	return ""
 }
 
 // lastReceptionCause is the cause on the last line the worker wrote about
 // its own failure, or "" when it wrote none.
+// The worker's own ending line is the last one it writes, and the lines
+// before it can be its own re-ask notices; reading forwards would let a
+// transient the run recovered from decide the note ahead of what actually
+// ended the stage (review of #122).
 func lastReceptionCause(stderr string) string {
 	found := ""
 	for _, line := range strings.Split(stderr, "\n") {
