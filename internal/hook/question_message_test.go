@@ -184,6 +184,20 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 			t.Fatalf("marker %q is not unique across comment kinds", tt.marker)
 		}
 		seen[tt.marker] = true
+		// A local instance may explicitly use the requester's account for
+		// automation. Rendered notifications must still never act as answers
+		// or operator commands, even with matching author and valid timing.
+		decision, err := EvaluateAnswerIntake(AnswerIntakeInput{
+			Question: record, QuestionCommentID: 100, AnswererID: 7,
+			Comments: []BacklogComment{{CommentID: 101, UserID: 7, Body: tt.body, PostedAt: record.AnswerDeadlineAt - 1}},
+		})
+		if err != nil || decision.Adopted != nil || decision.Cancel != nil || len(decision.Replies) != 0 {
+			t.Fatalf("%s: automated comment acted as a requester answer: err=%v decision=%+v", tt.name, err, decision)
+		}
+		switch firstContentLine(tt.body) {
+		case "Go", "停止", "確認済み":
+			t.Fatalf("%s: automated comment acts as an operator command", tt.name)
+		}
 	}
 }
 

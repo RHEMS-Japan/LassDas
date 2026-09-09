@@ -61,7 +61,7 @@ lassdas run start / stop / status / logs
 | 設定 → /etc/lassdas/config (read-only) | runtime.json と consumer.json。/etc/lassdas 全体を覆うと tool-pins.txt が隠れるので禁止 |
 | init の台帳 | 非秘密の回答、段の入力の指紋、生成物 ID、検査結果、動作確認の相関 ID・issue ID・PR URL・所要時間。鍵の値やハッシュは含めない |
 
-常用の鍵は env ファイルに保存し、entrypoint が納品用トークンと板の鍵を /data/secrets/ の 0600 ファイルへ移す。管理者の鍵と動作確認の本人の鍵はメモリ限り。ログ・環境変数・コンテナ・設定へ渡さない。
+常用の鍵は env ファイルに保存し、entrypoint が納品用トークンと板の鍵を /data/secrets/ の 0600 ファイルへ移す。管理者の鍵と動作確認のためだけに入力した本人の鍵はメモリ限り。ログ・環境変数・コンテナ・設定へ渡さない。本人のキーを常用にも使うと明示確認した場合は、そのキーを運転用として保存する。
 
 台帳の「済み」は現在の認証の証明ではない。再開時は必要な鍵の疎通、repo と枝、image digest、設定、コンテナの実在を再検査する。失効はその段で止め、入力し直した常用鍵を原子的に保存する。`--redo <段名>` は依存する後段を未完了に戻す。稼働中の設定変更は対象コンテナを停止してから差し替え、他 project の状態を触らない。
 
@@ -71,7 +71,7 @@ lassdas run start / stop / status / logs
 |---|---|---|
 | 1 準備 | GitHub トークン、repo (remote があれば候補)、image 参照と対応ソース SHA | 認証後に private repo も読む。repo の数値 ID、枝の実在、Docker の接続・arm64、digest と pin を確認。取り込み枝は repo の規則を読み利用者が確認し、default branch と同じだと決め打たない |
 | 2 納品先 | cli 固定。範囲、上限、toolchain、install_command、verify_commands (1〜4)、verify_working_directory。Go/Node の構成から提案 | 同じ digest の使い捨てコンテナで、確定した枝 SHA の clone に対して版を測り、install と検証を実行。モデル/トラッカー鍵は入れず、clone 後は GitHub 鍵も除く。納品時と同じ worker の検証関数を B の入口から使う。ホストで通った結果で代用しない |
-| 3 入口 | トラッカー接続先、project、許可起票者 ID、bot の鍵。必要時だけ管理者の鍵 | project・利用者・bot の本人情報・カテゴリ・4 状態の対応を取得。既存列を再利用し、不足分の一覧を示して確認後に作成。現行 setup は追加列 2 本と既存状態を使うので「4 本新設」ではない。作成済み ID を再利用 |
+| 3 入口 | トラッカー接続先、project、許可起票者 ID、自動処理の鍵。必要時だけ管理者の鍵 | project・利用者・キーの持ち主・カテゴリ・4 状態の対応を取得。既存列を再利用し、不足分の一覧を示して確認後に作成。現行 setup は追加列 2 本と既存状態を使うので「4 本新設」ではない。作成済み ID を再利用 |
 | 4 モデル | URL、モデルと鍵 (§7)。会社名は認識できる接頭辞から提案、不明なら聞く | 本体と同じ設定検査と全身元の疎通。別身元の同じ鍵は拒否。consumer と env を同じ回答から生成。再開時も鍵を検査。API 呼出しの費用は実行前に案内 |
 | 5 本体 | 設定・保存先・板の接続先をまとめて確認 | §5 の設定読込、必須秘密ファイルの実在、別ユーザ起動、読取拒否、常駐の生存、板の認証成功と未認証拒否。ログの一語だけで成功判定しない。既存コンテナのラベル・設定指紋を照合し重複起動しない |
 | 6 動作確認 | 本人が外で取得した鍵、小変更の提案、作る依頼・枝・PR の確認 | 本人 API の ID と allowed_creator_id の一致。起票に必要な種別・優先度は実在一覧から解決。PR の差分と確定記録を確認 (§8)。本人の鍵は起票終了・中断で破棄、redo も再入力 |
@@ -79,6 +79,8 @@ lassdas run start / stop / status / logs
 GitHub の Contents/Pull requests の write は必要権限として案内する。repo の read 成功だけでは write を確認済みにしない。実際の枝と PR の作成成功で確定し、不足時は失敗した操作と必要権限を示す。設定や権限を変更して補わない。
 
 段 2 の image 内の入口は、B で既存 worker に加える薄い `check-consumer` サブコマンドとする。consumer の設定・repo-root・確定した base SHA を受け、既存の consumer 検査と検証関数を共有し、測定した toolchain・コマンドと終了結果を返す。モデル未設定のこの段で全体の models/agents は要求しない。現在の `run-validation` は ticket/source/candidate を必須にするため初期試走には流用しない。`docker run --entrypoint /usr/local/bin/worker … check-consumer …` として通常の常駐 entrypoint を起動しない。初期試走の記録を候補の封緘証拠として納品へ流用することもない。
+
+起票者本人のキーを自動処理にも使う場合は、自動コメント・状態更新も本人名義になり、投稿者 ID では手動操作と区別できないこと、運転用として `runtime.env` (0600) に保存することを確認する。同一 ID の拒否をこの明示確認に置き換え、再開時も確認する。この確認で中断したキーを新たに保存しない。許可起票者の ID と回答判定は変更しない。
 
 トラッカーの管理者鍵は、必要な列を作る権限が bot に無い場合に必要。作成後は破棄する。webhook は新設しない。起票者の根拠は `internal/receiver/event.go` と `internal/state/resume.go` の ID 厳密一致。bot を許可者へ一時変更せず、本人の鍵で確認する。
 
