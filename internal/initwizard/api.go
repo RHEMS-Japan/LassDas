@@ -175,7 +175,7 @@ func (w *Wizard) tracker(ctx context.Context, s *State, secrets Secrets, save fu
 		return err
 	}
 	if bot.ID <= 0 {
-		return errors.New("bot の本人情報を確認できません")
+		return errors.New("API キーの持ち主を確認できません")
 	}
 	var project struct {
 		ID         int64  `json:"id"`
@@ -193,8 +193,16 @@ func (w *Wizard) tracker(ctx context.Context, s *State, secrets Secrets, save fu
 	if err := w.API.Tracker(ctx, s, key, "GET", base+"/users", nil, &users); err != nil {
 		return err
 	}
-	if !containsID(users, s.Tracker.AllowedCreatorID) || s.Tracker.AllowedCreatorID == bot.ID {
-		return errors.New("許可起票者は project の利用者で、bot と異なる本人の ID にしてください")
+	if !containsID(users, s.Tracker.AllowedCreatorID) {
+		return errors.New("許可起票者は project の利用者の ID にしてください")
+	}
+	if s.Tracker.AllowedCreatorID == bot.ID {
+		if err := w.confirm(s, fmt.Sprintf("この API キーは起票者本人 (ID: %d) のものです。自動処理のコメントと状態更新も本人名義になり、投稿者 ID では手動操作と区別できません。キーはこの project の runtime.env (0600) に運転用として保存します。この名義で進めますか", bot.ID)); err != nil {
+			// Run saves entered runtime keys on interruption. A requester key
+			// declined for runtime use must not be included in that save.
+			delete(secrets, "BACKLOG_API_KEY")
+			return err
+		}
 	}
 	var categories, statuses []NamedID
 	if err := w.API.Tracker(ctx, s, key, "GET", base+"/categories", nil, &categories); err != nil {

@@ -64,8 +64,9 @@ type Metrics struct {
 	ExternalKeyAcquisition string  `json:"external_key_acquisition"`
 }
 
-// Secrets includes only runtime credentials. Administrator and requester keys
-// must never be put in this map: those belong to a single API operation.
+// Secrets includes only runtime credentials. Keys entered only for a single
+// administrator or smoke operation do not belong here. A requester key may
+// also serve as BACKLOG_API_KEY after explicit confirmation of runtime use.
 type Secrets map[string]string
 
 func ProjectDir(home, project string) (string, error) {

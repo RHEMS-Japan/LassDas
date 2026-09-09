@@ -85,10 +85,11 @@ func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T
 }
 
 type fakeUI struct {
-	answers   map[string]string
-	approve   bool
-	messages  []string
-	questions []string
+	answers       map[string]string
+	approve       bool
+	messages      []string
+	questions     []string
+	confirmations []string
 }
 
 func (u *fakeUI) Ask(id, _, fallback string, _ bool) (string, error) {
@@ -98,8 +99,11 @@ func (u *fakeUI) Ask(id, _, fallback string, _ bool) (string, error) {
 	}
 	return fallback, nil
 }
-func (u *fakeUI) Confirm(string) (bool, error) { return u.approve, nil }
-func (u *fakeUI) Info(value string)            { u.messages = append(u.messages, value) }
+func (u *fakeUI) Confirm(label string) (bool, error) {
+	u.confirmations = append(u.confirmations, label)
+	return u.approve, nil
+}
+func (u *fakeUI) Info(value string) { u.messages = append(u.messages, value) }
 
 type fakeProcess struct{ commands [][]string }
 
@@ -349,5 +353,91 @@ func TestTrackerCreateLostResponseReconcilesOnNextRun(t *testing.T) {
 	}
 	if posts != 1 || saves == 0 || s.Tracker.RequiredCategoryID != 9 || s.Tracker.AllowedCreatorID != 7 {
 		t.Fatal("resume duplicated category or changed allowed creator")
+	}
+}
+
+func TestTrackerRequesterKeyRequiresConfirmationBeforeUse(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		identity         int64
+		creator          int64
+		approve          bool
+		wantOK           bool
+		wantConfirmation bool
+	}{
+		{"separate account", 8, 7, false, true, false},
+		{"requester approved", 7, 7, true, true, true},
+		{"requester declined", 7, 7, false, false, true},
+		{"nonmember", 8, 99, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, secrets := wizardFixture(t)
+			s.Tracker.AllowedCreatorID = tc.creator
+			s.Category = "自動処理"
+			s.StatusNames = [4]string{"処理中", "回答待ち", "納品済み", "要確認"}
+			key := secrets["BACKLOG_API_KEY"]
+			ui := &fakeUI{approve: tc.approve}
+			saves := 0
+			w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != "GET" || req.URL.Query().Get("apiKey") != key {
+					t.Fatal("unexpected mutation or identity change")
+				}
+				switch req.URL.Path {
+				case "/api/v2/users/myself":
+					return response(200, NamedID{ID: tc.identity}), nil
+				case "/api/v2/projects/EXAMPLE":
+					return response(200, map[string]any{"id": 1, "projectKey": "EXAMPLE"}), nil
+				case "/api/v2/projects/1/users":
+					return response(200, []NamedID{{ID: 7}, {ID: 8}}), nil
+				case "/api/v2/projects/1/categories":
+					if tc.wantConfirmation && len(ui.confirmations) != 1 {
+						t.Fatal("continued before confirming requester identity")
+					}
+					return response(200, []NamedID{{ID: 9, Name: s.Category}}), nil
+				case "/api/v2/projects/1/statuses":
+					var states []NamedID
+					for i, name := range s.StatusNames {
+						states = append(states, NamedID{ID: int64(10 + i), Name: name})
+					}
+					return response(200, states), nil
+				}
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+				return nil, nil
+			})}}}
+			err := w.tracker(context.Background(), s, secrets, func() error { saves++; return nil })
+			if (err == nil) != tc.wantOK || (saves > 0) != tc.wantOK {
+				t.Fatalf("success=%v saves=%d, want success=%v", err == nil, saves, tc.wantOK)
+			}
+			if (len(ui.confirmations) == 1) != tc.wantConfirmation || s.Tracker.AllowedCreatorID != tc.creator {
+				t.Fatal("confirmation or fixed requester changed")
+			}
+			if tc.wantConfirmation {
+				for _, required := range []string{"ID: 7", "本人名義", "区別できません", "runtime.env", "0600"} {
+					if !strings.Contains(ui.confirmations[0], required) {
+						t.Fatalf("confirmation missing %q", required)
+					}
+				}
+				if strings.Contains(ui.confirmations[0], key) {
+					t.Fatal("confirmation exposed key")
+				}
+			}
+			// Run saves partial input after an error. Exercise that same save:
+			// declining runtime use must not persist the requester credential.
+			dir := t.TempDir()
+			if err := Save(dir, s, secrets); err != nil {
+				t.Fatal(err)
+			}
+			_, saved, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantConfirmation && !tc.approve {
+				if saved["BACKLOG_API_KEY"] != "" {
+					t.Fatal("declined key was persisted")
+				}
+			} else if saved["BACKLOG_API_KEY"] != key {
+				t.Fatal("runtime key changed")
+			}
+		})
 	}
 }

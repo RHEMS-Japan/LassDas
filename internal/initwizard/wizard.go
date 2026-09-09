@@ -447,7 +447,7 @@ func (w *Wizard) consumer(ctx context.Context, s *State, secrets Secrets, dir st
 }
 
 func (w *Wizard) trackerStage(ctx context.Context, s *State, secrets Secrets, save func() error) error {
-	w.UI.Info("Backlog の bot 用 API キーは個人設定 → API で外部取得してください。project の参照・コメント・課題状態更新が必要です")
+	w.UI.Info("Backlog の API キーは個人設定 → API で取得してください。project の参照・コメント・課題状態更新が必要です。起票者本人のキーも、名義を確認したうえで自動処理に使えます")
 	if err := w.field(s, "tracker", "tracker-origin", "Backlog 接続先 (https://space.backlog.com)", &s.Tracker.Origin, ""); err != nil {
 		return err
 	}
@@ -479,13 +479,13 @@ func (w *Wizard) trackerStage(ctx context.Context, s *State, secrets Secrets, sa
 			return err
 		}
 	}
-	if err = w.secret(s, secrets, "BACKLOG_API_KEY", "外で取得した bot の API キー", false); err != nil {
+	if err = w.secret(s, secrets, "BACKLOG_API_KEY", "自動処理に使う Backlog API キー", false); err != nil {
 		return err
 	}
 	err = w.tracker(ctx, s, secrets, save)
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403) {
-		if err = w.secret(s, secrets, "BACKLOG_API_KEY", "bot の本人・project を読めません。API キーを再入力", true); err != nil {
+		if err = w.secret(s, secrets, "BACKLOG_API_KEY", "キーの持ち主・project を読めません。API キーを再入力", true); err != nil {
 			return err
 		}
 		err = w.tracker(ctx, s, secrets, save)
