@@ -427,7 +427,10 @@ rules the worker placed, a reviewer program's configuration — so nothing
 an agent wrote into an earlier home reaches the next launch and two
 agents running at once never share one; the launcher lends the whole
 directory (Hermes keeps its state beside its profile), and the worker
-takes it back when the run ends, so the engine can read what was left. An
+takes it back when the run ends, so the engine can read what was left. A
+design reviewer's home also carries a read-only copy (0444) of the run's
+measurements: the file the engine writes is the engine's own, and the
+prompt names the copy by the path this launch made. An
 agent therefore starts every launch from a fresh home: nothing it kept in
 an earlier launch — a Hermes session, a memory, a skill — carries over,
 by design; the run record holds the transcript. At boot the entrypoint
@@ -575,6 +578,8 @@ means adding a row here and the test it names.
 | The role answering an "unmeasured" finding by swapping the cited id for another record of the same probe, round after round | `internal/worker` `TestRevisePromptStatesHowAPreviousFindingIsAnswered` | live, 2026-09-08 |
 | A turn the provider ended with its own error inside a 200 (`finish_reason=error`) ending a design round's investigation on its first call, while the gateway retry covered only 502/503/504 and a 429 with Retry-After (the turn is now asked again on the gateway's pauses, up to their count) | `internal/worker` `TestInvestigateAsksAgainAfterAProviderError` | live, 2026-09-09 |
 | The reception asking the requester what a measurement would tell, on the belief that production cannot be reached (it can: the investigation stage measures with the catalogue), and refusing over-long texts as "invalid" with no field or number named | `internal/worker` `TestReceptionKnowsTheCatalogueAndTheTextLimits`, `TestReceptionRefusalsNameTheFieldAndTheLimit`, `TestEarlierAnswersLicenseRecordNumbers` | live, 2026-09-09 |
+| A revise round's designer with no way back to the earlier round's records — previous_round carried the design and the findings only, and the read rule allowed no offset 0 — so an "unmeasured" finding could only be answered by swapping ids or measuring again (live, two rounds); a fixed marker for the launch home rewritten inside a record, so the excerpt the reviewer judges no longer matches the sealed record | `internal/worker` `TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart`, `cmd/worker` `TestPreviousRoundCarriesTheInvestigation`, `TestTheHomeTokenIsPerLaunchAndLeavesRecordedOutputAlone`, `TestALaunchRefusesAStandInItDidNotDraw`, `TestTheRecordIndexKeepsTheNewestAndSaysHowManyItLeftOut` | live, 2026-09-08 |
+| A design reviewer told to read the measurements file it cannot open (0600 to the engine; the reviewer runs as its own user), and judging without the ticket or the catalogue | `internal/worker` `TestCopyHomeFilesPlacesReadOnlyCopies`, `TestReviewingAgentGetsItsHomeFilesAndTheHomePath`, `cmd/worker` `TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection`, `TestReadPreviousObjectionBecomesAFinding`, `TestAgentDesignReviewReadsTheRealTicketAndObjectionFiles`, `internal/runner` `TestChainDesignReviewPassesTheTicketAndTheObjection`, `TestAgentDesignReviewPointsTheReviewerAtTheCopyInItsOwnHome`, `TestTheLaunchHomePathFitsTheReserveAndAnOverlongOneLeavesNoHome`, `TestAFailedHomeCopyLeavesNoHomeBehind` | live, 2026-09-08 |
 | A ticket that makes no screen promise (empty verification path) | `internal/runner` `TestReferenceStagingReportPassesWithAnHonestHold` | live, 2026-09-01 |
 | A ticket arriving while another run is active | `internal/state` `TestQuestionFlowIngestsNewTicketsWhileARunIsActive` | live, 2026-09-01 |
 | A reviewer that leaves tooling byproducts (files, directories, hidden caches) | `cmd/worker` `TestAgentReviewToleratesAndCleansUpToolingByproducts`; `internal/worker` `TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts`, `TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft` | live, 2026-09-01 |

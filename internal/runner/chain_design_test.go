@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -158,5 +160,61 @@ func TestRequiredDesignFailsClosedWhenTheDecisionIsGoneAfterADesignRound(t *test
 	}
 	if _, _, err := p.requiredDesign(); err == nil {
 		t.Error("a run that designed but lost its decision fell back to the original chain")
+	}
+}
+
+// The design reviewer is handed the ticket the run was accepted on and, on a
+// round the applier's objection reopened, that objection: the runner passes
+// --ticket whenever readiness-ticket.json exists and --previous-objection
+// only when the earlier round left objection.json (live: reviewers judged
+// without the request and never saw the objection).
+func TestChainDesignReviewPassesTheTicketAndTheObjection(t *testing.T) {
+	pipeline := chainStagePipeline(t)
+	record := filepath.Join(t.TempDir(), "worker.log")
+	fake := filepath.Join(t.TempDir(), "fake-worker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+record+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.WorkerBin = fake
+	pipeline.Config.ConsumerConfigPath = "/etc/consumer.json"
+	pipeline.Config.KnowledgeRoot = "/knowledge"
+	pipeline.Config.Identity.EngineSHA = strings.Repeat("a", 40)
+	if err := os.MkdirAll(pipeline.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Join(pipeline.designRoundDir(1), "investigation.json"), pipeline.path("readiness-ticket.json")} {
+		if err := os.WriteFile(name, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The fake worker seals no review, so the stage reports that; the argv
+	// it was given is what this test reads.
+	_ = pipeline.chainDesignReview(context.Background(), []string{"review-a", "review-b"}, 0, pipeline.path("target-repo"), strings.Repeat("b", 40))
+	logged, _ := os.ReadFile(record)
+	first := string(logged)
+	if !strings.Contains(first, "--ticket "+pipeline.path("readiness-ticket.json")) || strings.Contains(first, "--previous-objection") {
+		t.Fatalf("round 1 argv = %q; want the ticket and no objection", first)
+	}
+	// Round 2, reopened by the applier's objection to the round-1 design.
+	for name, content := range map[string]string{
+		filepath.Join(pipeline.designRoundDir(1), "decision.json"):  `{"outcome":"approved"}`,
+		filepath.Join(pipeline.designRoundDir(1), "objection.json"): `{"reason":"r","section":"files"}`,
+	} {
+		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(pipeline.designRoundDir(2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pipeline.designRoundDir(2), "investigation.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(record)
+	_ = pipeline.chainDesignReview(context.Background(), []string{"review-a", "review-b"}, 1, pipeline.path("target-repo"), strings.Repeat("b", 40))
+	logged, _ = os.ReadFile(record)
+	second := string(logged)
+	if !strings.Contains(second, "--previous-objection "+filepath.Join(pipeline.designRoundDir(1), "objection.json")) || !strings.Contains(second, "--ticket ") {
+		t.Fatalf("round 2 argv = %q; want the objection and the ticket", second)
 	}
 }

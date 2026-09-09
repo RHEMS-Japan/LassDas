@@ -33,3 +33,37 @@ func TestWriteIncompleteKeepsTheLastRefusedAnswerAndObjection(t *testing.T) {
 		t.Fatal("writeIncomplete must return the incomplete error")
 	}
 }
+
+// The next round is handed the earlier round's sealed report along with
+// its design and the verdicts; without it the designer could only cite ids
+// it never saw. The earlier round's files are a real sealed investigation
+// and design, which previousRound verifies against the run's identity.
+func TestPreviousRoundCarriesTheInvestigation(t *testing.T) {
+	fixture := newDesignFixture(t, passVerdict, nil)
+	dir := t.TempDir()
+	for from, to := range map[string]string{fixture.investigationPath: "investigation.json", fixture.designPath: "design.json"} {
+		content, err := os.ReadFile(from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, to), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "decision.json"), []byte(`{"outcome":"revise"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, encoded, err := previousRound(dir, fixture.identity, fixture.measurementsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var context map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &context); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"investigation", "design", "decision"} {
+		if _, ok := context[key]; !ok {
+			t.Errorf("previous_round lacks %q: %s", key, encoded)
+		}
+	}
+}
