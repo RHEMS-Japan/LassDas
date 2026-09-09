@@ -85,6 +85,20 @@ func receptionErrorText(line string) string {
 	return cause
 }
 
+// receptionCauseOf returns the worker's own cause on the last line whose
+// cause begins with the given phrase, or "" when no line does. Everything
+// the notes read comes through here, so a phrase can only be matched where
+// the worker wrote it.
+func receptionCauseOf(stderr, phrase string) string {
+	found := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		if cause := receptionErrorText(line); strings.HasPrefix(cause, phrase) {
+			found = cause
+		}
+	}
+	return found
+}
+
 // receptionCauseNote renders the requester-facing note for the reception
 // failures that are not about the shape of one answer: the model could not
 // be reached, or it never answered in the shape the contract asks for. Both
@@ -94,11 +108,32 @@ func receptionCauseNote(stage, stderr string) string {
 	for _, line := range strings.Split(stderr, "\n") {
 		cause := receptionErrorText(line)
 		switch {
-		case strings.HasPrefix(cause, worker.TransportFailedPhrase),
-			strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase):
+		// Asked again and still nothing: the spent allowance, the
+		// provider's own error, and the one gateway status that comes
+		// after its retries were spent. Only these three may tell a
+		// requester that sending the same ticket again is worth doing.
+		case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase),
+			strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
+			strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
 			return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
 				"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
 				"同じ依頼をそのまま出し直すと通る場合があります。\n"
+		// A limit that waiting does not lift. An exhausted balance is one
+		// of these, and telling its requester to send the ticket again
+		// would send them round the same wall with nobody looking at the
+		// balance.
+		case strings.HasPrefix(cause, worker.TransportFailedPhrase) &&
+			(strings.Contains(cause, worker.LimitNotLiftedPhrase) || strings.Contains(cause, worker.RetryAfterTooLongPhrase)):
+			return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
+				"時間をおいて出し直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
+		// Everything else the transport reports: a status that is not
+		// retried at all (a setting or a credential), a connection that
+		// did not open, a wait that was cut short. Nothing was asked
+		// again, so nothing here promises that asking again would help.
+		case strings.HasPrefix(cause, worker.TransportFailedPhrase):
+			return "受付の AI (" + stage + ") への問い合わせが通りませんでした。" +
+				"設定か接続の問題である可能性があり、同じ依頼を出し直しても同じ結果になることがあります。" +
+				"運用担当者が原因を確認します。\n"
 		case strings.HasPrefix(cause, worker.ShapeRefusedPhrase):
 			return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
 				"聞き直しても同じでした。同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。" +
@@ -139,14 +174,20 @@ func receptionCutoffNote(stage, stderr string) string {
 			"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
 			"依頼文に、変更するファイルの位置を書き足して出し直してください (例: docs/ の下に新しく作る場合は、その相対パスをそのまま書く)。\n"
 	}
-	if !strings.Contains(stderr, receptionCutoffMarker) {
+	// Read at the same fixed position as every other cause. Scanning the
+	// whole output for the marker let a requester choose this note and
+	// which of its three forms they were shown: a failure the model itself
+	// refused carries the head of its answer, and a ticket's own words
+	// reach that answer (measured, review of #122).
+	cutoff := receptionCauseOf(stderr, worker.CutoffPhrase)
+	if !strings.Contains(cutoff, receptionCutoffMarker) {
 		return ""
 	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
 	switch {
-	case strings.Contains(stderr, worker.CutoffAskedAgainPhrase):
+	case strings.Contains(cutoff, worker.CutoffAskedAgainPhrase):
 		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
-	case strings.Contains(stderr, worker.CutoffAtCeilingPhrase):
+	case strings.Contains(cutoff, worker.CutoffAtCeilingPhrase):
 		note += "上限は既に最大値だったため、聞き直しはできませんでした。"
 	}
 	note += "同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"

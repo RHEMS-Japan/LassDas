@@ -101,7 +101,7 @@ var (
 	// errModelResponseTruncated marks a turn the provider ended at the output
 	// allowance (finish_reason=length): converseTurn asks the same turn once
 	// more with the allowance widened, below the configuration ceiling.
-	errModelResponseTruncated = errors.New("model response ended before a complete answer")
+	errModelResponseTruncated = errors.New(CutoffPhrase)
 	// errModelResponseUpstream marks a turn the provider ended with an error
 	// of its own (finish_reason=error): converseTurn asks the same turn
 	// again after the gateway pauses, up to their count (live 2026-09-09:
@@ -114,7 +114,7 @@ var (
 	// ladder, because three more would spend most of a round on one
 	// question. Its text begins with TransportFailedPhrase, so what reads
 	// these failures for the requester still recognises it.
-	errModelAllowanceSpent = errors.New(TransportFailedPhrase + ": the call spent its allowance without answering")
+	errModelAllowanceSpent = errors.New(TransportFailedPhrase + ": " + SpentAllowancePhrase)
 )
 
 // These are the phrases a reception failure carries out to the runner, which
@@ -134,8 +134,24 @@ const (
 	// TransportFailedPhrase begins every failure the transport itself
 	// reports: it could not reach the gateway, or the gateway answered with
 	// a status that asking again does not lift, or the call spent its whole
-	// allowance without an answer.
+	// allowance without an answer. It says nothing about whether anything
+	// was asked again — the three phrases below are what separate those.
 	TransportFailedPhrase = "model invocation failed"
+	// SpentAllowancePhrase names the failure the turn asks again for; with
+	// TransportFailedPhrase it begins errModelAllowanceSpent.
+	SpentAllowancePhrase = "the call spent its allowance without answering"
+	// AttemptsExhaustedPhrase appears in the one transport failure that
+	// comes after the gateway's own retries were spent.
+	AttemptsExhaustedPhrase = " attempts"
+	// LimitNotLiftedPhrase and RetryAfterTooLongPhrase appear in the two
+	// failures a gateway gives for a limit that waiting does not lift (an
+	// exhausted balance among them). Telling a requester to send the same
+	// ticket again is wrong for both.
+	LimitNotLiftedPhrase    = "a limit that a wait does not lift"
+	RetryAfterTooLongPhrase = "longer than a turn waits"
+	// CutoffPhrase begins the failure of a turn the provider ended at the
+	// output allowance.
+	CutoffPhrase = "model response ended before a complete answer"
 )
 
 // allowanceTurnRetries is how many times one turn asks again after a call
@@ -277,13 +293,13 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		pause, again := gatewayPause(status, retryAfter, attempt)
 		if !again {
 			if attempt > 0 {
-				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d attempts", status, attempt+1))
+				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
 			}
 			if status == http.StatusTooManyRequests {
 				if retryAfter != nil {
-					return nil, safeModelError(fmt.Sprintf("model invocation failed with status 429 and a Retry-After of %s, longer than a turn waits", *retryAfter))
+					return nil, safeModelError(fmt.Sprintf("model invocation failed with status 429 and a Retry-After of %s, %s", *retryAfter, RetryAfterTooLongPhrase))
 				}
-				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (a limit that a wait does not lift)")
+				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")")
 			}
 			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", status))
 		}
@@ -818,8 +834,8 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
-		return "", InvocationUsage{}, errors.New(
-			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
+		return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s",
+			errModelResponseTruncated, output.Choices[0].FinishReason)
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {

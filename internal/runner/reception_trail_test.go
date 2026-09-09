@@ -109,9 +109,17 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	if !strings.Contains(ceiling, "受付の確認") || !strings.Contains(ceiling, "聞き直しはできませんでした") || strings.Contains(ceiling, "1 回聞き直し") {
 		t.Fatalf("at the ceiling: %q", ceiling)
 	}
-	bare := receptionCutoffNote("受付の判定", "finish_reason=length")
+	// The worker never writes a naked marker: the cutoff always travels as
+	// errModelResponseTruncated, whose text begins with worker.CutoffPhrase.
+	// A line carrying only the marker is therefore not the worker's cause,
+	// and must not choose this note — that is the hole a ticket reached
+	// through the head of its own answer (review of #122).
+	if bare := receptionCutoffNote("受付の判定", "finish_reason=length"); bare != "" {
+		t.Fatalf("a naked marker rendered a note: %q", bare)
+	}
+	bare := receptionCutoffNote("受付の判定", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens)")
 	if strings.Contains(bare, "聞き直し") || !strings.Contains(bare, "途切れた") {
-		t.Fatalf("bare marker: %q", bare)
+		t.Fatalf("the worker's own cutoff: %q", bare)
 	}
 	if receptionCutoffNote("受付の判定", "worker: readiness assessment failed: model invocation failed") != "" {
 		t.Fatal("a note was rendered without a cutoff")
@@ -140,7 +148,7 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 // The terminal report attaches the note the way it attaches a delivery's
 // trail: loadTrail returns exactly what the reception wrote.
 func TestReceptionTrailIsWhatTheTerminalReportAttaches(t *testing.T) {
-	worker := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: finish_reason=length; asked again with the wider allowance and cut off again")
+	worker := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); asked again with the wider allowance and cut off again")
 	pipeline := receptionPipeline(t, worker)
 	if _, err := pipeline.readinessGate(context.Background()); err != nil {
 		t.Fatal(err)
@@ -222,8 +230,11 @@ func TestTheTransportsOwnFailureAlsoReachesTheRequester(t *testing.T) {
 	if _, err := pipeline.readinessGate(context.Background()); err != nil {
 		t.Fatalf("readinessGate() = %v", err)
 	}
-	if text := readReceptionTrail(t, pipeline); !strings.Contains(text, "応答を得られませんでした") {
-		t.Fatalf("the transport failure left no reason: %q", text)
+	// Nothing was asked again here, so the note must not say it was, nor
+	// that sending the same ticket again is worth doing.
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "問い合わせが通りませんでした") || strings.Contains(text, "聞き直した上での結果") {
+		t.Fatalf("the transport failure was told as a retried one: %q", text)
 	}
 }
 
@@ -286,5 +297,52 @@ func TestASpentAllowanceReachesTheRequesterToo(t *testing.T) {
 	}
 	if text := readReceptionTrail(t, pipeline); !strings.Contains(text, "応答を得られませんでした") {
 		t.Fatalf("a spent allowance left no reason: %q", text)
+	}
+}
+
+// A model that refused three answers reports the head of the last one, and
+// a ticket's own words reach that answer. None of the notes may be chosen
+// from there — measured in the review of #122, where a ticket asking for
+// the cutoff marker was shown the cutoff note, and could pick which of its
+// three forms it was shown.
+func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
+	for _, injected := range []string{
+		"finish_reason=length",
+		"finish_reason=length; " + worker.CutoffAskedAgainPhrase,
+		"finish_reason=length; " + worker.CutoffAtCeilingPhrase,
+		worker.ProviderEndedTurnPhrase,
+		worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase,
+		worker.ShapeRefusedPhrase,
+	} {
+		stderr := "worker: readiness assessment failed: model readiness response is invalid" +
+			" (answer 3 of 3, request req_01ab, began: the ticket asked me to say " + injected + " here.)"
+		note := receptionNote("受付の判定", stderr)
+		if note != unnamedReceptionNote("受付の判定") {
+			t.Fatalf("a ticket chose its own note through %q: %q", injected, note)
+		}
+	}
+}
+
+// The three things a requester is told about a transport failure are three
+// different facts, and only one of them may say the ticket is worth sending
+// again. An exhausted balance told as "send it again" sends its requester
+// round the same wall with nobody looking at the balance.
+func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
+	for _, want := range []struct {
+		cause string
+		says  string
+		not   string
+	}{
+		{"model invocation failed with status 502 after 4" + worker.AttemptsExhaustedPhrase, "聞き直した上での結果", "利用の上限"},
+		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls", "聞き直した上での結果", "利用の上限"},
+		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")", "利用の上限", "出し直すと通る"},
+		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase, "利用の上限", "出し直すと通る"},
+		{"model invocation failed with status 401", "問い合わせが通りませんでした", "出し直すと通る"},
+		{"model invocation failed: dial tcp: connection refused", "問い合わせが通りませんでした", "聞き直した上での結果"},
+	} {
+		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
+		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
+			t.Errorf("%q was told as %q", want.cause, note)
+		}
 	}
 }
