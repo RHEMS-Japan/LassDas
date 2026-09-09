@@ -496,6 +496,20 @@ type recordIndexEntry struct {
 // (live: two rounds were spent swapping ids). count is the recorder's own
 // count, so the file is read once; a file that cannot be read yields
 // ok=false and the task says so instead of showing an empty list.
+// maxEarlierRecordsBytes bounds the index of earlier records in the revise
+// round's task: sixty probes with long arguments would otherwise take a
+// tenth of the prompt from the data the round is there to answer.
+const maxEarlierRecordsBytes = 16 * 1024
+
+// size is roughly what this entry costs in the encoded task.
+func (e recordIndexEntry) size() int {
+	size := len(e.ID) + len(e.Probe) + 64
+	for key, value := range e.Args {
+		size += len(key) + len(value) + 8
+	}
+	return size
+}
+
 func earlierRecords(measurementsPath string, count int) ([]recordIndexEntry, bool) {
 	if measurementsPath == "" || count < 0 {
 		return nil, false
@@ -504,10 +518,21 @@ func earlierRecords(measurementsPath string, count int) ([]recordIndexEntry, boo
 	if err != nil {
 		return nil, false
 	}
+	total := 0
 	entries := make([]recordIndexEntry, 0, len(measurements))
 	for _, m := range measurements {
-		entries = append(entries, recordIndexEntry{ID: m.ID, Probe: m.Probe, Args: m.Args, ExitCode: m.ExitCode,
-			OutputBytes: m.OutputBytes, StoredBytes: len(m.Output), Refused: m.Refused})
+		entry := recordIndexEntry{ID: m.ID, Probe: m.Probe, Args: m.Args, ExitCode: m.ExitCode,
+			OutputBytes: m.OutputBytes, StoredBytes: len(m.Output), Refused: m.Refused}
+		if size := entry.size(); size > maxEarlierRecordsBytes-total {
+			// The index is a convenience, and the prompt has no room to
+			// shed it: the newest records are the ones a revise round is
+			// answering, so the list stops rather than growing without a
+			// bound.
+			break
+		} else {
+			total += size
+		}
+		entries = append(entries, entry)
 	}
 	return entries, true
 }

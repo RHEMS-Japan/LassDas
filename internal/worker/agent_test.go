@@ -466,7 +466,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	config.Args = []string{"--profile", "stand-in"}
 	config.Profile = "stand-in"
 	config.Knowledge.Rules = []KnowledgePlacement{{From: "rules/RULES.md", To: ".claude/RULES.md"}}
-	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing", nil)
+	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing", nil, "")
 	if err != nil {
 		t.Fatalf("runAgentProcess() error = %v (%s)", err, outcome.Transcript)
 	}
@@ -617,15 +617,16 @@ func TestReviewingAgentGetsItsHomeFilesAndTheHomePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	name, _ := writeFakeAgent(t, `for a in "$@"; do last="$a"; done; echo "PROMPT=$last"; echo "HOME=$HOME"; cat "$HOME/measurements.jsonl"`)
+	token := NewAgentHomeToken()
 	config := fixtureAgentConfig("judge", name)
-	outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read "+AgentHomePlaceholder+"/measurements.jsonl", map[string]string{"measurements.jsonl": source})
+	outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read "+token+"/measurements.jsonl", map[string]string{"measurements.jsonl": source}, token)
 	if err != nil {
 		t.Fatalf("RunReviewingAgentWithHomeFiles: %v (%s)", err, outcome.Transcript)
 	}
 	if !strings.Contains(outcome.Transcript, "the whole record") {
 		t.Errorf("the copy was not readable in the home: %q", outcome.Transcript)
 	}
-	if strings.Contains(outcome.Transcript, AgentHomePlaceholder) || !strings.Contains(outcome.Transcript, "PROMPT=read "+filepath.Join(filepath.Dir(root), "agent-home", "judge-")) {
+	if strings.Contains(outcome.Transcript, token) || !strings.Contains(outcome.Transcript, "PROMPT=read "+filepath.Join(filepath.Dir(root), "agent-home", "judge-")) {
 		t.Errorf("the placeholder was not replaced by the launch home: %q", outcome.Transcript)
 	}
 }
@@ -654,21 +655,89 @@ func TestTheLaunchHomePathFitsTheReserveAndAnOverlongOneLeavesNoHome(t *testing.
 		return len(entries)
 	}
 
-	filler := strings.Repeat("x", MaxAgentPromptBytes-2*len(AgentHomePlaceholder))
-	atLimit := AgentHomePlaceholder + filler + AgentHomePlaceholder
+	token := NewAgentHomeToken()
+	filler := strings.Repeat("x", MaxAgentPromptBytes-2*len(token))
+	atLimit := token + filler + token
 	if len(atLimit) != MaxAgentPromptBytes {
 		t.Fatalf("the fixture prompt is %d bytes", len(atLimit))
 	}
-	if outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, atLimit, nil); err != nil {
+	if outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, atLimit, nil, token); err != nil {
 		t.Fatalf("a prompt at the limit with two placeholders: %v (%s)", err, outcome.Transcript)
 	}
 	left := homes()
 
-	overlong := strings.Repeat(AgentHomePlaceholder, 200)
-	if _, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, overlong, nil); err == nil {
+	overlong := strings.Repeat(token, 200)
+	if _, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, overlong, nil, token); err == nil {
 		t.Fatal("a prompt that grows past the reserve was launched")
 	}
 	if homes() != left {
 		t.Errorf("the refused launch left its home behind: %d homes, was %d", homes(), left)
+	}
+}
+
+// The stand-in for the launch home is drawn per launch, so recorded output
+// that happens to contain such a marker is handed to the agent unchanged.
+// A fixed marker was rewritten inside the data: this engine works on
+// repositories whose source can carry the marker (its own does), and the
+// reviewer would then judge an excerpt that no longer matches the sealed
+// record it is checking.
+func TestTheHomeTokenIsPerLaunchAndLeavesRecordedOutputAlone(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `for a in "$@"; do last="$a"; done; echo "PROMPT=$last"`)
+	config := fixtureAgentConfig("judge", name)
+
+	first, second := NewAgentHomeToken(), NewAgentHomeToken()
+	if first == "" || first == second {
+		t.Fatalf("the token is not drawn per launch: %q, %q", first, second)
+	}
+	recorded := `{"id":"m-0001","output":"const AgentHomePlaceholder = \"{{AGENT_HOME}}\""}`
+	outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, recorded+"\nread "+first+"/measurements.jsonl", nil, first)
+	if err != nil {
+		t.Fatalf("RunReviewingAgentWithHomeFiles: %v (%s)", err, outcome.Transcript)
+	}
+	if !strings.Contains(outcome.Transcript, `\"{{AGENT_HOME}}\"`) {
+		t.Errorf("the recorded output was rewritten by the replacement: %q", outcome.Transcript)
+	}
+	if strings.Contains(outcome.Transcript, first) {
+		t.Errorf("this launch's token survived into the prompt: %q", outcome.Transcript)
+	}
+	if !strings.Contains(outcome.Transcript, filepath.Join(filepath.Dir(root), "agent-home", "judge-")) {
+		t.Errorf("the token was not replaced by the launch home: %q", outcome.Transcript)
+	}
+}
+
+// A home this launch made is removed when the files it must carry cannot be
+// placed; only the launch that made it can, and nothing else looks there.
+func TestAFailedHomeCopyLeavesNoHomeBehind(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `echo ok`)
+	config := fixtureAgentConfig("judge", name)
+	missing := filepath.Join(t.TempDir(), "not-there.jsonl")
+	if _, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read it", map[string]string{"measurements.jsonl": missing}, NewAgentHomeToken()); err == nil {
+		t.Fatal("a home file that cannot be read was accepted")
+	}
+	entries, _ := os.ReadDir(filepath.Join(filepath.Dir(root), "agent-home"))
+	if len(entries) != 0 {
+		t.Errorf("the failed launch left %d home(s) behind", len(entries))
 	}
 }

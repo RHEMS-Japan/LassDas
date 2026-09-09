@@ -87,10 +87,17 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	// The reviewer runs as its own user and cannot open the engine's
 	// measurements file; a read-only copy travels in the launch's home.
 	homeFiles := map[string]string(nil)
+	homeToken := ""
 	measurementsFile := *measurementsPath
 	if worker.AgentLauncherConfigured() {
+		// The token is drawn per launch, so a record of a repository that
+		// contains this engine's own source cannot be rewritten by the
+		// replacement that puts the home path into the prompt.
+		if homeToken = worker.NewAgentHomeToken(); homeToken == "" {
+			return errors.New("the launch home could not be named")
+		}
 		homeFiles = map[string]string{reviewMeasurementsCopy: *measurementsPath}
-		measurementsFile = worker.AgentHomePlaceholder + "/" + reviewMeasurementsCopy
+		measurementsFile = homeToken + "/" + reviewMeasurementsCopy
 	}
 	measurements, err := probe.ReadPrefix(*measurementsPath, inputs.investigation.MeasurementsCount)
 	if err != nil {
@@ -98,7 +105,7 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	}
 	prompt, err := designReviewPrompt(designReviewPromptInput{
 		subject: inputs.subject, lens: lens, investigation: inputs.investigation, design: inputs.design,
-		measurements: measurements, measurementsPath: measurementsFile, previous: previous,
+		measurements: measurements, measurementsPath: measurementsFile, homeToken: homeToken, previous: previous,
 		ticket: ticket, catalogue: reviewCatalogue(config),
 	})
 	if err != nil {
@@ -112,7 +119,7 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 		return err
 	}
 
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles)
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles, homeToken)
 	identity := inputs.identity
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: inputs.subject.Round,
@@ -297,7 +304,11 @@ type designReviewPromptInput struct {
 	design           *investigate.Design
 	measurements     []probe.Measurement
 	measurementsPath string
-	previous         []investigate.DesignFinding
+	// homeToken is the stand-in this launch will replace with its home path,
+	// empty when the reviewer runs as the engine and reads the records where
+	// they are. The prompt is fitted with room for the path it becomes.
+	homeToken string
+	previous  []investigate.DesignFinding
 	// ticket is the request the design must satisfy, as the reviewer sees
 	// it (nil when the command was given none).
 	ticket *reviewTicket
@@ -578,7 +589,7 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		parts = append(parts, middle...)
 		parts = append(parts, tail...)
 		prompt := strings.Join(parts, "\n")
-		if len(prompt) <= designPromptBudget(prompt) {
+		if len(prompt) <= designPromptBudget(prompt, input.homeToken) {
 			return prompt, nil
 		}
 	}
@@ -590,8 +601,8 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 // the placeholder with the real path, which is longer, and a prompt fitted
 // to the whole limit would then be refused at launch — retried twice on the
 // same input and failing the card (review of #101, 2026-09-09).
-func designPromptBudget(prompt string) int {
-	if strings.Contains(prompt, worker.AgentHomePlaceholder) {
+func designPromptBudget(prompt, homeToken string) int {
+	if homeToken != "" && strings.Contains(prompt, homeToken) {
 		return worker.MaxAgentPromptBytes - worker.AgentHomePathReserve
 	}
 	return worker.MaxAgentPromptBytes

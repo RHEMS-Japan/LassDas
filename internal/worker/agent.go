@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -129,7 +132,7 @@ type AgentOutcome struct {
 // it changed. The credential is read from this process's environment and
 // passed to the child; it is never written to configuration or transcript.
 func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string) (AgentOutcome, error) {
-	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, nil)
+	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, nil, "")
 	if err != nil {
 		return outcome, err
 	}
@@ -141,25 +144,19 @@ func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string,
 	return outcome, nil
 }
 
-// RunReviewingAgent runs a reviewer the same way but does not scan the tree
-// afterwards: a reviewer's changes are not a deliverable to record, and the
-// strict scan died on the hidden caches a reviewer's tooling leaves behind
-// (an .eslintcache is "not addressable"), killing reviews that had passed.
-// What a reviewer may and may not do to the tree is judged by
-// ConfirmTreeMatchesCandidate against the sealed candidate instead.
-func RunReviewingAgent(ctx context.Context, config AgentConfig, workspace, prompt string) (AgentOutcome, error) {
-	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt, nil)
-	return outcome, err
-}
-
-// RunReviewingAgentWithHomeFiles is RunReviewingAgent with files placed in
+// RunReviewingAgentWithHomeFiles runs a reviewer without scanning the tree
+// afterwards (a reviewer's changes are not a deliverable, and the strict
+// scan died on the hidden caches a reviewer's tooling leaves behind, killing
+// reviews that had passed; what a reviewer may do to the tree is judged by
+// ConfirmTreeMatchesCandidate against the sealed candidate instead), with
+// files placed in
 // the home made for the launch (relative path in the home → source path),
 // readable to the agent user: what a reviewer must read whole but cannot
 // open where the engine keeps it (the measurements, 0600 to the engine).
 // Without a launcher the agent shares this user's home and the files are
 // not copied; AgentLauncherConfigured tells the caller which path to name.
-func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, error) {
-	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt, homeFiles)
+func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string, homeToken string) (AgentOutcome, error) {
+	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt, homeFiles, homeToken)
 	return outcome, err
 }
 
@@ -167,13 +164,33 @@ func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, wor
 // with a home made per launch.
 func AgentLauncherConfigured() bool { return agentLauncher() != "" }
 
-// AgentHomePlaceholder stands, in a prompt, for the home the launch will
-// make; runAgentProcess replaces it with the real path once the home
-// exists. The prompt reaches the agent as an argument, not through a
-// shell, so "$HOME" would arrive unexpanded.
-const AgentHomePlaceholder = "{{AGENT_HOME}}"
+// NewAgentHomeToken returns the stand-in a prompt uses for the home the
+// launch will make; runAgentProcess replaces it with the real path once the
+// home exists. The prompt reaches the agent as an argument, not through a
+// shell, so "$HOME" would arrive unexpanded. The token is drawn per launch
+// rather than fixed: a prompt carries recorded output of the repository
+// under work, that output can contain any fixed marker this engine defines
+// (its own source does), and replacing a marker inside a record would hand
+// the reviewer an excerpt that no longer matches the sealed record it
+// judges (review of #101, 2026-09-09).
+// agentHomeTokenPattern is the shape NewAgentHomeToken draws.
+var agentHomeTokenPattern = regexp.MustCompile(`^\{\{AGENT_HOME:[0-9a-f]{24}\}\}$`)
 
-// AgentHomePathReserve is the room a prompt using AgentHomePlaceholder
+func NewAgentHomeToken() string {
+	buffer := make([]byte, 12)
+	if _, err := rand.Read(buffer); err != nil {
+		// A launch without a usable token names no home; the caller's
+		// prompt then carries no stand-in and nothing is replaced.
+		return ""
+	}
+	return "{{AGENT_HOME:" + hex.EncodeToString(buffer) + "}}"
+}
+
+// MaxAgentHomeFileBytes bounds a file copied into a launch's home; the
+// records file a design reviewer reads is the largest of them.
+const MaxAgentHomeFileBytes = 8 * 1024 * 1024
+
+// AgentHomePathReserve is the room a prompt using an agent home token
 // leaves for the real path: the placeholder is short and the home is a
 // path, so the replacement grows the prompt. A generator that fits a prompt
 // to MaxAgentPromptBytes - AgentHomePathReserve is safe to launch; a
@@ -182,7 +199,7 @@ const AgentHomePlaceholder = "{{AGENT_HOME}}"
 // (review of #101, 2026-09-09).
 const AgentHomePathReserve = 1024
 
-func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, string, error) {
+func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string, homeToken string) (AgentOutcome, string, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
 		return AgentOutcome{}, "", errors.New("agent input is invalid")
 	}
@@ -205,6 +222,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 			return AgentOutcome{}, "", err
 		}
 		if err := copyHomeFiles(agentHome, homeFiles); err != nil {
+			_ = os.RemoveAll(agentHome)
 			return AgentOutcome{}, "", err
 		}
 		user, err = acquireAgentUser()
@@ -221,8 +239,19 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	// is refused is growth beyond the reserve: the placeholder can also
 	// arrive inside the data a prompt carries (a record of a repository
 	// that contains this text), and that must not inflate the launch.
-	if occurrences := strings.Count(prompt, AgentHomePlaceholder); occurrences > 0 {
-		growth := occurrences * (len(agentHome) - len(AgentHomePlaceholder))
+	if homeToken != "" && !agentHomeTokenPattern.MatchString(homeToken) {
+		// Only a token this run drew may be replaced: a fixed marker would
+		// also match text the prompt merely carries (a record of a
+		// repository whose source defines one), and rewriting that hands
+		// the reviewer an excerpt its sealed record does not match.
+		if launcher != "" {
+			_ = os.RemoveAll(agentHome)
+		}
+		return AgentOutcome{}, "", errors.New("the launch home stand-in is not one this run drew")
+	}
+	if occurrences := 0; homeToken != "" {
+		occurrences = strings.Count(prompt, homeToken)
+		growth := occurrences * (len(agentHome) - len(homeToken))
 		if growth > AgentHomePathReserve || len(prompt)+growth > MaxAgentPromptBytes+AgentHomePathReserve {
 			if launcher != "" {
 				// This launch made the home; nothing else will remove it.
@@ -230,7 +259,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 			}
 			return AgentOutcome{}, "", errors.New("agent input is invalid")
 		}
-		prompt = strings.ReplaceAll(prompt, AgentHomePlaceholder, agentHome)
+		prompt = strings.ReplaceAll(prompt, homeToken, agentHome)
 	}
 	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
@@ -615,7 +644,7 @@ func copyHomeFiles(agentHome string, files map[string]string) error {
 		if !validAgentHomePath(relative) {
 			return errors.New("agent home file path is invalid")
 		}
-		content, err := os.ReadFile(source)
+		content, err := ReadBoundedRegularFile(source, MaxAgentHomeFileBytes)
 		if err != nil {
 			return errors.New("agent home file could not be read")
 		}

@@ -606,15 +606,15 @@ func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
 		lens:             worker.DesignLensApproach,
 		investigation:    investigate.Investigation{Round: 2, Questions: []string{"q"}, Next: "n"},
 		design:           &investigate.Design{Round: 2},
-		measurementsPath: worker.AgentHomePlaceholder + "/measurements.jsonl",
-		previous:         previous,
-		ticket:           ticket,
-		catalogue:        catalogue,
+		measurementsPath: "{{AGENT_HOME:0123456789abcdef01234567}}/measurements.jsonl", homeToken: "{{AGENT_HOME:0123456789abcdef01234567}}",
+		previous:  previous,
+		ticket:    ticket,
+		catalogue: catalogue,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"ticket":{"issue_key":"TKT-1","summary":"add the health page","request":"write docs/health.md from measurements"`, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`, "ticket は依頼者の文", "catalogue は調査・設計役が計れる probe の一覧", "実測の全文は {{AGENT_HOME}}/measurements.jsonl にあります", `"code":"applier-objection"`, "写し役が設計に従えず止めました"} {
+	for _, want := range []string{`"ticket":{"issue_key":"TKT-1","summary":"add the health page","request":"write docs/health.md from measurements"`, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`, "ticket は依頼者の文", "catalogue は調査・設計役が計れる probe の一覧", "実測の全文は {{AGENT_HOME:0123456789abcdef01234567}}/measurements.jsonl にあります", `"code":"applier-objection"`, "写し役が設計に従えず止めました"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -723,8 +723,8 @@ func TestAgentDesignReviewPointsTheReviewerAtTheCopyInItsOwnHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(prompt), worker.AgentHomePlaceholder) {
-		t.Error("the reviewer was given the placeholder instead of a path it can open")
+	if strings.Contains(string(prompt), "{{AGENT_HOME") {
+		t.Error("the reviewer was given the stand-in instead of a path it can open")
 	}
 	wantPrefix := `"measurements_file":"` + filepath.Join(filepath.Dir(fixture.repoRoot), "agent-home")
 	if !strings.Contains(string(prompt), wantPrefix) {
@@ -733,10 +733,11 @@ func TestAgentDesignReviewPointsTheReviewerAtTheCopyInItsOwnHome(t *testing.T) {
 	if len(prompt) > worker.MaxAgentPromptBytes {
 		t.Errorf("the prompt is %d bytes after the home path went in", len(prompt))
 	}
-	if budget := designPromptBudget(string(prompt)); budget != worker.MaxAgentPromptBytes {
+	token := worker.NewAgentHomeToken()
+	if budget := designPromptBudget(string(prompt), token); budget != worker.MaxAgentPromptBytes {
 		t.Errorf("a prompt with the real path in it still reserves room: %d", budget)
 	}
-	if budget := designPromptBudget("read " + worker.AgentHomePlaceholder + "/x"); budget != worker.MaxAgentPromptBytes-worker.AgentHomePathReserve {
+	if budget := designPromptBudget("read "+token+"/x", token); budget != worker.MaxAgentPromptBytes-worker.AgentHomePathReserve {
 		t.Errorf("a prompt naming the launch home does not reserve room for it: %d", budget)
 	}
 	copied, err := os.ReadFile(homeRead)
