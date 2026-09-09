@@ -122,10 +122,10 @@ var malformedTurnDelay = 2 * time.Second
 // error object a gateway may return inside a 200 with no choices; only
 // its code is read, never its message.
 type ChatResponse struct {
-	Error *ChatResponseError `json:"error,omitempty"`
-	ID      string       `json:"id"`
-	Choices []ChatChoice `json:"choices"`
-	Usage   *ChatUsage   `json:"usage"`
+	Error   *ChatResponseError `json:"error,omitempty"`
+	ID      string             `json:"id"`
+	Choices []ChatChoice       `json:"choices"`
+	Usage   *ChatUsage         `json:"usage"`
 }
 
 // ChatResponseError is the code of a top-level error object; the message
