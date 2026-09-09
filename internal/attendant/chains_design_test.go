@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"automation.internal/ticket-ingress/internal/backlog"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -96,11 +100,96 @@ func TestDesignObjectionRecorded(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(runDir, "history", "stage-1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(runDir, "history", "stage-1", "review-b.json"), []byte(`{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`), 0o644); err != nil {
+	for name, content := range map[string]string{
+		"review-a.json": `{"verdict":"revise","findings":[{"code":"style","message":"a smaller thing"}]}`,
+		"review-b.json": `{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(runDir, "history", "stage-1", name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The signal is read from whichever reviewer carries it, so the walk
+	// must not stop at the first record that does not.
+	flagged, err := reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"})
+	if err != nil || !flagged {
+		t.Errorf("design-wrong finding not read from the sealed reviews: %v, %v", flagged, err)
+	}
+	// Another round's records are not this round's answer. Asking about a
+	// round whose reviews were never sealed is a reason to stop, not a no:
+	// the caller only ever asks about a round that sealed a revise decision,
+	// which proves the records were there (review of #123).
+	if flagged, err := reviewsFlagDesignWrong(runDir, 2, []string{"review-a", "review-b"}); err == nil || flagged {
+		t.Errorf("another round's absent reviews were read as an answer: %v, %v", flagged, err)
+	}
+}
+
+// A sealed review that cannot be read is not a review that found nothing,
+// and it is not a judgement about the design either: it is a reason to stop.
+// Read as "no design-wrong", it sent the delivery back to the applier with a
+// design a reviewer may have called wrong, and wrote nothing anywhere
+// (audit, 2026-09-09).
+func TestSealedReviewsThatCannotBeReadAreAReasonToStop(t *testing.T) {
+	place := func(t *testing.T, write func(dir string)) string {
+		t.Helper()
+		runDir := t.TempDir()
+		dir := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(dir)
+		return runDir
+	}
+	cases := map[string]func(dir string){
+		"truncated": func(dir string) { writeReview(t, dir, `{"findings":[`) },
+		"empty":     func(dir string) { writeReview(t, dir, ``) },
+		"not json":  func(dir string) { writeReview(t, dir, `not json at all`) },
+		// Opens as a directory rather than a file.
+		"a directory in its place": func(dir string) {
+			if err := os.MkdirAll(filepath.Join(dir, "review-a.json"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		// Reaching this point proves every review was there and parsed, so
+		// one that is now missing was removed after — as a dangling symlink
+		// is, and as a renamed reviewer id makes every record look.
+		"missing": func(string) {},
+		"a dangling symlink": func(dir string) {
+			if err := os.Symlink(filepath.Join(dir, "nowhere.json"), filepath.Join(dir, "review-a.json")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, write := range cases {
+		runDir := place(t, write)
+		flagged, err := reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"})
+		if err == nil {
+			t.Errorf("%s: gave no reason to record", name)
+		}
+		if flagged {
+			t.Errorf("%s: answered a question about the design", name)
+		}
+	}
+}
+
+// A configuration that names no reviewer reads every review record as
+// nothing at all. It is the same silent no the rest of this closes.
+func TestAConfigurationWithNoReviewerIsAReasonToStop(t *testing.T) {
+	runDir := t.TempDir()
+	dir := filepath.Join(runDir, "history", "stage-1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !reviewsFlagDesignWrong(runDir, 1, []string{"review-a", "review-b"}) || reviewsFlagDesignWrong(runDir, 2, []string{"review-a", "review-b"}) {
-		t.Error("design-wrong finding not read from the sealed reviews")
+	writeReview(t, dir, `{"verdict":"revise","findings":[{"code":"design-wrong"}]}`)
+	flagged, err := reviewsFlagDesignWrong(runDir, 1, nil)
+	if err == nil || flagged {
+		t.Fatalf("no configured reviewer: %v, %v", flagged, err)
+	}
+}
+
+func writeReview(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "review-a.json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -474,5 +563,250 @@ func TestApplyCardObjectionReopensDesignRound(t *testing.T) {
 	}
 	if !containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageInvestigate, 2)) {
 		t.Fatalf("design round 2 was not opened: %v", created)
+	}
+}
+
+// The decision the attendant actually makes, measured without a board or a
+// tracker: where an implementation round goes next, and what it records.
+// The call site had no test at all — disabling the branch that sends a
+// delivery back to the designer, or the line that records why a run was
+// stopped, failed nothing (review of #123).
+func TestWhereAnImplementationRoundGoesNext(t *testing.T) {
+	config := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "consumer.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	twoReviewers := `{"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`
+	for name, c := range map[string]struct {
+		reviews  map[string]string
+		config   string
+		wantBack bool
+		wantStop bool
+	}{
+		"a reviewer found the design wrong": {
+			reviews:  map[string]string{"review-a.json": `{"findings":[]}`, "review-b.json": `{"findings":[{"code":"design-wrong"}]}`},
+			config:   twoReviewers,
+			wantBack: true,
+		},
+		"the reviews found other things": {
+			reviews: map[string]string{"review-a.json": `{"findings":[{"code":"style"}]}`, "review-b.json": `{"findings":[]}`},
+			config:  twoReviewers,
+		},
+		"one review will not parse": {
+			reviews:  map[string]string{"review-a.json": `{"findings":[`, "review-b.json": `{"findings":[]}`},
+			config:   twoReviewers,
+			wantStop: true,
+		},
+		"one review was removed": {
+			reviews:  map[string]string{"review-b.json": `{"findings":[{"code":"design-wrong"}]}`},
+			config:   twoReviewers,
+			wantStop: true,
+		},
+		"the configuration names no reviewer": {
+			reviews:  map[string]string{"review-a.json": `{"findings":[{"code":"design-wrong"}]}`},
+			config:   `{"models":{}}`,
+			wantStop: true,
+		},
+		"the configuration cannot be read": {
+			reviews:  map[string]string{"review-a.json": `{"findings":[{"code":"design-wrong"}]}`},
+			config:   `not json`,
+			wantStop: true,
+		},
+	} {
+		runDir := t.TempDir()
+		dir := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for file, body := range c.reviews {
+			if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		back, err := designWrongForRound(runDir, config(t, c.config), 1)
+		if (err != nil) != c.wantStop {
+			t.Errorf("%s: stop = %v, want %v", name, err, c.wantStop)
+		}
+		if back != c.wantBack {
+			t.Errorf("%s: back to the designer = %v, want %v", name, back, c.wantBack)
+		}
+	}
+}
+
+// A run the attendant stops itself says why on the ticket. The reason names
+// no file and no error text: those are the operator's, and the requester's
+// question is only whether their own ticket is at fault.
+func TestTheReasonAStoppedRunCarriesNamesNothingInternal(t *testing.T) {
+	code, reason := unreadableReviewsOutcome(2)
+	// Not a model failure: no model was asked anything on this path, and the
+	// code decides both the comment the requester reads and whether the
+	// failure counts toward the hold on new work.
+	if code != hook.TerminalInternalFailed {
+		t.Fatalf("the run ends as %s", code)
+	}
+	if !strings.Contains(reason, "2 巡目") || !strings.Contains(reason, "依頼の内容とは別のところ") {
+		t.Fatalf("the reason does not say what happened: %q", reason)
+	}
+	for _, internal := range []string{".json", "review-a", "unexpected end", "/"} {
+		if strings.Contains(reason, internal) {
+			t.Errorf("the reason names something internal (%q): %q", internal, reason)
+		}
+	}
+}
+
+// Where an implementation round goes is decided in handleChainFailure, and
+// nothing measured it: disabling the branch that stops a run, changing the
+// code it stops with, or deleting the sentence its requester is told, all
+// left every test green (review of #123). This drives the real function
+// against a board and watches what it does with the cards and the run.
+func TestAFailedRoundGoesWhereTheReviewsSay(t *testing.T) {
+	const designWrong = `{"verdict":"revise","findings":[{"code":"design-wrong","message":"the cause is elsewhere"}]}`
+	const otherFindings = `{"verdict":"revise","findings":[{"code":"style","message":"a smaller thing"}]}`
+	for name, c := range map[string]struct {
+		reviewA, reviewB  string
+		wantNewDesign     bool
+		wantNextImplement bool
+		wantStopped       bool
+	}{
+		"a reviewer found the design wrong": {reviewA: otherFindings, reviewB: designWrong, wantNewDesign: true},
+		// The re-apply route needs a sealed design this fixture does not
+		// build, and says so — which is itself the proof it took that route
+		// rather than stopping or opening a new design round.
+		"the reviews found other things": {reviewA: otherFindings, reviewB: otherFindings, wantNextImplement: true},
+		"a review will not parse":        {reviewA: `{"findings":[`, reviewB: otherFindings, wantStopped: true},
+		"a review was removed":           {reviewB: otherFindings, wantStopped: true},
+	} {
+		config, runDir := designRunConfigWithReviewers(t)
+		stage1 := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(stage1, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// A sealed revise decision is what brings a round here at all.
+		if err := os.WriteFile(filepath.Join(stage1, "decision.json"), []byte(`{"outcome":"revise"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for file, body := range map[string]string{"review-a.json": c.reviewA, "review-b.json": c.reviewB} {
+			if body == "" {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(stage1, file), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hermes, callLog := fakeBoard(t)
+		envelope := hook.DispatchEnvelope{DeliveryID: "delivery-1", Snapshot: hook.TicketSnapshot{IssueID: 4242}}
+		logger := &recordingLogger{}
+		err := handleChainFailure(context.Background(), config, quietServices(t), hermes, envelope,
+			state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, failedValidateBoard(), runtime.StageValidate, logger)
+		_, created := boardCalls(t, callLog)
+		newDesign := containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageInvestigate, 2))
+		nextImplement := containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageApply, 2)) ||
+			(err != nil && strings.Contains(err.Error(), "no approved design to re-apply"))
+		reason, _ := os.ReadFile(filepath.Join(runDir, "delivery-stop-reason.txt"))
+		stopped := len(reason) > 0
+		if newDesign != c.wantNewDesign || nextImplement != c.wantNextImplement || stopped != c.wantStopped {
+			t.Errorf("%s: new design=%v next implement=%v stopped=%v (err=%v)", name, newDesign, nextImplement, stopped, err)
+		}
+		if c.wantStopped {
+			if !strings.Contains(string(reason), "レビュー結果を読めなかった") {
+				t.Errorf("%s: the requester was told %q", name, reason)
+			}
+			if len(logger.lines) == 0 {
+				t.Errorf("%s: the run stopped without saying why anywhere", name)
+			}
+		}
+	}
+}
+
+// designRunConfigWithReviewers is designRunConfig with the two reviewers the
+// cards orchestration runs, which is what the sealed reviews are named for.
+func designRunConfigWithReviewers(t *testing.T) (runtime.Config, string) {
+	t.Helper()
+	config, runDir := designRunConfig(t, 3)
+	if err := os.WriteFile(config.ConsumerConfigPath, []byte(`{"max_stages":3,"design_max_rounds":3,`+
+		`"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},`+
+		`"agents":{"applier":{"command":"true","timeout_seconds":60}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The shape comes from the readiness decision: this is the delivery the
+	// investigating designer produced a design for.
+	readiness := filepath.Join(runDir, "history", "readiness")
+	if err := os.MkdirAll(readiness, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(readiness, "decision.json"),
+		[]byte(`{"outcome":"ready","request_kind":"change","needs_design":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return config, runDir
+}
+
+// failedValidateBoard is a design-backed delivery whose validate card failed
+// on its first implementation round: the one shape that reaches the question
+// of where the round goes next.
+func failedValidateBoard() chainView {
+	card := func(id, stage, status string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey("delivery-1", stage, round)}
+	}
+	return chainViewFor([]runtime.BoardTask{
+		card("t_i1", runtime.StageInvestigate, "done", 1), card("t_a1", runtime.StageDesignReviewA, "done", 1),
+		card("t_b1", runtime.StageDesignReviewB, "done", 1), card("t_d1", runtime.StageDesignDecide, "done", 1),
+		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "done", 1),
+		card("t_rb", runtime.StageReviewB, "done", 1), card("t_v", runtime.StageValidate, "blocked", 1),
+		card("t_p", runtime.StagePublish, "todo", 1),
+	}, "delivery-1")
+}
+
+// quietServices is the services a chain needs to answer "the requester has
+// not asked us to stop": a real Backlog client whose transport answers every
+// comment lookup with none.
+func quietServices(t *testing.T) *runtime.Services {
+	t.Helper()
+	client, err := backlog.NewClient(backlog.Config{
+		SpaceKey: "space", APIKey: "k", Origin: "https://space.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20,
+	}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader("[]"))}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &runtime.Services{Backlog: client}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The answer must not depend on the order the reviewers are configured in.
+// Stopping at the first design-wrong left a later unreadable record unread,
+// so the same pair of records sent the delivery to the designer one way
+// round and stopped the run the other (review of #123).
+func TestTheAnswerDoesNotDependOnTheOrderOfTheReviewers(t *testing.T) {
+	for name, broken := range map[string]string{"unreadable": `{"findings":[`, "removed": ""} {
+		runDir := t.TempDir()
+		dir := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "review-a.json"),
+			[]byte(`{"verdict":"revise","findings":[{"code":"design-wrong"}]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if broken != "" {
+			if err := os.WriteFile(filepath.Join(dir, "review-b.json"), []byte(broken), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, order := range [][]string{{"review-a", "review-b"}, {"review-b", "review-a"}} {
+			flagged, err := reviewsFlagDesignWrong(runDir, 1, order)
+			if err == nil || flagged {
+				t.Errorf("%s, order %v: flagged=%v err=%v; a record that cannot be read is not an answer", name, order, flagged, err)
+			}
+		}
 	}
 }

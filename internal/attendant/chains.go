@@ -691,6 +691,9 @@ func handleChainFailure(
 	logger Logger,
 ) error {
 	runDir := runDirectory(config, run.DeliveryID)
+	// stopReason, when set, is the requester-facing sentence for a run this
+	// process is ending itself; the report below folds it into the trail.
+	stopReason := ""
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	action, code := classifyChainFailure(stageName, func() (string, error) {
 		return readField(runDir, fmt.Sprintf("history/stage-%d/decision.json", view.round), "outcome")
@@ -713,18 +716,30 @@ func handleChainFailure(
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
 		case view.round < limit:
-			if plan, planErr := chainPlanFor(config, runDir, run, logger); planErr == nil && plan.Shape == runtime.ShapeDesign {
-				// A design-backed delivery: a reviewer who found the design
-				// itself wrong sends the run back to the designer; anything
-				// else is another application of the same design.
-				if reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath); err == nil && reviewsFlagDesignWrong(runDir, view.round, reviewers) {
-					// At the design-round limit this ends the run as
-					// nonconverged instead of returning the limit error every tick.
-					return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "a review found the design itself wrong", logger)
-				}
+			plan, planErr := chainPlanFor(config, runDir, run, logger)
+			if planErr != nil || plan.Shape != runtime.ShapeDesign {
+				return regenerateRound(ctx, hermes, config, run, view, logger)
+			}
+			// A design-backed delivery: a reviewer who found the design
+			// itself wrong sends the run back to the designer; anything
+			// else is another application of the same design.
+			designWrong, readErr := designWrongForRound(runDir, config.ConsumerConfigPath, view.round)
+			switch {
+			case readErr != nil:
+				// Not an answer about the design: the reviews could not be
+				// read, and no amount of redesigning repairs a record. The
+				// run ends here with the reason, rather than spending the
+				// delivery's remaining design rounds re-reading it.
+				logger.Error("the sealed reviews could not be read",
+					"delivery_id", run.DeliveryID, "round", view.round, "error", readErr.Error())
+				code, stopReason = unreadableReviewsOutcome(view.round)
+			case designWrong:
+				// At the design-round limit this ends the run as
+				// nonconverged instead of returning the limit error every tick.
+				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "a review found the design itself wrong", logger)
+			default:
 				return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
 			}
-			return regenerateRound(ctx, hermes, config, run, view, logger)
 		default:
 			// The decide verb converts a final-round revise into nonconverged;
 			// a revise at the limit means the artifacts and the configuration
@@ -741,6 +756,9 @@ func handleChainFailure(
 	// have (#10); composition failure never blocks the report.
 	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-1")); err == nil {
 		pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
+		if stopReason != "" {
+			pipeline.WriteStopReason(stopReason)
+		}
 		_ = pipeline.EnsureTrail(ctx)
 		// The publish card records why a delivery stopped in its own
 		// process; the recomposed trail would silently drop it otherwise.

@@ -295,6 +295,11 @@ func (p *Pipeline) writeStopReason(reason string) {
 	_ = os.WriteFile(p.path(deliveryStopReasonFile), []byte(reason), 0o600)
 }
 
+// WriteStopReason lets the attendant record a requester-facing reason for a
+// run it is ending in its own process, the same way a card's runner does.
+// Without it a run the attendant stops carries only its failure class.
+func (p *Pipeline) WriteStopReason(reason string) { p.writeStopReason(reason) }
+
 // AttachDeliveryStopReason appends the recorded stop reason (if any) to the
 // trail this pipeline composed. Call it after EnsureTrail: the attendant's
 // trail recomposition would otherwise discard a note the publish card's own

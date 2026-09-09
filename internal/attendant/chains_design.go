@@ -176,31 +176,88 @@ func designObjectionRecorded(runDir string, designRound int) (bool, error) {
 	return false, nil
 }
 
+// unreadableReviewsStopReason is what a requester is told when the run ends
+// because its sealed reviews could not be read. It names no file and no
+// error text: those are the operator's, and the requester's question is
+// only whether their ticket is at fault.
+func unreadableReviewsStopReason(round int) string {
+	return fmt.Sprintf("%d 巡目のレビュー結果を読めなかったため、自動処理を止めました。"+
+		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。", round)
+}
+
+// unreadableReviewsOutcome is how a run ends when its sealed reviews could
+// not be read: the code and the sentence together, because the code decides
+// which comment the requester reads and whether the failure counts toward
+// the hold on new work. It is internal rather than a model failure — no
+// model was asked anything here.
+func unreadableReviewsOutcome(round int) (hook.TerminalCode, string) {
+	return hook.TerminalInternalFailed, unreadableReviewsStopReason(round)
+}
+
+// designWrongForRound answers, for one implementation round, whether the
+// delivery goes back to the designer. An error means the reviews could not
+// be read at all, which is not an answer to that question: it is a reason to
+// stop. It is separate from the attendant's own plumbing so the decision can
+// be measured without a board or a tracker (review of #123).
+func designWrongForRound(runDir, consumerConfigPath string, implementRound int) (bool, error) {
+	reviewers, err := consumerReviewerIDs(consumerConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("the configured reviewers could not be read: %w", err)
+	}
+	return reviewsFlagDesignWrong(runDir, implementRound, reviewers)
+}
+
 // reviewsFlagDesignWrong reports whether any sealed review of the
 // implementation round carries the finding code design-wrong: the reviewer
 // judged that the design itself does not hold, which sends the delivery back
 // to the designer rather than to another implementation round.
-func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) bool {
+//
+// Every configured reviewer's record must be there and readable. Reaching
+// this point proves they were: the round only gets here on a sealed revise
+// decision, and the decide verb refuses to seal one unless it read every
+// review it was given (measured in the review of #123). So a record that is
+// now missing was deleted after that, which is the same corruption as one
+// that will not parse — a dangling symlink reaches this as "missing", and a
+// renamed reviewer id reaches it as "missing" for a record that is right
+// there. Answering false for any of them inverted the decision silently.
+//
+// None of them is a judgement about the design, so none of them returns one:
+// the error says the reviews could not be read, and the caller ends the run
+// with that reason rather than spending the delivery's remaining design
+// rounds re-reading the same broken record (the implement round does not
+// advance across a design round, so it would be re-read every time).
+func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []string) (bool, error) {
+	if len(reviewers) == 0 {
+		return false, errors.New("no reviewer is configured, so no sealed review was read")
+	}
+	designWrong := false
 	for _, reviewer := range reviewers {
-		raw, err := os.ReadFile(filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json"))
+		path := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json")
+		raw, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return false, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
 		}
 		var review struct {
 			Findings []struct {
 				Code string `json:"code"`
 			} `json:"findings"`
 		}
-		if json.Unmarshal(raw, &review) != nil {
-			continue
+		if err := json.Unmarshal(raw, &review); err != nil {
+			return false, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
 		}
 		for _, finding := range review.Findings {
 			if finding.Code == "design-wrong" {
-				return true
+				// Not returned yet: a record after this one may be
+				// unreadable, and answering here would leave that unread and
+				// unrecorded — the same silent no this closes, in a window
+				// the order of the configured reviewers decides (review of
+				// #123). Reading them all makes the answer the same whatever
+				// that order is.
+				designWrong = true
 			}
 		}
 	}
-	return false
+	return designWrong, nil
 }
 
 // regenerateDesignBackedRound starts the next implementation round of a
