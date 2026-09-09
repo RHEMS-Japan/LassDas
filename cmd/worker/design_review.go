@@ -537,6 +537,7 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		"- 好みの問題は指摘しないでください。根拠が無い・前提が誤っている・確認方法で判定できない・副作用を見落としている、というものだけを指摘してください。",
 	}
 	if input.subject.Kind == investigate.SubjectDesign {
+		tail = append(tail, "", "## 設計と後続工程の持ち場", worker.DesignExecutionRules)
 		tail = append(tail, designVerificationVocabulary...)
 	}
 	tail = append(tail,
