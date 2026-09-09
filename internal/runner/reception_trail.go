@@ -23,11 +23,6 @@ const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 // instruction here would hand them two opposite directions in one comment
 // (review of #122). Making that line follow the note is its own change.
 //
-// The derivation's own call to this, in the pretrip, is the one place a
-// test does not reach: the pretrip clones the target repository before it,
-// so driving it needs a repository rather than a stand-in worker. Deleting
-// that call is therefore still free (review of #127).
-//
 // noteReceptionCutoff leaves the requester a reason when a reception stage
 // (the readiness pair, the contract derivation) failed because the model's
 // answer was cut off at the output allowance. Without this the terminal

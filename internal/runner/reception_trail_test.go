@@ -3,7 +3,9 @@ package runner
 import (
 	"automation.internal/ticket-ingress/internal/worker"
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -681,5 +683,63 @@ func TestEveryReceptionExitLeavesANote(t *testing.T) {
 		if !strings.Contains(text, c.stage) {
 			t.Errorf("%s: the note does not name %q: %q", name, c.stage, text)
 		}
+	}
+}
+
+// The derivation's own exit, in the pretrip rather than the readiness gate.
+// It was the one place a note could be deleted with nothing failing, and
+// the reason the note exists at all is a live ticket that ended with the
+// failure class and no reason (2026-09-09). Reaching it needs the target
+// clone stubbed, which the pipeline already allows for.
+func TestTheDerivationsExitLeavesANote(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "stand-in-worker")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"read-ticket\" ]; then printf '%s' '{\"gaps\":[]}' > intake.json; fi\n" +
+		"if [ \"$1\" = \"build-draft\" ]; then printf '%s' '{\"repository\":\"o/r\"}' > ticket-draft.json; fi\n" +
+		"if [ \"$1\" = \"list-candidates\" ]; then printf '%s' '{\"files\":[]}' > candidate-listing.json; fi\n" +
+		"if [ \"$1\" = \"derive-contract\" ]; then " +
+		"printf '%s\\n' 'worker: contract derivation failed: " + worker.NoTargetFileChosen + " (answer 3 of 3)' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := receptionPipeline(t, script)
+	consumer := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(consumer, []byte(`{"max_stages":3,"consumers":[{"repository":"o/r","delivery":"pull_request"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.ConsumerConfigPath = consumer
+	// The baseline step runs the controller, which this run does not need
+	// past the derivation: a stand-in that writes the record and exits.
+	controller := filepath.Join(t.TempDir(), "stand-in-controller")
+	if err := os.WriteFile(controller, []byte("#!/bin/sh\nprintf '{\"baseline\":{\"Integration\":{\"SHA\":\"%s\"}}}' \"$(git -C target-repo rev-parse HEAD)\" > baseline.json\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.ControllerBin = controller
+	// A real repository: the pretrip checks the base commit out before it
+	// reaches the derivation, so an empty directory stops one step short.
+	pipeline.cloneTarget = func(_ context.Context, destination string) error {
+		if err := os.MkdirAll(destination, 0o700); err != nil {
+			return err
+		}
+		for _, argv := range [][]string{
+			{"init", "--quiet", "-b", "main"},
+			{"-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "--quiet", "--allow-empty", "-m", "base"},
+		} {
+			command := exec.Command("git", argv...)
+			command.Dir = destination
+			if out, err := command.CombinedOutput(); err != nil {
+				return fmt.Errorf("git %v: %v: %s", argv, err, out)
+			}
+		}
+		return nil
+	}
+	_, outcome, _ := pipeline.pretrip(context.Background())
+	if outcome.Code != "internal_failed" {
+		t.Fatalf("pretrip() = %+v; want internal_failed", outcome)
+	}
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "変更するファイルを決められなかった") || !strings.Contains(text, deriveStage) {
+		t.Fatalf("the derivation's exit left no reason: %q", text)
 	}
 }
