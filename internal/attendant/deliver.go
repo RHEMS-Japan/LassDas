@@ -207,12 +207,19 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 	return err
 }
 
+// promotableStagingVerdict is the one staging outcome a promotion may rest
+// on. It is a named answer rather than a comparison inside the gate so that
+// widening it is a change to something a test holds: every other verdict —
+// a deployment that failed, one that never started, a screen that could not
+// be judged — means nothing verified the change.
+func promotableStagingVerdict(verdict string) bool { return verdict == "pass" }
+
 // advanceTowardsPromotion runs while the staging report is on the ticket
 // and no promote card exists: enforce the Go deadline, detect the Go, and
 // issue the promote card.
 func advanceTowardsPromotion(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) error {
 	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
-	if err != nil || report.Verdict != "pass" || report.PromotionHold != "" {
+	if err != nil || !promotableStagingVerdict(report.Verdict) || report.PromotionHold != "" {
 		// Failed or promotion-held staging reports are terminal for the
 		// automation; the ones that asked an operator to look wait for the
 		// operator's 「確認済み」 so the board can stop calling them open.

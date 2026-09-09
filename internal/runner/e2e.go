@@ -78,6 +78,15 @@ func (p *Pipeline) RunE2ECheck(ctx context.Context) error {
 			"--out", p.path(E2EMergedStagingFile),
 		})
 		if err != nil || code != 0 {
+			// The merge landing and no deployment being created is a
+			// different fact from either not completing, and this is the
+			// path both shipped destinations take (review of #134).
+			if p.lastStepEndedWith(controllerStagingAbsentCode) {
+				return p.sealE2EResult(E2EResult{
+					Verdict: "unknown",
+					Detail:  "設定されたステージングのデプロイ処理が、このマージに対して実行を 1 つも作りませんでした。",
+				})
+			}
 			return p.sealE2EResult(E2EResult{
 				Verdict: "unknown",
 				Detail:  "マージまたはステージング反映の完了を確認できませんでした（マージされずクローズされた場合・期限内にマージされなかった場合を含みます）。",

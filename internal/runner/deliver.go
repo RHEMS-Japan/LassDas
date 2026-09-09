@@ -52,7 +52,7 @@ const (
 type DeliverReport struct {
 	SchemaVersion int    `json:"schema_version"`
 	Phase         string `json:"phase"`   // staging | production
-	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | promotion_failed
+	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | observe_failed | observe_blocked | promotion_failed
 	// Block, with an observe_blocked verdict, says why the page could not
 	// be judged at all: "sign_in" (the consumer's login did not land — the
 	// session jar is no longer accepted) or "redirect" (the target sent the
@@ -192,6 +192,23 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 			return err
 		}
 		if code != 0 {
+			if p.lastStepEndedWith(controllerStagingAbsentCode) {
+				// The merge landed and the destination created no staging run
+				// for it — a change outside what its deployment covers, most
+				// often. Nothing failed, and nothing deployed either, so the
+				// screen check has nothing to look at and the promotion has
+				// no deployment to rest on.
+				return p.sealDeliverReport(DeliverReport{
+					Phase: "staging", Verdict: "deploy_absent",
+					// Exactly what was watched and what was seen. An earlier
+					// wording said "this repository's automatic deploy never
+					// started", which claims more: one configured workflow
+					// was watched, only for the push that this merge is, and
+					// whether the change is still on the branch was not
+					// re-read at the end (review of #134).
+					Detail: "設定されたステージングのデプロイ処理が、このマージに対して実行を 1 つも作りませんでした。",
+				})
+			}
 			return p.sealDeliverReport(DeliverReport{
 				Phase: "staging", Verdict: "deploy_failed",
 				Detail: "ステージングの自動デプロイの完了を確認できませんでした。",
@@ -416,6 +433,15 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 			return err
 		}
 		if code != 0 {
+			if p.lastStepEndedWith(controllerProductionAbsentCode) {
+				// The same fact as on staging, on the phase where saying it
+				// wrong costs more: no run was created, so there is nothing
+				// that failed and nothing that deployed.
+				return p.sealDeliverReport(DeliverReport{
+					Phase: "production", Verdict: "deploy_absent",
+					Detail: "設定された本番のデプロイ処理が、この反映に対して実行を 1 つも作りませんでした。",
+				})
+			}
 			return p.sealDeliverReport(DeliverReport{
 				Phase: "production", Verdict: "deploy_failed",
 				Detail: "本番の自動デプロイの完了を確認できませんでした（コードは prod ブランチに入っています）。",
@@ -756,6 +782,33 @@ func (p *Pipeline) fillDelta(report *DeliverReport) {
 		return
 	}
 	report.Delta = json.RawMessage(raw)
+}
+
+// controllerStagingAbsentCode is the controller's fixed code for a merge
+// that landed with no staging run created for it. The controller prints its
+// code on its own last line and exits one for every failure alike, so the
+// code is what separates them here.
+const controllerStagingAbsentCode = "staging_deployment_absent"
+
+// controllerProductionAbsentCode is the same on the promotion.
+const controllerProductionAbsentCode = "production_deployment_absent"
+
+// lastStepEndedWith reports whether the step that just ran ended with the
+// given controller failure code. The controller prints its detail first and
+// its code last, so the LAST such line is the one the verb ended with:
+// scanning for any match would let a code mentioned in an earlier line
+// answer for a different failure below it (review of #134 measured that
+// exact inversion). The same text inside a wrapped error is a detail, not
+// an ending, so the whole line must be the code.
+func (p *Pipeline) lastStepEndedWith(code string) bool {
+	ending := ""
+	for _, line := range strings.Split(p.lastStepStderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if after, found := strings.CutPrefix(trimmed, "controller: "); found && !strings.Contains(after, ":") {
+			ending = after
+		}
+	}
+	return ending == code
 }
 
 func (p *Pipeline) sealDeliverReport(report DeliverReport) error {

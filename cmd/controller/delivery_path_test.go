@@ -265,6 +265,11 @@ type deliveryTransport struct {
 	runUpdated         string
 	workflowConclusion string
 
+	// stagingRuns is what the staging workflow's run list answers with.
+	// Empty — the zero value — is a destination that created no run for the
+	// commit, which is a real answer and not a missing fixture.
+	stagingRuns []map[string]any
+
 	// failures forces a status for one "METHOD path", standing in for a
 	// GitHub refusal the command must report rather than paper over.
 	failures map[string]int
@@ -494,6 +499,15 @@ func (transport *deliveryTransport) pullPayload() map[string]any {
 }
 
 func (transport *deliveryTransport) workflowRuns(identifier string) (*http.Response, error) {
+	if identifier == decimal(testPrimaryConsumer().Contract().StagingWorkflow.ID) {
+		// The staging workflow answers separately: a destination does not
+		// necessarily create a run for every commit that lands on its
+		// integration branch, and the wait has to be able to see none.
+		return jsonResponse(http.StatusOK, map[string]any{
+			"total_count":   len(transport.stagingRuns),
+			"workflow_runs": transport.stagingRuns,
+		}), nil
+	}
 	index := transport.featureWorkflowIndex(identifier)
 	if index < 0 {
 		return deliveryNotFound(), nil
