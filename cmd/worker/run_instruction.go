@@ -111,6 +111,16 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		}
 	}
 	outcome, halted, runErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, string(instruction), consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+	if runErr == nil && !halted && len(outcome.ChangedFiles) == 0 {
+		// The agent finished, wrote nothing, and said it was done: on the
+		// tenth live run the applier described the file it had created in
+		// detail, and the working copy was untouched (2026-09-09). The
+		// working tree is what counts, so it is asked once more with that
+		// fact in front of it. One extra attempt costs half a minute; the
+		// delivery it saves costs half an hour.
+		outcome, halted, runErr = worker.RunAgentUnlessHalted(ctx, agent, *repoRoot,
+			string(instruction)+emptyResultRetryNote, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+	}
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
 		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
@@ -141,6 +151,27 @@ func runRunInstruction(ctx context.Context, args []string) error {
 	}
 	return nil
 }
+
+// emptyResultRetryNote is appended when an agent reported success without
+// touching the working copy. It states the measurement, not a scolding: the
+// engine read the tree and found nothing, so whatever the previous message
+// said, the work is still to do.
+const emptyResultRetryNote = `
+
+---
+
+## The working copy is unchanged
+
+Your previous answer reported the work as done. The engine then read the
+working copy and found no change at all — no new file, no edited file.
+Nothing you described exists.
+
+Only the working copy counts. A message describing edits is not an edit;
+the seal reads the tree. Make the changes now with your tools, one file at
+a time, starting with the first file the design lists. If you cannot make
+them, write the objection file the rules above describe instead of
+reporting success.
+`
 
 // sealAppliersHalt reads the objection the applier left at the root of its
 // working copy and seals it as the design round's record, then fails the

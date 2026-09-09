@@ -249,3 +249,46 @@ func TestTheApplierCardClearsALeftoverObjectionBeforeItRuns(t *testing.T) {
 		t.Fatalf("the round that applied the design was thrown away: %q (%v)", string(applied), readErr)
 	}
 }
+
+// An agent that finishes, changes nothing and reports success is asked once
+// more with that measurement in front of it. On the tenth live run the
+// applier described the file it had created in detail and the working copy
+// was untouched; the delivery died there, half an hour in.
+func TestAnAgentThatChangedNothingIsAskedAgainWithTheTreeInFrontOfIt(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "attempts")
+	fixture := newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+		// The stand-in writes only on the attempt that is told the tree is
+		// unchanged, the way the live applier behaved.
+		writeStandInAgent(t, binaries, "stand-in-applier",
+			`printf 'x' >> `+marker+`; for a in "$@"; do last="$a"; done; `+
+				`case "$last" in *"The working copy is unchanged"*) `+editTheLabel+`; echo "done for real";; *) echo "the design is applied";; esac`)
+		applier := config.Agents.Implementer
+		applier.ID = "applier-stand-in"
+		applier.Command = "stand-in-applier"
+		config.Agents.Applier = &applier
+	})
+	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(t.TempDir(), "applier-run.json")
+	if err := run(context.Background(), []string{"run-instruction", "--role", "applier", "--config", fixture.configPath,
+		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction,
+		"--repo-root", fixture.repoRoot, "--base-sha", fixture.baseSHA, "--stage", "1", "--out", record}); err != nil {
+		t.Fatalf("run-instruction: %v", err)
+	}
+	attempts, err := os.ReadFile(marker)
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("attempts = %q (%v), want two", attempts, err)
+	}
+	var sealed worker.AgentRun
+	if err := worker.ReadJSONFile(record, worker.MaxArtifactJSONBytes, &sealed); err != nil {
+		t.Fatalf("run record: %v", err)
+	}
+	if len(sealed.ChangedFiles) != 1 || sealed.ChangedFiles[0] != "client/src/label.ts" {
+		t.Fatalf("the second attempt's work was not recorded: %+v", sealed.ChangedFiles)
+	}
+	if !strings.Contains(sealed.Transcript, "done for real") {
+		t.Errorf("the sealed transcript is not the second attempt's: %q", sealed.Transcript)
+	}
+}
