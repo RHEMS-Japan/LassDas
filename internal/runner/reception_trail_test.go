@@ -660,29 +660,32 @@ func TestEveryReceptionExitLeavesANote(t *testing.T) {
 			stage: "受付の判定のまとめ",
 		},
 	} {
-		failing := c.failing
-		if failing == "" {
-			failing = "no-such-subcommand"
-		}
-		pipeline := receptionPipeline(t, receptionStubWorker(t, failing, ""))
-		for path, body := range c.files {
-			full := pipeline.path(path)
-			if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-				t.Fatal(err)
+		// Each case in its own subtest: ranged over a map with a Fatalf
+		// inside, two exits breaking at once reported only one of them, and
+		// which one changed between runs (review of #127).
+		t.Run(name, func(t *testing.T) {
+			failing := c.failing
+			if failing == "" {
+				failing = "no-such-subcommand"
 			}
-			if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
+			pipeline := receptionPipeline(t, receptionStubWorker(t, failing, ""))
+			for path, body := range c.files {
+				full := pipeline.path(path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-		outcome, _ := pipeline.readinessGate(context.Background())
-		if outcome.Code != hook.TerminalModelFailed {
-			t.Errorf("%s: readinessGate() = %+v; want model_failed", name, outcome)
-			continue
-		}
-		text := readReceptionTrail(t, pipeline)
-		if !strings.Contains(text, c.stage) {
-			t.Errorf("%s: the note does not name %q: %q", name, c.stage, text)
-		}
+			outcome, _ := pipeline.readinessGate(context.Background())
+			if outcome.Code != hook.TerminalModelFailed {
+				t.Fatalf("readinessGate() = %+v; want model_failed", outcome)
+			}
+			if text := readReceptionTrail(t, pipeline); !strings.Contains(text, c.stage) {
+				t.Fatalf("the note does not name %q: %q", c.stage, text)
+			}
+		})
 	}
 }
 
