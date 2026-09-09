@@ -230,8 +230,14 @@ func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA str
 	if err := worker.WriteJSONFileExclusive(out, record, worker.MaxArtifactJSONBytes); err != nil {
 		return false, errors.New("the objection record could not be written")
 	}
-	if err := os.Rename(path, filepath.Join(filepath.Dir(out), "revise-design.json")); err != nil {
-		return false, errors.New("the applier's objection could not be moved into the round")
+	if err := os.Rename(path, filepath.Join(filepath.Dir(out), objectionFileName)); err != nil {
+		// The record is sealed; keeping the applier's file beside it is a
+		// convenience. What must not happen is the file staying in the tree
+		// for the next attempt to read, so it goes either way — and the
+		// objection is reported as sealed, because it is (an error here
+		// used to say the objection had been refused, which the design
+		// round's record contradicts).
+		_ = os.Remove(path)
 	}
 	return true, nil
 }

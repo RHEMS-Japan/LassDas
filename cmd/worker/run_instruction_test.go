@@ -211,3 +211,41 @@ func TestAnApplierHaltThatIsNotARegularFileIsRefused(t *testing.T) {
 		t.Fatalf("a named pipe in the halt file's place: %v", err)
 	}
 }
+
+// The applier's card clears a leftover objection before it starts. A run
+// killed outright leaves one behind (nothing of its own cleanup runs), and
+// the card is re-dispatched into the same working copy: the second attempt
+// would read the dead attempt's file as its own.
+func TestTheApplierCardClearsALeftoverObjectionBeforeItRuns(t *testing.T) {
+	fixture := newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+		writeStandInAgent(t, binaries, "stand-in-applier", editTheLabel)
+		applier := config.Agents.Implementer
+		applier.ID = "applier-stand-in"
+		applier.Command = "stand-in-applier"
+		config.Agents.Applier = &applier
+	})
+	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// What the killed attempt left behind.
+	if err := os.WriteFile(filepath.Join(fixture.repoRoot, "revise-design.json"),
+		[]byte(`{"reason":"a stale objection from the attempt that was killed","section":"files"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	design := sealedDesignFor(t, fixture, "client/src/label.ts")
+	err := run(context.Background(), []string{"run-instruction", "--role", "applier", "--config", fixture.configPath,
+		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "applier-run.json"),
+		"--design", design, "--objection-out", fixture.path("history/design-1/objection.json")})
+	if err != nil {
+		t.Fatalf("the second attempt applied the design but did not finish: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.path("history/design-1/objection.json")); statErr == nil {
+		t.Fatal("the dead attempt's objection was sealed as this attempt's")
+	}
+	applied, readErr := os.ReadFile(filepath.Join(fixture.repoRoot, "client", "src", "label.ts"))
+	if readErr != nil || !strings.Contains(string(applied), "Updated label") {
+		t.Fatalf("the round that applied the design was thrown away: %q (%v)", string(applied), readErr)
+	}
+}

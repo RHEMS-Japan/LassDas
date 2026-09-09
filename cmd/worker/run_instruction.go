@@ -98,6 +98,18 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		design = &loaded
 		haltFile = objectionFileName
 	}
+	if haltFile != "" {
+		// The card is re-dispatched once, in the same working copy, and a
+		// run that was killed outright (the pod's own death, a stop past
+		// the grace period) runs none of the cleanup below. Whatever is
+		// here now is a leftover: a run that finished honestly had its
+		// objection moved into the design round. The repository clears the
+		// previous attempt's leavings at the start elsewhere too (the run
+		// record and the seal's partial outputs).
+		if err := os.RemoveAll(filepath.Join(*repoRoot, haltFile)); err != nil {
+			return errors.New("a leftover objection could not be cleared before the applier ran")
+		}
+	}
 	outcome, halted, runErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, string(instruction), consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
@@ -120,7 +132,7 @@ func runRunInstruction(ctx context.Context, args []string) error {
 			// beside the edits it made (losing a round that applied the
 			// design), or, if it changed nothing, as this round's objection
 			// carrying the previous attempt's reason (#103 review).
-			_ = os.Remove(filepath.Join(*repoRoot, haltFile))
+			_ = os.RemoveAll(filepath.Join(*repoRoot, haltFile))
 		}
 		return errors.New("the " + *role + " did not finish: " + runErr.Error())
 	}
