@@ -154,3 +154,30 @@ func TestAskImpasseNormalizesAModelSuppliedDimension(t *testing.T) {
 		t.Fatalf("dimension was not normalized: %+v", decision.Questions[0])
 	}
 }
+
+// The impasse asker licenses a record number the requester chose in an
+// earlier answer of this run (the same sources the reception uses), and
+// still refuses one from nowhere.
+func TestAskImpasseLicensesTheRequestersChosenRecordNumber(t *testing.T) {
+	config, request, source, candidate, reviews := nonconvergedFixture(t)
+	answer := `{"questions":[{"id":"Q1","question":"REC-77 を基準のままにしますか？","why_blocking":"基準が変わると表示が変わります。","choices":[{"id":"a","label":"REC-77 のまま","effect":"今の表示のまま"},{"id":"b","label":"基準を外す","effect":"数値が消える"}]}]}`
+	clarification := &ClarificationContext{
+		SHA256: strings.Repeat("ab", 32), Revision: 1, DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
+		Exchanges: []ClarificationExchange{{
+			Questions: []ReadinessQuestion{{ID: "Q1", Question: "どの基準で計りますか？", Choices: []ReadinessChoice{{ID: "a", Label: "公開経路 (記録 REC-77)", Effect: "e"}, {ID: "b", Label: "クラスタ内", Effect: "e"}}}},
+			Answers:   map[string]string{"Q1": "a"},
+		}},
+	}
+	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(answer)})
+	decision, err := invoker.AskImpasse(context.Background(), candidate, reviews, clarification, source, request, config, testInvocationTime)
+	if err != nil {
+		t.Fatalf("a record number the requester chose was refused: %v", err)
+	}
+	if decision.Outcome != ImpasseOutcomeAsk || len(decision.Questions) != 1 {
+		t.Fatalf("decision = %+v", decision)
+	}
+	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(answer)})
+	if _, err := invoker.AskImpasse(context.Background(), candidate, reviews, nil, source, request, config, testInvocationTime); err == nil {
+		t.Fatal("a record number from nowhere was accepted by the impasse asker")
+	}
+}
