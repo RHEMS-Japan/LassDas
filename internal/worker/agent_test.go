@@ -741,3 +741,32 @@ func TestAFailedHomeCopyLeavesNoHomeBehind(t *testing.T) {
 		t.Errorf("the failed launch left %d home(s) behind", len(entries))
 	}
 }
+
+// A stand-in that this run did not draw is refused before the agent starts.
+// The check catches a caller that went back to a fixed marker, which would
+// again rewrite the data a prompt carries.
+func TestALaunchRefusesAStandInItDidNotDraw(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `echo ok`)
+	config := fixtureAgentConfig("judge", name)
+	if _, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read {{AGENT_HOME}}/x", nil, "{{AGENT_HOME}}"); err == nil {
+		t.Fatal("a fixed marker was accepted as this launch's stand-in")
+	}
+	entries, _ := os.ReadDir(filepath.Join(filepath.Dir(root), "agent-home"))
+	if len(entries) != 0 {
+		t.Errorf("the refused launch left %d home(s) behind", len(entries))
+	}
+	if outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read it", nil, NewAgentHomeToken()); err != nil {
+		t.Fatalf("a token this run drew: %v (%s)", err, outcome.Transcript)
+	}
+}

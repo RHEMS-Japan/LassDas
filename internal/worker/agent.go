@@ -164,6 +164,12 @@ func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, wor
 // with a home made per launch.
 func AgentLauncherConfigured() bool { return agentLauncher() != "" }
 
+// agentHomeTokenPattern is the shape NewAgentHomeToken draws. Checking it
+// catches a caller that went back to a fixed marker; the protection from
+// data that happens to contain a stand-in is the ninety-six bits of
+// randomness, not this pattern.
+var agentHomeTokenPattern = regexp.MustCompile(`^\{\{AGENT_HOME:[0-9a-f]{24}\}\}$`)
+
 // NewAgentHomeToken returns the stand-in a prompt uses for the home the
 // launch will make; runAgentProcess replaces it with the real path once the
 // home exists. The prompt reaches the agent as an argument, not through a
@@ -173,9 +179,6 @@ func AgentLauncherConfigured() bool { return agentLauncher() != "" }
 // (its own source does), and replacing a marker inside a record would hand
 // the reviewer an excerpt that no longer matches the sealed record it
 // judges (review of #101, 2026-09-09).
-// agentHomeTokenPattern is the shape NewAgentHomeToken draws.
-var agentHomeTokenPattern = regexp.MustCompile(`^\{\{AGENT_HOME:[0-9a-f]{24}\}\}$`)
-
 func NewAgentHomeToken() string {
 	buffer := make([]byte, 12)
 	if _, err := rand.Read(buffer); err != nil {
@@ -186,9 +189,12 @@ func NewAgentHomeToken() string {
 	return "{{AGENT_HOME:" + hex.EncodeToString(buffer) + "}}"
 }
 
-// MaxAgentHomeFileBytes bounds a file copied into a launch's home; the
-// records file a design reviewer reads is the largest of them.
-const MaxAgentHomeFileBytes = 8 * 1024 * 1024
+// MaxAgentHomeFileBytes bounds a file copied into a launch's home. The
+// records file a design reviewer reads is the largest of them, and a round
+// may store up to the measurement budget (sixteen mebibytes), so the bound
+// sits above it: a bound below it would fail every review of a run that
+// measured to its budget, before the agent even started (review of #101).
+const MaxAgentHomeFileBytes = 32 * 1024 * 1024
 
 // AgentHomePathReserve is the room a prompt using an agent home token
 // leaves for the real path: the placeholder is short and the home is a
@@ -240,7 +246,8 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	// arrive inside the data a prompt carries (a record of a repository
 	// that contains this text), and that must not inflate the launch.
 	if homeToken != "" && !agentHomeTokenPattern.MatchString(homeToken) {
-		// Only a token this run drew may be replaced: a fixed marker would
+		// Only a token of the shape this run draws may be replaced: a
+		// fixed marker would
 		// also match text the prompt merely carries (a record of a
 		// repository whose source defines one), and rewriting that hands
 		// the reviewer an excerpt its sealed record does not match.

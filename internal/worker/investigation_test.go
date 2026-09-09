@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -672,6 +674,64 @@ func TestInvestigateAsksAgainAfterAProviderError(t *testing.T) {
 // can read any of them from offset 0; the earlier round's conversation is
 // gone, and without the index the role could only cite ids it never saw
 // or measure again (live: two rounds were spent swapping ids).
+// The index is bounded, and what it keeps is the newest: a revise round is
+// answering findings about the records it just made. Filling it from the
+// start dropped exactly those, silently, while the contract said every
+// record was listed — the round would then conclude that a cited record
+// does not exist.
+func TestTheRecordIndexKeepsTheNewestAndSaysHowManyItLeftOut(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "measurements.jsonl")
+	recorder, err := probe.OpenRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := probe.NewCatalog(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "label.ts"), []byte("export const label = 'Old label';\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &probe.Session{Catalog: catalog, Recorder: recorder, RepoRoot: repoRoot, Limits: probe.DefaultLimits}
+	for i := 0; i < 60; i++ {
+		if _, err := session.Run(context.Background(), probe.Request{Probe: "repo.grep", Args: map[string]string{
+			"pattern": strings.Repeat("a", 180) + strconv.Itoa(i), "path": strings.Repeat("b", 180),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, omitted, ok := earlierRecords(path, session.Recorder.Count())
+	if !ok || len(entries) == 0 {
+		t.Fatalf("index: ok=%v entries=%d", ok, len(entries))
+	}
+	if omitted == 0 {
+		t.Skip("the fixture no longer overflows the index bound")
+	}
+	if omitted+len(entries) != 60 {
+		t.Fatalf("%d listed and %d omitted, want 60 in total", len(entries), omitted)
+	}
+	newest := entries[len(entries)-1].ID
+	if want := session.Recorder.Count(); newest != fmt.Sprintf("m-%04d", want) {
+		t.Errorf("the newest record is %s, want m-%04d", newest, want)
+	}
+	if first := entries[0].ID; first == "m-0001" {
+		t.Error("the index starts at the oldest record: the newest were dropped")
+	}
+	task := investigationTaskPrompt(InvestigationInput{MeasurementsPath: path, Session: session, Previous: []byte(`{"design":{}}`)})
+	if !strings.Contains(task, `"earlier_records_omitted":`) {
+		t.Errorf("the round is not told what was left out: %s", boundedHeadOfTask(task))
+	}
+}
+
+func boundedHeadOfTask(task string) string {
+	if len(task) > 400 {
+		return task[:400]
+	}
+	return task
+}
+
 func TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart(t *testing.T) {
 	input, measurementsPath := investigationFixture(t, 10)
 	// Record two measurements the way the earlier round did.
@@ -695,7 +755,7 @@ func TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart(t *testing.T) {
 		t.Error("the index carries outputs; the role reads what it needs")
 	}
 	contract := investigationSystemPrompt(ModeDesign, true)
-	for _, want := range []string{"Offsets are 0 (the start of a recorded output", "USER_DATA_JSON.earlier_records lists every record of the run so far; read one from offset 0"} {
+	for _, want := range []string{"Offsets are 0 (the start of a recorded output", "USER_DATA_JSON.earlier_records lists the run's records, newest last, and earlier_records_omitted counts the older ones left out for space; read one from offset 0"} {
 		if !strings.Contains(contract, want) {
 			t.Errorf("revise contract lacks %q", want)
 		}
