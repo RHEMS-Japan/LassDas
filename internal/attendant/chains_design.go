@@ -137,10 +137,13 @@ func handleDesignChainFailure(
 			// be rendered, or the card died after sealing — the machinery's own.
 			code = hook.TerminalInternalFailed
 		}
-	case runtime.StageReviewA:
-		// The card that seals the applier's work is where an objection
-		// surfaces: the applier left revise-design.json and the seal turned
-		// it into a sealed design-objection.json instead of a candidate.
+	case runtime.StageApply, runtime.StageReviewA:
+		// An objection surfaces on one of two cards: the apply card itself,
+		// when the applier left revise-design.json at the root of its
+		// working copy and the run-instruction command sealed it into the
+		// design round's objection.json (issue #103); or the card that seals
+		// the applier's work, when the file was left in the run directory.
+		// Either way the design round's record is what says so.
 		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
 			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design", logger)
 		}

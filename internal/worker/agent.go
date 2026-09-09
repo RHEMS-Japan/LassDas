@@ -133,16 +133,42 @@ type AgentOutcome struct {
 // it changed. The credential is read from this process's environment and
 // passed to the child; it is never written to configuration or transcript.
 func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string) (AgentOutcome, error) {
+	outcome, _, err := RunAgentUnlessHalted(ctx, config, workspace, prompt, allowedPrefixes, ignoredByproducts, "")
+	return outcome, err
+}
+
+// RunAgentUnlessHalted is RunAgent for an agent that may stop instead of
+// editing (the applier of an approved design, docs/INVESTIGATING_DESIGNER.md
+// §7): when haltFile — a base name — is a regular file at the root of the
+// working copy after the agent finished, halted is true and the tree is not
+// scanned here. The caller reads the halt, decides what it means and removes
+// it; a scan would only have refused it as a file outside the writable
+// scope, which is how an honest objection used to end as a failed run
+// (issue #103). An empty haltFile is plain RunAgent.
+func RunAgentUnlessHalted(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string, haltFile string) (AgentOutcome, bool, error) {
 	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, nil, "")
 	if err != nil {
-		return outcome, err
+		return outcome, false, err
+	}
+	if haltFile != "" {
+		switch info, statErr := os.Lstat(filepath.Join(root, haltFile)); {
+		case statErr == nil && info.Mode().IsRegular():
+			return outcome, true, nil
+		case statErr == nil:
+			// A symbolic link, a directory or a named pipe in the halt
+			// file's place: the scan below reports a link or a directory as
+			// a change outside the scope, but never a pipe (git does not
+			// list one), so the run would pass a scan of nothing. It is
+			// refused here by name instead.
+			return outcome, false, errors.New("the agent left " + haltFile + " as something other than a regular file")
+		}
 	}
 	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)
 	if err != nil {
-		return outcome, err
+		return outcome, false, err
 	}
 	outcome.ChangedFiles = changed
-	return outcome, nil
+	return outcome, false, nil
 }
 
 // RunReviewingAgentWithHomeFiles runs a reviewer without scanning the tree
@@ -396,6 +422,13 @@ func RetryableReviewFailure(outcome AgentOutcome) bool {
 // error rather than a filtered-out result: the agent was told where it may
 // write, and writing elsewhere is a failure of the run, not noise to discard.
 func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts []string) ([]string, error) {
+	return ChangedFilesUnderExcept(root, allowedPrefixes, ignoredByproducts, "")
+}
+
+// ChangedFilesUnderExcept is ChangedFilesUnder with one file at the root of
+// the working copy left out of the scan: the applier's halt file, which its
+// caller reads and removes itself. Empty except scans everything.
+func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredByproducts []string, except string) ([]string, error) {
 	output, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
 	if err != nil {
 		return nil, errors.New("changed files could not be read")
@@ -403,6 +436,9 @@ func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts 
 	changed := make([]string, 0, 8)
 	entries := strings.Split(output, "\x00")
 	appendPath := func(path string) error {
+		if except != "" && path == except {
+			return nil
+		}
 		if !validRelativePath(path) || hasHiddenComponent(path) {
 			return errors.New("agent changed a path that is not addressable")
 		}
