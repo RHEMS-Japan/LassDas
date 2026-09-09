@@ -578,11 +578,23 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		parts = append(parts, middle...)
 		parts = append(parts, tail...)
 		prompt := strings.Join(parts, "\n")
-		if len(prompt) <= worker.MaxAgentPromptBytes {
+		if len(prompt) <= designPromptBudget(prompt) {
 			return prompt, nil
 		}
 	}
 	return "", errors.New("instruction is too large")
+}
+
+// designPromptBudget is how long this prompt may be here. A prompt that
+// names the launch's home is shorter by the reserve: the launcher replaces
+// the placeholder with the real path, which is longer, and a prompt fitted
+// to the whole limit would then be refused at launch — retried twice on the
+// same input and failing the card (review of #101, 2026-09-09).
+func designPromptBudget(prompt string) int {
+	if strings.Contains(prompt, worker.AgentHomePlaceholder) {
+		return worker.MaxAgentPromptBytes - worker.AgentHomePathReserve
+	}
+	return worker.MaxAgentPromptBytes
 }
 
 // measurementView is a measurement as the reviewer sees it: the outcome

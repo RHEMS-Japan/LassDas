@@ -629,3 +629,46 @@ func TestReviewingAgentGetsItsHomeFilesAndTheHomePath(t *testing.T) {
 		t.Errorf("the placeholder was not replaced by the launch home: %q", outcome.Transcript)
 	}
 }
+
+// A prompt fitted to the generator's budget — the limit less the reserve —
+// still launches after the placeholder becomes the real home path, and a
+// prompt that would grow past the reserve is refused without leaving its
+// home behind. Before the reserve, a prompt filled to the limit was refused
+// at launch, retried twice on the same input and failed the card.
+func TestTheLaunchHomePathFitsTheReserveAndAnOverlongOneLeavesNoHome(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	name, _ := writeFakeAgent(t, `echo ok`)
+	config := fixtureAgentConfig("judge", name)
+	homes := func() int {
+		entries, _ := os.ReadDir(filepath.Join(filepath.Dir(root), "agent-home"))
+		return len(entries)
+	}
+
+	filler := strings.Repeat("x", MaxAgentPromptBytes-2*len(AgentHomePlaceholder))
+	atLimit := AgentHomePlaceholder + filler + AgentHomePlaceholder
+	if len(atLimit) != MaxAgentPromptBytes {
+		t.Fatalf("the fixture prompt is %d bytes", len(atLimit))
+	}
+	if outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, atLimit, nil); err != nil {
+		t.Fatalf("a prompt at the limit with two placeholders: %v (%s)", err, outcome.Transcript)
+	}
+	left := homes()
+
+	overlong := strings.Repeat(AgentHomePlaceholder, 200)
+	if _, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, overlong, nil); err == nil {
+		t.Fatal("a prompt that grows past the reserve was launched")
+	}
+	if homes() != left {
+		t.Errorf("the refused launch left its home behind: %d homes, was %d", homes(), left)
+	}
+}

@@ -695,3 +695,59 @@ func TestAgentDesignReviewReadsTheRealTicketAndObjectionFiles(t *testing.T) {
 		t.Error("an objection file was accepted as a ticket")
 	}
 }
+
+// With agents under their own user, the design reviewer cannot open the
+// engine's measurements file: the command places a read-only copy in the
+// home the launch makes and points the prompt at it by the real path. The
+// prompt the agent receives therefore names a path inside its own home,
+// never the placeholder, and reading that path gives what the engine
+// measured.
+func TestAgentDesignReviewPointsTheReviewerAtTheCopyInItsOwnHome(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.txt")
+	homeRead := filepath.Join(t.TempDir(), "home-read.txt")
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newDesignFixture(t, `for a in "$@"; do last="$a"; done; printf '%s' "$last" > `+promptFile+
+		`; cat "$HOME/`+reviewMeasurementsCopy+`" > `+homeRead+`; `+passVerdict, nil)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(worker.AgentLauncherEnv, launcher)
+	t.Setenv(worker.AgentTreeRootEnv, filepath.Dir(fixture.repoRoot))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	if err := fixture.review(t, "design-review-a", "review-a", true); err != nil {
+		t.Fatalf("review under the launcher: %v", err)
+	}
+	prompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(prompt), worker.AgentHomePlaceholder) {
+		t.Error("the reviewer was given the placeholder instead of a path it can open")
+	}
+	wantPrefix := `"measurements_file":"` + filepath.Join(filepath.Dir(fixture.repoRoot), "agent-home")
+	if !strings.Contains(string(prompt), wantPrefix) {
+		t.Errorf("the prompt does not point into the launch home: want %q", wantPrefix)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Errorf("the prompt is %d bytes after the home path went in", len(prompt))
+	}
+	if budget := designPromptBudget(string(prompt)); budget != worker.MaxAgentPromptBytes {
+		t.Errorf("a prompt with the real path in it still reserves room: %d", budget)
+	}
+	if budget := designPromptBudget("read " + worker.AgentHomePlaceholder + "/x"); budget != worker.MaxAgentPromptBytes-worker.AgentHomePathReserve {
+		t.Errorf("a prompt naming the launch home does not reserve room for it: %d", budget)
+	}
+	copied, err := os.ReadFile(homeRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(fixture.measurementsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(copied) != string(original) {
+		t.Errorf("the copy in the home is not what the engine measured (%d vs %d bytes)", len(copied), len(original))
+	}
+}

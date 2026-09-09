@@ -173,6 +173,15 @@ func AgentLauncherConfigured() bool { return agentLauncher() != "" }
 // shell, so "$HOME" would arrive unexpanded.
 const AgentHomePlaceholder = "{{AGENT_HOME}}"
 
+// AgentHomePathReserve is the room a prompt using AgentHomePlaceholder
+// leaves for the real path: the placeholder is short and the home is a
+// path, so the replacement grows the prompt. A generator that fits a prompt
+// to MaxAgentPromptBytes - AgentHomePathReserve is safe to launch; a
+// generator that filled the limit exactly used to have its launch refused
+// as invalid input, which the caller then retried twice and failed the card
+// (review of #101, 2026-09-09).
+const AgentHomePathReserve = 1024
+
 func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, string, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
 		return AgentOutcome{}, "", errors.New("agent input is invalid")
@@ -206,12 +215,22 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		defer user.release()
 	}
 	// The prompt may name the home this launch made (a reviewer's copy of
-	// the measurements lives there); the real path is known only now.
-	if strings.Contains(prompt, AgentHomePlaceholder) {
-		prompt = strings.ReplaceAll(prompt, AgentHomePlaceholder, agentHome)
-		if len(prompt) > MaxAgentPromptBytes {
+	// the measurements lives there); the real path is known only now. The
+	// replacement is allowed to spend the reserve the generator left, so a
+	// prompt that was legal before the launch is not refused after it. What
+	// is refused is growth beyond the reserve: the placeholder can also
+	// arrive inside the data a prompt carries (a record of a repository
+	// that contains this text), and that must not inflate the launch.
+	if occurrences := strings.Count(prompt, AgentHomePlaceholder); occurrences > 0 {
+		growth := occurrences * (len(agentHome) - len(AgentHomePlaceholder))
+		if growth > AgentHomePathReserve || len(prompt)+growth > MaxAgentPromptBytes+AgentHomePathReserve {
+			if launcher != "" {
+				// This launch made the home; nothing else will remove it.
+				_ = os.RemoveAll(agentHome)
+			}
 			return AgentOutcome{}, "", errors.New("agent input is invalid")
 		}
+		prompt = strings.ReplaceAll(prompt, AgentHomePlaceholder, agentHome)
 	}
 	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {
