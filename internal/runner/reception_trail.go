@@ -42,28 +42,6 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 	}
 }
 
-// noFileChosenMarker is the worker's own phrase for a derivation whose
-// model answered that none of the offered paths can carry the change
-// (internal/worker DeriveTargetFiles). Like the cutoff marker it reaches
-// the runner only through the step's stderr.
-const noFileChosenReason = "contract derivation failed: " + worker.NoTargetFileChosen
-
-// noFileChosen reports whether the derivation itself ended for want of a
-// file to change. The reason must sit where the worker writes its own
-// reason — right after the step's prefix — because the same line carries
-// the head of the model's answer, and the requester's words reach that
-// answer: a phrase anywhere in the line would let a ticket choose the note
-// the requester is shown.
-func noFileChosen(stderr string) bool {
-	for _, line := range strings.Split(stderr, "\n") {
-		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "worker:"))
-		if strings.HasPrefix(reason, noFileChosenReason) {
-			return true
-		}
-	}
-	return false
-}
-
 // deriveStage is the reception stage whose failure the no-file note explains.
 // The note names what to do about a derivation, so it must not appear under
 // the readiness stages even if their models write the same words.
@@ -84,11 +62,11 @@ func receptionErrorText(line string) string {
 	if !strings.HasPrefix(rest, workerLinePrefix) {
 		return ""
 	}
-	_, cause, found := strings.Cut(strings.TrimPrefix(rest, workerLinePrefix), ": ")
+	_, cause, found := strings.Cut(strings.TrimPrefix(rest, workerLinePrefix), ":")
 	if !found {
 		return ""
 	}
-	return cause
+	return strings.TrimLeft(cause, " ")
 }
 
 // receptionCauseOf returns the worker's own cause on the last line whose
@@ -110,9 +88,13 @@ func receptionCauseOf(stderr, phrase string) string {
 // be reached, or it never answered in the shape the contract asks for. Both
 // are told as what happened and what the requester can do, because those are
 // the two things the note is for.
-func receptionCauseNote(stage, stderr string) string {
-	for _, line := range strings.Split(stderr, "\n") {
-		cause := receptionErrorText(line)
+func receptionCauseNote(stage, cause string) string {
+	// The worker's own ending line is the last one it writes, and the lines
+	// before it can be its own re-ask notices. Reading forwards would let a
+	// transient the run recovered from decide the note ahead of what
+	// actually ended the stage; the cutoff reader already read backwards, so
+	// the two agree now (review of #122).
+	{
 		switch {
 		// Asked again and still nothing: the spent allowance, the
 		// provider's own error, and the one gateway status that comes
@@ -161,6 +143,18 @@ func receptionCauseNote(stage, stderr string) string {
 	return ""
 }
 
+// lastReceptionCause is the cause on the last line the worker wrote about
+// its own failure, or "" when it wrote none.
+func lastReceptionCause(stderr string) string {
+	found := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		if cause := receptionErrorText(line); cause != "" {
+			found = cause
+		}
+	}
+	return found
+}
+
 // unnamedReceptionNote is what a requester is told when the worker's cause is
 // one the runner has no words for. It is deliberately the last resort and not
 // a silence: before it, such a failure left the terminal comment saying the
@@ -179,10 +173,18 @@ func unnamedReceptionNote(stage string) string {
 // worker names, and last the note that says only that the stage could not
 // answer.
 func receptionNote(stage, stderr string) string {
-	if note := receptionCutoffNote(stage, stderr); note != "" {
+	// One line decides: the last one the worker wrote about its own failure,
+	// which is the one that ended the stage. Asking each note in turn
+	// whether its phrase appears anywhere let a cutoff the run recovered
+	// from overrule the line that actually ended the stage (review of #122).
+	cause := lastReceptionCause(stderr)
+	if stage == deriveStage && strings.HasPrefix(cause, worker.NoTargetFileChosen) {
+		return noFileChosenNote(stage)
+	}
+	if note := receptionCutoffNote(stage, cause); note != "" {
 		return note
 	}
-	if note := receptionCauseNote(stage, stderr); note != "" {
+	if note := receptionCauseNote(stage, cause); note != "" {
 		return note
 	}
 	return unnamedReceptionNote(stage)
@@ -190,30 +192,42 @@ func receptionNote(stage, stderr string) string {
 
 // receptionCutoffNote renders the requester-facing note for a step's stderr,
 // or "" when the step did not fail for a reason the requester can be told.
-func receptionCutoffNote(stage, stderr string) string {
-	if stage == deriveStage && noFileChosen(stderr) {
-		return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
-			"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
-			"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
-	}
-	// Read at the same fixed position as every other cause. Scanning the
-	// whole output for the marker let a requester choose this note and
-	// which of its three forms they were shown: a failure the model itself
-	// refused carries the head of its answer, and a ticket's own words
-	// reach that answer (measured, review of #122).
-	cutoff := receptionCauseOf(stderr, worker.CutoffPhrase)
-	if !strings.Contains(cutoff, receptionCutoffMarker) {
+func receptionCutoffNote(stage, cause string) string {
+	if !strings.HasPrefix(cause, worker.CutoffPhrase) || !strings.Contains(cause, receptionCutoffMarker) {
 		return ""
 	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
 	switch {
-	case strings.Contains(cutoff, worker.CutoffAskedAgainPhrase):
+	case strings.Contains(cause, worker.CutoffAskedAgainPhrase):
 		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
-	case strings.Contains(cutoff, worker.CutoffAtCeilingPhrase):
+	case strings.Contains(cause, worker.CutoffAtCeilingPhrase):
 		note += "上限は既に最大値だったため、聞き直しはできませんでした。"
 	}
 	note += "同じ依頼を動かし直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"
 	return note
+}
+
+// noFileChosenNote is what a requester is told when the derivation had no
+// file to change: the one reception failure whose remedy is in the ticket.
+func noFileChosenNote(stage string) string {
+	return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
+		"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
+		"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
+}
+
+// noteReceptionRecord leaves the requester a reason for a reception stage
+// that ended over a record the pipeline could not read or could not accept.
+// No model is involved in reading a record, so the notes above have nothing
+// to say about it, and without this the ticket carried the failure class and
+// nothing else — five of the readiness gate's seven such exits (review of
+// #122). Best-effort, like the note above: an unwritable trail must not
+// change the outcome.
+func (p *Pipeline) noteReceptionRecord(stage string) {
+	note := "受付の " + stage + " の記録を読めなかったため、自動処理を止めました。" +
+		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
+	if err := p.writeReceptionTrail(note); err != nil {
+		p.Logger.Error("reception trail not written", "error", err.Error())
+	}
 }
 
 // writeReceptionTrail writes the trail this run composes for a reception

@@ -101,11 +101,11 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 // again, no re-ask because the allowance was already at the ceiling, or
 // neither when the worker's words say nothing more.
 func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
-	again := receptionCutoffNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
+	again := receptionNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
 	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") || strings.Contains(again, "最大値") {
 		t.Fatalf("cut off again: %q", again)
 	}
-	ceiling := receptionCutoffNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
+	ceiling := receptionNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
 	if !strings.Contains(ceiling, "受付の確認") || !strings.Contains(ceiling, "聞き直しはできませんでした") || strings.Contains(ceiling, "1 回聞き直し") {
 		t.Fatalf("at the ceiling: %q", ceiling)
 	}
@@ -114,15 +114,15 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	// A line carrying only the marker is therefore not the worker's cause,
 	// and must not choose this note — that is the hole a ticket reached
 	// through the head of its own answer (review of #122).
-	if bare := receptionCutoffNote("受付の判定", "finish_reason=length"); bare != "" {
+	if bare := receptionNote("受付の判定", "finish_reason=length"); bare != unnamedReceptionNote("受付の判定") {
 		t.Fatalf("a naked marker rendered a note: %q", bare)
 	}
-	bare := receptionCutoffNote("受付の判定", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens)")
+	bare := receptionNote("受付の判定", "worker: readiness assessment failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens)")
 	if strings.Contains(bare, "聞き直し") || !strings.Contains(bare, "途切れた") {
 		t.Fatalf("the worker's own cutoff: %q", bare)
 	}
-	if receptionCutoffNote("受付の判定", "worker: readiness assessment failed: model invocation failed") != "" {
-		t.Fatal("a note was rendered without a cutoff")
+	if note := receptionNote("受付の判定", "worker: readiness assessment failed: model invocation failed"); strings.Contains(note, "途切れた") {
+		t.Fatalf("a cutoff note was rendered without a cutoff: %q", note)
 	}
 	for _, note := range []string{again, ceiling, bare} {
 		if err := hook.ValidateTrailText(note); err != nil {
@@ -179,13 +179,13 @@ func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
 // requester used to get "内部エラーが発生し" and nothing else, and the real
 // reason lived in the pod log (live, 2026-09-09).
 func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
-	note := receptionCutoffNote(deriveStage, "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)\nworker: contract derivation failed")
+	note := receptionNote(deriveStage, "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)")
 	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the note lacks %q: %q", want, note)
 		}
 	}
-	if note := receptionCutoffNote(deriveStage, "worker: something else went wrong"); note != "" {
+	if note := receptionNote(deriveStage, "worker: something else went wrong"); note != unnamedReceptionNote(deriveStage) {
 		t.Errorf("an unrelated failure produced a note: %q", note)
 	}
 	// The requester's own words reach the model, and the model's answer
@@ -428,5 +428,56 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 				t.Errorf("a note instructs the requester (%q): %q", instruction, note)
 			}
 		}
+	}
+}
+
+// What the worker really writes when a stage ends: its own re-ask notices
+// first, then the line that ends the stage. The note must come from the
+// last one — a transient the run recovered from must not decide what the
+// requester is told (review of #122). Both readers scan the same way now,
+// so the cutoff and the cause cannot disagree about which line is the one.
+func TestTheNoteComesFromTheLineThatEndedTheStage(t *testing.T) {
+	recovered := "worker: the provider ended the turn with an error; asking again in 2s (retry 1 of 3)\n" +
+		"worker: the call spent its allowance without answering; asking again in 2s (retry 1 of 1)\n" +
+		"worker: readiness assessment failed: " + worker.CutoffPhrase + ": finish_reason=length (output allowance 32768 tokens)\n"
+	note := receptionNote("受付の判定", recovered)
+	if !strings.Contains(note, "出力の上限で途切れた") {
+		t.Fatalf("an earlier line decided the note: %q", note)
+	}
+	// And the other way: an ending line that is not a cutoff must not be
+	// overruled by a cutoff mentioned earlier.
+	earlier := "worker: readiness assessment failed: " + worker.CutoffPhrase + ": finish_reason=length (output allowance 32768 tokens)\n" +
+		"worker: readiness check failed: " + worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)\n"
+	if note := receptionNote("受付の確認", earlier); !strings.Contains(note, "依頼文の内容を理由に") {
+		t.Fatalf("an earlier cutoff decided the note: %q", note)
+	}
+}
+
+// The readiness gate has seven ways to end as a model failure. Two of them
+// come from a stage the model ran; the other five come from a record this
+// pipeline could not read or could not accept, and they left the ticket
+// with the failure class and nothing else (review of #122). A verdict
+// outside its two values is one of the five.
+func TestARecordTheGateCouldNotAcceptAlsoLeavesAReason(t *testing.T) {
+	stub := receptionStubWorker(t, "no-such-subcommand", "")
+	pipeline := receptionPipeline(t, stub)
+	// Both model stages succeed and write a check whose verdict is neither
+	// pass nor fail, which is the exit this measures.
+	if err := os.MkdirAll(pipeline.path("history/readiness"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pipeline.path("history/readiness/check-1.json"), []byte(`{"verdict":"maybe"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := pipeline.readinessGate(context.Background())
+	if err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
+	}
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "記録を読めなかった") || !strings.Contains(text, "受付の確認") {
+		t.Fatalf("a record the gate could not accept left no reason: %q", text)
+	}
+	if err := hook.ValidateTrailText(text); err != nil {
+		t.Fatalf("the trail would be refused by the report: %v", err)
 	}
 }

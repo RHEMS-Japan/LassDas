@@ -528,12 +528,14 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		readinessArgs = append(readinessArgs, "--assessment", assessment, "--check", check)
 		verdict, err := p.readJSONField(relPath(p.Workspace, check), "verdict")
 		if err != nil {
+			p.noteReceptionRecord("受付の確認")
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
 		// The workflow's jq -er 'select(pass|fail)' hard-failed the step on
 		// anything else; a malformed verdict is a model failure, not "try
 		// again".
 		if verdict != "pass" && verdict != "fail" {
+			p.noteReceptionRecord("受付の確認")
 			return Outcome{Code: hook.TerminalModelFailed}, nil
 		}
 		if verdict == "pass" || attempt == 3 {
@@ -547,10 +549,12 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+		p.noteReceptionRecord("受付の判定のまとめ")
 		return Outcome{Code: hook.TerminalModelFailed}, err
 	}
 	readinessOutcome, err := p.readJSONField(relPath(p.Workspace, decision), "outcome")
 	if err != nil {
+		p.noteReceptionRecord("受付の判定のまとめ")
 		return Outcome{Code: hook.TerminalModelFailed}, err
 	}
 	switch readinessOutcome {
@@ -566,6 +570,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		// The workflow's jq select() hard-failed on a malformed outcome; a
 		// decision file this pipeline cannot read is a model failure, not a
 		// legitimate readiness stop.
+		p.noteReceptionRecord("受付の判定のまとめ")
 		return Outcome{Code: hook.TerminalModelFailed}, nil
 	}
 }
