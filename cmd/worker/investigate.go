@@ -45,6 +45,7 @@ func runInvestigate(ctx context.Context, args []string) error {
 	previousDir := flags.String("previous-dir", "", "")
 	sessionSeed := flags.String("session-seed", "", "")
 	sessionState := flags.String("session-state", "", "")
+	clarificationPath := flags.String("clarification", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *draftPath, *repoRoot, *baseSHA, *measurementsPath, *outDir) ||
 		!worker.ValidToolSHA(*toolSHA) || *round < 1 || *round > 20 || (*mode != worker.ModeInvestigation && *mode != worker.ModeDesign) {
 		return errors.New("investigate arguments are invalid")
@@ -96,10 +97,15 @@ func runInvestigate(ctx context.Context, args []string) error {
 		ToolSHA: draft.ToolSHA, IssueKey: draft.IssueKey, RunID: draft.RunID, Repository: draft.Repository, Mode: draft.Mode,
 		Summary: draft.Summary, VerificationPath: draft.VerificationPath, ExpectedText: draft.ExpectedText, AbsentText: draft.AbsentText, Request: draft.Request,
 	}
+	clarification, err := readClarificationContext(*clarificationPath)
+	if err != nil {
+		return err
+	}
 	input := worker.InvestigationInput{
 		Identity: identity, Round: *round, Mode: *mode, Request: request, Session: session, MeasurementsPath: *measurementsPath,
 		Bounds:       investigate.Bounds{AllowedFilePrefixes: consumer.Mode.AllowedFilePrefixes, MaxFiles: consumer.Mode.MaxFiles, Catalog: catalog, RepoRoot: *repoRoot},
 		ElapsedCarry: carry.ElapsedSeconds, Previous: previous,
+		Clarification: clarification,
 	}
 	invoker, err := newModelInvoker(ctx, *config.Models.Designer)
 	if err != nil {

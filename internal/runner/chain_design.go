@@ -142,6 +142,7 @@ func (p *Pipeline) chainInvestigate(ctx context.Context, repoRoot, baseSHA strin
 		"--round", strconv.Itoa(round), "--mode", mode,
 		"--measurements", p.path("measurements.jsonl"), "--out-dir", roundDir,
 	}
+	args = append(args, p.clarificationArgs()...)
 	if round > 1 {
 		args = append(args, "--previous-dir", p.designRoundDir(round-1))
 	}
@@ -187,6 +188,7 @@ func (p *Pipeline) chainDesignReview(ctx context.Context, reviewers []string, in
 		"--measurements", p.path("measurements.jsonl"), "--repo-root", repoRoot, "--base-sha", baseSHA,
 		"--reviewer", reviewer, "--lens", lens,
 	}
+	args = append(args, p.clarificationArgs()...)
 	if _, err := os.Stat(filepath.Join(roundDir, "design.json")); err == nil {
 		args = append(args, "--design", filepath.Join(roundDir, "design.json"))
 	}

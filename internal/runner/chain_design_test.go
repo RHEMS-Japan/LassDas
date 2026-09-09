@@ -333,3 +333,76 @@ func TestTheApplyInstructionIgnoresADesignThatDoesNotMatchItsDigest(t *testing.T
 		t.Error("the section lost the root as well")
 	}
 }
+
+// Both halves of the design stage are handed what the requester decided.
+// Without it the designer wrote designs that contradicted the answers and
+// the design reviewers approved them, while the implementation reviewers —
+// who have always had the answers — sent the design back every round citing
+// them. The designer could not act on that, because it could not see what
+// it was wrong about. Live, 2026-09-09: four design rounds approved, three
+// implementation rounds refused, and the answers appearing nowhere in what
+// the designer was given.
+func TestTheDesignStageIsHandedTheRequestersAnswers(t *testing.T) {
+	argvOf := func(t *testing.T, withAnswers bool) (string, string) {
+		t.Helper()
+		pipeline := chainStagePipeline(t)
+		record := filepath.Join(t.TempDir(), "worker.log")
+		fake := filepath.Join(t.TempDir(), "fake-worker")
+		if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+record+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		pipeline.Config.WorkerBin = fake
+		pipeline.Config.ConsumerConfigPath = "/etc/consumer.json"
+		pipeline.Config.Identity.EngineSHA = strings.Repeat("a", 40)
+		if err := os.MkdirAll(pipeline.designRoundDir(1), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{
+			filepath.Join(pipeline.designRoundDir(1), "investigation.json"),
+			pipeline.path("readiness-ticket.json"),
+			pipeline.path("ticket-draft.json"),
+		} {
+			if err := os.WriteFile(name, []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if withAnswers {
+			if err := os.WriteFile(pipeline.path("clarification.json"), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = pipeline.chainDesignReview(context.Background(), []string{"review-a", "review-b"}, 0,
+			pipeline.path("target-repo"), strings.Repeat("b", 40))
+		reviewArgv, _ := os.ReadFile(record)
+		_ = os.Remove(record)
+		// The designer's own call: a round it has not sealed yet, and a
+		// readiness decision that asks for a design.
+		if err := os.MkdirAll(filepath.Join(pipeline.path("history"), "readiness"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pipeline.path("history"), "readiness", "decision.json"),
+			[]byte(`{"request_kind":"change","needs_design":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(pipeline.designRoundDir(1), "investigation.json")); err != nil {
+			t.Fatal(err)
+		}
+		_ = pipeline.chainInvestigate(context.Background(), pipeline.path("target-repo"), strings.Repeat("b", 40))
+		designerArgv, _ := os.ReadFile(record)
+		return string(designerArgv), string(reviewArgv)
+	}
+
+	designer, reviewer := argvOf(t, true)
+	for name, argv := range map[string]string{"the designer": designer, "the design reviewer": reviewer} {
+		if !strings.Contains(argv, "--clarification ") {
+			t.Errorf("%s was not handed the requester's answers: %q", name, argv)
+		}
+	}
+	// A run that was never asked anything passes no empty flag.
+	designer, reviewer = argvOf(t, false)
+	for name, argv := range map[string]string{"the designer": designer, "the design reviewer": reviewer} {
+		if strings.Contains(argv, "--clarification") {
+			t.Errorf("%s was handed an answers flag for a run with no answers: %q", name, argv)
+		}
+	}
+}
