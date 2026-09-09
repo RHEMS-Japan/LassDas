@@ -637,20 +637,114 @@ func TestASpentAllowanceJoinsTheProvidersRetryLadder(t *testing.T) {
 	var calls int
 	invoker := &ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &calls}}
 	_, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
-	if err == nil || !errors.Is(err, errModelResponseUpstream) {
+	if err == nil || !errors.Is(err, errModelAllowanceSpent) {
 		t.Fatalf("a spent allowance was classified as %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want one: the ladder does the asking", calls)
 	}
 	// A caller that has given up gets the failure itself, not a class that
-	// invites another attempt.
+	// invites another attempt. Its own counter: sharing the one above would
+	// put the stand-in past its failing calls, so it would answer and the
+	// check would pass without the guard (measured, review of #121).
+	var afterGivingUp int
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err = (&ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &calls}}).converseTurnOnce(cancelled, ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
-	if err == nil || errors.Is(err, errModelResponseUpstream) {
+	_, _, err = (&ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &afterGivingUp}}).converseTurnOnce(cancelled, ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if err == nil || errors.Is(err, errModelAllowanceSpent) {
 		t.Fatalf("a finished caller was invited to ask again: %v", err)
 	}
+	if afterGivingUp != 1 {
+		t.Fatalf("the stand-in answered instead of running out: calls = %d", afterGivingUp)
+	}
+}
+
+// A turn whose every call runs out of time asks again once, not for the
+// provider's whole ladder: each ask costs ModelInvocationTimeout in real
+// time, and the investigating designer's round is 1,800 seconds.
+func TestATurnOfSpentAllowancesAsksAgainOnceNotThreeTimes(t *testing.T) {
+	quickenTurnPauses(t)
+	var calls int
+	invoker := &ModelInvoker{api: &timeoutChatAPI{fail: 99, calls: &calls}}
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m"},
+		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if err == nil || !errors.Is(err, errModelAllowanceSpent) {
+		t.Fatalf("the turn ended as %v", err)
+	}
+	if want := allowanceTurnRetries + 1; calls != want {
+		t.Fatalf("calls = %d, want %d", calls, want)
+	}
+	// The failure must say what happened. Naming the provider's errors here
+	// would send whoever reads it after a provider that never answered.
+	if !strings.Contains(err.Error(), "spent its allowance") || strings.Contains(err.Error(), "provider errors") {
+		t.Fatalf("the failure does not name the spent allowance: %v", err)
+	}
+}
+
+// A provider's own error still gets the provider's whole ladder: narrowing
+// the allowance must not narrow that too.
+func TestAProviderErrorKeepsItsOwnLadder(t *testing.T) {
+	quickenTurnPauses(t)
+	var calls int
+	invoker := &ModelInvoker{api: &upstreamChatAPI{calls: &calls}}
+	if _, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m"},
+		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024); err == nil {
+		t.Fatal("the turn reported an answer")
+	}
+	if want := len(gatewayRetryPauses) + 1; calls != want {
+		t.Fatalf("calls = %d, want %d", calls, want)
+	}
+}
+
+// A transport that reports its own time limit without the caller's context
+// — a dial or handshake that ran out — is a spent allowance too. This is the
+// only path that reaches the Timeout() half of spentItsAllowance.
+func TestATransportsOwnTimeLimitIsAlsoASpentAllowance(t *testing.T) {
+	var calls int
+	invoker := &ModelInvoker{api: &dialTimeoutChatAPI{calls: &calls}}
+	_, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"},
+		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("this stand-in must not reach the context half of the check")
+	}
+	if err == nil || !errors.Is(err, errModelAllowanceSpent) {
+		t.Fatalf("a transport time limit was classified as %v", err)
+	}
+}
+
+// quickenTurnPauses removes the gateway's real waits for one test.
+func quickenTurnPauses(t *testing.T) {
+	t.Helper()
+	restore := gatewayRetryPauses
+	quick := make([]time.Duration, len(gatewayRetryPauses))
+	gatewayRetryPauses = quick
+	t.Cleanup(func() { gatewayRetryPauses = restore })
+}
+
+// upstreamChatAPI always answers with the provider's own error inside a 200.
+type upstreamChatAPI struct{ calls *int }
+
+func (u *upstreamChatAPI) ChatCompletions(context.Context, ModelEndpoint, ChatRequest) (*ChatResponse, error) {
+	*u.calls++
+	return &ChatResponse{
+		Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: ""}, FinishReason: ChatFinishError}},
+		Usage:   &ChatUsage{PromptTokens: 1, TotalTokens: 1},
+	}, nil
+}
+
+// dialTimeoutChatAPI reports a time limit the way a transport does when the
+// caller's context is untouched: an error that says it timed out, and that
+// carries no context.DeadlineExceeded.
+type dialTimeoutChatAPI struct{ calls *int }
+
+type dialTimeout struct{}
+
+func (dialTimeout) Error() string { return "dial tcp: i/o timeout" }
+func (dialTimeout) Timeout() bool { return true }
+
+func (d *dialTimeoutChatAPI) ChatCompletions(context.Context, ModelEndpoint, ChatRequest) (*ChatResponse, error) {
+	*d.calls++
+	return nil, safeModelErrorFor("model invocation failed: dial tcp: i/o timeout", dialTimeout{})
 }
 
 // The retry has to fire on what the real transport returns, not on what a
@@ -688,14 +782,15 @@ func TestTheAllowanceRetryFiresOnTheRealTransportsError(t *testing.T) {
 	// And through the turn: the spent allowance is classified as the
 	// provider's own error, so the ladder asks again — four calls for one
 	// turn, the same bound a provider error has always had.
+	quickenTurnPauses(t)
 	requests = 0
 	_, _, turnErr := (&ModelInvoker{api: client}).converseTurn(context.Background(), endpoint,
 		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
-	if turnErr == nil {
-		t.Fatal("the turn reported an answer")
+	if !errors.Is(turnErr, errModelAllowanceSpent) {
+		t.Fatalf("the turn ended as %v", turnErr)
 	}
-	if requests != len(gatewayRetryPauses)+1 {
-		t.Fatalf("requests = %d, want %d", requests, len(gatewayRetryPauses)+1)
+	if want := allowanceTurnRetries + 1; requests != want {
+		t.Fatalf("requests = %d, want %d", requests, want)
 	}
 }
 

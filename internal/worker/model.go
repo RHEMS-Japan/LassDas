@@ -108,7 +108,21 @@ var (
 	// one such answer ended a design round's investigation as model_failed
 	// on its first call).
 	errModelResponseUpstream = errors.New("the provider ended the turn with an error")
+	// errModelAllowanceSpent marks a call that ran out of its own time
+	// without answering: no answer, no usage, no cost, and five minutes
+	// gone. converseTurn asks again once — not for the provider's whole
+	// ladder, because three more would spend most of a round on one
+	// question. Its text keeps the transport's prefix, so what reads these
+	// failures for the requester still recognises it.
+	errModelAllowanceSpent = errors.New("model invocation failed: the call spent its allowance without answering")
 )
+
+// allowanceTurnRetries is how many times one turn asks again after a call
+// spent its allowance. One: at ModelInvocationTimeout each ask costs five
+// minutes with nothing to show, and the investigating designer's own budget
+// is 1,800 seconds (docs/INVESTIGATING_DESIGNER.md 3.1), so a second ladder
+// of three would put one unanswered question at 69% of a round.
+const allowanceTurnRetries = 1
 
 // malformedTurnRetries is how many out-of-shape responses in a row one turn
 // tolerates before its failure travels; malformedTurnDelay is the pause
@@ -594,12 +608,13 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // final) with 42 s of pauses between them; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
 // round's wall (the context) is what ends a turn that keeps failing. A call
-// that spends that whole allowance is classified upstream, so a turn whose
-// every call runs out costs 4 x ModelInvocationTimeout plus 40 s, 20 min
-// 40 s at the present five minutes; the stage's own budget
-// (ChainStage.MaxRuntimeSeconds, 40 min for the investigation, 6 h for the
-// reception) is what stops it, and one that keeps failing now fails late
-// instead of at once; an error after the widened re-ask still carries the
+// that spent its allowance (errModelAllowanceSpent) shares the provider's
+// budget, so that bound is unchanged, but stops after allowanceTurnRetries
+// of its own, because unlike a provider error its asks cost minutes rather
+// than milliseconds: a turn whose every call runs out costs 2 x
+// ModelInvocationTimeout plus 2 s, 10 min 2 s at the present five minutes,
+// against the investigating designer's 1,800 s round. The stage's own
+// budget (ChainStage.MaxRuntimeSeconds) is the outer wall; an error after the widened re-ask still carries the
 // cutoff that caused it, so the caller's log names the cutoff whatever
 // ended the turn. The widened allowance lives for this turn only: a
 // conversation whose every answer is long pays one cut-off request per
@@ -610,6 +625,7 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	malformed := 0
 	upstream := 0
+	allowance := 0
 	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
@@ -618,6 +634,16 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		}
 		delay := malformedTurnDelay
 		switch {
+		case errors.Is(err, errModelAllowanceSpent):
+			// Shares the provider's budget so the turn's bound is unchanged,
+			// and stops first on its own, because its asks cost minutes.
+			if allowance >= allowanceTurnRetries || upstream >= len(gatewayRetryPauses) {
+				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d such calls", err, allowance+1))
+			}
+			delay = gatewayRetryPauses[upstream]
+			upstream++
+			allowance++
+			fmt.Fprintf(os.Stderr, "worker: the call spent its allowance without answering; asking again in %s (retry %d of %d)\n", delay, allowance, allowanceTurnRetries)
 		case errors.Is(err, errModelResponseUpstream):
 			// The provider's own error inside a 200: the same transient as a
 			// gateway 5xx, asked again on the gateway's schedule.
@@ -707,14 +733,15 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// transport's.
 		if spentItsAllowance(err) && ctx.Err() == nil {
 			// A call that spends its whole allowance leaves nothing — no
-			// answer, no usage, no cost — so it is asked again on the
-			// ladder the turn already runs for a provider's own error,
-			// rather than on a second ladder of its own: the bound on one
-			// turn stays what the comment above converseTurn says, and the
-			// re-ask is logged there like every other one. A live reception
+			// answer, no usage, no cost — so it is asked again by the turn
+			// rather than travelling at once, but on a shorter count than a
+			// provider's own error: it shares that error's budget, so the
+			// bound on one turn stays what the comment above converseTurn
+			// says, and stops after allowanceTurnRetries, because each ask
+			// costs ModelInvocationTimeout in real time. A live reception
 			// died on a spent allowance after thirteen runs that did not
 			// (2026-09-09).
-			return "", InvocationUsage{}, fmt.Errorf("%w (the call spent its allowance)", errModelResponseUpstream)
+			return "", InvocationUsage{}, errModelAllowanceSpent
 		}
 		var safe *SafeModelError
 		if errors.As(err, &safe) {
