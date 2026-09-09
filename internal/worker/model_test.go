@@ -815,3 +815,22 @@ func (t *timeoutChatAPI) ChatCompletions(ctx context.Context, endpoint ModelEndp
 		Usage:   &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 	}, nil
 }
+
+// The runner tells a requester why their ticket stopped by reading the
+// phrase a failure begins with. A failure whose text no longer begins with
+// the phrase the runner keys off leaves the requester with the last-resort
+// note instead of the reason, and nothing else would say so.
+func TestTheFailuresTheRunnerReadsBeginWithThePhrasesItKeysOff(t *testing.T) {
+	for _, pair := range []struct {
+		err    error
+		phrase string
+	}{
+		{errModelAllowanceSpent, TransportFailedPhrase},
+		{errModelResponseUpstream, ProviderEndedTurnPhrase},
+		{errModelResponseMetadata, ShapeRefusedPhrase},
+	} {
+		if !strings.HasPrefix(pair.err.Error(), pair.phrase) {
+			t.Errorf("%q does not begin with %q", pair.err.Error(), pair.phrase)
+		}
+	}
+}

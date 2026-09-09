@@ -272,3 +272,19 @@ func readReceptionTrail(t *testing.T, pipeline *Pipeline) string {
 	}
 	return string(content)
 }
+
+// The failure a spent allowance now ends a turn with, after the model
+// package learned to ask again. Its text begins with the transport's own
+// prefix so this note keeps recognising it; a reworded failure that no
+// longer did would leave the requester with the last-resort note instead.
+func TestASpentAllowanceReachesTheRequesterToo(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness",
+		"worker: readiness assessment failed: model invocation failed: the call spent its allowance without answering after 2 such calls")
+	pipeline := receptionPipeline(t, stub)
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatalf("readinessGate() = %v", err)
+	}
+	if text := readReceptionTrail(t, pipeline); !strings.Contains(text, "応答を得られませんでした") {
+		t.Fatalf("a spent allowance left no reason: %q", text)
+	}
+}
