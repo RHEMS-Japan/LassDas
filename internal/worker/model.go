@@ -396,14 +396,27 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			again = false
 		}
 		if !again {
+			// What the last answer WAS comes before how many there were. A
+			// 429 that arrives second loses nothing by having a first: it is
+			// still a limit, and the requester still has to be told a limit
+			// rather than "temporary congestion, run it again". The count
+			// used to be tested first, which dropped the classification for
+			// every 429 after the first — and 429 is retried, so a second
+			// one is the ordinary case, not a corner (review of #133
+			// measured the whole chain: the ticket said the request was
+			// worth running again while the balance was exhausted).
+			attempts := ""
 			if attempt > 0 {
-				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
+				attempts = fmt.Sprintf(" after %d%s", attempt+1, AttemptsExhaustedPhrase)
 			}
 			if status == http.StatusTooManyRequests {
 				if retryAfter != nil {
-					return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s", *retryAfter, RetryAfterTooLongPhrase))
+					return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s%s", *retryAfter, RetryAfterTooLongPhrase, attempts))
 				}
-				return nil, safeModelError(TransportFailedPhrase + " with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")")
+				return nil, safeModelError(TransportFailedPhrase + " with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")" + attempts)
+			}
+			if attempts != "" {
+				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d%s", status, attempts))
 			}
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
 		}
