@@ -148,8 +148,12 @@ func receptionCauseNote(stage, stderr string) string {
 // a silence: before it, such a failure left the terminal comment saying the
 // failure class and nothing else (live 2026-09-09).
 func unnamedReceptionNote(stage string) string {
-	return "受付の AI (" + stage + ") が答えを返せなかったため、自動処理を止めました。" +
-		"依頼の内容ではなく自動処理側の問題です。運用担当者が実行記録で理由を確認します。\n"
+	// Asserts neither that a model was reached (some reception failures
+	// happen before any call) nor that the ticket is blameless (a model may
+	// refuse an answer over what the ticket asks for). Both were claimed
+	// here and both are sometimes false (review of #122).
+	return "受付の " + stage + " が完了しなかったため、自動処理を止めました。" +
+		"理由はこの記録からは特定できていません。運用担当者が実行記録で確認します。\n"
 }
 
 // receptionNote renders the requester-facing note for a step's stderr. Every

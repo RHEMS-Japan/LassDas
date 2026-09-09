@@ -834,3 +834,44 @@ func TestTheFailuresTheRunnerReadsBeginWithThePhrasesItKeysOff(t *testing.T) {
 		}
 	}
 }
+
+// The failures the transport itself reports must all begin with the phrase
+// the runner keys off, or a reception that stopped on one of them drops its
+// requester to the last-resort note. Ten of these were written out by hand,
+// and rewording any of them was free (review of #122). Driven through a
+// real server so the check is on what the transport returns, not on a list
+// kept in a test.
+func TestEveryTransportFailureCarriesThePhraseTheRunnerReads(t *testing.T) {
+	t.Setenv("LASSDAS_TEST_KEY", "k")
+	for _, status := range []int{400, 401, 403, 404, 429, 500, 502} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		client, err := NewGatewayClient(&http.Client{Timeout: 2 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		restore := gatewayRetryPauses
+		gatewayRetryPauses = make([]time.Duration, len(restore))
+		_, callErr := client.ChatCompletions(context.Background(),
+			ModelEndpoint{Model: "m", BaseURL: server.URL, APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+		gatewayRetryPauses = restore
+		server.Close()
+		if callErr == nil {
+			t.Fatalf("status %d reported an answer", status)
+		}
+		if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
+			t.Errorf("status %d: %q does not begin with %q", status, callErr.Error(), TransportFailedPhrase)
+		}
+	}
+	// And the one that never reaches a server.
+	client, err := NewGatewayClient(&http.Client{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.ChatCompletions(context.Background(),
+		ModelEndpoint{Model: "m", BaseURL: "http://127.0.0.1:1", APIKeyEnv: "LASSDAS_TEST_KEY"}, ChatRequest{Model: "m"})
+	if callErr == nil || !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) {
+		t.Errorf("a connection that did not open: %v", callErr)
+	}
+}

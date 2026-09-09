@@ -293,22 +293,22 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		pause, again := gatewayPause(status, retryAfter, attempt)
 		if !again {
 			if attempt > 0 {
-				return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
+				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
 			}
 			if status == http.StatusTooManyRequests {
 				if retryAfter != nil {
-					return nil, safeModelError(fmt.Sprintf("model invocation failed with status 429 and a Retry-After of %s, %s", *retryAfter, RetryAfterTooLongPhrase))
+					return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s", *retryAfter, RetryAfterTooLongPhrase))
 				}
-				return nil, safeModelError("model invocation failed with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")")
+				return nil, safeModelError(TransportFailedPhrase + " with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")")
 			}
-			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d", status))
+			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
 		}
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
 		timer := time.NewTimer(pause)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, safeModelError(fmt.Sprintf("model invocation failed with status %d; the wait before asking again was cancelled", status))
+			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
 		case <-timer.C:
 		}
 	}
@@ -355,9 +355,9 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		// key travels in a header, never in the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, 0, nil, safeModelErrorFor("model invocation failed: "+urlErr.Err.Error(), urlErr.Err)
+			return nil, 0, nil, safeModelErrorFor(TransportFailedPhrase+": "+urlErr.Err.Error(), urlErr.Err)
 		}
-		return nil, 0, nil, safeModelError("model invocation failed")
+		return nil, 0, nil, safeModelError(TransportFailedPhrase)
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
@@ -718,7 +718,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
 			timer.Stop()
-			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("model invocation failed: %w", ctx.Err()))
+			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err()))
 		case <-timer.C:
 		}
 	}
@@ -789,10 +789,10 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		if errors.As(err, &safe) {
 			return "", InvocationUsage{}, safe
 		}
-		return "", InvocationUsage{}, errors.New("model invocation failed")
+		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
 	}
 	if output == nil {
-		return "", InvocationUsage{}, errors.New("model invocation failed")
+		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
 	}
 	// The provider's own error inside a 200 is judged before the usage and
 	// content checks: such an answer may carry no usage and no content, and

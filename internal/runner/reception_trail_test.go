@@ -74,7 +74,7 @@ func TestAnUnexplainedReceptionFailureInventsNoCause(t *testing.T) {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	text := readReceptionTrail(t, pipeline)
-	for _, invented := range []string{"出力の上限で途切れた", "応答を得られませんでした", "決められた形になりませんでした", "derived contract is invalid"} {
+	for _, invented := range []string{"出力の上限で途切れた", "応答を得られませんでした", "決められた形になりませんでした", "利用の上限", "derived contract is invalid"} {
 		if strings.Contains(text, invented) {
 			t.Fatalf("the note names a cause the runner did not see (%q): %q", invented, text)
 		}
@@ -248,8 +248,16 @@ func TestAnUnnamedReceptionFailureStillLeavesANote(t *testing.T) {
 		t.Fatalf("readinessGate() = %v", err)
 	}
 	text := readReceptionTrail(t, pipeline)
-	if !strings.Contains(text, "答えを返せなかった") || !strings.Contains(text, "受付の判定") {
+	if !strings.Contains(text, "完了しなかった") || !strings.Contains(text, "受付の判定") {
 		t.Fatalf("an unnamed failure left the requester nothing: %q", text)
+	}
+	// It must claim neither that a model answered nor that the ticket is
+	// blameless: a reception failure can happen before any model call, and
+	// a model can refuse over what the ticket asks for.
+	for _, claim := range []string{"AI", "依頼の内容ではなく"} {
+		if strings.Contains(text, claim) {
+			t.Fatalf("the last-resort note claims %q: %q", claim, text)
+		}
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
 		t.Fatalf("the trail would be refused by the report: %v", err)
@@ -344,5 +352,26 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
 			t.Errorf("%q was told as %q", want.cause, note)
 		}
+	}
+}
+
+// Three things the note reader does that nothing measured: it reads only
+// the worker's own lines, it reads every line rather than the first, and it
+// has a note for an answer that never arrived in the required shape. Each
+// was free to delete (review of #122).
+func TestTheNoteReaderReadsOnlyTheWorkersLinesAndAllOfThem(t *testing.T) {
+	// A line that is not the worker's own says nothing, however it reads.
+	loose := "the agent printed: " + worker.ProviderEndedTurnPhrase + " here\n" +
+		"npm warn " + worker.TransportFailedPhrase + " with status 500"
+	if note := receptionNote("受付の判定", loose); note != unnamedReceptionNote("受付の判定") {
+		t.Fatalf("a line the worker did not write chose a note: %q", note)
+	}
+	// The worker's line is not always the first: an agent's output and the
+	// shell's come through the same stderr.
+	later := "some other tool said something\n" +
+		"worker: readiness assessment failed: " + worker.ShapeRefusedPhrase + "\n"
+	note := receptionNote("受付の判定", later)
+	if !strings.Contains(note, "決められた形になりませんでした") {
+		t.Fatalf("the worker's line was not read past the first line: %q", note)
 	}
 }
