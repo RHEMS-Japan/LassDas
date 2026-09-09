@@ -244,8 +244,8 @@ func (w *Wizard) Run(ctx context.Context, options Options) (*State, error) {
 }
 
 func (w *Wizard) prepare(ctx context.Context, s *State, secrets Secrets) error {
-	w.UI.Info("GitHub の鍵は https://github.com/settings/personal-access-tokens で取得してください。対象 repo の Contents と Pull requests の write が必要です。read 成功だけで write 確認済みにはしません")
-	if err := w.secret(s, secrets, "TARGET_GITHUB_TOKEN", "外で取得した納品用 GitHub トークン", false); err != nil {
+	w.UI.Info("対象リポジトリへの PR 作成に使う GitHub アクセストークンを入力してください。取得先: https://github.com/settings/personal-access-tokens。対象リポジトリの Contents と Pull requests に書き込み権限が必要です。")
+	if err := w.secret(s, secrets, "TARGET_GITHUB_TOKEN", "GitHub アクセストークン", false); err != nil {
 		return err
 	}
 	candidate := ""
