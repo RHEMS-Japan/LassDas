@@ -220,6 +220,11 @@ func (p *Pipeline) noteReceptionRecord(stage string) {
 // and only the file this run wrote is trusted (trailWritten).
 func (p *Pipeline) writeReceptionTrail(note string) error {
 	trailPath := p.path("m1-trail.txt")
+	// Returning here rather than writing anyway is a shape, not a behaviour:
+	// in both cases the removal can fail — something not empty standing at
+	// the path, a parent that cannot be written — the write fails too
+	// (measured, review of #127). It stays because reporting the first
+	// failure is clearer than reporting the second.
 	if err := os.Remove(trailPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

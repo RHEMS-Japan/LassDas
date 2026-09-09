@@ -746,3 +746,50 @@ func TestTheDerivationsExitLeavesANote(t *testing.T) {
 		t.Fatalf("the derivation's exit left no reason: %q", text)
 	}
 }
+
+// Four things the reader and the writer do that nothing measured, each of
+// them a rule the notes rest on (review of #127).
+func TestTheReaderAndWriterKeepTheirOwnRules(t *testing.T) {
+	// A line the worker indented is still the worker's line.
+	indented := "   worker: readiness assessment failed: " + worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)"
+	if note := receptionNote("受付の判定", indented); !strings.Contains(note, "依頼文の内容を理由に") {
+		t.Errorf("an indented worker line was not read: %q", note)
+	}
+	// A line with only the worker's own prefix and no second separator
+	// carries no cause: the position a cause is read from is what keeps a
+	// ticket's words out of the choice, and a line without it has none.
+	if note := receptionNote("受付の判定", "worker: "+worker.TransportFailedPhrase); note != unnamedReceptionNote("受付の判定") {
+		t.Errorf("a line with no cause position produced a note: %q", note)
+	}
+	// A trail that could not be replaced is not written over: the note must
+	// not land in whatever is standing there.
+	pipeline := receptionPipeline(t, receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: x"))
+	if err := os.MkdirAll(pipeline.path("m1-trail.txt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pipeline.path("m1-trail.txt"), "kept"), []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pipeline.trailWritten {
+		t.Error("a trail that could not be replaced was reported as written")
+	}
+	if _, err := os.ReadFile(filepath.Join(pipeline.path("m1-trail.txt"), "kept")); err != nil {
+		t.Errorf("what stood in the trail's place was written over: %v", err)
+	}
+	// And the note is readable by its owner only: it carries what a stopped
+	// ticket says, in a workspace the agents share.
+	written := receptionPipeline(t, receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: x"))
+	if _, err := written.readinessGate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(written.path("m1-trail.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("the note is readable beyond its owner: %v", mode)
+	}
+}
