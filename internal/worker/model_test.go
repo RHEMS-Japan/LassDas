@@ -940,7 +940,9 @@ func TestAMomentThatPassesIsAskedAgainHoweverItArrived(t *testing.T) {
 		// passed (measured, review of #125). 529 is the number a provider
 		// over capacity answers with.
 		529:                     len(gatewayRetryPauses) + 1,
+		http.StatusBadRequest:   1,
 		http.StatusUnauthorized: 1,
+		http.StatusForbidden:    1,
 		http.StatusNotFound:     1,
 	} {
 		calls := 0
