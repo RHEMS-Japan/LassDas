@@ -778,7 +778,8 @@ func TestTheDesignContractStatesWhatTheReviewersKeepRejecting(t *testing.T) {
 	for _, want := range []string{
 		"needs a record that searched for it, not a record that listed names",
 		"Every record you made is either used in the design or accounted for",
-		"the verification must name the record ids that carry them",
+		"list those records in cause_evidence and quote the value in cause or approach",
+		"The verification has no field for a record id",
 	} {
 		if !strings.Contains(design, want) {
 			t.Errorf("the design contract lacks %q", want)

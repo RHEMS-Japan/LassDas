@@ -82,13 +82,13 @@ func TestDecodeAgentReviewOutputIgnoresBracesInProse(t *testing.T) {
 // rather than take the last one it sees.
 func TestDecodeAgentReviewOutputReadsANestedVerdict(t *testing.T) {
 	transcript := `Here is my answer.
-{"verdict":"revise","findings":[{"code":"a","path":"client/src/label.ts","message":"first"},{"code":"b","path":"client/src/label.ts","message":"second"}]}`
+{"verdict":"revise","findings":[{"code":"first-issue","path":"client/src/label.ts","message":"first"},{"code":"second-issue","path":"client/src/label.ts","message":"second"}]}`
 
 	output, err := DecodeAgentReviewOutput(transcript)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(output.Findings) != 2 || output.Findings[1].Code != "b" {
+	if len(output.Findings) != 2 || output.Findings[1].Code != "second-issue" {
 		t.Fatalf("nested verdict was not read: %+v", output)
 	}
 }
@@ -326,5 +326,24 @@ func TestConfirmTreeMatchesCandidateChecksASubmittedNewFile(t *testing.T) {
 	}
 	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
 		t.Fatal("a reviewer that deleted a submitted new file was accepted")
+	}
+}
+
+// The candidate reviewer's label is made to fit as its answer is read. This
+// review is where a label carries machine meaning: design-wrong sends the
+// delivery back to its design, and a label the shape refuses would fail the
+// whole card, losing both the finding and that signal.
+func TestTheCandidateReviewersLabelIsNormalisedAsItIsRead(t *testing.T) {
+	transcript := `見た結果です。
+{"verdict":"revise","findings":[{"code":"design-wrong-設計誤り","path":"client/src/label.ts","line":3,"message":"設計の前提が実装と合っていません。"}]}`
+	output, err := DecodeAgentReviewOutput(transcript)
+	if err != nil {
+		t.Fatalf("DecodeAgentReviewOutput: %v", err)
+	}
+	if len(output.Findings) != 1 || output.Findings[0].Code != "design-wrong" {
+		t.Fatalf("findings = %+v", output.Findings)
+	}
+	if output.Findings[0].Path != "client/src/label.ts" || output.Findings[0].Line != 3 {
+		t.Errorf("the rest of the finding did not survive: %+v", output.Findings[0])
 	}
 }

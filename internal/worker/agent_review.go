@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -262,7 +263,19 @@ func DecodeAgentReviewOutput(transcript string) (ModelReviewOutput, error) {
 	if err != nil {
 		return ModelReviewOutput{}, errors.New("the reviewing agent did not report a verdict")
 	}
-	return DecodeModelReviewOutput([]byte(block))
+	output, err := DecodeModelReviewOutput([]byte(block))
+	if err != nil {
+		return output, err
+	}
+	// The label is made to fit here too. This is the review whose labels
+	// carry machine meaning: design-wrong sends the delivery back to the
+	// design instead of to another implementation round, and a label the
+	// shape refuses would otherwise fail the whole card — losing the
+	// finding and the signal with it.
+	for i, finding := range output.Findings {
+		output.Findings[i].Code = investigate.NormalizeFindingCode(finding.Code)
+	}
+	return output, nil
 }
 
 // lastJSONObject returns the final balanced {...} run in the text, ignoring

@@ -390,7 +390,7 @@ func reviewAgentPrompt(
 		"## 答え方 (最後にこの形の JSON だけを出力する)",
 		`{"verdict":"pass","findings":[]}`,
 		"または",
-		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンの短い識別子","path":"変更されたファイルのいずれか","line":0,"message":"何がどう問題かを一文で"}]}`,
+		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンだけの短い識別子 (例 missing-null-check。日本語や大文字や記号は使わない。設計そのものが誤りなら design-wrong)","path":"変更されたファイルのいずれか","line":0,"message":"何がどう問題かを一文で (ここは日本語で書く)"}]}`,
 		"- verdict が pass のときは findings を空にしてください。revise のときは 1 件以上必要です。",
 		"- path は上の「変更されたファイル」に挙がっているものだけです。",
 		worker.ReviewAnswerRulesTail,

@@ -274,7 +274,8 @@ func (r DesignReview) Validate(identity Identity, subject ReviewSubject) error {
 // ASCII, spaces and punctuation become hyphens; the result is lowercased,
 // trimmed of leading and trailing hyphens and bounded. A label with nothing
 // usable left becomes "finding", which is honest: the reviewer named
-// something the code could not carry.
+// something the code could not carry. A label that would start with a digit
+// keeps its text behind a "finding-" prefix rather than losing the digits.
 func NormalizeFindingCode(code string) string {
 	lowered := strings.ToLower(strings.TrimSpace(code))
 	var b strings.Builder
@@ -287,8 +288,19 @@ func NormalizeFindingCode(code string) string {
 		}
 	}
 	trimmed := strings.Trim(collapseHyphens(b.String()), "-")
-	for len(trimmed) > 0 && (trimmed[0] < 'a' || trimmed[0] > 'z') {
-		trimmed = strings.Trim(trimmed[1:], "-")
+	if trimmed == "" {
+		return "finding"
+	}
+	if trimmed[0] < 'a' || trimmed[0] > 'z' {
+		// A label that starts with a digit ("503-timeout") keeps its
+		// meaning behind a prefix; dropping the digits would leave
+		// "timeout", which says something else.
+		trimmed = "finding-" + trimmed
+	}
+	if len(trimmed) == 1 {
+		// The shape wants two characters or more. Padding keeps two short
+		// labels apart, which "finding" for both would not.
+		trimmed += "-finding"
 	}
 	if len(trimmed) > 64 {
 		trimmed = strings.Trim(trimmed[:64], "-")
