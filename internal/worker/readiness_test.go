@@ -696,3 +696,22 @@ func TestEarlierAnswersLicenseRecordNumbers(t *testing.T) {
 		t.Fatalf("an earlier answer's record number was refused: %v", err)
 	}
 }
+
+// The reception itself (not only the helper) licenses a record number from
+// a preserved answer: NewReadinessAssessment must build its sources from
+// the answers it is given, or the helper is decoration.
+func TestReceptionLicensesAPreservedAnswersRecordNumber(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	needsDesign := true
+	output := ModelReadinessOutput{Decision: ReadinessOutcomeClarification, RequestKind: "change", NeedsDesign: &needsDesign,
+		Questions: []ReadinessQuestion{{ID: "Q1", Dimension: "acceptance_criterion", Question: "Keep the basis of REC-77?", WhyBlocking: "It was the requester's own basis.",
+			Choices: []ReadinessChoice{{ID: "a", Label: "Keep REC-77 as the basis", Effect: "The guide cites it."}, {ID: "b", Label: "Drop it", Effect: "The guide cites nothing."}}}}}
+	invocation := validTestInvocation(config.Models.Readiness.Assessor)
+	if _, err := NewReadinessAssessment(1, output, nil, nil, source, request, config, invocation, testInvocationTime); err == nil {
+		t.Fatal("a record number from nowhere was accepted by the reception")
+	}
+	preserved := []PreservedAnswer{{Name: "TKT-1.md", Content: "Adopted: the basis is record REC-77."}}
+	if _, err := NewReadinessAssessment(1, output, nil, preserved, source, request, config, invocation, testInvocationTime); err != nil {
+		t.Fatalf("the reception refused a preserved answer's record number: %v", err)
+	}
+}
