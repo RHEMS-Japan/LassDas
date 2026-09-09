@@ -118,11 +118,20 @@ const malformedTurnRetries = 1
 var malformedTurnDelay = 2 * time.Second
 
 // ChatResponse is the subset of an OpenAI-compatible chat completions
-// response the pipeline consumes and verifies.
+// response the pipeline consumes and verifies. Error is the top-level
+// error object a gateway may return inside a 200 with no choices; only
+// its code is read, never its message.
 type ChatResponse struct {
+	Error *ChatResponseError `json:"error,omitempty"`
 	ID      string       `json:"id"`
 	Choices []ChatChoice `json:"choices"`
 	Usage   *ChatUsage   `json:"usage"`
+}
+
+// ChatResponseError is the code of a top-level error object; the message
+// is upstream text and is not decoded.
+type ChatResponseError struct {
+	Code int `json:"code"`
 }
 
 // ChatCompletionsAPI is the transport seam between the pipeline and the
@@ -548,8 +557,12 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // toward MaxConfiguredOutputTokens — a readiness answer long enough to hit
 // the allowance ended a live run as model_failed that the next attempt
 // passed (2026-09-05). At the ceiling there is no room to give, so the
-// cutoff travels at once. A second of either kind, or any other error,
-// travels named; an error after the widened re-ask still carries the
+// cutoff travels at once. One more of any kind than its allowance, or any
+// other error, travels named. The counters are independent, so one turn
+// makes at most 6 calls (3 provider errors, 1 cutoff, 1 malformed, 1
+// final) with 42 s of pauses between them; each call has its own
+// ModelInvocationTimeout and the turn has no deadline of its own — the
+// round's wall (the context) is what ends a turn that keeps failing; an error after the widened re-ask still carries the
 // cutoff that caused it, so the caller's log names the cutoff whatever
 // ended the turn. The widened allowance lives for this turn only: a
 // conversation whose every answer is long pays one cut-off request per
@@ -572,7 +585,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			// The provider's own error inside a 200: the same transient as a
 			// gateway 5xx, asked again on the gateway's schedule.
 			if upstream >= len(gatewayRetryPauses) {
-				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d attempts", err, upstream+1))
+				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d provider errors", err, upstream+1))
 			}
 			delay = gatewayRetryPauses[upstream]
 			upstream++
@@ -664,6 +677,16 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 	if output == nil {
 		return "", InvocationUsage{}, errors.New("model invocation failed")
 	}
+	// The provider's own error inside a 200 is judged before the usage and
+	// content checks: such an answer may carry no usage and no content, and
+	// judged after them it would travel as a malformed response, asked
+	// again once instead of on the gateway's schedule (review of #99).
+	if len(output.Choices) == 1 && output.Choices[0].FinishReason == ChatFinishError {
+		return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseUpstream, ChatFinishError)
+	}
+	if len(output.Choices) == 0 && output.Error != nil {
+		return "", InvocationUsage{}, fmt.Errorf("%w (error code %d, no choices)", errModelResponseUpstream, output.Error.Code)
+	}
 	if output.Usage == nil {
 		return "", InvocationUsage{}, fmt.Errorf("%w (no usage)", errModelResponseMetadata)
 	}
@@ -693,9 +716,6 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		if output.Choices[0].FinishReason == ChatFinishLength {
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
-		}
-		if output.Choices[0].FinishReason == ChatFinishError {
-			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseUpstream, ChatFinishError)
 		}
 		return "", InvocationUsage{}, errors.New(
 			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
