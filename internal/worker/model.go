@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -152,8 +153,11 @@ const (
 	// SpentAllowancePhrase names the failure the turn asks again for; with
 	// TransportFailedPhrase it begins errModelAllowanceSpent.
 	SpentAllowancePhrase = "the call spent its allowance without answering"
-	// AttemptsExhaustedPhrase appears in the one transport failure that
-	// comes after the gateway's own retries were spent.
+	// AttemptsExhaustedPhrase appears in the transport failures that come
+	// after the gateway's retries were spent — a status it kept answering,
+	// and a gateway that could not be reached at all — or cut short because
+	// the call's remaining allowance could not fit another attempt. It says
+	// the call was asked again, not that it was asked its full count.
 	AttemptsExhaustedPhrase = " attempts"
 	// LimitNotLiftedPhrase and RetryAfterTooLongPhrase appear in the two
 	// failures a gateway gives for a limit that waiting does not lift (an
@@ -230,10 +234,55 @@ var gatewayRetryPauses = []time.Duration{2 * time.Second, 8 * time.Second, 30 * 
 // that passes.
 func retryableGatewayStatus(code int) bool {
 	switch code {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+		// A gateway's own 500 and 408, and the 529 an overloaded provider
+		// answers with, are moments that pass in the same way its 502 is.
+		// One of them ended a whole investigating round on its first
+		// occurrence; an investigation spends up to sixty probe calls
+		// across its rounds.
+		http.StatusInternalServerError, http.StatusRequestTimeout, statusOverloaded:
 		return true
 	}
 	return false
+}
+
+// statusOverloaded is the status a provider answers with when it is over
+// capacity. Go has no constant for it.
+const statusOverloaded = 529
+
+// transientTransportFailure reports whether a failure to reach the gateway
+// at all is one that asking again shortly can pass: a connection the network
+// dropped, a name that did not resolve, a handshake that did not finish. A
+// call that spent its own allowance is deliberately not one of these — the
+// turn asks that one again on a count of its own, and asking again here as
+// well would multiply five-minute calls (converseTurn).
+func transientTransportFailure(err error) bool {
+	if err == nil || spentItsAllowance(err) || settledTransportFailure(err) {
+		return false
+	}
+	var safe *SafeModelError
+	return errors.As(err, &safe) && strings.HasPrefix(safe.Error(), TransportFailedPhrase)
+}
+
+// settledTransportFailure reports whether a failure to reach the gateway is
+// one that waiting cannot change: the address is wrong, the name does not
+// exist, or the certificate does not verify. Asking again costs the caller
+// four attempts and forty seconds for an answer that was already final, and
+// the person fixing the setting pays that on every try (measured, review of
+// #125). The last two are matched on the transport's own words because Go
+// gives them no type; they are Go's words, never a requester's.
+func settledTransportFailure(err error) bool {
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return true
+	}
+	// A name that does not resolve is deliberately not here: the pod's own
+	// resolver restarts, and a name that exists answers NXDOMAIN for a
+	// moment while it does (review of #125). Treating that as settled would
+	// turn the transient this change exists to survive into a hard failure.
+	message := err.Error()
+	return strings.Contains(message, "unsupported protocol scheme") ||
+		strings.Contains(message, "server gave HTTP response to HTTPS client")
 }
 
 func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
@@ -291,9 +340,44 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		return nil, safeModelError("model request could not be encoded")
 	}
 	for attempt := 0; ; attempt++ {
+		// How long the attempt took is what sizes the guard below: another
+		// one of the same length is what the call would be paying for. A
+		// fixed assumption let a round trip slower than the assumption slip
+		// through and spend the whole allowance anyway (review of #125).
+		startedAttempt := time.Now()
 		body, status, retryAfter, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
+		lastAttempt := time.Since(startedAttempt)
 		if err != nil {
-			return nil, err
+			// A gateway that answered a status gets the ladder below; one
+			// that could not be reached at all gets the same ladder here,
+			// because the moment that stopped it passes the same way.
+			if !transientTransportFailure(err) {
+				return nil, err
+			}
+			pause, again := gatewayPause(http.StatusServiceUnavailable, nil, attempt)
+			if again && !roomForAnotherAttempt(ctx, pause, lastAttempt) {
+				// The attempts themselves are slow: another one would spend
+				// the call's whole allowance, and the failure would reach the
+				// caller as a spent allowance rather than as what actually
+				// happened — which the turn then asks again, doubling it
+				// (measured, review of #125).
+				again = false
+			}
+			if !again {
+				// Wrapped safely rather than with fmt.Errorf: converseTurnOnce
+				// keeps only the innermost safe error, so a wrapper's words
+				// are dropped and the requester is told nothing was asked
+				// again after four attempts and forty seconds (measured,
+				// review of #125).
+				return nil, safeModelErrorFor(fmt.Sprintf("%s after %d%s", err.Error(), attempt+1, AttemptsExhaustedPhrase), err)
+			}
+			fmt.Fprintf(os.Stderr, "worker: the gateway could not be reached; asking again in %s (retry %d of %d)\n", pause, attempt+1, len(gatewayRetryPauses))
+			if !pauseBeforeAskingAgain(ctx, pause) {
+				// The caller gave up during the wait. The failure that
+				// prompted it is what happened, so that is what travels.
+				return nil, err
+			}
+			continue
 		}
 		if status == http.StatusOK {
 			var response ChatResponse
@@ -303,6 +387,14 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return &response, nil
 		}
 		pause, again := gatewayPause(status, retryAfter, attempt)
+		if again && !roomForAnotherAttempt(ctx, pause, lastAttempt) {
+			// The same guard the unreachable branch uses, for the same
+			// reason: a status that is slow to arrive would otherwise spend
+			// the call's whole allowance between attempts, and the failure
+			// would reach the turn as a spent allowance with the status
+			// lost (measured, review of #125).
+			again = false
+		}
 		if !again {
 			if attempt > 0 {
 				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d after %d%s", status, attempt+1, AttemptsExhaustedPhrase))
@@ -316,14 +408,37 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
 		}
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
-		timer := time.NewTimer(pause)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !pauseBeforeAskingAgain(ctx, pause) {
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
-		case <-timer.C:
 		}
 	}
+}
+
+// pauseBeforeAskingAgain waits, and reports whether the wait finished rather
+// than the caller giving up first.
+func pauseBeforeAskingAgain(ctx context.Context, pause time.Duration) bool {
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// roomForAnotherAttempt reports whether the call has enough of its allowance
+// left to wait and then try once more. Without it, attempts that are slow to
+// fail spend the whole allowance between them, and the call reaches its
+// caller as a spent allowance — which the turn asks again, so one slow
+// status becomes two allowances instead of one immediate failure (measured,
+// review of #125). A call with no deadline of its own is not bounded here.
+func roomForAnotherAttempt(ctx context.Context, pause, lastAttempt time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) > pause+lastAttempt
 }
 
 // maxRetryAfter caps how long a 429's Retry-After is honoured: a gateway
