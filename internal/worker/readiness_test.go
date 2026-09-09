@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/probe"
 	"context"
 	"regexp"
 	"strings"
@@ -586,5 +587,112 @@ func TestCheckerPromptCodesAreInItsSchema(t *testing.T) {
 	}
 	if !strings.Contains(enum[1], `"fabricated-evidence"`) {
 		t.Fatal("the schema enum lacks fabricated-evidence")
+	}
+}
+
+// The reception is told what the pipeline can measure and that a
+// measurable point is not a requester's question: the catalogue travels in
+// both prompts' USER_DATA_JSON, the assessor's contract carries the
+// measurement rule and the text limits, and the checker's false-block names
+// the catalogue (live: the reception, believing production out of reach,
+// asked whether to write placeholders instead of measurements).
+func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
+	config, request, source := validArtifactFixture(t)
+	config.Probes = []probe.Spec{{ID: "http.timing", Kind: probe.KindHTTP}, {ID: "k8s.workloads", Kind: probe.KindExec}}
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`) {
+		t.Errorf("assessor data lacks the catalogue:\n%s", prompt)
+	}
+	assessment := ReadinessAssessment{Decision: ReadinessOutcomeReady, RequestKind: "change"}
+	check, err := readinessCheckPrompt(assessment, source, request, config, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(check, `"catalogue":[{"id":"http.timing"`) {
+		t.Errorf("checker data lacks the catalogue:\n%s", check)
+	}
+	system := readinessSystemPrompt()
+	for _, want := range []string{"would not be given by a measurement of the live system or the repository", "probes listed in USER_DATA_JSON.catalogue", "never assume that production or the repository cannot be reached or measured", "question and why_blocking are one line of at most 2000 bytes", "reject_code matches ^[a-z][a-z0-9-]{1,63}$"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("assessor contract lacks %q", want)
+		}
+	}
+	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"})
+	if !strings.Contains(checker, "would be answered by a measurement with a probe in USER_DATA_JSON.catalogue") {
+		t.Error("checker's false-block does not name the catalogue")
+	}
+	if !strings.Contains(impasseSystemPrompt(), "question and why_blocking are one line of at most 2000 bytes") {
+		t.Error("impasse contract lacks the text limits")
+	}
+	if len(readinessCatalogue(Config{})) != 0 {
+		t.Error("an empty catalogue invented entries")
+	}
+}
+
+// A refusal names the field, its size and the limit, so the next answer
+// can be right (live: "question text is invalid" named nothing).
+func TestReceptionRefusalsNameTheFieldAndTheLimit(t *testing.T) {
+	needsDesign := true
+	base := func() ModelReadinessOutput {
+		return ModelReadinessOutput{Decision: ReadinessOutcomeClarification, RequestKind: "change", NeedsDesign: &needsDesign,
+			Questions: []ReadinessQuestion{{ID: "Q1", Dimension: "acceptance_criterion", Question: "Which?", WhyBlocking: "It differs.",
+				Choices: []ReadinessChoice{{ID: "a", Label: "one", Effect: "the first"}, {ID: "b", Label: "two", Effect: "the second"}}}}}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*ModelReadinessOutput)
+		want   string
+	}{
+		{"long question", func(o *ModelReadinessOutput) { o.Questions[0].Question = strings.Repeat("q", 2001) }, "question Q1 text is 2001 bytes (limit 2000)"},
+		{"newline in why", func(o *ModelReadinessOutput) { o.Questions[0].WhyBlocking = "line\nbreak" }, "question Q1 why_blocking contains a newline"},
+		{"long label", func(o *ModelReadinessOutput) { o.Questions[0].Choices[0].Label = strings.Repeat("l", 801) }, "question Q1 choice a label is 801 bytes (limit 800)"},
+		{"empty effect", func(o *ModelReadinessOutput) { o.Questions[0].Choices[1].Effect = "" }, "question Q1 choice b effect is empty"},
+		{"padded assumption", func(o *ModelReadinessOutput) {
+			o.Assumptions = []ReadinessAssumption{{Kind: "repository_convention", Statement: " padded", Evidence: "e"}}
+		}, "assumption 1 statement has leading or trailing whitespace"},
+		{"empty evidence", func(o *ModelReadinessOutput) {
+			o.Assumptions = []ReadinessAssumption{{Kind: "repository_convention", Statement: "s", Evidence: ""}}
+		}, "assumption 1 evidence is empty"},
+		{"bad reject code", func(o *ModelReadinessOutput) {
+			o.Decision = ReadinessOutcomeReject
+			o.Questions = nil
+			o.RejectCode = "Out Of Scope"
+		}, `reject_code "Out Of Scope" does not match ^[a-z][a-z0-9-]{1,63}$`},
+	}
+	for _, tc := range cases {
+		output := base()
+		tc.mutate(&output)
+		err := validateModelReadinessOutput(output)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// A record number the requester wrote in an earlier answer — this run's
+// clarification or a preserved answer from an earlier ticket — is the
+// requester's, and quoting it is not fabrication.
+func TestEarlierAnswersLicenseRecordNumbers(t *testing.T) {
+	needsDesign := true
+	output := ModelReadinessOutput{Decision: ReadinessOutcomeClarification, RequestKind: "change", NeedsDesign: &needsDesign,
+		Questions: []ReadinessQuestion{{ID: "Q1", Dimension: "acceptance_criterion", Question: "Keep the basis of REC-77?", WhyBlocking: "It was the requester's own basis.",
+			Choices: []ReadinessChoice{{ID: "a", Label: "Keep REC-77 as the basis", Effect: "The guide cites it."}, {ID: "b", Label: "Drop it", Effect: "The guide cites nothing."}}}}}
+	request := TicketRequest{Summary: "Write the guide", Request: "Write the guide from the measurements."}
+	if err := refuseFabricatedEvidence(output, licensedEvidenceText(request, nil, nil)); err == nil {
+		t.Fatal("a record number from nowhere was accepted")
+	}
+	preserved := []PreservedAnswer{{Name: "TKT-1.md", Content: "Adopted: the basis is record REC-77 (measured through the public entry point)."}}
+	if err := refuseFabricatedEvidence(output, licensedEvidenceText(request, nil, preserved)); err != nil {
+		t.Fatalf("a preserved answer's record number was refused: %v", err)
+	}
+	clarification := &ClarificationContext{Exchanges: []ClarificationExchange{{
+		Questions: []ReadinessQuestion{{ID: "Q1", Question: "Which basis?", Choices: []ReadinessChoice{{ID: "a", Label: "REC-77 through the public entry point", Effect: "e"}}}},
+		Answers:   map[string]string{"Q1": "a"},
+	}}}
+	if err := refuseFabricatedEvidence(output, licensedEvidenceText(request, clarification, nil)); err != nil {
+		t.Fatalf("an earlier answer's record number was refused: %v", err)
 	}
 }

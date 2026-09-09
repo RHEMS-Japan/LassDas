@@ -320,6 +320,27 @@ func validVerificationPath(value string) bool {
 	return cleaned == value && !strings.Contains(value, "/../") && !strings.HasSuffix(value, "/..")
 }
 
+// plainTextProblem says what validatePlainText would refuse about a
+// single-line value, in words a refusal can carry: empty, its size against
+// the limit, a newline, surrounding whitespace, a control character.
+func plainTextProblem(value string, maxBytes int) string {
+	switch {
+	case value == "":
+		return "is empty"
+	case len(value) > maxBytes:
+		return fmt.Sprintf("is %d bytes (limit %d)", len(value), maxBytes)
+	case !utf8.ValidString(value):
+		return "is not valid UTF-8"
+	case strings.ContainsAny(value, "\r\n"):
+		return "contains a newline"
+	case strings.TrimSpace(value) != value:
+		return "has leading or trailing whitespace"
+	case hasDisallowedControls(value, false):
+		return "has a control character"
+	}
+	return ""
+}
+
 func validatePlainText(value string, maxBytes int, allowNewlines bool) error {
 	if value == "" || len(value) > maxBytes || !utf8.ValidString(value) || strings.TrimSpace(value) != value || hasDisallowedControls(value, allowNewlines) {
 		return errors.New("plain text is invalid")
