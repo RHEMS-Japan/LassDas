@@ -45,12 +45,6 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
-// One thing here is deliberately not measured, on the line the review of
-// #127 drew: a change to it puts nothing in front of a requester and has no
-// failure behind it — the order the notes are asked in, which no phrase
-// distinguishes. Everything else that sweep raised turned out to change
-// what a requester sees, and is measured.
-//
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
 
@@ -84,9 +78,10 @@ func receptionCauseNote(stage, cause string) string {
 	// provider's own error, and the one gateway status that comes
 	// after its retries were spent. Only these three may tell a
 	// requester that sending the same ticket again is worth doing.
-	case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase),
+	case strings.HasPrefix(cause, worker.TransportFailedPhrase+": "+worker.SpentAllowancePhrase) && !limitThatWaitingDoesNotLift(cause),
 		strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
-		strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
+		strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase) &&
+			!limitThatWaitingDoesNotLift(cause):
 		return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
 			"何度か聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
 			"同じ依頼をもう一度動かせば通る見込みです。\n"
@@ -94,8 +89,7 @@ func receptionCauseNote(stage, cause string) string {
 	// of these, and telling its requester to send the ticket again
 	// would send them round the same wall with nobody looking at the
 	// balance.
-	case strings.HasPrefix(cause, worker.TransportFailedPhrase) &&
-		(strings.Contains(cause, worker.LimitNotLiftedPhrase) || strings.Contains(cause, worker.RetryAfterTooLongPhrase)):
+	case strings.HasPrefix(cause, worker.TransportFailedPhrase) && limitThatWaitingDoesNotLift(cause):
 		return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
 			"時間をおいて動かし直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
 	// Everything else the transport reports: a status that is not
@@ -124,6 +118,20 @@ func receptionCauseNote(stage, cause string) string {
 			"運用担当者が受付の設定を確認します。\n"
 	}
 	return ""
+}
+
+// limitThatWaitingDoesNotLift reports whether the transport said the wall is
+// one that time does not move. It is one definition rather than a condition
+// written twice because it decides, on its own, which of two opposite things
+// a requester is told: that the same ticket is worth sending again, or that
+// it will meet the same wall until someone looks at the balance. A cause can
+// carry both this and the count of attempts — nothing in the worker emits
+// that pair today, but which arm answered it used to depend only on which
+// was written first, and the wrong one tells an exhausted balance to try
+// again (found by the review of #131).
+func limitThatWaitingDoesNotLift(cause string) bool {
+	return strings.Contains(cause, worker.LimitNotLiftedPhrase) ||
+		strings.Contains(cause, worker.RetryAfterTooLongPhrase)
 }
 
 // lastReceptionCause is the cause on the last line the worker wrote about

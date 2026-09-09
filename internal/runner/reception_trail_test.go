@@ -50,7 +50,9 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 		t.Fatalf("no trail was written for the cutoff: %v", readErr)
 	}
 	text := string(content)
-	if !strings.Contains(text, "出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
+	// 答えが長すぎて names the cause; without it the note says an output was
+	// cut off and never says by what (review of #131).
+	if !strings.Contains(text, "答えが長すぎて出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
 		t.Fatalf("the trail does not name the cause in the requester's words: %q", text)
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
@@ -219,7 +221,10 @@ func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 	// The advice is the third sentence and was the only part not required:
 	// this is the one reception failure a requester can fix themselves, so
 	// losing it leaves them told they are stuck and not how (review of #126).
-	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前", "書き足せば通る見込み"} {
+	// The worked example is the whole remedy: without it the note asks for
+	// "変更するファイルの位置" and shows none (review of #131).
+	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前",
+		"例: docs/ の下に新しく作るなら、その相対パス", "書き足せば通る見込み"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the note lacks %q: %q", want, note)
 		}
@@ -411,16 +416,30 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 		says []string
 		not  string
 	}{
+		// 一時的な混雑で起きることが多いため、 is the only thing joining "we
+		// already asked again" to "asking again will probably work". Without
+		// it the note tells the requester to redo what it just said was
+		// already redone, and nothing failed when it was deleted (review of
+		// #131).
 		{"model invocation failed with status 502 after 4" + worker.AttemptsExhaustedPhrase,
-			[]string{"聞き直した上での結果", "もう一度動かせば通る見込み"}, "利用の上限"},
+			[]string{"聞き直した上での結果", "一時的な混雑", "もう一度動かせば通る見込み"}, "利用の上限"},
 		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls",
-			[]string{"聞き直した上での結果", "もう一度動かせば通る見込み"}, "利用の上限"},
+			[]string{"聞き直した上での結果", "一時的な混雑", "もう一度動かせば通る見込み"}, "利用の上限"},
+		// A cause that carries both the count of attempts and a limit that
+		// waiting does not lift. Which one answers it decided, before this,
+		// only by which arm was written first — and the wrong one sends an
+		// exhausted balance round the same wall.
+		{worker.TransportFailedPhrase + ": status 429 after 3" + worker.AttemptsExhaustedPhrase + " (" + worker.LimitNotLiftedPhrase + ")",
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "もう一度動かせば通る見込み"},
+		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " (" + worker.RetryAfterTooLongPhrase + ")",
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "もう一度動かせば通る見込み"},
 		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
 			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase,
 			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果", "運用担当者が利用枠を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed with status 401",
-			[]string{"問い合わせが通りませんでした", "設定か接続の問題", "運用担当者が原因を確認します"}, "動かせば通る見込み"},
+			[]string{"問い合わせが通りませんでした", "設定か接続の問題",
+				"同じ依頼を動かし直しても同じ結果になることがあります", "運用担当者が原因を確認します"}, "動かせば通る見込み"},
 		{"model invocation failed: dial tcp: connection refused",
 			[]string{"問い合わせが通りませんでした", "設定か接続の問題", "運用担当者が原因を確認します"}, "聞き直した上での結果"},
 	} {
@@ -473,8 +492,11 @@ func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 		says  []string
 		not   string
 	}{
+		// 一時的なことが多いため、 is the same justification the retried
+		// transport note carries, and the same one nothing measured: it is
+		// what makes "asking again will work" follow "asking again did not".
 		{worker.GatewayBookkeepingPhrase + " (no usage)",
-			[]string{"通信の記録が壊れていた", "聞き直しても同じでした", "もう一度動かせば通る見込み"}, "依頼文"},
+			[]string{"通信の記録が壊れていた", "聞き直しても同じでした", "一時的なことが多いため", "もう一度動かせば通る見込み"}, "依頼文"},
 		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)",
 			[]string{"決められた形になりませんでした", "聞き直しても同じでした", "動かし直しても同じ結果", "運用担当者が受付の設定を確認します"}, "動かせば通る見込み"},
 		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)",
