@@ -13,6 +13,11 @@ import (
 
 var modelRoles = []string{"implementer", "review-a", "review-b", "readiness-assessor", "readiness-checker", "designer", "applier"}
 
+const (
+	modelKeysShared   = "shared"
+	modelKeysSeparate = "separate"
+)
+
 func keyName(role string) string {
 	return "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"
 }
@@ -76,7 +81,7 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	if err := config.Validate(); err != nil {
 		return config, runtimeconfig.Config{}, nil, fmt.Errorf("生成設定: %w", err)
 	}
-	if err := DistinctKeys(s, secrets); err != nil {
+	if err := ValidateModelKeys(s, secrets); err != nil {
 		return config, runtimeconfig.Config{}, nil, err
 	}
 	limit := 3
@@ -91,7 +96,10 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	return config, runtime, env, nil
 }
 
-func DistinctKeys(s *State, secrets Secrets) error {
+func ValidateModelKeys(s *State, secrets Secrets) error {
+	if s.ModelKeyMode != "" && s.ModelKeyMode != modelKeysShared && s.ModelKeyMode != modelKeysSeparate {
+		return errors.New("モデルの鍵の設定は shared または separate です")
+	}
 	names := []string{"LASSDAS_INTAKE_TARGET_KEY"}
 	for _, role := range allRoles(s) {
 		names = append(names, keyName(role))
@@ -102,6 +110,13 @@ func DistinctKeys(s *State, secrets Secrets) error {
 		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("%s の鍵を入力してください", name)
 		}
+		if s.ModelKeyMode == modelKeysShared {
+			if value != secrets["LASSDAS_INTAKE_TARGET_KEY"] {
+				return errors.New("共通キーの設定と役の鍵が一致しません。init の models 段をやり直してください")
+			}
+			continue
+		}
+		// Journals written before key modes existed used separate keys.
 		if prior, ok := seen[value]; ok {
 			return fmt.Errorf("別身元の鍵が同じです: %s / %s", prior, name)
 		}

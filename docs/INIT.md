@@ -2,7 +2,7 @@
 <!-- provenance: v0.2 independent reviews 87/100 (0 blockers), 85/100 (1 blocker); one correction/re-evaluation round, final 92/100 and 93/100 (both 0 blockers). Design approval does not certify runtime acceptance. -->
 # lassdas init — 一本で立ち上げが終わる入口 (設計書 v0.2)
 
-発注者決定 (2026-09-08): **setup は init に改名し、init だけで立ち上げを終わらせる。終わりは「依頼を 1 本流して、納品先に Pull Request が出ること」。** 最初の対象はシンプルな CLI アプリ。本体は手元の Docker で Pod と同じイメージを動かす。入口は既存トラッカー、役の道具は Hermes。モデルは OpenAI 互換の URL と役ごとの鍵を入力する。
+発注者決定 (2026-09-08): **setup は init に改名し、init だけで立ち上げを終わらせる。終わりは「依頼を 1 本流して、納品先に Pull Request が出ること」。** 最初の対象はシンプルな CLI アプリ。本体は手元の Docker で Pod と同じイメージを動かす。入口は既存トラッカー、役の道具は Hermes。モデル接続先は初期版では OpenRouter 固定とし、既定ではキー1本を全役で共用する。役別のキーは任意で選べる。
 
 **トラッカー・GitHub・モデルの鍵は、利用者が外で取得して入力する。** init が取得先と必要な権限を案内し、入力後に検査する。資格情報の発行や権限変更の自動化は不要。
 
@@ -22,9 +22,9 @@
 | tool-pins.txt | worker、controller、browsercheck の SHA-256、3 本分 |
 | boot が書く profile | runner 1、validate/publish/investigate/design-decide 4、e2e 1、配送 3、実装 1、レビュー 2、設計レビュー 2、写し 1、計 15 |
 | 本設計のカード用 profile | 実装系 5 + 設計系 5、計 10。runner は別枠。観測・配送用は使用しない |
-| モデルの鍵 | §7 の 8 身元。設計レビューを別に指定する場合は 10 本 |
+| モデルの鍵 | 既定は共通の1本。任意で §7 の役別8本、設計レビューも別に指定する場合は10本 |
 
-鍵を共有する役は予算監視でもまとめられる (`internal/attendant/budget.go` の roleProbes)。別の役へ同じ鍵を設定しないことと、費用内訳が正しく分かれることは別の検査であり、後者は §10 で測る。私的な個別の運用記録を公開設計の実測根拠にしない。
+予算監視は接続先とキー変数名が同じ役をまとめる (`internal/attendant/budget.go` の roleProbes)。別の変数名へ同じ値を設定しただけで監視が1回になるとは扱わない。共通キーではキー単位の費用と利用上限が全役の合算になる。役別に異なるキーを設定することと、費用内訳が正しく分かれることは別の検査であり、後者は §10 で測る。私的な個別の運用記録を公開設計の実測根拠にしない。
 
 ## 1. 一枚の絵
 
@@ -33,7 +33,7 @@ lassdas init
  ├ 1 準備      GitHub の鍵 → repo と枝を読む / Docker と固定イメージを確認
  ├ 2 納品先    編集範囲・検証手順を提案 → 確認 → イメージ内で試走
  ├ 3 入口      トラッカーの接続先・bot の鍵・許可起票者 → カテゴリと列を確認
- ├ 4 モデル    URL・モデル・役ごとの鍵 → 設定検査と疎通
+ ├ 4 モデル    OpenRouter・モデル・共通キー (役別も選択可) → 設定検査と疎通
  ├ 5 本体      設定・env・volume → 起動時検査 → 認証つきの板を確認
  └ 6 動作確認  本人の鍵 (保存しない) → 依頼の内容を確認 → 起票
                受付 → 調査・設計 → 設計レビュー A/B → 写し役
@@ -72,7 +72,7 @@ lassdas run start / stop / status / logs
 | 1 準備 | GitHub トークン、repo (remote があれば候補)、image 参照と対応ソース SHA | 認証後に private repo も読む。repo の数値 ID、枝の実在、Docker の接続・arm64、digest と pin を確認。取り込み枝は repo の規則を読み利用者が確認し、default branch と同じだと決め打たない |
 | 2 納品先 | cli 固定。範囲、上限、toolchain、install_command、verify_commands (1〜4)、verify_working_directory。Go/Node の構成から提案 | 同じ digest の使い捨てコンテナで、確定した枝 SHA の clone に対して版を測り、install と検証を実行。モデル/トラッカー鍵は入れず、clone 後は GitHub 鍵も除く。納品時と同じ worker の検証関数を B の入口から使う。ホストで通った結果で代用しない |
 | 3 入口 | トラッカー接続先、project、許可起票者 ID、自動処理の鍵。必要時だけ管理者の鍵 | project・利用者・キーの持ち主・カテゴリ・4 状態の対応を取得。既存列を再利用し、不足分の一覧を示して確認後に作成。現行 setup は追加列 2 本と既存状態を使うので「4 本新設」ではない。作成済み ID を再利用 |
-| 4 モデル | URL、モデルと鍵 (§7)。会社名は認識できる接頭辞から提案、不明なら聞く | 本体と同じ設定検査と全身元の疎通。別身元の同じ鍵は拒否。consumer と env を同じ回答から生成。再開時も鍵を検査。API 呼出しの費用は実行前に案内 |
+| 4 モデル | OpenRouter のモデルと鍵 (§7)。会社名は認識できる接頭辞から提案、不明なら聞く | 本体と同じ設定検査と全身元の疎通。共通キーが既定。役別キーを選んだ場合だけ同値を拒否。consumer と env を同じ回答から生成。再開時も鍵を検査。API 呼出しの費用は実行前に案内 |
 | 5 本体 | 設定・保存先・板の接続先をまとめて確認 | §5 の設定読込、必須秘密ファイルの実在、別ユーザ起動、読取拒否、常駐の生存、板の認証成功と未認証拒否。ログの一語だけで成功判定しない。既存コンテナのラベル・設定指紋を照合し重複起動しない |
 | 6 動作確認 | 本人が外で取得した鍵、小変更の提案、作る依頼・枝・PR の確認 | 本人 API の ID と allowed_creator_id の一致。起票に必要な種別・優先度は実在一覧から解決。PR の差分と確定記録を確認 (§8)。本人の鍵は起票終了・中断で破棄、redo も再入力 |
 
@@ -84,7 +84,7 @@ GitHub の Contents/Pull requests の write は必要権限として案内する
 
 トラッカーの管理者鍵は、必要な列を作る権限が bot に無い場合に必要。作成後は破棄する。webhook は新設しない。起票者の根拠は `internal/receiver/event.go` と `internal/state/resume.go` の ID 厳密一致。bot を許可者へ一時変更せず、本人の鍵で確認する。
 
-質問数は「値を入力・選択する欄」を 1、まとめた確認画面も 1 と数え、1 画面の多数の欄をまとめて 1 としない。7 モデル + 8 鍵 + URL だけで 16 欄、接続先・repo・起票者・検証手順・確認・必要時の会社名等が加わる。**25 欄・入力 10 分は未検証の改善目標であり、合否条件にはしない。** §10 で既定・追加・再入力を別々に測る。鍵の外部取得とダウンロード時間も分けて記録する。
+質問数は「値を入力・選択する欄」を 1、まとめた確認画面も 1 と数え、1 画面の多数の欄をまとめて 1 としない。既定は 7 モデル + 共通キー1本で、接続先 URL の入力は不要。接続先・repo・起票者・検証手順・確認・必要時の会社名等が加わる。**25 欄・入力 10 分は未検証の改善目標であり、合否条件にはしない。** §10 で既定・追加・再入力を別々に測る。鍵の外部取得とダウンロード時間も分けて記録する。
 
 ## 4. AC2 — 納品先の種類 cli
 
@@ -197,7 +197,7 @@ agentexec は役を uid 2001〜2063 のプールで動かす。関所と別 uid�
 
 ## 7. AC5 — モデルと鍵の対応
 
-URL は現行検査と同じ HTTPS、認証情報/query/fragment/明示 port なし、末尾 / なしの正規形。必要な API と応答を疎通で確認し、任意の互換口に無条件対応するとは言わない。特定の接続先や事業者に固定しない。
+初期版は OpenRouter の `https://openrouter.ai/api/v1` に固定する。必要な API と応答を疎通で確認する。キーは既定で全役に共用し、任意で役ごとに分ける。別会社のモデルによるレビューとキーの共用は別の設定であり、モデル構成の既存検査は保つ。
 
 | 身元 | 関所の直接呼出し | Hermes / env |
 |---|---|---|
@@ -210,13 +210,13 @@ URL は現行検査と同じ HTTPS、認証情報/query/fragment/明示 port な
 | 調査・設計 | designer.api_key_env=LASSDAS_DESIGNER_KEY | 直接のみ。LASSDAS_DESIGNER_MODEL も一致 |
 | 写し役 | agents.applier の起動定義 | lassdas-applier / LASSDAS_APPLIER_KEY・MODEL |
 
-受付は対象導出 + 起案 + 確認の **3 呼出し**。対象導出は models.implementer.api_key_env、実装役は profile を読むため、モデルを追加せず鍵を分けられる。見本の複数役の鍵共有は生成設定へ引き継がない。
+受付は対象導出 + 起案 + 確認の **3 呼出し**。対象導出は models.implementer.api_key_env、実装役は profile を読むため、モデルを追加せず鍵を分けられる。共通キーを選んだ場合は、既存の各役の変数名に同じ値を設定する。役別を選んだ場合は別の値を要求する。
 
-既定ではレビュー A/B が設計と候補を両方担当し、design_reviewers と design_reviewer_agents は省略。同じ役の工程間の鍵再利用は許すが、別身元同士の同値は拒否する。設計レビューを別モデルにする場合は 2 名とも指定し、新しい鍵 2 本を入力。LASSDAS_DESIGN_REVIEW_A/B_KEY_VAR は LASSDAS_DESIGN_REVIEW_A/B_KEY を指す。既定では LASSDAS_REVIEW_A/B_KEY を指す。直接 API と profile の両経路を表の対応で検査する。
+既定ではレビュー A/B が設計と候補を両方担当し、design_reviewers と design_reviewer_agents は省略。同じ役の工程間の鍵再利用は許す。共通キーでは全役が同じ値を使い、役別キーでは別身元同士の同値を拒否する。設計レビューを別モデルにする場合は 2 名とも指定し、役別キーの場合だけ新しい鍵 2 本を入力。LASSDAS_DESIGN_REVIEW_A/B_KEY_VAR は LASSDAS_DESIGN_REVIEW_A/B_KEY を指す。既定では LASSDAS_REVIEW_A/B_KEY を指す。直接 API と profile の両経路を表の対応で検査する。
 
 agents は既存の `hermes --profile <name> -z`、secret_env のキー名は profile の api_key_env と一致。モデル・vendor・base_url も同じ回答から生成。agent の timeout はカード壁より短くする (初期値は実装 3600、レビュー 3600、写し 900 秒)。調査・設計は直接 API と既存予算を使う。
 
-**agents.reviewer_agents は A/B 全員分生成し、各 profile と secret_env を設定する。** 省略すると ReviewerAgentFor が共通の agents.reviewer へ戻るため、カード側の profile 指定だけでは鍵は分かれない。入力 URL は全 endpoint の base_url と **LASSDAS_GATEWAY_BASE_URL** の両方へ同値で保存する。
+**agents.reviewer_agents は A/B 全員分生成し、各 profile と secret_env を設定する。** 省略すると ReviewerAgentFor が共通の agents.reviewer へ戻るため、カード側の profile 指定だけでは鍵は分かれない。接続先は初期版では `https://openrouter.ai/api/v1` に固定し、URL 入力欄を設けない。全 endpoint の base_url と **LASSDAS_GATEWAY_BASE_URL** の両方へ同値で保存する。別接続先の保存設定がある場合は、キーを別サービスへ転送しないよう変更せず停止し、新しい project を案内する。
 
 全身元の疎通には既存 ModelInvoker.Preflight を B の検査処理から使い、表の直接呼出しと profile が使う実際の鍵を一つずつ渡す。現行 worker preflight の endpoint 選択は implementer/readiness/reviewers に限られるため、その CLI の単純な繰り返しでは designer・写し役・実装 profile の鍵を検査できない。出力には身元名と合否のみを残し、鍵は記録しない。
 
@@ -285,7 +285,7 @@ GitHub Issues の入口、Docker 無しの native 実行、project ごとの Kub
 | bot 起票が受付に弾かれる | 本人 ID 不一致は POST 前停止、許可者不変、一時鍵再入力 | D |
 | ホストだけの道具で検証済みになる | image の版/実行結果、道具欠落・コマンド失敗・候補 bytes 変更の拒否 | B/A |
 | 秘密欠落/漏えいでも起動成功 | 実在、関所/役の可読性、capability 不足、guard 補正可能/不可能 | C |
-| model 設定と実際の鍵がずれる | 8 身元の同値拒否、直接 API/profile/env 一致、設計レビュー全員/省略、失効再入力 | B |
+| model 設定と実際の鍵がずれる | 共用/役別の指定と実値の一致、役別時の同値拒否、直接 API/profile/env 一致、設計レビュー全員/省略、失効再入力 | B |
 | 重複操作 / 未完了を完了と呼ぶ | 中断・POST 応答喪失・30 分超過・redo で同じ issue/PR を追跡 | B/D |
 | ログだけで成功を誤認 | 板の認証・本体の生存、PR の repo/base/head/差分と確定記録を実際に照合 | C/D |
 

@@ -493,12 +493,39 @@ func (w *Wizard) trackerStage(ctx context.Context, s *State, secrets Secrets, sa
 	return err
 }
 
+const openRouterBaseURL = "https://openrouter.ai/api/v1"
+
 func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
-	if err := w.field(s, "models", "model-url", "外で契約した OpenAI 互換 API の base URL", &s.BaseURL, ""); err != nil {
-		return err
+	if s.BaseURL != "" && s.BaseURL != openRouterBaseURL {
+		return errors.New("この init のモデル接続先は OpenRouter 固定です。保存済みの別接続先や鍵は変更しません。OpenRouter 用には新しい project を使ってください")
+	}
+	s.BaseURL = openRouterBaseURL
+	w.UI.Info("モデルの接続先は OpenRouter です。疎通確認にも API の利用料がかかります")
+	if s.ModelKeyMode == "" {
+		s.ModelKeyMode = modelKeysShared
+		// Preserve keys from earlier versions or interrupted role-by-role
+		// input; sharing is the default only for a new configuration.
+		if secrets["LASSDAS_INTAKE_TARGET_KEY"] != "" || secrets[keyName("implementer")] != "" {
+			s.ModelKeyMode = modelKeysSeparate
+		}
+	}
+	if s.ModelKeyMode != modelKeysShared && s.ModelKeyMode != modelKeysSeparate {
+		return errors.New("モデルの鍵の設定は shared または separate です")
 	}
 	if s.Completed["models"] == "" {
-		value, err := w.ask(s, "separate-design", "設計レビューを別の 2 モデルにしますか (yes/no)", strconv.FormatBool(s.SeparateDesignReviews), false)
+		value, err := w.ask(s, "separate-model-keys", "役ごとに別の OpenRouter API キーを使いますか (yes/no)", strconv.FormatBool(s.ModelKeyMode == modelKeysSeparate), false)
+		if err != nil {
+			return err
+		}
+		switch value {
+		case "yes", "true":
+			s.ModelKeyMode = modelKeysSeparate
+		case "no", "false":
+			s.ModelKeyMode = modelKeysShared
+		default:
+			return errors.New("yes または no を入力してください")
+		}
+		value, err = w.ask(s, "separate-design", "設計レビューを別の 2 モデルにしますか (yes/no)", strconv.FormatBool(s.SeparateDesignReviews), false)
 		if err != nil {
 			return err
 		}
@@ -547,13 +574,8 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 			s.Models[role] = endpoint
 		}
 	}
-	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の鍵 (実装役と別の鍵)", false); err != nil {
+	if err := w.modelKeys(s, secrets, false); err != nil {
 		return err
-	}
-	for _, role := range allRoles(s) {
-		if err := w.secret(s, secrets, keyName(role), role+" 専用の外部取得済み API キー", false); err != nil {
-			return err
-		}
 	}
 	if secrets["LASSDAS_BOARD_PASS"] == "" {
 		password, err := randomHex(16)
@@ -567,20 +589,11 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 		if err := w.confirm(s, "鍵を再入力して全身元を再検査します"); err != nil {
 			return err
 		}
-		names := []string{"LASSDAS_INTAKE_TARGET_KEY"}
-		for _, role := range allRoles(s) {
-			names = append(names, keyName(role))
-		}
-		for _, name := range names {
-			if err := w.secret(s, secrets, name, name+" を再入力", true); err != nil {
-				return err
-			}
-		}
-		return nil
+		return w.modelKeys(s, secrets, true)
 	}
 	// Saved duplicate values must have a repair path too: --redo retains
 	// credentials, so rejecting Generate alone would reject every later run.
-	if err := DistinctKeys(s, secrets); err != nil {
+	if err := ValidateModelKeys(s, secrets); err != nil {
 		w.UI.Info(err.Error())
 		if err := repairKeys(); err != nil {
 			return err
@@ -597,6 +610,28 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 			return err
 		}
 		return w.modelPreflight(ctx, s, secrets)
+	}
+	return nil
+}
+
+func (w *Wizard) modelKeys(s *State, secrets Secrets, replace bool) error {
+	if s.ModelKeyMode == modelKeysShared {
+		w.UI.Info("OpenRouter のキー1本を全役で共用します。キー単位の利用上限と費用は全役の合算になります")
+		if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "OpenRouter API キー", replace); err != nil {
+			return err
+		}
+		for _, role := range allRoles(s) {
+			secrets[keyName(role)] = secrets["LASSDAS_INTAKE_TARGET_KEY"]
+		}
+		return nil
+	}
+	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の OpenRouter API キー", replace); err != nil {
+		return err
+	}
+	for _, role := range allRoles(s) {
+		if err := w.secret(s, secrets, keyName(role), role+" 専用の OpenRouter API キー", replace); err != nil {
+			return err
+		}
 	}
 	return nil
 }
