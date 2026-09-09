@@ -1156,12 +1156,18 @@ func TestASettingThatIsWrongIsNotAskedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A name that does not resolve is deliberately absent from the settled
-	// list: the pod's own resolver restarts. Putting it back passed every
-	// test (review of #125), so it is measured the other way below.
-	if _, callErr := client.ChatCompletions(context.Background(),
-		ModelEndpoint{Model: "m", BaseURL: "http://lassdas-no-such-host.invalid", APIKeyEnv: "LASSDAS_TEST_KEY"},
-		ChatRequest{Model: "m"}); callErr == nil || !strings.Contains(callErr.Error(), AttemptsExhaustedPhrase) {
-		t.Fatalf("a name that does not resolve was not asked again: %v", callErr)
+	// list: the pod's own resolver restarts, and a name that exists answers
+	// NXDOMAIN for a moment while it does. Asked of the decision directly
+	// rather than by looking a name up: a resolver that answers NXDOMAIN
+	// with a search page would make a live lookup measure something else
+	// (review of #125).
+	notFound := safeModelErrorFor(TransportFailedPhrase+": lookup gone.invalid: no such host",
+		&net.DNSError{Err: "no such host", Name: "gone.invalid", IsNotFound: true})
+	if settledTransportFailure(notFound) {
+		t.Fatal("a name that does not resolve was treated as settled")
+	}
+	if !transientTransportFailure(notFound) {
+		t.Fatal("a name that does not resolve would not be asked again")
 	}
 	for name, baseURL := range map[string]string{
 		"a certificate that does not verify": secure.URL,
@@ -1282,11 +1288,12 @@ func TestTheFailureSurvivesACallerWhoGivesUpDuringTheWait(t *testing.T) {
 	if callErr == nil {
 		t.Fatal("a dropped connection reported an answer")
 	}
-	// The cause itself, not merely the absence of a sentence about the wait:
-	// dropping the cause entirely passed this before (review of #125).
-	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) ||
-		strings.Contains(callErr.Error(), "cancelled") ||
-		len(callErr.Error()) <= len(TransportFailedPhrase) {
+	// The cause itself. Checking that the wait's own word is absent, or that
+	// the message is merely longer than the phrase, are both stand-ins for
+	// "the cause survived" and neither is the thing: a differently worded
+	// generic message passes both (review of #125). The listener closes
+	// every connection, so the cause is always EOF.
+	if !strings.HasPrefix(callErr.Error(), TransportFailedPhrase) || !strings.Contains(callErr.Error(), "EOF") {
 		t.Fatalf("the failure that prompted the wait did not travel: %q", callErr.Error())
 	}
 }
