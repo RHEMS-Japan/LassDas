@@ -170,7 +170,7 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 		digest := strings.Repeat("d", 64)
 		cases = append(cases, contractCase{
 			"terminal-" + string(code),
-			fixedTerminalComment(report, digest),
+			TerminalCommentContent(report, digest),
 			CommentMarker("terminal", report.AutomationRunID, string(code), digest),
 		})
 	}
