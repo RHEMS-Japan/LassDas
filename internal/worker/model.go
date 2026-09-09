@@ -29,6 +29,10 @@ const (
 	// ChatFinishLength is the provider ending the answer at max_tokens; the
 	// same turn can be given more room (converseTurn does, once).
 	ChatFinishLength = "length"
+	// ChatFinishError is the provider ending the turn with its own error
+	// inside a 200 response: a transient of the same class as a gateway
+	// 5xx, asked again by converseTurn with the same pauses.
+	ChatFinishError = "error"
 	// CutoffAskedAgainPhrase and CutoffAtCeilingPhrase are the words a
 	// cutoff error carries about what converseTurn could do; the runner
 	// reads them from the worker's stderr to tell the requester the same.
@@ -98,6 +102,12 @@ var (
 	// allowance (finish_reason=length): converseTurn asks the same turn once
 	// more with the allowance widened, below the configuration ceiling.
 	errModelResponseTruncated = errors.New("model response ended before a complete answer")
+	// errModelResponseUpstream marks a turn the provider ended with an error
+	// of its own (finish_reason=error): converseTurn asks the same turn
+	// again after the gateway pauses, up to their count (live 2026-09-09:
+	// one such answer ended a design round's investigation as model_failed
+	// on its first call).
+	errModelResponseUpstream = errors.New("the provider ended the turn with an error")
 )
 
 // malformedTurnRetries is how many out-of-shape responses in a row one turn
@@ -527,12 +537,14 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 	return total
 }
 
-// converseTurn asks one turn. Two kinds of answer are asked again, each on
+// converseTurn asks one turn. Three kinds of answer are asked again, each on
 // the caller's unchanged messages with nothing recorded: a response the
 // gateway returned out of shape (errModelResponseMetadata /
 // errModelResponseContent / errModelResponseRefused) once after
-// malformedTurnDelay, and a response the provider cut off at the output
-// allowance (errModelResponseTruncated) once with the allowance widened
+// malformedTurnDelay; a turn the provider ended with its own error
+// (errModelResponseUpstream, finish_reason=error) up to len(gatewayRetryPauses)
+// times on the gateway's pauses; and a response the provider cut off at the
+// output allowance (errModelResponseTruncated) once with the allowance widened
 // toward MaxConfiguredOutputTokens — a readiness answer long enough to hit
 // the allowance ended a live run as model_failed that the next attempt
 // passed (2026-09-05). At the ceiling there is no room to give, so the
@@ -547,13 +559,24 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // through here.
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	malformed := 0
+	upstream := 0
 	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
 		if err == nil {
 			return response, usage, nil
 		}
+		delay := malformedTurnDelay
 		switch {
+		case errors.Is(err, errModelResponseUpstream):
+			// The provider's own error inside a 200: the same transient as a
+			// gateway 5xx, asked again on the gateway's schedule.
+			if upstream >= len(gatewayRetryPauses) {
+				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d attempts", err, upstream+1))
+			}
+			delay = gatewayRetryPauses[upstream]
+			upstream++
+			fmt.Fprintf(os.Stderr, "worker: the provider ended the turn with an error; asking again in %s (retry %d of %d)\n", delay, upstream, len(gatewayRetryPauses))
 		case errors.Is(err, errModelResponseTruncated):
 			if cutoff != nil {
 				return "", InvocationUsage{}, fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase)
@@ -572,11 +595,13 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		default:
 			return "", InvocationUsage{}, afterCutoff(cutoff, err)
 		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
+			timer.Stop()
 			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("model invocation failed: %w", ctx.Err()))
-		case <-time.After(malformedTurnDelay):
+		case <-timer.C:
 		}
 	}
 }
@@ -668,6 +693,9 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		if output.Choices[0].FinishReason == ChatFinishLength {
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
+		}
+		if output.Choices[0].FinishReason == ChatFinishError {
+			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseUpstream, ChatFinishError)
 		}
 		return "", InvocationUsage{}, errors.New(
 			"model response ended before a complete answer: finish_reason=" + output.Choices[0].FinishReason)
