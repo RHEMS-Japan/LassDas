@@ -48,7 +48,7 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 		t.Fatalf("no trail was written for the cutoff: %v", readErr)
 	}
 	text := string(content)
-	if !strings.Contains(text, "出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "出し直しても同じ結果になる可能性") {
+	if !strings.Contains(text, "出力の上限で途切れた") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
 		t.Fatalf("the trail does not name the cause in the requester's words: %q", text)
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
@@ -212,7 +212,7 @@ func TestAReceptionStageThatNeverGotAnAnswerTellsTheRequesterSo(t *testing.T) {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 	text := readReceptionTrail(t, pipeline)
-	if !strings.Contains(text, "応答を得られませんでした") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "出し直すと通る場合があります") {
+	if !strings.Contains(text, "応答を得られませんでした") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "もう一度動かせば通る見込みです") {
 		t.Fatalf("the trail does not say the model never answered: %q", text)
 	}
 	if err := hook.ValidateTrailText(text); err != nil {
@@ -343,9 +343,9 @@ func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 	}{
 		{"model invocation failed with status 502 after 4" + worker.AttemptsExhaustedPhrase, "聞き直した上での結果", "利用の上限"},
 		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls", "聞き直した上での結果", "利用の上限"},
-		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")", "利用の上限", "出し直すと通る"},
-		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase, "利用の上限", "出し直すと通る"},
-		{"model invocation failed with status 401", "問い合わせが通りませんでした", "出し直すと通る"},
+		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")", "利用の上限", "動かせば通る見込み"},
+		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase, "利用の上限", "動かせば通る見込み"},
+		{"model invocation failed with status 401", "問い合わせが通りませんでした", "動かせば通る見込み"},
 		{"model invocation failed: dial tcp: connection refused", "問い合わせが通りませんでした", "聞き直した上での結果"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
@@ -389,12 +389,44 @@ func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 		not   string
 	}{
 		{worker.GatewayBookkeepingPhrase + " (no usage)", "通信の記録が壊れていた", "依頼文"},
-		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)", "決められた形になりませんでした", "出し直すと通る"},
+		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)", "決められた形になりませんでした", "動かせば通る見込み"},
 		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)", "依頼文の内容を理由に", "運用担当者"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
 		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
 			t.Errorf("%q was told as %q", want.cause, note)
+		}
+	}
+}
+
+// The comment a note arrives in tells the requester they need not act and
+// that an operator will look at it. A note that instructs the requester
+// hands them two opposite directions in one comment (review of #122), so no
+// note may carry an instruction.
+func TestNoNoteInstructsTheRequester(t *testing.T) {
+	notes := []string{
+		unnamedReceptionNote("受付の判定"),
+		receptionNote("契約の導出", "worker: contract derivation failed: "+worker.NoTargetFileChosen),
+		receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens)"),
+	}
+	for _, cause := range []string{
+		worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls",
+		"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
+		"model invocation failed with status 401",
+		worker.GatewayBookkeepingPhrase + " (no usage)",
+		worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)",
+		worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)",
+	} {
+		notes = append(notes, receptionNote("受付の判定", "worker: readiness assessment failed: "+cause))
+	}
+	for _, note := range notes {
+		if note == "" {
+			t.Fatal("a note was empty")
+		}
+		for _, instruction := range []string{"ください", "出し直すと", "出し直して"} {
+			if strings.Contains(note, instruction) {
+				t.Errorf("a note instructs the requester (%q): %q", instruction, note)
+			}
 		}
 	}
 }

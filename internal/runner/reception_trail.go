@@ -17,6 +17,12 @@ import (
 // what happened.
 const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 
+// The notes say what happened and what would help, and never tell the
+// requester to do something: the comment they arrive in states that the
+// requester need not act and that an operator will look at it, so an
+// instruction here would hand them two opposite directions in one comment
+// (review of #122). Making that line follow the note is its own change.
+//
 // noteReceptionCutoff leaves the requester a reason when a reception stage
 // (the readiness pair, the contract derivation) failed because the model's
 // answer was cut off at the output allowance. Without this the terminal
@@ -117,7 +123,7 @@ func receptionCauseNote(stage, stderr string) string {
 			strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
 			return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
 				"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
-				"同じ依頼をそのまま出し直すと通る場合があります。\n"
+				"同じ依頼をもう一度動かせば通る見込みです。\n"
 		// A limit that waiting does not lift. An exhausted balance is one
 		// of these, and telling its requester to send the ticket again
 		// would send them round the same wall with nobody looking at the
@@ -125,30 +131,30 @@ func receptionCauseNote(stage, stderr string) string {
 		case strings.HasPrefix(cause, worker.TransportFailedPhrase) &&
 			(strings.Contains(cause, worker.LimitNotLiftedPhrase) || strings.Contains(cause, worker.RetryAfterTooLongPhrase)):
 			return "受付の AI (" + stage + ") への問い合わせが、利用の上限に当たって断られました。" +
-				"時間をおいて出し直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
+				"時間をおいて動かし直しても同じ結果になります。運用担当者が利用枠を確認します。\n"
 		// Everything else the transport reports: a status that is not
 		// retried at all (a setting or a credential), a connection that
 		// did not open, a wait that was cut short. Nothing was asked
 		// again, so nothing here promises that asking again would help.
 		case strings.HasPrefix(cause, worker.TransportFailedPhrase):
 			return "受付の AI (" + stage + ") への問い合わせが通りませんでした。" +
-				"設定か接続の問題である可能性があり、同じ依頼を出し直しても同じ結果になることがあります。" +
+				"設定か接続の問題である可能性があり、同じ依頼を動かし直しても同じ結果になることがあります。" +
 				"運用担当者が原因を確認します。\n"
 		// The model declined over what it was asked. The ticket's own words
 		// are in that question, so this is the one reception failure worth
 		// telling its requester to look at their own wording for.
 		case strings.HasPrefix(cause, worker.DeclinedOverContentPhrase):
 			return "受付の AI (" + stage + ") が、依頼文の内容を理由に答えを断りました。" +
-				"聞き直しても同じでした。依頼文の書き方を変えて出し直すと通る場合があります。\n"
+				"聞き直しても同じでした。依頼文の書き方を変えれば通る見込みです。\n"
 		// The gateway's accounting, not the answer: a transient worth
 		// sending the same ticket again for. Told as the opposite before
 		// (review of #122).
 		case strings.HasPrefix(cause, worker.GatewayBookkeepingPhrase):
 			return "受付の AI (" + stage + ") との通信の記録が壊れていたため、答えを受け取れませんでした。" +
-				"聞き直しても同じでした。一時的なことが多いため、同じ依頼をそのまま出し直すと通る場合があります。\n"
+				"聞き直しても同じでした。一時的なことが多いため、同じ依頼をもう一度動かせば通る見込みです。\n"
 		case strings.HasPrefix(cause, worker.AnswerUnusablePhrase):
 			return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
-				"聞き直しても同じでした。同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。" +
+				"聞き直しても同じでした。同じ依頼を動かし直しても同じ結果になる可能性が高いです。" +
 				"運用担当者が受付の設定を確認します。\n"
 		}
 	}
@@ -188,7 +194,7 @@ func receptionCutoffNote(stage, stderr string) string {
 	if stage == deriveStage && noFileChosen(stderr) {
 		return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
 			"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
-			"依頼文に、変更するファイルの位置を書き足して出し直してください (例: docs/ の下に新しく作る場合は、その相対パスをそのまま書く)。\n"
+			"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
 	}
 	// Read at the same fixed position as every other cause. Scanning the
 	// whole output for the marker let a requester choose this note and
@@ -206,7 +212,7 @@ func receptionCutoffNote(stage, stderr string) string {
 	case strings.Contains(cutoff, worker.CutoffAtCeilingPhrase):
 		note += "上限は既に最大値だったため、聞き直しはできませんでした。"
 	}
-	note += "同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"
+	note += "同じ依頼を動かし直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"
 	return note
 }
 
