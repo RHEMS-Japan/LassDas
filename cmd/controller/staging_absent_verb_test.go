@@ -114,3 +114,38 @@ func TestTheControllerEndsWithItsCodeOnALineOfItsOwn(t *testing.T) {
 		t.Fatalf("the ending line is not a bare code: %q", ending)
 	}
 }
+
+// The wait the pull-request destinations use has the same two endings, and
+// the E2E check downstream reads them apart. Guarding only the delivery
+// verb left this one reporting both as the same thing (review of #134).
+func TestAwaitMergedStagingSeparatesAMergeThatStartedNoDeployment(t *testing.T) {
+	fixture := newDeliveryFixture(t)
+	transport := newDeliveryTransport(fixture)
+
+	featurePath := fixture.output("feature.json")
+	if err := run(context.Background(), fixture.publishArguments(featurePath), deliveryEnvironment, transport); err != nil {
+		t.Fatalf("publish-feature: %v", err)
+	}
+	pullPath := fixture.output("feature-pr.json")
+	if err := run(context.Background(), fixture.createPullRequestArguments(featurePath, pullPath), deliveryEnvironment, transport); err != nil {
+		t.Fatalf("create-feature-pr: %v", err)
+	}
+	checksPath := fixture.output("feature-checks.json")
+	if err := run(context.Background(), fixture.waitArguments(pullPath, checksPath), deliveryEnvironment, transport); err != nil {
+		t.Fatalf("wait-feature: %v", err)
+	}
+	// Someone merged it: that is what this wait is waiting for.
+	if err := run(context.Background(), fixture.mergeArguments(pullPath, checksPath, fixture.output("feature-merge.json")), deliveryEnvironment, transport); err != nil {
+		t.Fatalf("merge-feature: %v", err)
+	}
+
+	arguments := []string{
+		"await-merged-staging", "--config", controllerConfigPath, "--ticket", fixture.ticketPath,
+		"--feature-pr", pullPath, "--out", fixture.output("merged-staging.json"),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if code := failureCode(run(ctx, arguments, deliveryEnvironment, transport)); code != StagingDeploymentAbsentCode {
+		t.Fatalf("failure code = %q, want %q", code, StagingDeploymentAbsentCode)
+	}
+}
