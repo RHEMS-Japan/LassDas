@@ -240,6 +240,16 @@ func NewFileCandidates(draft TicketDraft, listing CandidateListing, consumer Con
 			if bounds[0] > 0 && pathRune(text[bounds[0]-1]) {
 				continue
 			}
+			if end := bounds[1]; end < len(text) && pathRune(text[end]) {
+				// The match is the head of a longer token ("docs/x.md-old",
+				// "docs/x.md/inner"): offering the head would name a
+				// different file from the one the requester wrote. A single
+				// trailing "." is the exception — it ends a sentence, and
+				// the pattern already stopped before it.
+				if text[end] != '.' || (end+1 < len(text) && pathRune(text[end+1])) {
+					continue
+				}
+			}
 			match := text[bounds[0]:bounds[1]]
 			// Only a leading "./" is removed. Trimming the ends would
 			// rewrite what the requester wrote ("../docs/x.md" is not

@@ -344,6 +344,25 @@ func TestARequestedNewFileIsOfferedAndAccepted(t *testing.T) {
 	if offered := NewFileCandidates(rewritten, listing, consumer); len(offered) != 0 {
 		t.Errorf("a path was rewritten into the writable area: %v", offered)
 	}
+	// A match that is the head of a longer token names a different file, so
+	// it is dropped; a sentence-ending period is not part of the name.
+	for text, want := range map[string]string{
+		"docs/x.md-old を直して":   "",
+		"docs/x.md_v2 を直して":    "",
+		"docs/x.md/inner を作って": "",
+		"Create docs/x.md.":    "docs/x.md",
+		"docs/x.md を作って":       "docs/x.md",
+	} {
+		offered := NewFileCandidates(TicketDraft{Request: text}, listing, consumer)
+		got := ""
+		if len(offered) == 1 {
+			got = offered[0]
+		}
+		if got != want {
+			t.Errorf("%q offered %v, want %q", text, offered, want)
+		}
+	}
+
 	// The offer is bounded, so a ticket that is mostly paths cannot fill it.
 	many := make([]string, 0, 40)
 	for index := 0; index < 40; index++ {

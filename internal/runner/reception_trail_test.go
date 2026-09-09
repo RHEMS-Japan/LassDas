@@ -182,7 +182,7 @@ func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 		t.Errorf("an echoed answer chose the note: %q", note)
 	}
 	// The note explains a derivation, so the readiness stages never carry it.
-	if note := receptionCutoffNote("受付の判定", `worker: `+worker.NoTargetFileChosen); note != "" {
+	if note := receptionCutoffNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != "" {
 		t.Errorf("the readiness stage carried the derivation note: %q", note)
 	}
 }
