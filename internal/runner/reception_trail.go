@@ -45,11 +45,18 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
-// One thing here is deliberately not measured, on the line the review of
-// #127 drew: a change to it puts nothing in front of a requester and has no
-// failure behind it — the order the notes are asked in, which no phrase
-// distinguishes. Everything else that sweep raised turned out to change
-// what a requester sees, and is measured.
+// Two things here are deliberately not measured, on the line the review of
+// #127 drew: a change to either puts nothing in front of a requester and
+// has no failure behind it. They are named rather than counted, because
+// counting them is how the count came out wrong twice.
+//
+//   - the order the notes are asked in, which no phrase distinguishes
+//   - "一時的な混雑で起きることが多いため、" in the note for a stage that
+//     was asked again: removing it leaves both the sentence and the advice
+//     that follows it intact
+//
+// Everything else that sweep raised turned out to change what a requester
+// sees, and is measured.
 //
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
