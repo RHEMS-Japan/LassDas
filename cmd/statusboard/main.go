@@ -9,10 +9,9 @@
 // ones. Actions are journaled to actions.jsonl for audit and for
 // consistent "sent" rendering across browsers.
 //
-// Fail-closed exposure: the process refuses to start without basic-auth
-// credentials of adequate length, so a misconfigured deployment yields no
-// server rather than an open or weakly-guarded one. /healthz alone
-// answers unauthenticated (probes).
+// Basic authentication is required by default. The explicit local mode is
+// read-only and accepts loopback Host names; its launcher publishes only to
+// host loopback. /healthz remains unauthenticated for probes in either mode.
 package main
 
 import (
@@ -85,7 +84,8 @@ func run() error {
 	addr := envOr("LASSDAS_BOARD_ADDR", ":9200")
 	user := os.Getenv("LASSDAS_BOARD_USER")
 	pass := os.Getenv("LASSDAS_BOARD_PASS")
-	if file := os.Getenv("LASSDAS_BOARD_PASS_FILE"); file != "" {
+	mode := os.Getenv("LASSDAS_BOARD_AUTH")
+	if file := os.Getenv("LASSDAS_BOARD_PASS_FILE"); file != "" && mode != "local" {
 		// The entrypoint moves the password out of the process environment
 		// (every card stage spawns from that environment); the file is the
 		// trusted copy.
@@ -95,20 +95,23 @@ func run() error {
 		}
 		pass = strings.TrimSpace(string(raw))
 	}
-	if user == "" || len(pass) < minPasswordLength {
-		return fmt.Errorf("LASSDAS_BOARD_USER and LASSDAS_BOARD_PASS (>= %d chars) are required (fail-closed)", minPasswordLength)
-	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-	poster, trackerBase, err := buildPoster()
+	protect, err := boardAccess(mode, user, pass, logger)
 	if err != nil {
 		return err
+	}
+	var poster *backlog.Client
+	var trackerBase string
+	if mode != "local" {
+		poster, trackerBase, err = buildPoster()
+		if err != nil {
+			return err
+		}
 	}
 	if poster == nil {
 		logger.Info("board actions disabled (no requester credential configured)")
 	}
 
-	auth := newAuthGate(user, pass, logger)
 	board := &boardServer{
 		statusDir: statusDir, trackerBase: trackerBase,
 		poster: poster, logger: logger,
@@ -126,7 +129,7 @@ func run() error {
 	// (cmd/setup/backlog.go does exactly that), so the secret rides in the
 	// path: without LASSDAS_BOARD_BELL_TOKEN the route does not exist, and
 	// a wrong token is a 404 — anonymous callers cannot even ring.
-	if bellToken := os.Getenv("LASSDAS_BOARD_BELL_TOKEN"); bellToken != "" {
+	if bellToken := os.Getenv("LASSDAS_BOARD_BELL_TOKEN"); bellToken != "" && mode != "local" {
 		wantToken := sha256.Sum256([]byte(bellToken))
 		var bellMu sync.Mutex
 		var lastBell time.Time
@@ -160,22 +163,56 @@ func run() error {
 			_, _ = w.Write([]byte("ok"))
 		})
 	}
-	mux.Handle("/", auth.wrap(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", protect(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		writePage(w, boardPage)
 	}))
-	mux.Handle("/demo/", auth.wrap(serveDemo))
-	mux.Handle("/api/board", auth.wrap(board.serveBoard))
-	mux.Handle("/api/act", auth.wrap(board.serveAct))
-	mux.Handle("/stream", auth.wrap(board.serveStream))
+	mux.Handle("/demo/", protect(serveDemo))
+	mux.Handle("/api/board", protect(board.serveBoard))
+	mux.Handle("/api/act", protect(board.serveAct))
+	mux.Handle("/stream", protect(board.serveStream))
 
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	logger.Info("statusboard listening", "addr", addr, "status_dir", statusDir,
-		"actions_enabled", poster != nil, "bell_armed", os.Getenv("LASSDAS_BOARD_BELL_TOKEN") != "")
+		"actions_enabled", poster != nil, "bell_armed", mode != "local" && os.Getenv("LASSDAS_BOARD_BELL_TOKEN") != "")
 	return server.ListenAndServe()
+}
+
+func boardAccess(mode, user, pass string, logger *slog.Logger) (func(http.HandlerFunc) http.Handler, error) {
+	switch mode {
+	case "local":
+		return localBoardAccess, nil
+	case "", "basic":
+		if user == "" || len(pass) < minPasswordLength {
+			return nil, fmt.Errorf("LASSDAS_BOARD_USER and LASSDAS_BOARD_PASS (>= %d chars) are required (fail-closed)", minPasswordLength)
+		}
+		return newAuthGate(user, pass, logger).wrap, nil
+	default:
+		return nil, errors.New("LASSDAS_BOARD_AUTH must be basic or local")
+	}
+}
+
+func localBoardAccess(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = strings.Trim(r.Host, "[]")
+		}
+		// The Docker launcher fixes publication to host loopback. Also reject
+		// arbitrary Host names so a website cannot use DNS rebinding to read it.
+		if !strings.EqualFold(host, "localhost") && !net.ParseIP(host).IsLoopback() {
+			http.Error(w, "local board requires a loopback host", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "local board is read-only", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	})
 }
 
 func envOr(name, fallback string) string {
