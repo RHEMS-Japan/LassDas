@@ -108,3 +108,27 @@ func TestReviewAgentPromptFallsBackToOutlinesWhenPatchesOvergrow(t *testing.T) {
 		t.Fatal("the outline dropped a changed file")
 	}
 }
+
+// The candidate reviewer is shown a label of the shape it must write, and
+// told that the signal sending a delivery back to its design is written
+// alone. The label is normalised on the way in, and normalisation refuses
+// to manufacture that signal, so a reviewer writing "design_wrong" loses
+// it: this line is what keeps that from happening.
+func TestTheCandidateReviewerIsToldHowToWriteTheSignal(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("reviewAgentPrompt: %v", err)
+	}
+	for _, want := range []string{
+		`"code":"missing-null-check"`,
+		"code は英小文字と数字とハイフンだけの短い識別子です",
+		"code をちょうど design-wrong とし",
+		"design-wrong に語を足さないでください",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the reviewer's instruction lacks %q", want)
+		}
+	}
+}

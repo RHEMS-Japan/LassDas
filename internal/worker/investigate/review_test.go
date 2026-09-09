@@ -304,3 +304,25 @@ func TestAFindingLabelIsMadeToFitInsteadOfEndingTheReview(t *testing.T) {
 		}
 	}
 }
+
+// Every exit of the normaliser is under the same post-condition, including
+// the one that withholds a signal: a reserved label long enough that the
+// suffix would overflow leaves as "finding" rather than as a label the seal
+// refuses.
+func TestEveryReservedLabelStillFitsAfterTheSuffix(t *testing.T) {
+	for reserved := range reservedFindingCodes {
+		if !codePattern.MatchString(reserved) {
+			t.Errorf("reserved label %q does not fit the shape itself", reserved)
+		}
+		if got := NormalizeFindingCode(strings.ToUpper(reserved)); !codePattern.MatchString(got) {
+			t.Errorf("NormalizeFindingCode(%q) = %q, which the seal refuses", strings.ToUpper(reserved), got)
+		}
+	}
+	// A reserved label of the maximum length leaves by the "finding" exit.
+	long := "a" + strings.Repeat("b", 63)
+	reservedFindingCodes[long] = true
+	defer delete(reservedFindingCodes, long)
+	if got := NormalizeFindingCode(strings.ToUpper(long)); !codePattern.MatchString(got) {
+		t.Errorf("a reserved label at the limit produced %q, which the seal refuses", got)
+	}
+}

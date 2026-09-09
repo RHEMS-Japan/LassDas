@@ -317,13 +317,19 @@ func NormalizeFindingCode(code string) string {
 		return "finding"
 	}
 	if reservedFindingCodes[trimmed] {
+		// The guard below keeps this exit under the same post-condition as
+		// the others: a longer reserved label must not leave through here
+		// without fitting the shape.
 		// A label that carries machine meaning has to be written, not
 		// manufactured. "design-wrong-ではない" normalises to exactly
 		// "design-wrong", and firing on that would archive an
 		// implementation round and spend a design round on a reviewer
 		// saying the opposite. The finding still travels; only the signal
 		// is withheld.
-		return trimmed + "-unclear"
+		trimmed += "-unclear"
+		if !codePattern.MatchString(trimmed) {
+			return "finding"
+		}
 	}
 	return trimmed
 }
