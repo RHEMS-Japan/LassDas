@@ -612,9 +612,14 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // budget, so that bound is unchanged, but stops after allowanceTurnRetries
 // of its own, because unlike a provider error its asks cost minutes rather
 // than milliseconds: a turn whose every call runs out costs 2 x
-// ModelInvocationTimeout plus 2 s, 10 min 2 s at the present five minutes,
-// against the investigating designer's 1,800 s round. The stage's own
-// budget (ChainStage.MaxRuntimeSeconds) is the outer wall; an error after the widened re-ask still carries the
+// ModelInvocationTimeout plus 2 s, 10 min 2 s at the present five minutes.
+// What ends such a turn is the context the caller passed: for the
+// investigating designer that is investigationWallSeconds (1,800) less what
+// the earlier rounds of the same delivery already spent
+// (cmd/worker/investigate.go), so a spent allowance that is then answered
+// still takes its five minutes out of that budget and carries the loss into
+// the next round. ChainStage.MaxRuntimeSeconds is a different thing: the
+// board killing the process from outside, not a deadline the turn sees; an error after the widened re-ask still carries the
 // cutoff that caused it, so the caller's log names the cutoff whatever
 // ended the turn. The widened allowance lives for this turn only: a
 // conversation whose every answer is long pays one cut-off request per
