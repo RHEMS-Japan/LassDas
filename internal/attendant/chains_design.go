@@ -230,6 +230,7 @@ func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []strin
 	if len(reviewers) == 0 {
 		return false, errors.New("no reviewer is configured, so no sealed review was read")
 	}
+	designWrong := false
 	for _, reviewer := range reviewers {
 		path := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json")
 		raw, err := os.ReadFile(path)
@@ -246,11 +247,17 @@ func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []strin
 		}
 		for _, finding := range review.Findings {
 			if finding.Code == "design-wrong" {
-				return true, nil
+				// Not returned yet: a record after this one may be
+				// unreadable, and answering here would leave that unread and
+				// unrecorded — the same silent no this closes, in a window
+				// the order of the configured reviewers decides (review of
+				// #123). Reading them all makes the answer the same whatever
+				// that order is.
+				designWrong = true
 			}
 		}
 	}
-	return false, nil
+	return designWrong, nil
 }
 
 // regenerateDesignBackedRound starts the next implementation round of a

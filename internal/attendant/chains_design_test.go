@@ -781,3 +781,32 @@ func quietServices(t *testing.T) *runtime.Services {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The answer must not depend on the order the reviewers are configured in.
+// Stopping at the first design-wrong left a later unreadable record unread,
+// so the same pair of records sent the delivery to the designer one way
+// round and stopped the run the other (review of #123).
+func TestTheAnswerDoesNotDependOnTheOrderOfTheReviewers(t *testing.T) {
+	for name, broken := range map[string]string{"unreadable": `{"findings":[`, "removed": ""} {
+		runDir := t.TempDir()
+		dir := filepath.Join(runDir, "history", "stage-1")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "review-a.json"),
+			[]byte(`{"verdict":"revise","findings":[{"code":"design-wrong"}]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if broken != "" {
+			if err := os.WriteFile(filepath.Join(dir, "review-b.json"), []byte(broken), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, order := range [][]string{{"review-a", "review-b"}, {"review-b", "review-a"}} {
+			flagged, err := reviewsFlagDesignWrong(runDir, 1, order)
+			if err == nil || flagged {
+				t.Errorf("%s, order %v: flagged=%v err=%v; a record that cannot be read is not an answer", name, order, flagged, err)
+			}
+		}
+	}
+}
