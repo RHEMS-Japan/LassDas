@@ -45,6 +45,15 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
+// Four things here are deliberately not measured, on the line the review of
+// #127 drew: a change to any of them puts nothing in front of a requester,
+// and none has a failure behind it. Trimming a line's own leading space;
+// treating a line with only one separator as carrying a cause; writing the
+// note when the removal before it failed (which cannot happen — where the
+// removal fails the write fails too, measured); and the note's file mode.
+// The first two now are measured after all, because they turned out to be
+// what keeps a ticket's words out of the choice.
+//
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
 
