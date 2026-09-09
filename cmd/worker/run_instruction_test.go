@@ -299,6 +299,15 @@ func TestAnAgentThatChangedNothingIsAskedAgainWithTheTreeInFrontOfIt(t *testing.
 	if sealed.PromptBytes <= len("Apply the design.\n") {
 		t.Errorf("prompt_bytes = %d, want the retry's length", sealed.PromptBytes)
 	}
+	// What the first attempt claimed is kept beside the final record, so
+	// the fabricated report can be read, not only counted.
+	var first worker.AgentRun
+	if err := worker.ReadJSONFile(emptyAttemptRecordPath(record), worker.MaxArtifactJSONBytes, &first); err != nil {
+		t.Fatalf("the attempt that changed nothing was not kept: %v", err)
+	}
+	if len(first.ChangedFiles) != 0 || !strings.Contains(first.Transcript, "the design is applied") {
+		t.Errorf("kept record = %+v", first)
+	}
 }
 
 // The retry is skipped where it cannot help: an instruction with no room
@@ -372,6 +381,10 @@ func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
 		t.Fatalf("the slow attempt was not recorded: %v", err)
 	}
 
+	// A skipped retry writes no separate record: nothing was answered.
+	if _, err := os.Stat(emptyAttemptRecordPath(slowRecord)); err == nil {
+		t.Error("a skipped retry left an empty-attempt record")
+	}
 	// The record is written even when the retry is skipped after the first
 	// attempt was already sealed: an exclusive write over its own leftover
 	// would otherwise fail in silence.

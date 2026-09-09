@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
@@ -124,9 +125,14 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		// leaves the first one's evidence behind.
 		retry := prompt + emptyResultRetryNote(haltFile != "")
 		if len(retry) <= worker.MaxAgentPromptBytes && firstAttemptWasQuick(outcome, agent) {
+			// The attempt that reported work it had not done is kept beside
+			// the final record, not in its place: a wall or a failure
+			// during the second launch leaves this behind, and what the
+			// model actually claimed stays readable (the count alone says
+			// it happened, not what was said).
 			first, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), 0))
 			if sealErr == nil {
-				_ = worker.WriteJSONFileExclusive(*runOutPath, first, worker.MaxArtifactJSONBytes)
+				_ = worker.WriteJSONFileExclusive(emptyAttemptRecordPath(*runOutPath), first, worker.MaxArtifactJSONBytes)
 			}
 			emptyAttempts = 1
 			second, secondHalted, secondErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, retry,
@@ -138,12 +144,6 @@ func runRunInstruction(ctx context.Context, args []string) error {
 				prompt = retry
 			}
 		}
-	}
-	if emptyAttempts > 0 {
-		// The first attempt's record is on disk; the write below is
-		// exclusive-create, so it goes whether or not the second launch
-		// replaced it.
-		_ = os.Remove(*runOutPath)
 	}
 	run, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), emptyAttempts))
 	if sealErr == nil {
@@ -182,10 +182,20 @@ func agentRunOf(outcome worker.AgentOutcome, draft worker.TicketDraft, baseSHA s
 	}
 }
 
+// emptyAttemptRecordPath is where the attempt that changed nothing is kept:
+// beside the run record, under a name nothing else writes.
+func emptyAttemptRecordPath(runOut string) string {
+	extension := filepath.Ext(runOut)
+	return strings.TrimSuffix(runOut, extension) + "-empty-attempt" + extension
+}
+
 // retryTimeShare is the part of an agent's own timeout a first attempt may
 // spend and still leave room for a second one inside the card's wall. A
 // variable so a test can move the cutoff without sleeping through a third
-// of the smallest timeout the configuration allows.
+// of the smallest timeout the configuration allows. The guard keeps two
+// launches inside the card's wall only where the wall is at least four
+// thirds of the agent's timeout, which both shipped configurations satisfy
+// (apply: 1200 against 900; implement: 5400 against 3600).
 var retryTimeShare = 3
 
 // firstAttemptWasQuick reports whether the launch that changed nothing
@@ -197,7 +207,7 @@ var retryTimeShare = 3
 // spent most of its time and produced nothing would push a second launch
 // into the wall.
 func firstAttemptWasQuick(outcome worker.AgentOutcome, agent worker.AgentConfig) bool {
-	if agent.TimeoutSeconds <= 0 {
+	if agent.TimeoutSeconds <= 0 || retryTimeShare <= 0 {
 		return false
 	}
 	return outcome.Duration < time.Duration(agent.TimeoutSeconds)*time.Second/time.Duration(retryTimeShare)
