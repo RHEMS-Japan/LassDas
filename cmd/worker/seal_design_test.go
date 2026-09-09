@@ -196,6 +196,22 @@ func TestSealTurnsObjectionIntoDesignRound(t *testing.T) {
 	if err := fixture5.sealCandidate(t, "--design", design5, "--objection", fixture5.path("revise-design.json"), "--objection-out", fixture5.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
 		t.Fatalf("invalid UTF-8: %v", err)
 	}
+	// The six are matched without case: an objection lost to a capital
+	// letter would be the ending this contract exists to remove.
+	fixture7 := newAgentFixture(t, "true", "true")
+	design7 := sealedDesignFor(t, fixture7, "client/src/label.ts")
+	if err := os.WriteFile(fixture7.path("revise-design.json"), []byte(`{"reason":"the label lives elsewhere","section":" Files "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture7.sealCandidate(t, "--design", design7, "--objection", fixture7.path("revise-design.json"), "--objection-out", fixture7.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "objected") {
+		t.Fatalf("a section in capitals: %v", err)
+	}
+	var folded DesignObjection
+	readAgentArtifact(t, fixture7.path("history/design-1/objection.json"), worker.MaxArtifactJSONBytes, &folded)
+	if folded.Section != "files" {
+		t.Fatalf("the section was recorded as %q", folded.Section)
+	}
+
 	// An empty section stays the default: not saying which part is the whole approach.
 	fixture6 := newAgentFixture(t, "true", "true")
 	design6 := sealedDesignFor(t, fixture6, "client/src/label.ts")

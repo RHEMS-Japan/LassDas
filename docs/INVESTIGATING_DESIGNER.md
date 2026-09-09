@@ -240,7 +240,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | `internal/worker` 新規 `investigate` | モデルの反復呼び出し (道具 1 種類)、`investigation-N.json` / `design-N.json` の確定記録と検算、`DESIGN.md` の描画 |
 | `cmd/worker` | `investigate` 副命令、`design-instruction` (写し役の指示描画)、`seal-candidate` の `design_sha256` 束縛と `revise-design.json` の扱い、`ValidatePublishGate` の files 包含検査 |
 | `cmd/worker/agent.go` | 設計レビューのプロンプト (`design_lens`)、写し役のプロンプト |
-| `internal/attendant` | 新カードの生成・退役、冪等キーの `:d<N>` (設計の巡。`investigate` カードも `<delivery>:investigate:d<N>` で、2 巡目が完了済みの 1 巡目のカードと衝突しない) を `ParseChainCardKey` / `chainViewFor` が実装の巡と区別して読むこと、`design-objection.json` の有無による分類と設計巡の再開、終端 `investigated` / `design_nonconverged` / `investigation_nonconverged` / `investigation_incomplete` の扱い、板の段階 |
+| `internal/attendant` | 新カードの生成・退役、冪等キーの `:d<N>` (設計の巡。`investigate` カードも `<delivery>:investigate:d<N>` で、2 巡目が完了済みの 1 巡目のカードと衝突しない) を `ParseChainCardKey` / `chainViewFor` が実装の巡と区別して読むこと、`history/design-<N>/objection.json` の有無による分類と設計巡の再開、終端 `investigated` / `design_nonconverged` / `investigation_nonconverged` / `investigation_incomplete` の扱い、板の段階 |
 | `internal/runner/deliver.go` | 計測形の確認 (§4.3): 反映後に関所が同じ probe を実行して閾値と比べ、写真係の判定と同じ場所 (`deliverVerification`) に載せる |
 | `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` (`report_protocol.go`) と streak の扱い (`investigated` だけが streak を切る) |
 | `internal/worker/artifact.go`, `impasse.go` | 確定記録 `DesignReview` / `DesignDecision` と検算、`design-impasse-question` |

@@ -202,11 +202,15 @@ func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA str
 	if reason := strings.TrimSpace(objection.Reason); reason == "" || len(reason) > maxObjectionReasonBytes {
 		return false, fmt.Errorf("the applier's objection is not a readable reason: it must be 1 to %d bytes of text (got %d)", maxObjectionReasonBytes, len(reason))
 	}
-	if section := strings.TrimSpace(objection.Section); section == "" {
+	if section := strings.ToLower(strings.TrimSpace(objection.Section)); section == "" {
 		// Not saying which part is the default: the whole approach.
 		objection.Section = "approach"
 	} else if !objectionSections[section] {
-		return false, fmt.Errorf("the applier's objection names section %q, which is not one of cause, approach, files, verification, blast_radius, not_doing", boundedObjectionHead(section))
+		// Matching folds case and trims: an objection lost to a capital
+		// letter would be the very ending this contract exists to remove
+		// (the design would never hear it, and the run would die as a model
+		// failure). Only a value that is not one of the six is refused.
+		return false, fmt.Errorf("the applier's objection names section %q, which is not one of cause, approach, files, verification, blast_radius, not_doing", boundedObjectionHead(strings.TrimSpace(objection.Section)))
 	} else {
 		objection.Section = section
 	}
