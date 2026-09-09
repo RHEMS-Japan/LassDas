@@ -95,6 +95,28 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 	if strings.Contains(string(content), "forged") {
 		t.Fatalf("the squatter survived: %q", content)
 	}
+	// Replacing an ordinary file is not what the removal is for: writing
+	// truncates one anyway. What it stops is a symlink, which writing would
+	// follow — the agents run with the workspace's parent writable, so the
+	// note would land wherever the link pointed and the requester would get
+	// no trail at all (review of #124).
+	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
+	if err := os.WriteFile(outside, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := receptionPipeline(t, worker)
+	if err := os.Symlink(outside, linked.path("m1-trail.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := linked.readinessGate(context.Background()); err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
+	}
+	if info, err := os.Lstat(linked.path("m1-trail.txt")); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("the trail path is still a symlink: %v %v", info, err)
+	}
+	if content, _ := os.ReadFile(outside); string(content) != "untouched\n" {
+		t.Fatalf("the note was written outside the workspace: %q", content)
+	}
 }
 
 // The note says only what happened: a widened re-ask that was cut off
@@ -341,18 +363,33 @@ func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
 func TestATransportFailureIsToldAsWhatActuallyHappened(t *testing.T) {
 	for _, want := range []struct {
 		cause string
-		says  string
-		not   string
+		// says carries both halves: what happened, and what the requester
+		// can expect from it. Only the first was required before, so every
+		// note could lose its advice without anything failing (review of
+		// #124) — and the advice is the half the requester acts on.
+		says []string
+		not  string
 	}{
-		{"model invocation failed with status 502 after 4" + worker.AttemptsExhaustedPhrase, "聞き直した上での結果", "利用の上限"},
-		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls", "聞き直した上での結果", "利用の上限"},
-		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")", "利用の上限", "動かせば通る見込み"},
-		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase, "利用の上限", "動かせば通る見込み"},
-		{"model invocation failed with status 401", "問い合わせが通りませんでした", "動かせば通る見込み"},
-		{"model invocation failed: dial tcp: connection refused", "問い合わせが通りませんでした", "聞き直した上での結果"},
+		{"model invocation failed with status 502 after 4" + worker.AttemptsExhaustedPhrase,
+			[]string{"聞き直した上での結果", "もう一度動かせば通る見込み"}, "利用の上限"},
+		{worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase + " after 2 such calls",
+			[]string{"聞き直した上での結果", "もう一度動かせば通る見込み"}, "利用の上限"},
+		{"model invocation failed with status 429 and no Retry-After (" + worker.LimitNotLiftedPhrase + ")",
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "動かせば通る見込み"},
+		{"model invocation failed with status 429 and a Retry-After of 5m0s, " + worker.RetryAfterTooLongPhrase,
+			[]string{"利用の上限", "時間をおいて動かし直しても同じ結果"}, "動かせば通る見込み"},
+		{"model invocation failed with status 401",
+			[]string{"問い合わせが通りませんでした", "設定か接続の問題"}, "動かせば通る見込み"},
+		{"model invocation failed: dial tcp: connection refused",
+			[]string{"問い合わせが通りませんでした", "設定か接続の問題"}, "聞き直した上での結果"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
-		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
+		for _, says := range want.says {
+			if !strings.Contains(note, says) {
+				t.Errorf("%q was told without %q: %q", want.cause, says, note)
+			}
+		}
+		if strings.Contains(note, want.not) {
 			t.Errorf("%q was told as %q", want.cause, note)
 		}
 	}
@@ -388,15 +425,23 @@ func TestTheNoteReaderReadsOnlyTheWorkersLinesAndAllOfThem(t *testing.T) {
 func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 	for _, want := range []struct {
 		cause string
-		says  string
+		says  []string
 		not   string
 	}{
-		{worker.GatewayBookkeepingPhrase + " (no usage)", "通信の記録が壊れていた", "依頼文"},
-		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)", "決められた形になりませんでした", "動かせば通る見込み"},
-		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)", "依頼文の内容を理由に", "運用担当者"},
+		{worker.GatewayBookkeepingPhrase + " (no usage)",
+			[]string{"通信の記録が壊れていた", "もう一度動かせば通る見込み"}, "依頼文"},
+		{worker.AnswerUnusablePhrase + " (content 0 bytes, limit 200000)",
+			[]string{"決められた形になりませんでした", "動かし直しても同じ結果"}, "動かせば通る見込み"},
+		{worker.DeclinedOverContentPhrase + " (finish_reason=content_filter)",
+			[]string{"依頼文の内容を理由に", "書き方を変えれば通る見込み"}, "運用担当者"},
 	} {
 		note := receptionNote("受付の判定", "worker: readiness assessment failed: "+want.cause)
-		if !strings.Contains(note, want.says) || strings.Contains(note, want.not) {
+		for _, says := range want.says {
+			if !strings.Contains(note, says) {
+				t.Errorf("%q was told without %q: %q", want.cause, says, note)
+			}
+		}
+		if strings.Contains(note, want.not) {
 			t.Errorf("%q was told as %q", want.cause, note)
 		}
 	}
