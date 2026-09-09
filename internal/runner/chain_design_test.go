@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,6 +233,15 @@ func TestTheApplyInstructionNamesTheWorkingCopyAbsolutely(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "DESIGN.md"), []byte("# Design — round 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A sealed design, so the section can list its files as finished paths.
+	design := investigate.Design{Files: []investigate.FileChange{{Path: "docs/OPERATIONS.md"}, {Path: "client/src/label.ts"}}}
+	raw, err := json.Marshal(design)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.designRoundDir(1), "design.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := p.RenderApplyInstruction(nil, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +250,12 @@ func TestTheApplyInstructionNamesTheWorkingCopyAbsolutely(t *testing.T) {
 	for _, want := range []string{
 		"## Where the working copy is",
 		root,
-		root + "/docs/EXAMPLE.md",
-		"A relative path does not land in the working copy",
+		root + "/docs/OPERATIONS.md",
+		root + "/client/src/label.ts",
+		"the paths to give your tools",
+		"it lands in your own home",
+		"is never\nwritten inside a file",
+		"A relative path does not land in the working",
 		"the seal reads the working tree at the absolute path named above",
 		"at the root of the working copy named above (its absolute path)",
 	} {

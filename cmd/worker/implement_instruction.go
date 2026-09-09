@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
 
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -25,7 +26,7 @@ func runImplementInstruction(args []string) error {
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	if !parseFlags(flags, args) ||
-		!allPresent(*configPath, *toolSHA, *draftPath, *outputPath, *repoRoot) ||
+		!allPresent(*configPath, *toolSHA, *draftPath, *outputPath, *repoRoot) || !filepath.IsAbs(*repoRoot) ||
 		!worker.ValidToolSHA(*toolSHA) {
 		return errors.New("implement-instruction arguments are invalid")
 	}

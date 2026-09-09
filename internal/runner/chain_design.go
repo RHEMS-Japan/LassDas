@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"context"
 	"encoding/json"
 	"errors"
@@ -281,7 +282,8 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 	if err != nil {
 		return errors.New("the approved design's rendering is missing")
 	}
-	instruction := applyInstructionPreamble + string(design) + workingCopySection(p.path("target-repo")) + applyInstructionRules + p.previousApplyFindings()
+	root := p.path("target-repo")
+	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) + applyInstructionRules + p.previousApplyFindings()
 	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
 
@@ -352,8 +354,8 @@ the complete list of what changes.
 // and both files landed in the agent's home while the working copy stayed
 // empty (measured four ways, 2026-09-09). The design lists repository-
 // relative paths, so the instruction has to carry the root they hang from.
-func workingCopySection(root string) string {
-	return `
+func workingCopySection(root string, files []string) string {
+	section := `
 
 ---
 
@@ -361,12 +363,40 @@ func workingCopySection(root string) string {
 
 ` + root + `
 
-The design lists paths relative to that directory. Write with absolute
-paths: join the root above to each path the design names, so
-` + "`docs/EXAMPLE.md`" + ` is written as ` + "`" + root + `/docs/EXAMPLE.md` + "`" + `.
-A relative path does not land in the working copy, and a change that is
-not in the working copy did not happen.
+Write with absolute paths. A relative path does not land in the working
+copy — it lands in your own home — and a change that is not in the
+working copy did not happen. This path is where files live and is never
+written inside a file.
 `
+	if len(files) == 0 {
+		return section
+	}
+	// The join is done here rather than asked for: the failure this section
+	// exists to fix was a path resolved wrongly, so the instruction hands
+	// over the finished paths instead of a rule for making them. The design
+	// still lists them relative — that is what the seal compares against.
+	section += `
+The files this design changes, written as the paths to give your tools:
+`
+	for _, file := range files {
+		section += "\n- " + root + "/" + file
+	}
+	return section + "\n"
+}
+
+// designedFiles are the paths the approved design names, in its order.
+// Empty when the design cannot be read: the section still names the root,
+// and the seal is what holds the change to the design either way.
+func (p *Pipeline) designedFiles(round int) []string {
+	design, err := investigate.ReadDesign(filepath.Join(p.designRoundDir(round), "design.json"))
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(design.Files))
+	for _, file := range design.Files {
+		paths = append(paths, file.Path)
+	}
+	return paths
 }
 
 const applyInstructionRules = `
