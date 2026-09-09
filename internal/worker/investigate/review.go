@@ -265,6 +265,96 @@ func (r DesignReview) Validate(identity Identity, subject ReviewSubject) error {
 	return nil
 }
 
+// NormalizeFindingCode makes a reviewer's label fit the code shape instead
+// of refusing the review that carries it. The label names a finding for a
+// reader; the message is the substance, and a whole round of judgement was
+// thrown away because a reviewer wrote one word of Japanese in a label
+// (live, 2026-09-09: "postgres-503-誤記" ended the delivery as a model
+// failure while the finding itself was correct). Letters and digits outside
+// ASCII, spaces and punctuation become hyphens; the result is lowercased,
+// trimmed of leading and trailing hyphens and bounded. A label with nothing
+// usable left becomes "finding", which is honest: the reviewer named
+// something the code could not carry. A label that would start with a digit
+// keeps its text behind a "finding-" prefix rather than losing the digits.
+func NormalizeFindingCode(code string) string {
+	if codePattern.MatchString(code) {
+		// A label the shape already accepts is left exactly as it is: this
+		// is a rescue for labels that would otherwise lose the whole
+		// review, not a rewrite of labels that work today (a label like
+		// "design--wrong" means what it means, and must not become another
+		// label's meaning).
+		return code
+	}
+	lowered := strings.ToLower(strings.TrimSpace(code))
+	var b strings.Builder
+	for _, r := range lowered {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	trimmed := strings.Trim(collapseHyphens(b.String()), "-")
+	if trimmed == "" {
+		return "finding"
+	}
+	if trimmed[0] < 'a' || trimmed[0] > 'z' {
+		// A label that starts with a digit ("503-timeout") keeps its
+		// meaning behind a prefix; dropping the digits would leave
+		// "timeout", which says something else.
+		trimmed = "finding-" + trimmed
+	}
+	if len(trimmed) == 1 {
+		// The shape wants two characters or more. Padding keeps two short
+		// labels apart, which "finding" for both would not.
+		trimmed += "-finding"
+	}
+	if len(trimmed) > 64 {
+		trimmed = strings.Trim(trimmed[:64], "-")
+	}
+	if !codePattern.MatchString(trimmed) {
+		return "finding"
+	}
+	if reservedFindingCodes[trimmed] {
+		// The guard below keeps this exit under the same post-condition as
+		// the others: a longer reserved label must not leave through here
+		// without fitting the shape.
+		// A label that carries machine meaning has to be written, not
+		// manufactured. "design-wrong-ではない" normalises to exactly
+		// "design-wrong", and firing on that would archive an
+		// implementation round and spend a design round on a reviewer
+		// saying the opposite. The finding still travels; only the signal
+		// is withheld.
+		trimmed += "-unclear"
+		if !codePattern.MatchString(trimmed) {
+			return "finding"
+		}
+	}
+	return trimmed
+}
+
+// reservedFindingCodes are the labels a stage compares by equality, so
+// normalisation must never produce one that the reviewer did not write.
+var reservedFindingCodes = map[string]bool{"design-wrong": true}
+
+func collapseHyphens(value string) string {
+	var b strings.Builder
+	previous := false
+	for _, r := range value {
+		if r == '-' {
+			if previous {
+				continue
+			}
+			previous = true
+		} else {
+			previous = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func validateDesignReviewOutput(output ModelDesignReviewOutput, subject string) error {
 	switch output.Verdict {
 	case VerdictPass:

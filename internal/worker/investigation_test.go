@@ -766,3 +766,35 @@ func TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart(t *testing.T) {
 		t.Fatalf("Read(m-0001, 0) = %+v, %v", window, err)
 	}
 }
+
+// The reviewers rejected the same three things in both live runs of the
+// design chain: an absence claimed from a listing of names, measurements
+// taken and then left out of the design, and a verification that promises
+// measured values without naming the records that carry them. The design
+// contract states them, so the round that writes the design is held to
+// them before a reviewer spends a round saying so.
+func TestTheDesignContractStatesWhatTheReviewersKeepRejecting(t *testing.T) {
+	design := investigationSystemPrompt(ModeDesign, false)
+	for _, want := range []string{
+		"needs a record that searched for it, not a record that listed names",
+		"Every record you made is either used in the design or accounted for",
+		"list those records in cause_evidence and quote the value in cause or approach",
+		"The verification has no field for a record id",
+	} {
+		if !strings.Contains(design, want) {
+			t.Errorf("the design contract lacks %q", want)
+		}
+	}
+	// The investigation-only contract is unchanged: it writes no design, so
+	// none of the three reach it.
+	report := investigationSystemPrompt(ModeInvestigation, false)
+	for _, rule := range []string{
+		"needs a record that searched for it",
+		"Every record you made is either used in the design",
+		"The verification has no field for a record id",
+	} {
+		if strings.Contains(report, rule) {
+			t.Errorf("the investigation-only contract carries a design rule: %q", rule)
+		}
+	}
+}

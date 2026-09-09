@@ -752,3 +752,24 @@ func TestAgentDesignReviewPointsTheReviewerAtTheCopyInItsOwnHome(t *testing.T) {
 		t.Errorf("the copy in the home is not what the engine measured (%d vs %d bytes)", len(copied), len(original))
 	}
 }
+
+// The answer shape shows a label of the shape it asks for. A slot filled
+// with the rule instead of a value teaches the opposite: a model copying
+// the structure writes the description, and a label that does not fit used
+// to cost the whole review.
+func TestTheReviewerIsShownALabelOfTheShapeItMustWrite(t *testing.T) {
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject:       investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:          "根拠",
+		investigation: investigate.Investigation{},
+	})
+	if err != nil {
+		t.Fatalf("designReviewPrompt: %v", err)
+	}
+	if !strings.Contains(prompt, `"code":"missing-record-citation"`) {
+		t.Error("the answer shape does not show a usable label")
+	}
+	if !strings.Contains(prompt, "code は英小文字と数字とハイフンだけの短い識別子です") {
+		t.Error("the constraint on the label is not stated")
+	}
+}

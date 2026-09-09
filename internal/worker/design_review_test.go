@@ -277,3 +277,22 @@ func TestResolveDesignLensReadsTheJudgesOwnLens(t *testing.T) {
 		t.Fatalf("first position without a lens: %q, %v", lens, err)
 	}
 }
+
+// The label a reviewing agent writes is normalised as its answer is read,
+// so a review whose finding is sound is not thrown away over the label.
+// Before this, a label containing one Japanese word ended the delivery as a
+// model failure and the finding never reached the design's author.
+func TestTheAgentsFindingLabelIsNormalisedAsItIsRead(t *testing.T) {
+	transcript := `思考の途中経過。
+{"verdict":"revise","findings":[{"code":"postgres-503-誤記","section":"approach","message":"接続失敗時に 503 になるとは限らないので、条件を分けて書いてください。"}]}`
+	output, err := DecodeAgentDesignReviewOutput(transcript)
+	if err != nil {
+		t.Fatalf("DecodeAgentDesignReviewOutput: %v", err)
+	}
+	if len(output.Findings) != 1 || output.Findings[0].Code != "postgres-503" {
+		t.Fatalf("findings = %+v", output.Findings)
+	}
+	if !strings.Contains(output.Findings[0].Message, "条件を分けて") {
+		t.Errorf("the finding's substance did not survive: %q", output.Findings[0].Message)
+	}
+}

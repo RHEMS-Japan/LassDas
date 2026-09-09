@@ -267,3 +267,62 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 		t.Errorf("round trip: %v", err)
 	}
 }
+
+// A reviewer's label is made to fit rather than taken as a reason to throw
+// the review away: one Japanese word in a label ended a live delivery as a
+// model failure while the finding it named was correct.
+func TestAFindingLabelIsMadeToFitInsteadOfEndingTheReview(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"postgres-503-誤記", "postgres-503"},
+		{"Missing Record Citation", "missing-record-citation"},
+		{"already-fine", "already-fine"},
+		{"design--wrong", "design--wrong"},
+		{"design-wrong-", "design-wrong-"},
+		{"x-", "x-"},
+		{"design-wrong", "design-wrong"},
+		{"design-wrong-ではない", "design-wrong-unclear"},
+		{"design-wrong-設計誤り", "design-wrong-unclear"},
+		{"a", "a-finding"},
+		{"b", "b-finding"},
+		{"  spaced  out  ", "spaced-out"},
+		{"503", "finding-503"},
+		{"503-timeout", "finding-503-timeout"},
+		{"2fa-bypass", "finding-2fa-bypass"},
+		{"誤記", "finding"},
+		{"", "finding"},
+		{"---", "finding"},
+		{"a" + strings.Repeat("b", 200), "a" + strings.Repeat("b", 63)},
+	} {
+		if got := NormalizeFindingCode(c.in); got != c.want {
+			t.Errorf("NormalizeFindingCode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// Whatever it returns is a code the seal accepts.
+	for _, in := range []string{"postgres-503-誤記", "誤記", "A_B_C", strings.Repeat("x", 300)} {
+		if got := NormalizeFindingCode(in); !codePattern.MatchString(got) {
+			t.Errorf("NormalizeFindingCode(%q) = %q, which the seal refuses", in, got)
+		}
+	}
+}
+
+// Every exit of the normaliser is under the same post-condition, including
+// the one that withholds a signal: a reserved label long enough that the
+// suffix would overflow leaves as "finding" rather than as a label the seal
+// refuses.
+func TestEveryReservedLabelStillFitsAfterTheSuffix(t *testing.T) {
+	for reserved := range reservedFindingCodes {
+		if !codePattern.MatchString(reserved) {
+			t.Errorf("reserved label %q does not fit the shape itself", reserved)
+		}
+		if got := NormalizeFindingCode(strings.ToUpper(reserved)); !codePattern.MatchString(got) {
+			t.Errorf("NormalizeFindingCode(%q) = %q, which the seal refuses", strings.ToUpper(reserved), got)
+		}
+	}
+	// A reserved label of the maximum length leaves by the "finding" exit.
+	long := "a" + strings.Repeat("b", 63)
+	reservedFindingCodes[long] = true
+	defer delete(reservedFindingCodes, long)
+	if got := NormalizeFindingCode(strings.ToUpper(long)); !codePattern.MatchString(got) {
+		t.Errorf("a reserved label at the limit produced %q, which the seal refuses", got)
+	}
+}

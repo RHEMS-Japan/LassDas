@@ -101,6 +101,9 @@ func DecodeAgentDesignReviewOutput(transcript string) (investigate.ModelDesignRe
 	if err := decodeStrictJSON([]byte(block), &output); err != nil {
 		return investigate.ModelDesignReviewOutput{}, errors.New("model design review response is invalid")
 	}
+	for i, finding := range output.Findings {
+		output.Findings[i].Code = investigate.NormalizeFindingCode(finding.Code)
+	}
 	return output, nil
 }
 
