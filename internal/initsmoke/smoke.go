@@ -263,7 +263,7 @@ func (r Runner) propose(ctx context.Context, s *initwizard.State, secrets initwi
 	}
 	addition += line + "\n"
 	record := Record{Correlation: correlation, ProjectID: s.Tracker.ProjectID, CreatorID: s.Tracker.AllowedCreatorID, Repository: s.Repository, RepositoryID: s.RepositoryID, Branch: s.Branch, BaseSHA: s.BaseSHA, Path: filename, BeforeSHA256: digest(string(before)), After: string(before) + addition, Addition: addition, Summary: "CLI の初回動作確認"}
-	record.Description = fmt.Sprintf("対象は %s。%s の末尾に次の 1 行を追加してください。既存の内容と他のファイルは維持してください。\n\n%s\n\n登録済みの検証コマンドを通し、%s 枝に PR を出してください。調査・設計、設計レビュー、写し役、候補レビュー、検証を経た変更を確認します。\n\n%s", s.Repository, filename, line, s.Branch, marker(correlation))
+	record.Description = fmt.Sprintf("対象は %s。%s の末尾に次の 1 行を追加してください。既存の内容と他のファイルは維持してください。既存部分は改行を含めて変更せず、既存ファイルが空でなく末尾に改行がない場合だけ、区切りの LF を 1 つ追加してから新しい行を書いてください。追加する行の末尾にも LF の改行を 1 つ付け、空行は増やさないでください。\n\n%s\n\n登録済みの検証コマンドを通し、%s 枝に PR を出してください。調査・設計、設計レビュー、写し役、候補レビュー、検証を経た変更を確認します。\n\n%s", s.Repository, filename, line, s.Branch, marker(correlation))
 	return record, nil
 }
 
@@ -310,7 +310,7 @@ func (r Runner) create(ctx context.Context, s *initwizard.State, secrets initwiz
 	if err != nil {
 		return err
 	}
-	yes, err := r.UI.Confirm(fmt.Sprintf("%s に本人名義で課題を 1 件作成します。\n%s\n\nファイル: %s\n追加する内容:\n%s\nPR の宛先: %s / %s", s.Tracker.ProjectKey, record.Summary, record.Path, record.Addition, record.Repository, record.Branch))
+	yes, err := r.UI.Confirm(fmt.Sprintf("%s に本人名義で課題を 1 件作成します。\n%s\n\nファイル: %s\n追加する内容:\n%s\n追加行の末尾には改行（LF）を 1 つ付け、既存部分を維持します。\nPR の宛先: %s / %s", s.Tracker.ProjectKey, record.Summary, record.Path, record.Addition, record.Repository, record.Branch))
 	if err != nil {
 		return err
 	}
