@@ -26,7 +26,7 @@ type PromotionPreview struct {
 
 // DeliverStagingReport is the staging-phase summary the attendant renders.
 type DeliverStagingReport struct {
-	Verdict string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | stopped | card_failed
+	Verdict string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | observe_failed | observe_blocked | stopped | card_failed
 	// Block names, with observe_blocked, why the page could not be judged:
 	// "sign_in" (the login did not land) or "redirect" (the page sent the
 	// browser elsewhere). It decides who has to act.
@@ -93,6 +93,10 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		builder.WriteString("【ステージング反映できず】ステージングへの自動マージが完了しませんでした。\n\n")
 	case "deploy_failed":
 		builder.WriteString("【ステージング反映が未確認】マージ後、ステージングの自動デプロイの完了を確認できませんでした。\n\n")
+	case "deploy_absent":
+		builder.WriteString("【ステージングのブランチに反映済み・自動デプロイは動いていません】変更はステージングのブランチに入りましたが、" +
+			"このリポジトリの自動デプロイは今回のマージでは 1 度も起動しませんでした。" +
+			"動いていないため、画面での確認は行っていません。本番反映も行いません。\n\n")
 	case "measure_failed":
 		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、設計書が約束した計測が閾値を満たしませんでした。本番反映は行えません。\n\n")
 	case "observe_failed":
@@ -155,6 +159,15 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.Operation = "計測値と閾値を確認し、必要なら直し方を変えて再度起票してください"
 		facts.NextEvent = "以後の自動通知はありません"
 		facts.Production = "未変更"
+	case report.Verdict == "deploy_absent":
+		// Nothing is broken and nothing is pending: the change is in the
+		// branch, and whether it needs deploying at all is the operator's
+		// to say. The requester has nothing to do either way.
+		facts.State = "ステージングのブランチに反映済み・自動デプロイは起動せず"
+		facts.NextActor = "運用担当者"
+		facts.Operation = "このリポジトリの自動デプロイが今回の変更を対象にしているかを確認します"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更（本番反映は行われません）"
 	case report.Verdict == "deploy_failed" || report.Verdict == "merge_unverified":
 		// The staging state itself needs an operator's eyes; the requester
 		// has nothing to fix.

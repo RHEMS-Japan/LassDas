@@ -52,7 +52,7 @@ const (
 type DeliverReport struct {
 	SchemaVersion int    `json:"schema_version"`
 	Phase         string `json:"phase"`   // staging | production
-	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | observe_failed | observe_blocked | promotion_failed
+	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | observe_failed | observe_blocked | promotion_failed
 	// Block, with an observe_blocked verdict, says why the page could not
 	// be judged at all: "sign_in" (the consumer's login did not land — the
 	// session jar is no longer accepted) or "redirect" (the target sent the
@@ -192,6 +192,17 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 			return err
 		}
 		if code != 0 {
+			if p.lastStepSaid(controllerStagingAbsentCode) {
+				// The merge landed and the destination created no staging run
+				// for it — a change outside what its deployment covers, most
+				// often. Nothing failed, and nothing deployed either, so the
+				// screen check has nothing to look at and the promotion has
+				// no deployment to rest on.
+				return p.sealDeliverReport(DeliverReport{
+					Phase: "staging", Verdict: "deploy_absent",
+					Detail: "変更はステージングのブランチに入りましたが、このリポジトリの自動デプロイは今回のマージでは 1 度も起動しませんでした。",
+				})
+			}
 			return p.sealDeliverReport(DeliverReport{
 				Phase: "staging", Verdict: "deploy_failed",
 				Detail: "ステージングの自動デプロイの完了を確認できませんでした。",
@@ -756,6 +767,26 @@ func (p *Pipeline) fillDelta(report *DeliverReport) {
 		return
 	}
 	report.Delta = json.RawMessage(raw)
+}
+
+// controllerStagingAbsentCode is the controller's fixed code for a merge
+// that landed with no staging run created for it. The controller prints its
+// code on its own last line and exits one for every failure alike, so the
+// code is what separates them here.
+const controllerStagingAbsentCode = "staging_deployment_absent"
+
+// lastStepSaid reports whether the step that just ran ended with the given
+// controller failure code. The controller writes "controller: <code>" as its
+// own last line, so the code is matched against a whole line: the same text
+// inside a wrapped error is the detail underneath a failure, not the code
+// the verb ended with.
+func (p *Pipeline) lastStepSaid(code string) bool {
+	for _, line := range strings.Split(p.lastStepStderr, "\n") {
+		if strings.TrimSpace(line) == "controller: "+code {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pipeline) sealDeliverReport(report DeliverReport) error {

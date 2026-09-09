@@ -529,6 +529,14 @@ func (c *Controller) waitWorkflowRun(parent context.Context, workflow WorkflowCo
 		return WorkflowRun{}, err
 	}
 	defer cancel()
+	// seen separates the two ways this wait can run out. A run that
+	// appeared and never finished is a deployment that did not complete; a
+	// run that never appeared at all is a destination that started no
+	// deployment for this commit — a different fact, and the only one of
+	// the two that is not a failure of anything. Reported as one, the
+	// second reads as "the deploy did not finish" about a deploy that was
+	// never going to run (live 2026-09-09).
+	seen := false
 	for {
 		var response struct {
 			TotalCount   int `json:"total_count"`
@@ -570,6 +578,7 @@ func (c *Controller) waitWorkflowRun(parent context.Context, workflow WorkflowCo
 			return WorkflowRun{}, invariant("ambiguous_workflow_run")
 		}
 		if len(matches) == 1 {
+			seen = true
 			actual := response.WorkflowRuns[matches[0]]
 			createdAt, createdErr := time.Parse(time.RFC3339, actual.CreatedAt)
 			updatedAt, updatedErr := time.Parse(time.RFC3339, actual.UpdatedAt)
@@ -592,11 +601,19 @@ func (c *Controller) waitWorkflowRun(parent context.Context, workflow WorkflowCo
 				return WorkflowRun{}, invariant("unknown_workflow_status")
 			}
 		}
-		if err := sleepOrTimeout(ctx, c.client, wait.PollInterval, "workflow_run_timeout"); err != nil {
+		timeoutCode := WorkflowRunAbsentCode
+		if seen {
+			timeoutCode = "workflow_run_timeout"
+		}
+		if err := sleepOrTimeout(ctx, c.client, wait.PollInterval, timeoutCode); err != nil {
 			return WorkflowRun{}, err
 		}
 	}
 }
+
+// WorkflowRunAbsentCode is what the wait reports when the window closed
+// without the destination ever creating a run for the commit.
+const WorkflowRunAbsentCode = "workflow_run_absent"
 
 func (c *Controller) waitDigestCommit(parent context.Context, branch, sourceSHA string, policy DigestCommitPolicy, wait WaitOptions) (string, string, error) {
 	if err := validateDigestPolicy(policy); err != nil {

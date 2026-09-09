@@ -131,3 +131,9 @@ func controllerGitHubConfig(token string, consumer worker.ConsumerConfig) github
 		Timeout: 30 * time.Second, MaxResponseBytes: 8 * 1024 * 1024,
 	}
 }
+
+// StagingDeploymentAbsentCode is the failure the await-staging verb reports
+// when the merge landed and the destination created no staging run for it.
+// It is a fixed code because the runner keys the requester's wording off it:
+// the change is in the integration branch, and nothing deployed it.
+const StagingDeploymentAbsentCode = "staging_deployment_absent"

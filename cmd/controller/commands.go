@@ -509,6 +509,12 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 	}
 	deployment, err := runtime.controller.AwaitStaging(ctx, merge.Payload.Merge, waitOptions(), stagingDigestPolicyFor(merge.Binding.Repository))
 	if err != nil {
+		// A destination that created no run at all for this commit is not a
+		// deployment that failed: nothing was started. The runner tells its
+		// requester the two apart, so the code has to.
+		if githubapi.IsInvariant(err, githubapi.WorkflowRunAbsentCode) {
+			return failFrom(StagingDeploymentAbsentCode, err)
+		}
 		return failFrom("staging_deployment_failed", err)
 	}
 	if !validStagingDeployment(deployment, merge.Binding) {

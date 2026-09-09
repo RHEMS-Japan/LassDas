@@ -354,6 +354,8 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 		status.place("failed", "ステージング反映済み・計測が閾値を超過", "設計書が約束した計測値を満たしていません")
 	case verdict == "observe_blocked":
 		status.placeAt("attention", "confirm", "ステージング反映済み・画面確認ができず", "確認用の画面を開けなかったため合否は判定できていません")
+	case verdict == "deploy_absent":
+		status.placeAt("attention", "staging", "ステージングのブランチに反映済み・自動デプロイは起動せず", "運用担当者が対象範囲を確認します")
 	case verdict == "deploy_failed" || verdict == "merge_unverified":
 		status.placeAt("attention", "staging", "ステージング反映の状態確認が必要", "運用担当者が状態を確認します")
 	default:
