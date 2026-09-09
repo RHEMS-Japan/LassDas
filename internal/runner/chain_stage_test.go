@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,5 +146,67 @@ func TestChainImplementRunsTheInstructionThroughTheWorker(t *testing.T) {
 	}
 	if len(lines) != 2 || lines[0] != want[0] || lines[1] != want[1] {
 		t.Fatalf("worker calls = %q, want %q", lines, want)
+	}
+}
+
+// The applier's card carries the approved design and where the design round's
+// objection record goes, so the run-instruction command can seal an objection
+// the applier wrote at the root of its working copy (issue #103). The
+// implementer's card, and an applier card of a run that never designed, carry
+// neither.
+func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) {
+	pipeline := chainStagePipeline(t)
+	record := filepath.Join(t.TempDir(), "worker.log")
+	fake := filepath.Join(t.TempDir(), "fake-worker")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+record+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	consumer := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(consumer, []byte(`{"consumers":[{"design":{"review_investigation":true}}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.WorkerBin = fake
+	pipeline.Config.ConsumerConfigPath = consumer
+	writeDecision(t, pipeline.Workspace, `{"outcome":"ready","request_kind":"change","needs_design":true}`)
+	if err := os.MkdirAll(pipeline.designRoundDir(1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"investigation.json": `{}`, "decision.json": `{"outcome":"approved"}`, "design.json": `{}`} {
+		if err := os.WriteFile(filepath.Join(pipeline.designRoundDir(1), name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(pipeline.path("INSTRUCTION.md"), []byte("apply this\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := pipeline.path("target-repo")
+	baseSHA := strings.Repeat("b", 40)
+	if err := pipeline.chainRunInstruction(context.Background(), "applier", repoRoot, baseSHA); err != nil {
+		t.Fatalf("applier card: %v", err)
+	}
+	logged, _ := os.ReadFile(record)
+	line := strings.TrimSpace(string(logged))
+	wantTail := " --design " + filepath.Join(pipeline.designRoundDir(1), "design.json") + " --objection-out " + filepath.Join(pipeline.designRoundDir(1), "objection.json")
+	if !strings.Contains(line, "--role applier") || !strings.HasSuffix(line, wantTail) {
+		t.Fatalf("applier call = %q, want it to end with %q", line, wantTail)
+	}
+	// The implementer's card never carries a design, even on a run that designed.
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.chainRunInstruction(context.Background(), "implementer", repoRoot, baseSHA); err != nil {
+		t.Fatalf("implementer card: %v", err)
+	}
+	logged, _ = os.ReadFile(record)
+	if strings.Contains(string(logged), "--design") {
+		t.Fatalf("implementer call carries a design: %q", strings.TrimSpace(string(logged)))
+	}
+	// A design-shaped run whose approved design is gone fails closed rather
+	// than running the applier without the binding.
+	if err := os.Remove(filepath.Join(pipeline.designRoundDir(1), "design.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.chainRunInstruction(context.Background(), "applier", repoRoot, baseSHA); err == nil || !errors.Is(err, ErrNoApprovedDesign) {
+		t.Fatalf("applier without its design: %v", err)
 	}
 }

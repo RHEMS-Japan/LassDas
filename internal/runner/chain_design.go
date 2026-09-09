@@ -350,8 +350,10 @@ const applyInstructionRules = `
 
 ## Rules
 
-- Change only the files the design lists, in the way it says. Any other change makes the seal refuse the result.
-- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` in the working directory with ` + "`{\"reason\": \"…\", \"section\": \"files|approach|verification|cause\"}`" + ` and finish without editing anything else. The design goes back to its author.
+- Change only the files the design lists, in the way it says. Any other change makes the seal refuse the result: no file of your own, no notes, no scratch or temporary file left behind — remove anything you created while working before you finish.
+- Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` in the working directory (the root of this repository) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
+- There is no person on this run. Nobody answers a question, approves a step or fills in a blank; a question you would have asked is an objection (above), not a comment left in the code.
+- Your tool calls are counted and capped. Open only the files the design names, write the first change early, and do not survey the repository or run its whole test suite first: a run that spends its turns reading ends with nothing written and nothing sealed.
 - Never add automation, CI/CD, release, credential, IAM, repository-governance or deployment machinery. Never claim to have run a command or observed a deployment.
 - Do not commit; the seal reads the working tree.
 `

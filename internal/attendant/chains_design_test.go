@@ -206,6 +206,22 @@ func objectedBoard() chainView {
 	return chainViewFor(tasks, "delivery-1")
 }
 
+// objectedOnApplyBoard is the board after the applier objected from its own
+// card: the apply card sealed the objection and failed, the tail never
+// started (issue #103).
+func objectedOnApplyBoard() chainView {
+	card := func(id, stage, status string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey("delivery-1", stage, round)}
+	}
+	tasks := []runtime.BoardTask{
+		card("t_i1", runtime.StageInvestigate, "done", 1), card("t_a1", runtime.StageDesignReviewA, "done", 1),
+		card("t_b1", runtime.StageDesignReviewB, "done", 1), card("t_d1", runtime.StageDesignDecide, "done", 1),
+		card("t_apply", runtime.StageApply, "blocked", 1), card("t_ra", runtime.StageReviewA, "todo", 1),
+		card("t_rb", runtime.StageReviewB, "todo", 1), card("t_v", runtime.StageValidate, "todo", 1), card("t_p", runtime.StagePublish, "todo", 1),
+	}
+	return chainViewFor(tasks, "delivery-1")
+}
+
 func boardCalls(t *testing.T, callLog string) (archived, created []string) {
 	t.Helper()
 	raw, _ := os.ReadFile(callLog)
@@ -420,4 +436,43 @@ func TestIncompleteRunPostsTheRefusalThroughBothPaths(t *testing.T) {
 		}
 		assertRefusalPosted(t, fixture.comments.posted)
 	})
+}
+
+// The apply card fails with the objection already sealed (the applier wrote
+// it at the root of its working copy and run-instruction sealed it, issue
+// #103): the attendant reopens the design exactly as it does when the
+// sealing review card found the objection.
+func TestApplyCardObjectionReopensDesignRound(t *testing.T) {
+	config, runDir := designRunConfig(t, 3)
+	hermes, callLog := fakeBoard(t)
+	logger := &recordingLogger{}
+	view := objectedOnApplyBoard()
+	// Without the sealed record the failed apply card is an ordinary failure.
+	handled, err := handleDesignChainFailure(context.Background(), config, nil, hermes, hook.DispatchEnvelope{},
+		state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, view, runtime.ChainPlan{Shape: runtime.ShapeDesign}, runtime.StageApply, logger)
+	if handled || err != nil {
+		t.Fatalf("without an objection record: handled=%v err=%v", handled, err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "history", "design-1", "objection.json"), []byte(`{"reason":"the label is not in that file","section":"files"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handled, err = handleDesignChainFailure(context.Background(), config, nil, hermes, hook.DispatchEnvelope{},
+		state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, view, runtime.ChainPlan{Shape: runtime.ShapeDesign}, runtime.StageApply, logger)
+	if !handled || err != nil {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	archived, created := boardCalls(t, callLog)
+	for _, want := range []string{"t_apply", "t_ra", "t_rb", "t_v", "t_p"} {
+		if !containsID(archived, want) {
+			t.Errorf("%s was not archived: %v", want, archived)
+		}
+	}
+	for _, keep := range []string{"t_i1", "t_a1", "t_b1", "t_d1"} {
+		if containsID(archived, keep) {
+			t.Errorf("done design card %s was archived", keep)
+		}
+	}
+	if !containsID(created, runtime.ChainCardKey("delivery-1", runtime.StageInvestigate, 2)) {
+		t.Fatalf("design round 2 was not opened: %v", created)
+	}
 }

@@ -94,7 +94,7 @@ func TestDesignRoundsAreCountedFromSealedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	instruction, _ := os.ReadFile(p.path("INSTRUCTION.md"))
-	for _, want := range []string{"You apply an approved design", "# Design — round 2", "revise-design.json", "Change only the files the design lists"} {
+	for _, want := range []string{"You apply an approved design", "# Design — round 2", "revise-design.json", "Change only the files the design lists", "the root of this repository", "1 to 600 bytes", "There is no person on this run", "write the first change early", "remove anything you created", "blast_radius|not_doing"} {
 		if !containsString(string(instruction), want) {
 			t.Errorf("instruction lacks %q", want)
 		}

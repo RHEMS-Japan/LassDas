@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,6 +145,14 @@ type DesignObjection struct {
 // maxObjectionBytes bounds the applier's revise-design.json.
 const maxObjectionBytes = 16 * 1024
 
+// maxObjectionReasonBytes bounds the applier's reason; the instruction
+// names the same number.
+const maxObjectionReasonBytes = 600
+
+// objectionFileName is the file the applier writes at the root of its
+// working copy to stop instead of editing (docs/INVESTIGATING_DESIGNER.md §7).
+const objectionFileName = "revise-design.json"
+
 var objectionSections = map[string]bool{"cause": true, "approach": true, "files": true, "verification": true, "blast_radius": true, "not_doing": true}
 
 // sealDesignObjection turns the applier's revise-design.json into a sealed
@@ -167,8 +176,11 @@ func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA str
 		Reason  string `json:"reason"`
 		Section string `json:"section"`
 	}
-	if err := json.Unmarshal(raw, &objection); err != nil || strings.TrimSpace(objection.Reason) == "" || len(objection.Reason) > 600 || !utf8.ValidString(objection.Reason) {
-		return false, errors.New("the applier's objection is not a readable reason")
+	if err := json.Unmarshal(raw, &objection); err != nil {
+		return false, errors.New("the applier's objection is not a readable reason: the file is not the contract's JSON")
+	}
+	if reason := strings.TrimSpace(objection.Reason); reason == "" || len(reason) > maxObjectionReasonBytes || !utf8.ValidString(reason) {
+		return false, fmt.Errorf("the applier's objection is not a readable reason: it must be 1 to %d bytes of text (got %d)", maxObjectionReasonBytes, len(reason))
 	}
 	if !objectionSections[objection.Section] {
 		objection.Section = "approach"

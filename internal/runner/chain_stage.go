@@ -193,6 +193,20 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 		"--repo-root", repoRoot, "--base-sha", baseSHA, "--stage", strconv.Itoa(round),
 		"--knowledge-root", p.Config.KnowledgeRoot, "--out", record,
 	}
+	if role == "applier" {
+		// The applier may stop instead of editing: it writes its objection at
+		// the root of its working copy (the only place it can write), and the
+		// command seals that into the design round's record — so the card
+		// needs the design the objection is against and where the record
+		// goes (issue #103).
+		design, designRound, err := p.requiredDesign()
+		if err != nil {
+			return err
+		}
+		if design != "" {
+			args = append(args, "--design", design, "--objection-out", p.designObjectionPath(designRound))
+		}
+	}
 	if code, err := p.worker(ctx, "run-instruction", args); err != nil || code != 0 {
 		return fmt.Errorf("the %s did not finish", role)
 	}
