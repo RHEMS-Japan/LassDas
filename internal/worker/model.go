@@ -93,7 +93,7 @@ type ChatChoice struct {
 // (live 2026-09-05: one such response ended an 18-probe investigation as
 // model_failed). Each carries the detail that failed, as counts only.
 var (
-	errModelResponseMetadata = errors.New("model response metadata is invalid")
+	errModelResponseMetadata = errors.New(ShapeRefusedPhrase)
 	errModelResponseContent  = errors.New("model response content is invalid")
 	// errModelResponseRefused is the provider declining one turn
 	// (finish_reason=content_filter): asked again once like the two above.
@@ -107,14 +107,35 @@ var (
 	// again after the gateway pauses, up to their count (live 2026-09-09:
 	// one such answer ended a design round's investigation as model_failed
 	// on its first call).
-	errModelResponseUpstream = errors.New("the provider ended the turn with an error")
+	errModelResponseUpstream = errors.New(ProviderEndedTurnPhrase)
 	// errModelAllowanceSpent marks a call that ran out of its own time
 	// without answering: no answer, no usage, no cost, and five minutes
 	// gone. converseTurn asks again once — not for the provider's whole
 	// ladder, because three more would spend most of a round on one
-	// question. Its text keeps the transport's prefix, so what reads these
-	// failures for the requester still recognises it.
-	errModelAllowanceSpent = errors.New("model invocation failed: the call spent its allowance without answering")
+	// question. Its text begins with TransportFailedPhrase, so what reads
+	// these failures for the requester still recognises it.
+	errModelAllowanceSpent = errors.New(TransportFailedPhrase + ": the call spent its allowance without answering")
+)
+
+// These are the phrases a reception failure carries out to the runner, which
+// has only the step's stderr to tell the requester why their ticket stopped.
+// They are the error texts above and the transport's own prefix, named here
+// so the two packages cannot drift apart silently: a note keyed off a phrase
+// no error still writes would leave the requester with nothing, which is the
+// state this pair was built to end (live 2026-09-09: a ticket whose comment
+// said model_failed and no more, with the cause only in the pod log).
+const (
+	// ShapeRefusedPhrase begins the failure of a turn whose answer never
+	// arrived in the shape the contract asks for.
+	ShapeRefusedPhrase = "model response metadata is invalid"
+	// ProviderEndedTurnPhrase begins the failure of a turn the provider
+	// ended with an error of its own, after converseTurn asked again.
+	ProviderEndedTurnPhrase = "the provider ended the turn with an error"
+	// TransportFailedPhrase begins every failure the transport itself
+	// reports: it could not reach the gateway, or the gateway answered with
+	// a status that asking again does not lift, or the call spent its whole
+	// allowance without an answer.
+	TransportFailedPhrase = "model invocation failed"
 )
 
 // allowanceTurnRetries is how many times one turn asks again after a call

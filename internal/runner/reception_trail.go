@@ -27,7 +27,7 @@ const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 // the way it attaches a delivery's trail. Best-effort: an unwritable trail
 // must not change the outcome.
 func (p *Pipeline) noteReceptionCutoff(stage string) {
-	note := receptionCutoffNote(stage, p.lastStepStderr)
+	note := receptionNote(stage, p.lastStepStderr)
 	if note == "" {
 		return
 	}
@@ -62,6 +62,74 @@ func noFileChosen(stderr string) bool {
 // The note names what to do about a derivation, so it must not appear under
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
+
+// workerLinePrefix begins every line the worker writes about its own failure.
+const workerLinePrefix = "worker: "
+
+// receptionErrorText is what the worker itself wrote as the cause on one of
+// its own failure lines, or "" for any other line. The worker writes
+// `worker: <what failed>: <cause>`, so the cause begins right after the
+// second separator — the one position on the line the requester's words can
+// never reach, because the head of a model answer is carried further along.
+// Reading the cause anywhere on the line would let a ticket choose the note
+// its own requester is shown.
+func receptionErrorText(line string) string {
+	rest := strings.TrimSpace(line)
+	if !strings.HasPrefix(rest, workerLinePrefix) {
+		return ""
+	}
+	_, cause, found := strings.Cut(strings.TrimPrefix(rest, workerLinePrefix), ": ")
+	if !found {
+		return ""
+	}
+	return cause
+}
+
+// receptionCauseNote renders the requester-facing note for the reception
+// failures that are not about the shape of one answer: the model could not
+// be reached, or it never answered in the shape the contract asks for. Both
+// are told as what happened and what the requester can do, because those are
+// the two things the note is for.
+func receptionCauseNote(stage, stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		cause := receptionErrorText(line)
+		switch {
+		case strings.HasPrefix(cause, worker.TransportFailedPhrase),
+			strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase):
+			return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
+				"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
+				"同じ依頼をそのまま出し直すと通る場合があります。\n"
+		case strings.HasPrefix(cause, worker.ShapeRefusedPhrase):
+			return "受付の AI (" + stage + ") の答えが、決められた形になりませんでした。" +
+				"聞き直しても同じでした。同じ依頼をそのまま出し直しても同じ結果になる可能性が高いです。" +
+				"運用担当者が受付の設定を確認します。\n"
+		}
+	}
+	return ""
+}
+
+// unnamedReceptionNote is what a requester is told when the worker's cause is
+// one the runner has no words for. It is deliberately the last resort and not
+// a silence: before it, such a failure left the terminal comment saying the
+// failure class and nothing else (live 2026-09-09).
+func unnamedReceptionNote(stage string) string {
+	return "受付の AI (" + stage + ") が答えを返せなかったため、自動処理を止めました。" +
+		"依頼の内容ではなく自動処理側の問題です。運用担当者が実行記録で理由を確認します。\n"
+}
+
+// receptionNote renders the requester-facing note for a step's stderr. Every
+// reception failure gets one: the specific notes first, then the causes the
+// worker names, and last the note that says only that the stage could not
+// answer.
+func receptionNote(stage, stderr string) string {
+	if note := receptionCutoffNote(stage, stderr); note != "" {
+		return note
+	}
+	if note := receptionCauseNote(stage, stderr); note != "" {
+		return note
+	}
+	return unnamedReceptionNote(stage)
+}
 
 // receptionCutoffNote renders the requester-facing note for a step's stderr,
 // or "" when the step did not fail for a reason the requester can be told.

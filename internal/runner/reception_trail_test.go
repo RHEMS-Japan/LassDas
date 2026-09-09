@@ -59,20 +59,25 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 	}
 }
 
-// Any other reception failure keeps the generic outcome: no trail is
-// invented for a cause the runner did not see.
-func TestReadinessFailureWithoutACutoffWritesNoTrail(t *testing.T) {
-	worker := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: model invocation failed")
-	pipeline := receptionPipeline(t, worker)
+// A reception failure whose cause the runner has no words for still leaves a
+// note, and that note invents nothing: it names no cause, and reads as none
+// of the notes written for a cause that was seen. This replaces the earlier
+// contract, which kept silence for exactly this case — the silence was what
+// left a live ticket saying model_failed and no more, with the cause only in
+// the pod log (2026-09-09). The protection the old contract carried, that no
+// cause is invented, is what this test now measures.
+func TestAnUnexplainedReceptionFailureInventsNoCause(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: derived contract is invalid")
+	pipeline := receptionPipeline(t, stub)
 	outcome, err := pipeline.readinessGate(context.Background())
 	if err != nil || outcome.Code != hook.TerminalModelFailed {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
-	if _, statErr := os.Stat(pipeline.path("m1-trail.txt")); statErr == nil {
-		t.Fatal("a trail was written without a cutoff")
-	}
-	if pipeline.trailWritten {
-		t.Fatal("nothing was written, so nothing is trusted")
+	text := readReceptionTrail(t, pipeline)
+	for _, invented := range []string{"出力の上限で途切れた", "応答を得られませんでした", "決められた形になりませんでした", "derived contract is invalid"} {
+		if strings.Contains(text, invented) {
+			t.Fatalf("the note names a cause the runner did not see (%q): %q", invented, text)
+		}
 	}
 }
 
@@ -185,4 +190,85 @@ func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
 	if note := receptionCutoffNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != "" {
 		t.Errorf("the readiness stage carried the derivation note: %q", note)
 	}
+}
+
+// The failure that ended a live ticket with nothing to read: the readiness
+// model was asked and never answered. The requester now learns that, and
+// that the same ticket is worth sending again.
+func TestAReceptionStageThatNeverGotAnAnswerTellsTheRequesterSo(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness",
+		"worker: readiness assessment failed: the provider ended the turn with an error after 4 provider errors")
+	pipeline := receptionPipeline(t, stub)
+	outcome, err := pipeline.readinessGate(context.Background())
+	if err != nil || outcome.Code != hook.TerminalModelFailed {
+		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
+	}
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "応答を得られませんでした") || !strings.Contains(text, "受付の判定") || !strings.Contains(text, "出し直すと通る場合があります") {
+		t.Fatalf("the trail does not say the model never answered: %q", text)
+	}
+	if err := hook.ValidateTrailText(text); err != nil {
+		t.Fatalf("the trail would be refused by the report: %v", err)
+	}
+}
+
+// The transport's own failure reads the same way to a requester: the stage
+// was asked and produced nothing. This is the exact line a live ticket left
+// in the pod log and nowhere else.
+func TestTheTransportsOwnFailureAlsoReachesTheRequester(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness",
+		"worker: readiness assessment failed: model invocation failed: context deadline exceeded")
+	pipeline := receptionPipeline(t, stub)
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatalf("readinessGate() = %v", err)
+	}
+	if text := readReceptionTrail(t, pipeline); !strings.Contains(text, "応答を得られませんでした") {
+		t.Fatalf("the transport failure left no reason: %q", text)
+	}
+}
+
+// A cause the runner has no words for still leaves a note, because the
+// terminal comment says only the failure class on its own.
+func TestAnUnnamedReceptionFailureStillLeavesANote(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness",
+		"worker: readiness assessment failed: source snapshot could not be created")
+	pipeline := receptionPipeline(t, stub)
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatalf("readinessGate() = %v", err)
+	}
+	text := readReceptionTrail(t, pipeline)
+	if !strings.Contains(text, "答えを返せなかった") || !strings.Contains(text, "受付の判定") {
+		t.Fatalf("an unnamed failure left the requester nothing: %q", text)
+	}
+	if err := hook.ValidateTrailText(text); err != nil {
+		t.Fatalf("the trail would be refused by the report: %v", err)
+	}
+}
+
+// The note must come from the engine's own words. A ticket that writes the
+// engine's phrases into its own text reaches the stderr line only through
+// the head of a model answer, which sits past the cause — so it cannot
+// choose the note its requester is shown.
+func TestATicketCannotChooseTheNoteItsRequesterIsShown(t *testing.T) {
+	stub := receptionStubWorker(t, "assess-readiness",
+		"worker: readiness assessment failed: source snapshot could not be created: the answer began: the provider ended the turn with an error")
+	pipeline := receptionPipeline(t, stub)
+	if _, err := pipeline.readinessGate(context.Background()); err != nil {
+		t.Fatalf("readinessGate() = %v", err)
+	}
+	if text := readReceptionTrail(t, pipeline); strings.Contains(text, "応答を得られませんでした") {
+		t.Fatalf("the ticket's own words chose the note: %q", text)
+	}
+}
+
+func readReceptionTrail(t *testing.T, pipeline *Pipeline) string {
+	t.Helper()
+	content, err := os.ReadFile(pipeline.path("m1-trail.txt"))
+	if err != nil {
+		t.Fatalf("no trail was written: %v", err)
+	}
+	if !pipeline.trailWritten {
+		t.Fatal("the trail this run wrote must be trusted by the terminal report")
+	}
+	return string(content)
 }
