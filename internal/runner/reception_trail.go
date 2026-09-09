@@ -200,6 +200,15 @@ func noFileChosenNote(stage string) string {
 		"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
 }
 
+// unreadableRecordNote is what a requester is told when a reception stage
+// ended over a record rather than over an answer. It is the note five of
+// the eight exits use, so it is a function rather than a literal: the
+// checks that hold what a note may carry take it from here.
+func unreadableRecordNote(stage string) string {
+	return "受付処理 (" + stage + ") の記録を読めなかったため、自動処理を止めました。" +
+		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
+}
+
 // noteReceptionRecord leaves the requester a reason for a reception stage
 // that ended over a record the pipeline could not read or could not accept.
 // No model is involved in reading a record, so the notes above have nothing
@@ -208,9 +217,7 @@ func noFileChosenNote(stage string) string {
 // #122). Best-effort, like the note above: an unwritable trail must not
 // change the outcome.
 func (p *Pipeline) noteReceptionRecord(stage string) {
-	note := "受付処理 (" + stage + ") の記録を読めなかったため、自動処理を止めました。" +
-		"依頼の内容とは別のところで止まっています。運用担当者が記録を確認します。\n"
-	if err := p.writeReceptionTrail(note); err != nil {
+	if err := p.writeReceptionTrail(unreadableRecordNote(stage)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
 }

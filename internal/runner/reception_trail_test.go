@@ -497,8 +497,15 @@ func TestAnAnswerFailureIsToldAsWhatItActuallyIs(t *testing.T) {
 // hands them two opposite directions in one comment (review of #122), so no
 // note may carry an instruction.
 func TestNoNoteInstructsTheRequester(t *testing.T) {
+	cutoff := worker.CutoffPhrase + ": finish_reason=length (output allowance 16384 tokens)"
 	notes := []string{
 		unnamedReceptionNote("受付の判定"),
+		unreadableRecordNote("受付の確認"),
+		// Both endings of the cutoff note: the wider re-ask, and the ceiling.
+		// Neither was in this list, so both could carry the worker's words
+		// (review of #127).
+		receptionNote("受付の判定", "worker: readiness assessment failed: "+cutoff+"; "+worker.CutoffAskedAgainPhrase),
+		receptionNote("受付の判定", "worker: readiness assessment failed: "+cutoff+"; "+worker.CutoffAtCeilingPhrase),
 		receptionNote("契約の導出", "worker: contract derivation failed: "+worker.NoTargetFileChosen),
 		receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens)"),
 	}
@@ -515,6 +522,13 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 	for _, note := range notes {
 		if note == "" {
 			t.Fatal("a note was empty")
+		}
+		// Every note opens by naming what stopped. Those two openings were
+		// among the sentences still free to delete, and losing one leaves a
+		// note beginning mid-sentence (review of #127).
+		if !strings.HasPrefix(note, "受付の AI (") && !strings.HasPrefix(note, "受付処理 (") &&
+			!strings.HasPrefix(note, "この依頼で変更するファイルを決められなかった") {
+			t.Errorf("a note does not open by naming what stopped: %q", note)
 		}
 		for _, instruction := range []string{"ください", "出し直すと", "出し直して"} {
 			if strings.Contains(note, instruction) {
