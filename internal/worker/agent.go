@@ -151,8 +151,16 @@ func RunAgentUnlessHalted(ctx context.Context, config AgentConfig, workspace, pr
 		return outcome, false, err
 	}
 	if haltFile != "" {
-		if info, statErr := os.Lstat(filepath.Join(root, haltFile)); statErr == nil && info.Mode().IsRegular() {
+		switch info, statErr := os.Lstat(filepath.Join(root, haltFile)); {
+		case statErr == nil && info.Mode().IsRegular():
 			return outcome, true, nil
+		case statErr == nil:
+			// A symbolic link, a directory or a named pipe in the halt
+			// file's place: the scan below reports a link or a directory as
+			// a change outside the scope, but never a pipe (git does not
+			// list one), so the run would pass a scan of nothing. It is
+			// refused here by name instead.
+			return outcome, false, errors.New("the agent left " + haltFile + " as something other than a regular file")
 		}
 	}
 	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)

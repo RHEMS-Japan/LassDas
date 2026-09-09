@@ -149,3 +149,65 @@ func TestRunInstructionSealsTheAppliersObjectionWrittenInTheWorkingDirectory(t *
 		t.Fatalf("implementer with a design: %v", err)
 	}
 }
+
+// A run that did not finish leaves nothing for the card's second attempt to
+// read: the kanban re-dispatches a blocked card once, in the same working
+// copy, and an objection left behind by the dead attempt would be read as
+// that attempt's — either as an objection beside the edits the second
+// attempt made (losing a round that applied the design), or, if it changed
+// nothing, as this round's objection carrying the previous reason.
+func TestAFailedApplierLeavesNoObjectionForTheNextAttempt(t *testing.T) {
+	fixture := newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+		writeStandInAgent(t, binaries, "stand-in-applier",
+			`printf '{"reason":"a stale objection from the previous round","section":"files"}' > revise-design.json; exit 3`)
+		applier := config.Agents.Implementer
+		applier.ID = "applier-stand-in"
+		applier.Command = "stand-in-applier"
+		config.Agents.Applier = &applier
+	})
+	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	design := sealedDesignFor(t, fixture, "client/src/label.ts")
+	args := []string{"run-instruction", "--role", "applier", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+		"--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "applier-run.json"),
+		"--design", design, "--objection-out", fixture.path("history/design-1/objection.json")}
+	err := run(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("a dead applier: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(fixture.repoRoot, "revise-design.json")); statErr == nil {
+		t.Fatal("the dead attempt left its objection in the tree for the next attempt to read")
+	}
+	if _, statErr := os.Stat(fixture.path("history/design-1/objection.json")); statErr == nil {
+		t.Fatal("a run that did not finish sealed an objection")
+	}
+}
+
+// The halt file is honoured only as a regular file. A named pipe in its
+// place would otherwise pass every check: git does not list it, so the
+// scope scan sees an unchanged tree and the card succeeds having done
+// nothing.
+func TestAnApplierHaltThatIsNotARegularFileIsRefused(t *testing.T) {
+	fixture := newTunedAgentFixture(t, "true", "true", func(binaries string, config *worker.Config) {
+		writeStandInAgent(t, binaries, "stand-in-applier", `mkfifo revise-design.json`)
+		applier := config.Agents.Implementer
+		applier.ID = "applier-stand-in"
+		applier.Command = "stand-in-applier"
+		config.Agents.Applier = &applier
+	})
+	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
+	if err := os.WriteFile(instruction, []byte("Apply the design.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	design := sealedDesignFor(t, fixture, "client/src/label.ts")
+	err := run(context.Background(), []string{"run-instruction", "--role", "applier", "--config", fixture.configPath,
+		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "applier-run.json"),
+		"--design", design, "--objection-out", fixture.path("history/design-1/objection.json")})
+	if err == nil || !strings.Contains(err.Error(), "other than a regular file") {
+		t.Fatalf("a named pipe in the halt file's place: %v", err)
+	}
+}

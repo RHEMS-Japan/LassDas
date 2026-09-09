@@ -149,6 +149,20 @@ const maxObjectionBytes = 16 * 1024
 // names the same number.
 const maxObjectionReasonBytes = 600
 
+// boundedObjectionHead is the head of a value echoed back in a refusal, so
+// a long or ill-formed field cannot flood the card's log.
+func boundedObjectionHead(value string) string {
+	const limit = 64
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
+}
+
 // objectionFileName is the file the applier writes at the root of its
 // working copy to stop instead of editing (docs/INVESTIGATING_DESIGNER.md §7).
 const objectionFileName = "revise-design.json"
@@ -176,14 +190,25 @@ func sealDesignObjection(path, out string, draft worker.TicketDraft, baseSHA str
 		Reason  string `json:"reason"`
 		Section string `json:"section"`
 	}
+	if !utf8.Valid(raw) {
+		// json.Unmarshal would turn the invalid bytes into U+FFFD and seal
+		// the replacement characters as the reason, so the file is checked
+		// before it is decoded.
+		return false, errors.New("the applier's objection is not valid UTF-8")
+	}
 	if err := json.Unmarshal(raw, &objection); err != nil {
 		return false, errors.New("the applier's objection is not a readable reason: the file is not the contract's JSON")
 	}
-	if reason := strings.TrimSpace(objection.Reason); reason == "" || len(reason) > maxObjectionReasonBytes || !utf8.ValidString(reason) {
+	if reason := strings.TrimSpace(objection.Reason); reason == "" || len(reason) > maxObjectionReasonBytes {
 		return false, fmt.Errorf("the applier's objection is not a readable reason: it must be 1 to %d bytes of text (got %d)", maxObjectionReasonBytes, len(reason))
 	}
-	if !objectionSections[objection.Section] {
+	if section := strings.TrimSpace(objection.Section); section == "" {
+		// Not saying which part is the default: the whole approach.
 		objection.Section = "approach"
+	} else if !objectionSections[section] {
+		return false, fmt.Errorf("the applier's objection names section %q, which is not one of cause, approach, files, verification, blast_radius, not_doing", boundedObjectionHead(section))
+	} else {
+		objection.Section = section
 	}
 	record := DesignObjection{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: stage,

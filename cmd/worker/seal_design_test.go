@@ -177,6 +177,40 @@ func TestSealTurnsObjectionIntoDesignRound(t *testing.T) {
 	if err := fixture3.sealCandidate(t, "--design", design3, "--objection", fixture3.path("revise-design.json"), "--objection-out", fixture3.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "could not be read") {
 		t.Fatalf("oversized objection accepted: %v", err)
 	}
+	// A section that is not one of the six is named, not silently rewritten;
+	// invalid UTF-8 is refused before it is decoded (json would replace the
+	// bytes and seal the replacement characters as the reason).
+	fixture4 := newAgentFixture(t, "true", "true")
+	design4 := sealedDesignFor(t, fixture4, "client/src/label.ts")
+	if err := os.WriteFile(fixture4.path("revise-design.json"), []byte(`{"reason":"the label lives elsewhere","section":"totally-unknown"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture4.sealCandidate(t, "--design", design4, "--objection", fixture4.path("revise-design.json"), "--objection-out", fixture4.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), `names section "totally-unknown"`) {
+		t.Fatalf("unknown section: %v", err)
+	}
+	fixture5 := newAgentFixture(t, "true", "true")
+	design5 := sealedDesignFor(t, fixture5, "client/src/label.ts")
+	if err := os.WriteFile(fixture5.path("revise-design.json"), append([]byte(`{"reason":"bad bytes `), append([]byte{0xff, 0xfe}, []byte(`","section":"files"}`)...)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture5.sealCandidate(t, "--design", design5, "--objection", fixture5.path("revise-design.json"), "--objection-out", fixture5.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("invalid UTF-8: %v", err)
+	}
+	// An empty section stays the default: not saying which part is the whole approach.
+	fixture6 := newAgentFixture(t, "true", "true")
+	design6 := sealedDesignFor(t, fixture6, "client/src/label.ts")
+	if err := os.WriteFile(fixture6.path("revise-design.json"), []byte(`{"reason":"the design cannot be followed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture6.sealCandidate(t, "--design", design6, "--objection", fixture6.path("revise-design.json"), "--objection-out", fixture6.path("history/design-1/objection.json")); err == nil || !strings.Contains(err.Error(), "objected") {
+		t.Fatalf("empty section: %v", err)
+	}
+	var defaulted DesignObjection
+	readAgentArtifact(t, fixture6.path("history/design-1/objection.json"), worker.MaxArtifactJSONBytes, &defaulted)
+	if defaulted.Section != "approach" {
+		t.Fatalf("an unstated section became %q", defaulted.Section)
+	}
+
 	// An unreadable objection is refused rather than silently ignored.
 	fixture2 := newAgentFixture(t, "true", "true")
 	design2 := sealedDesignFor(t, fixture2, "client/src/label.ts")

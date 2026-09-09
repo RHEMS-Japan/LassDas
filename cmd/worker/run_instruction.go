@@ -113,6 +113,15 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		_ = worker.WriteJSONFileExclusive(*runOutPath, run, worker.MaxArtifactJSONBytes)
 	}
 	if runErr != nil {
+		if haltFile != "" {
+			// The run did not finish, so nothing it left is a finished
+			// statement — and the card is re-dispatched once. A halt file
+			// left here would be read by that attempt: as an objection
+			// beside the edits it made (losing a round that applied the
+			// design), or, if it changed nothing, as this round's objection
+			// carrying the previous attempt's reason (#103 review).
+			_ = os.Remove(filepath.Join(*repoRoot, haltFile))
+		}
 		return errors.New("the " + *role + " did not finish: " + runErr.Error())
 	}
 	if halted {
