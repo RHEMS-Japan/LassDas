@@ -108,7 +108,21 @@ var (
 	// one such answer ended a design round's investigation as model_failed
 	// on its first call).
 	errModelResponseUpstream = errors.New("the provider ended the turn with an error")
+	// errModelAllowanceSpent marks a call that ran out of its own time
+	// without answering: no answer, no usage, no cost, and five minutes
+	// gone. converseTurn asks again once — not for the provider's whole
+	// ladder, because three more would spend most of a round on one
+	// question. Its text keeps the transport's prefix, so what reads these
+	// failures for the requester still recognises it.
+	errModelAllowanceSpent = errors.New("model invocation failed: the call spent its allowance without answering")
 )
+
+// allowanceTurnRetries is how many times one turn asks again after a call
+// spent its allowance. One: at ModelInvocationTimeout each ask costs five
+// minutes with nothing to show, and the investigating designer's own budget
+// is 1,800 seconds (docs/INVESTIGATING_DESIGNER.md 3.1), so a second ladder
+// of three would put one unanswered question at 69% of a round.
+const allowanceTurnRetries = 1
 
 // malformedTurnRetries is how many out-of-shape responses in a row one turn
 // tolerates before its failure travels; malformedTurnDelay is the pause
@@ -190,11 +204,30 @@ func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
 // ChatCompletionsAPI implementation may echo anything - and lets only
 // the marked error itself travel, because which failure it was (a
 // timeout, a refused connection, an HTTP status) decides the remedy.
-type SafeModelError struct{ message string }
+type SafeModelError struct {
+	message string
+	// cause is the error this one stands for, kept unexported and reachable
+	// only through errors.Is/As: the message is still the only text that
+	// travels, and a caller can ask what kind of failure it was without
+	// reading anything the transport wrote.
+	cause error
+}
 
 func (e *SafeModelError) Error() string { return e.message }
 
+// Unwrap lets a caller ask what the failure was — a spent allowance, a
+// refused connection — without the upstream text reaching a prompt or a
+// record. Without it, every failure looks the same to errors.Is, and a
+// remedy that depends on the kind (asking again after a timeout) can never
+// fire (review of #121: measured false in production, true only against a
+// test double).
+func (e *SafeModelError) Unwrap() error { return e.cause }
+
 func safeModelError(message string) error { return &SafeModelError{message: message} }
+
+func safeModelErrorFor(message string, cause error) error {
+	return &SafeModelError{message: message, cause: cause}
+}
 
 func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	if g == nil || g.client == nil || ctx == nil {
@@ -285,7 +318,7 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		// key travels in a header, never in the error.
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			return nil, 0, nil, safeModelError("model invocation failed: " + urlErr.Err.Error())
+			return nil, 0, nil, safeModelErrorFor("model invocation failed: "+urlErr.Err.Error(), urlErr.Err)
 		}
 		return nil, 0, nil, safeModelError("model invocation failed")
 	}
@@ -335,6 +368,18 @@ func NewModelInvoker(api ChatCompletionsAPI) (*ModelInvoker, error) {
 		return nil, errors.New("model API is required")
 	}
 	return &ModelInvoker{api: api}, nil
+}
+
+// spentItsAllowance reports whether a failed call ran out of time rather
+// than failing for a reason asking again cannot fix. Two clocks can end it:
+// the invocation context, and the HTTP client's own timeout, whose error
+// says so in words rather than through context.DeadlineExceeded.
+func spentItsAllowance(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func (i *ModelInvoker) GenerateCandidate(
@@ -562,7 +607,19 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // makes at most 6 calls (3 provider errors, 1 cutoff, 1 malformed, 1
 // final) with 42 s of pauses between them; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
-// round's wall (the context) is what ends a turn that keeps failing; an error after the widened re-ask still carries the
+// round's wall (the context) is what ends a turn that keeps failing. A call
+// that spent its allowance (errModelAllowanceSpent) shares the provider's
+// budget, so that bound is unchanged, but stops after allowanceTurnRetries
+// of its own, because unlike a provider error its asks cost minutes rather
+// than milliseconds: a turn whose every call runs out costs 2 x
+// ModelInvocationTimeout plus 2 s, 10 min 2 s at the present five minutes.
+// What ends such a turn is the context the caller passed: for the
+// investigating designer that is investigationWallSeconds (1,800) less what
+// the earlier rounds of the same delivery already spent
+// (cmd/worker/investigate.go), so a spent allowance that is then answered
+// still takes its five minutes out of that budget and carries the loss into
+// the next round. ChainStage.MaxRuntimeSeconds is a different thing: the
+// board killing the process from outside, not a deadline the turn sees; an error after the widened re-ask still carries the
 // cutoff that caused it, so the caller's log names the cutoff whatever
 // ended the turn. The widened allowance lives for this turn only: a
 // conversation whose every answer is long pays one cut-off request per
@@ -573,6 +630,7 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
 	malformed := 0
 	upstream := 0
+	allowance := 0
 	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
@@ -581,6 +639,16 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 		}
 		delay := malformedTurnDelay
 		switch {
+		case errors.Is(err, errModelAllowanceSpent):
+			// Shares the provider's budget so the turn's bound is unchanged,
+			// and stops first on its own, because its asks cost minutes.
+			if allowance >= allowanceTurnRetries || upstream >= len(gatewayRetryPauses) {
+				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d such calls", err, allowance+1))
+			}
+			delay = gatewayRetryPauses[upstream]
+			upstream++
+			allowance++
+			fmt.Fprintf(os.Stderr, "worker: the call spent its allowance without answering; asking again in %s (retry %d of %d)\n", delay, allowance, allowanceTurnRetries)
 		case errors.Is(err, errModelResponseUpstream):
 			// The provider's own error inside a 200: the same transient as a
 			// gateway 5xx, asked again on the gateway's schedule.
@@ -660,14 +728,26 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 	}
 	started := time.Now()
 	invocationContext, cancel := context.WithTimeout(ctx, ModelInvocationTimeout)
-	defer cancel()
 	output, err := i.api.ChatCompletions(invocationContext, endpoint, request)
+	cancel()
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		// The marked error itself travels, never the wrapper around it: a
 		// wrapping implementation could smuggle upstream text around the
 		// mark, and the mark's own message is by definition the
 		// transport's.
+		if spentItsAllowance(err) && ctx.Err() == nil {
+			// A call that spends its whole allowance leaves nothing — no
+			// answer, no usage, no cost — so it is asked again by the turn
+			// rather than travelling at once, but on a shorter count than a
+			// provider's own error: it shares that error's budget, so the
+			// bound on one turn stays what the comment above converseTurn
+			// says, and stops after allowanceTurnRetries, because each ask
+			// costs ModelInvocationTimeout in real time. A live reception
+			// died on a spent allowance after thirteen runs that did not
+			// (2026-09-09).
+			return "", InvocationUsage{}, errModelAllowanceSpent
+		}
 		var safe *SafeModelError
 		if errors.As(err, &safe) {
 			return "", InvocationUsage{}, safe
