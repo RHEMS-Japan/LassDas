@@ -315,7 +315,7 @@ func (a modelAPI) ChatCompletions(ctx context.Context, endpoint worker.ModelEndp
 	return &response, err
 }
 func (w *Wizard) modelPreflight(ctx context.Context, s *State, secrets Secrets) error {
-	if err := DistinctKeys(s, secrets); err != nil {
+	if err := ValidateModelKeys(s, secrets); err != nil {
 		return err
 	}
 	if err := w.confirm(s, "全身元の疎通を試します。モデル API の呼び出しには費用が発生します"); err != nil {

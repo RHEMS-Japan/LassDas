@@ -19,7 +19,7 @@ import (
 
 func wizardFixture(t *testing.T) (*State, Secrets) {
 	t.Helper()
-	s := &State{Version: 1, Project: "sample-cli", Repository: "example/cli", RepositoryID: 1, DefaultBranch: "main", Branch: "develop", BaseSHA: strings.Repeat("a", 40), EngineRepository: "example/engine", EngineRepositoryID: 2, EngineSHA: strings.Repeat("b", 40), Image: "registry.example.com/engine@sha256:" + strings.Repeat("c", 64), DockerContext: "desktop-linux", BuildRecord: "https://example.com/build/1", Pins: map[string]string{"worker": strings.Repeat("d", 64), "controller": strings.Repeat("e", 64)}, Models: map[string]worker.ModelEndpoint{}, BaseURL: "https://models.example.com/v1", Completed: map[string]string{}, Checks: map[string]json.RawMessage{}, BoardPort: 9200, AutomationRunID: "run_20260908_" + strings.Repeat("a", 24)}
+	s := &State{Version: 1, Project: "sample-cli", Repository: "example/cli", RepositoryID: 1, DefaultBranch: "main", Branch: "develop", BaseSHA: strings.Repeat("a", 40), EngineRepository: "example/engine", EngineRepositoryID: 2, EngineSHA: strings.Repeat("b", 40), Image: "registry.example.com/engine@sha256:" + strings.Repeat("c", 64), DockerContext: "desktop-linux", BuildRecord: "https://example.com/build/1", Pins: map[string]string{"worker": strings.Repeat("d", 64), "controller": strings.Repeat("e", 64)}, Models: map[string]worker.ModelEndpoint{}, BaseURL: openRouterBaseURL, Completed: map[string]string{}, Checks: map[string]json.RawMessage{}, BoardPort: 9200, AutomationRunID: "run_20260908_" + strings.Repeat("a", 24)}
 	s.Mode = worker.ModeConfig{ID: "cli-change", AllowedFilePrefixes: []string{"main.go", "README.md"}, ForbiddenCandidateText: []string{"LassDas"}, MaxFiles: 8, MaxFileBytes: 393216, MaxTotalBytes: 1048576, MaxChangedLines: 3000, MaxChangedBytes: 196608, VerifyWorkingDirectory: ".", InstallCommand: []string{"go", "mod", "download"}, VerifyCommands: [][]string{{"go", "test", "./..."}}}
 	s.Tracker = runtimeconfig.TrackerConfig{Origin: "https://example.backlog.com", SpaceKey: "example", ProjectID: 1, ProjectKey: "EXAMPLE", AllowedCreatorID: 7, AllowedActivityType: 1, RequiredCategoryID: 9}
 	secrets := Secrets{"TARGET_GITHUB_TOKEN": "artificial-delivery-key", "BACKLOG_API_KEY": "artificial-bot-key", "LASSDAS_BOARD_USER": "operator", "LASSDAS_BOARD_PASS": "artificial-board-password", "LASSDAS_INTAKE_TARGET_KEY": "artificial-intake-key"}
@@ -293,7 +293,7 @@ func TestModelsResumeRepairsSavedDuplicateKeys(t *testing.T) {
 			})}}}
 			err = w.models(context.Background(), s, secrets)
 			if approve {
-				if err != nil || calls != 8 || DistinctKeys(s, secrets) != nil || len(ui.questions) != 8 {
+				if err != nil || calls != 8 || ValidateModelKeys(s, secrets) != nil || len(ui.questions) != 8 {
 					t.Fatalf("saved duplicate keys could not be repaired: err=%v calls=%d questions=%v", err, calls, ui.questions)
 				}
 			} else if err == nil || calls != 0 || len(ui.questions) != 0 {
@@ -437,6 +437,142 @@ func TestTrackerRequesterKeyRequiresConfirmationBeforeUse(t *testing.T) {
 				}
 			} else if saved["BACKLOG_API_KEY"] != key {
 				t.Fatal("runtime key changed")
+			}
+		})
+	}
+}
+
+func TestModelsUseOpenRouterWithoutEndpointInput(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.BaseURL = ""
+	ui := &fakeUI{approve: true}
+	calls := 0
+	w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.String() != "https://openrouter.ai/api/v1/chat/completions" {
+			t.Fatal("model credential sent outside OpenRouter")
+		}
+		return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+	})}}}
+	if err := w.models(context.Background(), s, secrets); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 8 || s.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Fatal("OpenRouter preflight incomplete")
+	}
+	for _, id := range ui.questions {
+		if id == "model-url" {
+			t.Fatal("URL input is still exposed")
+		}
+	}
+	config, _, env, err := Generate(s, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["LASSDAS_GATEWAY_BASE_URL"] != s.BaseURL || config.Models.Implementer.BaseURL != s.BaseURL {
+		t.Fatal("direct and profile endpoints differ")
+	}
+}
+
+func TestModelsDoNotRedirectExistingProviderCredentials(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.BaseURL = "https://models.example.com/v1"
+	ui := &fakeUI{approve: true}
+	w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatal("saved credentials sent to a different provider")
+		return nil, nil
+	})}}}
+	before, _ := marshal(s)
+	beforeKeys, _ := marshal(secrets)
+	if err := w.models(context.Background(), s, secrets); err == nil {
+		t.Fatal("saved provider silently changed")
+	}
+	after, _ := marshal(s)
+	afterKeys, _ := marshal(secrets)
+	if string(before) != string(after) || string(beforeKeys) != string(afterKeys) || len(ui.questions) != 0 {
+		t.Fatal("saved state or credentials changed before provider check")
+	}
+}
+
+func TestModelKeysDefaultToOneAndSeparateKeysAreOptional(t *testing.T) {
+	for _, separate := range []bool{false, true} {
+		t.Run(fmt.Sprint(separate), func(t *testing.T) {
+			s, secrets := wizardFixture(t)
+			s.ModelKeyMode = ""
+			answers := map[string]string{}
+			if separate {
+				answers["separate-model-keys"] = "yes"
+			}
+			names := []string{"LASSDAS_INTAKE_TARGET_KEY"}
+			for _, role := range allRoles(s) {
+				names = append(names, keyName(role))
+			}
+			for _, name := range names {
+				answers[name] = secrets[name]
+				delete(secrets, name)
+			}
+			ui := &fakeUI{approve: true, answers: answers}
+			calls := 0
+			identities := map[string]bool{}
+			w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				identities[req.Header.Get("Authorization")] = true
+				return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+			})}}}
+			if err := w.models(context.Background(), s, secrets); err != nil {
+				t.Fatal(err)
+			}
+			keyInputs := 0
+			for _, id := range ui.questions {
+				if strings.HasSuffix(id, "_KEY") {
+					keyInputs++
+				}
+			}
+			want := 1
+			mode := modelKeysShared
+			if separate {
+				want = 8
+				mode = modelKeysSeparate
+			}
+			if calls != 8 || len(identities) != want || keyInputs != want || s.ModelKeyMode != mode {
+				t.Fatalf("calls=%d identities=%d key inputs=%d mode=%s", calls, len(identities), keyInputs, s.ModelKeyMode)
+			}
+			config, _, env, err := Generate(s, secrets)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := marshal(config)
+			for _, name := range names {
+				if env[name] == "" || strings.Contains(string(raw), env[name]) {
+					t.Fatal("key missing or leaked into config")
+				}
+				if !separate && env[name] != secrets["LASSDAS_INTAKE_TARGET_KEY"] {
+					t.Fatal("shared key did not reach all roles")
+				}
+			}
+			// Persist the selected mode so a resumed shared setup never asks
+			// for eight keys, and a role-key setup never silently collapses.
+			dir := t.TempDir()
+			if err := Save(dir, s, secrets); err != nil {
+				t.Fatal(err)
+			}
+			loaded, saved, err := Load(dir)
+			if err != nil || loaded.ModelKeyMode != mode || ValidateModelKeys(loaded, saved) != nil {
+				t.Fatal("key mode did not survive resume")
+			}
+			loaded.Completed["models"] = "previous"
+			resumeUI := &fakeUI{approve: true}
+			w.UI = resumeUI
+			if err := w.models(context.Background(), loaded, saved); err != nil || len(resumeUI.questions) != 0 || loaded.ModelKeyMode != mode {
+				t.Fatal("resume reentered credentials or changed key mode")
+			}
+			if separate {
+				saved[keyName("applier")] = saved[keyName("implementer")]
+			} else {
+				saved[keyName("applier")] = "artificial-unexpected-key"
+			}
+			if _, _, _, err := Generate(loaded, saved); err == nil {
+				t.Fatal("key mode mismatch accepted")
 			}
 		})
 	}

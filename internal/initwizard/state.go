@@ -45,6 +45,7 @@ type State struct {
 	StatusNames           [4]string                       `json:"status_names"`
 	Models                map[string]worker.ModelEndpoint `json:"models"`
 	BaseURL               string                          `json:"base_url"`
+	ModelKeyMode          string                          `json:"model_key_mode,omitempty"`
 	SeparateDesignReviews bool                            `json:"separate_design_reviews"`
 	BoardPort             int                             `json:"board_port"`
 	AutomationRunID       string                          `json:"automation_run_id"`
