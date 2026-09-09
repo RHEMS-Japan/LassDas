@@ -59,6 +59,54 @@ func TestGeneratedConfigAcceptedByController(t *testing.T) {
 	}
 }
 
+func TestGeneratedHermesLaunchUsesWorkingCopyAndPreservesPrompt(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	config, _, _, err := Generate(s, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "working copy ' with $syntax")
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	for _, dir := range []string{workspace, home, bin} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const readme = "working-copy contents\n"
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte(readme), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the generated command boundary without contacting a model. Hermes
+	// one-shot tools resolve relative paths through TERMINAL_CWD, not HOME.
+	const fakeHermes = "#!/bin/sh\nprintf '%s\\000' \"$TERMINAL_CWD\" \"$@\"\ncat \"$TERMINAL_CWD/README.md\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "hermes"), []byte(fakeHermes), 0700); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "Apply the design.\n\"quotes\" 'quotes'; $(touch prompt-executed) `touch prompt-executed`\n"
+	agent := config.Agents.Applier
+	args := append(append([]string{}, agent.Args...), prompt)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd := exec.Command(agent.Command, args...)
+	cmd.Dir = workspace
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "TERMINAL_CWD=" + home}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated Hermes launch failed: %v\n%s", err, output)
+	}
+	want := strings.Join([]string{workspace, "--profile", agent.Profile, "-z", prompt, readme}, "\x00")
+	if string(output) != want {
+		t.Fatalf("working copy or positional arguments changed:\ngot %q\nwant %q", output, want)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "prompt-executed")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prompt was interpreted as shell commands: %v", err)
+	}
+}
+
 func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T) {
 	for _, separate := range []bool{false, true} {
 		s, secrets := wizardFixture(t)
