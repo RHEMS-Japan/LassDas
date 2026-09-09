@@ -51,6 +51,18 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 		output := chatOutput(strings.TrimPrefix(answer, lengthMarker))
 		output.Choices[0].FinishReason = "length"
 		return output, nil
+	case strings.HasPrefix(answer, providerErrorMarker):
+		output := chatOutput(strings.TrimPrefix(answer, providerErrorMarker))
+		output.Choices[0].FinishReason = ChatFinishError
+		return output, nil
+	case strings.HasPrefix(answer, bareErrorMarker):
+		// The provider's error with nothing else: no usage, empty content.
+		output := chatOutput("")
+		output.Choices[0].FinishReason = ChatFinishError
+		output.Usage = nil
+		return output, nil
+	case answer == topLevelErrorMarker:
+		return &ChatResponse{ID: "gen-topLevelError000000000", Error: &ChatResponseError{Code: 502}}, nil
 	}
 	return chatOutput(answer), nil
 }
@@ -64,6 +76,9 @@ const (
 	emptyContentMarker   = "\x00empty\x00"
 	contentFilterMarker  = "\x00filtered\x00"
 	lengthMarker         = "\x00length\x00"
+	providerErrorMarker  = "\x00error\x00"
+	bareErrorMarker      = "\x00bare-error\x00"
+	topLevelErrorMarker  = "\x00top-level-error\x00"
 )
 
 func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, string) {
@@ -553,5 +568,58 @@ func TestRevisePromptStatesHowAPreviousFindingIsAnswered(t *testing.T) {
 	prompt := investigationTaskPrompt(input)
 	if !strings.Contains(prompt, `"previous_round":{"design"`) || strings.Contains(prompt, "previous_round_rule") || strings.Contains(prompt, "Resolve or refute") {
 		t.Errorf("revise task must carry the previous round as data and no rule: %s", prompt)
+	}
+}
+
+// A turn the provider ends with its own error (finish_reason=error inside
+// a 200) is asked again on the gateway's schedule, up to its count; one
+// more error than that travels named with the attempt count (live
+// 2026-09-09: one such answer ended a design round's investigation on its
+// first call). A cancelled context ends the wait at once.
+func TestInvestigateAsksAgainAfterAProviderError(t *testing.T) {
+	saved := gatewayRetryPauses
+	gatewayRetryPauses = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { gatewayRetryPauses = saved })
+	probeList := `{"probe":{"probe":"repo.list"}}`
+	report := `{"report":{"questions":["What is there?"],"findings":[{"claim":"The listing was taken","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Nothing."}}`
+	input, _ := investigationFixture(t, 10)
+	api := &loopScriptAPI{answers: []string{providerErrorMarker + probeList, providerErrorMarker + probeList, providerErrorMarker + probeList, probeList, report}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("Investigate after three provider errors: %v (%s)", err, result.Incomplete)
+	}
+	if len(api.requests) != 5 || result.Turns != 2 || result.Investigation.MeasurementsCount != 1 {
+		t.Fatalf("requests %d turns %d measurements %d; want the errored turn asked again three times", len(api.requests), result.Turns, result.Investigation.MeasurementsCount)
+	}
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{providerErrorMarker + probeList, providerErrorMarker + probeList, providerErrorMarker + probeList, providerErrorMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	_, err = invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if !errors.Is(err, errModelResponseUpstream) || len(api.requests) != 4 || !strings.Contains(err.Error(), "finish_reason=error") || !strings.Contains(err.Error(), "after 4 provider errors") {
+		t.Fatalf("four provider errors in a row: err = %v after %d requests, want the error named after 4", err, len(api.requests))
+	}
+	gatewayRetryPauses = []time.Duration{10 * time.Second}
+	input, _ = investigationFixture(t, 10)
+	api = &loopScriptAPI{answers: []string{providerErrorMarker + probeList, probeList}}
+	invoker, _ = NewModelInvoker(api)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	began := time.Now()
+	if _, err := invoker.Investigate(ctx, ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err == nil || time.Since(began) > 5*time.Second || len(api.requests) != 1 {
+		t.Fatalf("a cancelled wait: err = %v after %s and %d requests, want the wait ended by the context", err, time.Since(began), len(api.requests))
+	}
+	// The provider's error may arrive with no usage and no content, or as a
+	// top-level error with no choices: both are the same transient, judged
+	// before the usage and content checks, and asked again the same way.
+	gatewayRetryPauses = []time.Duration{0, 0, 0}
+	for name, marker := range map[string]string{"bare error": bareErrorMarker + probeList, "top-level error": topLevelErrorMarker} {
+		input, _ = investigationFixture(t, 10)
+		api = &loopScriptAPI{answers: []string{marker, marker, probeList, report}}
+		invoker, _ = NewModelInvoker(api)
+		result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+		if err != nil || len(api.requests) != 4 || result.Investigation.MeasurementsCount != 1 {
+			t.Fatalf("%s: err = %v after %d requests, want two errors asked again and the round completed", name, err, len(api.requests))
+		}
 	}
 }
