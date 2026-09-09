@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -310,8 +311,9 @@ func TestARequestedNewFileIsOfferedAndAccepted(t *testing.T) {
 	if err := validateDerivedFiles([]string{"docs/SOMETHING_ELSE.md"}, draft, listing, consumer); err == nil {
 		t.Fatal("a path nobody named was accepted")
 	}
-	// Nor one outside the writable prefixes, or hidden, even when named.
-	for _, refused := range []string{"config/secret.yaml", ".github/workflows/deploy.yml"} {
+	// Nor one outside the writable prefixes, or hidden inside them, or a
+	// path that escapes, even when the requester named it.
+	for _, refused := range []string{"config/secret.yaml", ".github/workflows/deploy.yml", "docs/.secret.md", "docs/../etc/passwd"} {
 		if err := validateDerivedFiles([]string{refused}, draft, listing, consumer); err == nil {
 			t.Errorf("%q was accepted", refused)
 		}
@@ -326,6 +328,29 @@ func TestARequestedNewFileIsOfferedAndAccepted(t *testing.T) {
 	}
 	if !strings.Contains(deriveSystemPrompt(consumer), "candidate_paths or in new_file_candidates") {
 		t.Error("the instruction still allows only existing paths")
+	}
+
+	// The same rules filter what is offered, not only what is accepted: a
+	// hidden path and an escaping path inside the writable prefixes are
+	// never shown to the model either.
+	tricky := TicketDraft{Summary: "docs/.secret.md", Request: "docs/../etc/passwd と docs/.hidden/x.md と ./docs/plain.md を作ってください。"}
+	offeredTricky := NewFileCandidates(tricky, listing, consumer)
+	if len(offeredTricky) != 1 || offeredTricky[0] != "docs/plain.md" {
+		t.Fatalf("the filtered offer = %v", offeredTricky)
+	}
+	// What the requester wrote is what is offered: a path is never trimmed
+	// into another one.
+	rewritten := TicketDraft{Request: "../docs/escape.md を作ってください。"}
+	if offered := NewFileCandidates(rewritten, listing, consumer); len(offered) != 0 {
+		t.Errorf("a path was rewritten into the writable area: %v", offered)
+	}
+	// The offer is bounded, so a ticket that is mostly paths cannot fill it.
+	many := make([]string, 0, 40)
+	for index := 0; index < 40; index++ {
+		many = append(many, fmt.Sprintf("docs/f%02d.md", index))
+	}
+	if offered := NewFileCandidates(TicketDraft{Request: strings.Join(many, " ")}, listing, consumer); len(offered) != maxNewFileCandidates {
+		t.Errorf("the offer is not bounded: %d", len(offered))
 	}
 
 	// A request naming no file offers nothing; the key disappears entirely.

@@ -17,7 +17,7 @@ const (
 	maxCandidatePaths        = 2000
 	maxCandidateListingBytes = 256 * 1024
 	maxDeriveResponseBytes   = 16 * 1024
-	derivePromptVersion      = 1
+	derivePromptVersion      = 2
 )
 
 // CandidateListing is the deterministic set of files the automation is allowed
@@ -199,6 +199,12 @@ type ContractDerivation struct {
 	DerivationSHA256 string          `json:"derivation_sha256"`
 }
 
+// NoTargetFileChosen is the engine's own phrase for a derivation whose model
+// answered with an empty file list. The runner matches it to tell the
+// requester what happened, so it must not be a phrase a model could put in
+// its own answer: the answer's head travels in the same error text.
+const NoTargetFileChosen = "derive-no-target-file-chosen"
+
 // maxNewFileCandidates bounds how many not-yet-existing paths a ticket may
 // offer. A request names one file, occasionally two; the bound keeps a
 // ticket that is mostly paths from filling the choice with them.
@@ -207,7 +213,17 @@ const maxNewFileCandidates = 8
 // newFileCandidatePattern matches a path-looking token in the request text.
 // Anything it finds is then held to the same rules as a listed candidate,
 // so a host name or a sentence fragment cannot survive the filter.
-var newFileCandidatePattern = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,8}`)
+var newFileCandidatePattern = regexp.MustCompile(`(?:\./)?[A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,8}`)
+
+// pathRune reports whether a character can be part of a path token. A match
+// that starts right after one is the tail of a longer token the pattern
+// could not take whole ("../docs/x.md" would otherwise be offered as
+// "docs/x.md"), so it is dropped rather than trimmed into something the
+// requester did not write.
+func pathRune(b byte) bool {
+	return b == '.' || b == '/' || b == '-' || b == '_' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
 
 // NewFileCandidates are the paths the requester named that do not exist yet:
 // a request to create a file has no answer among the offered candidates, and
@@ -220,8 +236,16 @@ var newFileCandidatePattern = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9_./-]*\.[
 func NewFileCandidates(draft TicketDraft, listing CandidateListing, consumer ConsumerConfig) []string {
 	found := make(map[string]struct{})
 	for _, text := range []string{draft.Summary, draft.Request} {
-		for _, match := range newFileCandidatePattern.FindAllString(text, -1) {
-			candidate := strings.Trim(match, "./-")
+		for _, bounds := range newFileCandidatePattern.FindAllStringIndex(text, -1) {
+			if bounds[0] > 0 && pathRune(text[bounds[0]-1]) {
+				continue
+			}
+			match := text[bounds[0]:bounds[1]]
+			// Only a leading "./" is removed. Trimming the ends would
+			// rewrite what the requester wrote ("../docs/x.md" is not
+			// "docs/x.md"), and the instruction says a path is never
+			// altered.
+			candidate := strings.TrimPrefix(match, "./")
 			if !validRelativePath(candidate) || hasHiddenComponent(candidate) ||
 				!allowedPath(candidate, consumer.Mode.AllowedFilePrefixes) || listing.contains(candidate) {
 				continue
@@ -364,7 +388,7 @@ func DecodeModelDeriveOutput(encoded []byte) (ModelDeriveOutput, error) {
 		return ModelDeriveOutput{}, errors.New("model derive response is not the demanded strict json")
 	}
 	if len(output.Files) == 0 {
-		return ModelDeriveOutput{}, errors.New("model derive output names no files")
+		return ModelDeriveOutput{}, errors.New(NoTargetFileChosen)
 	}
 	return output, nil
 }

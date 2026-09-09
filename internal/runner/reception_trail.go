@@ -40,12 +40,33 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // model answered that none of the offered paths can carry the change
 // (internal/worker DeriveTargetFiles). Like the cutoff marker it reaches
 // the runner only through the step's stderr.
-const noFileChosenMarker = "names no files"
+const noFileChosenReason = "contract derivation failed: " + worker.NoTargetFileChosen
+
+// noFileChosen reports whether the derivation itself ended for want of a
+// file to change. The reason must sit where the worker writes its own
+// reason — right after the step's prefix — because the same line carries
+// the head of the model's answer, and the requester's words reach that
+// answer: a phrase anywhere in the line would let a ticket choose the note
+// the requester is shown.
+func noFileChosen(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "worker:"))
+		if strings.HasPrefix(reason, noFileChosenReason) {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveStage is the reception stage whose failure the no-file note explains.
+// The note names what to do about a derivation, so it must not appear under
+// the readiness stages even if their models write the same words.
+const deriveStage = "契約の導出"
 
 // receptionCutoffNote renders the requester-facing note for a step's stderr,
 // or "" when the step did not fail for a reason the requester can be told.
 func receptionCutoffNote(stage, stderr string) string {
-	if strings.Contains(stderr, noFileChosenMarker) {
+	if stage == deriveStage && noFileChosen(stderr) {
 		return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
 			"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
 			"依頼文に、変更するファイルの位置を書き足して出し直してください (例: docs/ の下に新しく作る場合は、その相対パスをそのまま書く)。\n"

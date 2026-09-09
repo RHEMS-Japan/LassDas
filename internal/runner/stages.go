@@ -180,7 +180,7 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 			"--derivation-out", p.path("derivation.json"),
 			"--out", p.path("readiness-ticket.json"),
 		}, p.modelKeyEnv()...); err != nil || code != 0 {
-			p.noteReceptionCutoff("契約の導出")
+			p.noteReceptionCutoff(deriveStage)
 			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -155,6 +156,19 @@ func ReadSourceSnapshot(repoRoot, baseSHA string, request TicketRequest, config 
 	for _, name := range request.TargetFiles {
 		filename, err := regularFileWithin(root, name)
 		if err != nil {
+			// A target the change is to create has no before-side: the file
+			// is absent from the base, and the snapshot records that rather
+			// than refusing the run. Only a name the request already holds
+			// reaches here, and that name passed the writable-prefix rules
+			// when the target files were derived. Anything else that makes
+			// the path unreadable — a component that is a symlink, a
+			// directory in the way — is still a refusal.
+			if created, createdErr := newFileTarget(root, name); createdErr != nil {
+				return SourceSnapshot{}, fmt.Errorf("source file %q is invalid", name)
+			} else if created {
+				files = append(files, SourceFile{Path: name, GitBlobSHA: gitBlobDigest(nil), SHA256: digestBytes(nil), Created: true})
+				continue
+			}
 			return SourceSnapshot{}, fmt.Errorf("source file %q is invalid", name)
 		}
 		content, err := readTextFile(filename, consumer.Mode.MaxFileBytes)
@@ -559,6 +573,40 @@ func validateModelReviewOutput(output ModelReviewOutput, request TicketRequest) 
 		}
 	}
 	return nil
+}
+
+// newFileTarget reports whether a target the request names is simply absent
+// from the base — the shape of a request to create a file. Every component
+// that does exist must be an ordinary directory: a symlink or a file in the
+// path is a refusal, not a file to create.
+func newFileTarget(root, relative string) (bool, error) {
+	if !validRelativePath(relative) || hasHiddenComponent(relative) {
+		return false, errors.New("relative path is invalid")
+	}
+	current := root
+	parts := strings.Split(filepath.FromSlash(relative), string(filepath.Separator))
+	for index, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return true, nil
+			}
+			return false, errors.New("path component is invalid")
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return false, errors.New("path component is invalid")
+		}
+		if index < len(parts)-1 && !info.IsDir() {
+			return false, errors.New("path component is invalid")
+		}
+		if index == len(parts)-1 {
+			// The name exists after all: whatever it is, it is not a file
+			// this run may create, and the ordinary reader refused it.
+			return false, errors.New("path component is invalid")
+		}
+	}
+	return false, errors.New("path component is invalid")
 }
 
 func regularFileWithin(root, relative string) (string, error) {
