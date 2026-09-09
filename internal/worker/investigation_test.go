@@ -695,7 +695,7 @@ func TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart(t *testing.T) {
 		t.Error("the index carries outputs; the role reads what it needs")
 	}
 	contract := investigationSystemPrompt(ModeDesign, true)
-	for _, want := range []string{"Offsets are 0 (the start of any recorded output", "USER_DATA_JSON.earlier_records lists every record of the run so far; read one from offset 0"} {
+	for _, want := range []string{"Offsets are 0 (the start of a recorded output", "USER_DATA_JSON.earlier_records lists every record of the run so far; read one from offset 0"} {
 		if !strings.Contains(contract, want) {
 			t.Errorf("revise contract lacks %q", want)
 		}

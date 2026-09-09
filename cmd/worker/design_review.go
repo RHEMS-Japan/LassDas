@@ -90,7 +90,7 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	measurementsFile := *measurementsPath
 	if worker.AgentLauncherConfigured() {
 		homeFiles = map[string]string{reviewMeasurementsCopy: *measurementsPath}
-		measurementsFile = "$HOME/" + reviewMeasurementsCopy
+		measurementsFile = worker.AgentHomePlaceholder + "/" + reviewMeasurementsCopy
 	}
 	measurements, err := probe.ReadPrefix(*measurementsPath, inputs.investigation.MeasurementsCount)
 	if err != nil {
@@ -311,14 +311,16 @@ const reviewMeasurementsCopy = "measurements.jsonl"
 
 // reviewTicket is the requester's text the reviewer judges the design
 // against: what must appear, what must be gone, where, and the request.
+// It carries no target_files: those are the machine's pre-investigation
+// guess, not the requester's words, and the seal holds the design's files
+// on its own.
 type reviewTicket struct {
-	IssueKey         string   `json:"issue_key,omitempty"`
-	Summary          string   `json:"summary"`
-	Request          string   `json:"request"`
-	TargetFiles      []string `json:"target_files,omitempty"`
-	VerificationPath string   `json:"verification_path,omitempty"`
-	ExpectedText     string   `json:"expected_text,omitempty"`
-	AbsentText       string   `json:"absent_text,omitempty"`
+	IssueKey         string `json:"issue_key,omitempty"`
+	Summary          string `json:"summary"`
+	Request          string `json:"request"`
+	VerificationPath string `json:"verification_path,omitempty"`
+	ExpectedText     string `json:"expected_text,omitempty"`
+	AbsentText       string `json:"absent_text,omitempty"`
 }
 
 // reviewCatalogueEntry is one probe the investigating designer can use, so
@@ -328,38 +330,46 @@ type reviewCatalogueEntry struct {
 	Kind string `json:"kind"`
 }
 
+// reviewCatalogue is the designer's own catalogue — the consumer's probes
+// plus the built-in repository probes — as the role saw it.
 func reviewCatalogue(config worker.Config) []reviewCatalogueEntry {
-	entries := make([]reviewCatalogueEntry, 0, len(config.Probes))
-	for _, spec := range config.Probes {
+	catalog, err := config.ProbeCatalog()
+	if err != nil {
+		return nil
+	}
+	specs := catalog.Specs()
+	entries := make([]reviewCatalogueEntry, 0, len(specs))
+	for _, spec := range specs {
 		entries = append(entries, reviewCatalogueEntry{ID: spec.ID, Kind: string(spec.Kind)})
 	}
 	return entries
 }
 
-// readReviewTicket reads the readiness ticket the run was accepted on.
+// readReviewTicket reads the readiness ticket the run was accepted on: the
+// file the runner writes is a whole TicketRequest, so it is decoded as one
+// and the requester's fields are copied out.
 func readReviewTicket(path string) (*reviewTicket, error) {
-	var ticket reviewTicket
-	if err := worker.ReadJSONFile(path, worker.MaxTicketJSONBytes, &ticket); err != nil || ticket.Summary == "" {
+	var request worker.TicketRequest
+	if err := worker.ReadJSONFile(path, worker.MaxTicketJSONBytes, &request); err != nil || request.Summary == "" {
 		return nil, errors.New("the ticket for the design review could not be read")
 	}
-	return &ticket, nil
+	return &reviewTicket{IssueKey: request.IssueKey, Summary: request.Summary, Request: request.Request,
+		VerificationPath: request.VerificationPath, ExpectedText: request.ExpectedText, AbsentText: request.AbsentText}, nil
 }
 
 // readPreviousObjection turns the applier's objection that reopened the
-// design into a finding the reviewers see with the earlier round's.
+// design into a finding the reviewers see with the earlier round's. The
+// file is the sealed DesignObjection the seal wrote.
 func readPreviousObjection(path string) (investigate.DesignFinding, error) {
-	var objection struct {
-		Reason  string `json:"reason"`
-		Section string `json:"section"`
-	}
-	if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &objection); err != nil || objection.Reason == "" {
+	var objection DesignObjection
+	if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &objection); err != nil || strings.TrimSpace(objection.Reason) == "" {
 		return investigate.DesignFinding{}, errors.New("the previous objection could not be read")
 	}
 	section := objection.Section
 	if section == "" {
-		section = investigate.SectionFiles
+		section = "approach"
 	}
-	return investigate.DesignFinding{Code: "applier-objection", Section: section, Message: "写し役が設計に従えず止めました: " + objection.Reason}, nil
+	return investigate.DesignFinding{Code: "applier-objection", Section: section, Message: "写し役が設計に従えず止めました: " + strings.TrimSpace(objection.Reason)}, nil
 }
 
 // designReviewExcerptBytes bounds one measurement's excerpt inside the

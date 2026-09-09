@@ -167,6 +167,12 @@ func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, wor
 // with a home made per launch.
 func AgentLauncherConfigured() bool { return agentLauncher() != "" }
 
+// AgentHomePlaceholder stands, in a prompt, for the home the launch will
+// make; runAgentProcess replaces it with the real path once the home
+// exists. The prompt reaches the agent as an argument, not through a
+// shell, so "$HOME" would arrive unexpanded.
+const AgentHomePlaceholder = "{{AGENT_HOME}}"
+
 func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, string, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
 		return AgentOutcome{}, "", errors.New("agent input is invalid")
@@ -198,6 +204,14 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 			return AgentOutcome{}, "", err
 		}
 		defer user.release()
+	}
+	// The prompt may name the home this launch made (a reviewer's copy of
+	// the measurements lives there); the real path is known only now.
+	if strings.Contains(prompt, AgentHomePlaceholder) {
+		prompt = strings.ReplaceAll(prompt, AgentHomePlaceholder, agentHome)
+		if len(prompt) > MaxAgentPromptBytes {
+			return AgentOutcome{}, "", errors.New("agent input is invalid")
+		}
 	}
 	environment, err := agentEnvironment(config, agentHome)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/probe"
 	"automation.internal/ticket-ingress/internal/worker"
@@ -597,7 +598,7 @@ func TestDesignReviewPromptKeepsTheDesignsOwnRecordsWholeUnderALongReport(t *tes
 // head names them; the applier's objection that reopened a round is one of
 // the previous findings the reviewers see.
 func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
-	ticket := &reviewTicket{IssueKey: "TKT-1", Summary: "add the health page", Request: "write docs/health.md from measurements", TargetFiles: []string{"docs/"}, VerificationPath: "/docs/health.md", ExpectedText: "status 200"}
+	ticket := &reviewTicket{IssueKey: "TKT-1", Summary: "add the health page", Request: "write docs/health.md from measurements", VerificationPath: "/docs/health.md", ExpectedText: "status 200"}
 	catalogue := []reviewCatalogueEntry{{ID: "http.timing", Kind: "http"}, {ID: "k8s.workloads", Kind: "exec"}}
 	previous := []investigate.DesignFinding{{Code: "applier-objection", Section: investigate.SectionFiles, Message: "写し役が設計に従えず止めました: the path does not exist"}}
 	prompt, err := designReviewPrompt(designReviewPromptInput{
@@ -605,7 +606,7 @@ func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
 		lens:             worker.DesignLensApproach,
 		investigation:    investigate.Investigation{Round: 2, Questions: []string{"q"}, Next: "n"},
 		design:           &investigate.Design{Round: 2},
-		measurementsPath: "$HOME/measurements.jsonl",
+		measurementsPath: worker.AgentHomePlaceholder + "/measurements.jsonl",
 		previous:         previous,
 		ticket:           ticket,
 		catalogue:        catalogue,
@@ -613,7 +614,7 @@ func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"ticket":{"issue_key":"TKT-1","summary":"add the health page","request":"write docs/health.md from measurements"`, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`, "ticket は依頼者の文", "catalogue は調査・設計役が計れる probe の一覧", "実測の全文は $HOME/measurements.jsonl にあります", `"code":"applier-objection"`, "写し役が設計に従えず止めました"} {
+	for _, want := range []string{`"ticket":{"issue_key":"TKT-1","summary":"add the health page","request":"write docs/health.md from measurements"`, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`, "ticket は依頼者の文", "catalogue は調査・設計役が計れる probe の一覧", "実測の全文は {{AGENT_HOME}}/measurements.jsonl にあります", `"code":"applier-objection"`, "写し役が設計に従えず止めました"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -649,5 +650,48 @@ func TestReadPreviousObjectionBecomesAFinding(t *testing.T) {
 	}
 	if _, err := readPreviousObjection(path); err == nil {
 		t.Error("an empty objection was accepted")
+	}
+}
+
+// The command reads the files the runner really writes — a whole
+// TicketRequest and a sealed DesignObjection — and the reviewer's prompt
+// carries the ticket, the designer's catalogue (built-in repository probes
+// included) and the objection. Hand-shaped two-field files once hid a
+// decoder that refused every real file (review of the first cut).
+func TestAgentDesignReviewReadsTheRealTicketAndObjectionFiles(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.txt")
+	fixture := newDesignFixture(t, `for a in "$@"; do last="$a"; done; printf '%s' "$last" > `+promptFile+`; `+passVerdict, nil)
+	ticketPath := filepath.Join(t.TempDir(), "readiness-ticket.json")
+	request := worker.TicketRequest{SchemaVersion: 1, DeliveryID: fixture.identity.DeliveryID, InputSHA256: fixture.identity.InputSHA256,
+		ConfigSHA256: fixture.identity.ConfigSHA256, ToolSHA: cliToolSHA, IssueKey: "TKT-9", RunID: "TKT-9", Repository: "example/consumer", Mode: "change",
+		Summary: "add the health page", TargetFiles: []string{"web/page.tmpl"}, VerificationPath: "/page", ExpectedText: "New label", AbsentText: "Old label",
+		Request: "Replace the label from measurements."}
+	if err := worker.WriteJSONFileExclusive(ticketPath, request, worker.MaxTicketJSONBytes); err != nil {
+		t.Fatal(err)
+	}
+	objectionPath := filepath.Join(t.TempDir(), "objection.json")
+	objection := DesignObjection{SchemaVersion: worker.ArtifactSchemaVersion, Stage: 1, DeliveryID: fixture.identity.DeliveryID,
+		InputSHA256: fixture.identity.InputSHA256, ConfigSHA256: fixture.identity.ConfigSHA256, ToolSHA: cliToolSHA, BaseSHA: fixture.baseSHA,
+		Reason: "the label is not in that file", Section: "files", RaisedAt: time.Now().UTC(), ObjectionSHA256: strings.Repeat("0", 64)}
+	if err := worker.WriteJSONFileExclusive(objectionPath, objection, worker.MaxArtifactJSONBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t, "design-review-a", "review-a", true, "--ticket", ticketPath, "--previous-objection", objectionPath); err != nil {
+		t.Fatalf("review with the real files: %v", err)
+	}
+	prompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"ticket":{"issue_key":"TKT-9","summary":"add the health page","request":"Replace the label from measurements."`, `"catalogue":[`, `{"id":"repo.read","kind":"repo"}`, `"code":"applier-objection"`, "the label is not in that file"} {
+		if !strings.Contains(string(prompt), want) {
+			t.Errorf("reviewer prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(string(prompt), `"target_files"`) {
+		t.Error("the machine's target_files guess reached the reviewer as the requester's words")
+	}
+	if _, err := readReviewTicket(objectionPath); err == nil {
+		t.Error("an objection file was accepted as a ticket")
 	}
 }

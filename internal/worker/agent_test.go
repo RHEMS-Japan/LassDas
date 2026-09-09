@@ -595,3 +595,37 @@ func TestCopyHomeFilesPlacesReadOnlyCopies(t *testing.T) {
 		t.Errorf("no files: %v", err)
 	}
 }
+
+// A reviewer launched under its own user finds the files the launch was
+// asked to place in its home, and the prompt names the real home path in
+// place of the placeholder (the prompt travels as an argument, so "$HOME"
+// would arrive unexpanded).
+func TestReviewingAgentGetsItsHomeFilesAndTheHomePath(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(AgentLauncherEnv, launcher)
+	t.Setenv(AgentTreeRootEnv, filepath.Dir(root))
+	t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
+	source := filepath.Join(t.TempDir(), "measurements.jsonl")
+	if err := os.WriteFile(source, []byte("{\"id\":\"m-0001\",\"output\":\"the whole record\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, _ := writeFakeAgent(t, `for a in "$@"; do last="$a"; done; echo "PROMPT=$last"; echo "HOME=$HOME"; cat "$HOME/measurements.jsonl"`)
+	config := fixtureAgentConfig("judge", name)
+	outcome, err := RunReviewingAgentWithHomeFiles(context.Background(), config, root, "read "+AgentHomePlaceholder+"/measurements.jsonl", map[string]string{"measurements.jsonl": source})
+	if err != nil {
+		t.Fatalf("RunReviewingAgentWithHomeFiles: %v (%s)", err, outcome.Transcript)
+	}
+	if !strings.Contains(outcome.Transcript, "the whole record") {
+		t.Errorf("the copy was not readable in the home: %q", outcome.Transcript)
+	}
+	if strings.Contains(outcome.Transcript, AgentHomePlaceholder) || !strings.Contains(outcome.Transcript, "PROMPT=read "+filepath.Join(filepath.Dir(root), "agent-home", "judge-")) {
+		t.Errorf("the placeholder was not replaced by the launch home: %q", outcome.Transcript)
+	}
+}
