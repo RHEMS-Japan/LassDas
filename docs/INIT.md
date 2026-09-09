@@ -58,7 +58,7 @@ lassdas run start / stop / status / logs
 |---|---|
 | `~/.lassdas/<project>/` (0700) | init の台帳、設定 2 本、runtime.env (0600)。利用者所有、納品先 repo の外 |
 | named volume → /data | ledger.db、kanban.db、runs、knowledge、秘密ファイル。関所 uid 1000 所有。通常の停止で消さない |
-| 設定 → /etc/lassdas/config (read-only) | runtime.json と consumer.json。/etc/lassdas 全体を覆うと tool-pins.txt が隠れるので禁止 |
+| 設定 → /etc/lassdas/config (read-only) | runtime.json と m1-consumer.json。/etc/lassdas 全体を覆うと tool-pins.txt が隠れるので禁止 |
 | init の台帳 | 非秘密の回答、段の入力の指紋、生成物 ID、検査結果、動作確認の相関 ID・issue ID・PR URL・所要時間。鍵の値やハッシュは含めない |
 
 常用の鍵は env ファイルに保存し、entrypoint が納品用トークンと板の鍵を /data/secrets/ の 0600 ファイルへ移す。管理者の鍵と動作確認のためだけに入力した本人の鍵はメモリ限り。ログ・環境変数・コンテナ・設定へ渡さない。本人のキーを常用にも使うと明示確認した場合は、そのキーを運転用として保存する。
@@ -143,7 +143,7 @@ statusboard はコンテナ内 :9200、LASSDAS_BOARD_USER と 16 文字以上の
 
 | 項目 | 出どころ・値 |
 |---|---|
-| ledger_path / consumer_config_path / knowledge_root | /data/ledger.db、/etc/lassdas/config/consumer.json、/data/instance (読み書き可) |
+| ledger_path / consumer_config_path / knowledge_root | /data/ledger.db、/etc/lassdas/config/m1-consumer.json、/data/instance (読み書き可) |
 | tracker | 段 3 の接続先と実在 ID。allowed_activity_type=1、allowed_creator_id は本人 1 人、カテゴリと 4 状態、operator_user_ids は同じ本人 |
 | identity | repository/repository_id は本体ソース repo の API で確認した身元、engine_sha は §1.1 のビルド記録。workflow_ref はその repo + /local-runtime@ + engine_sha という安定名 (workflow を作る意味ではない) |
 | automation_run_id | 初回に UTC 日付 + 12 ランダム bytes で run_YYYYMMDD_<24 hex> を作り、再開時も保持 |

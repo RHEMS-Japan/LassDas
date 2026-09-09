@@ -27,7 +27,7 @@ func fixture(t *testing.T) Instance {
 	}
 	i := Instance{ID: "example", Dir: dir, Image: "registry.example/runtime@sha256:" + strings.Repeat("a", 64), EngineSHA: strings.Repeat("b", 40), BoardPort: 9200}
 	config := map[string]any{
-		"ledger_path": "/data/ledger.db", "consumer_config_path": "/etc/lassdas/config/consumer.json", "knowledge_root": "/data/instance",
+		"ledger_path": "/data/ledger.db", "consumer_config_path": "/etc/lassdas/config/m1-consumer.json", "knowledge_root": "/data/instance",
 		"worker_bin": "/usr/local/bin/worker", "controller_bin": "/usr/local/bin/controller", "hermes_bin": "/usr/local/bin/hermes",
 		"worker_sha256": strings.Repeat("c", 64), "controller_sha256": strings.Repeat("d", 64),
 		"hermes_board": "project-example", "hermes_profile": "lassdas-runner", "orchestration": "cards",
@@ -43,7 +43,7 @@ func fixture(t *testing.T) Instance {
 	config["chain"] = map[string]any{"runs_root": "/data/runs", "target_token_path": "/data/secrets/target-token", "profiles": profiles}
 	raw, _ := json.Marshal(config)
 	writeFile(t, filepath.Join(dir, "config", "runtime.json"), raw, 0o644)
-	writeFile(t, filepath.Join(dir, "config", "consumer.json"), []byte(`{"consumers":[]}`), 0o644)
+	writeFile(t, filepath.Join(dir, "config", "m1-consumer.json"), []byte(`{"consumers":[]}`), 0o644)
 	env := "LASSDAS_RUNTIME_CONFIG=/etc/lassdas/config/runtime.json\nLASSDAS_STATE_DIR=/data\nHERMES_KANBAN_DB=/data/kanban.db\nHERMES_KANBAN_BOARD=project-example\nLASSDAS_AGENT_TREE_ROOT=/data/runs\nLASSDAS_GUARDED_FILES=/data/secrets/target-token:/data/secrets/board-pass:/data/secrets/board-tracker-key:/data/route.key\nTARGET_GITHUB_TOKEN=artificial-target-token\nBACKLOG_API_KEY=artificial-tracker-key\nLASSDAS_GATEWAY_BASE_URL=https://models.example/v1\nLASSDAS_BOARD_USER=viewer\nLASSDAS_BOARD_PASS=artificial-board-password\n"
 	for _, role := range []string{"IMPLEMENTER", "REVIEW_A", "REVIEW_B", "DESIGNER", "APPLIER", "INTAKE_TARGET", "READINESS_ASSESSOR", "READINESS_CHECKER"} {
 		env += "LASSDAS_" + role + "_KEY=artificial-" + role + "-key\n"

@@ -706,7 +706,7 @@ func validStage(stage string) bool {
 }
 
 func generatedUnchanged(dir string, consumer, runtime any, env Secrets) bool {
-	for name, value := range map[string]any{"consumer.json": consumer, "runtime.json": runtime} {
+	for name, value := range map[string]any{"m1-consumer.json": consumer, "runtime.json": runtime} {
 		want, err := marshal(value)
 		if err != nil {
 			return false
