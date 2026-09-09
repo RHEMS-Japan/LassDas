@@ -3,6 +3,7 @@ package initwizard
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -86,7 +87,7 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	}
 	limit := 3
 	board := "local-" + s.Project
-	runtime := runtimeconfig.Config{LedgerPath: "/data/ledger.db", ConsumerConfigPath: "/etc/lassdas/config/consumer.json", KnowledgeRoot: "/data/instance", Tracker: s.Tracker, Identity: runtimeconfig.IdentityConfig{RepositoryID: s.EngineRepositoryID, Repository: s.EngineRepository, WorkflowRef: s.EngineRepository + "/local-runtime@" + s.EngineSHA, EngineSHA: s.EngineSHA}, AutomationRunID: s.AutomationRunID, ReportDestinations: []hook.ReportDestination{{Kind: "cli", Repository: s.Repository, Delivery: "pull_request"}}, WorkerBin: "/usr/local/bin/worker", ControllerBin: "/usr/local/bin/controller", WorkerSHA256: s.Pins["worker"], ControllerSHA256: s.Pins["controller"], HermesBin: "/usr/local/bin/hermes", HermesBoard: board, HermesProfile: "lassdas-runner", Orchestration: "cards", Chain: runtimeconfig.ChainConfig{RunsRoot: "/data/runs", TargetTokenPath: "/data/secrets/target-token", FailureStreakLimit: &limit, Profiles: runtimeconfig.ChainProfiles{Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b", Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate", DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b", DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier"}}}
+	runtime := runtimeconfig.Config{LedgerPath: "/data/ledger.db", ConsumerConfigPath: "/etc/lassdas/config/m1-consumer.json", KnowledgeRoot: "/data/instance", Tracker: s.Tracker, Identity: runtimeconfig.IdentityConfig{RepositoryID: s.EngineRepositoryID, Repository: s.EngineRepository, WorkflowRef: s.EngineRepository + "/local-runtime@" + s.EngineSHA, EngineSHA: s.EngineSHA}, AutomationRunID: s.AutomationRunID, ReportDestinations: []hook.ReportDestination{{Kind: "cli", Repository: s.Repository, Delivery: "pull_request"}}, WorkerBin: "/usr/local/bin/worker", ControllerBin: "/usr/local/bin/controller", WorkerSHA256: s.Pins["worker"], ControllerSHA256: s.Pins["controller"], HermesBin: "/usr/local/bin/hermes", HermesBoard: board, HermesProfile: "lassdas-runner", Orchestration: "cards", Chain: runtimeconfig.ChainConfig{RunsRoot: "/data/runs", TargetTokenPath: "/data/secrets/target-token", FailureStreakLimit: &limit, Profiles: runtimeconfig.ChainProfiles{Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b", Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate", DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b", DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier"}}}
 	for k, v := range map[string]string{"LASSDAS_RUNTIME_CONFIG": "/etc/lassdas/config/runtime.json", "LASSDAS_STATE_DIR": "/data", "HERMES_KANBAN_DB": "/data/kanban.db", "LASSDAS_AGENT_TREE_ROOT": "/data/runs", "HERMES_KANBAN_BOARD": board, "LASSDAS_GATEWAY_BASE_URL": s.BaseURL, "LASSDAS_GUARDED_FILES": "/data/secrets/target-token:/data/secrets/board-pass:/data/secrets/board-tracker-key:/data/route.key"} {
 		env[k] = v
 	}
@@ -130,7 +131,13 @@ func writeConfigs(dir string, consumer worker.Config, runtime runtimeconfig.Conf
 	if err := secureDir(configDir, 0755); err != nil {
 		return err
 	}
-	for name, value := range map[string]any{"consumer.json": consumer, "runtime.json": runtime} {
+	legacyPath := filepath.Join(configDir, "consumer.json")
+	if info, err := os.Lstat(legacyPath); err == nil && !info.Mode().IsRegular() {
+		return errors.New("旧生成設定 consumer.json は通常ファイルである必要があります")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for name, value := range map[string]any{"m1-consumer.json": consumer, "runtime.json": runtime} {
 		raw, err := marshal(value)
 		if err != nil {
 			return err
@@ -138,6 +145,12 @@ func writeConfigs(dir string, consumer worker.Config, runtime runtimeconfig.Conf
 		if err := atomicWrite(filepath.Join(configDir, name), raw, 0644); err != nil {
 			return err
 		}
+	}
+	// Earlier init versions used a basename the controller cannot load. This
+	// is a generated config, retired only after the instance has been stopped
+	// and both replacement configs have been written. Runtime state is retained.
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

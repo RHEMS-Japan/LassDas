@@ -63,10 +63,10 @@ func prepare(i Instance) (prepared, error) {
 	}
 	entries, err := os.ReadDir(configDir)
 	if err != nil || len(entries) != 2 {
-		return prepared{}, errors.New("config directory must contain only runtime.json and consumer.json")
+		return prepared{}, errors.New("config directory must contain only runtime.json and m1-consumer.json")
 	}
 	hash := sha256.New()
-	for _, name := range []string{"runtime.json", "consumer.json"} {
+	for _, name := range []string{"runtime.json", "m1-consumer.json"} {
 		path := filepath.Join(configDir, name)
 		if err := checkFile(path, 0o644, false); err != nil {
 			return prepared{}, err
@@ -93,7 +93,7 @@ func prepare(i Instance) (prepared, error) {
 	// Runtime.Load also loads consumer_config_path, which intentionally names
 	// a container path. Full validation runs through check-runtime in the
 	// pinned image; host inspection checks only the local launch contract.
-	if config.Identity.EngineSHA != i.EngineSHA || config.LedgerPath != "/data/ledger.db" || config.ConsumerConfigPath != "/etc/lassdas/config/consumer.json" ||
+	if config.Identity.EngineSHA != i.EngineSHA || config.LedgerPath != "/data/ledger.db" || config.ConsumerConfigPath != "/etc/lassdas/config/m1-consumer.json" ||
 		config.KnowledgeRoot != "/data/instance" || config.Chain.RunsRoot != "/data/runs" || config.Chain.TargetTokenPath != "/data/secrets/target-token" ||
 		config.Orchestration != "cards" || config.HermesBoard == "" || config.HermesProfile != "lassdas-runner" || config.HermesBin != "/usr/local/bin/hermes" ||
 		config.WorkerBin != "/usr/local/bin/worker" || config.ControllerBin != "/usr/local/bin/controller" || config.BrowserCheckBin != "" ||

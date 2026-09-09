@@ -94,7 +94,7 @@ chmod 0755 /data
 const preflightScript = `
 test "$(id -u)" = 1000
 test -r /etc/lassdas/config/runtime.json
-test -r /etc/lassdas/config/consumer.json
+test -r /etc/lassdas/config/m1-consumer.json
 test ! -e /etc/lassdas/runtime.env
 test -r /etc/lassdas/tool-pins.txt
 cd /usr/local/bin

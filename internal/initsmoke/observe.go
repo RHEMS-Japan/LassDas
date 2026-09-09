@@ -82,7 +82,7 @@ func (o RuntimeObserver) Observe(ctx context.Context, s *initwizard.State, recor
 	if len(raw) > 16*1024*1024 || json.Unmarshal(raw, &files) != nil {
 		return observation, errors.New("納品記録の一覧が不正です")
 	}
-	config, err := worker.LoadConfig(filepath.Join(o.Dir, "config", "consumer.json"))
+	config, err := worker.LoadConfig(filepath.Join(o.Dir, "config", "m1-consumer.json"))
 	if err != nil {
 		return observation, err
 	}

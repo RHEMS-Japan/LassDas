@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,30 @@ func wizardFixture(t *testing.T) (*State, Secrets) {
 		secrets[keyName(role)] = "artificial-" + role + "-key"
 	}
 	return s, secrets
+}
+
+// The worker accepts any config basename, while the delivery controller uses
+// its established fixed basename. Exercise the generated path at that boundary
+// before a real ticket has to discover a mismatch. A missing draft stops the
+// controller immediately after configuration loading, before any GitHub call.
+func TestGeneratedConfigAcceptedByController(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	consumer, runtime, _, err := Generate(s, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := writeConfigs(dir, consumer, runtime); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config", filepath.Base(runtime.ConsumerConfigPath))
+	cmd := exec.Command("go", "run", "../../cmd/controller", "baseline",
+		"--config", configPath, "--draft", filepath.Join(dir, "missing-draft.json"),
+		"--out", filepath.Join(dir, "baseline.json"))
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "controller: ticket_artifact_invalid") {
+		t.Fatalf("generated configuration did not reach the controller's draft check: %v\n%s", err, output)
+	}
 }
 
 func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T) {
@@ -60,7 +85,7 @@ func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T
 		}
 		// Only the test copy points at host paths. Generated JSON remains a
 		// container configuration, as loaded by worker check-runtime there.
-		runtime.ConsumerConfigPath = filepath.Join(dir, "config", "consumer.json")
+		runtime.ConsumerConfigPath = filepath.Join(dir, "config", "m1-consumer.json")
 		raw, _ := marshal(runtime)
 		path := filepath.Join(dir, "runtime-test.json")
 		if err := os.WriteFile(path, raw, 0600); err != nil {
@@ -69,7 +94,7 @@ func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T
 		if _, err := runtimeconfig.Load(path); err != nil {
 			t.Fatal(err)
 		}
-		for _, file := range []string{"consumer.json", "runtime.json"} {
+		for _, file := range []string{"m1-consumer.json", "runtime.json"} {
 			raw, _ := os.ReadFile(filepath.Join(dir, "config", file))
 			for _, value := range secrets {
 				if strings.Contains(string(raw), value) {
@@ -157,6 +182,56 @@ func TestStartResumeKeepsRunningInstanceAndLocalrunAcceptsGeneratedEnvironment(t
 	}
 	if runtime.stops != 2 {
 		t.Fatal("credential change was applied without stopping")
+	}
+}
+
+func TestStartMigratesLegacyConfigAndKeepsRuntimeState(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.Completed["runtime"] = "done"
+	s.Smoke = json.RawMessage(`{"correlation":"retained-request","issue_id":42}`)
+	consumer, runtime, _, err := Generate(s, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := writeConfigs(dir, consumer, runtime); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(dir, "config", "consumer.json")
+	if err := os.Rename(filepath.Join(dir, "config", "m1-consumer.json"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ConsumerConfigPath = "/etc/lassdas/config/consumer.json"
+	raw, _ := marshal(runtime)
+	if err := atomicWrite(filepath.Join(dir, "config", "runtime.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(dir, s, secrets); err != nil {
+		t.Fatal(err)
+	}
+	resident := &fakeRuntime{}
+	w := Wizard{UI: &fakeUI{approve: true}, Runtime: resident, Process: &fakeProcess{}}
+	if err := w.start(context.Background(), s, secrets, dir); err != nil {
+		t.Fatal(err)
+	}
+	if resident.stops != 1 || resident.starts != 1 {
+		t.Fatal("legacy config migration must stop the old instance before restarting")
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatal("legacy config left in the strict two-file mount")
+	}
+	loaded, keys, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var smoke map[string]any
+	if json.Unmarshal(loaded.Smoke, &smoke) != nil || smoke["correlation"] != "retained-request" || smoke["issue_id"] != float64(42) || keys["TARGET_GITHUB_TOKEN"] != secrets["TARGET_GITHUB_TOKEN"] {
+		t.Fatal("migration changed the request or saved credential")
+	}
+	manager := localrun.Manager{Docker: noContainerDocker{}}
+	_, err = manager.Start(context.Background(), localrun.Instance{ID: s.Project, Dir: dir, Image: s.Image, EngineSHA: s.EngineSHA, DockerContext: s.DockerContext, BoardPort: s.BoardPort})
+	if err == nil || !strings.Contains(err.Error(), "docker container failed") {
+		t.Fatalf("migrated config rejected before the Docker boundary: %v", err)
 	}
 }
 
