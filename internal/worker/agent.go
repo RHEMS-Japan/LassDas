@@ -129,7 +129,7 @@ type AgentOutcome struct {
 // it changed. The credential is read from this process's environment and
 // passed to the child; it is never written to configuration or transcript.
 func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string) (AgentOutcome, error) {
-	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt)
+	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, nil)
 	if err != nil {
 		return outcome, err
 	}
@@ -148,11 +148,26 @@ func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string,
 // What a reviewer may and may not do to the tree is judged by
 // ConfirmTreeMatchesCandidate against the sealed candidate instead.
 func RunReviewingAgent(ctx context.Context, config AgentConfig, workspace, prompt string) (AgentOutcome, error) {
-	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt)
+	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt, nil)
 	return outcome, err
 }
 
-func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string) (AgentOutcome, string, error) {
+// RunReviewingAgentWithHomeFiles is RunReviewingAgent with files placed in
+// the home made for the launch (relative path in the home → source path),
+// readable to the agent user: what a reviewer must read whole but cannot
+// open where the engine keeps it (the measurements, 0600 to the engine).
+// Without a launcher the agent shares this user's home and the files are
+// not copied; AgentLauncherConfigured tells the caller which path to name.
+func RunReviewingAgentWithHomeFiles(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, error) {
+	outcome, _, err := runAgentProcess(ctx, config, workspace, prompt, homeFiles)
+	return outcome, err
+}
+
+// AgentLauncherConfigured reports whether agents run under their own user
+// with a home made per launch.
+func AgentLauncherConfigured() bool { return agentLauncher() != "" }
+
+func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt string, homeFiles map[string]string) (AgentOutcome, string, error) {
 	if ctx == nil || prompt == "" || len(prompt) > MaxAgentPromptBytes {
 		return AgentOutcome{}, "", errors.New("agent input is invalid")
 	}
@@ -172,6 +187,9 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		reclaimWorkspace(launcher, root)
 		agentHome, err = prepareAgentHome(config, root)
 		if err != nil {
+			return AgentOutcome{}, "", err
+		}
+		if err := copyHomeFiles(agentHome, homeFiles); err != nil {
 			return AgentOutcome{}, "", err
 		}
 		user, err = acquireAgentUser()
@@ -552,6 +570,31 @@ func prepareAgentHome(config AgentConfig, root string) (string, error) {
 		}
 	}
 	return home, nil
+}
+
+// copyHomeFiles places the caller's files in the agent's home, read-only to
+// everyone (the agent user reads them; the engine took them from its own
+// files). A relative path outside the home or a source that cannot be read
+// is an error: a reviewer pointed at a file that is not there would judge
+// on the excerpt and call the rest absent.
+func copyHomeFiles(agentHome string, files map[string]string) error {
+	for relative, source := range files {
+		if !validAgentHomePath(relative) {
+			return errors.New("agent home file path is invalid")
+		}
+		content, err := os.ReadFile(source)
+		if err != nil {
+			return errors.New("agent home file could not be read")
+		}
+		target := filepath.Join(agentHome, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return errors.New("agent home could not be prepared")
+		}
+		if err := os.WriteFile(target, content, 0o444); err != nil {
+			return errors.New("agent home could not be prepared")
+		}
+	}
+	return nil
 }
 
 // copyHomeSeed copies one file of the engine's home into the agent's,

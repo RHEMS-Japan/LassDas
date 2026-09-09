@@ -466,7 +466,7 @@ func TestRunAgentProcessGoesThroughTheLauncher(t *testing.T) {
 	config.Args = []string{"--profile", "stand-in"}
 	config.Profile = "stand-in"
 	config.Knowledge.Rules = []KnowledgePlacement{{From: "rules/RULES.md", To: ".claude/RULES.md"}}
-	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing")
+	outcome, _, err := runAgentProcess(context.Background(), config, root, "do the thing", nil)
 	if err != nil {
 		t.Fatalf("runAgentProcess() error = %v (%s)", err, outcome.Transcript)
 	}
@@ -565,5 +565,33 @@ func TestAgentUsersAreDistinctWhileHeld(t *testing.T) {
 	defer second.release()
 	if third.uid != agentUIDBase {
 		t.Fatalf("a released user was not reused: got %d", third.uid)
+	}
+}
+
+// Files a launch needs in the agent's home (the measurements a reviewer
+// must read whole) are copied read-only; a path outside the home or a
+// missing source is refused rather than leaving the reviewer to judge on
+// the excerpt.
+func TestCopyHomeFilesPlacesReadOnlyCopies(t *testing.T) {
+	home := t.TempDir()
+	source := filepath.Join(t.TempDir(), "measurements.jsonl")
+	if err := os.WriteFile(source, []byte("{\"id\":\"m-0001\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyHomeFiles(home, map[string]string{"measurements.jsonl": source}); err != nil {
+		t.Fatalf("copyHomeFiles: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(home, "measurements.jsonl"))
+	if err != nil || info.Mode().Perm() != 0o444 {
+		t.Fatalf("copy = %v, %v; want a 0444 file", info, err)
+	}
+	if err := copyHomeFiles(home, map[string]string{"../escape": source}); err == nil {
+		t.Error("a path outside the home was accepted")
+	}
+	if err := copyHomeFiles(home, map[string]string{"missing.jsonl": filepath.Join(t.TempDir(), "nope")}); err == nil {
+		t.Error("a missing source was accepted")
+	}
+	if err := copyHomeFiles(home, nil); err != nil {
+		t.Errorf("no files: %v", err)
 	}
 }

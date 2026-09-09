@@ -191,7 +191,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 
 	// The reviewer is not told which files it may touch, because it is not
 	// meant to touch any; a review that edits the tree is rejected below.
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt)
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, nil)
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: candidate.Stage,
 		DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
@@ -242,8 +242,8 @@ func runAgentReview(ctx context.Context, args []string) error {
 // Every failed attempt's tail goes to the job log, the final one included,
 // so nothing is masked. The design reviewers share it: they are the same
 // launch judging a different subject.
-func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig, repoRoot, prompt string) (worker.AgentOutcome, error) {
-	outcome, runErr := worker.RunReviewingAgent(ctx, agent, repoRoot, prompt)
+func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig, repoRoot, prompt string, homeFiles map[string]string) (worker.AgentOutcome, error) {
+	outcome, runErr := worker.RunReviewingAgentWithHomeFiles(ctx, agent, repoRoot, prompt, homeFiles)
 	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
 		select {
@@ -252,7 +252,7 @@ func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig,
 			continue
 		case <-time.After(reviewRetryPause):
 		}
-		outcome, runErr = worker.RunReviewingAgent(ctx, agent, repoRoot, prompt)
+		outcome, runErr = worker.RunReviewingAgentWithHomeFiles(ctx, agent, repoRoot, prompt, homeFiles)
 	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))

@@ -591,3 +591,63 @@ func TestDesignReviewPromptKeepsTheDesignsOwnRecordsWholeUnderALongReport(t *tes
 		t.Errorf("the head does not state what the data carries:\n%s", prompt[:1400])
 	}
 }
+
+// The reviewer judges against the request and knows what can be measured:
+// the ticket and the catalogue travel in USER_DATA_JSON when given, and the
+// head names them; the applier's objection that reopened a round is one of
+// the previous findings the reviewers see.
+func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
+	ticket := &reviewTicket{IssueKey: "TKT-1", Summary: "add the health page", Request: "write docs/health.md from measurements", TargetFiles: []string{"docs/"}, VerificationPath: "/docs/health.md", ExpectedText: "status 200"}
+	catalogue := []reviewCatalogueEntry{{ID: "http.timing", Kind: "http"}, {ID: "k8s.workloads", Kind: "exec"}}
+	previous := []investigate.DesignFinding{{Code: "applier-objection", Section: investigate.SectionFiles, Message: "写し役が設計に従えず止めました: the path does not exist"}}
+	prompt, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectDesign, Round: 2, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensApproach,
+		investigation:    investigate.Investigation{Round: 2, Questions: []string{"q"}, Next: "n"},
+		design:           &investigate.Design{Round: 2},
+		measurementsPath: "$HOME/measurements.jsonl",
+		previous:         previous,
+		ticket:           ticket,
+		catalogue:        catalogue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"ticket":{"issue_key":"TKT-1","summary":"add the health page","request":"write docs/health.md from measurements"`, `"catalogue":[{"id":"http.timing","kind":"http"},{"id":"k8s.workloads","kind":"exec"}]`, "ticket は依頼者の文", "catalogue は調査・設計役が計れる probe の一覧", "実測の全文は $HOME/measurements.jsonl にあります", `"code":"applier-objection"`, "写し役が設計に従えず止めました"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
+	bare, err := designReviewPrompt(designReviewPromptInput{
+		subject:          investigate.ReviewSubject{Kind: investigate.SubjectInvestigation, Round: 1, SHA256: strings.Repeat("e", 64)},
+		lens:             worker.DesignLensEvidence,
+		investigation:    investigate.Investigation{Round: 1, Questions: []string{"q"}, Next: "n"},
+		measurementsPath: "/run/measurements.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bare, `"ticket":`) || strings.Contains(bare, `"catalogue":`) {
+		t.Error("a command given no ticket or catalogue invented them")
+	}
+}
+
+// The objection file the seal wrote becomes a finding; a broken or empty
+// one is refused rather than silently dropped.
+func TestReadPreviousObjectionBecomesAFinding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "objection.json")
+	if err := os.WriteFile(path, []byte(`{"reason":"the label is not in that file","section":"files"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finding, err := readPreviousObjection(path)
+	if err != nil || finding.Code != "applier-objection" || finding.Section != investigate.SectionFiles || !strings.Contains(finding.Message, "the label is not in that file") {
+		t.Fatalf("finding = %+v, %v", finding, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"reason":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPreviousObjection(path); err == nil {
+		t.Error("an empty objection was accepted")
+	}
+}

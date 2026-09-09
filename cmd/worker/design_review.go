@@ -37,6 +37,8 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	lensSelector := flags.String("lens", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
+	objectionPath := flags.String("previous-objection", "", "")
+	ticketPath := flags.String("ticket", "", "")
 	knowledgeRoot := flags.String("knowledge-root", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	outputPath := flags.String("out", "", "")
@@ -68,13 +70,36 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *objectionPath != "" {
+		objection, err := readPreviousObjection(*objectionPath)
+		if err != nil {
+			return err
+		}
+		previous = append(previous, objection)
+	}
+	var ticket *reviewTicket
+	if *ticketPath != "" {
+		ticket, err = readReviewTicket(*ticketPath)
+		if err != nil {
+			return err
+		}
+	}
+	// The reviewer runs as its own user and cannot open the engine's
+	// measurements file; a read-only copy travels in the launch's home.
+	homeFiles := map[string]string(nil)
+	measurementsFile := *measurementsPath
+	if worker.AgentLauncherConfigured() {
+		homeFiles = map[string]string{reviewMeasurementsCopy: *measurementsPath}
+		measurementsFile = "$HOME/" + reviewMeasurementsCopy
+	}
 	measurements, err := probe.ReadPrefix(*measurementsPath, inputs.investigation.MeasurementsCount)
 	if err != nil {
 		return errors.New("measurements could not be read")
 	}
 	prompt, err := designReviewPrompt(designReviewPromptInput{
 		subject: inputs.subject, lens: lens, investigation: inputs.investigation, design: inputs.design,
-		measurements: measurements, measurementsPath: *measurementsPath, previous: previous,
+		measurements: measurements, measurementsPath: measurementsFile, previous: previous,
+		ticket: ticket, catalogue: reviewCatalogue(config),
 	})
 	if err != nil {
 		return fmt.Errorf("design review instruction could not be built: %w", err)
@@ -87,7 +112,7 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 		return err
 	}
 
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt)
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles)
 	identity := inputs.identity
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: inputs.subject.Round,
@@ -273,6 +298,68 @@ type designReviewPromptInput struct {
 	measurements     []probe.Measurement
 	measurementsPath string
 	previous         []investigate.DesignFinding
+	// ticket is the request the design must satisfy, as the reviewer sees
+	// it (nil when the command was given none).
+	ticket *reviewTicket
+	// catalogue is what the investigating designer can measure.
+	catalogue []reviewCatalogueEntry
+}
+
+// reviewMeasurementsCopy is where, in the launch's home, the reviewer finds
+// the read-only copy of the measurements file.
+const reviewMeasurementsCopy = "measurements.jsonl"
+
+// reviewTicket is the requester's text the reviewer judges the design
+// against: what must appear, what must be gone, where, and the request.
+type reviewTicket struct {
+	IssueKey         string   `json:"issue_key,omitempty"`
+	Summary          string   `json:"summary"`
+	Request          string   `json:"request"`
+	TargetFiles      []string `json:"target_files,omitempty"`
+	VerificationPath string   `json:"verification_path,omitempty"`
+	ExpectedText     string   `json:"expected_text,omitempty"`
+	AbsentText       string   `json:"absent_text,omitempty"`
+}
+
+// reviewCatalogueEntry is one probe the investigating designer can use, so
+// the evidence lens knows what "should have been measured" can mean.
+type reviewCatalogueEntry struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+}
+
+func reviewCatalogue(config worker.Config) []reviewCatalogueEntry {
+	entries := make([]reviewCatalogueEntry, 0, len(config.Probes))
+	for _, spec := range config.Probes {
+		entries = append(entries, reviewCatalogueEntry{ID: spec.ID, Kind: string(spec.Kind)})
+	}
+	return entries
+}
+
+// readReviewTicket reads the readiness ticket the run was accepted on.
+func readReviewTicket(path string) (*reviewTicket, error) {
+	var ticket reviewTicket
+	if err := worker.ReadJSONFile(path, worker.MaxTicketJSONBytes, &ticket); err != nil || ticket.Summary == "" {
+		return nil, errors.New("the ticket for the design review could not be read")
+	}
+	return &ticket, nil
+}
+
+// readPreviousObjection turns the applier's objection that reopened the
+// design into a finding the reviewers see with the earlier round's.
+func readPreviousObjection(path string) (investigate.DesignFinding, error) {
+	var objection struct {
+		Reason  string `json:"reason"`
+		Section string `json:"section"`
+	}
+	if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &objection); err != nil || objection.Reason == "" {
+		return investigate.DesignFinding{}, errors.New("the previous objection could not be read")
+	}
+	section := objection.Section
+	if section == "" {
+		section = investigate.SectionFiles
+	}
+	return investigate.DesignFinding{Code: "applier-objection", Section: section, Message: "写し役が設計に従えず止めました: " + objection.Reason}, nil
 }
 
 // designReviewExcerptBytes bounds one measurement's excerpt inside the
@@ -396,7 +483,7 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		input.lens,
 		"",
 		"## 判定の対象",
-		"- 下の USER_DATA_JSON に、" + carried + "、その根拠になった実測の記録 (id と抜粋)、前の巡の指摘が入っています。",
+		"- 下の USER_DATA_JSON に、" + carried + "、その根拠になった実測の記録 (id と抜粋)、前の巡の指摘が入っています。ticket は依頼者の文 (満たすべき依頼、出るべき文言・消えるべき文言・確認先)、catalogue は調査・設計役が計れる probe の一覧です。方針は ticket に対して、「計るべきなのに計っていない」は catalogue にある probe に対して判定してください。",
 		"- 実測の全文は " + input.measurementsPath + " にあります (読み取りのみ)。抜粋で足りないときはそこを読んでください。",
 		"- 調査・設計役も抜粋 (先頭 excerpt_bytes) の外を読めます (記録の続きを窓で読む read。回数に上限あり)。抜粋の外にある値を見落とした結論は指摘してください。役が「読めなかった」と書いているときは、読める手段があったことを踏まえて判定してください。ただし、probe 自身の上限で切れた末尾 (記録の truncated) は誰にも読めません。read の回数上限で役が読めなかった分は、その旨が unknowns にあれば「読めなかったこと」自体は差し戻さず、あなたが全文で見つけた、結論と矛盾する値だけを指摘してください。",
 		evidenceNotePlaceholder,
@@ -605,6 +692,12 @@ func designReviewUserData(input designReviewPromptInput, cited map[string]citati
 	}
 	if input.design != nil {
 		data["design"] = input.design
+	}
+	if input.ticket != nil {
+		data["ticket"] = input.ticket
+	}
+	if len(input.catalogue) > 0 {
+		data["catalogue"] = input.catalogue
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {

@@ -196,6 +196,14 @@ func (p *Pipeline) chainDesignReview(ctx context.Context, reviewers []string, in
 				args = append(args, "--previous-findings", filepath.Join(previous, earlier+"-design-review.json"))
 			}
 		}
+		// A round the applier's objection reopened: the reviewers judge the
+		// answer to it, so they see it too.
+		if _, err := os.Stat(p.designObjectionPath(round - 1)); err == nil {
+			args = append(args, "--previous-objection", p.designObjectionPath(round-1))
+		}
+	}
+	if _, err := os.Stat(p.path("readiness-ticket.json")); err == nil {
+		args = append(args, "--ticket", p.path("readiness-ticket.json"))
 	}
 	args = append(args, "--run-out", filepath.Join(roundDir, reviewer+"-design-review-run.json"), "--out", out)
 	if code, err := p.worker(ctx, "agent-design-review", args, p.modelKeyEnv()...); err != nil || code != 0 {
