@@ -153,9 +153,11 @@ const (
 	// SpentAllowancePhrase names the failure the turn asks again for; with
 	// TransportFailedPhrase it begins errModelAllowanceSpent.
 	SpentAllowancePhrase = "the call spent its allowance without answering"
-	// AttemptsExhaustedPhrase appears in every transport failure that comes
-	// after the gateway's own retries were spent — a status it kept
-	// answering, and a gateway that could not be reached at all.
+	// AttemptsExhaustedPhrase appears in the transport failures that come
+	// after the gateway's retries were spent — a status it kept answering,
+	// and a gateway that could not be reached at all — or cut short because
+	// the call's remaining allowance could not fit another attempt. It says
+	// the call was asked again, not that it was asked its full count.
 	AttemptsExhaustedPhrase = " attempts"
 	// LimitNotLiftedPhrase and RetryAfterTooLongPhrase appear in the two
 	// failures a gateway gives for a limit that waiting does not lift (an

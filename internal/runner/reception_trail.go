@@ -84,7 +84,7 @@ func receptionCauseNote(stage, cause string) string {
 		strings.HasPrefix(cause, worker.ProviderEndedTurnPhrase),
 		strings.HasPrefix(cause, worker.TransportFailedPhrase) && strings.Contains(cause, worker.AttemptsExhaustedPhrase):
 		return "受付の AI (" + stage + ") に問い合わせましたが、応答を得られませんでした。" +
-			"規定の回数まで聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
+			"何度か聞き直した上での結果です。一時的な混雑で起きることが多いため、" +
 			"同じ依頼をもう一度動かせば通る見込みです。\n"
 	// A limit that waiting does not lift. An exhausted balance is one
 	// of these, and telling its requester to send the ticket again
