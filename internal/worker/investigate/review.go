@@ -265,6 +265,57 @@ func (r DesignReview) Validate(identity Identity, subject ReviewSubject) error {
 	return nil
 }
 
+// NormalizeFindingCode makes a reviewer's label fit the code shape instead
+// of refusing the review that carries it. The label names a finding for a
+// reader; the message is the substance, and a whole round of judgement was
+// thrown away because a reviewer wrote one word of Japanese in a label
+// (live, 2026-09-09: "postgres-503-誤記" ended the delivery as a model
+// failure while the finding itself was correct). Letters and digits outside
+// ASCII, spaces and punctuation become hyphens; the result is lowercased,
+// trimmed of leading and trailing hyphens and bounded. A label with nothing
+// usable left becomes "finding", which is honest: the reviewer named
+// something the code could not carry.
+func NormalizeFindingCode(code string) string {
+	lowered := strings.ToLower(strings.TrimSpace(code))
+	var b strings.Builder
+	for _, r := range lowered {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	trimmed := strings.Trim(collapseHyphens(b.String()), "-")
+	for len(trimmed) > 0 && (trimmed[0] < 'a' || trimmed[0] > 'z') {
+		trimmed = strings.Trim(trimmed[1:], "-")
+	}
+	if len(trimmed) > 64 {
+		trimmed = strings.Trim(trimmed[:64], "-")
+	}
+	if !codePattern.MatchString(trimmed) {
+		return "finding"
+	}
+	return trimmed
+}
+
+func collapseHyphens(value string) string {
+	var b strings.Builder
+	previous := false
+	for _, r := range value {
+		if r == '-' {
+			if previous {
+				continue
+			}
+			previous = true
+		} else {
+			previous = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func validateDesignReviewOutput(output ModelDesignReviewOutput, subject string) error {
 	switch output.Verdict {
 	case VerdictPass:

@@ -550,7 +550,7 @@ func designReviewPrompt(input designReviewPromptInput) (string, error) {
 		"## 答え方 (最後にこの形の JSON だけを出力する)",
 		`{"verdict":"pass","findings":[]}`,
 		"または",
-		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンの短い識別子","section":"`+strings.Join(sections, "|")+`","message":"何がどう問題かを一文で"}]}`,
+		`{"verdict":"revise","findings":[{"code":"英小文字とハイフンだけの短い識別子 (例 missing-record-citation。日本語や大文字や記号は使わない)","section":"`+strings.Join(sections, "|")+`","message":"何がどう問題かを一文で (ここは日本語で書く)"}]}`,
 		"- verdict が pass のときは findings を空にしてください。revise のときは 1 件以上必要です。",
 		"- section は "+strings.Join(sections, " / ")+" のいずれかです。path や line は書きません。",
 		worker.ReviewAnswerRulesTail,

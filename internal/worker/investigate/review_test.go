@@ -267,3 +267,30 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 		t.Errorf("round trip: %v", err)
 	}
 }
+
+// A reviewer's label is made to fit rather than taken as a reason to throw
+// the review away: one Japanese word in a label ended a live delivery as a
+// model failure while the finding it named was correct.
+func TestAFindingLabelIsMadeToFitInsteadOfEndingTheReview(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"postgres-503-誤記", "postgres-503"},
+		{"Missing Record Citation", "missing-record-citation"},
+		{"already-fine", "already-fine"},
+		{"  spaced  out  ", "spaced-out"},
+		{"503", "finding"},
+		{"誤記", "finding"},
+		{"", "finding"},
+		{"---", "finding"},
+		{"a" + strings.Repeat("b", 200), "a" + strings.Repeat("b", 63)},
+	} {
+		if got := NormalizeFindingCode(c.in); got != c.want {
+			t.Errorf("NormalizeFindingCode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// Whatever it returns is a code the seal accepts.
+	for _, in := range []string{"postgres-503-誤記", "誤記", "A_B_C", strings.Repeat("x", 300)} {
+		if got := NormalizeFindingCode(in); !codePattern.MatchString(got) {
+			t.Errorf("NormalizeFindingCode(%q) = %q, which the seal refuses", in, got)
+		}
+	}
+}
