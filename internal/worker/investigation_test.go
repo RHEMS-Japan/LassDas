@@ -667,3 +667,42 @@ func TestInvestigateAsksAgainAfterAProviderError(t *testing.T) {
 		}
 	}
 }
+
+// A revise round is told which records the run holds so far and that it
+// can read any of them from offset 0; the earlier round's conversation is
+// gone, and without the index the role could only cite ids it never saw
+// or measure again (live: two rounds were spent swapping ids).
+func TestReviseRoundListsEarlierRecordsAndMayReadFromTheStart(t *testing.T) {
+	input, measurementsPath := investigationFixture(t, 10)
+	// Record two measurements the way the earlier round did.
+	for _, request := range []probe.Request{{Probe: "repo.list"}, {Probe: "repo.list"}} {
+		if _, err := input.Session.Run(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input.MeasurementsPath = measurementsPath
+	if prompt := investigationTaskPrompt(input); strings.Contains(prompt, "earlier_records") {
+		t.Errorf("a first round lists earlier records: %s", prompt)
+	}
+	input.Previous = []byte(`{"design":{"round":1},"decision":{"outcome":"revise"},"reviews":[]}`)
+	prompt := investigationTaskPrompt(input)
+	for _, want := range []string{`"earlier_records":[{"id":"m-0001","probe":"repo.list"`, `{"id":"m-0002","probe":"repo.list"`, `"output_bytes":`} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("revise task lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, `"output":`) {
+		t.Error("the index carries outputs; the role reads what it needs")
+	}
+	contract := investigationSystemPrompt(ModeDesign, true)
+	for _, want := range []string{"Offsets are 0 (the start of any recorded output", "USER_DATA_JSON.earlier_records lists every record of the run so far; read one from offset 0"} {
+		if !strings.Contains(contract, want) {
+			t.Errorf("revise contract lacks %q", want)
+		}
+	}
+	// The kernel serves offset 0 of an earlier record.
+	window, err := input.Session.Read("m-0001", 0)
+	if err != nil || window.Offset != 0 || window.Bytes == 0 {
+		t.Fatalf("Read(m-0001, 0) = %+v, %v", window, err)
+	}
+}
