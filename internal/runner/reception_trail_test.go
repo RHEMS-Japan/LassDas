@@ -160,3 +160,18 @@ func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
 		t.Errorf("report = %+v", report)
 	}
 }
+
+// A run that could not choose a file to change says so on the ticket. The
+// requester used to get "内部エラーが発生し" and nothing else, and the real
+// reason lived in the pod log (live, 2026-09-09).
+func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
+	note := receptionCutoffNote("契約の導出", `worker: contract derivation failed: model derive output names no files (answer 3 of 3)`)
+	for _, want := range []string{"変更するファイルを決められなかった", "契約の導出", "新しく作るファイルの名前"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("the note lacks %q: %q", want, note)
+		}
+	}
+	if note := receptionCutoffNote("契約の導出", "worker: something else went wrong"); note != "" {
+		t.Errorf("an unrelated failure produced a note: %q", note)
+	}
+}

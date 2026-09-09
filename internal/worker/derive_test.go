@@ -281,3 +281,63 @@ func TestHiddenFilesAreNeitherOfferedNorSearched(t *testing.T) {
 		t.Fatalf("matches = %v, want the search to skip dotted paths", location.Matches)
 	}
 }
+
+// A request to create a file has no answer among the paths that exist, and
+// the model may not invent one: the run ended with "no candidate can satisfy
+// the change" (live, 2026-09-09) or, before that, with an existing file
+// picked to have something to answer. A path the requester named is offered
+// instead, held to the same rules as a listed one.
+func TestARequestedNewFileIsOfferedAndAccepted(t *testing.T) {
+	consumer := ConsumerConfig{Mode: ModeConfig{AllowedFilePrefixes: []string{"docs/", "client/src/"}, MaxFiles: 2}}
+	listing := CandidateListing{Paths: []string{"client/src/label.ts", "docs/README.md"}}
+	draft := TicketDraft{
+		Summary: "docs/ に稼働確認の手順書を追加してほしい",
+		Request: "docs/OPERATIONS_HEALTHCHECK.md を新しく作ってください。本番 API は https://api.example.invalid です。" +
+			"設定は config/secret.yaml には書かないこと。.github/workflows/deploy.yml も触らないでください。",
+	}
+	offered := NewFileCandidates(draft, listing, consumer)
+	if len(offered) != 1 || offered[0] != "docs/OPERATIONS_HEALTHCHECK.md" {
+		t.Fatalf("offered = %v", offered)
+	}
+	if err := validateDerivedFiles([]string{"docs/OPERATIONS_HEALTHCHECK.md"}, draft, listing, consumer); err != nil {
+		t.Fatalf("the named new file was refused: %v", err)
+	}
+	// A file that exists is still the ordinary answer.
+	if err := validateDerivedFiles([]string{"client/src/label.ts"}, draft, listing, consumer); err != nil {
+		t.Fatalf("an offered candidate was refused: %v", err)
+	}
+	// A path the requester never named cannot be invented.
+	if err := validateDerivedFiles([]string{"docs/SOMETHING_ELSE.md"}, draft, listing, consumer); err == nil {
+		t.Fatal("a path nobody named was accepted")
+	}
+	// Nor one outside the writable prefixes, or hidden, even when named.
+	for _, refused := range []string{"config/secret.yaml", ".github/workflows/deploy.yml"} {
+		if err := validateDerivedFiles([]string{refused}, draft, listing, consumer); err == nil {
+			t.Errorf("%q was accepted", refused)
+		}
+	}
+	// The prompt shows the requester's new file beside the existing paths.
+	prompt, err := derivePrompt(draft, listing, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, `"new_file_candidates":["docs/OPERATIONS_HEALTHCHECK.md"]`) {
+		t.Errorf("the prompt does not offer the named new file")
+	}
+	if !strings.Contains(deriveSystemPrompt(consumer), "candidate_paths or in new_file_candidates") {
+		t.Error("the instruction still allows only existing paths")
+	}
+
+	// A request naming no file offers nothing; the key disappears entirely.
+	plain := TicketDraft{Summary: "ラベルの文言を直してほしい", Request: "設定画面の見出しを新しい表現にしてください。"}
+	if offered := NewFileCandidates(plain, listing, consumer); len(offered) != 0 {
+		t.Errorf("a request naming no file offered %v", offered)
+	}
+	plainPrompt, err := derivePrompt(plain, listing, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plainPrompt, "new_file_candidates") {
+		t.Error("the prompt carries an empty new-file list")
+	}
+}

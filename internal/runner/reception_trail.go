@@ -36,9 +36,20 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 	}
 }
 
+// noFileChosenMarker is the worker's own phrase for a derivation whose
+// model answered that none of the offered paths can carry the change
+// (internal/worker DeriveTargetFiles). Like the cutoff marker it reaches
+// the runner only through the step's stderr.
+const noFileChosenMarker = "names no files"
+
 // receptionCutoffNote renders the requester-facing note for a step's stderr,
-// or "" when the step did not fail on a cutoff.
+// or "" when the step did not fail for a reason the requester can be told.
 func receptionCutoffNote(stage, stderr string) string {
+	if strings.Contains(stderr, noFileChosenMarker) {
+		return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
+			"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
+			"依頼文に、変更するファイルの位置を書き足して出し直してください (例: docs/ の下に新しく作る場合は、その相対パスをそのまま書く)。\n"
+	}
 	if !strings.Contains(stderr, receptionCutoffMarker) {
 		return ""
 	}
