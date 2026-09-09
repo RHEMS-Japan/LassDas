@@ -230,10 +230,33 @@ var gatewayRetryPauses = []time.Duration{2 * time.Second, 8 * time.Second, 30 * 
 // that passes.
 func retryableGatewayStatus(code int) bool {
 	switch code {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+		// A gateway's own 500 and 408, and the 529 an overloaded provider
+		// answers with, are moments that pass in the same way its 502 is.
+		// One of them ended a whole investigating round, which spends up to
+		// sixty calls, on its first occurrence.
+		http.StatusInternalServerError, http.StatusRequestTimeout, statusOverloaded:
 		return true
 	}
 	return false
+}
+
+// statusOverloaded is the status a provider answers with when it is over
+// capacity. Go has no constant for it.
+const statusOverloaded = 529
+
+// transientTransportFailure reports whether a failure to reach the gateway
+// at all is one that asking again shortly can pass: a connection the network
+// dropped, a name that did not resolve, a handshake that did not finish. A
+// call that spent its own allowance is deliberately not one of these — the
+// turn asks that one again on a count of its own, and asking again here as
+// well would multiply five-minute calls (converseTurn).
+func transientTransportFailure(err error) bool {
+	if err == nil || spentItsAllowance(err) {
+		return false
+	}
+	var safe *SafeModelError
+	return errors.As(err, &safe) && strings.HasPrefix(safe.Error(), TransportFailedPhrase)
 }
 
 func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
@@ -293,7 +316,21 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 	for attempt := 0; ; attempt++ {
 		body, status, retryAfter, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
 		if err != nil {
-			return nil, err
+			// A gateway that answered a status gets the ladder below; one
+			// that could not be reached at all gets the same ladder here,
+			// because the moment that stopped it passes the same way.
+			if !transientTransportFailure(err) {
+				return nil, err
+			}
+			pause, again := gatewayPause(http.StatusServiceUnavailable, nil, attempt)
+			if !again {
+				return nil, fmt.Errorf("%w after %d%s", err, attempt+1, AttemptsExhaustedPhrase)
+			}
+			fmt.Fprintf(os.Stderr, "worker: the gateway could not be reached; asking again in %s (retry %d of %d)\n", pause, attempt+1, len(gatewayRetryPauses))
+			if waitErr := pauseBeforeAskingAgain(ctx, pause); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
 		}
 		if status == http.StatusOK {
 			var response ChatResponse
@@ -323,6 +360,18 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
 		case <-timer.C:
 		}
+	}
+}
+
+// pauseBeforeAskingAgain waits, or reports that the caller gave up first.
+func pauseBeforeAskingAgain(ctx context.Context, pause time.Duration) error {
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return safeModelError(TransportFailedPhrase + "; the wait before asking again was cancelled")
+	case <-timer.C:
+		return nil
 	}
 }
 
