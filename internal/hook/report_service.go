@@ -243,7 +243,7 @@ func fixedTerminalComment(report TerminalReportRequest, reportDigest string) str
 		TerminalReleaseFailed:                  "既存のリリース経路で処理を完了できなかったため、本番環境への反映は完了していません。",
 		TerminalProductionDeploymentUnverified: "prodブランチへの反映は完了しましたが、既存の本番デプロイが完了したことを確認できませんでした。自動的な追加変更やロールバックは行っていません。",
 		TerminalProductionVerificationFailed:   "本番デプロイは完了しましたが、利用者目線の表示確認に失敗しました。自動的な追加変更やロールバックは行っていません。",
-		TerminalInternalFailed:                 "自動処理中の内部エラーにより、本番環境への反映は完了していません。",
+		TerminalInternalFailed:                 "自動処理中に内部エラーが発生し、依頼を完了できませんでした。",
 		TerminalInvestigated:                   "調査のみの依頼として、稼働環境とリポジトリを読み取りだけで計った報告をこのチケットに掲示しました。コードの変更と Pull Request はなく、対象リポジトリと本番環境は変更していません。このチケットでの自動処理は終了しています。",
 		TerminalInvestigationIncomplete:        incompleteMessage(report),
 		TerminalInvestigationNonconverged:      "調査報告が根拠のレビューを規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
