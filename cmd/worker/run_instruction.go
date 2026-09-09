@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
@@ -110,15 +111,41 @@ func runRunInstruction(ctx context.Context, args []string) error {
 			return errors.New("a leftover objection could not be cleared before the applier ran")
 		}
 	}
-	outcome, halted, runErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, string(instruction), consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
-	run, sealErr := worker.SealAgentRun(worker.AgentRun{
-		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
-		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
-		ConfigSHA256: draft.ConfigSHA256, ToolSHA: draft.ToolSHA, BaseSHA: *baseSHA,
-		AgentID: outcome.AgentID, Command: outcome.Command, PromptBytes: len(instruction), ExitCode: outcome.ExitCode,
-		DurationMs: outcome.Duration.Milliseconds(), ChangedFiles: outcome.ChangedFiles,
-		Transcript: outcome.Transcript, RanAt: time.Now().UTC(),
-	})
+	prompt := string(instruction)
+	outcome, halted, runErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+	emptyAttempts := 0
+	if runErr == nil && !halted && len(outcome.ChangedFiles) == 0 {
+		// The agent finished, wrote nothing, and said it was done: on the
+		// tenth live run the applier described the file it had created in
+		// detail, and the working copy was untouched (2026-09-09). The
+		// working tree is what counts, so it is asked once more with that
+		// fact in front of it — but only when there is room for the note
+		// and time for another launch, and the first attempt's record is
+		// written first, so a wall that fires during the second attempt
+		// leaves the first one's evidence behind.
+		retry := prompt + emptyResultRetryNote(haltFile != "")
+		if len(retry) <= worker.MaxAgentPromptBytes && firstAttemptWasQuick(outcome, agent) {
+			// The attempt that reported work it had not done is kept beside
+			// the final record, not in its place: a wall or a failure
+			// during the second launch leaves this behind, and what the
+			// model actually claimed stays readable (the count alone says
+			// it happened, not what was said).
+			first, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), 0))
+			if sealErr == nil {
+				_ = worker.WriteJSONFileExclusive(emptyAttemptRecordPath(*runOutPath), first, worker.MaxArtifactJSONBytes)
+			}
+			emptyAttempts = 1
+			second, secondHalted, secondErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, retry,
+				consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+			if secondErr == nil || second.Command != "" {
+				// The second launch ran: its record replaces the first,
+				// which stays on disk until the write below succeeds.
+				outcome, halted, runErr = second, secondHalted, secondErr
+				prompt = retry
+			}
+		}
+	}
+	run, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), emptyAttempts))
 	if sealErr == nil {
 		// The run record is evidence of what happened, written even when
 		// the run failed.
@@ -140,6 +167,80 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		return sealAppliersHalt(*repoRoot, *objectionOutPath, consumer, draft, *baseSHA, *stage, design)
 	}
 	return nil
+}
+
+// agentRunOf is the run record for one launch. Keeping it in one place is
+// what lets the first attempt be sealed before the second one starts.
+func agentRunOf(outcome worker.AgentOutcome, draft worker.TicketDraft, baseSHA string, stage, promptBytes, emptyAttempts int) worker.AgentRun {
+	return worker.AgentRun{
+		SchemaVersion: worker.ArtifactSchemaVersion, Stage: stage,
+		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
+		ConfigSHA256: draft.ConfigSHA256, ToolSHA: draft.ToolSHA, BaseSHA: baseSHA,
+		AgentID: outcome.AgentID, Command: outcome.Command, PromptBytes: promptBytes, ExitCode: outcome.ExitCode,
+		DurationMs: outcome.Duration.Milliseconds(), ChangedFiles: outcome.ChangedFiles,
+		Transcript: outcome.Transcript, EmptyAttempts: emptyAttempts, RanAt: time.Now().UTC(),
+	}
+}
+
+// emptyAttemptRecordPath is where the attempt that changed nothing is kept:
+// beside the run record, under a name nothing else writes.
+func emptyAttemptRecordPath(runOut string) string {
+	extension := filepath.Ext(runOut)
+	return strings.TrimSuffix(runOut, extension) + "-empty-attempt" + extension
+}
+
+// retryTimeShare is the part of an agent's own timeout a first attempt may
+// spend and still leave room for a second one inside the card's wall. A
+// variable so a test can move the cutoff without sleeping through a third
+// of the smallest timeout the configuration allows. The guard keeps two
+// launches inside the card's wall only where the wall is at least four
+// thirds of the agent's timeout, which both shipped configurations satisfy
+// (apply: 1200 against 900; implement: 5400 against 3600).
+var retryTimeShare = 3
+
+// firstAttemptWasQuick reports whether the launch that changed nothing
+// finished fast enough that another one fits. The card's wall is enforced
+// by the board, which kills this process and passes it no deadline, so the
+// only measured budget here is the agent's own timeout: an attempt that
+// reported work without doing any is fast by nature (twenty-seven seconds
+// against a nine-hundred-second timeout, live 2026-09-09), while one that
+// spent most of its time and produced nothing would push a second launch
+// into the wall.
+func firstAttemptWasQuick(outcome worker.AgentOutcome, agent worker.AgentConfig) bool {
+	if agent.TimeoutSeconds <= 0 || retryTimeShare <= 0 {
+		return false
+	}
+	return outcome.Duration < time.Duration(agent.TimeoutSeconds)*time.Second/time.Duration(retryTimeShare)
+}
+
+// emptyResultRetryNote is appended when an agent reported success without
+// touching the working copy. It states the measurement, not a scolding: the
+// engine read the tree and found nothing, so whatever the previous message
+// said, the work is still to do. The design and the objection are named
+// only for the role that has them.
+func emptyResultRetryNote(withDesign bool) string {
+	note := `
+
+---
+
+## The working copy is unchanged
+
+Your previous answer reported the work as done. The engine then read the
+working copy and found no change at all — no new file, no edited file.
+Nothing you described exists.
+
+Only the working copy counts. A message describing edits is not an edit;
+the seal reads the tree. Make the changes now with your tools, one file at
+a time.
+`
+	if withDesign {
+		note += `
+Start with the first file the design lists. If you cannot make the
+changes, write the objection file the rules above describe instead of
+reporting success.
+`
+	}
+	return note
 }
 
 // sealAppliersHalt reads the objection the applier left at the root of its
