@@ -793,6 +793,38 @@ func TestTheReaderAndWriterKeepTheirOwnRules(t *testing.T) {
 	if _, err := os.ReadFile(filepath.Join(pipeline.path("m1-trail.txt"), "kept")); err != nil {
 		t.Errorf("what stood in the trail's place was written over: %v", err)
 	}
+	// A trail whose place is held by a symlink is the case the removal
+	// exists for: a write does not need the directory to be writable when
+	// something is already at the path, so it succeeds, follows the link,
+	// and puts the note outside the workspace. Measured three ways —
+	// something not empty at the path (write fails too), a plain file with
+	// the workspace read-only (write succeeds), and this one (write
+	// succeeds and lands outside) — the earlier claim that the write always
+	// fails alongside was wrong (review of #127).
+	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
+	if err := os.WriteFile(outside, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The writer itself rather than the gate: a workspace this locked has
+	// nowhere to put the records the gate makes on its way here.
+	linked := receptionPipeline(t, receptionStubWorker(t, "assess-readiness", ""))
+	if err := os.Symlink(outside, linked.path("m1-trail.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(linked.Workspace, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(linked.Workspace, 0o700) })
+	if err := linked.writeReceptionTrail("受付処理が完了しませんでした\n"); err == nil {
+		t.Error("a trail that could not be replaced was reported as written")
+	}
+	if linked.trailWritten {
+		t.Error("a trail that was not written is trusted by the report")
+	}
+	if body, _ := os.ReadFile(outside); string(body) != "untouched\n" {
+		t.Errorf("the note was written outside the workspace: %q", body)
+	}
+
 	// And the note is readable by its owner only: it carries what a stopped
 	// ticket says, in a workspace the agents share.
 	written := receptionPipeline(t, receptionStubWorker(t, "assess-readiness", "worker: readiness assessment failed: x"))

@@ -45,14 +45,11 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
-// Four things here are deliberately not measured, on the line the review of
-// #127 drew: a change to any of them puts nothing in front of a requester,
-// and none has a failure behind it. Trimming a line's own leading space;
-// treating a line with only one separator as carrying a cause; writing the
-// note when the removal before it failed (which cannot happen — where the
-// removal fails the write fails too, measured); and the note's file mode.
-// The first two now are measured after all, because they turned out to be
-// what keeps a ticket's words out of the choice.
+// One thing here is deliberately not measured, on the line the review of
+// #127 drew: a change to it puts nothing in front of a requester and has no
+// failure behind it — the order the notes are asked in, which no phrase
+// distinguishes. Everything else that sweep raised turned out to change
+// what a requester sees, and is measured.
 //
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
@@ -236,11 +233,14 @@ func (p *Pipeline) noteReceptionRecord(stage string) {
 // and only the file this run wrote is trusted (trailWritten).
 func (p *Pipeline) writeReceptionTrail(note string) error {
 	trailPath := p.path("m1-trail.txt")
-	// Returning here rather than writing anyway is a shape, not a behaviour:
-	// in both cases the removal can fail — something not empty standing at
-	// the path, a parent that cannot be written — the write fails too
-	// (measured, review of #127). It stays because reporting the first
-	// failure is clearer than reporting the second.
+	// Returning here rather than writing anyway is a behaviour, and the
+	// earlier comment saying otherwise was wrong: a write does not need the
+	// directory to be writable when something is already at the path, so
+	// where the removal fails the write can still succeed — and if what is
+	// there is a symlink, the write follows it and the note lands outside
+	// the workspace, which is the whole reason the removal is here. Then
+	// nothing is written where the report looks, and the requester gets no
+	// trail at all.
 	if err := os.Remove(trailPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
