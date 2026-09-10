@@ -244,7 +244,13 @@
     background: var(--panel); border: 1px solid var(--panel-edge);
     color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em;
     text-decoration: none;
+    cursor: pointer; flex-wrap: wrap; max-width: 100%;
   }
+  .finished-run { min-width: 0; }
+  .finished-run[open] { flex-basis: 100%; }
+  .finished-run > .card { margin-top: 8px; }
+  .finished-run > summary::after { content: "詳細を見る ▾"; color: var(--cyan); }
+  .finished-run[open] > summary::after { content: "閉じる ▴"; }
   .chip:hover { border-color: var(--muted); }
   .chip .ckey { color: var(--ink); }
   .chip .mark { width: 7px; height: 7px; border-radius: 50%; flex: none; }
@@ -319,6 +325,7 @@ let sentActions = new Map(); // "action:issue" -> at
 const localPending = new Map(); // same key -> "sending" | "error:<msg>"
 const knownEvents = new Set();
 const cardStates = new Map(); // delivery_id -> {armed, armTimer, countdown}
+const expandedRuns = new Set();
 // Reserved for the answer phase (issue #14): drafts and the caret
 // restoration below are dormant until the board grows an answer box
 // again — nothing writes them today.
@@ -619,14 +626,20 @@ function buildCard(run) {
 }
 
 function buildChip(run) {
-  const link = trackerURL(run.issue_key);
-  const chip = el(link ? "a" : "span", "chip");
-  if (link) { chip.href = link; chip.target = "_blank"; chip.rel = "noopener"; }
+  const details = el("details", "finished-run");
+  details.open = expandedRuns.has(run.delivery_id);
+  details.addEventListener("toggle", () => {
+    if (details.open) expandedRuns.add(run.delivery_id);
+    else expandedRuns.delete(run.delivery_id);
+  });
+  const chip = el("summary", "chip");
   chip.classList.add(run.step === "done" ? "ok" : run.step === "stopped" ? "stop" : "bad");
   chip.appendChild(el("span", "mark"));
   chip.appendChild(el("span", "ckey", run.issue_key || run.delivery_id));
   chip.appendChild(el("span", null, run.step_title || run.step));
-  return chip;
+  details.appendChild(chip);
+  details.appendChild(buildCard(run));
+  return details;
 }
 
 let latestBoard = { runs: [] };

@@ -13,6 +13,60 @@ import (
 	"automation.internal/ticket-ingress/internal/state"
 )
 
+func TestStatusExplainsRecordedFailureAndNoActionWhileRunning(t *testing.T) {
+	config := runtime.Config{}
+	config.Chain.RunsRoot = t.TempDir()
+	delivery := "delivery-example"
+	dir := filepath.Join(config.Chain.RunsRoot, delivery)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, runner.FailedStepFile), []byte("AI による変更のレビュー"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "terminal", TerminalCode: "model_failed"}, nil)
+	if !strings.Contains(got.Detail, "AI による変更のレビュー") || !strings.Contains(got.NextAction, "運用担当者") || !strings.Contains(got.ActionEffect, "自動では再実行しません") || got.CanGo || got.CanResolve {
+		t.Fatalf("failure explanation or available actions = %+v", got)
+	}
+	got = classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "claimed"}, nil)
+	if !strings.Contains(got.NextAction, "利用者の操作は不要") || got.CanGo || got.CanResolve {
+		t.Fatalf("running guidance = %+v", got)
+	}
+}
+
+func TestProductionScreenPassRequiresTheRecordedScreenCheck(t *testing.T) {
+	for _, sealed := range []bool{false, true} {
+		for _, checked := range []bool{false, true} {
+			config := runtime.Config{}
+			config.Chain.RunsRoot = t.TempDir()
+			run := state.RunOverview{DeliveryID: "delivery-example", State: "terminal", TerminalCode: "success"}
+			dir := filepath.Join(config.Chain.RunsRoot, run.DeliveryID)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			report, err := json.Marshal(runner.DeliverReport{Verdict: "pass", ScreenChecked: checked})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, runner.DeliverProductionReportFile), report, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if sealed {
+				sealBoardOutcome(dir, "release", "pass", "")
+			}
+			got := classifyRun(config, run, nil)
+			if got.Step != "done" || strings.Contains(got.Detail, "画面確認まで合格") != checked {
+				t.Fatalf("sealed=%v checked=%v: %+v", sealed, checked, got)
+			}
+		}
+	}
+	var held RunStatus
+	placeStagingOutcome(&held, "pass", "依頼外の変更が含まれています")
+	if !strings.Contains(held.Detail, "依頼外の変更") || held.CanGo || !strings.Contains(held.ActionEffect, "始まりません") {
+		t.Fatalf("held reason hidden or false Go: %+v", held)
+	}
+}
+
 func TestAttentionAcknowledgementUsesExistingPostedReportWindow(t *testing.T) {
 	for _, phase := range []string{"staging", "release"} {
 		for _, verdict := range []string{"deploy_absent", "deploy_failed", "merge_unverified", "observe_blocked"} {
