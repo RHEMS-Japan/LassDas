@@ -206,6 +206,7 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 		}
 		if design != "" {
 			args = append(args, "--design", design, "--objection-out", p.designObjectionPath(designRound))
+			args = append(args, "--investigation", filepath.Join(filepath.Dir(design), "investigation.json"), "--measurements", p.path("measurements.jsonl"))
 		}
 	}
 	if code, err := p.worker(ctx, "run-instruction", args); err != nil || code != 0 {
@@ -303,6 +304,7 @@ func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, in
 	}
 	if design != "" {
 		reviewArgs = append(reviewArgs, "--design-md", filepath.Join(filepath.Dir(design), "DESIGN.md"))
+		reviewArgs = append(reviewArgs, "--design", design, "--investigation", filepath.Join(filepath.Dir(design), "investigation.json"), "--measurements", p.path("measurements.jsonl"))
 	}
 	reviewArgs = append(reviewArgs, "--reviewer", reviewer,
 		"--run-out", fmt.Sprintf("%s/%s-run.json", stageDir, reviewer),

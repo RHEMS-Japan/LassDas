@@ -213,8 +213,24 @@ func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) 
 	logged, _ := os.ReadFile(record)
 	line := strings.TrimSpace(string(logged))
 	wantTail := " --design " + filepath.Join(pipeline.designRoundDir(1), "design.json") + " --objection-out " + filepath.Join(pipeline.designRoundDir(1), "objection.json")
+	wantTail += " --investigation " + filepath.Join(pipeline.designRoundDir(1), "investigation.json") + " --measurements " + pipeline.path("measurements.jsonl")
 	if !strings.Contains(line, "--role applier") || !strings.HasSuffix(line, wantTail) {
 		t.Fatalf("applier call = %q, want it to end with %q", line, wantTail)
+	}
+	// The same approved design and measurement source reach both judges.
+	for i := range 2 {
+		if err := pipeline.chainReviewSealed(context.Background(), []string{"a", "b"}, i, repoRoot, baseSHA, 1); err != nil {
+			t.Fatalf("review card: %v", err)
+		}
+	}
+	logged, _ = os.ReadFile(record)
+	for _, review := range strings.Split(strings.TrimSpace(string(logged)), "\n")[1:] {
+		for _, required := range []string{"agent-review", "--design " + filepath.Join(pipeline.designRoundDir(1), "design.json"),
+			"--investigation " + filepath.Join(pipeline.designRoundDir(1), "investigation.json"), "--measurements " + pipeline.path("measurements.jsonl")} {
+			if !strings.Contains(review, required) {
+				t.Fatalf("review lost %q: %s", required, review)
+			}
+		}
 	}
 	// The implementer's card never carries a design, even on a run that designed.
 	if err := os.Remove(record); err != nil {
