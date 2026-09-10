@@ -265,8 +265,11 @@ type TerminalReportRequest struct {
 	// written here on purpose: three successive attempts to state one in a
 	// comment were wrong, and the list lives in runtime.AllStages.
 	// Empty means an older engine's report, which keeps the older sentence.
-	FailedStep string    `json:"failed_step,omitempty"`
-	IssuedAt   time.Time `json:"issued_at"`
+	FailedStep string `json:"failed_step,omitempty"`
+	// ModelFailureReason is a fixed explanation, like FailedStep, rather than
+	// a new terminal outcome. Empty preserves reports from older engines.
+	ModelFailureReason string    `json:"model_failure_reason,omitempty"`
+	IssuedAt           time.Time `json:"issued_at"`
 }
 
 // MaxTerminalTrailBytes bounds the requester-facing run record a terminal
@@ -280,6 +283,12 @@ const MaxTerminalTrailBytes = 6 * 1024
 // check, and a report that fails the shape check never reaches the
 // requester at all — the run retries for ever instead of ending.
 const MaxFailedStepBytes = 120
+
+const ModelFailureBudgetExhausted = "budget_exhausted"
+
+// BudgetFailureAction describes an operator action; it does not authorise a
+// budget increase or change the terminal run into a resumable hold.
+const BudgetFailureAction = "運用担当者が、終了した役に設定されているモデル利用枠と残高を確認し、必要な承認を得て利用枠を確保してください。依頼者の再起票は不要です。"
 
 // ValidateTrailText holds the trail to the same plain-text discipline as
 // every other requester-facing string: bounded, valid UTF-8, newlines only.
@@ -323,6 +332,9 @@ func (r TerminalReportRequest) ValidateShape() error {
 	if len(r.FailedStep) > MaxFailedStepBytes || !utf8.ValidString(r.FailedStep) ||
 		strings.ContainsAny(r.FailedStep, "\x00\r\n") {
 		return errors.New("terminal report failed step is invalid")
+	}
+	if r.ModelFailureReason != "" && (r.ModelFailureReason != ModelFailureBudgetExhausted || r.Code != TerminalModelFailed) {
+		return errors.New("terminal report model failure reason is invalid")
 	}
 	if (r.CommitSHA == "") != (r.CommitURL == "") || (r.CommitSHA != "" && !commitPattern.MatchString(r.CommitSHA)) {
 		return errors.New("terminal report commit binding is invalid")

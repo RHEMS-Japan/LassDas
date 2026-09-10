@@ -135,6 +135,7 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 		IncompleteReason:      evidence["incomplete_reason"],
 		IncompleteObjection:   evidence["incomplete_objection"],
 		FailedStep:            evidence["failed_step"],
+		ModelFailureReason:    evidence["model_failure_reason"],
 		TrailText:             trail,
 	}
 	if withSpend {

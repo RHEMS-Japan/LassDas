@@ -1,6 +1,8 @@
 package hook
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -55,5 +57,43 @@ func TestAStepNameThatIsNotOneBoundedLineIsRefused(t *testing.T) {
 	accepted.FailedStep = "稼働環境とリポジトリの調査"
 	if err := accepted.ValidateShape(); err != nil {
 		t.Fatalf("a well-formed step was refused: %v", err)
+	}
+}
+
+func TestBudgetRefusalExplainsTheOperatorActionAndNoAutomaticResume(t *testing.T) {
+	report := terminalTestRequest(TerminalModelFailed)
+	legacy, err := MarshalTerminalReportRecord(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil || bytes.Contains(encoded, []byte("model_failure_reason")) {
+		t.Fatalf("legacy optional field: %s, %v", encoded, err)
+	}
+	report.FailedStep = "AI による設計のレビュー（レビュー役 A）"
+	report.ModelFailureReason = ModelFailureBudgetExhausted
+	if err := report.ValidateShape(); err != nil {
+		t.Fatal(err)
+	}
+	comment := TerminalCommentContent(report, strings.Repeat("0", 64))
+	for _, want := range []string{"レビュー役 A", "モデル利用枠の上限超過", BudgetFailureAction, "自動では再実行しません", "本番環境には反映していません"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("missing %q: %s", want, comment)
+		}
+	}
+	// Explanations, like step names, do not change the immutable terminal
+	// outcome: an older pending report must still be able to finish.
+	withReason, err := MarshalTerminalReportRecord(report)
+	if err != nil || !bytes.Equal(legacy, withReason) {
+		t.Fatalf("explanation changed the pending report identity: %v", err)
+	}
+	report.ModelFailureReason = "unknown raw failure"
+	if report.ValidateShape() == nil {
+		t.Fatal("unrecognised cause accepted")
+	}
+	report.ModelFailureReason = ModelFailureBudgetExhausted
+	report.Code = TerminalSuccess
+	if report.ValidateShape() == nil {
+		t.Fatal("budget failure on a success accepted")
 	}
 }

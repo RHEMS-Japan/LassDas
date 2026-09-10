@@ -417,10 +417,20 @@ const ReviewRetryEligible = 10 * time.Minute
 // a genuinely fresh chance instead of the same collision.
 const ReviewRetryPause = 75 * time.Second
 
-// RetryableReviewFailure reports whether a failed review attempt died fast
-// enough to be the upstream lottery rather than a budget problem.
+// AgentBudgetRefused recognises the launcher's complete quota-refusal response.
+// A quoted error inside a review, or an ordinary rate limit, is not evidence
+// that another conversation cannot run. This classification never grants a pass.
+var agentBudgetRefusal = regexp.MustCompile(`^API call failed after [1-9][0-9]* retries: HTTP 429: Monthly budget exceeded$`)
+
+func AgentBudgetRefused(transcript string) bool {
+	return agentBudgetRefusal.MatchString(strings.TrimSpace(transcript))
+}
+
+// RetryableReviewFailure excludes explicit quota refusals even when they return
+// quickly with exit zero: decoding their text as a verdict must not spend more
+// conversations on the same exhausted allowance.
 func RetryableReviewFailure(outcome AgentOutcome) bool {
-	return outcome.Duration < ReviewRetryEligible
+	return outcome.Duration < ReviewRetryEligible && !AgentBudgetRefused(outcome.Transcript)
 }
 
 // ChangedFilesUnder reports which tracked files the working copy has modified,

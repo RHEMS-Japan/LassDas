@@ -2,16 +2,21 @@ package attendant
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Every stage a chain can run needs a name a requester recognises. The list
@@ -298,6 +303,185 @@ func TestAMalformedRecordCostsTheSentenceNotTheComment(t *testing.T) {
 			}
 			if !strings.Contains(fixture.comments.posted[0], "成果物の生成またはレビューを完了できなかった") {
 				t.Fatalf("a malformed record was used rather than dropped:\n%s", fixture.comments.posted[0])
+			}
+		})
+	}
+}
+
+// Build actual sealed launch evidence under this delivery. No model is invoked.
+func budgetFailureFixture(t *testing.T, fixture pendingFixture, stage string, round int) (string, string, worker.Config) {
+	t.Helper()
+	config, err := worker.LoadConfig("../../config/m1-consumer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, value any) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(fixture.config.ConsumerConfigPath, config)
+	configSHA, _ := config.SHA256()
+	dir := runDirectory(fixture.config, fixture.deliveryID)
+	raw := worker.RawTicket{SchemaVersion: worker.ArtifactSchemaVersion, DeliveryID: fixture.deliveryID,
+		InputSHA256: strings.Repeat("1", 64), ConfigSHA256: configSHA, ToolSHA: fixture.config.Identity.EngineSHA,
+		IssueKey: "TKT-4242", RunID: "TKT-4242", Summary: "Update the document", Description: "Check the source and revise the document."}
+	encoded, _ := json.Marshal(raw)
+	digest := sha256.Sum256(encoded)
+	raw.RawSHA256 = hex.EncodeToString(digest[:])
+	if err := raw.Validate(config); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(dir, "raw-ticket.json"), raw)
+	prefix, suffix, subject, roundField, index := "stage-", "-run.json", "candidate.json", "stage", 0
+	if stage == runtime.StageDesignReviewA || stage == runtime.StageDesignReviewB {
+		prefix, suffix, subject, roundField = "design-", "-design-review-run.json", "investigation.json", "round"
+	}
+	if stage == runtime.StageDesignReviewB || stage == runtime.StageReviewB {
+		index = 1
+	}
+	reviewer := config.Models.Reviewers[index].ID
+	agent := config.Agents.ReviewerAgentFor(reviewer)
+	if prefix == "design-" {
+		agent = config.Agents.DesignReviewerAgentFor(reviewer)
+	}
+	run, err := worker.SealAgentRun(worker.AgentRun{
+		SchemaVersion: worker.ArtifactSchemaVersion, Stage: round, DeliveryID: raw.DeliveryID,
+		InputSHA256: raw.InputSHA256, ConfigSHA256: configSHA, ToolSHA: raw.ToolSHA, BaseSHA: strings.Repeat("b", 40),
+		AgentID: agent.ID, Command: agent.Command, PromptBytes: 1, DurationMs: 1, RanAt: time.Now().UTC(),
+		Transcript: "API call failed after 3 retries: HTTP 429: Monthly budget exceeded\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Validate(config); err != nil {
+		t.Fatal(err)
+	}
+	roundDir := filepath.Join(dir, "history", prefix+strconv.Itoa(round))
+	runPath := filepath.Join(roundDir, reviewer+suffix)
+	write(runPath, run)
+	write(filepath.Join(roundDir, subject), map[string]any{
+		roundField: round, "base_sha": run.BaseSHA, "delivery_id": run.DeliveryID,
+		"input_sha256": run.InputSHA256, "config_sha256": run.ConfigSHA256, "tool_sha": run.ToolSHA,
+	})
+	return dir, runPath, config
+}
+
+func TestBudgetRefusalReachesReportBoardAndReportRetryForTheFailedRound(t *testing.T) {
+	for _, stage := range []string{runtime.StageDesignReviewA, runtime.StageDesignReviewB, runtime.StageReviewA, runtime.StageReviewB} {
+		t.Run(stage, func(t *testing.T) {
+			fixture := newPendingFixture(t, "")
+			fixture.writeRunDir(t, "")
+			dir, _, _ := budgetFailureFixture(t, fixture, stage, 2)
+			var envelope hook.DispatchEnvelope
+			if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			hermes, _ := fakeBoard(t)
+			card := runtime.BoardTask{ID: "t_failure", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, 2)}
+			view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
+			var err error
+			if strings.HasPrefix(stage, "design-") {
+				_, err = handleDesignChainFailure(context.Background(), fixture.config, fixture.services, hermes, envelope, fixture.run, view,
+					runtime.ChainPlan{Shape: runtime.ShapeDesign}, stage, &recordingLogger{})
+			} else {
+				err = handleChainFailure(context.Background(), fixture.config, fixture.services, hermes, envelope, fixture.run, view, stage, &recordingLogger{})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			role := "A"
+			if strings.HasSuffix(stage, "-b") {
+				role = "B"
+			}
+			if len(fixture.comments.posted) != 1 || !strings.Contains(fixture.comments.posted[0], "モデル利用枠の上限超過") || !strings.Contains(fixture.comments.posted[0], "レビュー役 "+role) {
+				t.Fatalf("failed round lost its cause or role: %v", fixture.comments.posted)
+			}
+			if got := runner.RecordedFailedStep(dir); got["model_failure_reason"] != hook.ModelFailureBudgetExhausted {
+				t.Fatalf("cause not persisted: %v", got)
+			}
+			run := fixture.run
+			run.State = "terminal"
+			status := classifyRun(fixture.config, run, nil)
+			if status.StepTitle != "AI の利用枠不足で終了" || !strings.Contains(status.Detail, "レビュー役 "+role) ||
+				status.NextAction != hook.BudgetFailureAction || !strings.Contains(status.ActionEffect, "自動では再実行しません") || status.CanGo || status.CanResolve {
+				t.Fatalf("board guidance: %+v", status)
+			}
+			// Simulate loss of the first post and the stage cards. The ledger's
+			// immutable outcome survives; the retry must recover its explanation.
+			fixture.comments.posted = nil
+			if err := os.Remove(fixture.config.ConsumerConfigPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), &pendingTestLogger{}); err != nil {
+				t.Fatal(err)
+			}
+			if len(fixture.comments.posted) != 1 || !strings.Contains(fixture.comments.posted[0], "モデル利用枠の上限超過") {
+				t.Fatalf("retry lost the cause: %v", fixture.comments.posted)
+			}
+		})
+	}
+}
+
+func TestBudgetFailureEvidenceRejectsTamperingReplayAndOtherStages(t *testing.T) {
+	for _, change := range []string{"digest", "delivery", "input", "config", "tool", "base", "round", "agent", "external", "ordinary rate limit", "missing subject", "other stage"} {
+		t.Run(change, func(t *testing.T) {
+			fixture := newPendingFixture(t, "")
+			dir, path, _ := budgetFailureFixture(t, fixture, runtime.StageDesignReviewA, 2)
+			var run worker.AgentRun
+			if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &run); err != nil {
+				t.Fatal(err)
+			}
+			stage := runtime.StageDesignReviewA
+			switch change {
+			case "digest":
+				run.PromptBytes++
+			case "delivery":
+				run.DeliveryID = "delivery_" + strings.Repeat("cd", 16)
+			case "input":
+				run.InputSHA256 = strings.Repeat("2", 64)
+			case "config":
+				run.ConfigSHA256 = strings.Repeat("2", 64)
+			case "tool":
+				run.ToolSHA = strings.Repeat("2", 40)
+			case "base":
+				run.BaseSHA = strings.Repeat("2", 40)
+			case "round":
+				run.Stage = 1
+			case "agent":
+				run.AgentID = "unrelated-role"
+			case "external":
+				run.Kind = worker.AgentRunKindExternal
+			case "ordinary rate limit":
+				run.Transcript = "API call failed after 3 retries: HTTP 429: Rate limit exceeded"
+			case "missing subject":
+				if err := os.Remove(filepath.Join(filepath.Dir(path), "investigation.json")); err != nil {
+					t.Fatal(err)
+				}
+			case "other stage":
+				stage = runtime.StageDesignDecide
+			}
+			if change != "digest" {
+				var err error
+				run, err = worker.SealAgentRun(run)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			encoded, _ := json.Marshal(run)
+			if err := os.WriteFile(path, encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := failedStepEvidence(fixture.config, dir, stage, 2); got["model_failure_reason"] != "" || got["failed_step"] == "" {
+				t.Fatalf("unbound cause accepted or failure step lost: %v", got)
 			}
 		})
 	}

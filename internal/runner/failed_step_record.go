@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,15 @@ import (
 // directories are keyed by delivery id so no two deliveries share one.
 const FailedStepFile = "failed-step.txt"
 
+// The companion keeps the legacy step file readable by older engines. The
+// step binding prevents a partial update from explaining a different failure.
+const ModelFailureFile = "model-failure.json"
+
+type modelFailureRecord struct {
+	Step   string `json:"failed_step"`
+	Reason string `json:"model_failure_reason"`
+}
+
 // recordFailedStep writes the step for a later attempt at the same report.
 // Best-effort by design: the report must never be blocked by it.
 func recordFailedStep(runDir string, evidence map[string]string) {
@@ -26,7 +36,14 @@ func recordFailedStep(runDir string, evidence map[string]string) {
 	if !UsableStepName(step) {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(runDir, FailedStepFile), []byte(step), 0o600)
+	_ = os.Remove(filepath.Join(runDir, ModelFailureFile))
+	if err := os.WriteFile(filepath.Join(runDir, FailedStepFile), []byte(step), 0o600); err != nil {
+		return
+	}
+	if evidence["model_failure_reason"] == hook.ModelFailureBudgetExhausted {
+		encoded, _ := json.Marshal(modelFailureRecord{Step: step, Reason: hook.ModelFailureBudgetExhausted})
+		_ = os.WriteFile(filepath.Join(runDir, ModelFailureFile), encoded, 0o600)
+	}
 }
 
 // RecordedFailedStep reads back the step a run ended on, as report evidence,
@@ -48,7 +65,14 @@ func RecordedFailedStep(runDir string) map[string]string {
 	if !UsableStepName(step) {
 		return nil
 	}
-	return map[string]string{"failed_step": step}
+	evidence := map[string]string{"failed_step": step}
+	var failure modelFailureRecord
+	encoded, err = os.ReadFile(filepath.Join(runDir, ModelFailureFile))
+	if err == nil && len(encoded) <= 1024 && json.Unmarshal(encoded, &failure) == nil &&
+		failure.Step == step && failure.Reason == hook.ModelFailureBudgetExhausted {
+		evidence["model_failure_reason"] = failure.Reason
+	}
+	return evidence
 }
 
 // UsableStepName reports whether a name is one the report will accept: the

@@ -363,6 +363,13 @@ const maxIncompleteObjectionBytes = 600
 // is an older engine's, and keeps the older sentence.
 func modelFailedMessage(report TerminalReportRequest) string {
 	step := singleLineBounded(report.FailedStep, MaxFailedStepBytes)
+	if report.ModelFailureReason == ModelFailureBudgetExhausted {
+		if step == "" {
+			step = "AI による処理"
+		}
+		return step + "でモデル利用枠の上限超過が報告されたため、処理を終了しました。本番環境には反映していません。\n" +
+			BudgetFailureAction + "\nこの試行は利用枠が回復しても自動では再実行しません。運用担当者が再開方法をこのチケットで案内します。"
+	}
 	if step == "" {
 		return "AIによる成果物の生成またはレビューを完了できなかったため、本番環境には反映していません。"
 	}

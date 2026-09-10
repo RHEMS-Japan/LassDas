@@ -294,7 +294,13 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 			return
 		}
 		status.place("failed", "失敗で終了", hook.DescribeTerminalCode(run.TerminalCode))
-		if step := runner.RecordedFailedStep(runDir)["failed_step"]; step != "" {
+		evidence := runner.RecordedFailedStep(runDir)
+		if run.TerminalCode == string(hook.TerminalModelFailed) && evidence["model_failure_reason"] == hook.ModelFailureBudgetExhausted {
+			status.place("failed", "AI の利用枠不足で終了", "モデル利用枠の上限超過が報告されました")
+			status.NextAction = hook.BudgetFailureAction
+			status.ActionEffect = "この試行は終了しています。利用枠が回復しても自動では再実行しません。運用担当者が再開方法をチケットで案内します。"
+		}
+		if step := evidence["failed_step"]; step != "" {
 			status.Detail += "。終了した工程: " + step
 		}
 		return
