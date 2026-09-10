@@ -115,14 +115,14 @@ func run() error {
 		}
 	}
 
-	tick()
 	if *once {
+		tick()
 		return nil
 	}
 	// The bell: the board server touches this file when the tracker's
 	// webhook rings (body unread — the bell only means "worth looking").
-	// A moved mtime makes the NEXT fast-loop pass run a full tick instead
-	// of a snapshot, so tracker events reach the pipeline within seconds
+	// A moved mtime makes the NEXT fast-loop pass request a full tick,
+	// so tracker events reach the pipeline within seconds
 	// instead of a minute. Forged rings cost one rate-limited look.
 	bellPath := filepath.Join(statusDir(), "wakeup")
 	lastBell := time.Time{}
@@ -141,42 +141,57 @@ func run() error {
 	// artifacts) change mid-tick as cards execute, and a minute-old picture
 	// reads as a frozen board. This loop re-snapshots every few seconds —
 	// it never touches the tracker unless the bell rang, so the extra rate
-	// costs nothing external. tickMu keeps bell-driven ticks and the timer
-	// loop's ticks serialized; observe() has its own mutex.
-	var tickMu sync.Mutex
-	runTick := func() {
-		tickMu.Lock()
-		defer tickMu.Unlock()
-		tick()
+	// costs nothing external. Only the main loop runs ticks; the observation
+	// loop signals a bell without waiting for the reception to finish.
+	snapshotInterval := *observeInterval
+	if !config.OrchestrationCards() {
+		snapshotInterval = 0
 	}
-	if config.OrchestrationCards() && *observeInterval > 0 {
+	runLoops(ctx, *interval, snapshotInterval, tick, observe, bellRang)
+	logger.Info("attendant stopping")
+	return nil
+}
+
+// A slow reception must not suspend its own progress display. Bells are
+// coalesced while one tick runs; they never spawn concurrent reception work.
+func runLoops(ctx context.Context, interval, observeInterval time.Duration, tick, observe func(), bellRang func() bool) {
+	wakeup := make(chan struct{}, 1)
+	if observeInterval > 0 {
+		observeCtx, stopObserving := context.WithCancel(ctx)
+		observing := make(chan struct{})
+		defer func() { stopObserving(); <-observing }()
 		go func() {
-			fast := time.NewTicker(*observeInterval)
+			defer close(observing)
+			fast := time.NewTicker(observeInterval)
 			defer fast.Stop()
 			for {
 				select {
-				case <-ctx.Done():
+				case <-observeCtx.Done():
 					return
 				case <-fast.C:
 					if bellRang() {
-						runTick()
-					} else {
-						observe()
+						select {
+						case wakeup <- struct{}{}:
+						default:
+						}
 					}
+					observe()
 				}
 			}
 		}()
 	}
-	timer := time.NewTicker(*interval)
+	// Observation is already running when the first tick prepares a request.
+	tick()
+	timer := time.NewTicker(interval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			// The context is signal-only, so Done always means a clean stop.
-			logger.Info("attendant stopping")
-			return nil
+			return
 		case <-timer.C:
-			runTick()
+			tick()
+		case <-wakeup:
+			tick()
 		}
 	}
 }
