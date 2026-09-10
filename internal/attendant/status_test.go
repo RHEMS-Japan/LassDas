@@ -24,11 +24,18 @@ func TestStatusExplainsRecordedFailureAndNoActionWhileRunning(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, runner.FailedStepFile), []byte("AI による変更のレビュー"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "terminal", TerminalCode: "model_failed"}, nil)
-	if !strings.Contains(got.Detail, "AI による変更のレビュー") || !strings.Contains(got.NextAction, "運用担当者") || !strings.Contains(got.ActionEffect, "自動では再実行しません") || got.CanGo || got.CanResolve {
-		t.Fatalf("failure explanation or available actions = %+v", got)
+	for _, code := range []string{
+		"model_failed", "nonconverged", "validation_failed", "release_failed", "internal_failed",
+		"production_deployment_unverified", "production_verification_failed",
+		"input_rejected", "readiness_rejected", "clarification_required", "readiness_unresolved", "clarification_expired",
+		"investigation_incomplete", "investigation_nonconverged", "design_nonconverged",
+	} {
+		got := classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "terminal", TerminalCode: code}, nil)
+		if strings.HasPrefix(got.Detail, code) || !strings.Contains(got.Detail, "AI による変更のレビュー") || !strings.Contains(got.NextAction, "運用担当者") || !strings.Contains(got.ActionEffect, "自動では再実行しません") || got.CanGo || got.CanResolve {
+			t.Errorf("%s failure explanation or available actions = %+v", code, got)
+		}
 	}
-	got = classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "claimed"}, nil)
+	got := classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "claimed"}, nil)
 	if !strings.Contains(got.NextAction, "利用者の操作は不要") || got.CanGo || got.CanResolve {
 		t.Fatalf("running guidance = %+v", got)
 	}

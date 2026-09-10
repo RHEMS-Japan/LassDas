@@ -13,6 +13,22 @@ import (
 // read it, with the machine code kept in parentheses for the operator.
 func DescribeTerminalCode(code string) string {
 	switch TerminalCode(code) {
+	case TerminalInputRejected:
+		return "依頼の入力検査で終了 (input_rejected)"
+	case TerminalReadinessRejected:
+		return "受付の審査で終了 (readiness_rejected)"
+	case TerminalClarificationRequired:
+		return "依頼内容の確認が必要 (clarification_required)"
+	case TerminalReadinessUnresolved:
+		return "依頼の不明点を解消できず終了 (readiness_unresolved)"
+	case TerminalClarificationExpired:
+		return "回答期限を過ぎて終了 (clarification_expired)"
+	case TerminalInvestigationIncomplete:
+		return "調査・設計の記録を完成できず終了 (investigation_incomplete)"
+	case TerminalInvestigationNonconverged:
+		return "調査結果のレビューが収束せず終了 (investigation_nonconverged)"
+	case TerminalDesignNonconverged:
+		return "設計のレビューが収束せず終了 (design_nonconverged)"
 	case TerminalModelFailed:
 		return "AI の応答が得られず終了 (model_failed)"
 	case TerminalNonconverged:
