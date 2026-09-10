@@ -777,7 +777,7 @@ func handleChainFailure(
 	}
 	var evidence map[string]string
 	if code == hook.TerminalModelFailed {
-		evidence = failedStepEvidence(runDir, stageName, view.round)
+		evidence = failedStepEvidence(config, runDir, stageName, view.round)
 
 	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {

@@ -534,3 +534,29 @@ func TestAgentReviewProcessAndJSONFailuresShareTheAttemptLimit(t *testing.T) {
 		})
 	}
 }
+
+// The actual command must preserve the refusal and end after one launch, even
+// when the launcher exits zero. A decoder failure must not turn it into a retry.
+func TestAgentReviewDoesNotRetryAnExplicitBudgetRefusal(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "attempts")
+	fixture := newAgentFixture(t, editTheLabel,
+		`n=$(cat `+counter+` 2>/dev/null || echo 0); n=$((n+1)); printf %s "$n" > `+counter+`; echo "API call failed after 3 retries: HTTP 429: Monthly budget exceeded"`)
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t); err == nil {
+		t.Fatal("a quota refusal was accepted as a review")
+	}
+	attempts, err := os.ReadFile(counter)
+	if err != nil || string(attempts) != "1" {
+		t.Fatalf("attempts = %q, %v", attempts, err)
+	}
+	var record worker.AgentRun
+	readAgentArtifact(t, fixture.path("review-run.json"), worker.MaxArtifactJSONBytes, &record)
+	if record.ExitCode != 0 || !worker.AgentBudgetRefused(record.Transcript) {
+		t.Fatalf("refusal evidence was lost: %+v", record)
+	}
+	if _, err := os.Stat(fixture.path("review.json")); !os.IsNotExist(err) {
+		t.Fatalf("a verdict was sealed from the refusal: %v", err)
+	}
+}

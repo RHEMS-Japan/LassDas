@@ -782,3 +782,28 @@ func TestTheHomeFileBoundClearsTheMeasurementBudget(t *testing.T) {
 			MaxAgentHomeFileBytes, probe.DefaultLimits.MaxTotalBytes)
 	}
 }
+
+func TestQuotaRefusalDoesNotStartAnotherReviewConversation(t *testing.T) {
+	refusal := "API call failed after 3 retries: HTTP 429: Monthly budget exceeded"
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{refusal, true}, {refusal + "\n", true},
+		{"API call failed after 2 retries: HTTP 429: Monthly budget exceeded", true},
+		{"HTTP 429: Monthly budget exceeded", false},
+		{"API call failed after 3 retries: HTTP 429: Rate limit exceeded", false},
+		{"API call failed after 3 retries: HTTP 503: Monthly budget exceeded", false},
+		{"API call failed after 3 retries: HTTP 429: Monthly budget exceeded yesterday", false},
+		{"The log said: " + refusal, false},
+		{"{\"verdict\":\"revise\",\"message\":\"" + refusal + "\"}", false},
+		{refusal + "\nAdditional review text", false},
+	} {
+		if got := AgentBudgetRefused(tc.text); got != tc.want {
+			t.Errorf("classification(%q) = %t, want %t", tc.text, got, tc.want)
+		}
+		if got := RetryableReviewFailure(AgentOutcome{Transcript: tc.text, Duration: time.Second}); got == tc.want {
+			t.Errorf("retry(%q) = %t", tc.text, got)
+		}
+	}
+}

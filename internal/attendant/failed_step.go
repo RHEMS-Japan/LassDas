@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // requesterStepNames is what each step of the work is called when a
@@ -24,6 +26,7 @@ import (
 //
 // Both reviewers of a pair share one name: which of the two refused is the
 // operator's question, and the requester's answer does not change with it.
+// A confirmed quota refusal adds the role so the operator can find its allowance.
 var requesterStepNames = map[string]string{
 	// The investigate card seals the investigation AND the design when the
 	// delivery is design-backed, so a failure while writing the design is
@@ -82,10 +85,62 @@ func candidateSealed(runDir string, round int) bool {
 // is refused never ends at all — it retries for ever with no comment. A
 // missing name costs the older, vaguer sentence; a refused report costs the
 // requester everything.
-func failedStepEvidence(runDir, stageName string, round int) map[string]string {
+func failedStepEvidence(config runtime.Config, runDir, stageName string, round int) map[string]string {
 	name := failedStepFor(runDir, stageName, round)
 	if !runner.UsableStepName(name) {
 		return nil
 	}
-	return map[string]string{"failed_step": name}
+	evidence := map[string]string{"failed_step": name}
+	if role := budgetRefusedReviewer(config.ConsumerConfigPath, runDir, stageName, round); role != "" {
+		evidence["failed_step"] = name + "（レビュー役 " + role + "）"
+		evidence["model_failure_reason"] = hook.ModelFailureBudgetExhausted
+	}
+	return evidence
+}
+
+// Only a sealed run from the failed review can explain it. Missing, malformed,
+// replayed, or differently configured records retain the unknown-cause message.
+// Once recorded, terminal retries read the explanation without loading config.
+func budgetRefusedReviewer(configPath, runDir, stageName string, round int) string {
+	index, prefix, suffix, subject, roundField := 0, "stage-", "-run.json", "candidate.json", "stage"
+	switch stageName {
+	case runtime.StageDesignReviewA, runtime.StageDesignReviewB:
+		prefix, suffix, subject, roundField = "design-", "-design-review-run.json", "investigation.json", "round"
+	case runtime.StageReviewA, runtime.StageReviewB:
+	default:
+		return ""
+	}
+	if stageName == runtime.StageReviewB || stageName == runtime.StageDesignReviewB {
+		index = 1
+	}
+	config, err := worker.LoadConfig(configPath)
+	if err != nil || round < 1 || len(config.Models.Reviewers) <= index {
+		return ""
+	}
+	reviewer := config.Models.Reviewers[index].ID
+	agent := config.Agents.ReviewerAgentFor(reviewer)
+	if prefix == "design-" {
+		agent = config.Agents.DesignReviewerAgentFor(reviewer)
+	}
+	roundDir := filepath.Join(runDir, "history", prefix+strconv.Itoa(round))
+	var run worker.AgentRun
+	if worker.ReadJSONFile(filepath.Join(roundDir, reviewer+suffix), worker.MaxArtifactJSONBytes, &run) != nil ||
+		run.Validate(config) != nil || run.Kind != "" || run.AgentID != agent.ID ||
+		run.Stage != round || !worker.AgentBudgetRefused(run.Transcript) {
+		return ""
+	}
+	var raw worker.RawTicket
+	if worker.ReadJSONFile(filepath.Join(runDir, "raw-ticket.json"), worker.MaxTicketJSONBytes, &raw) != nil || raw.Validate(config) != nil ||
+		raw.DeliveryID != filepath.Base(runDir) || run.DeliveryID != raw.DeliveryID ||
+		run.InputSHA256 != raw.InputSHA256 || run.ConfigSHA256 != raw.ConfigSHA256 || run.ToolSHA != raw.ToolSHA {
+		return ""
+	}
+	var judged map[string]any
+	if worker.ReadJSONFile(filepath.Join(roundDir, subject), worker.MaxArtifactJSONBytes, &judged) != nil ||
+		judged[roundField] != float64(round) || judged["base_sha"] != run.BaseSHA ||
+		judged["delivery_id"] != run.DeliveryID || judged["input_sha256"] != run.InputSHA256 ||
+		judged["config_sha256"] != run.ConfigSHA256 || judged["tool_sha"] != run.ToolSHA {
+		return ""
+	}
+	return []string{"A", "B"}[index]
 }
