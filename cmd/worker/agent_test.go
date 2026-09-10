@@ -304,6 +304,31 @@ func TestAgentReviewRejectsAReviewerThatReportsNoVerdict(t *testing.T) {
 	}
 }
 
+// A file tool can start in the agent's home even though the process was
+// launched in the checkout. The instruction must let it find the actual
+// candidate without relying on that tool's current directory.
+func TestAgentReviewCanLocateTheCandidateFromItsInstruction(t *testing.T) {
+	fixture := newAgentFixture(t, editTheLabel, `
+for arg in "$@"; do prompt="$arg"; done
+root=$(printf '%s\n' "$prompt" | sed -n 's/^作業コピーの絶対パス: //p' | head -n 1)
+cd "$HOME" || exit 1
+case "$root" in /*) ;; *) exit 1 ;; esac
+test "$(cat "$root/client/src/label.ts")" = "export const label = 'Updated label';" || exit 1
+echo SAW-CANDIDATE-AT-EXPLICIT-PATH
+echo '{"verdict":"pass","findings":[]}'`)
+	if err := fixture.implement(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.review(t); err != nil {
+		t.Fatalf("the candidate could not be found from the instruction: %v", err)
+	}
+	var record worker.AgentRun
+	readAgentArtifact(t, fixture.path("review-run.json"), worker.MaxArtifactJSONBytes, &record)
+	if !strings.Contains(record.Transcript, "SAW-CANDIDATE-AT-EXPLICIT-PATH") {
+		t.Fatal("the reviewer did not read the candidate at the supplied location")
+	}
+}
+
 // A verdict that names a file the change did not touch is a reviewer talking
 // about something else, which must not seal.
 func TestAgentReviewRejectsAVerdictAboutAnUnrelatedFile(t *testing.T) {
