@@ -448,7 +448,7 @@ func investigationSystemPrompt(mode string, revise bool) string {
 	clarification := "\n" + resolvedClarificationRule
 	if mode == ModeDesign {
 		design = DesignExecutionRules + `
-After the report is sealed you will be asked for the design: {"design":{"cause":"one sentence","cause_evidence":["m-0001"],"approach":"one sentence","alternatives":["not taken"],"files":[{"path":"exact path","changes":["what changes there"]}],"verification":{"form":"wording","path":"/page","expected_text":"…","absent_text":"…"} or {"form":"measurement","probe":"id","args":{},"metric":"time_total","threshold":3.0},"blast_radius":["…"],"not_doing":["…"]}}
+After the report is sealed you will be asked for the design: {"design":{"cause":"one sentence","cause_evidence":["m-0001"],"approach":"one sentence","alternatives":["not taken"],"files":[{"path":"exact path","changes":["what changes there"]}],"verification":{"form":"wording","path":"/page","expected_text":"…","absent_text":"…"} or {"form":"file_text","path":"docs/guide.md","expected_text":"…","absent_text":"…"} or {"form":"measurement","probe":"id","args":{},"metric":"time_total","threshold":3.0},"blast_radius":["…"],"not_doing":["…"]}}
 cause_evidence must cite ids that your measured findings cite. files must stay inside the allowed prefixes and be the smallest set.
 
 Evidence rules the reviewers apply to every design; do the necessary measurements before sealing the report, while probes are still available:

@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,7 +181,7 @@ func TestDesignValidation(t *testing.T) {
 		{"no files", func(o *ModelDesignOutput) { o.Files = nil }, "no files"},
 		{"wording already present", func(o *ModelDesignOutput) { o.Verification.ExpectedText = "Old label" }, "already contains"},
 		{"wording without path", func(o *ModelDesignOutput) { o.Verification.Path = "page" }, "wording verification is invalid"},
-		{"unknown form", func(o *ModelDesignOutput) { o.Verification.Form = "manual" }, "wording or measurement"},
+		{"unknown form", func(o *ModelDesignOutput) { o.Verification.Form = "manual" }, "wording, file_text or measurement"},
 		{"measurement probe unknown", func(o *ModelDesignOutput) {
 			o.Verification = Verification{Form: VerificationMeasurement, Probe: "http.other", Args: map[string]string{"path": "/page"}, Metric: "time_total", Threshold: 3}
 		}, "not in the catalogue"},
@@ -284,6 +285,80 @@ func TestDesignRenderingIsDeterministic(t *testing.T) {
 	}
 	if _, err := DecodeModelDesignOutput([]byte(`{"cause":"x","extra":1}`)); err == nil {
 		t.Error("unknown field accepted")
+	}
+}
+
+// A repository document must have an honest file check, without inventing a
+// screen route. Its wording is checked in that exact file, not a sibling.
+func TestRepositoryFileVerification(t *testing.T) {
+	measurements, _ := measurementsFile(t)
+	investigation := goodInvestigation(t, measurements)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"guide.md": "Old guidance\n",
+		"other.md": "New guidance\nOther guidance\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, "docs", name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := goodDesignOutput()
+	output.Files = []FileChange{
+		{Path: "docs/guide.md", Changes: []string{"replace the guidance"}},
+		{Path: "docs/other.md", Changes: []string{"link to the guide"}},
+	}
+	output.Verification = Verification{Form: VerificationFileText, Path: "docs/guide.md", ExpectedText: "New guidance", AbsentText: "Old guidance"}
+	design, err := NewDesign(testIdentity, 1, output, investigation, testBounds(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := design.VerificationSummary(); got != "リポジトリ内のファイル docs/guide.md に「New guidance」が記載される、「Old guidance」は記載されない" {
+		t.Fatalf("wrong acceptance promise: %s", got)
+	}
+	rendered := RenderDesign(design, investigation)
+	if !strings.Contains(rendered, "Repository file check on `docs/guide.md`") || strings.Contains(rendered, "Screen check") {
+		t.Fatal("repository verification was not rendered as a file check")
+	}
+	encoded, err := json.Marshal(design)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Design
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Validate(testIdentity, investigation, testBounds(t, root)); err != nil || RenderDesign(restored, investigation) != rendered {
+		t.Fatalf("file verification did not survive the sealed artifact: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*Verification)
+		reason string
+	}{
+		{"screen-shaped path", func(v *Verification) { v.Path = "/docs/guide.md" }, "invalid"},
+		{"traversal", func(v *Verification) { v.Path = "docs/../guide.md" }, "invalid"},
+		{"file outside the design", func(v *Verification) { v.Path = "docs/unlisted.md" }, "one of the design files"},
+		{"old text only in sibling", func(v *Verification) { v.AbsentText = "Other guidance" }, "no design file contains"},
+		{"new text already in target", func(v *Verification) { v.ExpectedText = "Old guidance" }, "already contains"},
+		{"mixed measurement", func(v *Verification) { v.Probe = "http.timing" }, "carries measurement fields"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := output
+			tc.change(&changed.Verification)
+			if _, err := NewDesign(testIdentity, 1, changed, investigation, testBounds(t, root)); err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("err = %v, want %s", err, tc.reason)
+			}
+		})
+	}
+	newFile := output
+	newFile.Files = []FileChange{{Path: "docs/new.md", Changes: []string{"write the guidance"}}}
+	newFile.Verification.Path = "docs/new.md"
+	newFile.Verification.AbsentText = ""
+	if _, err := NewDesign(testIdentity, 1, newFile, investigation, testBounds(t, root)); err != nil {
+		t.Fatalf("new file without absent text refused: %v", err)
 	}
 }
 

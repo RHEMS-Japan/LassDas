@@ -435,7 +435,7 @@ func TestDesignReviewPromptStatesTheVerificationVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"## 確認方法 (verification) の書式", "2 形しか書けません", "absent_text は任意です", "全部この変更で新しく作られるときは空でなければなりません", "任意の項目を必須として要求しないでください", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
+	for _, want := range []string{"## 確認方法 (verification) の書式", "任意の項目を必須として要求しないでください", "wording 形は関所が反映後に自動で検査するものではなく", "書式で表せない検査", "revise にしないでください"} {
 		if !strings.Contains(design, want) {
 			t.Errorf("design review prompt lacks %q", want)
 		}

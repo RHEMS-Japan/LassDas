@@ -46,6 +46,12 @@ func RenderDesign(design Design, investigation Investigation) string {
 			fmt.Fprintf(&b, " and must no longer show %q", design.Verification.AbsentText)
 		}
 		b.WriteString(".\n\n")
+	case VerificationFileText:
+		fmt.Fprintf(&b, "Repository file check on `%s`: the file must contain %q", design.Verification.Path, design.Verification.ExpectedText)
+		if design.Verification.AbsentText != "" {
+			fmt.Fprintf(&b, " and must no longer contain %q", design.Verification.AbsentText)
+		}
+		b.WriteString(".\n\n")
 	case VerificationMeasurement:
 		fmt.Fprintf(&b, "Measurement: probe `%s`", design.Verification.Probe)
 		if len(design.Verification.Args) > 0 {
@@ -128,6 +134,12 @@ func (d Design) VerificationSummary() string {
 		text := fmt.Sprintf("画面 %s に「%s」が表示される", d.Verification.Path, d.Verification.ExpectedText)
 		if d.Verification.AbsentText != "" {
 			text += fmt.Sprintf("、「%s」は表示されない", d.Verification.AbsentText)
+		}
+		return text
+	case VerificationFileText:
+		text := fmt.Sprintf("リポジトリ内のファイル %s に「%s」が記載される", d.Verification.Path, d.Verification.ExpectedText)
+		if d.Verification.AbsentText != "" {
+			text += fmt.Sprintf("、「%s」は記載されない", d.Verification.AbsentText)
 		}
 		return text
 	case VerificationMeasurement:
