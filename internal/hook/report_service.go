@@ -24,6 +24,8 @@ type TerminalBeginRequest struct {
 type TerminalBinding struct {
 	IssueID  int64
 	IssueKey string
+	// ClaimedAtMillis comes from the bound run, never from the report sender.
+	ClaimedAtMillis int64
 }
 
 type TerminalBeginDisposition string
@@ -72,18 +74,32 @@ type TerminalReportProcessor interface {
 }
 
 type TerminalReportService struct {
-	config  ReportRouteConfig
-	store   TerminalReportStore
-	backlog TerminalCommentClient
-	logger  *slog.Logger
-	board   BoardProjector
-	now     func() time.Time
-	token   func() (string, error)
+	config                 ReportRouteConfig
+	store                  TerminalReportStore
+	backlog                TerminalCommentClient
+	logger                 *slog.Logger
+	board                  BoardProjector
+	automaticDeliveryAfter time.Time
+	now                    func() time.Time
+	token                  func() (string, error)
 }
 
 // UseBoard mirrors endings onto the board humans watch: a delivery in its own
 // column, everything else where a person picks it up.
 func (s *TerminalReportService) UseBoard(board BoardProjector) { s.board = board }
+
+// UseAutomaticDeliveryAfter mirrors the existing attendant's delivery cut-off
+// for notification wording; it does not enable or schedule delivery.
+func (s *TerminalReportService) UseAutomaticDeliveryAfter(after time.Time) {
+	s.automaticDeliveryAfter = after
+}
+
+func (s *TerminalReportService) deliveryContinues(report TerminalReportRequest, binding TerminalBinding) bool {
+	return !s.automaticDeliveryAfter.IsZero() && binding.ClaimedAtMillis > 0 &&
+		binding.ClaimedAtMillis >= s.automaticDeliveryAfter.UnixMilli() &&
+		report.Code == TerminalSuccess && report.PullRequestURL != "" &&
+		report.StagingEvidenceURL == "" && report.ProductionEvidenceURL == ""
+}
 
 func terminalBoardPhase(code TerminalCode) BoardPhase {
 	if code == TerminalSuccess || code == TerminalInvestigated {
@@ -148,7 +164,8 @@ func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, repor
 		return s.reportResult(DecisionInternal, "terminal_report_state_invalid", report.DeliveryID)
 	}
 
-	comment := TerminalCommentContent(report, reportDigest)
+	deliveryContinues := s.deliveryContinues(report, binding)
+	comment := terminalCommentContent(report, reportDigest, deliveryContinues)
 	// Backlog's comment API has no idempotency key. The lease serializes live
 	// writers, and this lookup repairs the ambiguous case where a previous
 	// POST succeeded but the terminal store update did not: the posted
@@ -178,7 +195,11 @@ func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, repor
 	}
 	switch complete {
 	case TerminalCompleted, TerminalAlreadyComplete:
-		projectBoard(ctx, s.board, s.logger, binding.IssueID, terminalBoardPhase(report.Code))
+		phase := terminalBoardPhase(report.Code)
+		if deliveryContinues {
+			phase = BoardRunning
+		}
+		projectBoard(ctx, s.board, s.logger, binding.IssueID, phase)
 		return s.reportResult(DecisionAccepted, "terminal_report_recorded", report.DeliveryID)
 	case TerminalCompleteConflict:
 		return s.reportResult(DecisionInvalid, "terminal_report_conflict", report.DeliveryID)
@@ -233,6 +254,10 @@ func successMessage(report TerminalReportRequest) string {
 // wording is the product, and the one builder that was not reachable from
 // outside was the one nothing outside could hold to its sentences.
 func TerminalCommentContent(report TerminalReportRequest, reportDigest string) string {
+	return terminalCommentContent(report, reportDigest, false)
+}
+
+func terminalCommentContent(report TerminalReportRequest, reportDigest string, deliveryContinues bool) string {
 	message := map[TerminalCode]string{
 		TerminalSuccess:                        successMessage(report),
 		TerminalInputRejected:                  "入力が許可された形式または範囲に一致しなかったため、変更していません。",
@@ -256,8 +281,18 @@ func TerminalCommentContent(report TerminalReportRequest, reportDigest string) s
 	if message == "" {
 		message = "自動処理は終了しました。詳細は実行履歴を参照してください。"
 	}
+	heading := "自動処理の最終結果: " + string(report.Code)
+	facts := terminalCommentFacts(report, reportDigest)
+	if deliveryContinues {
+		heading = "進行状況: Pull Request 作成済み・自動処理を継続"
+		message = "Pull Request を作成しました。続いて CI の結果を確認し、通過後に staging への取り込みと確認を進めます。本番環境は変更していません。"
+		facts.State = "Pull Request 作成済み（CI 確認・staging 取り込みへ進行中）"
+		facts.NextActor = "自動処理"
+		facts.Operation = "いまは利用者の操作は不要です。自動処理の結果をお待ちください"
+		facts.NextEvent = "staging の確認結果、または処理を進められない理由と必要な操作を、このチケットでお知らせします"
+	}
 	lines := []string{
-		"自動処理の最終結果: " + string(report.Code),
+		heading,
 		message,
 		"実行履歴: " + report.RunURL,
 	}
@@ -279,7 +314,7 @@ func TerminalCommentContent(report TerminalReportRequest, reportDigest string) s
 	if report.SpendText != "" {
 		lines = append(lines, "", "## この依頼にかかった費用", report.SpendText)
 	}
-	return strings.Join(lines, "\n") + terminalCommentFacts(report, reportDigest).render()
+	return strings.Join(lines, "\n") + facts.render()
 }
 
 // terminalCommentFacts maps every finite terminal code onto the seven-item

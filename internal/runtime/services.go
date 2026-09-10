@@ -93,6 +93,14 @@ func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("report service: %w", err)
 	}
+	if config.Chain.Deliver.Enabled() {
+		after, err := config.Chain.Deliver.EnabledAfterTime()
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("delivery notification cut-off: %w", err)
+		}
+		reportService.UseAutomaticDeliveryAfter(after)
+	}
 	questionService, err := hook.NewQuestionReportService(route, store, backlogClient, logger)
 	if err != nil {
 		_ = store.Close()

@@ -287,3 +287,111 @@ func TestTerminalReportRetryFindsTheCommentByMarkerWhenTheBodyDrifted(t *testing
 		t.Fatalf("the completion did not bind the posted comment: %+v", store.completeRequests)
 	}
 }
+
+func TestTerminalReportDescribesTheConfiguredDeliveryContinuation(t *testing.T) {
+	cutoff := functionURLTestNow.Add(-time.Hour)
+	for _, tc := range []struct {
+		name      string
+		after     time.Time
+		claimedAt int64
+		ending    string
+		continues bool
+	}{
+		{"after cut-off", cutoff, cutoff.Add(time.Millisecond).UnixMilli(), "pr", true},
+		{"at cut-off", cutoff, cutoff.UnixMilli(), "pr", true},
+		{"before cut-off", cutoff, cutoff.Add(-time.Millisecond).UnixMilli(), "pr", false},
+		{"missing claim", cutoff, 0, "pr", false},
+		{"disabled", time.Time{}, cutoff.UnixMilli(), "pr", false},
+		{"staging completed", cutoff, cutoff.UnixMilli(), "staging", false},
+		{"production completed", cutoff, cutoff.UnixMilli(), "production", false},
+		{"failed", cutoff, cutoff.UnixMilli(), "failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := terminalTestRequest(TerminalSuccess)
+			switch tc.ending {
+			case "pr":
+				report.CommitSHA, report.CommitURL = "", ""
+				report.StagingEvidenceURL, report.ProductionEvidenceURL = "", ""
+			case "staging":
+				report.ProductionEvidenceURL = ""
+			case "failed":
+				report = terminalTestRequest(TerminalModelFailed)
+			}
+			store := &terminalFakeStore{
+				beginBindings:     []TerminalBinding{{IssueID: 404, ClaimedAtMillis: tc.claimedAt}},
+				beginDispositions: []TerminalBeginDisposition{TerminalBeginAcquired},
+				completeResults:   []TerminalCompleteDisposition{TerminalCompleted},
+			}
+			comments := &terminalFakeComments{addIDs: []int64{808}}
+			board := &fakeBoard{}
+			service := newTerminalTestService(t, store, comments, nil)
+			if tc.ending == "pr" {
+				service.config.Destinations[0].Delivery = DeliverPullRequest
+			} else if tc.ending == "staging" {
+				service.config.Destinations[0].Delivery = DeliverIntegration
+			}
+			service.UseAutomaticDeliveryAfter(tc.after)
+			service.UseBoard(board)
+			if result := service.ProcessTerminalReport(context.Background(), report); result.Decision != DecisionAccepted {
+				t.Fatalf("report failed: %+v", result)
+			}
+			body := comments.addContents[0]
+			digest := store.beginRequests[0].ReportSHA256
+			phase := terminalBoardPhase(report.Code)
+			if tc.continues {
+				phase = BoardRunning
+				for _, want := range []string{"自動処理を継続", "次に行動する人: 自動処理", "いまは利用者の操作は不要", "CI の結果を確認", "staging の確認結果", "このチケットでお知らせ", "未変更"} {
+					if !strings.Contains(body, want) {
+						t.Errorf("continuation notice missing %q: %s", want, body)
+					}
+				}
+				for _, falseEnding := range []string{"最終結果", "以後の自動通知はありません", "マージをご判断", "マージと以後の反映は人が行います"} {
+					if strings.Contains(body, falseEnding) {
+						t.Errorf("continuing run claims %q", falseEnding)
+					}
+				}
+			} else if body != TerminalCommentContent(report, digest) {
+				t.Fatalf("legacy or completed delivery wording changed: %s", body)
+			}
+			if len(board.calls) != 1 || board.calls[0].Phase != phase || board.calls[0].IssueID != 404 {
+				t.Fatalf("incorrect ticket status: %+v", board.calls)
+			}
+			record, err := MarshalTerminalReportRecord(report)
+			if err != nil || store.beginRequests[0].ReportJSON != string(record) || digest != TerminalReportDigest(record) {
+				t.Fatal("notification context changed the durable report")
+			}
+			if ExtractCommentMarker(body) != ExtractCommentMarker(TerminalCommentContent(report, digest)) {
+				t.Fatal("notification context changed the idempotency marker")
+			}
+		})
+	}
+}
+
+func TestTerminalReportRetryKeepsThePostedCommentWhenDeliveryConfigurationChanges(t *testing.T) {
+	claim := functionURLTestNow.Add(-time.Minute)
+	store := &terminalFakeStore{
+		beginBindings:     []TerminalBinding{{IssueID: 404, ClaimedAtMillis: claim.UnixMilli()}, {IssueID: 404, ClaimedAtMillis: claim.UnixMilli()}},
+		beginDispositions: []TerminalBeginDisposition{TerminalBeginAcquired, TerminalBeginAcquired},
+		completeErrors:    []error{errors.New("completion interrupted"), nil},
+		completeResults:   []TerminalCompleteDisposition{"", TerminalCompleted},
+	}
+	comments := &terminalFakeComments{addIDs: []int64{808}}
+	service := newTerminalTestService(t, store, comments, nil)
+	report := terminalTestRequest(TerminalSuccess)
+	service.config.Destinations[0].Delivery = DeliverPullRequest
+	report.CommitSHA, report.CommitURL = "", ""
+	report.StagingEvidenceURL, report.ProductionEvidenceURL = "", ""
+	if result := service.ProcessTerminalReport(context.Background(), report); result.Decision == DecisionAccepted {
+		t.Fatal("interrupted completion was accepted")
+	}
+	service.UseAutomaticDeliveryAfter(claim)
+	if result := service.ProcessTerminalReport(context.Background(), report); result.Decision != DecisionAccepted {
+		t.Fatalf("retry failed: %+v", result)
+	}
+	if len(comments.addContents) != 1 || len(store.completeRequests) != 2 || store.completeRequests[1].CommentID != 808 {
+		t.Fatal("configuration change duplicated or replaced the posted comment")
+	}
+	if store.beginRequests[0].ReportSHA256 != store.beginRequests[1].ReportSHA256 || comments.markerLookups[0] != comments.markerLookups[1] {
+		t.Fatal("retry changed report or marker identity")
+	}
+}
