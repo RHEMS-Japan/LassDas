@@ -33,8 +33,11 @@ func runRunInstruction(ctx context.Context, args []string) error {
 	knowledgeRoot := flags.String("knowledge-root", "", "")
 	runOutPath := flags.String("out", "", "")
 	designPath := flags.String("design", "", "")
+	investigationPath := flags.String("investigation", "", "")
+	measurementsPath := flags.String("measurements", "", "")
 	objectionOutPath := flags.String("objection-out", "", "")
 	if !parseFlags(flags, args) || (*designPath == "") != (*objectionOutPath == "") ||
+		(*investigationPath == "") != (*measurementsPath == "") || (*measurementsPath != "" && *designPath == "") ||
 		!allPresent(*configPath, *toolSHA, *draftPath, *role, *instructionPath, *repoRoot, *baseSHA, *runOutPath) ||
 		!worker.ValidToolSHA(*toolSHA) || *stage < 1 {
 		return errors.New("run-instruction arguments are invalid")
@@ -112,7 +115,24 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		}
 	}
 	prompt := string(instruction)
-	outcome, halted, runErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+	var measurements *designSubjectInputs
+	var homeFiles map[string]string
+	homeToken := ""
+	if *measurementsPath != "" {
+		inputs, err := readDesignSubject(config, *toolSHA, *baseSHA, *investigationPath, *designPath, *measurementsPath)
+		if err != nil {
+			return err
+		}
+		if inputs.identity.DeliveryID != draft.DeliveryID || inputs.identity.InputSHA256 != draft.InputSHA256 || inputs.design.DesignSHA256 != design.DesignSHA256 {
+			return errors.New("the measurements belong to another run or design")
+		}
+		measurements = &inputs
+		prompt, homeFiles, homeToken, err = withMeasurements(prompt, inputs, *measurementsPath)
+		if err != nil {
+			return err
+		}
+	}
+	outcome, halted, runErr := worker.RunAgentUnlessHaltedWithHomeFiles(ctx, agent, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile, homeFiles, homeToken)
 	emptyAttempts := 0
 	if runErr == nil && !halted && len(outcome.ChangedFiles) == 0 {
 		// The agent finished, wrote nothing, and said it was done: on the
@@ -124,7 +144,7 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		// written first, so a wall that fires during the second attempt
 		// leaves the first one's evidence behind.
 		retry := prompt + emptyResultRetryNote(haltFile != "")
-		if len(retry) <= worker.MaxAgentPromptBytes && firstAttemptWasQuick(outcome, agent) {
+		if len(retry) <= designPromptBudget(retry, homeToken) && firstAttemptWasQuick(outcome, agent) {
 			// The attempt that reported work it had not done is kept beside
 			// the final record, not in its place: a wall or a failure
 			// during the second launch leaves this behind, and what the
@@ -135,8 +155,8 @@ func runRunInstruction(ctx context.Context, args []string) error {
 				_ = worker.WriteJSONFileExclusive(emptyAttemptRecordPath(*runOutPath), first, worker.MaxArtifactJSONBytes)
 			}
 			emptyAttempts = 1
-			second, secondHalted, secondErr := worker.RunAgentUnlessHalted(ctx, agent, *repoRoot, retry,
-				consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile)
+			second, secondHalted, secondErr := worker.RunAgentUnlessHaltedWithHomeFiles(ctx, agent, *repoRoot, retry,
+				consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile, homeFiles, homeToken)
 			if secondErr == nil || second.Command != "" {
 				// The second launch ran: its record replaces the first,
 				// which stays on disk until the write below succeeds.
@@ -162,6 +182,11 @@ func runRunInstruction(ctx context.Context, args []string) error {
 			_ = os.RemoveAll(filepath.Join(*repoRoot, haltFile))
 		}
 		return errors.New("the " + *role + " did not finish: " + runErr.Error())
+	}
+	if measurements != nil {
+		if err := measurements.investigation.Validate(measurements.identity, *measurementsPath); err != nil {
+			return errors.New("the measurements changed during the apply")
+		}
 	}
 	if halted {
 		return sealAppliersHalt(*repoRoot, *objectionOutPath, consumer, draft, *baseSHA, *stage, design)

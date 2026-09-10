@@ -137,9 +137,13 @@ func runAgentReview(ctx context.Context, args []string) error {
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	designMDPath := flags.String("design-md", "", "")
+	designPath := flags.String("design", "", "")
+	investigationPath := flags.String("investigation", "", "")
+	measurementsPath := flags.String("measurements", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) ||
+		(*designPath == "") != (*investigationPath == "") || (*designPath == "") != (*measurementsPath == "") ||
 		!allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *reviewerID, *repoRoot, *baseSHA, *runOutPath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) {
 		return errors.New("agent-review arguments are invalid")
@@ -182,6 +186,23 @@ func runAgentReview(ctx context.Context, args []string) error {
 		// diagnosable in one glance instead of an artifact dig.
 		return fmt.Errorf("review instruction could not be built: %w", err)
 	}
+	var measurements *designSubjectInputs
+	var homeFiles map[string]string
+	homeToken := ""
+	if *measurementsPath != "" {
+		inputs, err := readDesignSubject(config, *toolSHA, *baseSHA, *investigationPath, *designPath, *measurementsPath)
+		if err != nil {
+			return err
+		}
+		if inputs.identity.DeliveryID != request.DeliveryID || inputs.identity.InputSHA256 != request.InputSHA256 || inputs.design.DesignSHA256 != candidate.DesignSHA256 {
+			return errors.New("the measurements belong to another run or design")
+		}
+		measurements = &inputs
+		prompt, homeFiles, homeToken, err = withMeasurements(prompt, inputs, *measurementsPath)
+		if err != nil {
+			return err
+		}
+	}
 	if err := placeAgentKnowledge(agent, *knowledgeRoot, *repoRoot); err != nil {
 		return err
 	}
@@ -192,7 +213,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 
 	// The reviewer is not told which files it may touch, because it is not
 	// meant to touch any; a review that edits the tree is rejected below.
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, nil, "", func(transcript string) error {
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles, homeToken, func(transcript string) error {
 		_, err := worker.DecodeAgentReviewOutput(transcript)
 		return err
 	})
@@ -209,6 +230,11 @@ func runAgentReview(ctx context.Context, args []string) error {
 	}
 	if runErr != nil {
 		return errors.New("the reviewing agent did not finish")
+	}
+	if measurements != nil {
+		if err := measurements.investigation.Validate(measurements.identity, *measurementsPath); err != nil {
+			return errors.New("the measurements changed during the review")
+		}
 	}
 	consumer, err := request.Consumer(config)
 	if err != nil {

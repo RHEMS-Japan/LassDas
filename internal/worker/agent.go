@@ -146,7 +146,13 @@ func RunAgent(ctx context.Context, config AgentConfig, workspace, prompt string,
 // scope, which is how an honest objection used to end as a failed run
 // (issue #103). An empty haltFile is plain RunAgent.
 func RunAgentUnlessHalted(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string, haltFile string) (AgentOutcome, bool, error) {
-	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, nil, "")
+	return RunAgentUnlessHaltedWithHomeFiles(ctx, config, workspace, prompt, allowedPrefixes, ignoredByproducts, haltFile, nil, "")
+}
+
+// RunAgentUnlessHaltedWithHomeFiles keeps the same halt and writable-scope
+// checks while giving the writer the read-only evidence used by reviewers.
+func RunAgentUnlessHaltedWithHomeFiles(ctx context.Context, config AgentConfig, workspace, prompt string, allowedPrefixes []string, ignoredByproducts []string, haltFile string, homeFiles map[string]string, homeToken string) (AgentOutcome, bool, error) {
+	outcome, root, err := runAgentProcess(ctx, config, workspace, prompt, homeFiles, homeToken)
 	if err != nil {
 		return outcome, false, err
 	}

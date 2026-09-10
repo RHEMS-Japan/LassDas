@@ -31,6 +31,124 @@ type designFixture struct {
 
 const passVerdict = `echo '{"verdict":"pass","findings":[]}'`
 
+// These real command/process tests cover the two downstream roles that
+// previously received the design but no readable measurement file.
+func TestDesignBackedRolesReadBoundMeasurements(t *testing.T) {
+	for _, role := range []string{"applier", "reviewer"} {
+		scenarios := []string{"copy", "corrupt-before", "changed-during", "another-run"}
+		if role == "reviewer" {
+			scenarios = append(scenarios, "unbound-candidate")
+		}
+		for _, scenario := range scenarios {
+			t.Run(role+"/"+scenario, func(t *testing.T) {
+				copied := filepath.Join(t.TempDir(), "read.jsonl")
+				promptFile := filepath.Join(t.TempDir(), "prompt.txt")
+				body := `set -e; for a in "$@"; do last="$a"; done; printf '%s' "$last" > ` + promptFile +
+					`; cat "$HOME/measurements.jsonl" > ` + copied
+				fixture := newDesignFixture(t, body+`; `+passVerdict, func(binaries string, config *worker.Config) {
+					writeStandInAgent(t, binaries, "stand-in-applier", body+`; `+editTheLabel)
+					applier := config.Agents.Implementer
+					applier.Command = "stand-in-applier"
+					applier.ID = "applier-stand-in"
+					config.Agents.Applier = &applier
+				})
+				// The design fixture uses an explicit identity; make the ticket
+				// the same run before sealing the candidate or launching apply.
+				var draft worker.TicketDraft
+				readAgentArtifact(t, fixture.draftPath, worker.MaxTicketJSONBytes, &draft)
+				draft.DeliveryID, draft.InputSHA256 = fixture.identity.DeliveryID, fixture.identity.InputSHA256
+				if scenario == "another-run" {
+					draft.DeliveryID = "delivery_" + strings.Repeat("e", 32)
+				}
+				writeTestJSON(t, fixture.draftPath, draft)
+				original, err := os.ReadFile(fixture.measurementsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "corrupt-before" {
+					if err := os.WriteFile(fixture.measurementsPath, []byte("{}\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "changed-during" {
+					// This stand-in still runs as the test user, so it can
+					// simulate damage to the engine's original during launch.
+					body += `; printf '{}\n' > ` + fixture.measurementsPath
+					name, tail := "stand-in-reviewer", passVerdict
+					if role == "applier" {
+						name, tail = "stand-in-applier", editTheLabel
+					}
+					writeStandInAgent(t, fixture.path("bin"), name, body+`; `+tail)
+				}
+				launcher := filepath.Join(t.TempDir(), "fake-agentexec")
+				if err := os.WriteFile(launcher, []byte("#!/bin/sh\nif [ \"$1\" = \"--reclaim\" ]; then exit 0; fi\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift\nexec \"$@\"\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("HOME", t.TempDir())
+				t.Setenv(worker.AgentLauncherEnv, launcher)
+				t.Setenv(worker.AgentTreeRootEnv, filepath.Dir(fixture.repoRoot))
+				t.Setenv("LASSDAS_STATE_DIR", t.TempDir())
+				args := []string{"--config", fixture.configPath, "--tool-sha", cliToolSHA, "--base-sha", fixture.baseSHA,
+					"--repo-root", fixture.repoRoot, "--design", fixture.designPath,
+					"--investigation", fixture.investigationPath, "--measurements", fixture.measurementsPath}
+				if role == "applier" {
+					instruction := fixture.path("INSTRUCTION.md")
+					if err := os.WriteFile(instruction, []byte("Apply the approved design.\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					args = append([]string{"run-instruction", "--role", "applier", "--draft", fixture.draftPath, "--stage", "1",
+						"--instruction", instruction, "--objection-out", fixture.path("objection.json"), "--out", fixture.path("apply-run.json")}, args...)
+				} else {
+					if err := os.WriteFile(filepath.Join(fixture.repoRoot, "client/src/label.ts"), []byte("export const label = 'Updated label';\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					sealArgs := []string{"--design", fixture.designPath}
+					if scenario == "another-run" || scenario == "unbound-candidate" {
+						sealArgs = nil // Valid candidate not bound to this design.
+					}
+					if err := fixture.sealCandidate(t, sealArgs...); err != nil {
+						t.Fatal(err)
+					}
+					args = append([]string{"agent-review", "--ticket", fixture.path("ticket.json"), "--source", fixture.path("source.json"),
+						"--candidate", fixture.path("candidate.json"), "--reviewer", "review-b", "--run-out", fixture.path("review-run.json"), "--out", fixture.path("review.json")}, args...)
+				}
+				err = run(context.Background(), args)
+				if scenario != "copy" {
+					if err == nil {
+						t.Fatal("unbound or damaged measurements were accepted")
+					}
+					if scenario != "changed-during" {
+						if _, statErr := os.Stat(copied); !os.IsNotExist(statErr) {
+							t.Fatal("agent started before the evidence was rejected")
+						}
+					} else if !strings.Contains(err.Error(), "measurements changed") {
+						t.Fatalf("wrong rejection after the launch: %v", err)
+					}
+					if role == "reviewer" {
+						if _, statErr := os.Stat(fixture.path("review.json")); !os.IsNotExist(statErr) {
+							t.Fatal("a review was sealed over rejected evidence")
+						}
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				read, err := os.ReadFile(copied)
+				if err != nil || string(read) != string(original) {
+					t.Fatalf("the agent did not read the original measurements: %v", err)
+				}
+				prompt, err := os.ReadFile(promptFile)
+				if err != nil || strings.Contains(string(prompt), "{{AGENT_HOME") ||
+					!strings.Contains(string(prompt), filepath.Join(filepath.Dir(fixture.repoRoot), "agent-home")) ||
+					!strings.Contains(string(prompt), "先頭 2 件") || len(prompt) > worker.MaxAgentPromptBytes {
+					t.Fatalf("the instruction did not name its readable bound evidence: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func newDesignFixture(t *testing.T, reviewerBody string, tune func(binaries string, config *worker.Config)) designFixture {
 	t.Helper()
 	fixture := designFixture{agentFixture: newTunedAgentFixture(t, "true", reviewerBody, tune)}

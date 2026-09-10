@@ -278,7 +278,7 @@ func (p *Pipeline) chainDesignDecide(ctx context.Context, reviewers []string) er
 // design: the kernel's rendering of the design plus the rules of §7, and —
 // from the second implementation round on — the reviewers' findings on the
 // previous attempt, so the applier does not repeat the same defect. The
-// applier reads nothing else.
+// applier also receives the sealed measurements when the card runs.
 func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 	design, err := os.ReadFile(filepath.Join(p.designRoundDir(round), "DESIGN.md"))
 	if err != nil {
@@ -420,7 +420,7 @@ const applyInstructionRules = `
 - Do not reopen the approach. If a step cannot be done as written, or you would have to touch another file, stop: write ` + "`revise-design.json`" + ` at the root of the working copy named above (its absolute path) with ` + "`{\"reason\": \"…\", \"section\": \"cause|approach|files|verification|blast_radius|not_doing\"}`" + ` and finish without editing anything else. The reason is 1 to 600 bytes of plain text naming what could not be done as written; an empty or longer reason is refused, and so is an objection next to other edits. The design goes back to its author.
 - There is no person on this run. Nobody answers a question, approves a step or fills in a blank; a question you would have asked is an objection (above), not a comment left in the code.
 - Write the files with your tools. What counts is the working copy, not your answer: a message that describes edits you did not make ends the delivery as a failure, and the engine will tell you the tree is unchanged.
-- Your tool calls are counted and capped. Open only the files the design names, write the first change early, and do not survey the repository or run its whole test suite first: a run that spends its turns reading ends with nothing written and nothing sealed.
+- Your tool calls are counted and capped. Read the supplied measurements and the files the design names, write the first change early, and do not survey the repository or run its whole test suite first: a run that spends its turns reading ends with nothing written and nothing sealed.
 - Never add automation, CI/CD, release, credential, IAM, repository-governance or deployment machinery. Never claim to have run a command or observed a deployment.
 - Do not commit; the seal reads the working tree at the absolute path named above.
 `
