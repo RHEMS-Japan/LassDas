@@ -226,7 +226,7 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 		return
 	}
 	detail := fmt.Sprintf("%d 巡目", view.round)
-	var implementLeft, reviewLeft, blocked, humanLane bool
+	var implementLeft, reviewLeft, validateLeft, publishLeft, blocked, humanLane bool
 	humanStage := "implement"
 	for stage, card := range view.cards {
 		if card.Status == "done" {
@@ -243,10 +243,17 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 		if failedCardStatuses[card.Status] {
 			blocked = true
 		}
-		if strings.Contains(stage, "review") {
+		// Future validation/publication cards already exist while a review
+		// runs. Their pending status must not put the display back at implement.
+		switch stage {
+		case runtime.StageReviewA, runtime.StageReviewB:
 			reviewLeft = true
-		} else {
+		case runtime.StageImplement, runtime.StageApply:
 			implementLeft = true
+		case runtime.StageValidate:
+			validateLeft = true
+		case runtime.StagePublish:
+			publishLeft = true
 		}
 	}
 	switch {
@@ -260,6 +267,10 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 		status.place("implement", "実装・検証中", detail)
 	case reviewLeft:
 		status.place("review", "レビュー中", detail)
+	case validateLeft:
+		status.place("checks", "変更内容の検査中", detail)
+	case publishLeft:
+		status.place("reporting", "PR の公開処理中", detail)
 	default:
 		status.place("implement", "次の工程を準備中", detail)
 	}
