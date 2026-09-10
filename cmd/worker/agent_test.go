@@ -354,7 +354,7 @@ func readAgentArtifact(t *testing.T, filename string, limit int64, into any) {
 func TestImplementFeedsBothPreviousReviewsToTheAgent(t *testing.T) {
 	// The stand-in prints its instruction, so what the agent was told is
 	// observable in the sealed run record.
-	fixture := newAgentFixture(t, `printf '%s\n' "$@" | tail -c 3000; `+editTheLabel, "true")
+	fixture := newAgentFixture(t, `printf '%s\n' "$@"; `+editTheLabel, "true")
 	first := fixture.path("review-one.json")
 	second := fixture.path("review-two.json")
 	writeTestJSON(t, first, map[string]any{"findings": []map[string]any{
