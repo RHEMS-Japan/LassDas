@@ -591,6 +591,44 @@ func TestInvestigateCorrectsUnknownMetricToAdditiveWording(t *testing.T) {
 	}
 }
 
+// The existing re-ask must identify an oversized verification literal in
+// bytes, so the next answer can fit without changing the accepted bounds.
+func TestInvestigateCorrectsOversizedFileVerification(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	input.Mode = ModeDesign
+	var answer struct {
+		Design investigate.ModelDesignOutput `json:"design"`
+	}
+	if err := json.Unmarshal([]byte(designAnswer), &answer); err != nil {
+		t.Fatal(err)
+	}
+	answer.Design.Verification = investigate.Verification{Form: investigate.VerificationFileText, Path: "web/page.tmpl", ExpectedText: strings.Repeat("あ", 100)}
+	corrected, _ := json.Marshal(answer)
+	answer.Design.Verification.ExpectedText += "あ"
+	refused, _ := json.Marshal(answer)
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.list"}}`,
+		`{"probe":{"probe":"repo.read","args":{"path":"web/page.tmpl"}}}`,
+		reportAnswer, string(refused), string(corrected),
+	}}
+	invoker, err := NewModelInvoker(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil || result.Design == nil || result.Turns != 5 {
+		t.Fatalf("recovery: result=%+v err=%v", result, err)
+	}
+	if err := result.Design.Validate(input.Identity, result.Investigation, input.Bounds); err != nil {
+		t.Fatalf("the corrected 300-byte file verification did not seal: %v", err)
+	}
+	messages := api.requests[len(api.requests)-1].Messages
+	objection := messages[len(messages)-1].Content
+	if !strings.Contains(objection, "verification.expected_text is 303 bytes (limit 300)") {
+		t.Fatalf("the next model turn did not receive the correction: %s", objection)
+	}
+}
+
 // A revise round's contract (the system prompt, never USER_DATA_JSON, which
 // the contract declares untrusted) says how each previous finding is
 // answered; a first round's contract does not, and the task JSON carries

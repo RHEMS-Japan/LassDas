@@ -344,6 +344,10 @@ func TestRepositoryFileVerification(t *testing.T) {
 		{"old text only in sibling", func(v *Verification) { v.AbsentText = "Other guidance" }, "no design file contains"},
 		{"new text already in target", func(v *Verification) { v.ExpectedText = "Old guidance" }, "already contains"},
 		{"mixed measurement", func(v *Verification) { v.Probe = "http.timing" }, "carries measurement fields"},
+		{"long expected text", func(v *Verification) { v.ExpectedText = strings.Repeat("あ", 101) }, "verification.expected_text is 303 bytes (limit 300)"},
+		{"long absent text", func(v *Verification) { v.AbsentText = strings.Repeat("あ", 101) }, "verification.absent_text is 303 bytes (limit 300)"},
+		{"long path", func(v *Verification) { v.Path = strings.Repeat("a", 301) }, "verification.path is 301 bytes (limit 300)"},
+		{"multiline expected text", func(v *Verification) { v.ExpectedText = "New\nguidance" }, "verification.expected_text has a control character"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := output

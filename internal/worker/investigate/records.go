@@ -322,8 +322,9 @@ const (
 // VerificationRules is shared by the designer and its reviewers so that a
 // revision asks for a promise the existing validator can actually accept.
 const VerificationRules = `Verification rules:
+- For wording and file_text, path, expected_text and nonempty absent_text are each one trimmed line of at most 300 UTF-8 bytes, not 300 characters; expected_text has at least two characters. Select a short literal that distinguishes the requested change; this single literal cannot encode a checklist or every changed line. Review the remaining changes against files, cause and the recorded evidence, not by requiring all of them inside expected_text. Do not choose absent_text that is a substring of expected_text: the promised new text would also contain the text promised to disappear.
 - wording is a screen check: path starts with / and names an actual application route supported by repository evidence. A repository file is not a screen merely because / is added to its path. expected_text is the text to add, not already present in the baseline design files. absent_text is optional: leave it empty when no existing text is removed; when nonempty, it must quote text present in a baseline design file.
-- file_text checks text in one repository file, including documentation that is not published as a Web page. path is the exact repository-relative path of one files entry, without a leading /; expected_text is the text to add to that file, not already present there at the baseline. absent_text is optional and, when nonempty, must quote text present in that same baseline file. For a new file, leave absent_text empty. Do not add a Web route or deployment just to check a repository document.
+- file_text checks text in one repository file, including documentation that is not published as a Web page. path is the exact repository-relative path of one files entry, without a leading / and within the file path limit of 256 ASCII characters; expected_text is the text to add to that file, not already present there at the baseline. absent_text is optional and, when nonempty, must quote text present in that same baseline file. For a new file, leave absent_text empty. Do not add a Web route or deployment just to check a repository document.
 - measurement.metric is exactly one of time_total, status, bytes, rows, value. output_bytes and match are not supported metrics. threshold is positive and the comparison is value <= threshold, never >=.
 - A measurement must use a declared probe whose output supplies the chosen metric: HTTP output supplies time_total/status/bytes; rows/value refer to SQL output. A repo.read or repo.grep record's output_bytes is metadata, not a verification metric or a match count. For a text addition, use wording for an actual screen or file_text for a repository file instead of inventing a measurement metric.
 - wording and file_text describe acceptance promises; neither claims an automatic post-change content check. A finding about verification must propose a correction within these supported forms.`
@@ -600,8 +601,17 @@ func validateVerificationShape(v Verification) error {
 			pathValid = relativePathPattern.MatchString(v.Path) && !strings.Contains(v.Path, "..") &&
 				!strings.Contains(v.Path, "//") && filepath.Clean(v.Path) == v.Path
 		}
-		if !pathValid || !validText(v.Path, maxShortText) || !validText(v.ExpectedText, maxShortText) ||
-			utf8.RuneCountInString(v.ExpectedText) < 2 || (v.AbsentText != "" && !validText(v.AbsentText, maxShortText)) {
+		for _, field := range []struct{ name, value string }{
+			{"path", v.Path}, {"expected_text", v.ExpectedText}, {"absent_text", v.AbsentText},
+		} {
+			if field.name == "absent_text" && field.value == "" {
+				continue
+			}
+			if problem := textProblem(field.value, maxShortText); problem != "" {
+				return fmt.Errorf("%s verification.%s %s", v.Form, field.name, problem)
+			}
+		}
+		if !pathValid || utf8.RuneCountInString(v.ExpectedText) < 2 {
 			return fmt.Errorf("%s verification is invalid", v.Form)
 		}
 		return nil
