@@ -125,7 +125,10 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 		return err
 	}
 
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles, homeToken)
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, homeFiles, homeToken, func(transcript string) error {
+		_, err := worker.DecodeAgentDesignReviewOutput(transcript)
+		return err
+	})
 	identity := inputs.identity
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: inputs.subject.Round,

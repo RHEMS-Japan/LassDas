@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -465,5 +466,46 @@ func TestAgentReviewStopsAfterTheAttemptLimit(t *testing.T) {
 	}
 	if _, err := os.Stat(fixture.path("review.json")); err == nil {
 		t.Fatal("a verdict was sealed from a review that never answered")
+	}
+}
+
+func TestAgentReviewProcessAndJSONFailuresShareTheAttemptLimit(t *testing.T) {
+	for _, recover := range []bool{true, false} {
+		t.Run(fmt.Sprintf("recover=%t", recover), func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "attempts")
+			body := `n=$(cat ` + counter + ` 2>/dev/null || echo 0); n=$((n+1)); printf %s "$n" > ` + counter + `; if [ "$n" -eq 1 ]; then exit 1; fi; `
+			if recover {
+				body += `if [ "$n" -eq 3 ]; then echo '{"verdict":"revise","findings":[{"code":"stale-label","path":"client/src/label.ts","message":"The label still needs work."}]}'; exit 0; fi; `
+			}
+			body += `echo '{"verdict":"pass","findings":[]'`
+			fixture := newAgentFixture(t, editTheLabel, body)
+			if err := fixture.implement(t); err != nil {
+				t.Fatal(err)
+			}
+			err := fixture.review(t)
+			if (err == nil) != recover {
+				t.Fatalf("review error = %v, recover = %t", err, recover)
+			}
+			attempts, err := os.ReadFile(counter)
+			if err != nil || string(attempts) != "3" {
+				t.Fatalf("attempts = %q, %v", attempts, err)
+			}
+			var record worker.AgentRun
+			readAgentArtifact(t, fixture.path("review-run.json"), worker.MaxArtifactJSONBytes, &record)
+			if recover {
+				var review worker.Review
+				readAgentArtifact(t, fixture.path("review.json"), worker.MaxReviewJSONBytes, &review)
+				if review.Verdict != "revise" || len(review.Findings) != 1 || review.Invocation.RequestID != record.RunSHA256 {
+					t.Fatalf("the final attempt's objection was not sealed: %+v", review)
+				}
+			} else {
+				if _, err := os.Stat(fixture.path("review.json")); !os.IsNotExist(err) {
+					t.Fatalf("an unreadable verdict left an artifact: %v", err)
+				}
+				if !strings.HasSuffix(strings.TrimSpace(record.Transcript), `"findings":[]`) {
+					t.Fatalf("the failed transcript was repaired or lost: %q", record.Transcript)
+				}
+			}
+		})
 	}
 }

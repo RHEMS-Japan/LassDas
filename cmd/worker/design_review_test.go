@@ -158,6 +158,43 @@ func TestAgentDesignReviewSealsTheVerdictTheReviewerPrinted(t *testing.T) {
 	}
 }
 
+func TestAgentDesignReviewRetriesTruncatedJSONWithoutMaskingAnEdit(t *testing.T) {
+	for _, edit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("edit=%t", edit), func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "attempts")
+			body := `n=$(cat ` + counter + ` 2>/dev/null || echo 0); n=$((n+1)); printf %s "$n" > ` + counter + `; if [ "$n" -eq 1 ]; then `
+			if edit {
+				body += `printf "export const label = 'Reviewer wrote this';\n" > client/src/label.ts; `
+			}
+			body += `echo '{"verdict":"pass","findings":[]'; exit 0; fi; echo '{"verdict":"revise","findings":[{"code":"missing-evidence","section":"cause","message":"Check the cause against the recorded source."}]}'`
+			fixture := newDesignFixture(t, body, nil)
+			err := fixture.review(t, "design-review-a", "review-a", true)
+			attempts, readErr := os.ReadFile(counter)
+			if readErr != nil || string(attempts) != "2" {
+				t.Fatalf("attempts = %q, %v", attempts, readErr)
+			}
+			if edit {
+				if err == nil || !strings.Contains(err.Error(), "changed the tree") {
+					t.Fatalf("the first attempt's edit was masked by retry: %v", err)
+				}
+				if _, err := os.Stat(fixture.path("design-review-a.json")); !os.IsNotExist(err) {
+					t.Fatalf("an edited baseline left a review artifact: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			review := fixture.readReview(t, "design-review-a")
+			var record worker.AgentRun
+			readAgentArtifact(t, fixture.path("design-review-a-run.json"), worker.MaxArtifactJSONBytes, &record)
+			if review.Verdict != investigate.VerdictRevise || len(review.Findings) != 1 || review.Findings[0].Section != "cause" || review.Invocation.RequestID != record.RunSHA256 {
+				t.Fatalf("the design verdict was not bound to the final attempt: %+v", review)
+			}
+		})
+	}
+}
+
 func TestAgentDesignReviewSealsAReviseWithItsSection(t *testing.T) {
 	fixture := newDesignFixture(t,
 		`echo '{"verdict":"revise","findings":[{"code":"unjudgeable-promise","section":"verification","message":"The screen check names a page the changed file does not render."}]}'`, nil)
