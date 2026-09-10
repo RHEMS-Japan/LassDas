@@ -10,7 +10,7 @@ func TestDeliverResolvedContentCarriesTheMarkerAndNamesProduction(t *testing.T) 
 	if ExtractCommentMarker(staging) != CommentMarker("resolved", "RUN-1") {
 		t.Fatalf("staging content marker = %q", ExtractCommentMarker(staging))
 	}
-	if !strings.Contains(staging, "本番への反映は自動では行わず") || !strings.Contains(staging, "本番の状態: 未変更") {
+	if !strings.Contains(staging, "本番への反映は自動では行わず") || !strings.Contains(staging, "本番の状態: この自動処理による反映なし") || !strings.Contains(staging, "次に行動する人: なし（本番反映が別途必要な場合のみ運用担当者）") {
 		t.Fatalf("staging content does not say what happens to production:\n%s", staging)
 	}
 	release := DeliverResolvedContent("RUN-1", DeliverResolvedReport{Phase: "release", Verdict: "merge_unverified"})
