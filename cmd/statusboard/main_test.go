@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,7 +11,90 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"automation.internal/ticket-ingress/internal/backlog"
 )
+
+type boardTestTransport func(*http.Request) (*http.Response, error)
+
+func (f boardTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestResolvePostsOnlyTheExistingFixedCommandForTheDisplayedDelivery(t *testing.T) {
+	for _, test := range []struct {
+		name, step, delivery, action string
+		canResolve                   bool
+		want                         int
+	}{
+		{"allowed", "attention", "delivery-example", "resolve", true, 200},
+		{"unavailable", "attention", "delivery-example", "resolve", false, 403},
+		{"already closed", "done", "delivery-example", "resolve", true, 403},
+		{"stale delivery", "attention", "old-delivery", "resolve", true, 403},
+		{"missing delivery", "attention", "", "resolve", true, 403},
+		{"not a Go", "attention", "delivery-example", "go", true, 403},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			posts := 0
+			poster, err := backlog.NewClient(backlog.Config{SpaceKey: "example", Origin: "https://example.backlog.com", APIKey: "test-only", Timeout: time.Second, MaxResponseBytes: 1024}, boardTestTransport(func(r *http.Request) (*http.Response, error) {
+				posts++
+				if r.Method != "POST" || r.URL.Path != "/api/v2/issues/123/comments" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				content := r.Form.Get("content")
+				if !strings.HasPrefix(content, "確認済み\n") || strings.Contains(content, "injected") {
+					t.Fatalf("not the fixed confirmation: %q", content)
+				}
+				response, err := json.Marshal(map[string]any{"id": 456, "issueId": 123, "content": content})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return &http.Response{StatusCode: 201, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(response))}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := boardServer{statusDir: t.TempDir(), poster: poster, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			board, err := json.Marshal(map[string]any{"runs": []boardRun{{DeliveryID: "delivery-example", IssueID: 123, Step: test.step, CanResolve: test.canResolve}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(s.statusDir, "board.json"), board, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(actRequest{Action: test.action, IssueID: 123, DeliveryID: test.delivery, Text: "injected"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest("POST", "https://board.example/api/act", bytes.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", "https://board.example")
+			request.SetBasicAuth("viewer", "test-only")
+			response := httptest.NewRecorder()
+			s.serveAct(response, request)
+			if response.Code != test.want {
+				t.Fatalf("got %d, want %d: %s", response.Code, test.want, response.Body.String())
+			}
+			if test.want == 200 {
+				if posts != 1 {
+					t.Fatalf("posts = %d", posts)
+				}
+				records := tailJSONL(filepath.Join(s.statusDir, "actions.jsonl"), 1)
+				var record actRecord
+				if len(records) != 1 || json.Unmarshal(records[0], &record) != nil || record.DeliveryID != test.delivery || record.User != "viewer" || record.Action != "resolve" {
+					t.Fatalf("missing action audit: %s", records)
+				}
+			} else if posts != 0 {
+				t.Fatalf("denied action posted %d comments", posts)
+			}
+			if got, err := os.ReadFile(filepath.Join(s.statusDir, "board.json")); err != nil || !bytes.Equal(got, board) {
+				t.Fatal("action changed the run snapshot")
+			}
+		})
+	}
+}
 
 func TestBoardAccessDefaultsToBasicAndLocalIsReadOnly(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

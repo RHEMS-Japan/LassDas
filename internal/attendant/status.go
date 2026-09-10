@@ -54,6 +54,14 @@ type RunStatus struct {
 	// merely the local report file) and the promotion is not held. The
 	// board shows its Go button only here.
 	CanGo bool `json:"can_go,omitempty"`
+	// CanResolve exposes the existing posted-report acknowledgement window.
+	// It never authorizes a deployment or a direct run-state change.
+	CanResolve   bool      `json:"can_resolve,omitempty"`
+	NextAction   string    `json:"next_action,omitempty"`
+	ActionEffect string    `json:"action_effect,omitempty"`
+	PRURL        string    `json:"pr_url,omitempty"`
+	ChangedFiles []string  `json:"changed_files,omitempty"`
+	ReportAt     time.Time `json:"report_at,omitempty"`
 	// Stage names the pipeline step an out-of-line state (attention)
 	// belongs to, so the board lights the node where the run stopped
 	// instead of an empty rail. Empty for every in-line step.
@@ -141,6 +149,8 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		status.place("intake", "受付待ち", "")
 	case "awaiting_answer":
 		status.place("question", "質問への回答待ち", "依頼者の返信を待っています")
+		status.NextAction = "依頼者がチケットの最新の質問を開き、そこに記載された回答例に沿ってコメントしてください。"
+		status.ActionEffect = "回答を受け取ると、追加の調査・設計または実装へ進みます。回答まで作業は再開しません。"
 	case "claimed":
 		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
 			break
@@ -168,10 +178,14 @@ func (s *RunStatus) place(step, title, detail string) {
 func placeIntakeHold(status *RunStatus, runDir string) bool {
 	if hold, held := readBudgetHold(runDir); held {
 		placeBudgetHold(status, hold)
+		status.NextAction = "運用担当者が表示された役のモデル利用枠と残高を確認し、必要な利用枠を確保してください。依頼者の再起票は不要です。"
+		status.ActionEffect = "利用枠の確認に通ると、同じ依頼の受付を自動で再開します。"
 		return true
 	}
 	if hold, held := readSessionHold(runDir); held {
 		placeSessionHold(status, hold)
+		status.NextAction = "運用担当者が表示された納品先の確認用アカウントでログインし直し、既存の手順で確認用のログイン情報を更新してください。依頼者の再起票は不要です。"
+		status.ActionEffect = "ログイン状態の検査に通ると、同じ依頼の受付を自動で再開します。"
 		return true
 	}
 	return false
@@ -221,6 +235,8 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 	switch {
 	case humanLane:
 		status.placeAt("attention", humanStage, "人の対応待ち", detail+"・工程カードが人の確認レーンにあります")
+		status.NextAction = "運用担当者がチケットの実行履歴から、確認待ちに移された工程と理由を調べ、工程カードの対応方針を記録してください。"
+		status.ActionEffect = "この画面から工程を再開する操作はありません。担当者が実行基盤で対応するまで、この工程の自動処理は進みません。"
 	case blocked:
 		status.place("implement", "工程の復旧処理中", detail)
 	case implementLeft:
@@ -251,6 +267,7 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		return
 	}
 	runDir := runDirectory(config, run.DeliveryID)
+	readDeliveryEvidence(status, runDir)
 	// An operator's sealed 「確認済み」 outranks the report that asked for it:
 	// the delivery is closed for the automation, whatever the report said.
 	if resolution, ok := readDeliverResolution(runDir); ok {
@@ -260,6 +277,15 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 	outcome, sealed := readBoardOutcome(runDir)
 	if sealed && outcome.Phase == "release" {
 		placeReleaseOutcome(status, outcome.Verdict)
+		// The feature PR targets staging; do not present it as the production PR.
+		status.PRURL = ""
+		if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
+			status.PRURL = report.PullRequestURL
+		}
+		status.ReportAt = outcome.At
+		if attentionVerdict(outcome.Verdict) {
+			allowResolution(status, outcome.At)
+		}
 		return
 	}
 	// The production report file beats a staging-phase seal: once the
@@ -267,6 +293,11 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 	// even while the release post is still on its way.
 	if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
 		placeReleaseOutcome(status, report.Verdict)
+		status.PRURL = report.PullRequestURL
+		status.ReportAt = report.ObservedAt
+		if status.Step == "attention" {
+			status.ActionEffect = "チケットへの結果報告の投稿を、この画面では確認できていません。報告が投稿済みで必要な対応も完了していれば、依頼者または登録された運用担当者が、チケットの先頭行に「確認済み」と書いてコメントしてください。"
+		}
 		return
 	}
 	if card, ok := deliverCard(tasks, run.DeliveryID, "promote"); ok && !card.archivedOrDone() {
@@ -278,10 +309,23 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		// Only the posted report arms a Go — the detection anchor is the
 		// report COMMENT, so a file-only confirm must not show the button.
 		status.CanGo = status.Step == "confirm"
+		status.ReportAt = outcome.At
+		if report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile); err == nil && report.Verdict == outcome.Verdict {
+			status.ReportAt = report.ObservedAt
+			if attentionVerdict(report.Verdict) {
+				allowResolution(status, report.ObservedAt)
+			}
+		} else if status.Step == "attention" {
+			status.ActionEffect = "確認受付に必要な記録を読み取れず、この画面からは閉じられません。運用担当者がチケットの報告と実行履歴を確認してください。"
+		}
 		return
 	}
 	if report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile); err == nil {
 		placeStagingOutcome(status, report.Verdict, report.PromotionHold)
+		status.ReportAt = report.ObservedAt
+		if status.Step == "attention" || status.Step == "confirm" {
+			status.ActionEffect = "チケットへの結果報告を確認するまで、この画面からは操作できません。報告後に受け付けられる操作が表示されます。"
+		}
 		return
 	}
 	if card, ok := deliverCard(tasks, run.DeliveryID, "integrate"); ok && !card.archivedOrDone() {
@@ -318,6 +362,10 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 }
 
 func placeReleaseOutcome(status *RunStatus, verdict string) {
+	if attentionVerdict(verdict) {
+		placeDeliveryAttention(status, "production", verdict)
+		return
+	}
 	switch verdict {
 	case "pass":
 		status.place("done", "本番反映済み", "本番の画面確認まで合格")
@@ -329,39 +377,85 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 		status.place("done", "本番反映済み・画面は要確認", "")
 	case "measure_failed":
 		status.place("done", "本番反映済み・計測は閾値超過", "設計書が約束した計測値を満たしていません")
-	case "observe_blocked":
-		status.placeAt("attention", "production", "本番反映済み・画面確認ができず", "確認用の画面を開けなかったため人の目での確認が必要です")
-	case "deploy_absent":
-		status.placeAt("attention", "production", "prod へマージ済み・デプロイの実行なし", "運用担当者が対象範囲を確認します")
-	case "deploy_failed":
-		status.placeAt("attention", "production", "本番反映の完了確認が必要", "運用担当者が状態を確認します")
-	case "merge_unverified":
-		status.placeAt("attention", "production", "本番反映の成否を確認中", "運用担当者が状態を確認します")
 	default:
 		status.place("failed", "本番反映の工程で停止", "")
 	}
 }
 
 func placeStagingOutcome(status *RunStatus, verdict, hold string) {
+	if attentionVerdict(verdict) {
+		placeDeliveryAttention(status, "staging", verdict)
+		return
+	}
 	switch {
 	case verdict == "pass" && hold != "":
 		status.place("done", "ステージング反映済み", "本番反映は運用手順で行います")
 	case verdict == "pass":
 		status.place("confirm", "本番反映の承認待ち", "あなたの「Go」を待っています")
+		status.NextAction = "依頼者がチケットのステージング結果と PR の変更内容を確認し、本番へ反映してよいか判断してください。"
+		status.ActionEffect = "「本番反映を承認」で本番への反映工程が始まります。「反映しない」でステージングの変更を残したまま、この依頼の自動処理を終了します。"
 	case verdict == "stopped":
 		status.place("stopped", "停止済み", "ご指示により停止しました")
 	case verdict == "observe_failed":
 		status.place("failed", "ステージング反映済み・画面確認が不合格", "")
 	case verdict == "measure_failed":
 		status.place("failed", "ステージング反映済み・計測が閾値を超過", "設計書が約束した計測値を満たしていません")
-	case verdict == "observe_blocked":
-		status.placeAt("attention", "confirm", "ステージング反映済み・画面確認ができず", "確認用の画面を開けなかったため合否は判定できていません")
-	case verdict == "deploy_absent":
-		status.placeAt("attention", "staging", "ステージングへマージ済み・デプロイの実行なし", "運用担当者が対象範囲を確認します")
-	case verdict == "deploy_failed" || verdict == "merge_unverified":
-		status.placeAt("attention", "staging", "ステージング反映の状態確認が必要", "運用担当者が状態を確認します")
 	default:
 		status.place("failed", "ステージング反映で停止", "")
+	}
+}
+
+func placeDeliveryAttention(status *RunStatus, stage, verdict string) {
+	name := "ステージング"
+	if stage == "production" {
+		name = "本番"
+	}
+	switch verdict {
+	case "deploy_absent":
+		status.placeAt("attention", stage, name+"へ取り込み済み・デプロイは未実行",
+			"変更のマージは完了しました。対応するデプロイ実行が見つからず、サービスへの反映は確認していません。")
+		status.NextAction = "運用担当者が PR の変更ファイルとデプロイ設定の対象を照合してください。文書など対象外の変更なら、PR の内容を確認すれば完了です。対象の変更なら、既存の運用手順でデプロイと結果確認が必要です。"
+	case "deploy_failed":
+		status.placeAt("attention", stage, name+"の反映結果を確認してください",
+			"自動処理はデプロイの成功を確認できず終了しました。実行の失敗・対象外・結果を取得できなかった場合の区別は、報告と実行履歴の確認が必要です。")
+		status.NextAction = "運用担当者が PR のマージ先と変更内容を開き、同じ変更のデプロイ実行履歴を確認してください。対象外の文書変更なら PR の内容を確認して完了できます。実行失敗なら既存の運用手順で復旧し、結果を確認してください。"
+	case "merge_unverified":
+		status.placeAt("attention", stage, name+"への取り込み結果が不明です",
+			"マージの成否を取得できず、自動処理が止まりました。取り込み済みとも未反映とも判定できていません。")
+		status.NextAction = "運用担当者が PR のマージ状態・マージ先・変更内容を確認してください。取り込み済みならデプロイの要否と実行結果も確認し、未完了なら既存の運用手順で対応してください。"
+	case "observe_blocked":
+		if stage == "staging" {
+			stage = "confirm"
+		}
+		status.placeAt("attention", stage, name+"反映済み・画面確認ができず手動確認待ち",
+			"デプロイは完了しました。確認用の画面を開けず、変更が依頼どおりか判定できていません。")
+		status.NextAction = "運用担当者がチケットの反映結果に記載された URL と確認条件を開き、ログインや遷移先を確認したうえで、画面が条件を満たすか確認してください。"
+	}
+	status.ActionEffect = "対応を終えたら「確認を記録して閉じる」で、この依頼を対応待ちから確認済みへ移します。この操作で再デプロイや本番への反映は行いません。未解決なら閉じず、チケットに確認結果と残る対応を記録してください。"
+}
+
+func allowResolution(status *RunStatus, since time.Time) {
+	status.CanResolve = since.IsZero() || !time.Now().After(since.Add(operatorConfirmationWindow))
+	if !status.CanResolve {
+		status.ActionEffect = "確認の受付期間（報告から60日）を過ぎているため、この画面からは閉じられません。運用担当者がチケットに確認結果と今後の対応を記録してください。自動処理は再開しません。"
+	}
+}
+
+// Use only the delivery's existing artifact, never model prose or a guessed URL.
+func readDeliveryEvidence(status *RunStatus, runDir string) {
+	raw, err := os.ReadFile(filepath.Join(runDir, "feature-pr.json"))
+	if err != nil {
+		return
+	}
+	var artifact struct {
+		Payload struct {
+			Feature     struct{ Paths []string }
+			PullRequest struct{ HTMLURL string } `json:"pull_request"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(raw, &artifact) == nil {
+		status.PRURL = artifact.Payload.PullRequest.HTMLURL
+		status.ChangedFiles = artifact.Payload.Feature.Paths
 	}
 }
 

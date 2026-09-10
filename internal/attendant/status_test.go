@@ -8,9 +8,76 @@ import (
 	"testing"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
 )
+
+func TestAttentionAcknowledgementUsesExistingPostedReportWindow(t *testing.T) {
+	for _, phase := range []string{"staging", "release"} {
+		for _, verdict := range []string{"deploy_absent", "deploy_failed", "merge_unverified", "observe_blocked"} {
+			t.Run(phase+"/"+verdict, func(t *testing.T) {
+				config := runtime.Config{}
+				config.Chain.RunsRoot = t.TempDir()
+				run := state.RunOverview{DeliveryID: "delivery-example", State: "terminal", TerminalCode: "success"}
+				dir := filepath.Join(config.Chain.RunsRoot, run.DeliveryID)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write := func(name string, value any) {
+					t.Helper()
+					raw, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				name := runner.DeliverStagingReportFile
+				if phase == "release" {
+					name = runner.DeliverProductionReportFile
+				}
+				report := runner.DeliverReport{Verdict: verdict, ObservedAt: time.Now().UTC(), PullRequestURL: "https://github.com/example/consumer/pull/13"}
+				write(name, report)
+				if got := classifyRun(config, run, nil); got.CanResolve || got.CanGo {
+					t.Fatalf("unposted report advertised an action: %+v", got)
+				}
+				seal := boardOutcome{Phase: phase, Verdict: verdict, At: time.Now().UTC()}
+				write(boardOutcomeFile, seal)
+				write("feature-pr.json", json.RawMessage(`{"payload":{"feature":{"Paths":["docs/guide.md"]},"pull_request":{"HTMLURL":"https://github.com/example/consumer/pull/12"}}}`))
+				got := classifyRun(config, run, nil)
+				if !got.CanResolve || got.CanGo || got.Step != "attention" || got.NextAction == "" || !strings.Contains(got.ActionEffect, "確認を記録して閉じる") || got.ReportAt.IsZero() {
+					t.Fatalf("reported attention lacks facts or its existing action: %+v", got)
+				}
+				wantPR := "https://github.com/example/consumer/pull/12"
+				if phase == "release" {
+					wantPR = report.PullRequestURL
+				}
+				if got.PRURL != wantPR || len(got.ChangedFiles) != 1 || got.ChangedFiles[0] != "docs/guide.md" {
+					t.Fatalf("delivery evidence missing: %+v", got)
+				}
+				// The staging resolver uses the report time, even if its post is recent.
+				// The release resolver uses the posted-outcome time.
+				old := time.Now().Add(-operatorConfirmationWindow - time.Hour)
+				if phase == "staging" {
+					report.ObservedAt = old
+					write(name, report)
+				} else {
+					seal.At = old
+					write(boardOutcomeFile, seal)
+				}
+				if got := classifyRun(config, run, nil); got.CanResolve || !strings.Contains(got.ActionEffect, "60日") {
+					t.Fatalf("expired window advertised a working action: %+v", got)
+				}
+				write(deliverResolutionFile, deliverResolution{Phase: phase, Verdict: verdict})
+				if got := classifyRun(config, run, nil); got.CanResolve || got.Step != "done" {
+					t.Fatalf("resolved delivery still actionable: %+v", got)
+				}
+			})
+		}
+	}
+}
 
 // The board never decides anything, but it must not lie: each ledger/card/
 // artifact constellation the sync machinery can produce maps to exactly one
