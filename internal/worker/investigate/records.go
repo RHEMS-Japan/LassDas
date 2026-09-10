@@ -315,22 +315,24 @@ func validText(value string, limit int) bool {
 // Verification forms a design may promise.
 const (
 	VerificationWording     = "wording"
+	VerificationFileText    = "file_text"
 	VerificationMeasurement = "measurement"
 )
 
 // VerificationRules is shared by the designer and its reviewers so that a
 // revision asks for a promise the existing validator can actually accept.
 const VerificationRules = `Verification rules:
-- wording.path starts with /. expected_text is the text to add, not already present in the baseline design files. absent_text is optional: leave it empty when no existing text is removed, including an addition to an existing file; when nonempty, it must quote text present in a baseline design file.
+- wording is a screen check: path starts with / and names an actual application route supported by repository evidence. A repository file is not a screen merely because / is added to its path. expected_text is the text to add, not already present in the baseline design files. absent_text is optional: leave it empty when no existing text is removed; when nonempty, it must quote text present in a baseline design file.
+- file_text checks text in one repository file, including documentation that is not published as a Web page. path is the exact repository-relative path of one files entry, without a leading /; expected_text is the text to add to that file, not already present there at the baseline. absent_text is optional and, when nonempty, must quote text present in that same baseline file. For a new file, leave absent_text empty. Do not add a Web route or deployment just to check a repository document.
 - measurement.metric is exactly one of time_total, status, bytes, rows, value. output_bytes and match are not supported metrics. threshold is positive and the comparison is value <= threshold, never >=.
-- A measurement must use a declared probe whose output supplies the chosen metric: HTTP output supplies time_total/status/bytes; rows/value refer to SQL output. A repo.read or repo.grep record's output_bytes is metadata, not a verification metric or a match count. For a text addition, use wording with the expected text instead of inventing a measurement metric.
-- wording describes the acceptance promise; it does not claim an automatic post-change content check. A finding about verification must propose a correction within these supported forms.`
+- A measurement must use a declared probe whose output supplies the chosen metric: HTTP output supplies time_total/status/bytes; rows/value refer to SQL output. A repo.read or repo.grep record's output_bytes is metadata, not a verification metric or a match count. For a text addition, use wording for an actual screen or file_text for a repository file instead of inventing a measurement metric.
+- wording and file_text describe acceptance promises; neither claims an automatic post-change content check. A finding about verification must propose a correction within these supported forms.`
 
-// Verification says how the change will be judged after deployment: by the
-// screen check (wording) or by re-running a probe against a threshold.
+// Verification says how the change will be judged: text on a screen or in
+// a repository file, or a probe re-run against a threshold after deployment.
 type Verification struct {
 	Form string `json:"form"`
-	// wording
+	// wording or file_text
 	Path         string `json:"path,omitempty"`
 	ExpectedText string `json:"expected_text,omitempty"`
 	AbsentText   string `json:"absent_text,omitempty"`
@@ -589,13 +591,18 @@ func withinPrefixes(path string, prefixes []string) bool {
 // that form's fields, a known metric and a positive threshold.
 func validateVerificationShape(v Verification) error {
 	switch v.Form {
-	case VerificationWording:
+	case VerificationWording, VerificationFileText:
 		if v.Probe != "" || len(v.Args) > 0 || v.Metric != "" || v.Threshold != 0 {
-			return errors.New("wording verification carries measurement fields")
+			return fmt.Errorf("%s verification carries measurement fields", v.Form)
 		}
-		if !strings.HasPrefix(v.Path, "/") || !validText(v.Path, maxShortText) || !validText(v.ExpectedText, maxShortText) ||
+		pathValid := strings.HasPrefix(v.Path, "/")
+		if v.Form == VerificationFileText {
+			pathValid = relativePathPattern.MatchString(v.Path) && !strings.Contains(v.Path, "..") &&
+				!strings.Contains(v.Path, "//") && filepath.Clean(v.Path) == v.Path
+		}
+		if !pathValid || !validText(v.Path, maxShortText) || !validText(v.ExpectedText, maxShortText) ||
 			utf8.RuneCountInString(v.ExpectedText) < 2 || (v.AbsentText != "" && !validText(v.AbsentText, maxShortText)) {
-			return errors.New("wording verification is invalid")
+			return fmt.Errorf("%s verification is invalid", v.Form)
 		}
 		return nil
 	case VerificationMeasurement:
@@ -605,14 +612,14 @@ func validateVerificationShape(v Verification) error {
 		switch v.Metric {
 		case "time_total", "status", "bytes", "rows", "value":
 		default:
-			return errors.New("verification metric is unknown: use time_total, status, bytes, rows or value; for a text addition use wording")
+			return errors.New("verification metric is unknown: use time_total, status, bytes, rows or value; for a text addition use wording or file_text")
 		}
 		if v.Threshold <= 0 {
 			return errors.New("verification threshold must be positive")
 		}
 		return nil
 	default:
-		return errors.New("verification form must be wording or measurement")
+		return errors.New("verification form must be wording, file_text or measurement")
 	}
 }
 
@@ -622,6 +629,13 @@ func validateVerificationBounds(v Verification, files []FileChange, bounds Bound
 	switch v.Form {
 	case VerificationWording:
 		return wordingCheckWithRoot(v, files, bounds.RepoRoot)
+	case VerificationFileText:
+		for _, file := range files {
+			if file.Path == v.Path {
+				return wordingCheckWithRoot(v, []FileChange{file}, bounds.RepoRoot)
+			}
+		}
+		return errors.New("file_text verification path must name one of the design files")
 	case VerificationMeasurement:
 		spec, ok := bounds.Catalog.Lookup(v.Probe)
 		if !ok {
@@ -635,7 +649,7 @@ func validateVerificationBounds(v Verification, files []FileChange, bounds Bound
 		}
 		return nil
 	default:
-		return errors.New("verification form must be wording or measurement")
+		return errors.New("verification form must be wording, file_text or measurement")
 	}
 }
 
