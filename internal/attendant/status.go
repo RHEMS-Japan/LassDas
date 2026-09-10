@@ -376,7 +376,7 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		return
 	}
 	if card, ok := deliverCard(tasks, run.DeliveryID, "checks"); ok && !card.archivedOrDone() {
-		status.place("checks", "自動検査 (CI) 待ち", "納品した変更の検査が走っています")
+		status.place("checks", "自動検査 (CI) 待ち", "必要な検査の実行と結果が揃うのを待っています")
 		return
 	}
 	if card, ok := e2eCard(tasks, run.DeliveryID); ok && !card.archivedOrDone() {
