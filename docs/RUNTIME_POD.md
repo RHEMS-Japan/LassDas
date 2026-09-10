@@ -174,6 +174,13 @@ fabricated workflow link.
   report (the board keeps showing the state afterwards), and a release
   report whose outcome seal was lost falls back to the production report
   file, so a lost seal cannot recreate the dead end.
+  認証済みの状態ボードでは、報告が投稿済みで受付期間内の依頼に
+  「確認を記録して閉じる」を表示する。PR・変更ファイル・判定時刻と
+  確認手順を読み、必要な対応を終えたことをチェックしてから送信する。
+  既存の依頼者の資格情報で「確認済み」を投稿し、従来の受付処理が
+  対応待ちを閉じる。再デプロイや本番反映は起動しない。送信済みと
+  終了処理の完了は区別し、投稿失敗時は再送できる。
+  ローカルの閲覧専用モードでは投稿せず、チケットでの確認方法を案内する。
 - **Model roles**: the three agent roles read their model and credential
   from the pod environment — `LASSDAS_IMPLEMENTER_MODEL` /
   `LASSDAS_IMPLEMENTER_KEY`, `LASSDAS_REVIEW_A_MODEL` / `LASSDAS_REVIEW_A_KEY`,

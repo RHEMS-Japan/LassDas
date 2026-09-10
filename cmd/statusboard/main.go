@@ -2,7 +2,7 @@
 // opens to watch what LassDas is doing RIGHT NOW, fed by the snapshot the
 // attendant writes every tick (internal/attendant/status.go) — plus, by
 // the operator's explicit decision (2026-09-01, "全権委任"), the three
-// requester actions: answering a question, Go, and stop. Every action is
+// requester actions: Go, stop, and operator confirmation. Every action is
 // posted to the TRACKER as the requester's own comment (the requester's
 // Backlog API key, provided via secret); the board never writes ledger or
 // run state — the attendant detects the comments exactly like hand-written
@@ -496,9 +496,10 @@ func tailJSONL(path string, limit int) []json.RawMessage {
 // ---- requester actions ----
 
 type actRequest struct {
-	Action  string `json:"action"` // answer | go | stop
-	IssueID int64  `json:"issue_id"`
-	Text    string `json:"text,omitempty"`
+	Action     string `json:"action"` // go | stop | resolve (answer remains closed)
+	IssueID    int64  `json:"issue_id"`
+	Text       string `json:"text,omitempty"`
+	DeliveryID string `json:"delivery_id,omitempty"`
 }
 
 // boardRun is the slice of the snapshot the authorization needs.
@@ -507,14 +508,14 @@ type boardRun struct {
 	IssueID    int64  `json:"issue_id"`
 	Step       string `json:"step"`
 	CanGo      bool   `json:"can_go"`
+	CanResolve bool   `json:"can_resolve"`
 }
 
 // authorizeAction is the confused-deputy gate: the requester's key posts
 // ONLY to an issue the pipeline currently owns, and only in the one state
-// where the action is guaranteed to be honoured (CanGo = the posted
-// staging report armed the Go anchor; a stop shares the same window —
-// that is where the reception loop consumes it).
-func (s *boardServer) authorizeAction(action string, issueID int64) (boardRun, string) {
+// where its existing comment handler accepts it: CanGo for Go/stop,
+// CanResolve for an acknowledgement of a posted attention report.
+func (s *boardServer) authorizeAction(action string, issueID int64, deliveryID string) (boardRun, string) {
 	raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json"))
 	if err != nil {
 		return boardRun{}, "盤面の状態を読めないため、操作を受け付けられません"
@@ -529,14 +530,20 @@ func (s *boardServer) authorizeAction(action string, issueID int64) (boardRun, s
 		if run.IssueID != issueID {
 			continue
 		}
+		if action == "resolve" && (deliveryID == "" || run.DeliveryID != deliveryID) {
+			continue
+		}
 		// Allow-list, never pass-through: an action this gate does not
 		// know is an action it refuses.
 		if (action == "go" || action == "stop") && run.CanGo {
 			return run, ""
 		}
-		return boardRun{}, "この依頼はいま Go / 停止を受け付けられる状態ではありません"
+		if action == "resolve" && run.Step == "attention" && run.CanResolve {
+			return run, ""
+		}
+		return boardRun{}, "この依頼はいまこの操作を受け付けられません。最新の状態とチケットの報告を確認してください"
 	}
-	return boardRun{}, "盤面に無いチケットへの操作は受け付けられません"
+	return boardRun{}, "表示した実行を盤面で確認できません。画面を更新して現在の状態を確認してください"
 }
 
 type actRecord struct {
@@ -594,11 +601,13 @@ func (s *boardServer) serveAct(w http.ResponseWriter, r *http.Request) {
 		content = "Go\n(状態ボードから送信)"
 	case "stop":
 		content = "停止\n(状態ボードから送信)"
+	case "resolve":
+		content = "確認済み\n(状態ボードから送信: 反映結果と残る対応を確認し、この依頼の対応待ちを閉じます。再デプロイ・本番反映の指示ではありません)"
 	default:
 		http.Error(w, "不明な操作です", http.StatusBadRequest)
 		return
 	}
-	run, denied := s.authorizeAction(request.Action, request.IssueID)
+	run, denied := s.authorizeAction(request.Action, request.IssueID, request.DeliveryID)
 	if denied != "" {
 		http.Error(w, denied, http.StatusForbidden)
 		return

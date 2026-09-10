@@ -114,15 +114,15 @@
   .tone-act .tkey { color: var(--lime); }
   .tone-warn .tkey { color: var(--amber); }
   .tone-bad .tkey { color: var(--red); }
-  .tsum { font-size: 13.5px; font-weight: 600; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46em; }
+  .tsum { font-size: 13.5px; font-weight: 600; color: var(--white); overflow-wrap: anywhere; max-width: 46em; }
   .elapsed { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0.1em; }
 
-  .nowline { display: flex; align-items: baseline; gap: 12px; margin: 9px 0 4px; height: 24px; overflow: hidden; }
-  .now-title { font-size: 14.5px; font-weight: 600; color: var(--cyan); letter-spacing: 0.24em; white-space: nowrap; }
+  .nowline { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 4px; }
+  .now-title { font-size: 14.5px; font-weight: 600; color: var(--cyan); letter-spacing: 0.12em; overflow-wrap: anywhere; }
   .tone-act .now-title { color: var(--lime); }
   .tone-warn .now-title { color: var(--amber); }
   .tone-bad .now-title { color: var(--red); }
-  .now-detail { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); min-width: 0; }
+  .now-detail { font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 
   /* ---- pipeline ---- */
   .track { display: flex; align-items: flex-start; margin-top: 16px; }
@@ -207,6 +207,13 @@
   .btn.ghost:hover:not(:disabled) { color: var(--ink); background: transparent; box-shadow: none; }
   .via { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-family: var(--mono); letter-spacing: 0.06em; }
   .approve-row { display: flex; align-items: center; gap: 10px; margin-top: 13px; flex-wrap: wrap; }
+  .guidance { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--panel-edge); font-size: 13px; line-height: 1.8; }
+  .guidance p { margin: 6px 0; }
+  .guidance strong { color: var(--cyan); }
+  .guidance a { color: var(--cyan); }
+  .guidance .evidence-links { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+  .guidance .files { overflow-wrap: anywhere; }
+  .resolve-check { display: flex; gap: 8px; align-items: baseline; margin: 12px 0; cursor: pointer; }
 
   /* ---- event log ---- */
   .log { background: rgba(2,10,9,0.85); border: 1px solid var(--panel-edge); padding: 13px 0; max-height: 620px; overflow-y: auto; }
@@ -366,17 +373,17 @@ function fmtElapsed(claimedAtMs) {
   return "経過 " + (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
 }
 
-function actKey(action, issueID) { return action + ":" + issueID; }
+function actKey(action, issueID, deliveryID) { return action + ":" + issueID + (action === "resolve" ? ":" + (deliveryID || "") : ""); }
 
-async function postAction(action, issueID, text, onDone) {
-  const key = actKey(action, issueID);
+async function postAction(action, issueID, text, onDone, deliveryID) {
+  const key = actKey(action, issueID, deliveryID);
   localPending.set(key, "sending");
   renderBoard();
   try {
     const response = await fetch("/api/act", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, issue_id: issueID, text: text || "" }),
+      body: JSON.stringify({ action, issue_id: issueID, text: text || "", delivery_id: deliveryID }),
     });
     if (!response.ok) {
       const body = await response.text();
@@ -392,8 +399,8 @@ async function postAction(action, issueID, text, onDone) {
   renderBoard();
 }
 
-function decisionState(action, issueID) {
-  const key = actKey(action, issueID);
+function decisionState(action, issueID, deliveryID) {
+  const key = actKey(action, issueID, deliveryID);
   if (localPending.has(key)) {
     const value = localPending.get(key);
     return value === "sending" ? { kind: "sending" } : { kind: "error", message: value.slice(6) };
@@ -414,7 +421,7 @@ function buildQuestionRow(run) {
   // grammar is not carried here yet, and a send that never gets adopted
   // is worse than no button.
   const row = el("div", "qrow");
-  row.appendChild(el("div", "qtitle", "LassDas からの質問がチケットにあります"));
+  row.appendChild(el("div", "qtitle", "作業を進めるための質問がチケットにあります"));
   const link = trackerURL(run.issue_key);
   if (link) {
     const via = el("div", "via");
@@ -423,7 +430,7 @@ function buildQuestionRow(run) {
     via.appendChild(anchor);
     row.appendChild(via);
   }
-  row.appendChild(el("div", "via", "回答はチケットのコメントで行ってください (ボードからの回答送信は段階解禁: issue #14)"));
+  row.appendChild(el("div", "via", "チケットの最新の質問にある回答例を使い、依頼者本人のコメントとして返信してください。回答後の進行はこの画面で確認できます。"));
   return row;
 }
 
@@ -434,7 +441,7 @@ function buildGoRow(run) {
   if (goState.kind === "sent") {
     const note = el("div", "qrow state-sent");
     note.appendChild(el("div", "qtitle", "✓ Go をチケットへ投稿しました"));
-    note.appendChild(el("div", "via", "LassDas が次の見回り (1 分以内) で検知し、本番反映を開始します。以後の進行はこのボードに出ます"));
+    note.appendChild(el("div", "via", "自動処理が次の見回りで承認を確認すると、本番反映へ進みます。投稿した時点では反映は完了していません。進行はこのボードに表示します"));
     return note;
   }
   if (stopState.kind === "sent") {
@@ -492,6 +499,80 @@ function buildGoRow(run) {
   return row;
 }
 
+function buildGuidance(run) {
+  const box = el("div", "guidance");
+  const paragraph = (label, text) => {
+    if (!text) return;
+    const p = el("p");
+    p.appendChild(el("strong", null, label + "　"));
+    p.appendChild(document.createTextNode(text));
+    box.appendChild(p);
+  };
+  const links = el("div", "evidence-links");
+  const addLink = (label, href) => {
+    try {
+      const url = new URL(href);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return;
+      const a = el("a", null, label + " ↗");
+      a.href = url.href; a.target = "_blank"; a.rel = "noopener noreferrer";
+      links.appendChild(a);
+    } catch (_) { /* absent or invalid evidence is not a clickable destination */ }
+  };
+  addLink("PR の変更内容・マージ状態", run.pr_url);
+  addLink("チケットの報告・確認条件", trackerURL(run.issue_key));
+  if (links.childNodes.length) box.appendChild(links);
+  if (run.changed_files && run.changed_files.length) {
+    const files = el("details", "files");
+    files.appendChild(el("summary", null, "変更ファイル（" + run.changed_files.length + "件）"));
+    const list = el("ul");
+    for (const file of run.changed_files) list.appendChild(el("li", null, file));
+    files.appendChild(list); box.appendChild(files);
+  }
+  const reportAt = Date.parse(run.report_at || "");
+  if (Number.isFinite(reportAt) && reportAt > 0) {
+    paragraph("判定した時刻", new Date(reportAt).toLocaleString("ja-JP") + "（現在の実環境を再確認した結果ではありません）");
+  }
+  paragraph("次にすること", run.next_action);
+  paragraph("操作すると", run.action_effect);
+  if (run.can_go && !actionsEnabled) {
+    paragraph("承認の方法", "この画面は閲覧専用です。チケットの報告を確認し、依頼者本人が先頭行に「Go」または「停止」と書いてコメントしてください。");
+  }
+  if (run.can_resolve) {
+    if (actionsEnabled && run.issue_id) box.appendChild(buildResolveRow(run));
+    else paragraph("確認の記録", "この画面は閲覧専用です。確認と必要な対応を終えたら、依頼者または登録された運用担当者が、チケットの先頭行に「確認済み」と書いてコメントしてください。");
+  }
+  return box;
+}
+
+function buildResolveRow(run) {
+  const row = el("div");
+  const state = decisionState("resolve", run.issue_id, run.delivery_id);
+  row.setAttribute("aria-live", "polite");
+  if (state.kind === "sent") {
+    row.appendChild(el("p", null, "✓ 確認済みをチケットへ投稿しました。まだ終了処理の完了前です。自動処理が受け取ると、この依頼は「確認済み」に移ります。"));
+    return row;
+  }
+  const label = el("label", "resolve-check");
+  const checked = el("input"); checked.type = "checkbox";
+  checked.checked = !!(cardStates.get(run.delivery_id) || {}).confirmed;
+  label.appendChild(checked);
+  label.appendChild(document.createTextNode("変更内容と反映結果を確認し、必要な対応を終えました"));
+  row.appendChild(label);
+  const button = el("button", "btn", state.kind === "sending" ? "確認を送信中…" : "確認を記録して閉じる");
+  button.disabled = !checked.checked || state.kind === "sending";
+  checked.disabled = state.kind === "sending";
+  checked.addEventListener("change", () => {
+    const card = cardStates.get(run.delivery_id) || {};
+    card.confirmed = checked.checked; cardStates.set(run.delivery_id, card);
+    button.disabled = !checked.checked;
+  });
+  button.addEventListener("click", () => postAction("resolve", run.issue_id, "", null, run.delivery_id));
+  row.appendChild(button);
+  row.appendChild(el("p", "via", "依頼者のコメントとして「確認済み」を投稿します。変更内容やデプロイ結果を書き換える操作ではありません。"));
+  if (state.kind === "error") row.appendChild(el("p", "state-error", "送信結果を確認できませんでした: " + state.message + " チケットに投稿があるか確認してから、必要なら再送してください。"));
+  return row;
+}
+
 function buildCard(run) {
   const card = el("div", "card");
   card.dataset.delivery = run.delivery_id;
@@ -524,6 +605,8 @@ function buildCard(run) {
   buildTrack(track);
   setTrack(track, run.step, run.round || 0, run.stage);
   card.appendChild(track);
+
+  if (run.next_action || run.can_resolve || run.can_go) card.appendChild(buildGuidance(run));
 
   if (run.step === "question") card.appendChild(buildQuestionRow(run));
   // The Go/stop controls appear ONLY when the server says a Go would be
@@ -638,14 +721,14 @@ function applyPayload(payload, firstLoad) {
   for (const raw of payload.actions || []) {
     try {
       const action = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (action && action.action && action.issue_id) sentActions.set(actKey(action.action, action.issue_id), action.at);
+      if (action && action.action && action.issue_id) sentActions.set(actKey(action.action, action.issue_id, action.delivery_id), action.at);
     } catch (_) { /* skip torn line */ }
   }
   try { latestBoard = typeof payload.board === "string" ? JSON.parse(payload.board) : (payload.board || { runs: [] }); }
   catch (_) { latestBoard = { runs: [] }; }
   document.getElementById("footer").textContent = actionsEnabled
-    ? "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。操作 (回答 / Go / 停止) はチケットへあなた本人のコメントとして投稿されます。"
-    : "LASSDAS STATUS BOARD — 表示は変化から数秒で追従します。新しい依頼の受付と Go の検知は毎分の見回りです。このボードは閲覧専用です (操作機能は段階解禁: issue #14)。";
+    ? "LASSDAS STATUS BOARD — 操作（Go・停止・確認済み）は依頼者のコメントとしてチケットに投稿します。質問への回答はチケットで行います。投稿後、自動処理が受け取るまで状態の更新をお待ちください。"
+    : "LASSDAS STATUS BOARD — この画面は閲覧専用です。回答・承認・確認の記録はチケットのコメントで行ってください。";
   renderBoard();
   const events = (payload.events || []).map(raw => {
     try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_) { return null; }
