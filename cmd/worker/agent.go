@@ -191,7 +191,10 @@ func runAgentReview(ctx context.Context, args []string) error {
 
 	// The reviewer is not told which files it may touch, because it is not
 	// meant to touch any; a review that edits the tree is rejected below.
-	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, nil, "")
+	outcome, runErr := runReviewingAgentWithRetries(ctx, agent, *repoRoot, prompt, nil, "", func(transcript string) error {
+		_, err := worker.DecodeAgentReviewOutput(transcript)
+		return err
+	})
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: candidate.Stage,
 		DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
@@ -236,26 +239,33 @@ func runAgentReview(ctx context.Context, args []string) error {
 }
 
 // runReviewingAgentWithRetries launches a reviewing agent and retries a
-// failed attempt that died fast on a fresh conversation (the upstream
-// lottery - see worker.ReviewAttemptLimit); one that burned real time is
+// failed attempt or an unreadable verdict on a fresh conversation (the
+// upstream lottery - see worker.ReviewAttemptLimit); one that burned real time is
 // not retried, so the stage's worst case stays inside the job's budget.
 // Every failed attempt's tail goes to the job log, the final one included,
 // so nothing is masked. The design reviewers share it: they are the same
 // launch judging a different subject.
-func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig, repoRoot, prompt string, homeFiles map[string]string, homeToken string) (worker.AgentOutcome, error) {
-	outcome, runErr := worker.RunReviewingAgentWithHomeFiles(ctx, agent, repoRoot, prompt, homeFiles, homeToken)
+func runReviewingAgentWithRetries(ctx context.Context, agent worker.AgentConfig, repoRoot, prompt string, homeFiles map[string]string, homeToken string, decode func(string) error) (worker.AgentOutcome, error) {
+	runAttempt := func() (worker.AgentOutcome, error) {
+		outcome, err := worker.RunReviewingAgentWithHomeFiles(ctx, agent, repoRoot, prompt, homeFiles, homeToken)
+		if err == nil {
+			err = decode(outcome.Transcript)
+		}
+		return outcome, err
+	}
+	outcome, runErr := runAttempt()
 	for attempt := 1; runErr != nil && attempt < worker.ReviewAttemptLimit && worker.RetryableReviewFailure(outcome); attempt++ {
-		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
+		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not return a readable verdict (exit %d) on attempt %d, retrying in %s; attempt tail:\n%s\n", outcome.ExitCode, attempt, reviewRetryPause, transcriptTail(outcome))
 		select {
 		case <-ctx.Done():
 			attempt = worker.ReviewAttemptLimit
 			continue
 		case <-time.After(reviewRetryPause):
 		}
-		outcome, runErr = worker.RunReviewingAgentWithHomeFiles(ctx, agent, repoRoot, prompt, homeFiles, homeToken)
+		outcome, runErr = runAttempt()
 	}
 	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not finish (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
+		fmt.Fprintf(os.Stderr, "worker: the reviewing agent did not return a readable verdict (exit %d) on its final attempt; tail:\n%s\n", outcome.ExitCode, transcriptTail(outcome))
 	}
 	return outcome, runErr
 }
