@@ -37,6 +37,7 @@ func runSealCandidate(args []string) error {
 	baseSHA := flags.String("base-sha", "", "")
 	stage := flags.Int("stage", 0, "")
 	reportPath := flags.String("report", "", "")
+	reportRunPath := flags.String("report-run", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	ticketOutPath := flags.String("ticket-out", "", "")
 	sourceOutPath := flags.String("source-out", "", "")
@@ -44,7 +45,7 @@ func runSealCandidate(args []string) error {
 	designPath := flags.String("design", "", "")
 	objectionPath := flags.String("objection", "", "")
 	objectionOutPath := flags.String("objection-out", "", "")
-	if !parseFlags(flags, args) ||
+	if !parseFlags(flags, args) || (*reportPath != "" && *reportRunPath != "") ||
 		!allPresent(*configPath, *toolSHA, *draftPath, *repoRoot, *baseRoot, *baseSHA, *runOutPath, *ticketOutPath, *sourceOutPath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) || *stage < 1 || (*objectionPath == "") != (*objectionOutPath == "") {
 		return errors.New("seal-candidate arguments are invalid")
@@ -83,6 +84,27 @@ func runSealCandidate(args []string) error {
 			return errors.New("the design belongs to another run")
 		}
 		design = &loaded
+	}
+	if *reportRunPath != "" {
+		// The cards path already sealed the implementer's account. Reuse
+		// only its transcript; launch facts in this observation stay external.
+		var reported worker.AgentRun
+		if err := worker.ReadJSONFile(*reportRunPath, worker.MaxArtifactJSONBytes, &reported); err != nil || reported.Validate(config) != nil {
+			return errors.New("the implementer report run could not be read or is not intact")
+		}
+		agentID := config.Agents.Implementer.ID
+		if design != nil {
+			if config.Agents.Applier == nil {
+				return errors.New("the applier is not configured")
+			}
+			agentID = config.Agents.Applier.ID
+		}
+		if reported.Kind != "" || reported.AgentID != agentID || reported.ExitCode != 0 ||
+			reported.DeliveryID != draft.DeliveryID || reported.InputSHA256 != draft.InputSHA256 ||
+			reported.ToolSHA != *toolSHA || reported.BaseSHA != *baseSHA || reported.Stage != *stage {
+			return errors.New("the implementer report belongs to another run, round, or role")
+		}
+		report = reported.Transcript
 	}
 	if *objectionPath != "" {
 		if objected, err := sealDesignObjection(*objectionPath, *objectionOutPath, draft, *baseSHA, *stage, design); err != nil {

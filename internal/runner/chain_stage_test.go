@@ -100,6 +100,53 @@ func TestChainValidateResumesBehindItsOwnDecision(t *testing.T) {
 	}
 }
 
+func TestChainSealCarriesTheCurrentWritingRolesReport(t *testing.T) {
+	for _, role := range []string{"implementer", "applier"} {
+		t.Run(role, func(t *testing.T) {
+			pipeline := chainStagePipeline(t)
+			log := filepath.Join(t.TempDir(), "worker.log")
+			fake := filepath.Join(t.TempDir(), "fake-worker")
+			if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+log+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			pipeline.Config.WorkerBin = fake
+			pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"a", "b"})
+			sealStageFiles(t, pipeline, 1, "revise")
+			if role == "applier" {
+				writeDecision(t, pipeline.Workspace, `{"outcome":"ready","request_kind":"change","needs_design":true}`)
+				if err := os.MkdirAll(pipeline.designRoundDir(1), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for name, body := range map[string]string{"investigation.json": `{}`, "decision.json": `{"outcome":"approved"}`, "design.json": `{}`} {
+					if err := os.WriteFile(filepath.Join(pipeline.designRoundDir(1), name), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for range 2 { // A re-dispatch must still use this round's original report.
+				if err := pipeline.chainSealAndReview(context.Background(), []string{"a", "b"}, 0,
+					pipeline.path("target-repo"), pipeline.path("target-base"), strings.Repeat("b", 40)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logged, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
+			if len(lines) != 4 {
+				t.Fatalf("worker calls: %q", lines)
+			}
+			for _, line := range []string{lines[0], lines[2]} {
+				if !strings.HasPrefix(line, "seal-candidate ") ||
+					!strings.Contains(line, "--report-run "+pipeline.path("history/stage-2/"+role+"-run.json")) {
+					t.Fatalf("the seal lost this round's writing-role report: %q", line)
+				}
+			}
+		})
+	}
+}
+
 // The implement and apply cards are direct commands: the stage hands the
 // rendered instruction to the worker's run-instruction, which starts the
 // agent through the launcher under the agent user, and records the run in
