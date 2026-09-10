@@ -365,7 +365,8 @@ func (s *DynamoStore) BeginTerminal(ctx context.Context, request hook.TerminalBe
 	if !terminalBindingMatches(binding, request.Report, request.Route) {
 		return hook.TerminalBinding{}, hook.TerminalBeginConflict, nil
 	}
-	result := hook.TerminalBinding{IssueID: binding.envelope.Snapshot.IssueID, IssueKey: binding.envelope.Snapshot.IssueKey}
+	claimedAt, _ := attributeInt64(binding.runItem, "claimed_at")
+	result := hook.TerminalBinding{IssueID: binding.envelope.Snapshot.IssueID, IssueKey: binding.envelope.Snapshot.IssueKey, ClaimedAtMillis: claimedAt}
 	stateValue, _ := attributeString(binding.runItem, "state")
 	switch stateValue {
 	case stateTerminal:

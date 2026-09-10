@@ -138,8 +138,11 @@ func runLedgerScenario(t *testing.T, store ledgerStore) []string {
 	step("notice-live", fmt.Sprintf("exists=%t terminal=%t", notice.Exists, notice.Terminal), err)
 
 	tb := testTerminalBegin(t, envelope2, hook.TerminalValidationFailed, testQueuedAt.Add(11*time.Second), tokenA)
-	_, td, err := store.BeginTerminal(ctx, tb)
+	terminalBinding, td, err := store.BeginTerminal(ctx, tb)
 	step("t-begin", td, err)
+	if terminalBinding.ClaimedAtMillis != pullAfterResume.ClaimedAt.UnixMilli() {
+		t.Fatalf("terminal binding lost the resumed claim time: %+v", terminalBinding)
+	}
 	tc := hook.TerminalCompleteRequest{
 		Report: tb.Report, ReportJSON: tb.ReportJSON, ReportSHA256: tb.ReportSHA256, Route: tb.Route,
 		LeaseToken: tokenA, CommentID: 6401, CompletedAt: testQueuedAt.Add(12 * time.Second),
@@ -148,8 +151,11 @@ func runLedgerScenario(t *testing.T, store ledgerStore) []string {
 	step("t-complete", tcd, err)
 	tcd2, err := store.CompleteTerminal(ctx, tc)
 	step("t-complete-again", tcd2, err)
-	_, td2, err := store.BeginTerminal(ctx, tb)
+	completedBinding, td2, err := store.BeginTerminal(ctx, tb)
 	step("t-begin-after", td2, err)
+	if completedBinding.ClaimedAtMillis != terminalBinding.ClaimedAtMillis {
+		t.Fatalf("completed binding changed the claim time: %+v", completedBinding)
+	}
 
 	notice2, err := store.LoadRunNotice(ctx, testTerminalRoute(t))
 	step("notice-terminal", fmt.Sprintf("exists=%t terminal=%t", notice2.Exists, notice2.Terminal), err)

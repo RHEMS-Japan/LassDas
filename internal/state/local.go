@@ -741,7 +741,8 @@ func (s *LocalStore) BeginTerminal(ctx context.Context, request hook.TerminalBeg
 	if !localTerminalBindingMatches(binding, request.Report, request.Route) {
 		return hook.TerminalBinding{}, hook.TerminalBeginConflict, nil
 	}
-	result := hook.TerminalBinding{IssueID: binding.envelope.Snapshot.IssueID, IssueKey: binding.envelope.Snapshot.IssueKey}
+	claimedAt, _ := binding.runRow.int64At("claimed_at")
+	result := hook.TerminalBinding{IssueID: binding.envelope.Snapshot.IssueID, IssueKey: binding.envelope.Snapshot.IssueKey, ClaimedAtMillis: claimedAt}
 	stateValue, _ := binding.runRow.str("state")
 	switch stateValue {
 	case stateTerminal:
