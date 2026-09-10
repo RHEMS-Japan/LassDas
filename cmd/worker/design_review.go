@@ -373,8 +373,9 @@ type reviewTicket struct {
 // reviewCatalogueEntry is one probe the investigating designer can use, so
 // the evidence lens knows what "should have been measured" can mean.
 type reviewCatalogueEntry struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Description string `json:"description,omitempty"`
 }
 
 // reviewCatalogue is the designer's own catalogue — the consumer's probes
@@ -387,7 +388,7 @@ func reviewCatalogue(config worker.Config) []reviewCatalogueEntry {
 	specs := catalog.Specs()
 	entries := make([]reviewCatalogueEntry, 0, len(specs))
 	for _, spec := range specs {
-		entries = append(entries, reviewCatalogueEntry{ID: spec.ID, Kind: string(spec.Kind)})
+		entries = append(entries, reviewCatalogueEntry{ID: spec.ID, Kind: string(spec.Kind), Description: spec.Description})
 	}
 	return entries
 }
@@ -671,6 +672,7 @@ func designPromptBudget(prompt, homeToken string) int {
 type measurementView struct {
 	ID               string            `json:"id"`
 	Probe            string            `json:"probe"`
+	Description      string            `json:"description,omitempty"`
 	Args             map[string]string `json:"args,omitempty"`
 	ExitCode         int               `json:"exit_code"`
 	Refused          bool              `json:"refused,omitempty"`
@@ -719,7 +721,8 @@ func designReviewUserData(input designReviewPromptInput, cited map[string]citati
 	for _, measurement := range input.measurements {
 		view := measurementView{
 			ID: measurement.ID, Probe: measurement.Probe, Args: measurement.Args, ExitCode: measurement.ExitCode,
-			Refused: measurement.Refused, Reason: measurement.Reason, OutputBytes: measurement.OutputBytes, Truncated: measurement.Truncated,
+			Description: measurement.Description,
+			Refused:     measurement.Refused, Reason: measurement.Reason, OutputBytes: measurement.OutputBytes, Truncated: measurement.Truncated,
 		}
 		tier := cited[measurement.ID]
 		treatment := citedFull

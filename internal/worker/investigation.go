@@ -476,6 +476,9 @@ func investigationTaskPrompt(input InvestigationInput) string {
 	catalogue := make([]map[string]any, 0)
 	for _, spec := range input.Session.Catalog.Specs() {
 		entry := map[string]any{"id": spec.ID, "kind": string(spec.Kind)}
+		if spec.Description != "" {
+			entry["description"] = spec.Description
+		}
 		if len(spec.Args) > 0 {
 			entry["slots"] = spec.Args
 		}

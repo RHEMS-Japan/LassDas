@@ -19,12 +19,15 @@ import (
 // kernel ran, what came back, and the chain value that lets a prefix of the
 // file be checked as one unit. The role never writes these; the kernel does.
 type Measurement struct {
-	ID        string            `json:"id"`
-	Probe     string            `json:"probe"`
-	Args      map[string]string `json:"args,omitempty"`
-	StartedAt time.Time         `json:"started_at"`
-	EndedAt   time.Time         `json:"ended_at"`
-	ExitCode  int               `json:"exit_code"`
+	ID    string `json:"id"`
+	Probe string `json:"probe"`
+	// Description is the declared meaning at measurement time. Omission
+	// preserves the fingerprints of records made before descriptions existed.
+	Description string            `json:"description,omitempty"`
+	Args        map[string]string `json:"args,omitempty"`
+	StartedAt   time.Time         `json:"started_at"`
+	EndedAt     time.Time         `json:"ended_at"`
+	ExitCode    int               `json:"exit_code"`
 	// Output is the captured text, cut at the probe's cap. OutputBytes is
 	// the full length before the cut; Truncated says a cut happened.
 	Output       string `json:"output,omitempty"`

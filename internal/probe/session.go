@@ -213,6 +213,7 @@ func (s *Session) Run(ctx context.Context, request Request) (Outcome, error) {
 		return s.record(measurement, execResult{exitCode: -1, failure: refusal.Reason}, true, limits)
 	}
 	measurement.Args = plan.Args
+	measurement.Description = plan.Spec.Description
 
 	var result execResult
 	rotated := false

@@ -21,6 +21,44 @@ type fakeSQLConn struct {
 	closed  bool
 }
 
+// A legacy prefix still verifies; new descriptions travel with the measured
+// output and are covered by the same chain, including after reopening.
+func TestProbeDescriptionTravelsWithMeasurementWithoutRewritingHistory(t *testing.T) {
+	const legacy = `{"id":"m-0001","probe":"metric.current","started_at":"2026-09-01T00:00:00Z","ended_at":"2026-09-01T00:00:01Z","exit_code":0,"output":"VALUE\n5\n","output_bytes":8,"output_sha256":"77989038d4dca9f0c6f6d29cd9b5429c274ef655955044eb1fbf5f982802aabf","excerpt_bytes":8,"line_sha256":"896a1f7165877f1b19848443f3e54fab1fc042b2900dd077e4c3c11f369782b6","chain_sha256":"4c40cd25f6e6c31a393546885deb5b5e8442cf410baa955c067562843fb3b748"}`
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	if err := os.WriteFile(path, []byte(legacy+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := OpenRecorder(path)
+	if err != nil {
+		t.Fatalf("old record stopped verifying: %v", err)
+	}
+	const description = "VALUE is requested bytes, not measured usage."
+	catalog, err := NewCatalog([]Spec{{ID: "metric.current", Kind: KindExec, Argv: []string{"printf", "VALUE\n5\n"}, Description: description}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{Catalog: catalog, Recorder: recorder}
+	outcome, err := session.Run(context.Background(), Request{Probe: "metric.current"})
+	if err != nil || outcome.Measurement.Description != description || outcome.Excerpt != "VALUE\n5\n" {
+		t.Fatalf("description or measured value lost: %+v, %v", outcome, err)
+	}
+	records, err := ReadPrefix(path, 2)
+	if err != nil || records[0].Description != "" || records[1].Description != description {
+		t.Fatalf("stored description changed or was invented: %+v, %v", records, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.HasPrefix(string(raw), legacy+"\n") {
+		t.Fatal("the old prefix was rewritten")
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), description, "VALUE is measured usage.", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenRecorder(path); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("rewriting the meaning was not detected: %v", err)
+	}
+}
+
 func (c *fakeSQLConn) exec(_ context.Context, statement string) error {
 	c.sent = append(c.sent, statement)
 	return nil

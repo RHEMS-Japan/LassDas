@@ -788,6 +788,40 @@ func TestDesignReviewPromptCarriesTheTicketCatalogueAndObjection(t *testing.T) {
 	}
 }
 
+func TestDesignReviewRetainsTheDeclaredMeasurementMeaning(t *testing.T) {
+	const description = "VALUE is requested bytes, not measured usage."
+	config := worker.Config{Probes: []probe.Spec{{ID: "metric.current", Kind: probe.KindExec,
+		Argv: []string{"printf", "VALUE\n5\n"}, Description: description}}}
+	catalog, err := config.ProbeCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	recorder, err := probe.OpenRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &probe.Session{Catalog: catalog, Recorder: recorder}
+	if _, err := session.Run(context.Background(), probe.Request{Probe: "metric.current"}); err != nil {
+		t.Fatal(err)
+	}
+	measurements, err := probe.ReadPrefix(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, treatment := range []citedTreatment{citedFull, citedWithdrawn} {
+		body, _, err := designReviewUserData(designReviewPromptInput{
+			measurements: measurements, catalogue: reviewCatalogue(config),
+		}, map[string]citationTier{"m-0001": citedByJudged}, designReviewFit{judged: treatment})
+		if err != nil || strings.Count(body, description) != 2 {
+			t.Fatalf("catalogue or measurement meaning was lost: %s (%v)", body, err)
+		}
+		if strings.Contains(body, `"argv"`) {
+			t.Fatal("the review received private command configuration")
+		}
+	}
+}
+
 // The objection file the seal wrote becomes a finding; a broken or empty
 // one is refused rather than silently dropped.
 func TestReadPreviousObjectionBecomesAFinding(t *testing.T) {
