@@ -163,6 +163,12 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.Operation = "計測値と閾値を確認し、必要なら直し方を変えて再度起票してください"
 		facts.NextEvent = "以後の自動通知はありません"
 		facts.Production = "未変更"
+	case report.Verdict == "checks_failed":
+		facts.State = "CI の成功を確認できず、ステージングへの取り込み前に停止"
+		facts.NextActor = "運用担当者"
+		facts.Operation = "PR の CI 実行履歴を確認します。実行がなければ変更ファイルと CI の対象条件を、不合格なら実行ログを確認し、結果と再開方法をこのチケットで案内します。利用者の再起票は不要です"
+		facts.NextEvent = "以後の自動通知はありません（原因を修正しても、この試行は自動では再開しません）"
+		facts.Production = "未変更（ステージングへの取り込みも行っていません）"
 	case report.Verdict == "deploy_absent":
 		// Nothing is broken and nothing is pending: the change is in the
 		// branch, and whether it needs deploying at all is the operator's
