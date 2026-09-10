@@ -395,10 +395,10 @@ func DeliverResolvedContent(runID string, report DeliverResolvedReport) string {
 		facts.Operation = "対応不要"
 		facts.Production = "確認済み（運用担当者による確認。詳細はこのコメントより前の報告を参照）"
 	} else {
-		builder.WriteString("【運用担当者の確認を記録】ステージング反映の状態は運用担当者が確認しました。本番への反映は自動では行わず、運用手順で行います。この依頼の自動処理はここで終了します。\n")
-		facts.NextActor = "運用担当者"
-		facts.Operation = "本番反映は運用手順で行います"
-		facts.Production = "未変更（自動処理による本番反映は行いません）"
+		builder.WriteString("【運用担当者の確認を記録】ステージング反映の状態は運用担当者が確認しました。本番への反映は自動では行わず、別途必要な場合だけ運用手順で対応します。この依頼の自動処理はここで終了します。\n")
+		facts.NextActor = "なし（本番反映が別途必要な場合のみ運用担当者）"
+		facts.Operation = "確認の記録として終了。本番反映が必要な場合のみ既存の運用手順で対応"
+		facts.Production = "この自動処理による反映なし（手動反映の状態は運用担当者の確認記録を参照）"
 	}
 	builder.WriteString(facts.render())
 	return builder.String()

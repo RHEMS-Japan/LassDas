@@ -589,9 +589,9 @@ func placeResolvedOutcome(status *RunStatus, phase, verdict string) {
 	case phase == "release":
 		status.place("done", "運用担当者が確認済み", "本番の状態は運用担当者の確認どおりです")
 	case verdict == "merge_unverified":
-		status.place("done", "運用担当者が確認済み", "ステージングへのマージの成否は運用担当者の確認どおり・本番反映は運用手順で行います")
+		status.place("done", "運用担当者が確認済み", "ステージングへのマージの成否は運用担当者の確認どおりです。本番反映が別途必要な場合のみ、運用担当者が既存の手順で対応します。")
 	default:
-		status.place("done", "運用担当者が確認済み", "ステージングの反映状態は運用担当者の確認どおり・本番反映は運用手順で行います")
+		status.place("done", "運用担当者が確認済み", "ステージングの反映状態は運用担当者の確認どおりです。本番反映が別途必要な場合のみ、運用担当者が既存の手順で対応します。")
 	}
 }
 
