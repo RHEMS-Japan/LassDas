@@ -219,6 +219,21 @@ func TestPlaceDesignStageShowsInvestigationAndDesign(t *testing.T) {
 	if placeDesignStage(&status, view) {
 		t.Error("a finished design round still shows as design")
 	}
+	// A revision archives the old implementation cards one at a time.
+	// A leftover publication card is not evidence that publication started.
+	for _, tail := range [][]runtime.BoardTask{
+		{{ID: "publish", Status: "todo", IdempotencyKey: "delivery-1:publish:r1"}},
+		nil,
+	} {
+		cards := append([]runtime.BoardTask{
+			{ID: "investigate", Status: "done", IdempotencyKey: "delivery-1:investigate:d1"},
+			{ID: "decide", Status: "done", IdempotencyKey: "delivery-1:design-decide:d1"},
+		}, tail...)
+		status = RunStatus{}
+		if !placeDesignStage(&status, chainViewFor(cards, "delivery-1")) || status.Step != "design" || status.StepTitle != "次の工程を準備中" {
+			t.Errorf("design transition with tail %+v: %+v", tail, status)
+		}
+	}
 	if placeDesignStage(&status, chainViewFor(nil, "delivery-1")) {
 		t.Error("no design round shows as design")
 	}

@@ -608,8 +608,9 @@ func placeResolvedOutcome(status *RunStatus, phase, verdict string) {
 
 // placeDesignStage shows the investigating designer's stages while any of
 // the newest design round's cards is still open: 調査 while the investigate
-// card runs, 設計 while its reviews and decision run. Once the design round
-// is done the implementation cards take over as before.
+// card runs, 設計 while its reviews and decision run. A finished design
+// hands off only while the first implementation card exists: retirement
+// can temporarily leave just a future publication card on the board.
 func placeDesignStage(status *RunStatus, view chainView) bool {
 	if view.designRound == 0 {
 		return false
@@ -632,7 +633,12 @@ func placeDesignStage(status *RunStatus, view chainView) bool {
 	}
 	switch {
 	case !open:
-		return false
+		_, hasApply := view.cards[runtime.StageApply]
+		_, hasImplement := view.cards[runtime.StageImplement]
+		if hasApply || hasImplement {
+			return false
+		}
+		status.place("design", "次の工程を準備中", detail)
 	case blocked:
 		status.place("design", "工程の復旧処理中", detail)
 	case investigating:
