@@ -248,12 +248,15 @@ func (p *Pipeline) chainSealAndReview(ctx context.Context, reviewers []string, i
 		if err != nil {
 			return err
 		}
+		reportRun := stageDir + "/implementer-run.json"
 		if design != "" {
 			// A design-backed round: the seal holds the applier to the design
 			// and turns an objection into the design round's record instead.
+			reportRun = stageDir + "/applier-run.json"
 			sealArgs = append(sealArgs, "--design", design,
 				"--objection", p.path("revise-design.json"), "--objection-out", p.designObjectionPath(designRound))
 		}
+		sealArgs = append(sealArgs, "--report-run", reportRun)
 		if code, err := p.worker(ctx, "seal-candidate", sealArgs); err != nil || code != 0 {
 			return errors.New("the implemented change could not be sealed")
 		}

@@ -91,6 +91,92 @@ func TestSealCandidateWithoutReportSealsAnEmptyAccount(t *testing.T) {
 	}
 }
 
+// The actual run-instruction output must reach the candidate's explanation,
+// for both writing roles. Another round or an altered record cannot supply it.
+func TestSealCandidateCarriesTheWritingRolesReport(t *testing.T) {
+	for _, role := range []string{"implementer", "applier"} {
+		t.Run(role, func(t *testing.T) {
+			fixture := newTunedAgentFixture(t, `printf '変更理由: 表示名を依頼に合わせた。\n'; `+editTheLabel, "true", func(binaries string, config *worker.Config) {
+				writeStandInAgent(t, binaries, "stand-in-applier", `printf '変更理由: 承認済みの表示名を反映した。\n'; `+editTheLabel)
+				applier := config.Agents.Implementer
+				applier.ID, applier.Command = "applier-stand-in", "stand-in-applier"
+				config.Agents.Applier = &applier
+			})
+			instruction := fixture.path("INSTRUCTION.md")
+			if err := os.WriteFile(instruction, []byte("Change the label.\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := fixture.path(role + "-run.json")
+			args := []string{"run-instruction", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+				"--draft", fixture.draftPath, "--role", role, "--instruction", instruction,
+				"--repo-root", fixture.repoRoot, "--base-sha", fixture.baseSHA, "--stage", "1", "--out", record}
+			sealArgs := []string{"--report-run", record}
+			if role == "applier" {
+				design := sealedDesignFor(t, fixture, "client/src/label.ts")
+				args = append(args, "--design", design, "--objection-out", fixture.path("objection.json"))
+				sealArgs = append(sealArgs, "--design", design)
+			}
+			if err := run(context.Background(), args); err != nil {
+				t.Fatal(err)
+			}
+			var reported worker.AgentRun
+			readAgentArtifact(t, record, worker.MaxArtifactJSONBytes, &reported)
+			for _, change := range []string{"round", "delivery", "tamper", "missing"} {
+				t.Run(change, func(t *testing.T) {
+					altered := reported
+					switch change {
+					case "round":
+						altered.Stage++
+					case "delivery":
+						altered.DeliveryID = "delivery_" + strings.Repeat("b", 32)
+					case "tamper":
+						altered.Transcript = "A report the agent did not write."
+					}
+					if change != "tamper" {
+						var err error
+						altered, err = worker.SealAgentRun(altered)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					if change == "missing" {
+						if err := os.Remove(record); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						writeTestJSON(t, record, altered)
+					}
+					if err := fixture.sealCandidate(t, sealArgs...); err == nil {
+						t.Fatal("an invalid report was used")
+					}
+					if _, err := os.Stat(fixture.path("candidate.json")); !os.IsNotExist(err) {
+						t.Fatal("a candidate was written for an invalid report")
+					}
+				})
+			}
+			writeTestJSON(t, record, reported)
+			if role == "applier" {
+				if err := fixture.sealCandidate(t, "--report-run", record); err == nil {
+					t.Fatal("the applier's report was attributed to the implementer")
+				}
+			}
+			if err := fixture.sealCandidate(t, sealArgs...); err != nil {
+				t.Fatal(err)
+			}
+			var candidate worker.Candidate
+			var observation worker.AgentRun
+			readAgentArtifact(t, fixture.path("candidate.json"), worker.MaxArtifactJSONBytes, &candidate)
+			readAgentArtifact(t, fixture.path("run.json"), worker.MaxArtifactJSONBytes, &observation)
+			if candidate.Rationale != strings.TrimSpace(reported.Transcript) || !strings.Contains(candidate.Rationale, "変更理由:") {
+				t.Fatalf("the report did not reach the candidate: %q", candidate.Rationale)
+			}
+			if observation.Kind != worker.AgentRunKindExternal || observation.Command != "" || observation.DurationMs != 0 {
+				t.Fatal("importing the explanation changed the seal's launch claims")
+			}
+		})
+	}
+}
+
 func TestSealCandidateRejectsAChangeOutsideTheScope(t *testing.T) {
 	fixture := newAgentFixture(t, "true", "true")
 	if err := os.WriteFile(filepath.Join(fixture.repoRoot, "outside.txt"), []byte("x\n"), 0o600); err != nil {
