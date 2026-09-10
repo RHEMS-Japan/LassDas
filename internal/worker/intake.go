@@ -214,7 +214,9 @@ func (c ContractIntake) ToDraft(raw RawTicket, config Config) (TicketDraft, erro
 		IssueKey: raw.IssueKey, RunID: raw.RunID, Repository: consumer.Repository,
 		Mode: consumer.Mode.ID, Summary: raw.Summary,
 		VerificationPath: c.VerificationPath, ExpectedText: c.ExpectedText,
-		AbsentText: c.AbsentText, Request: c.Request,
+		// The model's restatement can omit acceptance conditions. Carry the
+		// sealed original to every later stage, rather than replacing it.
+		AbsentText: c.AbsentText, Request: strings.TrimSpace(raw.Description),
 	}, nil
 }
 

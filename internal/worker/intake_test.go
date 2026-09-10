@@ -110,6 +110,46 @@ func TestReadContractReadsTheContractOutOfProse(t *testing.T) {
 	}
 }
 
+func TestIntakeKeepsAcceptanceConditionsBeyondTheModelRestatement(t *testing.T) {
+	config := validTestConfig()
+	conditions := "\n\n完了条件: 本文から根拠のコードを辿れること。設定変更や再起動は実行しないこと。"
+	for _, size := range []int{len(conditions) + 30, 32 * 1024} {
+		description := strings.Repeat("x", size-len(conditions)) + conditions
+		raw, err := ReadRawTicket(validTicketEnvelope(t, description), config, strings.Repeat("c", 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		invoker, err := NewModelInvoker(&fakeChatAPI{output: chatOutput(
+			`{"verification_path":"","expected_text":"","absent_text":"","request":"手順書の説明を更新する","gaps":[],"rationale":"文書の変更依頼"}`,
+		)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		intake, _, err := invoker.ReadContract(context.Background(), raw, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		draft, err := intake.ToDraft(raw, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if draft.Request != description {
+			t.Errorf("%d-byte ticket lost the original acceptance conditions after intake", size)
+		}
+		request, err := draft.WithTargetFiles([]string{"client/src/settings.tsx"}, config)
+		if err != nil {
+			t.Fatalf("an already accepted %d-byte ticket must reach the author and reviewer: %v", size, err)
+		}
+		if request.Request != description {
+			t.Errorf("%d-byte ticket lost the original acceptance conditions after target resolution", size)
+		}
+		request.Request = strings.Repeat("x", 32*1024+1)
+		if err := request.Validate(config); err == nil {
+			t.Fatal("the existing original-ticket size bound must still apply downstream")
+		}
+	}
+}
+
 // TestReadContractSettlesAnUnreadableWordingFieldWithoutAsking pins the
 // wording rule (2026-08-07, measured on the first live ticket): the wording
 // promise is optional, so an unreadable part of it is settled to "no promise"

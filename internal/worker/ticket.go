@@ -258,7 +258,9 @@ func (r TicketRequest) Validate(config Config) error {
 	if err := validateWordingPromise(r.VerificationPath, r.ExpectedText, r.AbsentText); err != nil {
 		return err
 	}
-	if len(r.Request) == 0 || len(r.Request) > maxTicketRequestBytes || strings.TrimSpace(r.Request) != r.Request ||
+	// Prose intake carries the original description, whose accepted bound
+	// is larger than the legacy parsed request and model restatement.
+	if len(r.Request) == 0 || len(r.Request) > maxTicketDescriptionBytes || strings.TrimSpace(r.Request) != r.Request ||
 		!utf8.ValidString(r.Request) || hasDisallowedControls(r.Request, true) {
 		return errors.New("ticket request is invalid")
 	}
