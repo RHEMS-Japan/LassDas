@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Kind names the executor a probe runs on.
@@ -41,6 +42,8 @@ const (
 	DefaultMaxOutputBytes = 256 * 1024
 	// DefaultTimeoutSeconds bounds one measurement's wall time.
 	DefaultTimeoutSeconds = 60
+	// MaxDescriptionBytes bounds the consumer's model-visible explanation.
+	MaxDescriptionBytes = 2048
 	// MaxSlotValueLength bounds a slot value; longer values are refused.
 	MaxSlotValueLength = 4096
 	// DefaultSQLStatementTimeoutMS is the statement timeout the kernel sets
@@ -67,6 +70,9 @@ var (
 type Spec struct {
 	ID   string `json:"id"`
 	Kind Kind   `json:"kind"`
+	// Description explains what the returned values mean and do not prove.
+	// It is model-visible data, unlike connection details or credentials.
+	Description string `json:"description,omitempty"`
 
 	// Argv is the fixed command line of an exec probe. A {{slot}} marks a
 	// value the model fills; every slot must have a pattern in Args.
@@ -157,6 +163,13 @@ func (c *Catalog) add(spec Spec) error {
 	}
 	if _, exists := c.specs[spec.ID]; exists {
 		return fmt.Errorf("probe %q is declared twice", spec.ID)
+	}
+	if len(spec.Description) > MaxDescriptionBytes || !utf8.ValidString(spec.Description) ||
+		strings.IndexFunc(spec.Description, unicode.IsControl) >= 0 {
+		return fmt.Errorf("probe %q: description must be at most %d bytes of plain text", spec.ID, MaxDescriptionBytes)
+	}
+	if _, found := SecretShaped(spec.Description, nil); found {
+		return fmt.Errorf("probe %q: description contains secret-shaped text", spec.ID)
 	}
 	compiled, err := compileSlots(spec)
 	if err != nil {

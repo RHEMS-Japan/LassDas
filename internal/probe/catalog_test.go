@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestProbeDescriptionIsOptionalBoundedPublicText(t *testing.T) {
+	for _, description := range []string{"", "要求容量であり使用実績ではない。", strings.Repeat("x", MaxDescriptionBytes)} {
+		if _, err := NewCatalog([]Spec{{ID: "metric.current", Kind: KindExec, Argv: []string{"true"}, Description: description}}); err != nil {
+			t.Fatalf("valid description rejected: %v", err)
+		}
+	}
+	for _, description := range []string{strings.Repeat("x", MaxDescriptionBytes+1), "line\nbreak", "bad\xff", "Bearer " + strings.Repeat("x", 24)} {
+		if _, err := NewCatalog([]Spec{{ID: "metric.current", Kind: KindExec, Argv: []string{"true"}, Description: description}}); err == nil {
+			t.Fatal("invalid or secret-shaped description accepted")
+		}
+	}
+}
+
 func testCatalog(t *testing.T) Catalog {
 	t.Helper()
 	catalog, err := NewCatalog([]Spec{

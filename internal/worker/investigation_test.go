@@ -296,6 +296,39 @@ func TestInvestigationTaskPromptNamesTheHostArgumentForMultiHostProbes(t *testin
 	}
 }
 
+func TestInvestigationReceivesTheProbeMeaningBeforeAndAfterMeasurement(t *testing.T) {
+	input, _ := investigationFixture(t, 3)
+	const description = "VALUE is requested bytes, not measured usage."
+	catalog, err := probe.NewCatalog([]probe.Spec{{ID: "metric.current", Kind: probe.KindExec,
+		Argv: []string{"printf", "VALUE\n5\n"}, Description: description}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Session.Catalog = catalog
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"metric.current"}}`,
+		`{"report":{"questions":["How much is requested?"],"findings":[{"claim":"5 bytes requested","evidence":["m-0001"],"confidence":"measured"}],"unknowns":["actual usage"],"next":"Document the distinction."}}`,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(api.requests[0].Messages[1].Content, description) {
+		t.Fatal("the tool selection omitted what the measurement means")
+	}
+	last := api.requests[1].Messages
+	if !strings.Contains(last[len(last)-1].Content, description) || !strings.Contains(last[len(last)-1].Content, `"excerpt":"VALUE\n5\n"`) {
+		t.Fatal("the measured value lost its declared meaning")
+	}
+	for _, request := range api.requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, `"argv"`) {
+				t.Fatal("private command configuration reached the model")
+			}
+		}
+	}
+}
+
 // One out-of-shape response does not end the round: the same turn is asked
 // again and the round seals with its measurements; two in a row are the
 // transport's failure. The count restarts after every turn that came back
