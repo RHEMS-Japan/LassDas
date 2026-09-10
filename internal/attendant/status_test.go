@@ -282,6 +282,24 @@ func TestCanGoRequiresThePostedReport(t *testing.T) {
 	if got := classifyRun(config, run, nil); got.CanGo {
 		t.Fatalf("held: can_go=%v, want false", got.CanGo)
 	}
+
+	// Failed CI ends before integration, whether or not its report is posted.
+	write(t, "deliver-staging-report.json", `{"verdict":"checks_failed"}`)
+	if err := os.Remove(filepath.Join(root, delivery, "board-outcome.json")); err != nil {
+		t.Fatal(err)
+	}
+	for _, posted := range []bool{false, true} {
+		if posted {
+			write(t, "board-outcome.json", `{"phase":"staging","verdict":"checks_failed","at":"2026-09-01T00:00:00Z"}`)
+		}
+		got := classifyRun(config, run, nil)
+		if got.Step != "failed" || got.Stage != "checks" || got.CanGo || got.CanResolve {
+			t.Errorf("failed CI posted=%v: step=%q stage=%q can_go=%v can_resolve=%v", posted, got.Step, got.Stage, got.CanGo, got.CanResolve)
+		}
+		if !strings.Contains(got.StepTitle, "CI") || got.Detail == "" || !strings.Contains(got.NextAction, "CI") || got.ActionEffect == "" {
+			t.Errorf("failed CI posted=%v has no CI reason or operator guidance: %+v", posted, got)
+		}
+	}
 }
 
 // Events are the diff between consecutive snapshots: same step, no line;

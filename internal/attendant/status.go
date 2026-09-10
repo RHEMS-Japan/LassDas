@@ -439,6 +439,11 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 		return
 	}
 	switch {
+	case verdict == "checks_failed":
+		status.placeAt("failed", "checks", "自動検査 (CI) の成功を確認できず終了",
+			"必要な検査の成功を確認できず、ステージングへの自動取り込み前に終了しました。")
+		status.NextAction = "運用担当者が PR の CI 実行履歴を確認してください。実行がなければ変更ファイルと CI の対象条件を照合し、不合格なら実行ログから原因を確認してください。"
+		status.ActionEffect = "この試行の自動処理は終了しています。原因を修正しても自動では再開しません。運用担当者が確認結果と再開方法をチケットに記録してください。"
 	case verdict == "pass" && hold != "":
 		status.place("done", "ステージング反映済み", "本番の自動反映を見送りました: "+hold)
 		status.NextAction = "運用担当者がチケットの本番反映を見送った理由と PR の変更範囲を確認し、必要なら既存のリリース手順で本番へ反映してください。"
