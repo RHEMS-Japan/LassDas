@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -174,7 +175,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings, designMD)
+	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings, designMD, *repoRoot)
 	if err != nil {
 		// The builder's failures are static prose ("instruction is too
 		// large") - naming them is what made the third live ticket's death
@@ -298,13 +299,20 @@ func reviewAgentPrompt(
 	clarification *worker.ClarificationContext,
 	findings []worker.ModelFinding,
 	designMD string,
+	repoRoot string,
 ) (string, error) {
+	absoluteRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return "", errors.New("the review workspace could not be located")
+	}
 	changed := make([]string, 0, len(candidate.Files))
 	for _, file := range candidate.Files {
 		changed = append(changed, file.Path)
 	}
 	sections := []string{
 		"あなたはこの変更を通すかどうかを判定するレビュアーです。作業ディレクトリには変更が適用済みです。",
+		"作業コピーの絶対パス: " + absoluteRoot,
+		"変更されたファイルと参照する実装・資料は、この絶対パスを起点に読んでください。道具の初期位置で見つからない場合も、ここを確認してから判断してください。",
 		"",
 		"## この実行環境について",
 		"あなたは自動実行の中にいます。人は見ていません。",
