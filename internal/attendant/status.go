@@ -164,6 +164,23 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		// Anything the vocabulary gains later; never leak internal state
 		// names into the requester-facing detail.
 		status.place("intake", "処理中", "")
+		status.NextAction = "現在の処理状態をこの画面では判定できません。運用担当者がチケットの報告と実行履歴を確認してください。"
+		status.ActionEffect = "状態を確認するまで、この画面からの操作はありません。"
+	}
+	if status.NextAction == "" {
+		switch status.Step {
+		case "failed":
+			status.NextAction = "運用担当者がチケットの最終報告と終了した工程の実行履歴を確認し、原因と残る対応をチケットに記録してください。"
+			status.ActionEffect = "この試行の自動処理は終了しています。原因を修正しても自動では再実行しません。再開方法は運用担当者がチケットで案内します。"
+		case "stopped":
+			status.NextAction = "この試行への操作は不要です。再度依頼する場合は、停止した理由と既に反映された範囲をチケットで確認してください。"
+			status.ActionEffect = "この試行は自動で再開しません。停止の記録によって、既に取り込まれた変更が取り消されることはありません。"
+		case "done":
+			status.NextAction = "この試行の自動処理は終了しています。チケットの最終報告と、PR がある場合はその変更内容を確認できます。"
+		case "intake", "investigate", "design", "implement", "review", "checks", "staging", "production", "reporting", "confirm":
+			status.NextAction = "いまは利用者の操作は不要です。進行状況はこの画面で確認できます。"
+			status.ActionEffect = "工程の結果はこの画面に表示します。質問や承認が必要になった場合は、チケットで具体的な操作をお知らせします。"
+		}
 	}
 	return status
 }
@@ -254,6 +271,8 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 // endings (expired, stopped, dead cards) exist only as posted comments,
 // and without the seal the board would keep telling the previous story.
 func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.RunOverview, tasks []runtime.BoardTask) {
+	runDir := runDirectory(config, run.DeliveryID)
+	readDeliveryEvidence(status, runDir)
 	if run.TerminalCode == string(hook.TerminalInvestigated) {
 		status.place("done", "調査報告を掲示して完了", "調査のみの依頼のため、コードの変更と Pull Request はありません")
 		return
@@ -263,15 +282,22 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 			status.place("stopped", "停止済み", "ご指示により停止しました")
 			return
 		}
-		status.place("failed", "失敗で終了", run.TerminalCode)
+		status.place("failed", "失敗で終了", hook.DescribeTerminalCode(run.TerminalCode))
+		if step := runner.RecordedFailedStep(runDir)["failed_step"]; step != "" {
+			status.Detail += "。終了した工程: " + step
+		}
 		return
 	}
-	runDir := runDirectory(config, run.DeliveryID)
-	readDeliveryEvidence(status, runDir)
 	// An operator's sealed 「確認済み」 outranks the report that asked for it:
 	// the delivery is closed for the automation, whatever the report said.
 	if resolution, ok := readDeliverResolution(runDir); ok {
 		placeResolvedOutcome(status, resolution.Phase, resolution.Verdict)
+		if resolution.Phase == "release" {
+			status.PRURL = ""
+			if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
+				status.PRURL = report.PullRequestURL
+			}
+		}
 		return
 	}
 	outcome, sealed := readBoardOutcome(runDir)
@@ -281,6 +307,9 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		status.PRURL = ""
 		if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
 			status.PRURL = report.PullRequestURL
+			if outcome.Verdict == "pass" && report.Verdict == "pass" && report.ScreenChecked {
+				status.Detail = "デプロイと本番の画面確認まで合格しました。"
+			}
 		}
 		status.ReportAt = outcome.At
 		if attentionVerdict(outcome.Verdict) {
@@ -294,6 +323,9 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 	if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
 		placeReleaseOutcome(status, report.Verdict)
 		status.PRURL = report.PullRequestURL
+		if report.Verdict == "pass" && report.ScreenChecked {
+			status.Detail = "デプロイと本番の画面確認まで合格しました。"
+		}
 		status.ReportAt = report.ObservedAt
 		if status.Step == "attention" {
 			status.ActionEffect = "チケットへの結果報告の投稿を、この画面では確認できていません。報告が投稿済みで必要な対応も完了していれば、依頼者または登録された運用担当者が、チケットの先頭行に「確認済み」と書いてコメントしてください。"
@@ -346,6 +378,8 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 			status.place("done", "ステージング反映・確認済み", "")
 		case "unknown":
 			status.placeAt("attention", "confirm", "ステージング画面の確認ができませんでした", "手動での確認が必要です")
+			status.NextAction = "運用担当者がチケットに記載された確認先と条件を開き、画面の確認結果と残る対応をチケットに記録してください。"
+			status.ActionEffect = "この画面から画面検査を再実行する操作はありません。運用担当者が既存の手順で確認します。"
 		default:
 			status.place("failed", "ステージング画面の確認が不合格", "")
 		}
@@ -368,15 +402,21 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 	}
 	switch verdict {
 	case "pass":
-		status.place("done", "本番反映済み", "本番の画面確認まで合格")
+		status.place("done", "本番反映済み", "本番反映の完了が報告されています。画面検査の合格を示す記録は確認できていません。")
 	case "expired":
 		status.place("done", "ステージング反映済み", "Go の期限切れで本番反映なし")
+		status.NextAction = "本番反映が必要な場合は、運用担当者が既存のリリース手順で対応してください。"
+		status.ActionEffect = "この試行の承認受付は終了しています。ここから Go を追加投稿しても自動では本番へ進みません。"
 	case "stopped":
 		status.place("stopped", "停止済み", "ご指示により本番反映を行わず終了")
 	case "observe_failed":
-		status.place("done", "本番反映済み・画面は要確認", "")
+		status.place("done", "本番反映済み・画面は要確認", "デプロイは完了しましたが、画面が確認条件を満たしていません。")
+		status.NextAction = "運用担当者がチケットの画面確認結果と期待した表示を比較し、必要な修正を判断してください。"
+		status.ActionEffect = "この試行では自動修正や自動ロールバックは行いません。確認結果と対応方針をチケットに記録してください。"
 	case "measure_failed":
 		status.place("done", "本番反映済み・計測は閾値超過", "設計書が約束した計測値を満たしていません")
+		status.NextAction = "運用担当者がチケットの計測対象・観測値・閾値を比較し、影響と必要な対応を確認してください。"
+		status.ActionEffect = "この試行では自動修正や自動ロールバックは行いません。確認結果と対応方針をチケットに記録してください。"
 	default:
 		status.place("failed", "本番反映の工程で停止", "")
 	}
@@ -389,7 +429,9 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 	}
 	switch {
 	case verdict == "pass" && hold != "":
-		status.place("done", "ステージング反映済み", "本番反映は運用手順で行います")
+		status.place("done", "ステージング反映済み", "本番の自動反映を見送りました: "+hold)
+		status.NextAction = "運用担当者がチケットの本番反映を見送った理由と PR の変更範囲を確認し、必要なら既存のリリース手順で本番へ反映してください。"
+		status.ActionEffect = "この試行の自動処理は終了しています。ここで Go を投稿しても本番反映は始まりません。"
 	case verdict == "pass":
 		status.place("confirm", "本番反映の承認待ち", "あなたの「Go」を待っています")
 		status.NextAction = "依頼者がチケットのステージング結果と PR の変更内容を確認し、本番へ反映してよいか判断してください。"
