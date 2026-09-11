@@ -151,10 +151,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 		answer, objection := decodeTurnAnswer([]byte(response), phase)
 		if objection != nil {
 			rejections++
+			conversation.objection(response, objection.Error())
 			if rejections >= modelAnswerAttempts {
 				return incomplete("the model's answers kept falling outside the contract: " + objection.Error())
 			}
-			conversation.objection(response, objection.Error())
 			continue
 		}
 		switch {
@@ -162,10 +162,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			window, err := input.Session.Read(answer.Read.ID, answer.Read.Offset)
 			if errors.Is(err, probe.ErrReadBudgetExhausted) {
 				rejections++
+				conversation.objection(response, "the read budget is spent; no more windows can be shown. Answer with your record, marking what you could not read as unknown.")
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the read budget is spent and the model asked for another window")
 				}
-				conversation.objection(response, "the read budget is spent; no more windows can be shown. Answer with your record, marking what you could not read as unknown.")
 				continue
 			}
 			if err != nil {
@@ -176,10 +176,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 					return result, fmt.Errorf("read: %w", err)
 				}
 				rejections++
+				conversation.objection(response, err.Error())
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the model kept asking to read what is not recorded: " + err.Error())
 				}
-				conversation.objection(response, err.Error())
 				continue
 			}
 			rejections = 0
@@ -190,10 +190,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			// The report sealed the measurements this round stands on; a
 			// probe now would sit outside probes_used and the chain prefix.
 			rejections++
+			conversation.objection(response, "the investigation is sealed; no more measurements this round. Answer with the design, citing the ids your measured findings already carry.")
 			if rejections >= modelAnswerAttempts {
 				return incomplete("the model kept asking for measurements after the report was sealed")
 			}
-			conversation.objection(response, "the investigation is sealed; no more measurements this round. Answer with the design, citing the ids your measured findings already carry.")
 		case answer.Probe != nil:
 			outcome, err := input.Session.Run(ctx, *answer.Probe)
 			if errors.Is(err, probe.ErrBudgetExhausted) {
@@ -216,10 +216,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			output, err := investigate.DecodeModelInvestigationOutput(answer.Report)
 			if err != nil {
 				rejections++
+				conversation.objection(response, "the report is not the contract's JSON: "+err.Error())
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the model's report could not be read: " + err.Error())
 				}
-				conversation.objection(response, "the report is not the contract's JSON: "+err.Error())
 				continue
 			}
 			elapsed := input.ElapsedCarry + int(time.Since(startedAt).Seconds())
@@ -227,10 +227,10 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				investigate.Budget{ProbesUsed: input.Session.Used, ElapsedSeconds: elapsed})
 			if err != nil {
 				rejections++
+				conversation.objection(response, "the report was refused: "+err.Error())
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the model's report kept failing the checks: " + err.Error())
 				}
-				conversation.objection(response, "the report was refused: "+err.Error())
 				continue
 			}
 			rejections = 0
@@ -245,19 +245,19 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			output, err := investigate.DecodeModelDesignOutput(answer.Design)
 			if err != nil {
 				rejections++
+				conversation.objection(response, "the design is not the contract's JSON: "+err.Error())
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the model's design could not be read: " + err.Error())
 				}
-				conversation.objection(response, "the design is not the contract's JSON: "+err.Error())
 				continue
 			}
 			design, err := investigate.NewDesign(input.Identity, input.Round, output, result.Investigation, input.Bounds)
 			if err != nil {
 				rejections++
+				conversation.objection(response, "the design was refused: "+err.Error())
 				if rejections >= modelAnswerAttempts {
 					return incomplete("the model's design kept failing the checks: " + err.Error())
 				}
-				conversation.objection(response, "the design was refused: "+err.Error())
 				continue
 			}
 			result.Design = &design
@@ -271,7 +271,7 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 func decodeTurnAnswer(encoded []byte, phase string) (turnAnswer, error) {
 	var answer turnAnswer
 	if err := decodeStrictJSON(encoded, &answer); err != nil {
-		return turnAnswer{}, errors.New("the answer is not one JSON object with probe, read, report or design")
+		return turnAnswer{}, fmt.Errorf("the answer is not one JSON object with probe, read, report or design: %w", err)
 	}
 	parts := 0
 	if answer.Probe != nil {

@@ -536,13 +536,14 @@ func TestInvestigationWithdrawsOldWindowsOverTheBudget(t *testing.T) {
 func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
 	input, _ := investigationFixture(t, 10)
 	long := `{"report":{"questions":["q"],"findings":[{"claim":"` + strings.Repeat("x", 601) + `","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`
-	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, long}}
+	last := strings.Replace(long, strings.Repeat("x", 601), strings.Repeat("y", 602), 1)
+	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, last}}
 	invoker, _ := NewModelInvoker(api)
 	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
-	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "claim is 601 bytes (limit 600)") {
+	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "claim is 602 bytes (limit 600)") {
 		t.Fatalf("err = %v, incomplete = %q; want the refusal to name the rule", err, result.Incomplete)
 	}
-	if result.LastRefusedAnswer != long || !strings.Contains(result.LastRefusedObjection, "finding 1: claim is 601 bytes (limit 600)") {
+	if result.LastRefusedAnswer != last || !strings.Contains(result.LastRefusedObjection, "finding 1: claim is 602 bytes (limit 600)") {
 		t.Fatalf("last refused answer/objection not kept: %d bytes / %q", len(result.LastRefusedAnswer), result.LastRefusedObjection)
 	}
 	messages := api.requests[2].Messages
@@ -561,6 +562,28 @@ func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
 	result, err = invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
 	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "probe budget") || result.LastRefusedAnswer != "" || result.LastRefusedObjection != "" {
 		t.Fatalf("a budget ending kept a stale refusal: %q / %q (%v)", result.Incomplete, result.LastRefusedObjection, err)
+	}
+}
+
+func TestInvestigateReturnsParseCauseToTheNextTurn(t *testing.T) {
+	input, path := investigationFixture(t, 10)
+	broken := `{"probe":{"probe":"repo.list","args":{"path":"."}}`
+	report := `{"report":{"questions":["What is there?"],"findings":[{"claim":"The listing was taken","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"Nothing."}}`
+	api := &loopScriptAPI{answers: []string{broken, `{"probe":{"probe":"repo.list"}}`, report}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("corrected answer: %v", err)
+	}
+	if result.Turns != 3 || len(api.requests) != 3 || input.Session.Used != 1 {
+		t.Fatalf("turns=%d requests=%d probes=%d; malformed JSON must run no probe", result.Turns, len(api.requests), input.Session.Used)
+	}
+	messages := api.requests[1].Messages
+	if messages[len(messages)-2].Content != broken || !strings.Contains(messages[len(messages)-1].Content, "JSON object is incomplete") {
+		t.Fatalf("the next turn lost the malformed answer or parse cause: %s", messages[len(messages)-1].Content)
+	}
+	if err := result.Investigation.Validate(input.Identity, path); err != nil {
+		t.Fatalf("corrected report: %v", err)
 	}
 }
 
