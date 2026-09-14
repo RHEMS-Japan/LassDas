@@ -13,6 +13,9 @@ import (
 	"automation.internal/ticket-ingress/internal/state"
 )
 
+// goReminderCount is how many reminder instants the schedule has.
+const goReminderCount = 3
+
 const (
 	// lateWordCheckFile throttles the ticket reads a finished run still
 	// makes: once an hour, for lateWordWindow after it ended.
@@ -46,6 +49,16 @@ func dueGoReminders(now, observedAt, deadline time.Time) []int {
 // tick; a reminder posted now is found by its marker next tick.
 func remindGo(ctx context.Context, backlog operatorConfirmationSource, run state.RunOverview, observedAt, deadline time.Time, comments []hook.BacklogComment, logger Logger) {
 	due := dueGoReminders(time.Now(), observedAt, deadline)
+	if len(due) == 0 {
+		return
+	}
+	// A reminder later than any now due — possible when the wait was
+	// shortened after it went out — also means the ticket is up to date.
+	for n := goReminderCount; n > due[len(due)-1]; n-- {
+		if _, posted := commentIDWithMarker(comments, hook.GoReminderMarker(run.RunID, n)); posted {
+			return
+		}
+	}
 	for index := len(due) - 1; index >= 0; index-- {
 		n := due[index]
 		if _, posted := commentIDWithMarker(comments, hook.GoReminderMarker(run.RunID, n)); posted {

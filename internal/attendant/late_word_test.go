@@ -81,6 +81,17 @@ func TestGoRemindersPostTheLatestDueOneOnce(t *testing.T) {
 	if len(fresh.added) != 1 || hook.ExtractCommentMarker(fresh.added[0]) != hook.GoReminderMarker("TKT-7", 3) {
 		t.Fatalf("with the first on the ticket: posted %d, marker %q", len(fresh.added), hook.ExtractCommentMarker(fresh.added[0]))
 	}
+	// The wait was shortened after the third reminder went out, so only
+	// the first two instants are now inside it: nothing is posted — the
+	// ticket already carries a later reminder.
+	notifyAt, _ := hook.ComputeQuestionSchedule(observed)
+	shortened := time.UnixMilli(notifyAt[2]).Add(-time.Minute)
+	third := []hook.BacklogComment{{CommentID: 12, UserID: 1, Body: hook.GoReminderContent("TKT-7", 3, deadline)}}
+	later := &fakeConfirmationSource{}
+	remindGo(context.Background(), later, run, observed, shortened, third, resolutionTestLogger{})
+	if len(later.added) != 0 {
+		t.Fatalf("a shortened wait back-filled an earlier reminder: %q", hook.ExtractCommentMarker(later.added[0]))
+	}
 }
 
 // A Go after the Go wait expired gets exactly one reply within the window,
