@@ -585,17 +585,28 @@ const (
 	maxDesignTriggerWordSize = 64
 )
 
+// DefaultDesignTriggerWords is the framework's own trigger vocabulary: the
+// words in a ticket that mean the running system has to be observed before
+// a fix is designed. It applies to every destination that configures no
+// vocabulary of its own, so a destination is never made to write one just
+// to let a small, precisely stated change skip its design. Matching is a
+// case-folded substring test over the ticket's summary and body.
+var DefaultDesignTriggerWords = []string{
+	"遅い", "遅延", "重い", "たまに", "時々", "不安定", "本番で", "本番環境", "ログに", "ログを", "原因", "再現",
+	"slow", "latency", "intermittent", "flaky", "in production", "root cause",
+}
+
 // DesignConfig is a destination's design-stage policy. Every key is optional
-// and absent means the safe reading: design on, no trigger vocabulary (so
-// the skip can never fire), investigation reports reviewed.
+// and absent means: design on, the framework's default trigger vocabulary,
+// investigation reports reviewed.
 type DesignConfig struct {
 	// Default is "on" or "off"; absent reads as "on".
 	Default string `json:"default,omitempty"`
 	// TriggerWords are the words in a ticket that mean the running system
 	// has to be observed before a fix is designed (in the requesters' own
 	// language: slowness, intermittence, production, logs, root cause,
-	// investigation). The framework holds no default list, and an empty
-	// list means the skip condition about them can never hold.
+	// investigation). Absent or empty means DefaultDesignTriggerWords; a
+	// configured list replaces the default rather than extending it.
 	TriggerWords []string `json:"trigger_words,omitempty"`
 	// ReviewInvestigation says whether an investigation-only report gets a
 	// grounding review before it is posted; absent reads as true.
@@ -634,13 +645,23 @@ func (c ConsumerConfig) DesignEnabled() bool {
 	return c.Design == nil || c.Design.Default != DesignDefaultOff
 }
 
-// DesignTriggerWords is the destination's trigger vocabulary, nil when none
-// is configured.
+// DesignTriggerWords is the destination's own trigger vocabulary, nil when
+// none is configured.
 func (c ConsumerConfig) DesignTriggerWords() []string {
 	if c.Design == nil {
 		return nil
 	}
 	return append([]string(nil), c.Design.TriggerWords...)
+}
+
+// EffectiveDesignTriggerWords is the vocabulary the design rule and the
+// reception prompts actually use: the destination's own when it configured
+// one, DefaultDesignTriggerWords otherwise.
+func (c ConsumerConfig) EffectiveDesignTriggerWords() []string {
+	if words := c.DesignTriggerWords(); len(words) > 0 {
+		return words
+	}
+	return append([]string(nil), DefaultDesignTriggerWords...)
 }
 
 // ReviewsInvestigation reports whether an investigation-only report is

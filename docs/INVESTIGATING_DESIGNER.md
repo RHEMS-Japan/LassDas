@@ -204,7 +204,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 
 1. 依頼本文に「どう直すか」が書いてある (起案役が `approach_in_ticket: true` を返し、根拠として本文の引用を添える)
 2. 受付が導出した対象ファイル (`target_files`) が 2 つ以下
-3. 依頼本文に、稼働環境の観測を示唆する語が無い。語彙は消費側設定 `design.trigger_words` (例: 「遅い」「たまに」「本番で」「ログに」「原因」「調査」)。フレームワークは既定リストを持たない。**未設定 (空) なら条件 3 は成立しない** (設計を飛ばせない。安全側に閉じる)
+3. 依頼本文に、稼働環境の観測を示唆する語が無い。語彙は消費側設定 `design.trigger_words`。**未設定 (空) ならフレームワークの既定語彙で判定する** (`internal/worker` の `DefaultDesignTriggerWords`: 遅い / 遅延 / 重い / たまに / 時々 / 不安定 / 本番で / 本番環境 / ログに / ログを / 原因 / 再現 / slow / latency / intermittent / flaky / in production / root cause。大文字小文字を区別しない部分一致)。消費側が語彙を設定したら、それが既定を置き換える (追加ではない)。語彙を書かないと設計を飛ばせない、という縛りは置かない (小さく正確な依頼まで設計工程に回してしまい、その設計が収束しない事故の原因になった)
 4. 依頼の種別が「調査」でない (起案役の `request_kind: change | investigation`)。**調査の依頼は `needs_design` の対象外** (封緘する受付判定には `needs_design: false`, `design_reason: "investigation"` と入れる。確認役の再導出も同じ値になる。設計は無く、§9 の調査だけの連鎖で `investigated` に終わる)
 
 判定は既存の受付と同じ 2 人体制で機械矯正する: 起案役が `needs_design` を出し、確認役が反対なら **設計あり** に倒す (安全側)。種別 (`request_kind`) で食い違ったときも同じで、片方だけが「調査」と答えた依頼は変更として設計ありになる (調査として扱うのは両者が調査と答えたときだけ)。残余: 確認役は起案役の答えを見た上で再導出する (受付の既存方式と同じ) ので、完全に独立ではない。理由はチケットの受付コメントに 1 行で出す (「方針が本文にあるため設計を省略」)。変更行数の見込みは条件に使わない (候補が無い時点では計れない)。
@@ -302,7 +302,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | probe の手数上限・壁時間で最終回答が無いのに `ready` 扱いになる | `investigation_incomplete` の終端 | `internal/worker` `TestInvestigationBudgetEndsHonestly` |
 | 調査だけの依頼が終端コードを持たず、進行係が納品カードの完了を待ち続ける | `investigated` の終端と板の節点 | `internal/hook` `TestInvestigatedIsATerminalCode`, `internal/attendant` `TestInvestigationOnlyDeliveryRetires` |
 | 後の巡が `measurements.jsonl` に追記すると前の巡の調査報告が検算できない | 接頭辞の連鎖検算 | `internal/probe` `TestMeasurementChainVerifiesPrefixes` |
-| `design.trigger_words` が空なのに設計を飛ばす | 空は条件不成立 | `internal/worker` `TestEmptyTriggerWordsNeverSkipDesign` |
+| `design.trigger_words` が空のとき、既定語彙を見ずに設計を飛ばす / 既定語彙の語があるのに飛ばす | 空は既定語彙で判定 | `internal/worker` `TestUnsetTriggerWordsUseTheDefaultVocabulary` |
 | `http` probe が私有アドレスに解決するホストへ接続する / jar の cookie を書き戻す / ID 基盤のホストへ打つ | 接続時の判定・読み取り専用の jar・ホストの除外 | `internal/probe` `TestHTTPProbeRefusesPrivateResolution`, `TestHTTPProbeNeverWritesJar` |
 | 写し役の異議が失敗として数えられ、設計に戻らない | `history/design-<N>/objection.json` の有無による分類 (apply カードでも review-a カードでも同じ) | `internal/attendant` `TestDesignObjectionReopensDesignRound`, `TestApplyCardObjectionReopensDesignRound` |
 

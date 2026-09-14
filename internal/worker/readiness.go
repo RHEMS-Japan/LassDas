@@ -74,15 +74,14 @@ const (
 	// or by calling the request an investigation while the other voice
 	// called it a change. They are machine codes - the requester-facing
 	// sentence for each lives with the ticket comment.
-	DesignReasonInvestigation     = "investigation"
-	DesignReasonApproachInTicket  = "approach_in_ticket"
-	DesignReasonDefaultOff        = "design_default_off"
-	DesignReasonApproachMissing   = "approach_not_in_ticket"
-	DesignReasonTooManyFiles      = "target_files_over_two"
-	DesignReasonTriggerWordsUnset = "trigger_words_unset"
-	DesignReasonTriggerWord       = "trigger_word"
-	DesignReasonProposer          = "proposer"
-	DesignReasonChecker           = "checker_disagreed"
+	DesignReasonInvestigation    = "investigation"
+	DesignReasonApproachInTicket = "approach_in_ticket"
+	DesignReasonDefaultOff       = "design_default_off"
+	DesignReasonApproachMissing  = "approach_not_in_ticket"
+	DesignReasonTooManyFiles     = "target_files_over_two"
+	DesignReasonTriggerWord      = "trigger_word"
+	DesignReasonProposer         = "proposer"
+	DesignReasonChecker          = "checker_disagreed"
 
 	// maxDesignSkipTargetFiles is the second skip condition: a change that
 	// the reception derived onto more files than this is designed first.
@@ -102,7 +101,7 @@ const (
 // have a sentence for each.
 var DesignReasons = []string{
 	DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff,
-	DesignReasonApproachMissing, DesignReasonTooManyFiles, DesignReasonTriggerWordsUnset,
+	DesignReasonApproachMissing, DesignReasonTooManyFiles,
 	DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker,
 }
 
@@ -112,7 +111,7 @@ func DesignReasonKeepsDesign(reason string) (keeps bool, known bool) {
 	switch reason {
 	case DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff:
 		return false, true
-	case DesignReasonApproachMissing, DesignReasonTooManyFiles, DesignReasonTriggerWordsUnset,
+	case DesignReasonApproachMissing, DesignReasonTooManyFiles,
 		DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker:
 		return true, true
 	}
@@ -1043,11 +1042,12 @@ func judgeDecisionDesign(final ReadinessAssessment, finalCheck ReadinessCheck, r
 // designVerdict is the rule itself, in the fixed order the reason reports.
 // An investigation has no design and a destination that turned the stage off
 // has none; otherwise the design is skipped only when the approach is quoted
-// from the ticket, the derived target files are two or fewer, the destination
-// configured a trigger vocabulary and none of it appears in the ticket, and
-// neither AI kept the design. An empty vocabulary fails its condition on
-// purpose: the framework holds no default list, so "no words configured"
-// must mean "no skip", not "nothing to trigger on".
+// from the ticket, the derived target files are two or fewer, none of the
+// trigger vocabulary appears in the ticket, and neither AI kept the design.
+// The vocabulary is the destination's own when it configured one and the
+// framework's DefaultDesignTriggerWords otherwise, so a destination that
+// wrote no vocabulary is judged by the same rule as every other, not made to
+// design every change until it writes one.
 func designVerdict(kind string, approachInTicket, proposerVeto, checkerVeto bool, request TicketRequest, consumer ConsumerConfig) (bool, string) {
 	if kind == RequestKindInvestigation {
 		return false, DesignReasonInvestigation
@@ -1061,11 +1061,7 @@ func designVerdict(kind string, approachInTicket, proposerVeto, checkerVeto bool
 	if len(request.TargetFiles) > maxDesignSkipTargetFiles {
 		return true, DesignReasonTooManyFiles
 	}
-	words := consumer.DesignTriggerWords()
-	if len(words) == 0 {
-		return true, DesignReasonTriggerWordsUnset
-	}
-	if _, hit := ticketTriggerWord(request, words); hit {
+	if _, hit := ticketTriggerWord(request, consumer.EffectiveDesignTriggerWords()); hit {
 		return true, DesignReasonTriggerWord
 	}
 	if proposerVeto {
@@ -1415,7 +1411,7 @@ func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config
 		PreviousCheck         *ModelReadinessCheckOutput `json:"previous_check_feedback,omitempty"`
 	}{
 		Label: "USER_DATA_JSON", Ticket: request, Source: source, WritableScope: consumer.Mode.AllowedFilePrefixes,
-		DesignTriggerWords: consumer.DesignTriggerWords(), Catalogue: readinessCatalogue(config, consumer),
+		DesignTriggerWords: consumer.EffectiveDesignTriggerWords(), Catalogue: readinessCatalogue(config, consumer),
 	}
 	contextValue.PreservedAnswers = answers
 	if clarification != nil {
@@ -1452,7 +1448,7 @@ func readinessCheckPrompt(assessment ReadinessAssessment, source SourceSnapshot,
 		Assessment            ModelReadinessOutput      `json:"assessment"`
 	}{
 		Label: "USER_DATA_JSON", Ticket: request, Source: source, WritableScope: consumer.Mode.AllowedFilePrefixes,
-		DesignTriggerWords: consumer.DesignTriggerWords(), Catalogue: readinessCatalogue(config, consumer),
+		DesignTriggerWords: consumer.EffectiveDesignTriggerWords(), Catalogue: readinessCatalogue(config, consumer),
 		Assessment: assessment.modelOutput(),
 	}
 	if clarification != nil {

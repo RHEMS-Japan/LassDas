@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,10 +104,12 @@ func designDecision(t *testing.T, output ModelReadinessOutput, checkKind string,
 	return decision
 }
 
-// An empty or absent trigger vocabulary fails its condition: the framework
-// holds no default list, so "no words configured" must mean "no skip", not
-// "nothing to trigger on". The control run differs only in the vocabulary.
-func TestEmptyTriggerWordsNeverSkipDesign(t *testing.T) {
+// A destination that configured no trigger vocabulary is judged with the
+// framework's default one: a precisely stated change with none of those
+// words skips its design, and one carrying a default word (here 本番で) keeps
+// it. A configured vocabulary replaces the default, so the same default word
+// no longer triggers under it while its own words still do.
+func TestUnsetTriggerWordsUseTheDefaultVocabulary(t *testing.T) {
 	for name, design := range map[string]*DesignConfig{
 		"absent":     nil,
 		"empty list": {Default: DesignDefaultOn, TriggerWords: []string{}},
@@ -114,18 +117,49 @@ func TestEmptyTriggerWordsNeverSkipDesign(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			config, request, source := designFixture(t, design, designApproachBody)
 			decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-			if !decision.NeedsDesign || decision.DesignReason != DesignReasonTriggerWordsUnset {
-				t.Fatalf("decision = (%v, %q), want design kept for the unset vocabulary", decision.NeedsDesign, decision.DesignReason)
+			if decision.NeedsDesign || decision.DesignReason != DesignReasonApproachInTicket {
+				t.Fatalf("decision = (%v, %q), want the design skipped under the default vocabulary", decision.NeedsDesign, decision.DesignReason)
 			}
 			if !decision.ApproachInTicket || decision.ApproachExcerpt != designApproachQuote || decision.RequestKind != RequestKindChange {
 				t.Fatalf("the other conditions were not recorded: %+v", decision)
 			}
+			config, request, source = designFixture(t, design, designApproachBody+" 本番で表示が崩れるので直したい。")
+			kept := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+			if !kept.NeedsDesign || kept.DesignReason != DesignReasonTriggerWord {
+				t.Fatalf("decision = (%v, %q), want the design kept for a default trigger word", kept.NeedsDesign, kept.DesignReason)
+			}
 		})
 	}
-	config, request, source := designFixture(t, &DesignConfig{TriggerWords: designTriggerWords()}, designApproachBody)
-	control := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-	if control.NeedsDesign || control.DesignReason != DesignReasonApproachInTicket {
-		t.Fatalf("control decision = (%v, %q), want the design skipped", control.NeedsDesign, control.DesignReason)
+	own := &DesignConfig{TriggerWords: designTriggerWords()}
+	config, request, source := designFixture(t, own, designApproachBody+" 本番で表示が崩れるので直したい。")
+	replaced := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+	if replaced.NeedsDesign || replaced.DesignReason != DesignReasonApproachInTicket {
+		t.Fatalf("decision = (%v, %q), want the configured vocabulary to replace the default", replaced.NeedsDesign, replaced.DesignReason)
+	}
+	config, request, source = designFixture(t, own, designApproachBody+" It is slow.")
+	ownHit := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+	if !ownHit.NeedsDesign || ownHit.DesignReason != DesignReasonTriggerWord {
+		t.Fatalf("decision = (%v, %q), want the design kept for a configured trigger word", ownHit.NeedsDesign, ownHit.DesignReason)
+	}
+}
+
+// The default vocabulary must itself pass the validation a destination's own
+// list passes, and be what the rule and the prompts read when nothing is
+// configured.
+func TestDefaultDesignTriggerWordsAreWellFormed(t *testing.T) {
+	if len(DefaultDesignTriggerWords) == 0 {
+		t.Fatal("the default vocabulary is empty")
+	}
+	if err := (&DesignConfig{TriggerWords: DefaultDesignTriggerWords}).validate(); err != nil {
+		t.Fatalf("the default vocabulary does not validate: %v", err)
+	}
+	var none ConsumerConfig
+	if got := none.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, DefaultDesignTriggerWords) {
+		t.Fatalf("effective vocabulary without configuration = %v, want the default", got)
+	}
+	own := ConsumerConfig{Design: &DesignConfig{TriggerWords: []string{"slow"}}}
+	if got := own.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, []string{"slow"}) {
+		t.Fatalf("effective vocabulary with configuration = %v, want the configured list alone", got)
 	}
 }
 
