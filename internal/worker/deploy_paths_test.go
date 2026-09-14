@@ -45,14 +45,68 @@ func TestAFeatureWorkflowRefusesADeployScope(t *testing.T) {
 	}
 }
 
+// The entries are read the way a workflow's paths filter reads them (the
+// cheat-sheet rows), plus the two documented departures.
+func TestDeployPathsAreReadLikeAWorkflowPathsFilter(t *testing.T) {
+	for _, tc := range []struct {
+		patterns []string
+		path     string
+		want     bool
+	}{
+		{[]string{"docs/"}, "docs/README.md", true},
+		{[]string{"docs"}, "docs/a/b.md", true},
+		{[]string{"docs"}, "docs", true},
+		{[]string{"docs/"}, "docs", false},
+		{[]string{"docs/"}, "docs2/x.md", false},
+		{[]string{"*"}, "README.md", true},
+		{[]string{"*"}, "docs/README.md", false},
+		{[]string{"**"}, "docs/a/b.md", true},
+		{[]string{"**.js"}, "index.js", true},
+		{[]string{"**.js"}, "js/index.js", true},
+		{[]string{"**.js"}, "src/js/app.js", true},
+		{[]string{"docs/**.md"}, "docs/a/b.md", true},
+		{[]string{"docs/**"}, "docs/guide/intro.md", true},
+		{[]string{"docs/**"}, "docs2/x.md", false},
+		{[]string{"**/*.go"}, "cmd/app/main.go", true},
+		{[]string{"**/*.go"}, "main.go", true},
+		{[]string{"src/**/*.go"}, "src/a/b/c.go", true},
+		{[]string{"src/**/*.go"}, "src/c.go", true},
+		{[]string{"src/**/*.go"}, "src/a/b/c.md", false},
+		{[]string{"**/migrate-*.sql"}, "migrate-10.sql", true},
+		{[]string{"**/migrate-*.sql"}, "db/sept/migrate-v1.sql", true},
+		{[]string{"docs/*.md"}, "docs/a/b.md", false},
+		{[]string{"src/**/"}, "src/main.go", true},
+		{[]string{"src/**/"}, "src", false},
+		{[]string{"src/*/"}, "src/x/y.go", true},
+		{[]string{"src/*/"}, "src/x", false},
+		{[]string{"cmd/*/main.go"}, "cmd/x/main.go", true},
+		{[]string{"a/**/b"}, "a/b", true},
+		{[]string{"a/**/b"}, "a/x/y/b", true},
+		{[]string{"a/**/b"}, "a/xb", false},
+		{[]string{"docs/[ab].md"}, "docs/a.md", true},
+		{[]string{"docs/[!ab].md"}, "docs/a.md", false},
+		{[]string{"*.jsx?"}, "page.jsx1", true}, // "?" is exactly one character here
+		{[]string{"*.jsx?"}, "page.jsx", false}, // (GitHub reads it as optional)
+		{[]string{"*.jsx?"}, "page.js", false},
+		{[]string{"src/+x"}, "src/+x", true}, // "+" is literal here
+		{[]string{"Docs/"}, "docs/a.md", false},
+		{[]string{""}, "anything", false},
+		{nil, "anything", false},
+	} {
+		if got := DeployPathCovered(tc.patterns, tc.path); got != tc.want {
+			t.Errorf("DeployPathCovered(%q, %q) = %v, want %v", tc.patterns, tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestDeployPathsRefuseWhatCannotMatchADeliveredPath(t *testing.T) {
 	for _, bad := range [][]string{{""}, {" docs/"}, {"docs/ "}, {"/docs"}, {"../docs"}, {"docs/../src"}, {"."}, {".."}, {"./docs"}, {"["},
-		{"!docs/"}, {"docs//x"}, {"docs/./x"}, {"docs/."}, {"docs/\\*"}, {"docs/[/x"}} {
+		{"!docs/"}, {"docs//x"}, {"docs/./x"}, {"docs/."}, {"docs/\\*"}, {"docs/[/x"}, {"docs/[a/b]"}, {"docs/[]"}} {
 		if err := (ConsumerWorkflow{DeployPaths: bad}).validateDeployPaths(); err == nil {
 			t.Errorf("deploy_paths %q accepted", bad)
 		}
 	}
-	for _, good := range [][]string{{"docs/"}, {"src", "app/"}, {"*.go"}, {"cmd/*/main.go"}, {"docs/**"}, {"**/*.go"}, {"**"}, nil} {
+	for _, good := range [][]string{{"docs/"}, {"src", "app/"}, {"*.go"}, {"cmd/*/main.go"}, {"docs/**"}, {"**/*.go"}, {"**"}, {"**.js"}, {"src/**/"}, {"docs/[ab].md"}, nil} {
 		if err := (ConsumerWorkflow{DeployPaths: good}).validateDeployPaths(); err != nil {
 			t.Errorf("deploy_paths %q refused: %v", good, err)
 		}

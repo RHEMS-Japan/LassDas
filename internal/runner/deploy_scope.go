@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // deployScope is what a destination's deployment reacts to, as the consumer
@@ -70,54 +71,10 @@ func consumerDeployScope(consumerConfigPath, repository, phase string) (deploySc
 }
 
 // deployPathCovered reports whether one delivered path falls inside the
-// declared scope. A pattern is a path prefix — "docs/" or "docs" covers
-// docs/README.md and docs itself, never docs2/ — or, when it carries a glob
-// character, a glob with the meaning a workflow's own paths filter gives it:
-// "*" and "?" stay inside one path segment, and "**" spans any number of
-// segments, so "docs/**" covers docs/guide/intro.md (path.Match alone would
-// not: its "*" never crosses "/", and "**" is just two of them).
+// declared scope, with the reading the config package gives deploy_paths
+// (prefixes, "*" within a segment, "**" across segments, trailing "/").
 func deployPathCovered(patterns []string, filePath string) bool {
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		if strings.ContainsAny(pattern, "*?[") {
-			if globCovers(strings.Split(pattern, "/"), strings.Split(filePath, "/")) {
-				return true
-			}
-			continue
-		}
-		prefix := strings.TrimSuffix(pattern, "/")
-		if filePath == prefix || strings.HasPrefix(filePath, prefix+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-// globCovers matches pattern segments against path segments. A "**" segment
-// matches zero or more path segments; every other segment is a path.Match
-// pattern that must match exactly one segment.
-func globCovers(pattern, segments []string) bool {
-	if len(pattern) == 0 {
-		return len(segments) == 0
-	}
-	if pattern[0] == "**" {
-		for skip := 0; skip <= len(segments); skip++ {
-			if globCovers(pattern[1:], segments[skip:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(segments) == 0 {
-		return false
-	}
-	if ok, err := path.Match(pattern[0], segments[0]); err != nil || !ok {
-		return false
-	}
-	return globCovers(pattern[1:], segments[1:])
+	return worker.DeployPathCovered(patterns, filePath)
 }
 
 // deployNotApplicable answers, before the runner waits for a deployment,

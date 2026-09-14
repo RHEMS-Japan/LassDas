@@ -71,6 +71,8 @@ func TestAChangeOutsideTheDeclaredStagingScopeCompletesWithoutWaiting(t *testing
 		{"one path inside the scope", declared, `["docs/README.md","src/main.go"]`, "deploy_absent", true},
 		{"no scope declared", `{"path":".github/workflows/stg.yml"}`, `["docs/README.md"]`, "deploy_absent", true},
 		{"a glob covers the path", `{"path":"s.yml","deploy_paths":["*.go"]}`, `["main.go"]`, "deploy_absent", true},
+		{"a trailing-slash glob covers the path", `{"path":"s.yml","deploy_paths":["src/**/"]}`, `["src/main.go"]`, "deploy_absent", true},
+		{"a bare globstar name covers nested paths", `{"path":"s.yml","deploy_paths":["**.js"]}`, `["src/js/app.js"]`, "deploy_absent", true},
 		{"a prefix does not cover a sibling directory", `{"path":"s.yml","deploy_paths":["docs"]}`, `["docs2/x.md"]`, "deploy_not_applicable", false},
 		{"no path list at all", declared, `[]`, "deploy_absent", true},
 	} {
@@ -281,6 +283,10 @@ func TestDeployPathCoveredReadsPrefixesAndGlobs(t *testing.T) {
 		{[]string{"src/**/*.go"}, "src/c.go", true},
 		{[]string{"src/**/*.go"}, "src/a/b/c.md", false},
 		{[]string{"docs/*.md"}, "docs/a/b.md", false},
+		// The two readings round one and two of the review caught: a glob
+		// with a trailing "/" and a "**" that is not a whole segment.
+		{[]string{"src/**/"}, "src/main.go", true},
+		{[]string{"**.js"}, "src/js/app.js", true},
 		{[]string{""}, "anything", false},
 		{nil, "anything", false},
 	} {

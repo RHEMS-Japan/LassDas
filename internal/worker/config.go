@@ -471,35 +471,26 @@ type ConsumerWorkflow struct {
 	Name         string   `json:"name"`
 	Path         string   `json:"path"`
 	RequiredJobs []string `json:"required_jobs,omitempty"`
-	// DeployPaths declares what this deployment reacts to: path prefixes
-	// ("docs/") or path.Match patterns against the whole path. When set and
-	// no delivered path falls under any of them, the runner records the
+	// DeployPaths declares what this deployment reacts to, read the way a
+	// workflow's own paths filter is read: an entry without glob characters
+	// is a prefix ("docs/" covers everything under docs), "*" and "?" stay
+	// inside one path segment, "**" spans segments wherever it appears
+	// ("docs/**", "**/*.go", "**.js"), "[...]" is a class, and a trailing
+	// "/" means "anything under such a directory". Two readings differ from
+	// GitHub's: "?" is exactly one character and "+" is literal. When set
+	// and no delivered path falls under any entry, the runner records the
 	// phase as not applicable instead of waiting for a run the destination
 	// will not create. Empty means unknown, and the runner waits as before.
 	DeployPaths []string `json:"deploy_paths,omitempty"`
 }
 
-// validateDeployPaths refuses a scope that could not mean what it says: an
-// absolute path, a "." or ".." segment, an empty segment, a workflow-style
-// negation ("!docs/"), a backslash (delivered paths never carry one), an
-// empty or padded entry, or a glob the matcher cannot parse — each would
-// make the scope look declared while covering nothing, and the runner would
-// then end deliveries the deployment reacts to.
+// validateDeployPaths refuses every entry the matcher could not read as
+// declared (see compileDeployPath): the config fails to load rather than
+// carrying a scope that covers nothing.
 func (w ConsumerWorkflow) validateDeployPaths() error {
 	for _, pattern := range w.DeployPaths {
-		if pattern == "" || strings.TrimSpace(pattern) != pattern || strings.HasPrefix(pattern, "/") ||
-			strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\") {
-			return errors.New("consumer workflow deploy_paths entry is invalid")
-		}
-		for _, segment := range strings.Split(strings.TrimSuffix(pattern, "/"), "/") {
-			if segment == "" || segment == "." || segment == ".." {
-				return errors.New("consumer workflow deploy_paths entry is invalid")
-			}
-			if segment != "**" && strings.ContainsAny(segment, "*?[") {
-				if _, err := path.Match(segment, ""); err != nil {
-					return errors.New("consumer workflow deploy_paths pattern is invalid")
-				}
-			}
+		if _, err := compileDeployPath(pattern); err != nil {
+			return err
 		}
 	}
 	return nil
