@@ -158,15 +158,27 @@ func TestDefaultDesignTriggerWordsAreWellFormed(t *testing.T) {
 	if got := none.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, DefaultDesignTriggerWords) {
 		t.Fatalf("effective vocabulary without configuration = %v, want the default", got)
 	}
-	// The requester-facing docs list the same vocabulary, word for word.
+	// The requester-facing docs list the same vocabulary, word for word and
+	// in the same order: the §6 list is cut out and compared whole, so a
+	// word dropped from it is not covered by a mention elsewhere in the file.
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "INVESTIGATING_DESIGNER.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, word := range DefaultDesignTriggerWords {
-		if !strings.Contains(string(doc), word) {
-			t.Errorf("docs/INVESTIGATING_DESIGNER.md does not list the default trigger word %q", word)
-		}
+	text := string(doc)
+	const head, mid, tail = "`DefaultDesignTriggerWords`。日本語: ", "。英語: ", ")。一致の規則"
+	start := strings.Index(text, head)
+	if start < 0 {
+		t.Fatal("docs/INVESTIGATING_DESIGNER.md no longer carries the §6 vocabulary list")
+	}
+	rest := text[start+len(head):]
+	split, end := strings.Index(rest, mid), strings.Index(rest, tail)
+	if split < 0 || end < 0 || split > end {
+		t.Fatalf("the §6 vocabulary list is not in the expected shape: %.200q", rest)
+	}
+	listed := append(strings.Split(rest[:split], " / "), strings.Split(rest[split+len(mid):end], " / ")...)
+	if !reflect.DeepEqual(listed, DefaultDesignTriggerWords) {
+		t.Fatalf("docs §6 lists %v\nwant %v", listed, DefaultDesignTriggerWords)
 	}
 	own := ConsumerConfig{Design: &DesignConfig{TriggerWords: []string{"slow"}}}
 	if got := own.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, []string{"slow"}) {
@@ -504,28 +516,37 @@ func TestEveryDesignReasonHasARequesterPhrase(t *testing.T) {
 }
 
 // The default vocabulary is matched so that a small change request about a
-// dialog, a catalogue, lazy loading, or a heading does not read as a symptom,
-// while the symptoms it is for are found in their usual wording. ASCII words
-// match whole words case-insensitively; other words match as substrings.
+// dialog, a catalogue, lazy loading, a heading, a UI name, or a finished
+// investigation does not read as a symptom, while the symptoms it is for
+// are found in their usual wording and inflections. ASCII words match whole
+// words case-insensitively; other words match as substrings.
 func TestTriggerWordMatchingRules(t *testing.T) {
 	for body, want := range map[string]string{
-		"確認ダイアログにキャンセルボタンを追加する。":               "",
-		"商品カタログを PDF で出力する。":                   "",
-		"ブログに新しい記事を投稿できるようにする。":                "",
-		"画像を遅延読み込みにする。":                        "",
-		"見出しのあたまに番号を付ける。":                      "",
-		"ファイル一覧を重い順に並べ替える。":                    "",
-		"Fade the banner in slowly.":           "",
-		"Rebuild the catalogs page.":           "",
-		"Add a log in button to the header.":   "",
-		"調査済みの不具合を直す。":                         "",
-		"一覧の表示が遅い。":                            "が遅い",
-		"本番のみ表示が崩れる。":                          "本番のみ",
-		"原因不明のエラーが出る。":                         "原因不明",
-		"手元では再現しない。":                           "再現しない",
-		"The page is Slow on prod.":            "slow",
-		"Investigate why the export fails.":    "investigate",
-		"Check the error log for the failure.": "error log",
+		"確認ダイアログにキャンセルボタンを追加する。":                       "",
+		"商品カタログを PDF で出力する。":                           "",
+		"ブログに新しい記事を投稿できるようにする。":                        "",
+		"画像を遅延読み込みにする。":                                "",
+		"見出しのあたまに番号を付ける。":                              "",
+		"ファイル一覧を重い順に並べ替える。":                            "",
+		"検索結果に含まれにくい項目を先頭に出す。":                         "",
+		"調査を終えたので、定数を新しい文言に変える。":                       "",
+		"原因を特定済みなので、定数を変える。":                           "",
+		"Fade the banner in slowly.":                   "",
+		"Rebuild the catalogs page.":                   "",
+		"Add a log in button to the header.":           "",
+		"Hide the debug banner in production builds.":  "",
+		"Add a link to the Logs page in the sidebar.":  "",
+		"Show the latency column in the table header.": "",
+		"After investigation we decided: change it.":   "",
+		"一覧の表示が遅い。":                                    "が遅い",
+		"表示が遅くなった。":                                    "遅くなった",
+		"本番のみ表示が崩れる。":                                  "本番のみ",
+		"原因不明のエラーが出る。":                                 "原因不明",
+		"手元では再現しない。":                                   "再現しない",
+		"The page is Slow on prod.":                    "slow",
+		"The dashboard is much slower since Monday.":   "slower",
+		"The export fails intermittently.":             "intermittently",
+		"We can't reproduce it locally.":               "can't reproduce",
 	} {
 		_, request, _ := designFixture(t, nil, designApproachBody+" "+body)
 		got, hit := ticketTriggerWord(request, DefaultDesignTriggerWords)
@@ -539,5 +560,23 @@ func TestTriggerWordMatchingRules(t *testing.T) {
 	}
 	if got, hit := ticketTriggerWord(request, []string{"SLOW"}); !hit || got != "SLOW" {
 		t.Error("a configured ASCII word did not match case-insensitively")
+	}
+	// The example configuration lists the inflections the whole-word rule
+	// needs, so the symptoms it was written for are still found under it.
+	example, err := LoadConfig(filepath.Join("..", "..", "config", "m1-consumer.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	words := example.Consumers[0].DesignTriggerWords()
+	for body, want := range map[string]string{
+		"The dashboard is much slower since Monday.":  "slower",
+		"There is noticeable slowness after login.":   "slowness",
+		"The export fails intermittently.":            "intermittently",
+		"We investigated it: the export still fails.": "investigated",
+	} {
+		_, request, _ := designFixture(t, nil, designApproachBody+" "+body)
+		if got, hit := ticketTriggerWord(request, words); !hit || got != want {
+			t.Errorf("example vocabulary: %q matched %q (hit %v), want %q", body, got, hit, want)
+		}
 	}
 }

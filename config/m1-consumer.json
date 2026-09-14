@@ -19,11 +19,17 @@
         "default": "on",
         "trigger_words": [
           "slow",
+          "slower",
+          "slowness",
           "intermittent",
+          "intermittently",
           "in production",
           "logs",
           "root cause",
-          "investigate"
+          "investigate",
+          "investigated",
+          "investigating",
+          "investigation"
         ],
         "review_investigation": true
       },

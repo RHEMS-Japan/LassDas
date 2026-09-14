@@ -588,23 +588,28 @@ const (
 // words in a ticket that mean the running system has to be observed before
 // a fix is designed. It applies to every destination that configures no
 // vocabulary of its own, so a destination is never made to write one just
-// to let a small, precisely stated change skip its design. A hit forces the
-// design stage, so the list is kept to words that rarely describe anything
-// else: the Japanese entries match as substrings and therefore carry the
-// particle or inflection that keeps them out of unrelated words (遅延読み込み,
-// 重い順, ダイアログに, あたまに); the English entries match as whole words
-// (see ticketTriggerWord). The AI proposer and checker judge needs_design
-// independently of this list, so a symptom said in other words is not lost.
+// to let a small, precisely stated change skip its design.
+//
+// A hit forces the design stage with no appeal, so the list is precision
+// first: only words that almost never describe anything but an unobserved
+// live symptom. Words that also appear in finished investigations ("root
+// cause: X, fix: Y", 原因を特定済み, 調査を終えたので), in UI names (Logs
+// page, latency column, "in production builds") or inside other words
+// (ダイアログに, カタログを, 遅延読み込み, あたまに, catalogs, slowly) are left
+// out; the AI proposer and checker judge needs_design independently of
+// this list and catch a symptom said in other words. The Japanese entries
+// match as substrings and therefore carry the particle or inflection that
+// keeps them out of unrelated words; the English entries match as whole
+// words (see ticketTriggerWord), so their inflections are listed.
 var DefaultDesignTriggerWords = []string{
-	"が遅い", "遅くなる", "遅すぎ", "遅延が", "遅延して", "レイテンシ",
-	"が重い", "重くて", "重すぎ", "時々", "ときどき", "断続的",
-	"不安定", "まれに", "稀に", "本番で", "本番環境", "本番のみ",
-	"本番だけ", "原因不明", "原因が分から", "原因がわから", "原因を調", "原因を特定",
-	"再現しない", "再現でき", "再現性", "再現条件", "調査して", "調査を",
-	"要調査", "調査が必要",
-	"slow", "sluggish", "latency", "intermittent", "intermittently", "flaky",
-	"unstable", "in production", "production only", "on prod", "on production", "root cause",
-	"investigate", "investigation", "logs", "error log",
+	"が遅い", "遅くなる", "遅くなった", "遅すぎ", "遅延が", "遅延して",
+	"遅延する", "レイテンシ", "が重い", "重くなる", "重くなった", "重すぎ",
+	"時々", "ときどき", "断続的", "不安定", "稀に", "本番で",
+	"本番環境", "本番のみ", "本番だけ", "原因不明", "原因は不明", "原因が分から",
+	"原因がわから", "再現しない", "再現でき", "再現性", "再現条件",
+	"slow", "slower", "slowness", "sluggish", "intermittent", "intermittently",
+	"flaky", "production only", "prod only", "on prod", "on production", "cannot reproduce",
+	"can't reproduce", "not reproducible",
 }
 
 // DesignConfig is a destination's design-stage policy. Every key is optional
