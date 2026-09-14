@@ -52,7 +52,7 @@ const (
 type DeliverReport struct {
 	SchemaVersion int    `json:"schema_version"`
 	Phase         string `json:"phase"`   // staging | production
-	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | observe_failed | observe_blocked | promotion_failed
+	Verdict       string `json:"verdict"` // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | deploy_not_applicable | observe_failed | observe_blocked | promotion_failed
 	// Block, with an observe_blocked verdict, says why the page could not
 	// be judged at all: "sign_in" (the consumer's login did not land — the
 	// session jar is no longer accepted) or "redirect" (the target sent the
@@ -184,6 +184,18 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 		}
 	}
 	if !p.exists(DeliverStagingProofFile) {
+		// A destination that declared what its deployment reacts to, and a
+		// change entirely outside it: nothing is going to start, so nothing
+		// is waited for. The merge landed; the delivery is done here.
+		if skip, detail, err := p.deployNotApplicable("staging"); err != nil {
+			return err
+		} else if skip {
+			report := DeliverReport{Phase: "staging", Verdict: "deploy_not_applicable", Detail: detail}
+			if sha, err := p.readJSONField(DeliverMergeFile, "payload", "merge", "MergeSHA"); err == nil {
+				report.MergedSHA = sha
+			}
+			return p.sealDeliverReport(report)
+		}
 		code, err := p.controller(ctx, "await-staging", append([]string{"await-staging"},
 			p.deliverGate(stageDir, reviews,
 				"--feature-merge", p.path(DeliverMergeFile),
@@ -425,6 +437,17 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 		}
 	}
 	if !p.exists(DeliverProductionFile) {
+		// The same declaration, on the phase where waiting for a run that
+		// will not come costs the most.
+		if skip, detail, err := p.deployNotApplicable("production"); err != nil {
+			return err
+		} else if skip {
+			report := DeliverReport{Phase: "production", Verdict: "deploy_not_applicable", Detail: detail}
+			if url, err := p.readJSONField(DeliverPromotionFile, "payload", "pull_request", "HTMLURL"); err == nil {
+				report.PullRequestURL = url
+			}
+			return p.sealDeliverReport(report)
+		}
 		code, err := p.controller(ctx, "await-production", append([]string{"await-production"},
 			p.deliverGate(stageDir, reviews,
 				"--promotion-merge", p.path(DeliverPromotionMergeFile),

@@ -26,7 +26,7 @@ type PromotionPreview struct {
 
 // DeliverStagingReport is the staging-phase summary the attendant renders.
 type DeliverStagingReport struct {
-	Verdict string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | observe_failed | observe_blocked | stopped | card_failed
+	Verdict string // pass | checks_failed | merge_failed | merge_unverified | deploy_failed | deploy_absent | deploy_not_applicable | observe_failed | observe_blocked | stopped | card_failed
 	// Block names, with observe_blocked, why the page could not be judged:
 	// "sign_in" (the login did not land) or "redirect" (the page sent the
 	// browser elsewhere). It decides who has to act.
@@ -101,6 +101,9 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		builder.WriteString("【ステージングへのマージ後、デプロイの実行が作られませんでした】" +
 			"設定されたステージングのデプロイ処理が、このマージに対して実行を 1 つも作りませんでした。" +
 			"デプロイが動いていないため、画面での確認は行っていません。本番反映も行いません。\n\n")
+	case "deploy_not_applicable":
+		builder.WriteString("【配布対象外のため、マージで完了】変更したファイルは、設定されたステージング配布の対象範囲の外です。" +
+			"配布の実行を待たず、画面での確認と本番反映は行わずに完了しました。ステージングへのマージは済んでいます。\n\n")
 	case "measure_failed":
 		builder.WriteString("【ステージング確認が不合格】変更はステージングに反映されましたが、設計書が約束した計測が閾値を満たしませんでした。本番反映は行えません。\n\n")
 	case "observe_failed":
@@ -169,6 +172,15 @@ func DeliverStagingContent(runID string, report DeliverStagingReport) string {
 		facts.Operation = "PR の CI 実行履歴を確認します。実行がなければ変更ファイルと CI の対象条件を、不合格なら実行ログを確認し、結果と再開方法をこのチケットで案内します。利用者の再起票は不要です"
 		facts.NextEvent = "以後の自動通知はありません（原因を修正しても、この試行は自動では再開しません）"
 		facts.Production = "未変更（ステージングへの取り込みも行っていません）"
+	case report.Verdict == "deploy_not_applicable":
+		// Nothing deployed because nothing was going to: the change sits in
+		// the branch outside what the deployment covers. Nobody has to act,
+		// and the delivery is over.
+		facts.State = "完了（ステージングへマージ済み・配布対象外）"
+		facts.NextActor = "なし"
+		facts.Operation = "対応不要（配布の対象範囲は設定の deploy_paths で確認できます）"
+		facts.NextEvent = "以後の自動通知はありません"
+		facts.Production = "未変更（本番反映は行われません）"
 	case report.Verdict == "deploy_absent":
 		// Nothing is broken and nothing is pending: the change is in the
 		// branch, and whether it needs deploying at all is the operator's
@@ -279,6 +291,9 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		builder.WriteString("【本番反映完了】Go を受けて本番に反映し、本番の画面を自動確認しました。結果: 合格です。\n\n")
 	case "promotion_failed":
 		builder.WriteString("【本番反映できず】Go を受けましたが、本番反映の準備が関所で止まりました。ステージングが確認時点から進んだ場合は、再確認からやり直す必要があります。\n\n")
+	case "deploy_not_applicable":
+		builder.WriteString("【本番ブランチへ反映済み・配布対象外】変更したファイルは、設定された本番配布の対象範囲の外です。" +
+			"配布の実行を待たず、本番画面の確認は行わずに完了しました。\n\n")
 	case "deploy_absent":
 		builder.WriteString("【prod へのマージ後、デプロイの実行が作られませんでした】" +
 			"設定された本番のデプロイ処理が、この反映に対して実行を 1 つも作りませんでした。\n\n")
@@ -323,6 +338,11 @@ func DeliverReleaseContent(runID string, report DeliverReleaseReport) string {
 		facts.NextActor = "なし（完了報告です）"
 		facts.Operation = "対応不要"
 		facts.Production = "反映済み（本番の画面確認まで合格）"
+	case "deploy_not_applicable":
+		facts.State = "完了（本番ブランチへ反映済み・配布対象外）"
+		facts.NextActor = "なし"
+		facts.Operation = "対応不要"
+		facts.Production = "本番ブランチへ反映済み（配布の対象範囲の外のため、配布と画面確認は無し）"
 	case "promotion_failed":
 		facts.State = "本番反映は開始されず終了"
 		facts.NextActor = "依頼者"

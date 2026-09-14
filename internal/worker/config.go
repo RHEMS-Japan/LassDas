@@ -471,6 +471,32 @@ type ConsumerWorkflow struct {
 	Name         string   `json:"name"`
 	Path         string   `json:"path"`
 	RequiredJobs []string `json:"required_jobs,omitempty"`
+	// DeployPaths declares what this deployment reacts to: path prefixes
+	// ("docs/") or path.Match patterns against the whole path. When set and
+	// no delivered path falls under any of them, the runner records the
+	// phase as not applicable instead of waiting for a run the destination
+	// will not create. Empty means unknown, and the runner waits as before.
+	DeployPaths []string `json:"deploy_paths,omitempty"`
+}
+
+// validateDeployPaths refuses a scope that could not mean what it says: an
+// absolute path or a ".." segment matches nothing a delivery names, an empty
+// or padded entry covers nothing while looking declared, and a glob the
+// matcher cannot parse would silently cover nothing.
+func (w ConsumerWorkflow) validateDeployPaths() error {
+	for _, pattern := range w.DeployPaths {
+		if pattern == "" || strings.TrimSpace(pattern) != pattern || strings.HasPrefix(pattern, "/") ||
+			pattern == "." || pattern == ".." || strings.HasPrefix(pattern, "./") || strings.HasPrefix(pattern, "../") ||
+			strings.Contains(pattern, "/../") || strings.HasSuffix(pattern, "/..") || strings.HasSuffix(pattern, "/.") {
+			return errors.New("consumer workflow deploy_paths entry is invalid")
+		}
+		if strings.ContainsAny(pattern, "*?[") {
+			if _, err := path.Match(pattern, ""); err != nil {
+				return errors.New("consumer workflow deploy_paths pattern is invalid")
+			}
+		}
+	}
+	return nil
 }
 
 type ConsumerDigestCommit struct {
@@ -878,6 +904,11 @@ func (c ConsumerConfig) validate() error {
 	}
 	if c.Description != "" && validatePlainText(c.Description, 256, false) != nil {
 		return errors.New("consumer description is invalid")
+	}
+	for _, workflow := range append([]ConsumerWorkflow{c.GitHub.StagingWorkflow}, c.GitHub.ProductionWorkflows...) {
+		if err := workflow.validateDeployPaths(); err != nil {
+			return err
+		}
 	}
 	switch c.EffectiveKind() {
 	case "cli":

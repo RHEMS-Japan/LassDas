@@ -424,6 +424,10 @@ func placeReleaseOutcome(status *RunStatus, verdict string) {
 		status.place("done", "ステージング反映済み", "Go の期限切れで本番反映なし")
 		status.NextAction = "本番反映が必要な場合は、運用担当者が既存のリリース手順で対応してください。"
 		status.ActionEffect = "この試行の承認受付は終了しています。ここから Go を追加投稿しても自動では本番へ進みません。"
+	case "deploy_not_applicable":
+		status.place("done", "本番ブランチへ反映済み・配布対象外", "変更は本番配布の対象範囲の外のため、配布の実行を待たず、画面確認は行いません。")
+		status.NextAction = "対応不要です。"
+		status.ActionEffect = "この試行の自動処理は終了しています。"
 	case "stopped":
 		status.place("stopped", "停止済み", "ご指示により本番反映を行わず終了")
 	case "observe_failed":
@@ -458,6 +462,10 @@ func placeStagingOutcome(status *RunStatus, verdict, hold string) {
 		status.place("confirm", "本番反映の承認待ち", "あなたの「Go」を待っています")
 		status.NextAction = "依頼者がチケットのステージング結果と PR の変更内容を確認し、本番へ反映してよいか判断してください。"
 		status.ActionEffect = "「本番反映を承認」で本番への反映工程が始まります。「反映しない」でステージングの変更を残したまま、この依頼の自動処理を終了します。"
+	case verdict == "deploy_not_applicable":
+		status.place("done", "ステージングへマージ済み・配布対象外", "変更は配布処理の対象範囲の外のため、配布の実行を待たず、画面確認と本番反映は行いません。")
+		status.NextAction = "対応不要です。配布の対象範囲は設定の deploy_paths で確認できます。"
+		status.ActionEffect = "この試行の自動処理は終了しています。ここで Go を投稿しても本番反映は始まりません。"
 	case verdict == "stopped":
 		status.place("stopped", "停止済み", "ご指示により停止しました")
 	case verdict == "observe_failed":
