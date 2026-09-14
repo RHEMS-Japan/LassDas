@@ -391,18 +391,19 @@ func TestSessionRecordsRefusalsAndBudget(t *testing.T) {
 	if recorder.Count() != 2 || session.Used != 2 {
 		t.Errorf("count %d used %d", recorder.Count(), session.Used)
 	}
-	// Secret-shaped output is not stored; the attempt is.
-	if err := os.WriteFile(filepath.Join(session.RepoRoot, "leak.txt"), []byte("AKIAABCDEFGHIJKLMNOP\n"), 0o644); err != nil {
+	// A secret-shaped value is not stored; the attempt and the rest of the
+	// output are, and the record names the masked kind.
+	if err := os.WriteFile(filepath.Join(session.RepoRoot, "leak.txt"), []byte("id "+fakeAWSKeyID+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	session.Limits.MaxProbes = 10
 	outcome, err = session.Run(context.Background(), Request{Probe: "repo.read", Args: map[string]string{"path": "leak.txt"}})
-	if err != nil || !outcome.Measurement.Refused || outcome.Excerpt != "" || !strings.Contains(outcome.Measurement.Reason, "aws access key id") {
+	if err != nil || outcome.Measurement.Refused || outcome.Excerpt != "id [masked:aws access key id]\n" || strings.Join(outcome.Measurement.Masked, ",") != "aws access key id" {
 		t.Errorf("leak: %+v %q %v", outcome.Measurement, outcome.Excerpt, err)
 	}
 	stored, _ := ReadPrefix(recorder.path, 3)
-	if stored[2].Output != "" || stored[2].OutputBytes != 0 {
-		t.Errorf("secret output stored: %+v", stored[2])
+	if stored[2].Output != "id [masked:aws access key id]\n" || stored[2].OutputBytes != len("id "+fakeAWSKeyID+"\n") || strings.Contains(stored[2].Output, "AKIA") {
+		t.Errorf("secret value stored or context lost: %+v", stored[2])
 	}
 }
 

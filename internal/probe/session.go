@@ -270,13 +270,20 @@ func (s *Session) record(measurement Measurement, result execResult, refused boo
 	// exactly what is stored.
 	result.output = strings.ToValidUTF8(result.output, "\uFFFD")
 	if !refused {
-		if kind, found := SecretShaped(result.output, s.forbiddenLiterals()); found {
+		masked, kinds, refusal := MaskSecrets(result.output, s.forbiddenLiterals())
+		switch {
+		case refusal != "":
 			// The output is not kept; the attempt is.
 			measurement.Refused = true
-			measurement.Reason = fmt.Sprintf("refused: output carried a %s and was not stored", kind)
+			measurement.Reason = fmt.Sprintf("refused: output carried a %s and was not stored", refusal)
 			result.output = ""
 			result.total = 0
 			result.truncated = false
+		case len(kinds) > 0:
+			// The values are not kept; everything around them is, and the
+			// record says which kinds were masked.
+			measurement.Masked = kinds
+			result.output = masked
 		}
 	}
 	if s.Bytes+len(result.output) > limits.MaxTotalBytes {

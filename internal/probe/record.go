@@ -42,6 +42,10 @@ type Measurement struct {
 	Refused bool   `json:"refused,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 	Rotated bool   `json:"rotated,omitempty"`
+	// Masked lists the secret shapes whose values were replaced by
+	// "[masked:<kind>]" markers before the output was stored (MaskSecrets);
+	// absent when nothing was masked.
+	Masked []string `json:"masked,omitempty"`
 
 	LineSHA256  string `json:"line_sha256"`
 	ChainSHA256 string `json:"chain_sha256"`
