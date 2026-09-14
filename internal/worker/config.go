@@ -594,22 +594,25 @@ const (
 // first: only words that almost never describe anything but an unobserved
 // live symptom. Words that also appear in finished investigations ("root
 // cause: X, fix: Y", 原因を特定済み, 調査を終えたので), in UI names (Logs
-// page, latency column, "in production builds") or inside other words
-// (ダイアログに, カタログを, 遅延読み込み, あたまに, catalogs, slowly) are left
-// out; the AI proposer and checker judge needs_design independently of
-// this list and catch a symptom said in other words. The Japanese entries
-// match as substrings and therefore carry the particle or inflection that
-// keeps them out of unrelated words; the English entries match as whole
-// words (see ticketTriggerWord), so their inflections are listed.
+// page, latency / レイテンシ column, "in production builds"), in the names
+// of techniques (遅延読み込み, 遅延する設定, 再現性のあるビルド, 不安定版) or
+// inside other words (ダイアログに, カタログを, あたまに, catalogs, slowly) are
+// left out; the AI proposer and checker judge needs_design independently
+// of this list and catch a symptom said in other words. The Japanese
+// entries match as substrings and therefore carry the particle or
+// inflection that keeps them out of unrelated words; the English entries
+// match as whole words (see ticketTriggerWord), so their inflections are
+// listed, and "can't" is listed with both apostrophes (U+0027 and the
+// U+2019 that macOS and Word substitute).
 var DefaultDesignTriggerWords = []string{
-	"が遅い", "遅くなる", "遅くなった", "遅すぎ", "遅延が", "遅延して",
-	"遅延する", "レイテンシ", "が重い", "重くなる", "重くなった", "重すぎ",
-	"時々", "ときどき", "断続的", "不安定", "稀に", "本番で",
-	"本番環境", "本番のみ", "本番だけ", "原因不明", "原因は不明", "原因が分から",
-	"原因がわから", "再現しない", "再現でき", "再現性", "再現条件",
+	"が遅い", "遅くなった", "遅くなって", "遅くなり", "遅すぎ", "遅延が",
+	"が重い", "重くなった", "重くなって", "重くなり", "重すぎ", "時々",
+	"ときどき", "断続的", "が不安定", "稀に", "本番で", "本番環境",
+	"本番のみ", "本番だけ", "原因不明", "原因は不明", "原因が分から", "原因がわから",
+	"再現しない", "再現できない", "再現できず", "再現できま", "再現条件",
 	"slow", "slower", "slowness", "sluggish", "intermittent", "intermittently",
 	"flaky", "production only", "prod only", "on prod", "on production", "cannot reproduce",
-	"can't reproduce", "not reproducible",
+	"can't reproduce", "can’t reproduce",
 }
 
 // DesignConfig is a destination's design-stage policy. Every key is optional

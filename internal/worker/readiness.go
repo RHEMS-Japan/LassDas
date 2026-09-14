@@ -964,11 +964,12 @@ func excerptInTicket(excerpt string, request TicketRequest) bool {
 // language; folding only touches scripts that have case).
 // ticketTriggerWord reports the first trigger word found in the ticket's
 // summary and body. A word made of ASCII letters, digits, spaces and hyphens
-// matches as a whole word, case-insensitively ("slow" is found in "Slow
-// page", not in "slowly"; "logs" is not found in "catalogs"). Any other
-// word, Japanese above all, matches as a case-folded substring, which is
-// why the default vocabulary carries the particle or inflection that keeps
-// each entry out of unrelated words.
+// matches as a whole word, case-insensitively: it may not be joined to a
+// letter, digit, underscore or hyphen on either side ("slow" is found in
+// "Slow page", not in "slowly", "slow_query" or "slow-motion"; "logs" is
+// not found in "catalogs"). Any other word, Japanese above all, matches as
+// a case-folded substring, which is why the default vocabulary carries the
+// particle or inflection that keeps each entry out of unrelated words.
 func ticketTriggerWord(request TicketRequest, words []string) (string, bool) {
 	text := readinessTicketText(request)
 	lower := strings.ToLower(text)
@@ -977,7 +978,7 @@ func ticketTriggerWord(request TicketRequest, words []string) (string, bool) {
 			continue
 		}
 		if triggerWordIsASCII(word) {
-			if regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`).MatchString(text) {
+			if regexp.MustCompile(`(?i)(?:^|[^a-z0-9_-])` + regexp.QuoteMeta(word) + `(?:[^a-z0-9_-]|$)`).MatchString(text) {
 				return word, true
 			}
 			continue
