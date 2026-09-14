@@ -11,20 +11,26 @@ import (
 // glob characters is a prefix — "docs" or "docs/" covers everything under
 // docs — "*" and "?" stay inside one path segment, "**" spans segments
 // wherever it appears ("docs/**", "**/*.go", "**.js"), "[...]" is a class,
-// and a trailing "/" means "anything under such a directory". Two readings
-// differ from GitHub's on purpose and are documented on the field: "?" is
-// exactly one character (not an optional one) and "+" is literal.
+// and a trailing "/" means "anything under such a directory". One reading
+// differs from GitHub's on purpose and is documented on the field: "?" is
+// exactly one character (not an optional one).
 //
-// An entry that could not mean what it says — absolute, "!"-negated,
-// carrying a backslash, an empty, "." or ".." segment, padding, or an
-// unparsable class — is refused, because accepted it would look declared
-// while covering nothing, and the runner would end deliveries the
-// deployment reacts to.
+// An entry that could not mean what it says is refused, because accepted
+// it would look declared while covering nothing, and the runner would end
+// deliveries the deployment reacts to: absolute, "!"-negated, longer than
+// a delivered path may be, an empty, "." or ".." segment, an unparsable
+// class, or any character a delivered path cannot carry — delivered paths
+// are [A-Za-z0-9._/-] only (releaseproof), so a space, a "+", a "(", or a
+// non-ASCII letter in an entry would match nothing, ever.
 func compileDeployPath(pattern string) (*regexp.Regexp, error) {
 	invalid := errors.New("consumer workflow deploy_paths entry is invalid")
-	if pattern == "" || strings.TrimSpace(pattern) != pattern || strings.HasPrefix(pattern, "/") ||
-		strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\") {
+	if pattern == "" || len(pattern) > maxDeployPathBytes || strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, "!") {
 		return nil, invalid
+	}
+	for i := 0; i < len(pattern); i++ {
+		if !deployPathByte(pattern[i]) {
+			return nil, invalid
+		}
 	}
 	directory := strings.HasSuffix(pattern, "/")
 	body := strings.TrimSuffix(pattern, "/")
@@ -91,6 +97,22 @@ func compileDeployPath(pattern string) (*regexp.Regexp, error) {
 		return nil, errors.New("consumer workflow deploy_paths pattern is invalid")
 	}
 	return compiled, nil
+}
+
+// maxDeployPathBytes is the longest entry worth compiling: a delivered
+// path is at most 512 bytes (releaseproof), and an entry longer than that
+// could only match through "**" while costing a longer regexp per file.
+const maxDeployPathBytes = 512
+
+// deployPathByte reports whether one byte may appear in an entry: the
+// delivered-path alphabet plus the glob syntax ("*", "?", "[", "]", "!"
+// and "^" for classes).
+func deployPathByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("._/-*?[]!^", c) >= 0
 }
 
 // DeployPathCovered reports whether one delivered path falls inside a

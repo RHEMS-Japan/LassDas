@@ -88,7 +88,6 @@ func TestDeployPathsAreReadLikeAWorkflowPathsFilter(t *testing.T) {
 		{[]string{"*.jsx?"}, "page.jsx1", true}, // "?" is exactly one character here
 		{[]string{"*.jsx?"}, "page.jsx", false}, // (GitHub reads it as optional)
 		{[]string{"*.jsx?"}, "page.js", false},
-		{[]string{"src/+x"}, "src/+x", true}, // "+" is literal here
 		{[]string{"Docs/"}, "docs/a.md", false},
 		{[]string{""}, "anything", false},
 		{nil, "anything", false},
@@ -101,7 +100,10 @@ func TestDeployPathsAreReadLikeAWorkflowPathsFilter(t *testing.T) {
 
 func TestDeployPathsRefuseWhatCannotMatchADeliveredPath(t *testing.T) {
 	for _, bad := range [][]string{{""}, {" docs/"}, {"docs/ "}, {"/docs"}, {"../docs"}, {"docs/../src"}, {"."}, {".."}, {"./docs"}, {"["},
-		{"!docs/"}, {"docs//x"}, {"docs/./x"}, {"docs/."}, {"docs/\\*"}, {"docs/[/x"}, {"docs/[a/b]"}, {"docs/[]"}} {
+		{"!docs/"}, {"docs//x"}, {"docs/./x"}, {"docs/."}, {"docs/\\*"}, {"docs/[/x"}, {"docs/[a/b]"}, {"docs/[]"},
+		// Characters no delivered path can carry: accepted, such an entry
+		// would be a declared scope that covers nothing (review, round 3).
+		{"a b"}, {"a\tb"}, {"src/+x"}, {"a(b)"}, {"a$b"}, {"a|b"}, {"a{2}"}, {"ドキュメント/*.md"}, {"a^b"}, {strings.Repeat("a", 513)}} {
 		if err := (ConsumerWorkflow{DeployPaths: bad}).validateDeployPaths(); err == nil {
 			t.Errorf("deploy_paths %q accepted", bad)
 		}

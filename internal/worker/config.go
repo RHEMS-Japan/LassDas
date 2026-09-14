@@ -476,9 +476,11 @@ type ConsumerWorkflow struct {
 	// is a prefix ("docs/" covers everything under docs), "*" and "?" stay
 	// inside one path segment, "**" spans segments wherever it appears
 	// ("docs/**", "**/*.go", "**.js"), "[...]" is a class, and a trailing
-	// "/" means "anything under such a directory". Two readings differ from
-	// GitHub's: "?" is exactly one character and "+" is literal. When set
-	// and no delivered path falls under any entry, the runner records the
+	// "/" means "anything under such a directory". One reading differs from
+	// GitHub's: "?" is exactly one character. Characters a delivered path
+	// cannot carry (anything outside [A-Za-z0-9._/-] and the glob syntax)
+	// are refused, so an entry cannot look declared while matching nothing.
+	// When set and no delivered path falls under any entry, the runner records the
 	// phase as not applicable instead of waiting for a run the destination
 	// will not create. Empty means unknown, and the runner waits as before.
 	DeployPaths []string `json:"deploy_paths,omitempty"`
