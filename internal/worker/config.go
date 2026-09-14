@@ -424,9 +424,8 @@ type ConsumerConfig struct {
 	// Design is the destination's say over the design stage the reception
 	// decides on for every change request (whether a change may skip the
 	// design, and which words in a ticket mean the running system has to be
-	// measured first). Optional: absent means design on for every change
-	// request, because the skip needs a trigger vocabulary and the framework
-	// holds no default one.
+	// measured first). Optional: absent means design on, judged with the
+	// framework's DefaultDesignTriggerWords.
 	Design *DesignConfig `json:"design,omitempty"`
 	// GitHub is the destination repository's observed delivery contract.
 	// CLI destinations pin its default branch; web destinations also pin
@@ -589,11 +588,23 @@ const (
 // words in a ticket that mean the running system has to be observed before
 // a fix is designed. It applies to every destination that configures no
 // vocabulary of its own, so a destination is never made to write one just
-// to let a small, precisely stated change skip its design. Matching is a
-// case-folded substring test over the ticket's summary and body.
+// to let a small, precisely stated change skip its design. A hit forces the
+// design stage, so the list is kept to words that rarely describe anything
+// else: the Japanese entries match as substrings and therefore carry the
+// particle or inflection that keeps them out of unrelated words (遅延読み込み,
+// 重い順, ダイアログに, あたまに); the English entries match as whole words
+// (see ticketTriggerWord). The AI proposer and checker judge needs_design
+// independently of this list, so a symptom said in other words is not lost.
 var DefaultDesignTriggerWords = []string{
-	"遅い", "遅延", "重い", "たまに", "時々", "不安定", "本番で", "本番環境", "ログに", "ログを", "原因", "再現",
-	"slow", "latency", "intermittent", "flaky", "in production", "root cause",
+	"が遅い", "遅くなる", "遅すぎ", "遅延が", "遅延して", "レイテンシ",
+	"が重い", "重くて", "重すぎ", "時々", "ときどき", "断続的",
+	"不安定", "まれに", "稀に", "本番で", "本番環境", "本番のみ",
+	"本番だけ", "原因不明", "原因が分から", "原因がわから", "原因を調", "原因を特定",
+	"再現しない", "再現でき", "再現性", "再現条件", "調査して", "調査を",
+	"要調査", "調査が必要",
+	"slow", "sluggish", "latency", "intermittent", "intermittently", "flaky",
+	"unstable", "in production", "production only", "on prod", "on production", "root cause",
+	"investigate", "investigation", "logs", "error log",
 }
 
 // DesignConfig is a destination's design-stage policy. Every key is optional
@@ -606,7 +617,10 @@ type DesignConfig struct {
 	// has to be observed before a fix is designed (in the requesters' own
 	// language: slowness, intermittence, production, logs, root cause,
 	// investigation). Absent or empty means DefaultDesignTriggerWords; a
-	// configured list replaces the default rather than extending it.
+	// configured list replaces the default rather than extending it. An
+	// entry of ASCII letters, digits, spaces and hyphens matches as a whole
+	// word, case-insensitively; any other entry matches as a case-folded
+	// substring (ticketTriggerWord).
 	TriggerWords []string `json:"trigger_words,omitempty"`
 	// ReviewInvestigation says whether an investigation-only report gets a
 	// grounding review before it is posted; absent reads as true.

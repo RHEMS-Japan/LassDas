@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// Absent configuration is the safe reading: design on, no trigger vocabulary
-// (so the skip can never fire), investigation reports reviewed.
+// Absent configuration is the safe reading: design on, the framework's
+// default trigger vocabulary, investigation reports reviewed.
 func TestDesignConfigDefaultsAreTheSafeReading(t *testing.T) {
 	consumer := validTestConfig().Consumers[0]
 	if !consumer.DesignEnabled() || consumer.DesignTriggerWords() != nil || !consumer.ReviewsInvestigation() {

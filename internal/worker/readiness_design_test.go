@@ -14,8 +14,9 @@ import (
 // The reception's design decision (README / issue #18 §6): a change request
 // skips the design stage only when the ticket itself states the approach
 // (quoted, and the quote really is in the ticket), the derived target files
-// are two or fewer, the destination configured a trigger vocabulary and none
-// of it appears, the request is a change - and neither AI kept the design.
+// are two or fewer, none of the trigger vocabulary (the destination's own,
+// or the framework's default) appears, the request is a change - and
+// neither AI kept the design.
 
 const (
 	designApproachBody  = "Replace the visible label. How to do it: change the label constant in Example.tsx to the new wording."
@@ -156,6 +157,16 @@ func TestDefaultDesignTriggerWordsAreWellFormed(t *testing.T) {
 	var none ConsumerConfig
 	if got := none.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, DefaultDesignTriggerWords) {
 		t.Fatalf("effective vocabulary without configuration = %v, want the default", got)
+	}
+	// The requester-facing docs list the same vocabulary, word for word.
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "INVESTIGATING_DESIGNER.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, word := range DefaultDesignTriggerWords {
+		if !strings.Contains(string(doc), word) {
+			t.Errorf("docs/INVESTIGATING_DESIGNER.md does not list the default trigger word %q", word)
+		}
 	}
 	own := ConsumerConfig{Design: &DesignConfig{TriggerWords: []string{"slow"}}}
 	if got := own.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, []string{"slow"}) {
@@ -462,8 +473,11 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 			t.Fatalf("the checker prompt lacks %q", want)
 		}
 	}
-	if readinessPromptVersion != 11 {
-		t.Fatalf("prompt version = %d, want 11 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements)", readinessPromptVersion)
+	if readinessPromptVersion != 12 {
+		t.Fatalf("prompt version = %d, want 12 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary)", readinessPromptVersion)
+	}
+	if strings.Contains(readinessSystemPrompt(), "no skip is possible") || strings.Contains(checker, "no skip is possible") {
+		t.Fatal("the prompts still say an absent vocabulary forbids the skip")
 	}
 }
 
@@ -486,5 +500,44 @@ func TestEveryDesignReasonHasARequesterPhrase(t *testing.T) {
 	}
 	if _, known := DesignReasonKeepsDesign("because"); known {
 		t.Fatal("an unknown reason was classified")
+	}
+}
+
+// The default vocabulary is matched so that a small change request about a
+// dialog, a catalogue, lazy loading, or a heading does not read as a symptom,
+// while the symptoms it is for are found in their usual wording. ASCII words
+// match whole words case-insensitively; other words match as substrings.
+func TestTriggerWordMatchingRules(t *testing.T) {
+	for body, want := range map[string]string{
+		"確認ダイアログにキャンセルボタンを追加する。":               "",
+		"商品カタログを PDF で出力する。":                   "",
+		"ブログに新しい記事を投稿できるようにする。":                "",
+		"画像を遅延読み込みにする。":                        "",
+		"見出しのあたまに番号を付ける。":                      "",
+		"ファイル一覧を重い順に並べ替える。":                    "",
+		"Fade the banner in slowly.":           "",
+		"Rebuild the catalogs page.":           "",
+		"Add a log in button to the header.":   "",
+		"調査済みの不具合を直す。":                         "",
+		"一覧の表示が遅い。":                            "が遅い",
+		"本番のみ表示が崩れる。":                          "本番のみ",
+		"原因不明のエラーが出る。":                         "原因不明",
+		"手元では再現しない。":                           "再現しない",
+		"The page is Slow on prod.":            "slow",
+		"Investigate why the export fails.":    "investigate",
+		"Check the error log for the failure.": "error log",
+	} {
+		_, request, _ := designFixture(t, nil, designApproachBody+" "+body)
+		got, hit := ticketTriggerWord(request, DefaultDesignTriggerWords)
+		if hit != (want != "") || got != want {
+			t.Errorf("%q: matched %q (hit %v), want %q", body, got, hit, want)
+		}
+	}
+	_, request, _ := designFixture(t, nil, designApproachBody+" It is slow.")
+	if _, hit := ticketTriggerWord(request, []string{"slowly"}); hit {
+		t.Error("a configured ASCII word matched inside another word")
+	}
+	if got, hit := ticketTriggerWord(request, []string{"SLOW"}); !hit || got != "SLOW" {
+		t.Error("a configured ASCII word did not match case-insensitively")
 	}
 }

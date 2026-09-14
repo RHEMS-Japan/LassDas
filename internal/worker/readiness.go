@@ -35,10 +35,12 @@ const (
 	// to both contracts; version 10 forbids invented measurements (the
 	// assessor measures nothing; the checker names fabricated-evidence);
 	// version 11 tells both what the investigation stage can measure (the
-	// catalogue, when a design stage will run) and states the text limits. An
-	// assessment or check sealed under an older contract is refused, because
-	// it carries no answer to re-derive from.
-	readinessPromptVersion = 11
+	// catalogue, when a design stage will run) and states the text limits;
+	// version 12 describes the trigger vocabulary as the destination's own or
+	// the framework's default (an absent vocabulary no longer forbids the
+	// skip). An assessment or check sealed under an older contract is
+	// refused, because it carries no answer to re-derive from.
+	readinessPromptVersion = 12
 
 	// ReadinessDecisionSchemaVersion is the sealed decision's own schema
 	// version, separate from ArtifactSchemaVersion because the decision is the
@@ -960,14 +962,44 @@ func excerptInTicket(excerpt string, request TicketRequest) bool {
 // ticketTriggerWord returns the first configured trigger word the ticket text
 // contains. The comparison folds case (the words are in the requesters' own
 // language; folding only touches scripts that have case).
+// ticketTriggerWord reports the first trigger word found in the ticket's
+// summary and body. A word made of ASCII letters, digits, spaces and hyphens
+// matches as a whole word, case-insensitively ("slow" is found in "Slow
+// page", not in "slowly"; "logs" is not found in "catalogs"). Any other
+// word, Japanese above all, matches as a case-folded substring, which is
+// why the default vocabulary carries the particle or inflection that keeps
+// each entry out of unrelated words.
 func ticketTriggerWord(request TicketRequest, words []string) (string, bool) {
-	text := strings.ToLower(readinessTicketText(request))
+	text := readinessTicketText(request)
+	lower := strings.ToLower(text)
 	for _, word := range words {
-		if word != "" && strings.Contains(text, strings.ToLower(word)) {
+		if word == "" {
+			continue
+		}
+		if triggerWordIsASCII(word) {
+			if regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`).MatchString(text) {
+				return word, true
+			}
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(word)) {
 			return word, true
 		}
 	}
 	return "", false
+}
+
+// triggerWordIsASCII says whether a trigger word is matched as a whole
+// ASCII word rather than as a substring.
+func triggerWordIsASCII(word string) bool {
+	for _, r := range word {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ' ', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // designJudgment is the reception's answer to "does this request need a
@@ -1308,7 +1340,7 @@ func readinessCheckJSONSchema() string {
 // checker are held to one definition and can be told apart only by their
 // answers.
 const designPromptRules = `request_kind is investigation when the ticket asks only to find out, measure, or explain what the running system does and asks for nothing to be changed; it is change otherwise, including a ticket that asks for both.
-needs_design is false only when all of these hold: the request is a change; the ticket text itself states how the change is to be made (which part changes, and to what), not merely what should be different afterwards; the change is confined to at most two of the target_files; and nothing in the ticket text calls for observing the running system first - slowness, intermittence, behaviour in production, log contents, a root cause, an investigation (design_trigger_words in USER_DATA_JSON lists this destination's own words for these; when it is absent, no skip is possible). For an investigation request needs_design is false. The engine re-derives every condition and keeps a design whenever the conditions or either model says so, so answer true whenever you are not sure.`
+needs_design is false only when all of these hold: the request is a change; the ticket text itself states how the change is to be made (which part changes, and to what), not merely what should be different afterwards; the change is confined to at most two of the target_files; and nothing in the ticket text calls for observing the running system first - slowness, intermittence, behaviour in production, log contents, a root cause, an investigation (design_trigger_words in USER_DATA_JSON lists the words the engine checks for these: the destination's own vocabulary, or the framework's default when it configured none). For an investigation request needs_design is false. The engine re-derives every condition and keeps a design whenever the conditions or either model says so, so answer true whenever you are not sure.`
 
 // readinessCatalogueEntry is one probe the investigation stage can use, so
 // the reception knows what the pipeline itself can find out and does not
