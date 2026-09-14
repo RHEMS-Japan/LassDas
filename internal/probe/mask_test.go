@@ -271,3 +271,51 @@ func TestWrappedTokensAreRefused(t *testing.T) {
 		t.Errorf("header after a token: %+v %q", outcome.Measurement, stored.Output)
 	}
 }
+
+// A letters-only value of eight bytes or more that is not a sample word is
+// a real password: it is removed from every place a command line, a config
+// format or a runbook may put it, not only from value positions.
+func TestRealLettersOnlyPasswordsAreRemovedEverywhere(t *testing.T) {
+	for _, line := range []string{
+		"redis-cli -a secretpass ping", "mongosh --password secretpass", "mysql -u app -psecretpass -e 'select 1'",
+		"password secretpass;", "password => secretpass", "password -> secretpass",
+		"パスワード：secretpass", "secretpass", "- secretpass", "| password | secretpass |",
+	} {
+		content := "url postgres://app:secretpass@db.example.invalid/app\n" + line + "\n"
+		outcome, stored := maskedRead(t, "runbook.md", content, maskedLimits)
+		if outcome.Measurement.Refused || strings.Contains(stored.Output, "secretpass") {
+			t.Errorf("%q: refused=%v stored=%q", line, outcome.Measurement.Refused, stored.Output)
+		}
+	}
+	// A sample word stays a word of the prose, and a JSON key is a key.
+	_, stored := maskedRead(t, "cfg.json", "url postgres://user:password@host:5432/db\n{\"password\": \"other\", \"user\": \"x\"}\npassword secretword;\n", maskedLimits)
+	if !strings.Contains(stored.Output, "{\"password\": \"other\", \"user\": \"x\"}") || !strings.Contains(stored.Output, "password secretword;") {
+		t.Fatalf("a sample word was removed outside a value position: %q", stored.Output)
+	}
+}
+
+// A wrapped token is refused in the forms mail and logs fold it: an
+// indented continuation, a space before the break, and a short tail.
+func TestWrappedTokenFormsAreRefused(t *testing.T) {
+	for name, content := range map[string]string{
+		"indented":   "Authorization: Bearer abcdefghijklmnopqrst\n uvwxyz0123456789abcd\n",
+		"tabbed":     "Authorization: Bearer abcdefghijklmnopqrst\n\tuvwxyz0123456789abcd\n",
+		"flowed":     "Authorization: Bearer abcdefghijklmnopqrst \nuvwxyz0123456789abcd\n",
+		"short tail": "Authorization: Bearer abcdefghijklmnopqrst\nuvwxyz1\n",
+	} {
+		outcome, stored := maskedRead(t, "mail.txt", content, maskedLimits)
+		if !outcome.Measurement.Refused || stored.Output != "" {
+			t.Errorf("%s: not refused: %+v", name, outcome.Measurement)
+		}
+	}
+}
+
+// A later '@' in the same run extends what is masked, not what is removed
+// elsewhere: the host and path of the connection string stay readable on
+// another line.
+func TestOuterCredentialPartDoesNotRemoveTheHost(t *testing.T) {
+	_, stored := maskedRead(t, "env.sh", "DATABASE_URL=postgres://reader:s3cretpass@db.example.invalid/app?application_name=svc@prod\nHOST=db.example.invalid/app\n", maskedLimits)
+	if !strings.HasSuffix(stored.Output, "\nHOST=db.example.invalid/app\n") || strings.Contains(stored.Output, "s3cretpass") {
+		t.Fatalf("stored = %q", stored.Output)
+	}
+}

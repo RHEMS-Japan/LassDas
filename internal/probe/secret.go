@@ -91,23 +91,37 @@ var (
 	tokenRun = regexp.MustCompile(`[A-Za-z0-9._~+/=-]+`)
 	// continuation is a line that is nothing but token characters (with
 	// '=' only as trailing padding, so a KEY=value line is not one): after a
-	// masked token it is the rest of a wrapped value.
-	continuation = regexp.MustCompile(`^\r?\n[A-Za-z0-9._~+/-]{8,}=*(?:\r?\n|$)`)
+	// masked token it is the rest of a wrapped value. A folded header
+	// indents it, a flowed mail leaves a space before the break, and a
+	// short tail is still a tail.
+	continuation = regexp.MustCompile(`^[ \t]*\r?\n[ \t]*[A-Za-z0-9._~+/-]{4,}=*[ \t]*(?:\r?\n|$)`)
 )
 
 // minValueBytes is the shortest value removed from the rest of the output;
 // minRunBytes the shortest token run inside a value that is removed on its
-// own. Values shorter than unboundedValueBytes that are letters only (a
-// sample password like "password" or "changeme") are removed only where
-// they stand as a word of their own in a value position - right after '=',
-// ':' or a quote, as in PGPASSWORD=changeme or "password": "changeme" -
-// so prose ("set the password") and keys ("password:") stay readable; a
-// value with a digit or a symbol in it, or a long one, is removed anywhere.
+// own. A value is removed wherever it occurs unless it is letters only and
+// either shorter than shortValueBytes or one of sampleValues: those are
+// the words prose and configuration use (a sample password like
+// "password" or "changeme", a four-letter word like "data"), and they are
+// removed only where they stand as a word of their own in a value position
+// - right after '=', ':' or a quote, as in PGPASSWORD=changeme or
+// "password": "changeme" - so "set the password", "password:" and
+// data_dir stay readable. A letters-only value of eight bytes or more that
+// is not a sample word is a real, if weak, password and is removed
+// anywhere a command line, a config format or a runbook may put it.
 const (
-	minValueBytes       = 4
-	minRunBytes         = 8
-	unboundedValueBytes = 16
+	minValueBytes   = 4
+	minRunBytes     = 8
+	shortValueBytes = 8
 )
+
+// sampleValues are the placeholder passwords documentation writes in place
+// of a real one; masked in their shape, they are otherwise left to prose.
+var sampleValues = map[string]bool{
+	"password": true, "passwd": true, "changeme": true, "yourpassword": true, "mypassword": true,
+	"placeholder": true, "redacted": true, "examplepassword": true, "testpassword": true,
+	"secretpassword": true, "supersecret": true, "xxxxxxxx": true,
+}
 
 // SecretShaped reports whether output carries a key-shaped string or any of
 // the literal values the caller knows must never appear (the jar's cookie
@@ -210,27 +224,31 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 				// The value goes on after a line break: nothing bounds it.
 				return "", nil, shape.kind
 			}
-			captured := []string{output[match[0]:match[1]]}
+			// The value is the innermost group (the password up to the
+			// first '@', the token); its forms are all candidates. An outer
+			// group (the credential part up to the last '@') is a candidate
+			// as a whole only, so the host and path it may carry are not.
+			var groups []string
 			for g := 2; g+1 < len(match); g += 2 {
 				if match[g] >= 0 {
-					captured = append(captured, output[match[g]:match[g+1]])
+					groups = append(groups, output[match[g]:match[g+1]])
 				}
 			}
-			for _, value := range captured[1:] {
-				captured = append(captured, strings.TrimSuffix(value, "@"))
-			}
-			if len(captured) == 1 {
-				captured = captured[:1]
-			} else {
-				captured = captured[1:]
-			}
-			for _, value := range captured {
-				for _, candidate := range valueCandidates(value) {
-					if !seen[candidate] {
-						seen[candidate] = true
-						values = append(values, maskedValue{shape: i, value: candidate})
-					}
+			add := func(candidate string) {
+				if len(candidate) >= minValueBytes && !seen[candidate] {
+					seen[candidate] = true
+					values = append(values, maskedValue{shape: i, value: candidate})
 				}
+			}
+			primary := output[match[0]:match[1]]
+			if len(groups) > 0 {
+				primary = groups[len(groups)-1]
+			}
+			for _, candidate := range valueCandidates(primary) {
+				add(candidate)
+			}
+			for _, outer := range groups[:max(len(groups)-1, 0)] {
+				add(strings.TrimSuffix(outer, "@"))
 			}
 		}
 	}
@@ -270,19 +288,17 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 	return masked, kinds, ""
 }
 
-// unbounded says a value is removed wherever it occurs: it is long, or it
-// carries a digit or a symbol and so is not a word prose would use.
+// unbounded says a value is removed wherever it occurs: it carries a digit
+// or a symbol, or it is a letters-only value long enough to be a real
+// password and not a sample word.
 func unbounded(value string) bool {
-	if len(value) >= unboundedValueBytes {
-		return true
-	}
 	for i := 0; i < len(value); i++ {
 		c := value[i]
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
 			return true
 		}
 	}
-	return false
+	return len(value) >= shortValueBytes && !sampleValues[strings.ToLower(value)]
 }
 
 // replaceValue removes every occurrence of value from text: anywhere for an
@@ -300,7 +316,7 @@ func replaceValue(text, value, with string) string {
 			return out.String()
 		}
 		j += i
-		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) {
+		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) && !keyPosition(text, j+len(value)) {
 			out.WriteString(text[i:j])
 			out.WriteString(with)
 			i = j + len(value)
@@ -324,7 +340,7 @@ func containsValue(text, value string) bool {
 			return false
 		}
 		j += i
-		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) {
+		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) && !keyPosition(text, j+len(value)) {
 			return true
 		}
 		_, size := utf8.DecodeRuneInString(text[j:])
@@ -348,6 +364,19 @@ func valuePosition(text string, start int) bool {
 		}
 	}
 	return false
+}
+
+// keyPosition says the text ending at end is a key, not a value: a closing
+// quote (if any) and blanks are followed by ':', as in "password": "...".
+func keyPosition(text string, end int) bool {
+	k := end
+	if k < len(text) && (text[k] == '"' || text[k] == '\'') {
+		k++
+	}
+	for k < len(text) && (text[k] == ' ' || text[k] == '\t') {
+		k++
+	}
+	return k < len(text) && text[k] == ':'
 }
 
 func wordBounded(text string, start, end int) bool {
