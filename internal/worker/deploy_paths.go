@@ -42,6 +42,9 @@ func compileDeployPath(pattern string) (*regexp.Regexp, error) {
 	var expression strings.Builder
 	expression.WriteString("^")
 	if !strings.ContainsAny(body, "*?[") {
+		if strings.ContainsAny(body, "]!^") {
+			return nil, invalid
+		}
 		expression.WriteString(regexp.QuoteMeta(body))
 		if directory {
 			expression.WriteString("/.+")
@@ -83,6 +86,9 @@ func compileDeployPath(pattern string) (*regexp.Regexp, error) {
 			}
 			expression.WriteString(class)
 			i += end + 1
+		case rest[0] == ']' || rest[0] == '!' || rest[0] == '^':
+			// Class syntax outside a class: no delivered path carries it.
+			return nil, invalid
 		default:
 			expression.WriteString(regexp.QuoteMeta(rest[:1]))
 			i++
