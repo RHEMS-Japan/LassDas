@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -31,8 +32,13 @@ type consoleServer struct {
 	local         *state.LocalStore
 	runtimeConfig *runtime.Config
 	// runtimeConfigPath lets the one setting that changes on a running pod
-	// (the intake pause) be re-read per request instead of at startup.
+	// (the intake pause) be re-read per request instead of at startup; the
+	// last value that could be read is kept over a transient failure, as
+	// the attendant does.
 	runtimeConfigPath string
+	pauseMu           sync.Mutex
+	pauseValue        string
+	pauseRead         bool
 	workerConfig      *worker.Config
 	hermes            *runtime.Hermes
 	client            *http.Client
@@ -143,12 +149,17 @@ func (s *consoleServer) intakePausedNow() bool {
 	if s.runtimeConfig == nil || !s.runtimeConfig.OrchestrationCards() {
 		return false
 	}
-	value := s.runtimeConfig.Chain.IntakePausedSince
+	s.pauseMu.Lock()
+	if !s.pauseRead {
+		s.pauseValue, s.pauseRead = s.runtimeConfig.Chain.IntakePausedSince, true
+	}
 	if s.runtimeConfigPath != "" {
 		if current, err := runtime.ReadIntakePause(s.runtimeConfigPath); err == nil {
-			value = current
+			s.pauseValue = current
 		}
 	}
+	value := s.pauseValue
+	s.pauseMu.Unlock()
 	probe := *s.runtimeConfig
 	probe.Chain.IntakePausedSince = value
 	_, paused := probe.Chain.IntakePaused()

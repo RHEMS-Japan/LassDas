@@ -521,31 +521,20 @@ func (c Config) Owner(hermesRunID int64) hook.PullOwner {
 }
 
 // ReadIntakePause reads chain.intake_paused_since from the config file as it
-// is NOW. The attendant loads its config once at start, but the pause is
-// the one setting an operator changes on a running pod (the ConfigMap is
-// mounted as a directory, so an edit reaches the file without a restart —
-// and a restart would interrupt the running deliveries the pause promises
-// to leave alone). An empty value means not paused; a value that is not a
-// time is an error, and the caller keeps what it last read.
+// is NOW, through the same strict Load the boot uses. The attendant loads
+// its config once at start, but the pause is the one setting an operator
+// changes on a running pod (the ConfigMap is mounted as a directory, so an
+// edit reaches the file without a restart — and a restart would interrupt
+// the running deliveries the pause promises to leave alone). Reading
+// through Load means a mistyped key or a dropped object is an error the
+// caller keeps the last good value over and logs, not a silent "not
+// paused" that the next boot would then refuse.
 func ReadIntakePause(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	config, err := Load(path)
 	if err != nil {
 		return "", err
 	}
-	var parsed struct {
-		Chain struct {
-			IntakePausedSince string `json:"intake_paused_since"`
-		} `json:"chain"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", errors.New("runtime config: unreadable while reading the intake pause")
-	}
-	if parsed.Chain.IntakePausedSince != "" {
-		if _, err := time.Parse(time.RFC3339, parsed.Chain.IntakePausedSince); err != nil {
-			return "", errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
-		}
-	}
-	return parsed.Chain.IntakePausedSince, nil
+	return config.Chain.IntakePausedSince, nil
 }
 
 // IntakePaused reports whether the operator paused intake, and since when.
