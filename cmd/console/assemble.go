@@ -116,6 +116,11 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 	for base, ticket := range byRun {
 		ticket.ClarificationNo = clarifications[base]
 		ticket.NextActor, ticket.OpenQuestion = nextActor(*ticket)
+		if ticket.State == "queued" && s.runtimeConfig != nil {
+			if _, paused := s.runtimeConfig.Chain.IntakePaused(); paused {
+				ticket.NextActor = "運用者 (受付停止中)"
+			}
+		}
 		response.Tickets = append(response.Tickets, *ticket)
 	}
 	// Newest activity first: the operator's question is "what needs me

@@ -17,6 +17,7 @@ func TestEveryRunCommentKindIsStoredOrMarkerScanned(t *testing.T) {
 	markerScanned := map[RunCommentKind]bool{
 		RunCommentResolved: true, RunCommentBudgetHold: true, RunCommentSessionHold: true,
 		RunCommentStreakHold: true, RunCommentStreakResolved: true,
+		RunCommentIntakePaused: true,
 	}
 	stored := map[RunCommentKind]bool{}
 	for _, kind := range StoreRunCommentKinds() {

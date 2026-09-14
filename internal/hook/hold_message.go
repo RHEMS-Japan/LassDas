@@ -3,6 +3,7 @@ package hook
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // The attendant's two operator holds. Neither is a failure of the delivery:
@@ -90,6 +91,25 @@ func SessionHoldContent(runID string, destinations []string) string {
 
 // FailureStreakContent announces that intake is held because the same
 // failure ended the last N deliveries in a row.
+// IntakePausedContent is the one notice a queued ticket gets while the
+// operator's pause is in force: the request was received, nothing is
+// wrong with it, and it starts when intake resumes.
+func IntakePausedContent(runID string, since time.Time) string {
+	when := since.In(questionZone).Format("2006-01-02 15:04")
+	body := fmt.Sprintf(
+		"【受付停止中】この依頼は受け付けましたが、現在は運用者の指示で新しい依頼の開始を止めています（停止: %s）。再開後にこの依頼を開始します。実行中の依頼はそのまま進みます。\n\n",
+		when)
+	return body + CommentFacts{
+		State:      "受付停止中（運用者の指示）",
+		NextActor:  "運用担当者",
+		Operation:  "再開の操作（設定の intake_paused_since を外す）",
+		NextEvent:  "再開後に開始（以後の自動通知はありません）",
+		Production: "未変更",
+		AutoRetry:  "なし（再開待ち）",
+		Marker:     CommentMarker(string(RunCommentIntakePaused), runID),
+	}.render()
+}
+
 func FailureStreakContent(runID, code string, count int) string {
 	body := fmt.Sprintf(
 		"【同じ失敗が %d 回連続】直近の自動処理が %d 回続けて同じ結果 — %s — になりました。仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",

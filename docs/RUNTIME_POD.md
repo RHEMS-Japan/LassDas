@@ -216,6 +216,11 @@ fabricated workflow link.
   `failure-streak-resolution.json` recorded in that run's directory).
   In-flight runs are not touched; the held ticket is read at most every
   two minutes.
+- **Intake pause**: `chain.intake_paused_since` (an RFC 3339 time) is the
+  operator's explicit pause. Queued deliveries are not started while it is
+  set — each queued ticket is told once (marker `intake-paused`) and the
+  board shows 受付停止中 — and claimed deliveries continue to their end.
+  Removing the value resumes intake; the queued runs then start in order.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
