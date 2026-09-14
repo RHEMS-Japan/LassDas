@@ -48,7 +48,10 @@ const (
 	// RunCommentStreakHold says intake is stopped because the same failure
 	// ended the last N deliveries; RunCommentStreakResolved acknowledges
 	// the operator's 「確認済み」 that lifts it.
-	RunCommentStreakHold     RunCommentKind = "streak-hold"
+	RunCommentStreakHold RunCommentKind = "streak-hold"
+	// RunCommentIntakePaused tells a queued ticket that the operator paused
+	// intake and the run will start once intake resumes.
+	RunCommentIntakePaused   RunCommentKind = "intake-paused"
 	RunCommentStreakResolved RunCommentKind = "streak-resolved"
 )
 

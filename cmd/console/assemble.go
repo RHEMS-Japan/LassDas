@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,9 +31,17 @@ type consoleServer struct {
 	dynamo        *dynamodb.Client
 	local         *state.LocalStore
 	runtimeConfig *runtime.Config
-	workerConfig  *worker.Config
-	hermes        *runtime.Hermes
-	client        *http.Client
+	// runtimeConfigPath lets the one setting that changes on a running pod
+	// (the intake pause) be re-read per request instead of at startup; the
+	// last value that could be read is kept over a transient failure, as
+	// the attendant does.
+	runtimeConfigPath string
+	pauseMu           sync.Mutex
+	pauseValue        string
+	pauseRead         bool
+	workerConfig      *worker.Config
+	hermes            *runtime.Hermes
+	client            *http.Client
 	// The tracker key's owner, read once at startup. Zero means unknown,
 	// and unknown keeps the answering write switched off.
 	keyOwnerID   int64
@@ -113,9 +122,14 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 			clarifications[basePK(pk)]++
 		}
 	}
+	// One strict config read per request, not one per queued ticket.
+	intakePaused := s.intakePausedNow()
 	for base, ticket := range byRun {
 		ticket.ClarificationNo = clarifications[base]
 		ticket.NextActor, ticket.OpenQuestion = nextActor(*ticket)
+		if ticket.State == "queued" && intakePaused {
+			ticket.NextActor = "運用者 (受付停止中)"
+		}
 		response.Tickets = append(response.Tickets, *ticket)
 	}
 	// Newest activity first: the operator's question is "what needs me
@@ -128,6 +142,30 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return left.IssueKey > right.IssueKey
 	})
 	writeJSON(w, response)
+}
+
+// intakePausedNow reads the operator's pause as the config file says now
+// (the cards attendant re-reads it the same way); it is meaningless under
+// any other orchestration.
+func (s *consoleServer) intakePausedNow() bool {
+	if s.runtimeConfig == nil || !s.runtimeConfig.OrchestrationCards() {
+		return false
+	}
+	s.pauseMu.Lock()
+	if !s.pauseRead {
+		s.pauseValue, s.pauseRead = s.runtimeConfig.Chain.IntakePausedSince, true
+	}
+	if s.runtimeConfigPath != "" {
+		if current, err := runtime.ReadIntakePause(s.runtimeConfigPath); err == nil {
+			s.pauseValue = current
+		}
+	}
+	value := s.pauseValue
+	s.pauseMu.Unlock()
+	probe := *s.runtimeConfig
+	probe.Chain.IntakePausedSince = value
+	_, paused := probe.Chain.IntakePaused()
+	return paused
 }
 
 // nextActor states whose move it is - the single most useful column of the

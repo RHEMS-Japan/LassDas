@@ -136,6 +136,7 @@ func run() error {
 		}
 		server.local, server.runtimeConfig, server.workerConfig = local, &runtimeConfig, &workerConfig
 		server.hermes = engineRuntime.NewHermes(runtimeConfig)
+		server.runtimeConfigPath = *runtimeConfigPath
 	} else {
 		awsConfig, err := config.LoadDefaultConfig(context.Background())
 		if err != nil {

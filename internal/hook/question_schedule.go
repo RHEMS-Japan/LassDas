@@ -7,6 +7,10 @@ import "time"
 // runtime dependency on a tzdata database.
 var questionZone = time.FixedZone("Asia/Tokyo", 9*60*60)
 
+// DisplayZone is the zone every instant shown to people is rendered in —
+// tickets and the board alike, so one pause never reads as two times.
+func DisplayZone() *time.Location { return questionZone }
+
 const (
 	questionNotifyHour   = 10
 	questionDeadlineHour = 17

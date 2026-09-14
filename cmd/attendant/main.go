@@ -75,6 +75,41 @@ func run() error {
 	// snapshot must never disturb the tick that feeds it. The mutex
 	// serializes the fast loop against the tick's own call — events.jsonl
 	// appends and the board.json rename must not interleave.
+	// The pause is the one setting an operator changes on a running pod;
+	// it is re-read from the mounted config before every tick and every
+	// observation, under a mutex because the two loops run concurrently.
+	// A value that cannot be read keeps the last one that could, said once.
+	var pauseMu sync.Mutex
+	pauseValue, lastPauseError := config.Chain.IntakePausedSince, ""
+	currentConfig := func() runtime.Config {
+		pauseMu.Lock()
+		defer pauseMu.Unlock()
+		current := config
+		current.Chain.IntakePausedSince = pauseValue
+		return current
+	}
+	refreshPause := func() {
+		if !config.OrchestrationCards() {
+			return
+		}
+		value, err := runtime.ReadIntakePause(*configPath)
+		pauseMu.Lock()
+		defer pauseMu.Unlock()
+		if err != nil {
+			if err.Error() != lastPauseError {
+				logger.Error("intake pause unreadable; keeping the last value", "error", err.Error())
+				lastPauseError = err.Error()
+			}
+			return
+		}
+		if lastPauseError != "" {
+			lastPauseError = ""
+		}
+		if value != pauseValue {
+			logger.Info("intake pause changed", "intake_paused_since", value)
+			pauseValue = value
+		}
+	}
 	var observeMu sync.Mutex
 	observe := func() {
 		observeMu.Lock()
@@ -84,7 +119,8 @@ func run() error {
 		// whole reception. The timeout kills the CLI via CommandContext.
 		observeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		if snapshot, err := attendant.SnapshotStatus(observeCtx, config, services, hermes); err != nil {
+		refreshPause()
+		if snapshot, err := attendant.SnapshotStatus(observeCtx, currentConfig(), services, hermes); err != nil {
 			logger.Error("status snapshot failed", "error", err.Error())
 		} else if err := attendant.WriteBoardStatus(statusDir(), snapshot); err != nil {
 			logger.Error("status write failed", "error", err.Error())
@@ -106,7 +142,8 @@ func run() error {
 		if config.OrchestrationCards() {
 			// The cards orchestration: the attendant claims, prepares,
 			// aligns chains and owns every report; no runner process exists.
-			if err := attendant.SyncChains(ctx, config, services, hermes, logger); err != nil {
+			refreshPause()
+			if err := attendant.SyncChains(ctx, currentConfig(), services, hermes, logger); err != nil {
 				logger.Error("chain sync failed", "error", err.Error())
 			}
 			observe()

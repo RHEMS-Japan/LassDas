@@ -118,6 +118,12 @@ type ChainConfig struct {
 	// ended with the same failure; the operator's 「確認済み」 on the newest
 	// of them resumes it. Omitted means 3; 0 turns the hold off.
 	FailureStreakLimit *int `json:"failure_streak_limit,omitempty"`
+	// IntakePausedSince, when set (RFC 3339), stops the attendant from
+	// starting queued deliveries: the operator's explicit pause (J03). Runs
+	// already claimed continue to their end; a queued ticket is told once
+	// that it waits for the resumption, and the board shows the pause.
+	// Resuming is removing the value.
+	IntakePausedSince string `json:"intake_paused_since,omitempty"`
 	// E2EProfile, when set, turns on the debug role: every successful
 	// delivery gets one post-merge staging observation card assigned to
 	// it. Empty (the default) leaves the role off.
@@ -339,6 +345,16 @@ func Load(path string) (Config, error) {
 	if config.Chain.FailureStreakLimit != nil && *config.Chain.FailureStreakLimit < 0 {
 		return Config{}, errors.New("runtime config: chain.failure_streak_limit must be 0 (off) or positive")
 	}
+	if config.Chain.IntakePausedSince != "" {
+		if _, err := time.Parse(time.RFC3339, config.Chain.IntakePausedSince); err != nil {
+			return Config{}, errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
+		}
+		if !config.OrchestrationCards() {
+			// Only the cards attendant holds queued runs; the runner
+			// orchestration would accept the value and start everything.
+			return Config{}, errors.New("runtime config: chain.intake_paused_since needs orchestration \"cards\"")
+		}
+	}
 	i := config.Identity
 	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
 		i.WorkflowRef == "" || !commit40.MatchString(i.EngineSHA) {
@@ -502,6 +518,37 @@ func (c Config) Owner(hermesRunID int64) hook.PullOwner {
 		WorkflowRunID:     hermesRunID,
 		RunAttempt:        1,
 	}
+}
+
+// ReadIntakePause reads chain.intake_paused_since from the config file as it
+// is NOW, through the same strict Load the boot uses. The attendant loads
+// its config once at start, but the pause is the one setting an operator
+// changes on a running pod (the ConfigMap is mounted as a directory, so an
+// edit reaches the file without a restart — and a restart would interrupt
+// the running deliveries the pause promises to leave alone). Reading
+// through Load means a mistyped key or a dropped object is an error the
+// caller keeps the last good value over and logs, not a silent "not
+// paused" that the next boot would then refuse.
+func ReadIntakePause(path string) (string, error) {
+	config, err := Load(path)
+	if err != nil {
+		return "", err
+	}
+	return config.Chain.IntakePausedSince, nil
+}
+
+// IntakePaused reports whether the operator paused intake, and since when.
+// An unreadable value counts as not paused: Load refuses it, so a running
+// attendant never holds a config it cannot read.
+func (c ChainConfig) IntakePaused() (time.Time, bool) {
+	if c.IntakePausedSince == "" {
+		return time.Time{}, false
+	}
+	since, err := time.Parse(time.RFC3339, c.IntakePausedSince)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return since, true
 }
 
 // defaultFailureStreakLimit is how many identical failures in a row hold
