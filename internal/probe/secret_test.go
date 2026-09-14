@@ -95,11 +95,22 @@ func TestSecretShapedOutputIsMaskedNotDropped(t *testing.T) {
 	if masked, kinds, refusal := MaskSecrets("set-cookie seen; value 0123456789abcdef", []string{"0123456789abcdef"}); refusal != "known secret value" || masked != "" || kinds != nil {
 		t.Errorf("known value: masked %q kinds %v refusal %q, want the whole output refused", masked, kinds, refusal)
 	}
-	// The masked text is scanned again before it is returned: a value that
-	// would only appear after masking (here a forbidden literal that the
-	// marker itself spells) refuses the output instead of being stored.
-	if masked, kinds, refusal := MaskSecrets("x "+fakeAWSKeyID+" y", []string{"masked:aws"}); refusal != "known secret value" || masked != "" || kinds != nil {
-		t.Errorf("re-scan: masked %q kinds %v refusal %q, want the output refused", masked, kinds, refusal)
+	// Markers are looked through by the scan: a marker right after
+	// "Bearer " or "user:" is not itself a shape, so a gateway key sent as
+	// a bearer token and a key id used as a password stay readable.
+	for sample, want := range map[string]string{
+		"Authorization: Bearer csk-abcdefgh12345678 sent\n": "Authorization: Bearer [masked:gateway-key] sent\n",
+		"dsn postgres://u:" + fakeAWSKeyID + "@host/db\n":   "dsn postgres://u:[masked:aws-access-key-id]@host/db\n",
+	} {
+		masked, _, refusal := MaskSecrets(sample, nil)
+		if refusal != "" || masked != want {
+			t.Errorf("marker after a shape prefix: masked %q refusal %q, want %q", masked, refusal, want)
+		}
+	}
+	// The private-use runes the placeholders are built from cannot come
+	// from the output: they are replaced before anything is masked.
+	if masked, kinds, refusal := MaskSecrets("note \uE0000\uE001 here\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\n", nil); refusal != "" || masked != "note \uFFFD0\uFFFD here\nAuthorization: [masked:bearer-token]\n" || strings.Join(kinds, ",") != "bearer token" {
+		t.Errorf("private-use runes: masked %q kinds %v refusal %q", masked, kinds, refusal)
 	}
 	// Benign output comes back untouched.
 	for _, benign := range []string{"NAME READY STATUS\nweb-1 1/1 Running", "postgres://db.example.invalid:5432/app", ""} {

@@ -159,3 +159,51 @@ func TestBudgetRefusalKeepsNoMaskedKinds(t *testing.T) {
 		t.Fatalf("a refused record kept masked kinds or output: %+v", stored)
 	}
 }
+
+// The value a shape captured may carry a closing quote, comma or semicolon,
+// or run past a later '@'; the same value standing bare elsewhere is still
+// removed, because the forms the value can take are all candidates.
+func TestMaskedValueCandidatesCoverBareOccurrences(t *testing.T) {
+	token := "abcdef0123456789abcdef0123456789"
+	for name, c := range map[string]struct{ content, secret string }{
+		"pretty json":      {"{\n  \"authorization\": \"Bearer " + token + "\",\n  \"token\": \"" + token + "\"\n}\n", token},
+		"shell then curl":  {"TOKEN=" + token + "\ncurl -H \"Authorization: Bearer " + token + "\" https://api.example.invalid/\n", token},
+		"dsn with later @": {"PGPASSWORD=s3cretpass\nDATABASE_URL=postgres://reader:s3cretpass@db.example.invalid/app?application_name=svc@prod\n", "s3cretpass"},
+		"semicolon":        {"Authorization: Bearer " + token + "\ntoken=" + token + ";\n", token},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome, stored := maskedRead(t, "out.txt", c.content, maskedLimits)
+			if outcome.Measurement.Refused {
+				t.Fatalf("refused: %s", outcome.Measurement.Reason)
+			}
+			if strings.Contains(stored.Output, c.secret) {
+				t.Fatalf("the value is stored: %q", stored.Output)
+			}
+		})
+	}
+}
+
+// A short value (under eight bytes) is removed from the rest of the output
+// only where it stands as a word of its own, so a four-letter password does
+// not take "data" out of "data_dir"; a longer value is removed anywhere.
+func TestShortValuesAreRemovedAtWordBoundariesOnly(t *testing.T) {
+	_, stored := maskedRead(t, "cfg.txt", "url postgres://app:data@db.example.invalid/x\ndata_dir=/var/lib/data\n", maskedLimits)
+	want := "url [masked:connection-string-with-password]db.example.invalid/x\ndata_dir=/var/lib/[masked:connection-string-with-password]\n"
+	if stored.Output != want {
+		t.Fatalf("stored = %q, want %q", stored.Output, want)
+	}
+	_, stored = maskedRead(t, "cfg2.txt", "url postgres://app:longpassword@db.example.invalid/x\nlongpassword_dir=/x\n", maskedLimits)
+	if strings.Contains(stored.Output, "longpassword") {
+		t.Fatalf("a long value survived inside a word: %q", stored.Output)
+	}
+}
+
+// Minified JSON keeps its host and its other fields: the password runs to
+// the last '@' before a closing quote, not to the last '@' in the line.
+func TestMinifiedJSONKeepsTheHost(t *testing.T) {
+	_, stored := maskedRead(t, "cfg.json", `{"db":"postgres://app:s3cretpass@db.example.invalid/app","contact":"ops@example.invalid","replicas":3}`, maskedLimits)
+	want := `{"db":"[masked:connection-string-with-password]db.example.invalid/app","contact":"ops@example.invalid","replicas":3}`
+	if stored.Output != want {
+		t.Fatalf("stored = %q, want %q", stored.Output, want)
+	}
+}
