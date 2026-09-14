@@ -97,7 +97,17 @@ func TestSecretShapedOutputIsMaskedNotDropped(t *testing.T) {
 	}
 	// Markers are looked through by the scan: a marker right after
 	// "Bearer " or "user:" is not itself a shape, so a gateway key sent as
-	// a bearer token and a key id used as a password stay readable.
+	// a bearer token and a key id used as a password stay readable, and a
+	// marker cannot join the text after it into a shape either.
+	for _, glued := range []string{
+		"Bearer [masked:connection-string-with-password] abcdefghijklmnopqrstuvwxyz",
+		"Bearer [masked:connection-string-with-password].eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+		"postgres://u:[masked:aws-access-key-id]@host/db",
+	} {
+		if kind, found := SecretShaped(glued, nil); found {
+			t.Errorf("a marker joined into a %s: %q", kind, glued)
+		}
+	}
 	for sample, want := range map[string]string{
 		"Authorization: Bearer csk-abcdefgh12345678 sent\n": "Authorization: Bearer [masked:gateway-key] sent\n",
 		"dsn postgres://u:" + fakeAWSKeyID + "@host/db\n":   "dsn postgres://u:[masked:aws-access-key-id]@host/db\n",

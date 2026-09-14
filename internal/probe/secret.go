@@ -64,6 +64,11 @@ func maskMarker(kind string) string { return "[masked:" + strings.ReplaceAll(kin
 
 var markerPattern = regexp.MustCompile(`\[masked:[a-z-]+\]`)
 
+// markerBlank is what a scan sees in place of a marker or a placeholder: a
+// character that belongs to no shape, with whitespace on both sides so the
+// text on either side of it cannot run together into a shape.
+const markerBlank = " \uFFFD "
+
 // placeholder stands in for a masked match or value while the output is
 // checked: it carries no kind words, so a masked value can never be found
 // again inside what replaced it. The private-use runes it is built from are
@@ -87,11 +92,12 @@ const minValueBytes = 4
 
 // SecretShaped reports whether output carries a key-shaped string or any of
 // the literal values the caller knows must never appear (the jar's cookie
-// values, for instance). Mask markers are looked through, so a marker that
-// happens to follow "Bearer " or "user:" is not itself a shape. The
-// returned kind names the shape, never the value.
+// values, for instance). Mask markers are looked through: each is read as
+// a hard boundary (markerBlank), so a marker that happens to follow
+// "Bearer " or "user:" is not itself a shape and cannot join the text after
+// it into one. The returned kind names the shape, never the value.
 func SecretShaped(output string, forbiddenLiterals []string) (string, bool) {
-	output = markerPattern.ReplaceAllLiteralString(output, " ")
+	output = markerPattern.ReplaceAllLiteralString(output, markerBlank)
 	for _, shape := range secretShapes {
 		if shape.pattern.MatchString(output) {
 			return shape.kind, true
@@ -200,7 +206,7 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 			return "", nil, secretShapes[v.shape].kind
 		}
 	}
-	if kind, found := SecretShaped(placeholderPattern.ReplaceAllLiteralString(text, " "), forbiddenLiterals); found {
+	if kind, found := SecretShaped(placeholderPattern.ReplaceAllLiteralString(text, markerBlank), forbiddenLiterals); found {
 		return "", nil, kind
 	}
 	masked = text
