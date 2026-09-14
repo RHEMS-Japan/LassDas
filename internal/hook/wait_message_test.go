@@ -12,7 +12,7 @@ import (
 func TestWaitMessagesSayWhatMovesTheRunAndWhatDoesNot(t *testing.T) {
 	deadline := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
 	reminder := GoReminderContent("TKT-7", 2, deadline)
-	for _, want := range []string{"2 回目の確認", "「Go」", "「停止」", "期限: 2026-09-21 09:00", "ステージングの変更はそのまま残ります", "次に行動する人: 依頼者"} {
+	for _, want := range []string{"2 回目の確認", "「Go」", "何もしなくて構いません", "「停止」", "期限: 2026-09-21 09:00", "ステージングの変更はそのまま残ります", "次に行動する人: 依頼者"} {
 		if !strings.Contains(reminder, want) {
 			t.Errorf("the reminder lacks %q:\n%s", want, reminder)
 		}

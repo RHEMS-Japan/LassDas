@@ -38,19 +38,26 @@ func dueGoReminders(now, observedAt, deadline time.Time) []int {
 	return due
 }
 
-// remindGo posts the due reminders that are not yet on the ticket. The
-// comments were listed by the caller this tick; a reminder posted now is
-// found by its marker next tick.
+// remindGo posts at most one reminder per tick: the latest due one, and
+// only if neither it nor a later one is on the ticket already. An
+// attendant that was down over several instants must not post the ones it
+// missed in a burst — the same rule the question tick applies (one
+// reminder, the latest). The comments were listed by the caller this
+// tick; a reminder posted now is found by its marker next tick.
 func remindGo(ctx context.Context, backlog operatorConfirmationSource, run state.RunOverview, observedAt, deadline time.Time, comments []hook.BacklogComment, logger Logger) {
-	for _, n := range dueGoReminders(time.Now(), observedAt, deadline) {
+	due := dueGoReminders(time.Now(), observedAt, deadline)
+	for index := len(due) - 1; index >= 0; index-- {
+		n := due[index]
 		if _, posted := commentIDWithMarker(comments, hook.GoReminderMarker(run.RunID, n)); posted {
-			continue
+			return // this one or a later one is there; everything earlier is stale
 		}
-		if _, err := backlog.AddComment(ctx, run.IssueID, hook.GoReminderContent(run.RunID, n, deadline)); err != nil {
-			logger.Error("go reminder: post failed", "run", run.RunID, "n", n, "error", err.Error())
-			return
+		if index == len(due)-1 {
+			if _, err := backlog.AddComment(ctx, run.IssueID, hook.GoReminderContent(run.RunID, n, deadline)); err != nil {
+				logger.Error("go reminder: post failed", "run", run.RunID, "n", n, "error", err.Error())
+				return
+			}
+			logger.Info("go reminder posted", "run", run.RunID, "n", n)
 		}
-		logger.Info("go reminder posted", "run", run.RunID, "n", n)
 	}
 }
 
@@ -63,7 +70,11 @@ func noticeLateGo(ctx context.Context, config runtime.Config, backlog operatorCo
 		return
 	}
 	noticeLateWord(ctx, backlog, run, runDir, outcome.At, func(comments []hook.BacklogComment) bool {
-		reportID, found := commentIDWithMarker(comments, hook.CommentMarker(string(hook.RunCommentReleaseReport), run.RunID))
+		// The boundary is the staging report — the comment the Go was for.
+		// The wait expired, so no Go after it was acted on: one that
+		// landed between the deadline instant and the expiry report is
+		// as late as one after the report, and is answered the same way.
+		reportID, found := commentIDWithMarker(comments, hook.CommentMarker(string(hook.RunCommentStagingReport), run.RunID))
 		return found && containsGoComment(comments, config.Tracker.AllowedCreatorID, reportID)
 	}, "Go", logger)
 }
@@ -104,12 +115,13 @@ func noticeLateWord(ctx context.Context, backlog operatorConfirmationSource, run
 	if endedAt.IsZero() || now.After(endedAt.Add(lateWordWindow)) || lateWordCheckedRecently(runDir, now) {
 		return
 	}
-	recordLateWordCheck(runDir, now)
 	comments, err := backlog.ListComments(ctx, run.IssueID, 0)
 	if err != nil {
+		// Not recorded: a listing that failed did not spend the hour.
 		logger.Error("late word: comment listing failed", "run", run.RunID, "error", err.Error())
 		return
 	}
+	recordLateWordCheck(runDir, now)
 	if _, replied := commentIDWithMarker(comments, hook.LateWordMarker(run.RunID)); replied {
 		return
 	}

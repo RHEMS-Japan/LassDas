@@ -18,12 +18,12 @@ func GoReminderMarker(runID string, n int) string {
 func GoReminderContent(runID string, n int, deadline time.Time) string {
 	when := deadline.In(questionZone).Format("2006-01-02 15:04")
 	body := fmt.Sprintf(
-		"【本番反映の承認待ち（%d 回目の確認）】ステージングの確認は合格しています。本番へ反映するなら、このチケットに「Go」とだけコメントしてください（依頼者ご本人のコメントのみ有効）。反映しないなら「停止」とだけコメントしてください。\n\n期限: %s。期限を過ぎると本番反映は行わず終了し、ステージングの変更はそのまま残ります。\n\n",
+		"【本番反映の承認待ち（%d 回目の確認）】ステージングの確認は合格しています。本番へ反映するなら、このチケットに「Go」とだけコメントしてください（依頼者ご本人のコメントのみ有効）。反映しない場合は何もしなくて構いません（期限で本番反映なしのまま終了します）。今すぐ終えるなら「停止」とだけコメントしてください。\n\n期限: %s。期限を過ぎると本番反映は行わず終了し、ステージングの変更はそのまま残ります。\n\n",
 		n, when)
 	return body + CommentFacts{
 		State:      "本番反映の承認待ち",
 		NextActor:  "依頼者",
-		Operation:  "「Go」で本番反映、「停止」で本番反映せず終了",
+		Operation:  "「Go」で本番反映。反映しないなら何もしない（期限で終了）。今すぐ終えるなら「停止」",
 		NextEvent:  "期限 " + when + "（期限切れで本番反映なしのまま終了）",
 		Production: "未変更",
 		AutoRetry:  "なし（人の判断待ち）",
