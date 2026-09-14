@@ -81,7 +81,7 @@ func compileDeployPath(pattern string) (*regexp.Regexp, error) {
 			if strings.HasPrefix(class, "[!") {
 				class = "[^" + class[2:]
 			}
-			if strings.ContainsAny(class[1:end], "/[") {
+			if strings.ContainsAny(class[1:end], "/[") || !classMatchesSomeDeliveredByte(class) {
 				return nil, errors.New("consumer workflow deploy_paths pattern is invalid")
 			}
 			expression.WriteString(class)
@@ -119,6 +119,27 @@ func deployPathByte(c byte) bool {
 		return true
 	}
 	return strings.IndexByte("._/-*?[]!^", c) >= 0
+}
+
+// deliveredPathAlphabet is every byte a delivered path may carry besides
+// the separator (releaseproof's relativePathPattern).
+const deliveredPathAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+
+// classMatchesSomeDeliveredByte reports whether a translated class can
+// match at least one byte a delivered path carries. "[*]", "[?-?]" and a
+// negation of the whole alphabet ("[!A-Za-z0-9._-]") match none, and an
+// entry built on them would be a declared scope that covers nothing.
+func classMatchesSomeDeliveredByte(class string) bool {
+	compiled, err := regexp.Compile("^" + class + "$")
+	if err != nil {
+		return false
+	}
+	for i := 0; i < len(deliveredPathAlphabet); i++ {
+		if compiled.MatchString(deliveredPathAlphabet[i : i+1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeployPathCovered reports whether one delivered path falls inside a

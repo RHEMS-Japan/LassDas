@@ -103,12 +103,14 @@ func TestDeployPathsRefuseWhatCannotMatchADeliveredPath(t *testing.T) {
 		{"!docs/"}, {"docs//x"}, {"docs/./x"}, {"docs/."}, {"docs/\\*"}, {"docs/[/x"}, {"docs/[a/b]"}, {"docs/[]"},
 		// Characters no delivered path can carry: accepted, such an entry
 		// would be a declared scope that covers nothing (review, round 3).
-		{"a b"}, {"a\tb"}, {"src/+x"}, {"a(b)"}, {"a$b"}, {"a|b"}, {"a{2}"}, {"ドキュメント/*.md"}, {"a^b"}, {strings.Repeat("a", 513)}} {
+		{"a b"}, {"a\tb"}, {"src/+x"}, {"a(b)"}, {"a$b"}, {"a|b"}, {"a{2}"}, {"ドキュメント/*.md"}, {"a^b"}, {strings.Repeat("a", 513)},
+		// A class that no delivered byte satisfies (review, round 4).
+		{"[*]"}, {"[?]"}, {"docs/[*?]"}, {"[?-?]"}, {"[!A-Za-z0-9._-]"}, {"docs/[^A-Za-z0-9._-]*"}} {
 		if err := (ConsumerWorkflow{DeployPaths: bad}).validateDeployPaths(); err == nil {
 			t.Errorf("deploy_paths %q accepted", bad)
 		}
 	}
-	for _, good := range [][]string{{"docs/"}, {"src", "app/"}, {"*.go"}, {"cmd/*/main.go"}, {"docs/**"}, {"**/*.go"}, {"**"}, {"**.js"}, {"src/**/"}, {"docs/[ab].md"}, nil} {
+	for _, good := range [][]string{{"docs/"}, {"src", "app/"}, {"*.go"}, {"cmd/*/main.go"}, {"docs/**"}, {"**/*.go"}, {"**"}, {"**.js"}, {"src/**/"}, {"docs/[ab].md"}, {"[!ab]*"}, {"[a-z]*"}, {"[.]*"}, {"[-a]*"}, nil} {
 		if err := (ConsumerWorkflow{DeployPaths: good}).validateDeployPaths(); err != nil {
 			t.Errorf("deploy_paths %q refused: %v", good, err)
 		}
