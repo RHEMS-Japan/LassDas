@@ -51,7 +51,13 @@ const (
 	RunCommentStreakHold RunCommentKind = "streak-hold"
 	// RunCommentIntakePaused tells a queued ticket that the operator paused
 	// intake and the run will start once intake resumes.
-	RunCommentIntakePaused   RunCommentKind = "intake-paused"
+	RunCommentIntakePaused RunCommentKind = "intake-paused"
+	// RunCommentGoReminder reminds the requester, on the weekday schedule the
+	// questions use, that the staging report waits for their Go.
+	RunCommentGoReminder RunCommentKind = "go-reminder"
+	// RunCommentLateWord answers a Go or an answer that arrived after the
+	// wait had expired: nothing resumes, and how to continue.
+	RunCommentLateWord       RunCommentKind = "late-word"
 	RunCommentStreakResolved RunCommentKind = "streak-resolved"
 )
 

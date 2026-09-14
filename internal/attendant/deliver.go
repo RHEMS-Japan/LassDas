@@ -80,6 +80,8 @@ func syncDeliver(
 		if verdict, since, waits := releaseAttentionVerdict(runDir); waits {
 			resolveAttention(ctx, config.Tracker, services.Backlog, run, runDir, "release", verdict, since, logger)
 		}
+		// A Go after the wait expired is answered, not acted on.
+		noticeLateGo(ctx, config, services.Backlog, run, runDir, logger)
 		return sweepDeliverCards(ctx, hermes, cards)
 	}
 	if deliverFileExists(runDir, runner.DeliverProductionReportFile) {
@@ -258,6 +260,9 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 		return nil // the report is not visible yet; fail closed
 	}
 	if !containsGoComment(comments, config.Tracker.AllowedCreatorID, reportCommentID) {
+		// Still waiting: remind on the questions' weekday rhythm, cut at
+		// the deadline the expiry above enforces.
+		remindGo(ctx, services.Backlog, run, report.ObservedAt, report.ObservedAt.Add(config.Chain.Deliver.GoWait()), comments, logger)
 		return nil
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{

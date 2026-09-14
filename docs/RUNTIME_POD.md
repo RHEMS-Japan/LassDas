@@ -227,6 +227,13 @@ fabricated workflow link.
   受付停止中 with the instant in Asia/Tokyo — and claimed deliveries continue
   to their end. Removing the value resumes intake; the queued runs then start
   in order. The runner orchestration refuses the value at load.
+- **Waits on a person**: the Go wait (`chain.deliver.go_wait_seconds`,
+  default 7 days) reminds the requester on the questions' weekday rhythm
+  (1st, 3rd, 5th weekday at 10:00 Asia/Tokyo after the staging report,
+  marker `go-reminder`), and a Go or an answer that arrives after its wait
+  expired gets one reply (marker `late-word`): nothing resumes, file the
+  request again to continue. Finished runs are read for such late words at
+  most once an hour for 14 days.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment

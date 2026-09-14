@@ -112,6 +112,8 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 				logger.Error("pending terminal report not completed", "run", run.RunID, "error", err.Error())
 			}
 		case "terminal":
+			// An answer after a question's deadline is answered, not acted on.
+			noticeLateAnswer(ctx, config, services.Backlog, run, runDirectory(config, run.DeliveryID), logger)
 			// The run itself is closed; what may remain is the debug
 			// role's post-merge observation, or the v2 delivery
 			// continuation (config makes the two mutually exclusive).
