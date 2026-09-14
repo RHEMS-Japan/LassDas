@@ -355,12 +355,18 @@ func (p *Pipeline) consumerDigestPaths() []string {
 	if err != nil {
 		return nil
 	}
+	// The policy lives under github_contract, where ConsumerGitHubContract
+	// declares it and the shipped config writes it. An earlier reading
+	// looked one level up, found nothing there, and let every digest file
+	// count as a foreign change on the promotion.
 	var parsed struct {
 		Consumers []struct {
-			Repository          string `json:"repository"`
-			StagingDigestCommit struct {
-				ExactPaths []string `json:"exact_paths"`
-			} `json:"staging_digest_commit"`
+			Repository string `json:"repository"`
+			GitHub     struct {
+				StagingDigestCommit struct {
+					ExactPaths []string `json:"exact_paths"`
+				} `json:"staging_digest_commit"`
+			} `json:"github_contract"`
 		} `json:"consumers"`
 	}
 	if json.Unmarshal(raw, &parsed) != nil {
@@ -368,7 +374,7 @@ func (p *Pipeline) consumerDigestPaths() []string {
 	}
 	for _, consumer := range parsed.Consumers {
 		if consumer.Repository == repository {
-			return consumer.StagingDigestCommit.ExactPaths
+			return consumer.GitHub.StagingDigestCommit.ExactPaths
 		}
 	}
 	return nil

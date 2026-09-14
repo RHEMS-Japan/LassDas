@@ -321,7 +321,7 @@ func TestPromotionHoldTracksTheGateReality(t *testing.T) {
 	}
 	// Digest-commit files ride every promotion and must not trigger a hold.
 	pipeline := deliverPipeline(t)
-	consumer := `{"models":{"reviewers":[{"id":"a"},{"id":"b"}]},"consumers":[{"repository":"example/one","staging_origin":"https://one.example.invalid","staging_digest_commit":{"exact_paths":["k8s/overlays/stg/kustomization.yaml"]}}]}`
+	consumer := `{"models":{"reviewers":[{"id":"a"},{"id":"b"}]},"consumers":[{"repository":"example/one","staging_origin":"https://one.example.invalid","github_contract":{"staging_digest_commit":{"exact_paths":["k8s/overlays/stg/kustomization.yaml"]}}}]}`
 	if err := os.WriteFile(pipeline.Config.ConsumerConfigPath, []byte(consumer), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,6 +149,113 @@ func TestAChangeOutsideEveryProductionScopeCompletesWithoutWaiting(t *testing.T)
 	}
 }
 
+// The promotion carries the CI digest files the staging deployment
+// committed, not the product paths alone. A production scope that names
+// the manifests those digests live in is reacting to exactly that commit,
+// so the runner must wait for the production run — and must not, once the
+// digest policy is gone.
+func TestAProductionScopeSeesTheDigestFilesThePromotionCarries(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		digest      string
+		want        string
+		awaitCalled bool
+	}{
+		{"digest files inside the production scope", `,"staging_digest_commit":{"exact_message_prefix":"ci: digest","exact_paths":["deploy/prod/kustomization.yaml"],"actor_login":"ci-bot"}`, "deploy_absent", true},
+		{"no digest policy", ``, "deploy_not_applicable", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipeline := deliverPipeline(t)
+			content := `{"models":{"reviewers":[{"id":"lassdas-review-a"},{"id":"lassdas-review-b"}]},` +
+				`"consumers":[{"repository":"example/one","staging_origin":"https://one.example.invalid",` +
+				`"github_contract":{"staging_workflow":{"path":"s.yml","deploy_paths":["src/"]},` +
+				`"production_workflows":[{"path":"p.yml","deploy_paths":["deploy/prod/"]}]` + tc.digest + `}}]}`
+			if err := os.WriteFile(pipeline.Config.ConsumerConfigPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sealRounds(t, pipeline, 1)
+			for name, content := range map[string]string{
+				"feature-pr.json":         `{"binding":{"repository":"example/one","product_paths":["src/main.go"]},"payload":{"pull_request":{"Number":41}}}`,
+				DeliverStagingReportFile:  `{"phase":"staging","verdict":"pass"}`,
+				DeliverStagingProofFile:   `{"payload":{}}`,
+				DeliverStagingVisibleFile: `{}`,
+				DeliverPromotionFile:      `{"payload":{"pull_request":{"Number":52}}}`,
+				DeliverPromotionMergeFile: `{}`,
+				DeliverReflectionFile:     `{}`,
+			} {
+				if err := os.WriteFile(pipeline.path(name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			record := absentController(t, pipeline, "await-production", "controller: production_deployment_absent")
+			if err := pipeline.RunDeliver(context.Background(), DeliverUntilProduction); err != nil {
+				t.Fatalf("RunDeliver() error = %v", err)
+			}
+			report := readSealedDeliverReport(t, pipeline, DeliverProductionReportFile)
+			if report.Verdict != tc.want {
+				t.Fatalf("verdict = %q, want %q", report.Verdict, tc.want)
+			}
+			if called := strings.Contains(controllerVerbsCalled(t, record), "await-production"); called != tc.awaitCalled {
+				t.Fatalf("await-production called = %v, want %v", called, tc.awaitCalled)
+			}
+		})
+	}
+}
+
+// A consumer config the scope reader cannot use is not a declaration. The
+// runner waits, as it did before the field existed, instead of ending the
+// card with an error nothing on the ticket explains.
+func TestAnUnreadableConsumerConfigIsNotADeclaration(t *testing.T) {
+	pipeline := deliverPipeline(t)
+	if err := os.WriteFile(pipeline.path("feature-pr.json"), []byte(`{"binding":{"repository":"example/one","product_paths":["docs/x.md"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, config := range map[string]string{"missing": filepath.Join(t.TempDir(), "none.json"), "not json": pipeline.path("feature-pr.json")} {
+		pipeline.Config.ConsumerConfigPath = config
+		skip, _, err := pipeline.deployNotApplicable("staging")
+		if err != nil || skip {
+			t.Fatalf("%s config: skip = %v err = %v, want wait with no error", name, skip, err)
+		}
+	}
+}
+
+// The digest-commit policy is declared under github_contract — that is
+// where the config type puts it and where the shipped config writes it.
+// Read from anywhere else, the promotion sees every digest file as a
+// foreign change.
+func TestConsumerDigestPathsReadTheContractLevelPolicy(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "m1-consumer.json"))
+	if err != nil {
+		t.Skipf("shipped config unavailable: %v", err)
+	}
+	var shipped struct {
+		Consumers []struct {
+			Repository string `json:"repository"`
+			GitHub     struct {
+				StagingDigestCommit struct {
+					ExactPaths []string `json:"exact_paths"`
+				} `json:"staging_digest_commit"`
+			} `json:"github_contract"`
+		} `json:"consumers"`
+	}
+	if err := json.Unmarshal(raw, &shipped); err != nil || len(shipped.Consumers) == 0 {
+		t.Fatalf("shipped config unreadable: %v", err)
+	}
+	want := shipped.Consumers[0].GitHub.StagingDigestCommit.ExactPaths
+	if len(want) == 0 {
+		t.Skip("the shipped config declares no digest policy")
+	}
+	pipeline := deliverPipeline(t)
+	pipeline.Config.ConsumerConfigPath = filepath.Join("..", "..", "config", "m1-consumer.json")
+	if err := os.WriteFile(pipeline.path("feature-pr.json"), []byte(`{"binding":{"repository":"`+shipped.Consumers[0].Repository+`"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := pipeline.consumerDigestPaths()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("consumerDigestPaths() = %q, want %q", got, want)
+	}
+}
+
 func TestDeployPathCoveredReadsPrefixesAndGlobs(t *testing.T) {
 	for _, tc := range []struct {
 		patterns []string
@@ -162,6 +270,17 @@ func TestDeployPathCoveredReadsPrefixesAndGlobs(t *testing.T) {
 		{[]string{"*.go"}, "main.go", true},
 		{[]string{"*.go"}, "cmd/main.go", false},
 		{[]string{"cmd/*/main.go"}, "cmd/x/main.go", true},
+		// "**" spans segments, as the workflow's own paths filter reads it.
+		{[]string{"docs/**"}, "docs/guide/intro.md", true},
+		{[]string{"docs/**"}, "docs/README.md", true},
+		{[]string{"docs/**"}, "docs2/x.md", false},
+		{[]string{"**"}, "src/pkg/main.go", true},
+		{[]string{"**/*.go"}, "cmd/app/main.go", true},
+		{[]string{"**/*.go"}, "main.go", true},
+		{[]string{"src/**/*.go"}, "src/a/b/c.go", true},
+		{[]string{"src/**/*.go"}, "src/c.go", true},
+		{[]string{"src/**/*.go"}, "src/a/b/c.md", false},
+		{[]string{"docs/*.md"}, "docs/a/b.md", false},
 		{[]string{""}, "anything", false},
 		{nil, "anything", false},
 	} {

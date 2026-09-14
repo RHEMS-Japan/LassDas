@@ -72,7 +72,10 @@ func consumerDeployScope(consumerConfigPath, repository, phase string) (deploySc
 // deployPathCovered reports whether one delivered path falls inside the
 // declared scope. A pattern is a path prefix — "docs/" or "docs" covers
 // docs/README.md and docs itself, never docs2/ — or, when it carries a glob
-// character, a path.Match pattern against the whole path.
+// character, a glob with the meaning a workflow's own paths filter gives it:
+// "*" and "?" stay inside one path segment, and "**" spans any number of
+// segments, so "docs/**" covers docs/guide/intro.md (path.Match alone would
+// not: its "*" never crosses "/", and "**" is just two of them).
 func deployPathCovered(patterns []string, filePath string) bool {
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
@@ -80,7 +83,7 @@ func deployPathCovered(patterns []string, filePath string) bool {
 			continue
 		}
 		if strings.ContainsAny(pattern, "*?[") {
-			if ok, err := path.Match(pattern, filePath); err == nil && ok {
+			if globCovers(strings.Split(pattern, "/"), strings.Split(filePath, "/")) {
 				return true
 			}
 			continue
@@ -93,12 +96,36 @@ func deployPathCovered(patterns []string, filePath string) bool {
 	return false
 }
 
+// globCovers matches pattern segments against path segments. A "**" segment
+// matches zero or more path segments; every other segment is a path.Match
+// pattern that must match exactly one segment.
+func globCovers(pattern, segments []string) bool {
+	if len(pattern) == 0 {
+		return len(segments) == 0
+	}
+	if pattern[0] == "**" {
+		for skip := 0; skip <= len(segments); skip++ {
+			if globCovers(pattern[1:], segments[skip:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(segments) == 0 {
+		return false
+	}
+	if ok, err := path.Match(pattern[0], segments[0]); err != nil || !ok {
+		return false
+	}
+	return globCovers(pattern[1:], segments[1:])
+}
+
 // deployNotApplicable answers, before the runner waits for a deployment,
 // whether the destination's declared scope says none will come: the scope
 // is known and not one delivered path falls inside it. Anything unknown —
 // no declaration, no readable path list — answers false, and the runner
-// waits as before. A consumer config it cannot read is broken plumbing and
-// is returned as such.
+// waits as before, including when the consumer config cannot be read: the
+// controller validates that same config and reports it properly.
 func (p *Pipeline) deployNotApplicable(phase string) (bool, string, error) {
 	repository, err := p.readJSONField("feature-pr.json", "binding", "repository")
 	if err != nil || repository == "" {
@@ -118,12 +145,27 @@ func (p *Pipeline) deployNotApplicable(phase string) (bool, string, error) {
 	}
 	scope, err := consumerDeployScope(p.Config.ConsumerConfigPath, repository, phase)
 	if err != nil {
-		return false, "", err
+		if err.Error() == "deploy phase is invalid" {
+			return false, "", err
+		}
+		// A config this reader cannot use is not a declaration: wait, and
+		// let the controller — which validates the same config — say what
+		// is wrong with it.
+		return false, "", nil
 	}
 	if !scope.Known {
 		return false, "", nil
 	}
-	for _, filePath := range wrapper.Binding.ProductPaths {
+	// What the phase actually changes. The staging merge is the feature
+	// PR: its product paths. The promotion carries those AND the CI digest
+	// files the staging deployment committed (see promotionHold) — a
+	// manifest under deploy/ that a production workflow very much reacts
+	// to, so leaving it out would end a delivery whose deployment runs.
+	changed := append([]string(nil), wrapper.Binding.ProductPaths...)
+	if phase == "production" {
+		changed = append(changed, p.consumerDigestPaths()...)
+	}
+	for _, filePath := range changed {
 		if deployPathCovered(scope.Patterns, filePath) {
 			return false, "", nil
 		}
@@ -133,6 +175,6 @@ func (p *Pipeline) deployNotApplicable(phase string) (bool, string, error) {
 		label = "本番"
 	}
 	detail := fmt.Sprintf("変更したファイル %d 件はすべて、設定された%s配布の対象範囲（%s）の外です。配布の実行を待たずに完了します。",
-		len(wrapper.Binding.ProductPaths), label, strings.Join(scope.Patterns, ", "))
+		len(changed), label, strings.Join(scope.Patterns, ", "))
 	return true, detail, nil
 }

@@ -480,19 +480,25 @@ type ConsumerWorkflow struct {
 }
 
 // validateDeployPaths refuses a scope that could not mean what it says: an
-// absolute path or a ".." segment matches nothing a delivery names, an empty
-// or padded entry covers nothing while looking declared, and a glob the
-// matcher cannot parse would silently cover nothing.
+// absolute path, a "." or ".." segment, an empty segment, a workflow-style
+// negation ("!docs/"), a backslash (delivered paths never carry one), an
+// empty or padded entry, or a glob the matcher cannot parse — each would
+// make the scope look declared while covering nothing, and the runner would
+// then end deliveries the deployment reacts to.
 func (w ConsumerWorkflow) validateDeployPaths() error {
 	for _, pattern := range w.DeployPaths {
 		if pattern == "" || strings.TrimSpace(pattern) != pattern || strings.HasPrefix(pattern, "/") ||
-			pattern == "." || pattern == ".." || strings.HasPrefix(pattern, "./") || strings.HasPrefix(pattern, "../") ||
-			strings.Contains(pattern, "/../") || strings.HasSuffix(pattern, "/..") || strings.HasSuffix(pattern, "/.") {
+			strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\") {
 			return errors.New("consumer workflow deploy_paths entry is invalid")
 		}
-		if strings.ContainsAny(pattern, "*?[") {
-			if _, err := path.Match(pattern, ""); err != nil {
-				return errors.New("consumer workflow deploy_paths pattern is invalid")
+		for _, segment := range strings.Split(strings.TrimSuffix(pattern, "/"), "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				return errors.New("consumer workflow deploy_paths entry is invalid")
+			}
+			if segment != "**" && strings.ContainsAny(segment, "*?[") {
+				if _, err := path.Match(segment, ""); err != nil {
+					return errors.New("consumer workflow deploy_paths pattern is invalid")
+				}
 			}
 		}
 	}
@@ -908,6 +914,14 @@ func (c ConsumerConfig) validate() error {
 	for _, workflow := range append([]ConsumerWorkflow{c.GitHub.StagingWorkflow}, c.GitHub.ProductionWorkflows...) {
 		if err := workflow.validateDeployPaths(); err != nil {
 			return err
+		}
+	}
+	for _, workflow := range c.GitHub.FeatureWorkflows {
+		// Nothing reads a feature workflow's scope: the feature CI is waited
+		// for by its required jobs, never skipped. Accepting the field there
+		// would look like a declaration that does something.
+		if len(workflow.DeployPaths) > 0 {
+			return errors.New("consumer feature workflow deploy_paths is not read; declare it on the staging or production workflow")
 		}
 	}
 	switch c.EffectiveKind() {
