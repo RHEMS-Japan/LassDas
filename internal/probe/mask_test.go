@@ -37,7 +37,7 @@ func TestMaskedOutputStaysReadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(script, "postgres://user:password@", "[masked:connection string with password]", 1)
+	want := strings.Replace(script, "postgres://user:password@", "[masked:connection-string-with-password]", 1)
 	if outcome.Measurement.Refused || outcome.Excerpt != want {
 		t.Fatalf("repo.read = %+v excerpt %q, want the masked file", outcome.Measurement, outcome.Excerpt)
 	}
@@ -61,5 +61,101 @@ func TestMaskedOutputStaysReadable(t *testing.T) {
 	outcome, err = session.Run(context.Background(), Request{Probe: "repo.read", Args: map[string]string{"path": "key.pem"}})
 	if err != nil || !outcome.Measurement.Refused || !strings.Contains(outcome.Measurement.Reason, "private key") || outcome.Excerpt != "" || outcome.Measurement.Masked != nil {
 		t.Fatalf("private key file = %+v excerpt %q, %v, want the whole output refused", outcome.Measurement, outcome.Excerpt, err)
+	}
+}
+
+// maskedRead records one repo.read of content and returns what the model
+// was told, the stored record, and the session.
+func maskedRead(t *testing.T, name, content string, limits Limits) (Outcome, Measurement) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewCatalog(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "measurements.jsonl")
+	recorder, err := OpenRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{Catalog: catalog, Recorder: recorder, RepoRoot: root, Limits: limits}
+	outcome, err := session.Run(context.Background(), Request{Probe: "repo.read", Args: map[string]string{"path": name}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := ReadPrefix(path, 1)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("stored = %+v, %v", stored, err)
+	}
+	return outcome, stored[0]
+}
+
+var maskedLimits = Limits{MaxProbes: 5, MaxTotalBytes: 1 << 20, ExcerptBytes: 4096, MaxReads: 5}
+
+// A value found by a shape is removed from the whole output, in whatever
+// other context it appears: a bearer token echoed in a response body, a
+// password exported on its own line, a key id inside a file name. Before
+// masking existed the whole output was refused, so none of these may be
+// stored now.
+func TestMaskedValuesAreRemovedEverywhere(t *testing.T) {
+	token := "abcdef0123456789abcdef0123456789"
+	for name, c := range map[string]struct{ content, secret, kind string }{
+		"token in body":     {"> Authorization: Bearer " + token + "\n< {\"access_token\":\"" + token + "\",\"token_type\":\"bearer\"}\n", token, "bearer token"},
+		"password exported": {"export PGPASSWORD=s3cretpass\nexport DATABASE_URL=postgres://reader:s3cretpass@db.example.invalid:5432/app\n", "s3cretpass", "connection string with password"},
+		"key id in a name":  {"AWS_ACCESS_KEY_ID=" + fakeAWSKeyID + "\ncredentials cache: /tmp/" + fakeAWSKeyID + "_creds.json\n", fakeAWSKeyID, "aws access key id"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome, stored := maskedRead(t, "out.log", c.content, maskedLimits)
+			if outcome.Measurement.Refused {
+				t.Fatalf("refused: %s", outcome.Measurement.Reason)
+			}
+			if strings.Contains(stored.Output, c.secret) || strings.Contains(outcome.Excerpt, c.secret) {
+				t.Fatalf("the value is stored: %q", stored.Output)
+			}
+			if strings.Count(stored.Output, maskMarker(c.kind)) != 2 || strings.Join(stored.Masked, ",") != c.kind {
+				t.Fatalf("stored = %q masked %v, want both occurrences marked", stored.Output, stored.Masked)
+			}
+		})
+	}
+	masked, _, refusal := MaskSecrets("export PGPASSWORD=s3cretpass\nurl postgres://reader:s3cretpass@db.example.invalid:5432/app\n", nil)
+	if refusal != "" || strings.Contains(masked, "s3cretpass") || masked != "export PGPASSWORD=[masked:connection-string-with-password]\nurl [masked:connection-string-with-password]db.example.invalid:5432/app\n" {
+		t.Fatalf("masked = %q refusal %q", masked, refusal)
+	}
+}
+
+// A value whose alphabet runs past the old pattern's charset leaves no tail:
+// a password with an '@' in it and a bearer token with a ':' in it are
+// taken whole.
+func TestMaskedValueTailsDoNotLeak(t *testing.T) {
+	for name, c := range map[string]struct{ content, tail string }{
+		"password with @":   {"url postgres://app:s3cr@t-pass@db.example.invalid:5432/app used\n", "t-pass"},
+		"bearer with colon": {"Authorization: Bearer abcdefghijklmnop:qrstuvwxyz0123456789\n", "qrstuvwxyz0123456789"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome, stored := maskedRead(t, "cfg.txt", c.content, maskedLimits)
+			if outcome.Measurement.Refused {
+				t.Fatalf("refused: %s", outcome.Measurement.Reason)
+			}
+			if strings.Contains(stored.Output, c.tail) || strings.Contains(stored.Output, "s3cr") {
+				t.Fatalf("a tail of the value is stored: %q", stored.Output)
+			}
+		})
+	}
+}
+
+// A record refused for the output budget after masking names no masked
+// kinds: nothing of it is stored.
+func TestBudgetRefusalKeepsNoMaskedKinds(t *testing.T) {
+	limits := maskedLimits
+	limits.MaxTotalBytes = 10
+	outcome, stored := maskedRead(t, "aws.log", "id "+fakeAWSKeyID+"\n", limits)
+	if !outcome.Measurement.Refused || !strings.Contains(outcome.Measurement.Reason, "budget") {
+		t.Fatalf("not refused for the budget: %+v", outcome.Measurement)
+	}
+	if outcome.Measurement.Masked != nil || stored.Masked != nil || stored.Output != "" {
+		t.Fatalf("a refused record kept masked kinds or output: %+v", stored)
 	}
 }

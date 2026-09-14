@@ -528,7 +528,7 @@ as `CrashLoopBackOff`, `kubectl logs --previous` on the pod carries the
 `REFUSING TO START` line naming the mode to set, and the release script's
 rollout wait ends after 300 seconds with the ConfigMap already at the new
 pins, so the way back is the previous image and the previous ConfigMap
-set by hand.
+set by hand. A `measurements.jsonl` that carries a record with `masked` kinds (written since the store-time masking change) does not verify under an image from before that change, because the older struct re-marshals the line without the field: a run whose measurements were masked stops with a broken chain after such a rollback, so let those runs finish or expire before rolling back past it.
 
 What stays closed to the agent user by mode: the kept jar
 (`$STATE/e2e-session`, 0700/0600), the engine's secrets (`$STATE/secrets`,

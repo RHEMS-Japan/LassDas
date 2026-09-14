@@ -398,11 +398,11 @@ func TestSessionRecordsRefusalsAndBudget(t *testing.T) {
 	}
 	session.Limits.MaxProbes = 10
 	outcome, err = session.Run(context.Background(), Request{Probe: "repo.read", Args: map[string]string{"path": "leak.txt"}})
-	if err != nil || outcome.Measurement.Refused || outcome.Excerpt != "id [masked:aws access key id]\n" || strings.Join(outcome.Measurement.Masked, ",") != "aws access key id" {
+	if err != nil || outcome.Measurement.Refused || outcome.Excerpt != "id [masked:aws-access-key-id]\n" || strings.Join(outcome.Measurement.Masked, ",") != "aws access key id" {
 		t.Errorf("leak: %+v %q %v", outcome.Measurement, outcome.Excerpt, err)
 	}
 	stored, _ := ReadPrefix(recorder.path, 3)
-	if stored[2].Output != "id [masked:aws access key id]\n" || stored[2].OutputBytes != len("id "+fakeAWSKeyID+"\n") || strings.Contains(stored[2].Output, "AKIA") {
+	if stored[2].Output != "id [masked:aws-access-key-id]\n" || stored[2].OutputBytes != len("id "+fakeAWSKeyID+"\n") || strings.Contains(stored[2].Output, "AKIA") {
 		t.Errorf("secret value stored or context lost: %+v", stored[2])
 	}
 }

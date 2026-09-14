@@ -87,7 +87,9 @@ type Window struct {
 	NextOffset int    `json:"next_offset"`
 	// StoredBytes is the end of what can be read. Truncated says the
 	// probe's own cap cut the output before it was stored, so OutputBytes
-	// on the measurement is larger and the tail exists nowhere.
+	// on the measurement is larger and the tail exists nowhere. A record
+	// with masked kinds stores markers in place of values, so its
+	// StoredBytes differs from OutputBytes in either direction.
 	StoredBytes int    `json:"stored_bytes"`
 	Remaining   int    `json:"remaining"`
 	Truncated   bool   `json:"truncated,omitempty"`
@@ -288,6 +290,7 @@ func (s *Session) record(measurement Measurement, result execResult, refused boo
 	}
 	if s.Bytes+len(result.output) > limits.MaxTotalBytes {
 		measurement.Refused = true
+		measurement.Masked = nil
 		measurement.Reason = "refused: the request's output budget is spent; output not stored"
 		result.output = ""
 		result.truncated = false

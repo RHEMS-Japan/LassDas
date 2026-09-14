@@ -67,7 +67,7 @@ func TestSecretShapedOutputIsMaskedNotDropped(t *testing.T) {
 			t.Errorf("%s: kinds %v refusal %q, want the one kind masked", kind, kinds, refusal)
 			continue
 		}
-		if !strings.Contains(masked, "[masked:"+kind+"]") || !strings.HasSuffix(masked, sample[strings.LastIndex(sample, " "):]) {
+		if !strings.Contains(masked, maskMarker(kind)) || !strings.HasSuffix(masked, sample[strings.LastIndex(sample, " "):]) {
 			t.Errorf("%s: masked = %q, want the marker with the surrounding text kept", kind, masked)
 		}
 		if k, found := SecretShaped(masked, nil); found {
@@ -78,7 +78,7 @@ func TestSecretShapedOutputIsMaskedNotDropped(t *testing.T) {
 	// format of a connection string. Everything but the credentials stays.
 	line := "#   PROD_DATABASE_URL  - 本番 Aurora への接続文字列（postgres://user:password@host:5432/db）\nset -euo pipefail"
 	masked, kinds, refusal := MaskSecrets(line, nil)
-	want := "#   PROD_DATABASE_URL  - 本番 Aurora への接続文字列（[masked:connection string with password]host:5432/db）\nset -euo pipefail"
+	want := "#   PROD_DATABASE_URL  - 本番 Aurora への接続文字列（[masked:connection-string-with-password]host:5432/db）\nset -euo pipefail"
 	if masked != want || refusal != "" || len(kinds) != 1 {
 		t.Errorf("doc comment: masked = %q kinds %v refusal %q, want %q", masked, kinds, refusal, want)
 	}
