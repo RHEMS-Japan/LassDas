@@ -471,6 +471,31 @@ type ConsumerWorkflow struct {
 	Name         string   `json:"name"`
 	Path         string   `json:"path"`
 	RequiredJobs []string `json:"required_jobs,omitempty"`
+	// DeployPaths declares what this deployment reacts to, read the way a
+	// workflow's own paths filter is read: an entry without glob characters
+	// is a prefix ("docs/" covers everything under docs), "*" and "?" stay
+	// inside one path segment, "**" spans segments wherever it appears
+	// ("docs/**", "**/*.go", "**.js"), "[...]" is a class, and a trailing
+	// "/" means "anything under such a directory". One reading differs from
+	// GitHub's: "?" is exactly one character. Characters a delivered path
+	// cannot carry (anything outside [A-Za-z0-9._/-] and the glob syntax)
+	// are refused, so an entry cannot look declared while matching nothing.
+	// When set and no delivered path falls under any entry, the runner records the
+	// phase as not applicable instead of waiting for a run the destination
+	// will not create. Empty means unknown, and the runner waits as before.
+	DeployPaths []string `json:"deploy_paths,omitempty"`
+}
+
+// validateDeployPaths refuses every entry the matcher could not read as
+// declared (see compileDeployPath): the config fails to load rather than
+// carrying a scope that covers nothing.
+func (w ConsumerWorkflow) validateDeployPaths() error {
+	for _, pattern := range w.DeployPaths {
+		if _, err := compileDeployPath(pattern); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type ConsumerDigestCommit struct {
@@ -878,6 +903,19 @@ func (c ConsumerConfig) validate() error {
 	}
 	if c.Description != "" && validatePlainText(c.Description, 256, false) != nil {
 		return errors.New("consumer description is invalid")
+	}
+	for _, workflow := range append([]ConsumerWorkflow{c.GitHub.StagingWorkflow}, c.GitHub.ProductionWorkflows...) {
+		if err := workflow.validateDeployPaths(); err != nil {
+			return err
+		}
+	}
+	for _, workflow := range c.GitHub.FeatureWorkflows {
+		// Nothing reads a feature workflow's scope: the feature CI is waited
+		// for by its required jobs, never skipped. Accepting the field there
+		// would look like a declaration that does something.
+		if len(workflow.DeployPaths) > 0 {
+			return errors.New("consumer feature workflow deploy_paths is not read; declare it on the staging or production workflow")
+		}
 	}
 	switch c.EffectiveKind() {
 	case "cli":
