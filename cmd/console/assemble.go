@@ -122,10 +122,12 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 			clarifications[basePK(pk)]++
 		}
 	}
+	// One strict config read per request, not one per queued ticket.
+	intakePaused := s.intakePausedNow()
 	for base, ticket := range byRun {
 		ticket.ClarificationNo = clarifications[base]
 		ticket.NextActor, ticket.OpenQuestion = nextActor(*ticket)
-		if ticket.State == "queued" && s.intakePausedNow() {
+		if ticket.State == "queued" && intakePaused {
 			ticket.NextActor = "運用者 (受付停止中)"
 		}
 		response.Tickets = append(response.Tickets, *ticket)
