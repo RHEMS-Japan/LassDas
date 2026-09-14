@@ -2,6 +2,8 @@
 <!-- provenance: v0.2 independent reviews 87/100 (0 blockers), 85/100 (1 blocker); one correction/re-evaluation round, final 92/100 and 93/100 (both 0 blockers). Design approval does not certify runtime acceptance. -->
 # lassdas init — 一本で立ち上げが終わる入口 (設計書 v0.2)
 
+方針追記 (2026-09-11): 今後の設計は [全体方針](PRODUCT_DIRECTION.md) に従い、既存の進め方の取り込みと、LLM との対話による構築を両方扱う。本書の CLI 向け固定手順と PR 到達の受入条件は当時の導入範囲の記録であり、全プロジェクト共通の完成形とはしない。対話型 init エージェントの実装完了を示すものでもない。
+
 発注者決定 (2026-09-08): **setup は init に改名し、init だけで立ち上げを終わらせる。終わりは「依頼を 1 本流して、納品先に Pull Request が出ること」。** 最初の対象はシンプルな CLI アプリ。本体は手元の Docker で Pod と同じイメージを動かす。入口は既存トラッカー、役の道具は Hermes。モデル接続先は初期版では OpenRouter 固定とし、既定ではキー1本を全役で共用する。役別のキーは任意で選べる。
 
 **トラッカー・GitHub・モデルの鍵は、利用者が外で取得して入力する。** init が取得先と必要な権限を案内し、入力後に検査する。資格情報の発行や権限変更の自動化は不要。
