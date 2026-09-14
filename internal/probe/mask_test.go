@@ -183,18 +183,26 @@ func TestMaskedValueCandidatesCoverBareOccurrences(t *testing.T) {
 	}
 }
 
-// A short value (under eight bytes) is removed from the rest of the output
-// only where it stands as a word of its own, so a four-letter password does
-// not take "data" out of "data_dir"; a longer value is removed anywhere.
-func TestShortValuesAreRemovedAtWordBoundariesOnly(t *testing.T) {
-	_, stored := maskedRead(t, "cfg.txt", "url postgres://app:data@db.example.invalid/x\ndata_dir=/var/lib/data\n", maskedLimits)
-	want := "url [masked:connection-string-with-password]db.example.invalid/x\ndata_dir=/var/lib/[masked:connection-string-with-password]\n"
+// A letters-only value shorter than sixteen bytes is removed from the rest
+// of the output only where it stands as a word of its own in a value
+// position (after '=', ':' or a quote), so a four-letter password does not
+// take "data" out of "data_dir" or out of a path, while PGPASSWORD=data and
+// "password": "data" lose it; a value with a digit is removed anywhere.
+func TestShortValuesAreRemovedInValuePositionsOnly(t *testing.T) {
+	_, stored := maskedRead(t, "cfg.txt", "url postgres://app:data@db.example.invalid/x\ndata_dir=/var/lib/data\nPGPASSWORD=data\nsecret: data\n{\"password\": \"data\"}\n", maskedLimits)
+	want := "url [masked:connection-string-with-password]db.example.invalid/x\ndata_dir=/var/lib/data\nPGPASSWORD=[masked:connection-string-with-password]\nsecret: [masked:connection-string-with-password]\n{\"password\": \"[masked:connection-string-with-password]\"}\n"
 	if stored.Output != want {
 		t.Fatalf("stored = %q, want %q", stored.Output, want)
 	}
-	_, stored = maskedRead(t, "cfg2.txt", "url postgres://app:longpassword@db.example.invalid/x\nlongpassword_dir=/x\n", maskedLimits)
-	if strings.Contains(stored.Output, "longpassword") {
-		t.Fatalf("a long value survived inside a word: %q", stored.Output)
+	_, stored = maskedRead(t, "cfg2.txt", "url postgres://app:l0ngpassw0rd@db.example.invalid/x\nl0ngpassw0rd_dir=/x\n", maskedLimits)
+	if strings.Contains(stored.Output, "l0ngpassw0rd") {
+		t.Fatalf("a value with digits survived inside a word: %q", stored.Output)
+	}
+	// A letters-only sample value, even eight bytes long, leaves prose and
+	// keys alone: the line that motivated masking stays readable.
+	_, stored = maskedRead(t, "cfg3.txt", "# set the password in the environment before running\npassword: ${DB_PASSWORD}\nurl postgres://user:password@host:5432/db\n", maskedLimits)
+	if !strings.HasPrefix(stored.Output, "# set the password in the environment before running\npassword: ${DB_PASSWORD}\nurl [masked:connection-string-with-password]host") {
+		t.Fatalf("prose or key lost: %q", stored.Output)
 	}
 }
 
@@ -205,5 +213,61 @@ func TestMinifiedJSONKeepsTheHost(t *testing.T) {
 	want := `{"db":"[masked:connection-string-with-password]db.example.invalid/app","contact":"ops@example.invalid","replicas":3}`
 	if stored.Output != want {
 		t.Fatalf("stored = %q, want %q", stored.Output, want)
+	}
+}
+
+// The delimiter after a token may be anything a document puts there - a
+// backtick, an HTML tag, Markdown emphasis - and is masked with it; the
+// same token standing bare elsewhere is still found through the token runs
+// inside the captured value.
+func TestDelimitedTokensStillRemoveBareOccurrences(t *testing.T) {
+	token := "abcdef0123456789abcdef0123456789"
+	for name, content := range map[string]string{
+		"markdown code": "Send `Authorization: Bearer " + token + "` on every call.\nexport API_TOKEN=" + token + "\n",
+		"html code":     "<code>Authorization: Bearer " + token + "</code>\nAPI_TOKEN=" + token + "\n",
+		"markdown bold": "header: **Bearer " + token + "**\ntoken=" + token + "\n",
+		"sentence end":  "The header is Bearer " + token + ".\ntoken=" + token + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome, stored := maskedRead(t, "doc.md", content, maskedLimits)
+			if outcome.Measurement.Refused {
+				t.Fatalf("refused: %s", outcome.Measurement.Reason)
+			}
+			if strings.Contains(stored.Output, token) {
+				t.Fatalf("the token is stored: %q", stored.Output)
+			}
+		})
+	}
+}
+
+// A password with punctuation in it is still a password: detection is as
+// wide as it was when a hit refused the whole output, and the value is not
+// stored.
+func TestPunctuatedPasswordsAreDetected(t *testing.T) {
+	for _, password := range []string{"Xy7,kQ2p", "Xy7)kQ2p", "Xy7'kQ2p", "Xy7\"kQ2p", "Xy7<kQ2p", "Xy7}kQ2p", "Xy7]kQ2p", "Xy7`kQ2p"} {
+		content := "PGPASSWORD=" + password + "\nurl postgres://app:" + password + "@db.example.invalid/app\n"
+		outcome, stored := maskedRead(t, "env.sh", content, maskedLimits)
+		if outcome.Measurement.Refused || strings.Contains(stored.Output, password) || strings.Join(stored.Masked, ",") != "connection string with password" {
+			t.Errorf("%q: refused=%v masked=%v stored=%q", password, outcome.Measurement.Refused, stored.Masked, stored.Output)
+		}
+	}
+}
+
+// A token that goes on after a line break cannot be bounded: the output is
+// refused rather than stored with the rest of the value in it. A header
+// line after the token is not a continuation.
+func TestWrappedTokensAreRefused(t *testing.T) {
+	for name, content := range map[string]string{
+		"bearer": "Authorization: Bearer abcdefghijklmnopqrst\nuvwxyz0123456789abcd\n",
+		"jwt":    "id_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3\njVmNHl0w5N_XgL0n3I9PVJ3n5RQ0\n",
+	} {
+		outcome, stored := maskedRead(t, "wrap.txt", content, maskedLimits)
+		if !outcome.Measurement.Refused || stored.Output != "" {
+			t.Errorf("%s: not refused: %+v", name, outcome.Measurement)
+		}
+	}
+	outcome, stored := maskedRead(t, "hdr.txt", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\nContent-Type: application/json\n", maskedLimits)
+	if outcome.Measurement.Refused || stored.Output != "Authorization: [masked:bearer-token]\nContent-Type: application/json\n" {
+		t.Errorf("header after a token: %+v %q", outcome.Measurement, stored.Output)
 	}
 }
