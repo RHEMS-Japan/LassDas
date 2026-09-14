@@ -609,7 +609,7 @@ var DefaultDesignTriggerWords = []string{
 	"が重い", "重くなった", "重くなって", "重くなり", "重すぎ", "時々",
 	"ときどき", "断続的", "が不安定", "稀に", "本番で", "本番環境",
 	"本番のみ", "本番だけ", "原因不明", "原因は不明", "原因が分から", "原因がわから",
-	"再現しない", "再現できない", "再現できず", "再現できま", "再現条件",
+	"再現しない", "再現できない", "再現できず", "再現できません", "再現条件",
 	"slow", "slower", "slowness", "sluggish", "intermittent", "intermittently",
 	"flaky", "production only", "prod only", "on prod", "on production", "cannot reproduce",
 	"can't reproduce", "can’t reproduce",
