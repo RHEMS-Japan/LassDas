@@ -349,6 +349,11 @@ func Load(path string) (Config, error) {
 		if _, err := time.Parse(time.RFC3339, config.Chain.IntakePausedSince); err != nil {
 			return Config{}, errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
 		}
+		if !config.OrchestrationCards() {
+			// Only the cards attendant holds queued runs; the runner
+			// orchestration would accept the value and start everything.
+			return Config{}, errors.New("runtime config: chain.intake_paused_since needs orchestration \"cards\"")
+		}
 	}
 	i := config.Identity
 	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
@@ -513,6 +518,34 @@ func (c Config) Owner(hermesRunID int64) hook.PullOwner {
 		WorkflowRunID:     hermesRunID,
 		RunAttempt:        1,
 	}
+}
+
+// ReadIntakePause reads chain.intake_paused_since from the config file as it
+// is NOW. The attendant loads its config once at start, but the pause is
+// the one setting an operator changes on a running pod (the ConfigMap is
+// mounted as a directory, so an edit reaches the file without a restart —
+// and a restart would interrupt the running deliveries the pause promises
+// to leave alone). An empty value means not paused; a value that is not a
+// time is an error, and the caller keeps what it last read.
+func ReadIntakePause(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var parsed struct {
+		Chain struct {
+			IntakePausedSince string `json:"intake_paused_since"`
+		} `json:"chain"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", errors.New("runtime config: unreadable while reading the intake pause")
+	}
+	if parsed.Chain.IntakePausedSince != "" {
+		if _, err := time.Parse(time.RFC3339, parsed.Chain.IntakePausedSince); err != nil {
+			return "", errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
+		}
+	}
+	return parsed.Chain.IntakePausedSince, nil
 }
 
 // IntakePaused reports whether the operator paused intake, and since when.

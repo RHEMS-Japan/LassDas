@@ -130,18 +130,26 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 		kept = append(kept, run)
 	}
 	snapshot.Runs = kept
-	if streak.Active {
-		snapshot.Notice = streakNotice(streak)
-	} else if since, paused := config.Chain.IntakePaused(); paused {
-		snapshot.Notice = intakePausedNotice(since)
-	}
+	snapshot.Notice = intakeNotice(config, streak)
 	return snapshot, nil
+}
+
+// intakeNotice is the board's banner while intake is held: the failure
+// streak first (its confirmation lifts it), else the operator's pause.
+func intakeNotice(config runtime.Config, streak failureStreak) string {
+	if streak.Active {
+		return streakNotice(streak)
+	}
+	if since, paused := config.Chain.IntakePaused(); paused {
+		return intakePausedNotice(since)
+	}
+	return ""
 }
 
 // intakePausedNotice is the board's banner while the operator's pause is
 // in force: what is stopped, since when, and what keeps going.
 func intakePausedNotice(since time.Time) string {
-	return "受付停止中: 運用者の指示で新しい依頼の開始を止めています（停止: " + since.In(time.Local).Format("2006-01-02 15:04") + "）。実行中の依頼はそのまま進みます。再開は設定の intake_paused_since を外します。"
+	return "受付停止中: 運用者の指示で新しい依頼の開始を止めています（停止: " + since.In(hook.DisplayZone()).Format("2006-01-02 15:04") + "）。実行中の依頼はそのまま進みます。再開は設定の intake_paused_since を外します。"
 }
 
 func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.BoardTask) RunStatus {
@@ -151,11 +159,14 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 	}
 	switch run.State {
 	case "queued":
-		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
+		// The pause outranks a budget or login hold left in the run
+		// directory: while paused nothing rechecks those, so their
+		// "resumes automatically" line would be false.
+		if since, paused := config.Chain.IntakePaused(); paused {
+			status.place("intake", "受付停止中", "運用者の指示で新しい依頼の開始を止めています（停止: "+since.In(hook.DisplayZone()).Format("2006-01-02 15:04")+"）。再開後に開始します")
 			break
 		}
-		if since, paused := config.Chain.IntakePaused(); paused {
-			status.place("intake", "受付停止中", "運用者の指示で新しい依頼の開始を止めています（停止: "+since.In(time.Local).Format("2006-01-02 15:04")+"）。再開後に開始します")
+		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
 			break
 		}
 		status.place("intake", "受付待ち", "")

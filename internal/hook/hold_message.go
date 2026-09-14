@@ -2,6 +2,7 @@ package hook
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -96,6 +97,7 @@ func SessionHoldContent(runID string, destinations []string) string {
 // wrong with it, and it starts when intake resumes.
 func IntakePausedContent(runID string, since time.Time) string {
 	when := since.In(questionZone).Format("2006-01-02 15:04")
+	marker := IntakePausedMarker(runID, since)
 	body := fmt.Sprintf(
 		"【受付停止中】この依頼は受け付けましたが、現在は運用者の指示で新しい依頼の開始を止めています（停止: %s）。再開後にこの依頼を開始します。実行中の依頼はそのまま進みます。\n\n",
 		when)
@@ -103,11 +105,18 @@ func IntakePausedContent(runID string, since time.Time) string {
 		State:      "受付停止中（運用者の指示）",
 		NextActor:  "運用担当者",
 		Operation:  "再開の操作（設定の intake_paused_since を外す）",
-		NextEvent:  "再開後に開始（以後の自動通知はありません）",
+		NextEvent:  "再開後に開始し、開始できた時点で実装方針を通知",
 		Production: "未変更",
 		AutoRetry:  "なし（再開待ち）",
-		Marker:     CommentMarker(string(RunCommentIntakePaused), runID),
+		Marker:     marker,
 	}.render()
+}
+
+// IntakePausedMarker names one pause on one ticket: the run and the pause
+// instant, so a later pause after a resumption is told again while the
+// same pause is told once.
+func IntakePausedMarker(runID string, since time.Time) string {
+	return CommentMarker(string(RunCommentIntakePaused), runID, strconv.FormatInt(since.Unix(), 10))
 }
 
 func FailureStreakContent(runID, code string, count int) string {

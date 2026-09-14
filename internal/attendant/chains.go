@@ -86,14 +86,9 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 		view := chainViewFor(tasks, run.DeliveryID)
 		switch run.State {
 		case "queued":
-			if streak.Active {
-				logger.Info("intake held by failure streak", "run", run.RunID, "code", streak.Code, "count", streak.Count)
-				continue
-			}
-			if since, paused := config.Chain.IntakePaused(); paused {
-				// The operator's pause: queued runs wait, told once on
-				// their ticket; claimed runs below keep going.
-				noticeIntakePaused(ctx, services.Backlog, run, since, runDirectory(config, run.DeliveryID), logger)
+			// The failure streak and the operator's pause both keep a
+			// queued run queued; claimed runs below keep going either way.
+			if holdQueuedRun(ctx, config, services.Backlog, run, streak, runDirectory(config, run.DeliveryID), logger) {
 				continue
 			}
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {

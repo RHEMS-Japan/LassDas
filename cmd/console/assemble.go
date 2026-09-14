@@ -30,9 +30,12 @@ type consoleServer struct {
 	dynamo        *dynamodb.Client
 	local         *state.LocalStore
 	runtimeConfig *runtime.Config
-	workerConfig  *worker.Config
-	hermes        *runtime.Hermes
-	client        *http.Client
+	// runtimeConfigPath lets the one setting that changes on a running pod
+	// (the intake pause) be re-read per request instead of at startup.
+	runtimeConfigPath string
+	workerConfig      *worker.Config
+	hermes            *runtime.Hermes
+	client            *http.Client
 	// The tracker key's owner, read once at startup. Zero means unknown,
 	// and unknown keeps the answering write switched off.
 	keyOwnerID   int64
@@ -116,10 +119,8 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 	for base, ticket := range byRun {
 		ticket.ClarificationNo = clarifications[base]
 		ticket.NextActor, ticket.OpenQuestion = nextActor(*ticket)
-		if ticket.State == "queued" && s.runtimeConfig != nil {
-			if _, paused := s.runtimeConfig.Chain.IntakePaused(); paused {
-				ticket.NextActor = "運用者 (受付停止中)"
-			}
+		if ticket.State == "queued" && s.intakePausedNow() {
+			ticket.NextActor = "運用者 (受付停止中)"
 		}
 		response.Tickets = append(response.Tickets, *ticket)
 	}
@@ -133,6 +134,25 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return left.IssueKey > right.IssueKey
 	})
 	writeJSON(w, response)
+}
+
+// intakePausedNow reads the operator's pause as the config file says now
+// (the cards attendant re-reads it the same way); it is meaningless under
+// any other orchestration.
+func (s *consoleServer) intakePausedNow() bool {
+	if s.runtimeConfig == nil || !s.runtimeConfig.OrchestrationCards() {
+		return false
+	}
+	value := s.runtimeConfig.Chain.IntakePausedSince
+	if s.runtimeConfigPath != "" {
+		if current, err := runtime.ReadIntakePause(s.runtimeConfigPath); err == nil {
+			value = current
+		}
+	}
+	probe := *s.runtimeConfig
+	probe.Chain.IntakePausedSince = value
+	_, paused := probe.Chain.IntakePaused()
+	return paused
 }
 
 // nextActor states whose move it is - the single most useful column of the

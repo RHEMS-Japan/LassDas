@@ -14,55 +14,104 @@ import (
 	"automation.internal/ticket-ingress/internal/state"
 )
 
-// A queued ticket is told about the pause exactly once: the first tick posts
-// the notice and records it; later ticks neither read nor write the ticket.
-// A post that failed is not recorded, so it is retried.
-func TestAQueuedTicketIsToldAboutThePauseOnce(t *testing.T) {
+func pausedConfig(t *testing.T, since string) runtime.Config {
+	t.Helper()
+	var config runtime.Config
+	config.Chain.RunsRoot = t.TempDir()
+	config.Chain.IntakePausedSince = since
+	return config
+}
+
+// A queued run stays queued under the streak (silently) and under the
+// pause (told once on its ticket), and starts when neither holds.
+func TestAQueuedRunIsHeldByTheStreakOrThePause(t *testing.T) {
+	run := state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", IssueID: 30, State: "queued"}
+	source := &fakeConfirmationSource{}
+	config := pausedConfig(t, "")
+	runDir := filepath.Join(config.Chain.RunsRoot, "d3")
+	if holdQueuedRun(context.Background(), config, source, run, failureStreak{}, runDir, resolutionTestLogger{}) {
+		t.Fatal("nothing holds the run, yet it stayed queued")
+	}
+	if !holdQueuedRun(context.Background(), config, source, run, failureStreak{Active: true, Code: "model_failed", Count: 3}, runDir, resolutionTestLogger{}) || len(source.added) != 0 {
+		t.Fatalf("the streak must hold silently; notices = %d", len(source.added))
+	}
+	config.Chain.IntakePausedSince = "2026-09-14T08:30:00+09:00"
+	if !holdQueuedRun(context.Background(), config, source, run, failureStreak{}, runDir, resolutionTestLogger{}) || len(source.added) != 1 {
+		t.Fatalf("the pause must hold and tell the ticket once; notices = %d", len(source.added))
+	}
+	since, _ := config.Chain.IntakePaused()
+	if hook.ExtractCommentMarker(source.added[0]) != hook.IntakePausedMarker("TKT-3", since) {
+		t.Fatalf("notice marker = %q", hook.ExtractCommentMarker(source.added[0]))
+	}
+	info, err := os.Stat(runDir)
+	if err != nil || info.Mode().Perm() != 0o711 {
+		t.Fatalf("run directory mode = %v err = %v, want 711 (the agent user must enter it later)", info.Mode(), err)
+	}
+}
+
+// The notice goes out once per pause: a failed post is retried, a delivered
+// one is neither read nor written again, a marker already on the ticket is
+// found rather than posted twice — and a LATER pause, after the run came
+// back to the queue, is told again.
+func TestAQueuedTicketIsToldAboutEachPauseOnce(t *testing.T) {
 	runDir := filepath.Join(t.TempDir(), "d3")
 	run := state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", IssueID: 30, State: "queued"}
-	since := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	first := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	source := &fakeConfirmationSource{addErr: errors.New("tracker down")}
-	noticeIntakePaused(context.Background(), source, run, since, runDir, resolutionTestLogger{})
-	if _, err := os.Stat(filepath.Join(runDir, intakePausedNoticeFile)); err == nil {
+	noticeIntakePaused(context.Background(), source, run, first, runDir, resolutionTestLogger{})
+	if toldAbout(runDir, first) {
 		t.Fatal("a failed post must not be recorded as delivered")
 	}
 	source.addErr = nil
-	noticeIntakePaused(context.Background(), source, run, since, runDir, resolutionTestLogger{})
-	if len(source.added) != 1 || hook.ExtractCommentMarker(source.added[0]) != hook.CommentMarker(string(hook.RunCommentIntakePaused), "TKT-3") {
+	noticeIntakePaused(context.Background(), source, run, first, runDir, resolutionTestLogger{})
+	if len(source.added) != 1 {
 		t.Fatalf("notices = %d", len(source.added))
 	}
 	listings := source.listings
-	noticeIntakePaused(context.Background(), source, run, since, runDir, resolutionTestLogger{})
+	noticeIntakePaused(context.Background(), source, run, first, runDir, resolutionTestLogger{})
 	if len(source.added) != 1 || source.listings != listings {
-		t.Fatalf("the told ticket must not be read or written again; notices = %d listings = %d", len(source.added), source.listings-listings)
+		t.Fatalf("the told ticket must not be read or written again; notices = %d extra listings = %d", len(source.added), source.listings-listings)
 	}
-	// A notice already on the ticket (the record file lost) is found, not
-	// posted twice.
+	// The record is lost (a claim empties the run directory) but the
+	// notice is on the ticket: found, not posted twice.
 	if err := os.Remove(filepath.Join(runDir, intakePausedNoticeFile)); err != nil {
 		t.Fatal(err)
 	}
 	source.comments = append(source.comments, hook.BacklogComment{CommentID: 5, UserID: 1, Body: source.added[0]})
-	noticeIntakePaused(context.Background(), source, run, since, runDir, resolutionTestLogger{})
+	noticeIntakePaused(context.Background(), source, run, first, runDir, resolutionTestLogger{})
 	if len(source.added) != 1 {
-		t.Fatalf("the notice was posted twice: %d", len(source.added))
+		t.Fatalf("the same pause was told twice: %d", len(source.added))
+	}
+	// A later pause is a different fact and is told.
+	second := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	noticeIntakePaused(context.Background(), source, run, second, runDir, resolutionTestLogger{})
+	if len(source.added) != 2 || hook.ExtractCommentMarker(source.added[1]) != hook.IntakePausedMarker("TKT-3", second) {
+		t.Fatalf("the later pause was not told; notices = %d", len(source.added))
 	}
 }
 
-// While intake is paused the board says so — on the queued run and as the
-// banner — and a claimed run is classified exactly as before.
+// While intake is paused the board says so — on the queued run, ahead of a
+// stale budget or login hold, and as the banner (the streak's banner wins
+// while a streak is active) — with the instant in the display zone that the
+// ticket uses, whatever the pod's local zone is. A claimed run is
+// classified exactly as before.
 func TestTheBoardShowsTheIntakePause(t *testing.T) {
-	var config runtime.Config
-	config.Chain.RunsRoot = t.TempDir()
-	config.Chain.IntakePausedSince = "2026-09-14T09:00:00+09:00"
+	config := pausedConfig(t, "2026-09-14T08:30:00+09:00")
 	queued := classifyRun(config, state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", State: "queued"}, nil)
-	if queued.Step != "intake" || queued.StepTitle != "受付停止中" || !strings.Contains(queued.Detail, "2026-09-14") {
+	if queued.Step != "intake" || queued.StepTitle != "受付停止中" || !strings.Contains(queued.Detail, "2026-09-14 08:30") {
 		t.Fatalf("queued run under the pause = step %q title %q detail %q", queued.Step, queued.StepTitle, queued.Detail)
 	}
-	since, _ := config.Chain.IntakePaused()
-	if notice := intakePausedNotice(since); !strings.Contains(notice, "受付停止中") || !strings.Contains(notice, "実行中の依頼はそのまま進みます") {
+	if notice := intakeNotice(config, failureStreak{}); !strings.Contains(notice, "受付停止中") || !strings.Contains(notice, "2026-09-14 08:30") || !strings.Contains(notice, "実行中の依頼はそのまま進みます") {
 		t.Fatalf("banner = %q", notice)
 	}
+	streak := failureStreak{Active: true, Code: "model_failed", Count: 3, Newest: state.RunOverview{RunID: "TKT-9"}}
+	if notice := intakeNotice(config, streak); strings.Contains(notice, "受付停止中: 運用者") {
+		t.Fatalf("the streak banner must win while a streak is active: %q", notice)
+	}
 	config.Chain.IntakePausedSince = ""
+	if notice := intakeNotice(config, failureStreak{}); notice != "" {
+		t.Fatalf("banner without a hold = %q", notice)
+	}
 	resumed := classifyRun(config, state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", State: "queued"}, nil)
 	if resumed.StepTitle != "受付待ち" {
 		t.Fatalf("queued run without the pause = %q", resumed.StepTitle)

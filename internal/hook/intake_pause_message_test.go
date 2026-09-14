@@ -23,7 +23,19 @@ func TestTheIntakePausedNoticeSaysReceivedNotFailed(t *testing.T) {
 			t.Errorf("the notice says %q, which is not what happened:\n%s", forbidden, content)
 		}
 	}
-	if ExtractCommentMarker(content) != CommentMarker(string(RunCommentIntakePaused), "TKT-3") {
+	if ExtractCommentMarker(content) != IntakePausedMarker("TKT-3", since) {
 		t.Fatalf("the notice does not carry its marker: %q", ExtractCommentMarker(content))
+	}
+	// One pause, one marker; another instant, another marker — and both
+	// name the run, so the kind stays marker-scanned per ticket.
+	later := since.Add(24 * time.Hour)
+	if IntakePausedMarker("TKT-3", since) == IntakePausedMarker("TKT-3", later) {
+		t.Fatal("two pauses share one marker")
+	}
+	if DisplayZone().String() != "Asia/Tokyo" {
+		t.Fatalf("display zone = %q", DisplayZone())
+	}
+	if strings.Contains(content, "以後の自動通知はありません") {
+		t.Fatalf("the notice promises silence, but a plan notice follows the start:\n%s", content)
 	}
 }

@@ -216,11 +216,17 @@ fabricated workflow link.
   `failure-streak-resolution.json` recorded in that run's directory).
   In-flight runs are not touched; the held ticket is read at most every
   two minutes.
-- **Intake pause**: `chain.intake_paused_since` (an RFC 3339 time) is the
-  operator's explicit pause. Queued deliveries are not started while it is
-  set — each queued ticket is told once (marker `intake-paused`) and the
-  board shows 受付停止中 — and claimed deliveries continue to their end.
-  Removing the value resumes intake; the queued runs then start in order.
+- **Intake pause** (cards orchestration only): `chain.intake_paused_since`
+  (an RFC 3339 time) is the operator's explicit pause. The attendant and the
+  console re-read it from the mounted config before every tick, so editing
+  the ConfigMap is enough — no restart, which would interrupt the running
+  deliveries the pause promises to leave alone (the edit reaches the mounted
+  file within the kubelet sync period, about a minute). Queued deliveries are
+  not started while it is set — each queued ticket is told once per pause
+  (marker `intake-paused` with the pause instant) and the board shows
+  受付停止中 with the instant in Asia/Tokyo — and claimed deliveries continue
+  to their end. Removing the value resumes intake; the queued runs then start
+  in order. The runner orchestration refuses the value at load.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
   model-stage children — the runner strips it from its own environment
