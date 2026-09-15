@@ -528,7 +528,7 @@ as `CrashLoopBackOff`, `kubectl logs --previous` on the pod carries the
 `REFUSING TO START` line naming the mode to set, and the release script's
 rollout wait ends after 300 seconds with the ConfigMap already at the new
 pins, so the way back is the previous image and the previous ConfigMap
-set by hand.
+set by hand. A `measurements.jsonl` that carries a record with `masked` kinds (written since the store-time masking change) does not verify under an image from before that change, because the older struct re-marshals the line without the field: a run whose measurements were masked stops with a broken chain after such a rollback, so let those runs finish or expire before rolling back past it.
 
 What stays closed to the agent user by mode: the kept jar
 (`$STATE/e2e-session`, 0700/0600), the engine's secrets (`$STATE/secrets`,
@@ -625,7 +625,7 @@ means adding a row here and the test it names.
 | An intake that cannot name the repository (gaps) | `cmd/worker/intake_cli_test.go` gap cases; the run ends as an honest `clarification_required` | live, 2026-09-01 |
 | A probe request outside the declared shape (an unknown id, a slot value with whitespace or `;`, an http path outside its pattern, a link-local address) executed anyway | `internal/probe` `TestCatalogRefusesOutOfShapeRequests`, `TestHTTPProbeRefusesPrivateResolution` | design review, 2026-09-04 |
 | A sql probe that lets a SELECT-only grant be bypassed (two statements, `EXPLAIN ANALYZE` of a write, `set_config`, advisory locks, `dblink`, `SELECT … INTO`, `FOR UPDATE`) | `internal/probe` `TestSQLProbeSendsOneReadStatement` | design review, 2026-09-04 |
-| Key-shaped output stored or attached | `internal/probe` `TestSecretShapedOutputIsRefused`; `internal/attendant` re-scan in `uploadMeasurements` | design review, 2026-09-04 |
+| Key-shaped output stored or attached | `internal/probe` `TestSecretShapedOutputIsMaskedNotDropped` / `TestMaskedOutputStaysReadable`; `internal/attendant` re-scan in `uploadMeasurements` | design review, 2026-09-04 |
 | A later round's appends breaking an earlier report's measurement fingerprint | `internal/probe` `TestMeasurementChainVerifiesPrefixes`; `internal/worker/investigate` `TestInvestigationRequiresMeasuredEvidence` | design review, 2026-09-04 |
 | A "measured" finding citing no measurement, a refused one, or one outside the sealed prefix; a design whose cause cites no measured finding or whose files leave the allowed prefixes | `internal/worker/investigate` `TestInvestigationRequiresMeasuredEvidence`, `TestDesignValidation` | design review, 2026-09-04 |
 | `DESIGN.md` drifting from `design.json` | `internal/worker/investigate` `TestDesignRenderingIsDeterministic` | design review, 2026-09-04 |

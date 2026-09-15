@@ -87,7 +87,9 @@ type Window struct {
 	NextOffset int    `json:"next_offset"`
 	// StoredBytes is the end of what can be read. Truncated says the
 	// probe's own cap cut the output before it was stored, so OutputBytes
-	// on the measurement is larger and the tail exists nowhere.
+	// on the measurement is larger and the tail exists nowhere. A record
+	// with masked kinds stores markers in place of values, so its
+	// StoredBytes differs from OutputBytes in either direction.
 	StoredBytes int    `json:"stored_bytes"`
 	Remaining   int    `json:"remaining"`
 	Truncated   bool   `json:"truncated,omitempty"`
@@ -270,17 +272,25 @@ func (s *Session) record(measurement Measurement, result execResult, refused boo
 	// exactly what is stored.
 	result.output = strings.ToValidUTF8(result.output, "\uFFFD")
 	if !refused {
-		if kind, found := SecretShaped(result.output, s.forbiddenLiterals()); found {
+		masked, kinds, refusal := MaskSecrets(result.output, s.forbiddenLiterals())
+		switch {
+		case refusal != "":
 			// The output is not kept; the attempt is.
 			measurement.Refused = true
-			measurement.Reason = fmt.Sprintf("refused: output carried a %s and was not stored", kind)
+			measurement.Reason = fmt.Sprintf("refused: output carried a %s and was not stored", refusal)
 			result.output = ""
 			result.total = 0
 			result.truncated = false
+		case len(kinds) > 0:
+			// The values are not kept; everything around them is, and the
+			// record says which kinds were masked.
+			measurement.Masked = kinds
+			result.output = masked
 		}
 	}
 	if s.Bytes+len(result.output) > limits.MaxTotalBytes {
 		measurement.Refused = true
+		measurement.Masked = nil
 		measurement.Reason = "refused: the request's output budget is spent; output not stored"
 		result.output = ""
 		result.truncated = false
