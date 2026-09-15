@@ -224,6 +224,17 @@ func receptionCutoffNote(stage, cause string) string {
 	if !strings.HasPrefix(cause, worker.CutoffPhrase) || !strings.Contains(cause, receptionCutoffMarker) {
 		return ""
 	}
+	if strings.Contains(cause, worker.ReasoningExhaustedPhrase) {
+		// The answer never began: the model spent the whole allowance
+		// thinking. That is a passing state of the model, not the ticket's
+		// length, so the advice differs from a long answer's.
+		note := "受付の AI (" + stage + ") が答えを書き始める前に、考える段階だけで出力の上限を使い切ったため、自動処理を止めました。"
+		if strings.Contains(cause, worker.EffortLoweredPhrase) {
+			note += "考える深さを下げて聞き直しましたが、それでも答えに至りませんでした。"
+		}
+		note += "AI が同じ考えを繰り返す一過性の事象で、同じ依頼を動かし直すと通ることがあります。運用担当者が受付モデルの設定を確認します。\n"
+		return note
+	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
 	switch {
 	case strings.Contains(cause, worker.CutoffAskedAgainPhrase):

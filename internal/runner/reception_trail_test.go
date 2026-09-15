@@ -894,3 +894,25 @@ func TestTheReaderAndWriterKeepTheirOwnRules(t *testing.T) {
 		t.Errorf("the note is readable beyond its owner: %v", mode)
 	}
 }
+
+// A cutoff in which the whole allowance went to reasoning is told as what
+// it is: the answer never began, the effort was lowered when it could be,
+// and running the ticket again may well pass - not "your answer was too
+// long", which is what a live ticket was told (2026-09-15).
+func TestReasoningExhaustedCutoffIsToldAsSuch(t *testing.T) {
+	lowered := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens); "+worker.ReasoningExhaustedPhrase+"; "+worker.EffortLoweredPhrase+"; "+worker.CutoffAtCeilingPhrase+" of 32768 tokens")
+	if !strings.Contains(lowered, "受付の判定") || !strings.Contains(lowered, "考える段階だけで出力の上限を使い切った") ||
+		!strings.Contains(lowered, "考える深さを下げて聞き直しましたが") || !strings.Contains(lowered, "動かし直すと通ることがあります") ||
+		strings.Contains(lowered, "答えが長すぎて") || strings.Contains(lowered, "同じ結果になる可能性が高い") {
+		t.Fatalf("reasoning exhausted after lowering: %q", lowered)
+	}
+	first := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens); "+worker.ReasoningExhaustedPhrase+"; "+worker.CutoffAtCeilingPhrase+" of 32768 tokens")
+	if strings.Contains(first, "考える深さを下げて") || !strings.Contains(first, "考える段階だけで") {
+		t.Fatalf("reasoning exhausted without a lowering: %q", first)
+	}
+	for _, note := range []string{lowered, first} {
+		if err := hook.ValidateTrailText(note); err != nil {
+			t.Fatalf("the report would refuse the note: %v", err)
+		}
+	}
+}

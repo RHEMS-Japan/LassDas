@@ -1392,3 +1392,57 @@ func TestTheGuardCountsTheWaitAsWellAsTheAttempt(t *testing.T) {
 		t.Fatal("the guard refused an attempt the call had time for")
 	}
 }
+
+// A cutoff in which no answer began - the whole completion counted as
+// reasoning, empty content - is asked again with the reasoning effort a
+// step lower on the same allowance, down the ladder twice at most; only
+// then does the room logic apply. An endpoint with no lower effort to try
+// goes straight to the room logic, and the failure names both.
+func TestConverseTurnLowersReasoningEffortWhenNoAnswerBegan(t *testing.T) {
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ := NewModelInvoker(api)
+	response, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if err != nil || response != `{"status":"ready"}` || len(api.requests) != 2 ||
+		api.requests[0].ReasoningEffort != "high" || api.requests[1].ReasoningEffort != "medium" || api.requests[1].MaxTokens != MaxConfiguredOutputTokens {
+		t.Fatalf("one lowering: err %v, %d requests, efforts %q -> %q, allowance %d", err, len(api.requests), api.requests[0].ReasoningEffort, api.requests[len(api.requests)-1].ReasoningEffort, api.requests[len(api.requests)-1].MaxTokens)
+	}
+
+	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	if _, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16); err != nil ||
+		len(api.requests) != 3 || api.requests[2].ReasoningEffort != "low" {
+		t.Fatalf("two lowerings: err %v, %d requests, last effort %q", err, len(api.requests), api.requests[len(api.requests)-1].ReasoningEffort)
+	}
+
+	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelResponseTruncated) || !errors.Is(err, errModelReasoningExhausted) || len(api.requests) != 3 ||
+		!strings.Contains(err.Error(), EffortLoweredPhrase) || !strings.Contains(err.Error(), CutoffAtCeilingPhrase) {
+		t.Fatalf("exhausted after two lowerings at the ceiling: err %v after %d requests", err, len(api.requests))
+	}
+
+	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "low", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelReasoningExhausted) || len(api.requests) != 1 || strings.Contains(err.Error(), EffortLoweredPhrase) || !strings.Contains(err.Error(), CutoffAtCeilingPhrase) {
+		t.Fatalf("nothing lower than low at the ceiling: err %v after %d requests", err, len(api.requests))
+	}
+
+	// Below the ceiling with no effort to lower, the room logic still runs.
+	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	if _, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16); err != nil ||
+		len(api.requests) != 2 || api.requests[1].MaxTokens != 8192 {
+		t.Fatalf("no effort to lower below the ceiling: err %v, %d requests, allowance %d", err, len(api.requests), api.requests[len(api.requests)-1].MaxTokens)
+	}
+
+	// A cutoff with content is not the reasoning case.
+	output := chatOutput("partial")
+	output.Choices[0].FinishReason = "length"
+	output.Usage.CompletionTokensDetails = &ChatCompletionTokensDetails{ReasoningTokens: 1}
+	if reasoningExhausted(output) {
+		t.Fatal("a cutoff that wrote content was taken for an exhausted reasoning")
+	}
+}

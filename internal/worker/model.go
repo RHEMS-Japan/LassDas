@@ -39,6 +39,15 @@ const (
 	// reads them from the worker's stderr to tell the requester the same.
 	CutoffAskedAgainPhrase = "asked again with the wider allowance and cut off again"
 	CutoffAtCeilingPhrase  = "the allowance is already at the ceiling"
+	// ReasoningExhaustedPhrase names a cutoff in which the whole allowance
+	// went to the model's reasoning and no answer was begun: more room is
+	// not the remedy, less reasoning is, and converseTurn asks again with
+	// the effort lowered a step (EffortLoweredPhrase says it did). A live
+	// reception died this way: 32,768 reasoning tokens circling the same
+	// thought, an empty answer, and a ticket told its answer was too long
+	// (2026-09-15).
+	ReasoningExhaustedPhrase = "the whole allowance went to reasoning and no answer was written"
+	EffortLoweredPhrase      = "asked again with less reasoning effort"
 )
 
 // ChatMessage is one OpenAI-compatible chat message.
@@ -78,6 +87,41 @@ type ChatUsage struct {
 	CompletionTokens int32   `json:"completion_tokens"`
 	TotalTokens      int32   `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	// CompletionTokensDetails is the provider's split of the completion,
+	// when it gives one: how much of it was reasoning that never reached
+	// the answer.
+	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// ChatCompletionTokensDetails is the reasoning share of a completion.
+type ChatCompletionTokensDetails struct {
+	ReasoningTokens int32 `json:"reasoning_tokens"`
+}
+
+// reasoningExhausted says a cutoff answer never began: the content is empty
+// and the provider counts the whole completion as reasoning.
+func reasoningExhausted(output *ChatResponse) bool {
+	if output == nil || output.Usage == nil || output.Usage.CompletionTokensDetails == nil || len(output.Choices) != 1 {
+		return false
+	}
+	return output.Choices[0].Message.Content == "" &&
+		output.Usage.CompletionTokensDetails.ReasoningTokens >= output.Usage.CompletionTokens
+}
+
+// lowerReasoningEffort is the next step down the effort ladder the
+// configuration accepts, and whether there is one.
+func lowerReasoningEffort(effort string) (string, bool) {
+	switch effort {
+	case "max":
+		return "xhigh", true
+	case "xhigh":
+		return "high", true
+	case "high":
+		return "medium", true
+	case "medium":
+		return "low", true
+	}
+	return "", false
 }
 
 type ChatChoice struct {
@@ -103,6 +147,11 @@ var (
 	// allowance (finish_reason=length): converseTurn asks the same turn once
 	// more with the allowance widened, below the configuration ceiling.
 	errModelResponseTruncated = errors.New(CutoffPhrase)
+	// errModelReasoningExhausted marks the cutoff in which no answer began
+	// (reasoningExhausted); it always travels wrapped together with
+	// errModelResponseTruncated, and converseTurn lowers the reasoning
+	// effort before it considers room.
+	errModelReasoningExhausted = errors.New(ReasoningExhaustedPhrase)
 	// errModelResponseUpstream marks a turn the provider ended with an error
 	// of its own (finish_reason=error): converseTurn asks the same turn
 	// again after the gateway pauses, up to their count (live 2026-09-09:
@@ -808,6 +857,8 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	malformed := 0
 	upstream := 0
 	allowance := 0
+	lowered := 0
+	widened := false
 	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
@@ -836,13 +887,29 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			upstream++
 			fmt.Fprintf(os.Stderr, "worker: the provider ended the turn with an error; asking again in %s (retry %d of %d)\n", delay, upstream, len(gatewayRetryPauses))
 		case errors.Is(err, errModelResponseTruncated):
-			if cutoff != nil {
+			if errors.Is(err, errModelReasoningExhausted) && lowered < effortLowerings {
+				// No answer began: the model reasoned itself to the wall.
+				// Room is not the remedy; a step less reasoning is, on the
+				// same allowance, down the ladder as far as it goes.
+				if next, ok := lowerReasoningEffort(endpoint.Effort); ok {
+					lowered++
+					cutoff = err
+					fmt.Fprintf(os.Stderr, "worker: %s; asking again with reasoning effort %q (retry %d of %d)\n", ReasoningExhaustedPhrase, next, lowered, effortLowerings)
+					endpoint.Effort = next
+					continue
+				}
+			}
+			if lowered > 0 {
+				err = fmt.Errorf("%w; %s", err, EffortLoweredPhrase)
+			}
+			if widened {
 				return "", InvocationUsage{}, fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase)
 			}
 			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
 				return "", InvocationUsage{}, fmt.Errorf("%w; %s of %d tokens", err, CutoffAtCeilingPhrase, MaxConfiguredOutputTokens)
 			}
 			cutoff = err
+			widened = true
 			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
 			continue
 		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
@@ -873,6 +940,12 @@ func afterCutoff(cutoff, err error) error {
 	}
 	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
 }
+
+// effortLowerings bounds how many steps down the effort ladder one turn
+// takes for a cutoff that never began an answer: two, so a turn makes at
+// most 8 calls (3 provider errors, 2 lowered, 1 cutoff, 1 malformed, 1
+// final).
+const effortLowerings = 2
 
 // widenedOutputAllowance doubles an output allowance, stopping at the
 // configuration ceiling.
@@ -971,6 +1044,10 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, ChatFinishContentFilter)
 		}
 		if output.Choices[0].FinishReason == ChatFinishLength {
+			if reasoningExhausted(output) {
+				return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens); %w",
+					errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens, errModelReasoningExhausted)
+			}
 			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
