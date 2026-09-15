@@ -69,6 +69,9 @@ func syncDeliver(
 			}
 		}
 	}
+	// The ticket's board phase follows the run's end, whichever tick
+	// posted it (board_phase.go).
+	projectDeliveryEnd(ctx, config, services, run, tasks, logger)
 
 	releasePosted, err := services.Tick.ReleaseReportPosted(ctx, run.RunID)
 	if err != nil {
