@@ -249,3 +249,93 @@ func TestProjectDeliveryEndLeavesTicketsItDoesNotOwn(t *testing.T) {
 		t.Error("a status outside the four was taken as owned")
 	}
 }
+
+// The release endings that write no production report file - a stop or an
+// expiry during the Go wait, a dead promote card - are sealed as release
+// once their report is posted, and are projected from that seal; an
+// operator's 「確認済み」 on an attention ending then moves the ticket on.
+func TestProjectDeliveryEndProjectsReleaseSealsWithoutAReportFile(t *testing.T) {
+	config := runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}, Tracker: runtime.TrackerConfig{BoardStatuses: boardTestStatuses}}
+	logger := &pendingTestLogger{}
+	for i, c := range []struct {
+		verdict string
+		want    string
+	}{
+		{"expired", "needs_attention"}, {"stopped", "needs_attention"}, {"card_failed", "needs_attention"},
+		{"deploy_failed", "needs_attention"}, {"merge_unverified", "needs_attention"},
+	} {
+		run := state.RunOverview{RunID: fmt.Sprintf("TKT-80%d", i), DeliveryID: fmt.Sprintf("delivery_%032d", i), IssueID: int64(800 + i), TerminalCode: string(hook.TerminalSuccess)}
+		runDir := runDirectory(config, run.DeliveryID)
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sealBoardOutcome(runDir, "staging", "pass", "")
+		sealBoardOutcome(runDir, "release", c.verdict, "")
+		board := &recordingBoard{}
+		projectDeliveryEnd(context.Background(), config, &runtime.Services{Board: board, Backlog: statusClient(t, boardTestStatuses.Running)}, run, nil, logger)
+		if want := fmt.Sprintf("%d:%s", run.IssueID, c.want); len(board.phases) != 1 || board.phases[0] != want {
+			t.Errorf("release %s without a report file: phases %v, want %s", c.verdict, board.phases, want)
+		}
+	}
+	// deploy_failed then the operator's 確認済み: attention, then delivered.
+	run := state.RunOverview{RunID: "TKT-810", DeliveryID: fmt.Sprintf("delivery_%032d", 10), IssueID: 810, TerminalCode: string(hook.TerminalSuccess)}
+	runDir := runDirectory(config, run.DeliveryID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sealBoardOutcome(runDir, "release", "deploy_failed", "")
+	board := &recordingBoard{}
+	services := &runtime.Services{Board: board, Backlog: statusClient(t, boardTestStatuses.Running)}
+	projectDeliveryEnd(context.Background(), config, services, run, nil, logger)
+	resolution, _ := json.Marshal(deliverResolution{Phase: "release", Verdict: "deploy_failed", CommentID: 1, UserID: 1, At: time.Now().UTC()})
+	if err := os.WriteFile(filepath.Join(runDir, deliverResolutionFile), resolution, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectDeliveryEnd(context.Background(), config, services, run, nil, logger)
+	if len(board.phases) != 2 || board.phases[0] != "810:needs_attention" || board.phases[1] != "810:delivered" {
+		t.Fatalf("phases = %v, want needs attention then delivered", board.phases)
+	}
+}
+
+// A ticket the tracker no longer has is left alone and remembered, like a
+// ticket in a person's status; a tracker error is tried again next tick.
+func TestProjectDeliveryEndLeavesADeletedTicketAlone(t *testing.T) {
+	config := runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}, Tracker: runtime.TrackerConfig{BoardStatuses: boardTestStatuses}}
+	run := state.RunOverview{RunID: "TKT-820", DeliveryID: fmt.Sprintf("delivery_%032d", 20), IssueID: 820, TerminalCode: string(hook.TerminalSuccess)}
+	runDir := runDirectory(config, run.DeliveryID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sealBoardOutcome(runDir, "staging", "deploy_not_applicable", "")
+	reads := 0
+	client := func(status int) *backlog.Client {
+		c, err := backlog.NewClient(backlog.Config{SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20},
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				reads++
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"errors":[]}`))}, nil
+			}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	board := &recordingBoard{}
+	logger := &pendingTestLogger{}
+	failing := &runtime.Services{Board: board, Backlog: client(500)}
+	projectDeliveryEnd(context.Background(), config, failing, run, nil, logger)
+	projectDeliveryEnd(context.Background(), config, failing, run, nil, logger)
+	if reads != 2 || len(board.phases) != 0 {
+		t.Fatalf("a tracker error: reads=%d phases=%v, want two reads and no projection", reads, board.phases)
+	}
+	if _, ok := readBoardPhase(runDir); ok {
+		t.Fatal("a tracker error was recorded as a phase")
+	}
+	reads = 0
+	gone := &runtime.Services{Board: board, Backlog: client(404)}
+	projectDeliveryEnd(context.Background(), config, gone, run, nil, logger)
+	projectDeliveryEnd(context.Background(), config, gone, run, nil, logger)
+	record, ok := readBoardPhase(runDir)
+	if reads != 1 || len(board.phases) != 0 || !ok || record.Phase != untouchedRecord(hook.BoardDelivered) {
+		t.Fatalf("a deleted ticket: reads=%d phases=%v record=%+v %v, want one read, no projection, untouched recorded", reads, board.phases, record, ok)
+	}
+}

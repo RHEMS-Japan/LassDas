@@ -85,15 +85,20 @@ func projectDeliveryEnd(ctx context.Context, config runtime.Config, services *ru
 		return
 	}
 	// Only an end that was posted counts, and only the end of the latest
-	// phase the run reached: a production report file that its release
-	// report has not been posted for is the previous story still (the
-	// classification prefers the file; the ticket has not been told).
+	// phase the run reached. The run is in its release phase once a
+	// production report file exists (the promote card wrote it) or a
+	// release seal exists (the release report was posted: a stop or an
+	// expiry during the Go wait, a dead promote card, seal without any
+	// file). A production report file whose release report is not posted
+	// yet is the previous story still: the classification prefers the
+	// file, the ticket has not been told, so nothing is projected until
+	// the release seal arrives.
 	runDir := runDirectory(config, run.DeliveryID)
+	outcome, sealed := readBoardOutcome(runDir)
 	latest := "staging"
-	if deliverFileExists(runDir, runner.DeliverProductionReportFile) {
+	if deliverFileExists(runDir, runner.DeliverProductionReportFile) || sealed && outcome.Phase == "release" {
 		latest = "release"
 	}
-	outcome, sealed := readBoardOutcome(runDir)
 	if _, resolved := readDeliverResolution(runDir); !resolved && !(sealed && outcome.Phase == latest) {
 		return
 	}
@@ -116,6 +121,13 @@ func projectDeliveryEnd(ctx context.Context, config runtime.Config, services *ru
 	}
 	current, err := reader.IssueStatusID(ctx, run.IssueID)
 	if err != nil {
+		if class, kind := hook.FailureDetails(err); class == hook.FailureRejected && kind == "not_found" {
+			// The ticket is gone: nothing to move, and nothing to ask
+			// again (the hook treats a vanished issue the same way).
+			logger.Info("delivery end: ticket not found; left alone", "run", run.RunID, "phase", string(phase))
+			writeBoardPhase(runDir, untouchedRecord(phase), logger, run.RunID)
+			return
+		}
 		logger.Error("delivery end: ticket status read failed", "run", run.RunID, "error", err.Error())
 		return
 	}
