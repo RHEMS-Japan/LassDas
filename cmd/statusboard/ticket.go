@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"automation.internal/ticket-ingress/internal/probe"
 	"automation.internal/ticket-ingress/internal/ticketview"
@@ -40,6 +41,8 @@ const (
 	maxRecordRead  = 32 << 20
 	maxRecordServe = 2 << 20
 )
+
+var recordServing sync.Mutex
 
 // boardRow is the board.json row as the ticket page needs it.
 type boardRow struct {
@@ -146,6 +149,10 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 // large to scan whole is refused), so a value can never be split across
 // a cut and leak in halves.
 func (s *boardServer) serveTicketRecord(w http.ResponseWriter, r *http.Request, runDir, rest string) {
+	// One record at a time: a request reads and scans up to 32 MiB, and
+	// the board shares the pod's memory with the engine.
+	recordServing.Lock()
+	defer recordServing.Unlock()
 	const prefix = "records/"
 	if !strings.HasPrefix(rest, prefix) {
 		http.NotFound(w, r)
