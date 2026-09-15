@@ -228,3 +228,23 @@ func TestTicketRoutesSitBehindTheAccessGate(t *testing.T) {
 		t.Fatalf("a dotted path must not reach a ticket: %d", rec.Code)
 	}
 }
+
+func TestTicketRecordsTooLargeToScanWholeAreRefused(t *testing.T) {
+	if maxRecordServe >= maxRecordRead {
+		t.Fatal("the serve bound must stay below the read bound")
+	}
+	s := ticketFixture(t)
+	runDir := filepath.Join(filepath.Dir(s.statusDir), "runs", "delivery_abc")
+	huge := make([]byte, maxRecordRead+1)
+	for i := range huge {
+		huge[i] = 'z'
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "m1-trail.txt"), huge, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.serveTicketAPI(rec, httptest.NewRequest("GET", "/api/tickets/PROJ-7/records/trail", nil))
+	if rec.Code != http.StatusRequestEntityTooLarge || strings.Contains(rec.Body.String(), "zzzz") {
+		t.Fatalf("a record too large to scan whole must be refused, not cut: %d len=%d", rec.Code, rec.Body.Len())
+	}
+}

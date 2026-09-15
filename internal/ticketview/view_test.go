@@ -313,7 +313,7 @@ func TestBuildReadsDesignRoundsAndApplierRuns(t *testing.T) {
 		t.Fatalf("design round not read in full: %v (%v)", steps, titles(view.Timeline))
 	}
 	raw, _ := json.Marshal(view)
-	for _, want := range []string{"既定値を 30 にする", "D01 (approach)", "判定を返せなかった", "この巡の結論: 差し戻し", "実装役の異議 (設計 1 巡目の files)", "設計に沿った実装 1 巡目: 変更が封緘されなかった", "発見 1 (high)", "[masked:"} {
+	for _, want := range []string{"既定値を 30 にする", "D01 (approach)", "判定を返せなかった", "この巡の結論: 差し戻し", "実装役の異議 (設計 1 巡目の files)", "設計に沿った実装 1 巡目: 変更を封緘せず (異議、または失敗)", "発見 1 (high)", "[masked:"} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("view should carry %q: %s", want, raw)
 		}
@@ -357,5 +357,72 @@ func TestBuildTakesTheRecordTimeWhenAnAttemptHasNoCheck(t *testing.T) {
 func TestDeliverTitleTreatsAFailedPromotionAsAFailure(t *testing.T) {
 	if _, tone := deliverTitle("本番反映", "promotion_failed"); tone != "bad" {
 		t.Fatalf("promotion_failed tone = %q", tone)
+	}
+}
+
+func TestBuildShowsTheRealEndOfALongTranscript(t *testing.T) {
+	// The failure reason of a reviewer that returned no verdict is at the
+	// end of its transcript; the end of the trail carries the failed line.
+	dir := filepath.Join(t.TempDir(), "delivery_long")
+	stage := filepath.Join(dir, "history", "stage-1")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := json.Marshal(map[string]any{"ran_at": "2026-09-15T01:12:00Z", "transcript": strings.Repeat("a", 6000) + "\nFINAL REASON MARKER"})
+	files := map[string][]byte{
+		filepath.Join(stage, "review-a-run.json"): run,
+		filepath.Join(dir, "m1-trail.txt"):        []byte(strings.Repeat("b", 5000) + "\nTRAIL FINAL LINE"),
+		filepath.Join(dir, "failed-step.txt"):     []byte("review\n"),
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(view)
+	if !strings.Contains(string(raw), "FINAL REASON MARKER") {
+		t.Fatalf("the transcript's real end must be shown: %s", raw)
+	}
+	if view.Failure == nil || !strings.HasSuffix(view.Failure.Detail, "TRAIL FINAL LINE") {
+		t.Fatalf("the trail's real end must be shown: %+v", view.Failure)
+	}
+}
+
+func TestBuildIgnoresStageRecordsThatAreNotVerdicts(t *testing.T) {
+	// The engine keeps an implementer's empty first attempt beside its run;
+	// it is not a reviewer's verdict and must not become a review row.
+	dir := filepath.Join(t.TempDir(), "delivery_empty_attempt")
+	stage := filepath.Join(dir, "history", "stage-1")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"candidate.json":                     `{"generated_at":"2026-09-15T01:05:00Z","files":[{"path":"a.go"}],"invocation":{"cost_usd":0.1}}`,
+		"implementer-run.json":               `{"agent_id":"impl","ran_at":"2026-09-15T01:04:00Z","duration_ms":10,"exit_code":0,"changed_files":["a.go"],"transcript":"done"}`,
+		"implementer-run-empty-attempt.json": `{"agent_id":"impl","ran_at":"2026-09-15T01:03:00Z","duration_ms":10,"exit_code":0,"changed_files":[],"transcript":"claimed to write, wrote nothing"}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(stage, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range view.Timeline {
+		if e.Step == "review" {
+			t.Fatalf("a non-verdict record became a review row: %+v", e)
+		}
+	}
+	if len(view.Timeline) != 1 || view.Timeline[0].Step != "implement" {
+		t.Fatalf("want the implementation only: %v", titles(view.Timeline))
+	}
+	if !contains(view.Records, "stage-1-implementer-run-empty-attempt") {
+		t.Fatalf("the empty attempt is still a record the operator can open: %v", view.Records)
 	}
 }

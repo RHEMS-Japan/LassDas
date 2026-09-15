@@ -148,6 +148,21 @@ func shown(text string) string {
 	return masked
 }
 
+// shownTail is the end of a long text (a transcript, the trail) after the
+// secret scan: the whole text is masked first, so a value straddling the
+// cut cannot lose its prefix and pass, and the tail is taken from the
+// masked whole - never from shown's head-first bound.
+func shownTail(text string, n int) string {
+	if text == "" {
+		return ""
+	}
+	masked, _, refusal := probe.MaskSecrets(text, nil)
+	if refusal != "" {
+		return "[秘密の形 (" + refusal + ") を含むため、この記録は表示しません]"
+	}
+	return tail(masked, n)
+}
+
 // Build reads the run directory and assembles the view. A missing run
 // directory is an error; any missing record inside it is simply absent from
 // the view, never an error - the page shows what the run recorded so far.
@@ -196,7 +211,7 @@ func Build(runDir string) (View, error) {
 		}
 	}
 	sort.Strings(view.Records)
-	view.Cost.Note = "記録に価格が残っている呼び出しの合計 (レビュー役の呼び出しは価格を残さないので含まれない)"
+	view.Cost.Note = "記録に価格が残っている呼び出しの合計 (コードのレビュー役の呼び出しは価格を残さないので含まれない。設計レビューは含む)"
 	return view, nil
 }
 
@@ -462,6 +477,11 @@ func (v *View) readImplementation(dir string, n int) {
 	}
 	if runRecord == "applier-run" {
 		event.Title = strings.Replace(event.Title, "実装", "設計に沿った実装", 1)
+		if !haveCandidate {
+			// An applier seals nothing when it objects to the design (an
+			// intended stop, recorded as the round's objection) or fails.
+			event.Title, event.Tone = fmt.Sprintf("設計に沿った実装 %d 巡目: 変更を封緘せず (異議、または失敗)", n), "warn"
+		}
 	}
 	if len(files) > 0 {
 		event.Evidence = append(event.Evidence, Evidence{Label: "変更したファイル", Text: strings.Join(files, "\n")})
@@ -506,7 +526,9 @@ func (v *View) readReviews(dir string, n int) {
 				Message string `json:"message"`
 			} `json:"findings"`
 		}
-		if !readJSON(filepath.Join(dir, name), &review) {
+		if !readJSON(filepath.Join(dir, name), &review) || review.ReviewerID == "" || review.Verdict == "" {
+			// Not a sealed verdict: the engine writes other JSON into a
+			// stage (an empty first attempt of the implementer, say).
 			continue
 		}
 		tone := "ok"
@@ -541,12 +563,12 @@ func (v *View) readReviews(dir string, n int) {
 			RanAt      time.Time `json:"ran_at"`
 			Transcript string    `json:"transcript"`
 		}
-		if !readJSON(filepath.Join(dir, name), &run) {
+		if !readJSON(filepath.Join(dir, name), &run) || run.RanAt.IsZero() {
 			continue
 		}
 		v.Timeline = append(v.Timeline, Event{
 			At: run.RanAt, Step: "review", Tone: "bad", Title: fmt.Sprintf("レビュー %d 巡目 · %s: 判定を返せなかった", n, reviewer),
-			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: tail(shown(run.Transcript), 800)}},
+			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: shownTail(run.Transcript, 800)}},
 			Record:   fmt.Sprintf("stage-%d-%s-run", n, reviewer),
 		})
 	}
@@ -724,7 +746,7 @@ func (v *View) readEnding(runDir string) {
 		failure.Reason = record.Reason
 	}
 	if trail, err := os.ReadFile(filepath.Join(runDir, "m1-trail.txt")); err == nil {
-		failure.Detail = tail(shown(strings.TrimSpace(string(trail))), 1200)
+		failure.Detail = shownTail(strings.TrimSpace(string(trail)), 1200)
 	}
 	v.Failure = failure
 	v.Timeline = append(v.Timeline, Event{

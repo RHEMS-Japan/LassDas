@@ -161,7 +161,7 @@ func (v *View) readDesignReviews(dir string, n int) {
 			} `json:"findings"`
 			Invocation invocation `json:"invocation"`
 		}
-		if !readJSON(filepath.Join(dir, name), &review) {
+		if !readJSON(filepath.Join(dir, name), &review) || review.Verdict == "" {
 			continue
 		}
 		id := review.ReviewerID
@@ -202,7 +202,7 @@ func (v *View) readDesignReviews(dir string, n int) {
 		}
 		v.Timeline = append(v.Timeline, Event{
 			At: run.RanAt, Step: "design-review", Tone: "bad", Title: fmt.Sprintf("設計レビュー %d 巡目 · %s: 判定を返せなかった", n, reviewer),
-			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: tail(shown(run.Transcript), 800)}},
+			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: shownTail(run.Transcript, 800)}},
 			Record:   fmt.Sprintf("design-%d-%s-design-review-run", n, reviewer),
 		})
 	}

@@ -29,13 +29,15 @@ var ticketPage []byte
 var ticketKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]*$`)
 var recordNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,96}$`)
 
-// maxRecordRead bounds what one record request reads; it sits above every
-// record the engine writes (a transcript is capped at 1 MiB, an artifact
-// below that), so the secret scan always sees a whole file. maxRecordServe
+// maxRecordRead bounds what one record request reads. A record larger
+// than that is refused whole, never cut: the secret scan must see a whole
+// file, or nothing (a value split at a cut would lose the shape the scan
+// looks for). The bound sits above every record the engine writes (an
+// artifact is capped at 8 MiB, a probe transcript at 16 MiB). maxRecordServe
 // bounds the masked text handed out; a longer one is cut after masking and
 // says so.
 const (
-	maxRecordRead  = 4 << 20
+	maxRecordRead  = 32 << 20
 	maxRecordServe = 2 << 20
 )
 
@@ -140,8 +142,9 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 // serveTicketRecord serves one raw record by its page name, masked. The
 // name must be one ticketview resolves; the file is read from the run
 // directory the board row named, never from a path the client wrote. The
-// whole file passes the secret scan before anything is cut, so a value
-// can never be split across a cut and leak in halves.
+// whole file passes the secret scan before anything is cut (a file too
+// large to scan whole is refused), so a value can never be split across
+// a cut and leak in halves.
 func (s *boardServer) serveTicketRecord(w http.ResponseWriter, r *http.Request, runDir, rest string) {
 	const prefix = "records/"
 	if !strings.HasPrefix(rest, prefix) {
@@ -169,10 +172,11 @@ func (s *boardServer) serveTicketRecord(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "この記録は読めませんでした", http.StatusNotFound)
 		return
 	}
-	cut := false
 	if len(raw) > maxRecordRead {
-		raw, cut = raw[:maxRecordRead], true
+		http.Error(w, "この原本は大きすぎるため画面では出しません (Pod 内で参照してください)", http.StatusRequestEntityTooLarge)
+		return
 	}
+	cut := false
 	masked, _, refusal := probe.MaskSecrets(string(raw), nil)
 	if refusal != "" {
 		http.Error(w, "この記録は秘密の形 ("+refusal+") を含むため表示しません", http.StatusForbidden)
