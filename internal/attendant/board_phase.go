@@ -18,7 +18,7 @@ import (
 // deliveryContinues), and nothing projected the ending after that: a ticket
 // merged to staging and finished - or one that asked an operator to look -
 // stayed 自動処理中 for ever, and every finished ticket was closed by hand
-// (live 2026-09-15: RFDEV-781's report said 完了, its status said 自動処理中).
+// (live 2026-09-15: a ticket's report said 完了, its status said 自動処理中).
 //
 // projectDeliveryEnd reads the run's end the way the status board does
 // (classifyAfterTerminal, the one definition of what a run's files and
