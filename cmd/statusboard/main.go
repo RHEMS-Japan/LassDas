@@ -163,6 +163,18 @@ func run() error {
 			_, _ = w.Write([]byte("ok"))
 		})
 	}
+	registerRoutes(mux, protect, board)
+
+	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	logger.Info("statusboard listening", "addr", addr, "status_dir", statusDir,
+		"actions_enabled", poster != nil, "bell_armed", mode != "local" && os.Getenv("LASSDAS_BOARD_BELL_TOKEN") != "")
+	return server.ListenAndServe()
+}
+
+// registerRoutes mounts every page and API of the board behind the access
+// gate: the list, the demo, the ticket pages and their records, the board
+// data, the actions and the event stream.
+func registerRoutes(mux *http.ServeMux, protect func(http.HandlerFunc) http.Handler, board *boardServer) {
 	mux.Handle("/", protect(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -176,11 +188,6 @@ func run() error {
 	mux.Handle("/api/board", protect(board.serveBoard))
 	mux.Handle("/api/act", protect(board.serveAct))
 	mux.Handle("/stream", protect(board.serveStream))
-
-	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	logger.Info("statusboard listening", "addr", addr, "status_dir", statusDir,
-		"actions_enabled", poster != nil, "bell_armed", mode != "local" && os.Getenv("LASSDAS_BOARD_BELL_TOKEN") != "")
-	return server.ListenAndServe()
 }
 
 func boardAccess(mode, user, pass string, logger *slog.Logger) (func(http.HandlerFunc) http.Handler, error) {

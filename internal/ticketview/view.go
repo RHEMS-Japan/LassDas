@@ -79,8 +79,6 @@ type Failure struct {
 // serve, by the name the page links; anything else is refused.
 var RecordNames = map[string]string{
 	"intake":                    "intake.json",
-	"readiness-assessment-1":    "history/readiness/assessment-1.json",
-	"readiness-check-1":         "history/readiness/check-1.json",
 	"readiness-decision":        "history/readiness/decision.json",
 	"validation":                "validation.json",
 	"feature-pr":                "feature-pr.json",
@@ -95,17 +93,33 @@ var RecordNames = map[string]string{
 	"measurements":              "measurements.jsonl",
 }
 
-var stageRecord = regexp.MustCompile(`^stage-([0-9]+)-(candidate|implement-run|implementer-run|review-[a-z]-run|review-[a-z]|decision)$`)
+// The reception makes up to three assess/check attempts; a stage or a
+// design round is a directory of JSON records named by the engine and its
+// configured reviewer ids (letters, digits, hyphens - never a path).
+var (
+	readinessRecord = regexp.MustCompile(`^readiness-(assessment|check)-([1-3])$`)
+	stageRecord     = regexp.MustCompile(`^stage-([1-9][0-9]?)-([a-z][a-z0-9-]{0,80})$`)
+	designRecord    = regexp.MustCompile(`^design-([1-9][0-9]?)-([a-z][a-z0-9-]{0,80})$`)
+	recordBase      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,80}$`)
+)
 
 // RecordPath resolves a record name the page may link to the file under the
-// run directory, or "" for a name it does not serve. Stage records are
-// "stage-<n>-<file>" (stage-1-review-a, stage-2-candidate).
+// run directory, or "" for a name it does not serve. Readiness attempts are
+// "readiness-assessment-<n>" / "readiness-check-<n>"; stage records are
+// "stage-<n>-<file>" (stage-1-review-a, stage-2-candidate); design-round
+// records are "design-<n>-<file>" (design-1-investigation).
 func RecordPath(name string) string {
 	if path, ok := RecordNames[name]; ok {
 		return path
 	}
+	if m := readinessRecord.FindStringSubmatch(name); m != nil {
+		return filepath.Join("history", "readiness", m[1]+"-"+m[2]+".json")
+	}
 	if m := stageRecord.FindStringSubmatch(name); m != nil {
 		return filepath.Join("history", "stage-"+m[1], m[2]+".json")
+	}
+	if m := designRecord.FindStringSubmatch(name); m != nil {
+		return filepath.Join("history", "design-"+m[1], m[2]+".json")
 	}
 	return ""
 }
@@ -146,6 +160,7 @@ func Build(runDir string) (View, error) {
 	view.readIntake(runDir)
 	view.readReadiness(runDir)
 	view.readStages(runDir)
+	view.readDesignRounds(runDir)
 	view.readValidation(runDir)
 	view.readDelivery(runDir)
 	view.readEnding(runDir)
@@ -156,23 +171,26 @@ func Build(runDir string) (View, error) {
 			view.Records = append(view.Records, name)
 		}
 	}
-	// Stage records: every file in history/stage-<n>/ that the page can
-	// serve (candidate, both run transcripts, each reviewer's verdict and
-	// transcript, the round's decision).
-	for n := 1; n <= 20; n++ {
-		dir := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", n))
-		if !exists(dir) {
-			break
-		}
-		for _, base := range []string{"candidate", "implement-run", "implementer-run", "decision"} {
-			if exists(filepath.Join(dir, base+".json")) {
-				view.Records = append(view.Records, fmt.Sprintf("stage-%d-%s", n, base))
+	for n := 1; n <= 3; n++ {
+		for _, kind := range []string{"assessment", "check"} {
+			if exists(filepath.Join(runDir, "history", "readiness", fmt.Sprintf("%s-%d.json", kind, n))) {
+				view.Records = append(view.Records, fmt.Sprintf("readiness-%s-%d", kind, n))
 			}
 		}
-		for _, reviewer := range []string{"a", "b", "c", "d"} {
-			for _, base := range []string{"review-" + reviewer, "review-" + reviewer + "-run"} {
-				if exists(filepath.Join(dir, base+".json")) {
-					view.Records = append(view.Records, fmt.Sprintf("stage-%d-%s", n, base))
+	}
+	// Every JSON record of every stage and design round, by the name the
+	// page serves it under.
+	for _, kind := range []string{"stage", "design"} {
+		for n := 1; n <= 20; n++ {
+			dir := filepath.Join(runDir, "history", fmt.Sprintf("%s-%d", kind, n))
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				break
+			}
+			for _, entry := range entries {
+				base, isJSON := strings.CutSuffix(entry.Name(), ".json")
+				if entry.Type().IsRegular() && isJSON && recordBase.MatchString(base) {
+					view.Records = append(view.Records, fmt.Sprintf("%s-%d-%s", kind, n, base))
 				}
 			}
 		}
@@ -254,9 +272,14 @@ func (v *View) readIntake(runDir string) {
 	})
 }
 
+// readReadiness reads the reception's judgment: up to three assess/check
+// attempts (a check that fails sends the assessor back once more), then
+// the sealed decision. Earlier attempts show as sent-back rounds with the
+// checker's reasons; the last attempt carries the assumptions and questions
+// the decision rests on.
 func (v *View) readReadiness(runDir string) {
 	dir := filepath.Join(runDir, "history", "readiness")
-	var assessment struct {
+	type assessment struct {
 		Decision  string `json:"decision"`
 		Questions []struct {
 			Text string `json:"text"`
@@ -271,7 +294,7 @@ func (v *View) readReadiness(runDir string) {
 		Model           string     `json:"model"`
 		Invocation      invocation `json:"invocation"`
 	}
-	var check struct {
+	type check struct {
 		Verdict    string     `json:"verdict"`
 		Reasons    []string   `json:"reasons"`
 		Model      string     `json:"model"`
@@ -284,22 +307,56 @@ func (v *View) readReadiness(runDir string) {
 		DesignReason string `json:"design_reason"`
 		RequestKind  string `json:"request_kind"`
 	}
-	haveAssessment := readJSON(filepath.Join(dir, "assessment-1.json"), &assessment)
-	haveCheck := readJSON(filepath.Join(dir, "check-1.json"), &check)
 	haveDecision := readJSON(filepath.Join(dir, "decision.json"), &decision)
+	var last assessment
+	var lastCheck check
+	var lastAt time.Time
+	haveAssessment, haveCheck, lastN := false, false, 0
+	for n := 1; n <= 3; n++ {
+		var a assessment
+		var c check
+		assessmentPath := filepath.Join(dir, fmt.Sprintf("assessment-%d.json", n))
+		haveA := readJSON(assessmentPath, &a)
+		haveC := readJSON(filepath.Join(dir, fmt.Sprintf("check-%d.json", n)), &c)
+		if !haveA && !haveC {
+			break
+		}
+		suffix := ""
+		if n > 1 || exists(filepath.Join(dir, "assessment-2.json")) {
+			suffix = fmt.Sprintf(" %d 回目", n)
+		}
+		v.addCost("受付の判定"+suffix+" (起案役)", a.Invocation.CostUSD)
+		v.addCost("受付の判定"+suffix+" (確認役)", c.Invocation.CostUSD)
+		at := c.CheckedAt
+		if at.IsZero() {
+			at = fileTime(assessmentPath)
+		}
+		if exists(filepath.Join(dir, fmt.Sprintf("assessment-%d.json", n+1))) {
+			// Sent back: the checker refused this attempt and the assessor
+			// tried again. Its reasons are the whole story of this round.
+			event := Event{At: at, Step: "readiness", Tone: "warn", Title: fmt.Sprintf("受付の判定 %d 回目: 確認役が差し戻し", n), Record: fmt.Sprintf("readiness-check-%d", n)}
+			if len(c.Reasons) > 0 {
+				event.Why = shown(strings.Join(c.Reasons, " / "))
+			}
+			v.Timeline = append(v.Timeline, event)
+			continue
+		}
+		last, lastCheck, haveAssessment, haveCheck, lastAt, lastN = a, c, haveA, haveC, at, n
+	}
 	if !haveAssessment && !haveCheck && !haveDecision {
 		return
 	}
-	v.addCost("受付の判定 (起案役)", assessment.Invocation.CostUSD)
-	v.addCost("受付の判定 (確認役)", check.Invocation.CostUSD)
-	at := check.CheckedAt
+	at := lastAt
 	if at.IsZero() {
 		at = fileTime(filepath.Join(dir, "decision.json"))
 	}
 	event := Event{At: at, Step: "readiness", Tone: "ok", Record: "readiness-decision"}
+	if !haveDecision && lastN > 0 {
+		event.Record = fmt.Sprintf("readiness-assessment-%d", lastN)
+	}
 	outcome := decision.Outcome
 	if outcome == "" {
-		outcome = assessment.Decision
+		outcome = last.Decision
 	}
 	switch outcome {
 	case "ready":
@@ -311,33 +368,36 @@ func (v *View) readReadiness(runDir string) {
 	default:
 		event.Title, event.Tone = "受付の判定: "+outcome, "warn"
 	}
+	if lastN > 1 {
+		event.Title += fmt.Sprintf(" (%d 回目で確定)", lastN)
+	}
 	needsDesign, reason := decision.NeedsDesign, decision.DesignReason
 	if !haveDecision {
-		needsDesign, reason = assessment.NeedsDesign, assessment.DesignReason
+		needsDesign, reason = last.NeedsDesign, last.DesignReason
 	}
 	if reason != "" {
 		// The same sentence the plan notice carries; an unknown code still
 		// reads as a decision, not as a code.
 		event.Why = hook.DesignDecisionLine(needsDesign, reason)
 	}
-	if assessment.ApproachExcerpt != "" {
-		event.Evidence = append(event.Evidence, Evidence{Label: "本文から引用した方針", Text: shown(assessment.ApproachExcerpt)})
+	if last.ApproachExcerpt != "" {
+		event.Evidence = append(event.Evidence, Evidence{Label: "本文から引用した方針", Text: shown(last.ApproachExcerpt)})
 	}
-	for i, a := range assessment.Assumptions {
+	for i, a := range last.Assumptions {
 		event.Evidence = append(event.Evidence, Evidence{Label: fmt.Sprintf("前提 %d", i+1), Text: shown(a.Statement)})
 	}
-	for i, q := range assessment.Questions {
+	for i, q := range last.Questions {
 		event.Evidence = append(event.Evidence, Evidence{Label: fmt.Sprintf("質問 %d", i+1), Text: shown(q.Text)})
 	}
 	if haveCheck {
-		text := "判定: " + check.Verdict
-		if len(check.Reasons) > 0 {
-			text += " — " + shown(strings.Join(check.Reasons, " / "))
+		text := "判定: " + lastCheck.Verdict
+		if len(lastCheck.Reasons) > 0 {
+			text += " — " + shown(strings.Join(lastCheck.Reasons, " / "))
 		}
-		event.Evidence = append(event.Evidence, Evidence{Label: "確認役 (" + check.Model + ")", Text: text})
+		event.Evidence = append(event.Evidence, Evidence{Label: "確認役 (" + lastCheck.Model + ")", Text: text})
 	}
-	if assessment.Model != "" {
-		event.Evidence = append(event.Evidence, Evidence{Label: "起案役", Text: assessment.Model})
+	if last.Model != "" {
+		event.Evidence = append(event.Evidence, Evidence{Label: "起案役", Text: last.Model})
 	}
 	v.Timeline = append(v.Timeline, event)
 }
@@ -371,9 +431,15 @@ func (v *View) readImplementation(dir string, n int) {
 		AgentID      string    `json:"agent_id"`
 	}
 	haveCandidate := readJSON(filepath.Join(dir, "candidate.json"), &candidate)
-	haveRun := readJSON(filepath.Join(dir, "implementer-run.json"), &run)
-	if !haveRun {
-		haveRun = readJSON(filepath.Join(dir, "implement-run.json"), &run)
+	// The implementer's own report (implementer-run), the applier's in a
+	// design-backed round (applier-run), or the seal's copy (implement-run).
+	runRecord := ""
+	var haveRun bool
+	for _, base := range []string{"implementer-run", "applier-run", "implement-run"} {
+		if haveRun = readJSON(filepath.Join(dir, base+".json"), &run); haveRun {
+			runRecord = base
+			break
+		}
 	}
 	if !haveCandidate && !haveRun {
 		return
@@ -392,7 +458,10 @@ func (v *View) readImplementation(dir string, n int) {
 	event := Event{At: at, Step: "implement", Tone: "ok", Title: fmt.Sprintf("実装 %d 巡目: 変更 %d ファイル", n, len(files)), Record: fmt.Sprintf("stage-%d-candidate", n)}
 	if !haveCandidate {
 		event.Title, event.Tone = fmt.Sprintf("実装 %d 巡目: 変更が封緘されなかった", n), "bad"
-		event.Record = fmt.Sprintf("stage-%d-implementer-run", n)
+		event.Record = fmt.Sprintf("stage-%d-%s", n, runRecord)
+	}
+	if runRecord == "applier-run" {
+		event.Title = strings.Replace(event.Title, "実装", "設計に沿った実装", 1)
 	}
 	if len(files) > 0 {
 		event.Evidence = append(event.Evidence, Evidence{Label: "変更したファイル", Text: strings.Join(files, "\n")})
@@ -421,10 +490,7 @@ func (v *View) readReviews(dir string, n int) {
 	readJSON(filepath.Join(dir, "decision.json"), &decision)
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "review-") || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if strings.HasSuffix(name, "-run.json") {
+		if !isReviewRecord(name) {
 			continue
 		}
 		reviewer := strings.TrimSuffix(name, ".json")
@@ -466,11 +532,8 @@ func (v *View) readReviews(dir string, n int) {
 	// answer: the run record's transcript tail is the only evidence.
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "review-") || !strings.HasSuffix(name, "-run.json") {
-			continue
-		}
-		reviewer := strings.TrimSuffix(name, "-run.json")
-		if exists(filepath.Join(dir, reviewer+".json")) {
+		reviewer, isRun := strings.CutSuffix(name, "-run.json")
+		if !isRun || !isReviewRecord(reviewer+".json") || exists(filepath.Join(dir, reviewer+".json")) {
 			continue
 		}
 		var run struct {
@@ -483,7 +546,7 @@ func (v *View) readReviews(dir string, n int) {
 		}
 		v.Timeline = append(v.Timeline, Event{
 			At: run.RanAt, Step: "review", Tone: "bad", Title: fmt.Sprintf("レビュー %d 巡目 · %s: 判定を返せなかった", n, reviewer),
-			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: shown(tail(run.Transcript, 800))}},
+			Evidence: []Evidence{{Label: "レビュー役の出力の末尾", Text: tail(shown(run.Transcript), 800)}},
 			Record:   fmt.Sprintf("stage-%d-%s-run", n, reviewer),
 		})
 	}
@@ -493,6 +556,22 @@ func (v *View) readReviews(dir string, n int) {
 			v.Timeline[last].Why = "この巡の結論: " + verdictWord(decision.Outcome)
 		}
 	}
+}
+
+// isReviewRecord says whether a stage file is a reviewer's sealed verdict:
+// every JSON record of a stage that is not one of the engine's own (the
+// candidate, the decision, the ticket and source copies, the implementer's
+// and applier's runs) is named by a configured reviewer id.
+func isReviewRecord(name string) bool {
+	base, isJSON := strings.CutSuffix(name, ".json")
+	if !isJSON || strings.HasSuffix(base, "-run") || !recordBase.MatchString(base) {
+		return false
+	}
+	switch base {
+	case "candidate", "decision", "ticket", "source", "implement", "implementer", "applier":
+		return false
+	}
+	return true
 }
 
 func verdictWord(verdict string) string {
@@ -615,7 +694,7 @@ func deliverTitle(phase, verdict string) (string, string) {
 		return phase + ": 停止", "warn"
 	case "expired":
 		return phase + ": Go の期限切れ", "warn"
-	case "checks_failed", "merge_failed", "deploy_failed", "observe_failed", "measure_failed", "card_failed":
+	case "checks_failed", "merge_failed", "deploy_failed", "observe_failed", "measure_failed", "card_failed", "promotion_failed":
 		return phase + ": 不合格 (" + verdict + ")", "bad"
 	case "merge_unverified", "deploy_absent", "observe_blocked":
 		return phase + ": 確認が必要 (" + verdict + ")", "warn"
@@ -645,7 +724,7 @@ func (v *View) readEnding(runDir string) {
 		failure.Reason = record.Reason
 	}
 	if trail, err := os.ReadFile(filepath.Join(runDir, "m1-trail.txt")); err == nil {
-		failure.Detail = shown(tail(strings.TrimSpace(string(trail)), 1200))
+		failure.Detail = tail(shown(strings.TrimSpace(string(trail))), 1200)
 	}
 	v.Failure = failure
 	v.Timeline = append(v.Timeline, Event{

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -133,4 +134,97 @@ func TestBoardHTMLLinksEachCardToItsTicketPage(t *testing.T) {
 		t.Fatal("board cards must link to /tickets/<issue_key>")
 	}
 	_ = http.StatusOK
+}
+
+func TestTicketAPIPicksTheNewestRunOfAKey(t *testing.T) {
+	for _, order := range [][2]string{{"delivery_old", "delivery_new"}, {"delivery_new", "delivery_old"}} {
+		s := ticketFixture(t)
+		rows := ""
+		for i, id := range order {
+			claimed := map[string]int64{"delivery_old": 100, "delivery_new": 200}[id]
+			step := map[string]string{"delivery_old": "failed", "delivery_new": "review"}[id]
+			if i > 0 {
+				rows += ","
+			}
+			rows += fmt.Sprintf(`{"delivery_id":%q,"issue_id":123,"issue_key":"PROJ-7","step":%q,"claimed_at_ms":%d}`, id, step, claimed)
+		}
+		if err := os.WriteFile(filepath.Join(s.statusDir, "board.json"), []byte(`{"runs":[`+rows+`]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		s.serveTicketAPI(rec, httptest.NewRequest("GET", "/api/tickets/PROJ-7", nil))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"delivery_id":"delivery_new"`) || !strings.Contains(rec.Body.String(), `"step":"review"`) {
+			t.Fatalf("order %v: newest run must win: %d %s", order, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestTicketKeysFollowTheEngineShape(t *testing.T) {
+	for key, want := range map[string]bool{"A-1": true, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_1-42": true, "PROJ-0": false, "proj-1": false, "PROJ-": false, "PROJ-1x": false} {
+		if got := ticketKeyPattern.MatchString(key); got != want {
+			t.Errorf("key %q accepted=%v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestTicketRecordsAreMaskedBeforeAnyCut(t *testing.T) {
+	s := ticketFixture(t)
+	runDir := filepath.Join(filepath.Dir(s.statusDir), "runs", "delivery_abc")
+	key := "sk-" + strings.Repeat("ABCDEFGHIJ", 4)
+	// The key sits across the old 512 KiB cut and inside the read bound.
+	body := strings.Repeat("x", (512<<10)-11) + "\n" + key + "\ntrailer text here\n"
+	if err := os.WriteFile(filepath.Join(runDir, "m1-trail.txt"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.serveTicketAPI(rec, httptest.NewRequest("GET", "/api/tickets/PROJ-7/records/trail", nil))
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), key[3:]) || !strings.Contains(rec.Body.String(), "[masked:") || !strings.HasSuffix(strings.TrimSpace(rec.Body.String()), "trailer text here") {
+		t.Fatalf("record must be masked whole and served whole: %d len=%d tail=%q", rec.Code, rec.Body.Len(), tailOf(rec.Body.String(), 60))
+	}
+	// A record longer than the serve bound is cut after masking, and says so.
+	long := strings.Repeat("y", maxRecordServe+100)
+	if err := os.WriteFile(filepath.Join(runDir, "m1-trail.txt"), []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	s.serveTicketAPI(rec, httptest.NewRequest("GET", "/api/tickets/PROJ-7/records/trail", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "以下略") || rec.Body.Len() > maxRecordServe+200 {
+		t.Fatalf("a long record must be cut with a note: %d len=%d", rec.Code, rec.Body.Len())
+	}
+}
+
+func tailOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+func TestTicketRoutesSitBehindTheAccessGate(t *testing.T) {
+	s := ticketFixture(t)
+	mux := http.NewServeMux()
+	gate := newAuthGate("operator", "a-password-of-sixteen-plus", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registerRoutes(mux, gate.wrap, &s)
+	for _, path := range []string{"/tickets/PROJ-7", "/api/tickets/PROJ-7", "/api/tickets/PROJ-7/records/intake"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 401 {
+			t.Fatalf("%s without credentials: %d, want 401", path, rec.Code)
+		}
+		req := httptest.NewRequest("GET", path, nil)
+		req.SetBasicAuth("operator", "a-password-of-sixteen-plus")
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s with credentials: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	// The mux cleans a dotted path before any handler sees it.
+	req := httptest.NewRequest("GET", "/api/tickets/../PROJ-7", nil)
+	req.SetBasicAuth("operator", "a-password-of-sixteen-plus")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code == 200 {
+		t.Fatalf("a dotted path must not reach a ticket: %d", rec.Code)
+	}
 }

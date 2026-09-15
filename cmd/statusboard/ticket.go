@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 )
 
 // The ticket page: one ticket, everything its run recorded, behind the
-// board's own credentials. /tickets/<key> serves the page, /api/tickets/<key>
+// board's own access gate. /tickets/<key> serves the page, /api/tickets/<key>
 // its data (the board row for "where it is now" plus ticketview's timeline),
 // and /api/tickets/<key>/records/<name> one raw record, masked, for the
 // operator who wants the original. The key is resolved to a run directory
@@ -24,25 +25,26 @@ import (
 //go:embed ticket.html
 var ticketPage []byte
 
-var ticketKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,15}-[0-9]{1,8}$`)
-var recordNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,48}$`)
+// ticketKeyPattern is the engine's own issue key shape (worker config).
+var ticketKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]*$`)
+var recordNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,96}$`)
+
+// maxRecordRead bounds what one record request reads; it sits above every
+// record the engine writes (a transcript is capped at 1 MiB, an artifact
+// below that), so the secret scan always sees a whole file. maxRecordServe
+// bounds the masked text handed out; a longer one is cut after masking and
+// says so.
+const (
+	maxRecordRead  = 4 << 20
+	maxRecordServe = 2 << 20
+)
 
 // boardRow is the board.json row as the ticket page needs it.
 type boardRow struct {
-	DeliveryID   string          `json:"delivery_id"`
-	IssueID      int64           `json:"issue_id"`
-	IssueKey     string          `json:"issue_key"`
-	Summary      string          `json:"summary"`
-	Step         string          `json:"step"`
-	StepTitle    string          `json:"step_title"`
-	Detail       string          `json:"detail"`
-	NextAction   string          `json:"next_action"`
-	ActionEffect string          `json:"action_effect"`
-	Terminal     string          `json:"terminal_code"`
-	CanGo        bool            `json:"can_go"`
-	CanResolve   bool            `json:"can_resolve"`
-	PRURL        string          `json:"pr_url"`
-	Raw          json.RawMessage `json:"-"`
+	DeliveryID string          `json:"delivery_id"`
+	IssueKey   string          `json:"issue_key"`
+	ClaimedAt  int64           `json:"claimed_at_ms"`
+	Raw        json.RawMessage `json:"-"`
 }
 
 // runsRoot is where the run directories live: LASSDAS_RUNS_ROOT, or the
@@ -55,7 +57,9 @@ func (s *boardServer) runsRoot() string {
 }
 
 // boardRowFor finds the board row of an issue key. Only rows the attendant
-// wrote are served; an unknown key is a 404, not a directory probe.
+// wrote are served; an unknown key is a 404, not a directory probe. A key
+// that was run more than once has several rows: the newest claim wins,
+// whatever order the file lists them in.
 func (s *boardServer) boardRowFor(key string) (boardRow, bool) {
 	raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json"))
 	if err != nil {
@@ -75,9 +79,9 @@ func (s *boardServer) boardRowFor(key string) (boardRow, bool) {
 			continue
 		}
 		row.Raw = entry
-		// Several runs may carry one key (a re-run); the newest row wins,
-		// and the attendant lists rows newest last.
-		found, haveRow = row, true
+		if !haveRow || row.ClaimedAt > found.ClaimedAt {
+			found, haveRow = row, true
+		}
 	}
 	return found, haveRow
 }
@@ -134,8 +138,10 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveTicketRecord serves one raw record by its page name, masked. The
-// name must be one ticketview serves; the file is read from the run
-// directory the board row named, never from a path the client wrote.
+// name must be one ticketview resolves; the file is read from the run
+// directory the board row named, never from a path the client wrote. The
+// whole file passes the secret scan before anything is cut, so a value
+// can never be split across a cut and leak in halves.
 func (s *boardServer) serveTicketRecord(w http.ResponseWriter, r *http.Request, runDir, rest string) {
 	const prefix = "records/"
 	if !strings.HasPrefix(rest, prefix) {
@@ -152,19 +158,35 @@ func (s *boardServer) serveTicketRecord(w http.ResponseWriter, r *http.Request, 
 		http.NotFound(w, r)
 		return
 	}
-	raw, err := os.ReadFile(filepath.Join(runDir, relative))
+	file, err := os.Open(filepath.Join(runDir, relative))
 	if err != nil {
 		http.Error(w, "この記録は残っていません", http.StatusNotFound)
 		return
 	}
-	const maxRecord = 512 << 10
-	if len(raw) > maxRecord {
-		raw = raw[:maxRecord]
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxRecordRead+1))
+	if err != nil {
+		http.Error(w, "この記録は読めませんでした", http.StatusNotFound)
+		return
+	}
+	cut := false
+	if len(raw) > maxRecordRead {
+		raw, cut = raw[:maxRecordRead], true
 	}
 	masked, _, refusal := probe.MaskSecrets(string(raw), nil)
 	if refusal != "" {
 		http.Error(w, "この記録は秘密の形 ("+refusal+") を含むため表示しません", http.StatusForbidden)
 		return
+	}
+	if len(masked) > maxRecordServe {
+		end := maxRecordServe
+		for end > 0 && (masked[end]&0xC0) == 0x80 {
+			end--
+		}
+		masked, cut = masked[:end], true
+	}
+	if cut {
+		masked += "\n…(以下略: この原本は長いためここまでで切ってあります)\n"
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
