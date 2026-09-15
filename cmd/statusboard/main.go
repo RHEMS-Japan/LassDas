@@ -171,6 +171,8 @@ func run() error {
 		writePage(w, boardPage)
 	}))
 	mux.Handle("/demo/", protect(serveDemo))
+	mux.Handle("/tickets/", protect(board.serveTicketPage))
+	mux.Handle("/api/tickets/", protect(board.serveTicketAPI))
 	mux.Handle("/api/board", protect(board.serveBoard))
 	mux.Handle("/api/act", protect(board.serveAct))
 	mux.Handle("/stream", protect(board.serveStream))
