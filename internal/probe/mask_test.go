@@ -375,3 +375,44 @@ func TestArrowKeysAreKeys(t *testing.T) {
 		t.Fatalf("stored = %q", stored.Output)
 	}
 }
+
+// The same word can be the sample password of a local example and the real
+// password of the production string below it: it is a default credential
+// only when every string that carries it says so, in either order.
+func TestDefaultCredentialNeedsEveryOccurrenceToAgree(t *testing.T) {
+	local := "DATABASE_URL=postgres://rhemsjapan:rhemsjapan@localhost/dev\n"
+	prod := "PROD_DATABASE_URL=postgres://svc:rhemsjapan@prod-db.example.invalid/app\n"
+	for name, content := range map[string]string{
+		"sample first": local + prod + "export PGPASSWORD=rhemsjapan\n",
+		"real first":   prod + local + "export PGPASSWORD=rhemsjapan\n",
+	} {
+		_, stored := maskedRead(t, "readme.md", content, maskedLimits)
+		if strings.Contains(stored.Output, "PGPASSWORD=rhemsjapan") {
+			t.Errorf("%s: the real password survived: %q", name, stored.Output)
+		}
+	}
+	// Without a path there is no database name to compare with: a password
+	// equal to the host is a real password.
+	_, stored := maskedRead(t, "env.sh", "url postgres://app:dbserver@dbserver\nPGPASSWORD=dbserver\n", maskedLimits)
+	if strings.Contains(stored.Output, "PGPASSWORD=dbserver") {
+		t.Fatalf("a password equal to the host survived: %q", stored.Output)
+	}
+}
+
+// A long run of digits after a token is the rest of it (a hexadecimal or
+// numeric token wraps like any other); only a short integer, a version or a
+// date is its own line.
+func TestDigitContinuationsAreRefusedUnlessShort(t *testing.T) {
+	for _, next := range []string{"12345678901234567890", "123456789", "20260915"} {
+		outcome, _ := maskedRead(t, "wrap.txt", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\n"+next+"\n", maskedLimits)
+		if !outcome.Measurement.Refused {
+			t.Errorf("%q after a token was stored", next)
+		}
+	}
+	for _, next := range []string{"123456", "1.2.3", "2026-09-15"} {
+		outcome, _ := maskedRead(t, "log.txt", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\n"+next+"\n", maskedLimits)
+		if outcome.Measurement.Refused {
+			t.Errorf("%q after a token refused the output", next)
+		}
+	}
+}

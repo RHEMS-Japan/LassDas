@@ -106,8 +106,9 @@ var (
 	continuation = regexp.MustCompile(`^[ \t]*\r?\n[ \t]*([A-Za-z0-9._~+/-]{4,}=*)[ \t]*(?:\r?\n|$)`)
 	// notContinuation is a line the continuation shape would otherwise
 	// take for the rest of a token but that is plainly its own line: a
-	// number, a version, a date, a rule of dashes.
-	notContinuation = regexp.MustCompile(`^(?:[0-9][0-9.-]*|-+|\.+)=*$`)
+	// short integer, a version, a date, a rule of dashes or dots. A longer
+	// run of digits is the rest of a token as much as anything else.
+	notContinuation = regexp.MustCompile(`^(?:[0-9]{1,6}|[0-9]+(?:\.[0-9]+)+|[0-9]{4}-[0-9]{2}-[0-9]{2}|-+|\.+)=*$`)
 )
 
 // continuationWords are whole lines the continuation shape would take for
@@ -252,9 +253,12 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 			return "", nil, shape.kind
 		}
 	}
-	// Pass 1: the values, found on the original text.
+	// Pass 1: the values, found on the original text. A candidate that
+	// several matches produce is a default credential only if every one
+	// of them says so: the same word can be the sample password of a local
+	// example and the real password of the production string below it.
 	var values []maskedValue
-	seen := map[string]bool{}
+	index := map[string]int{}
 	for i, shape := range secretShapes {
 		if !shape.whole {
 			continue
@@ -285,18 +289,25 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 			if i == connectionShape {
 				scheme, user, password := group(1), group(2), group(4)
 				primary, outer = password, strings.TrimSuffix(group(3), "@")
-				dbName := dbNamePattern.FindString(output[match[1]:])
-				dbName = dbName[strings.LastIndex(dbName, "/")+1:]
-				sample = strings.EqualFold(password, scheme) || strings.EqualFold(password, user) || dbName != "" && strings.EqualFold(password, dbName)
+				sample = strings.EqualFold(password, scheme) || strings.EqualFold(password, user)
+				if path := dbNamePattern.FindString(output[match[1]:]); strings.Contains(path, "/") {
+					dbName := path[strings.LastIndex(path, "/")+1:]
+					sample = sample || dbName != "" && strings.EqualFold(password, dbName)
+				}
 			} else if g := group(1); g != "" {
 				primary = g
 			}
 			sample = sample || defaultValues[strings.ToLower(primary)]
 			add := func(candidate string) {
-				if len(candidate) >= minValueBytes && !seen[candidate] {
-					seen[candidate] = true
-					values = append(values, maskedValue{shape: i, value: candidate, sample: sample})
+				if len(candidate) < minValueBytes {
+					return
 				}
+				if at, known := index[candidate]; known {
+					values[at].sample = values[at].sample && sample
+					return
+				}
+				index[candidate] = len(values)
+				values = append(values, maskedValue{shape: i, value: candidate, sample: sample})
 			}
 			for _, candidate := range valueCandidates(primary) {
 				add(candidate)
