@@ -15,6 +15,7 @@ func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 	runDir := filepath.Join(t.TempDir(), "delivery_test")
 	recordStreakCheck(runDir, time.Now())
 	sealBoardOutcome(runDir, "checks", "pass", "note")
+	writeBoardPhase(runDir, "delivered", &pendingTestLogger{}, "TKT-1")
 
 	info, err := os.Stat(runDir)
 	if err != nil {
@@ -23,7 +24,7 @@ func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o711 {
 		t.Fatalf("run directory mode = %o, want 711 (enter, not list)", got)
 	}
-	for _, name := range []string{streakCheckFile, boardOutcomeFile} {
+	for _, name := range []string{streakCheckFile, boardOutcomeFile, boardPhaseFile} {
 		info, err := os.Stat(filepath.Join(runDir, name))
 		if err != nil {
 			t.Fatal(err)

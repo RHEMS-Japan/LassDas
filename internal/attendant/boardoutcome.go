@@ -26,7 +26,10 @@ type boardOutcome struct {
 }
 
 // sealBoardOutcome is best-effort by design: a failed seal costs board
-// accuracy, never the tick or the ticket.
+// accuracy, never the tick or the ticket. Two things read the seal as a
+// fact: the status board (status.go) and the projection of a delivery's end
+// onto the tracker (board_phase.go); the attention resolution reads the
+// report files.
 func sealBoardOutcome(runDir, phase, verdict, note string) {
 	encoded, err := json.Marshal(boardOutcome{Phase: phase, Verdict: verdict, Note: note, At: time.Now().UTC()})
 	if err != nil {

@@ -30,6 +30,11 @@ type Services struct {
 	Tick     *hook.QuestionTickService
 	Route    hook.ReportRouteConfig
 	Logger   *slog.Logger
+	// Board mirrors a ticket's phase onto the tracker's board; nil when the
+	// tracker configured no board statuses. The attendant projects a
+	// delivery's end through it (attendant.projectDeliveryEnd), the hook
+	// services their own transitions.
+	Board hook.BoardProjector
 }
 
 // BuildServices opens the ledger and wires the services. The Backlog API
@@ -113,6 +118,7 @@ func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
 	}
 	hookService.UseAnswerSignal(tickService)
 	statuses := config.Tracker.BoardStatuses
+	var board hook.BoardProjector
 	if statuses.Running > 0 || statuses.AwaitingAnswer > 0 || statuses.Delivered > 0 || statuses.NeedsAttention > 0 {
 		projection, err := backlog.NewBoardProjection(backlogClient, backlog.BoardStatusMap{
 			Running: statuses.Running, AwaitingAnswer: statuses.AwaitingAnswer,
@@ -126,11 +132,13 @@ func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
 		questionService.UseBoard(projection)
 		tickService.UseBoard(projection)
 		reportService.UseBoard(projection)
+		board = projection
 	}
 	return &Services{
 		Config: config, Store: store, Backlog: backlogClient,
 		Hook: hookService, Report: reportService, Question: questionService, Tick: tickService,
 		Route: route, Logger: logger,
+		Board: board,
 	}, nil
 }
 
