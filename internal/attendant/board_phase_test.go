@@ -330,6 +330,38 @@ func TestProjectDeliveryEndLeavesADeletedTicketAlone(t *testing.T) {
 	if _, ok := readBoardPhase(runDir); ok {
 		t.Fatal("a tracker error was recorded as a phase")
 	}
+	// An authentication failure or a corrupt answer is not "the ticket is
+	// gone": it is tried again, and never recorded as untouched (an
+	// expired API key must not silence every run until its end changes).
+	for _, status := range []int{401, 403} {
+		reads = 0
+		rejected := &runtime.Services{Board: board, Backlog: client(status)}
+		projectDeliveryEnd(context.Background(), config, rejected, run, nil, logger)
+		projectDeliveryEnd(context.Background(), config, rejected, run, nil, logger)
+		if reads != 2 || len(board.phases) != 0 {
+			t.Fatalf("HTTP %d: reads=%d phases=%v, want two reads and no projection", status, reads, board.phases)
+		}
+		if _, ok := readBoardPhase(runDir); ok {
+			t.Fatalf("HTTP %d was recorded as a phase", status)
+		}
+	}
+	reads = 0
+	corrupt, err := backlog.NewClient(backlog.Config{SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20},
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			reads++
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":999,"status":{"id":0}}`))}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDeliveryEnd(context.Background(), config, &runtime.Services{Board: board, Backlog: corrupt}, run, nil, logger)
+	projectDeliveryEnd(context.Background(), config, &runtime.Services{Board: board, Backlog: corrupt}, run, nil, logger)
+	if reads != 2 || len(board.phases) != 0 {
+		t.Fatalf("a corrupt answer: reads=%d phases=%v, want two reads and no projection", reads, board.phases)
+	}
+	if _, ok := readBoardPhase(runDir); ok {
+		t.Fatal("a corrupt answer was recorded as a phase")
+	}
 	reads = 0
 	gone := &runtime.Services{Board: board, Backlog: client(404)}
 	projectDeliveryEnd(context.Background(), config, gone, run, nil, logger)
