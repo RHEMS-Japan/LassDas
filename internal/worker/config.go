@@ -424,9 +424,8 @@ type ConsumerConfig struct {
 	// Design is the destination's say over the design stage the reception
 	// decides on for every change request (whether a change may skip the
 	// design, and which words in a ticket mean the running system has to be
-	// measured first). Optional: absent means design on for every change
-	// request, because the skip needs a trigger vocabulary and the framework
-	// holds no default one.
+	// measured first). Optional: absent means design on, judged with the
+	// framework's DefaultDesignTriggerWords.
 	Design *DesignConfig `json:"design,omitempty"`
 	// GitHub is the destination repository's observed delivery contract.
 	// CLI destinations pin its default branch; web destinations also pin
@@ -585,17 +584,51 @@ const (
 	maxDesignTriggerWordSize = 64
 )
 
+// DefaultDesignTriggerWords is the framework's own trigger vocabulary: the
+// words in a ticket that mean the running system has to be observed before
+// a fix is designed. It applies to every destination that configures no
+// vocabulary of its own, so a destination is never made to write one just
+// to let a small, precisely stated change skip its design.
+//
+// A hit forces the design stage with no appeal, so the list is precision
+// first: only words that almost never describe anything but an unobserved
+// live symptom. Words that also appear in finished investigations ("root
+// cause: X, fix: Y", 原因を特定済み, 調査を終えたので), in UI names (Logs
+// page, latency / レイテンシ column, "in production builds"), in the names
+// of techniques (遅延読み込み, 遅延する設定, 再現性のあるビルド, 不安定版) or
+// inside other words (ダイアログに, カタログを, あたまに, catalogs, slowly) are
+// left out; the AI proposer and checker judge needs_design independently
+// of this list and catch a symptom said in other words. The Japanese
+// entries match as substrings and therefore carry the particle or
+// inflection that keeps them out of unrelated words; the English entries
+// match as whole words (see ticketTriggerWord), so their inflections are
+// listed, and "can't" is listed with both apostrophes (U+0027 and the
+// U+2019 that macOS and Word substitute).
+var DefaultDesignTriggerWords = []string{
+	"が遅い", "遅くなった", "遅くなって", "遅くなり", "遅すぎ", "遅延が",
+	"が重い", "重くなった", "重くなって", "重くなり", "重すぎ", "時々",
+	"ときどき", "断続的", "が不安定", "稀に", "本番で", "本番環境",
+	"本番のみ", "本番だけ", "原因不明", "原因は不明", "原因が分から", "原因がわから",
+	"再現しない", "再現できない", "再現できず", "再現できません", "再現条件",
+	"slow", "slower", "slowness", "sluggish", "intermittent", "intermittently",
+	"flaky", "production only", "prod only", "on prod", "on production", "cannot reproduce",
+	"can't reproduce", "can’t reproduce",
+}
+
 // DesignConfig is a destination's design-stage policy. Every key is optional
-// and absent means the safe reading: design on, no trigger vocabulary (so
-// the skip can never fire), investigation reports reviewed.
+// and absent means: design on, the framework's default trigger vocabulary,
+// investigation reports reviewed.
 type DesignConfig struct {
 	// Default is "on" or "off"; absent reads as "on".
 	Default string `json:"default,omitempty"`
 	// TriggerWords are the words in a ticket that mean the running system
 	// has to be observed before a fix is designed (in the requesters' own
 	// language: slowness, intermittence, production, logs, root cause,
-	// investigation). The framework holds no default list, and an empty
-	// list means the skip condition about them can never hold.
+	// investigation). Absent or empty means DefaultDesignTriggerWords; a
+	// configured list replaces the default rather than extending it. An
+	// entry of ASCII letters, digits, spaces and hyphens matches as a whole
+	// word, case-insensitively; any other entry matches as a case-folded
+	// substring (ticketTriggerWord).
 	TriggerWords []string `json:"trigger_words,omitempty"`
 	// ReviewInvestigation says whether an investigation-only report gets a
 	// grounding review before it is posted; absent reads as true.
@@ -634,13 +667,23 @@ func (c ConsumerConfig) DesignEnabled() bool {
 	return c.Design == nil || c.Design.Default != DesignDefaultOff
 }
 
-// DesignTriggerWords is the destination's trigger vocabulary, nil when none
-// is configured.
+// DesignTriggerWords is the destination's own trigger vocabulary, nil when
+// none is configured.
 func (c ConsumerConfig) DesignTriggerWords() []string {
 	if c.Design == nil {
 		return nil
 	}
 	return append([]string(nil), c.Design.TriggerWords...)
+}
+
+// EffectiveDesignTriggerWords is the vocabulary the design rule and the
+// reception prompts actually use: the destination's own when it configured
+// one, DefaultDesignTriggerWords otherwise.
+func (c ConsumerConfig) EffectiveDesignTriggerWords() []string {
+	if words := c.DesignTriggerWords(); len(words) > 0 {
+		return words
+	}
+	return append([]string(nil), DefaultDesignTriggerWords...)
 }
 
 // ReviewsInvestigation reports whether an investigation-only report is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,8 +14,9 @@ import (
 // The reception's design decision (README / issue #18 §6): a change request
 // skips the design stage only when the ticket itself states the approach
 // (quoted, and the quote really is in the ticket), the derived target files
-// are two or fewer, the destination configured a trigger vocabulary and none
-// of it appears, the request is a change - and neither AI kept the design.
+// are two or fewer, none of the trigger vocabulary (the destination's own,
+// or the framework's default) appears, the request is a change - and
+// neither AI kept the design.
 
 const (
 	designApproachBody  = "Replace the visible label. How to do it: change the label constant in Example.tsx to the new wording."
@@ -103,10 +105,12 @@ func designDecision(t *testing.T, output ModelReadinessOutput, checkKind string,
 	return decision
 }
 
-// An empty or absent trigger vocabulary fails its condition: the framework
-// holds no default list, so "no words configured" must mean "no skip", not
-// "nothing to trigger on". The control run differs only in the vocabulary.
-func TestEmptyTriggerWordsNeverSkipDesign(t *testing.T) {
+// A destination that configured no trigger vocabulary is judged with the
+// framework's default one: a precisely stated change with none of those
+// words skips its design, and one carrying a default word (here 本番で) keeps
+// it. A configured vocabulary replaces the default, so the same default word
+// no longer triggers under it while its own words still do.
+func TestUnsetTriggerWordsUseTheDefaultVocabulary(t *testing.T) {
 	for name, design := range map[string]*DesignConfig{
 		"absent":     nil,
 		"empty list": {Default: DesignDefaultOn, TriggerWords: []string{}},
@@ -114,18 +118,71 @@ func TestEmptyTriggerWordsNeverSkipDesign(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			config, request, source := designFixture(t, design, designApproachBody)
 			decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-			if !decision.NeedsDesign || decision.DesignReason != DesignReasonTriggerWordsUnset {
-				t.Fatalf("decision = (%v, %q), want design kept for the unset vocabulary", decision.NeedsDesign, decision.DesignReason)
+			if decision.NeedsDesign || decision.DesignReason != DesignReasonApproachInTicket {
+				t.Fatalf("decision = (%v, %q), want the design skipped under the default vocabulary", decision.NeedsDesign, decision.DesignReason)
 			}
 			if !decision.ApproachInTicket || decision.ApproachExcerpt != designApproachQuote || decision.RequestKind != RequestKindChange {
 				t.Fatalf("the other conditions were not recorded: %+v", decision)
 			}
+			config, request, source = designFixture(t, design, designApproachBody+" 本番で表示が崩れるので直したい。")
+			kept := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+			if !kept.NeedsDesign || kept.DesignReason != DesignReasonTriggerWord {
+				t.Fatalf("decision = (%v, %q), want the design kept for a default trigger word", kept.NeedsDesign, kept.DesignReason)
+			}
 		})
 	}
-	config, request, source := designFixture(t, &DesignConfig{TriggerWords: designTriggerWords()}, designApproachBody)
-	control := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-	if control.NeedsDesign || control.DesignReason != DesignReasonApproachInTicket {
-		t.Fatalf("control decision = (%v, %q), want the design skipped", control.NeedsDesign, control.DesignReason)
+	own := &DesignConfig{TriggerWords: designTriggerWords()}
+	config, request, source := designFixture(t, own, designApproachBody+" 本番で表示が崩れるので直したい。")
+	replaced := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+	if replaced.NeedsDesign || replaced.DesignReason != DesignReasonApproachInTicket {
+		t.Fatalf("decision = (%v, %q), want the configured vocabulary to replace the default", replaced.NeedsDesign, replaced.DesignReason)
+	}
+	config, request, source = designFixture(t, own, designApproachBody+" It is slow.")
+	ownHit := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
+	if !ownHit.NeedsDesign || ownHit.DesignReason != DesignReasonTriggerWord {
+		t.Fatalf("decision = (%v, %q), want the design kept for a configured trigger word", ownHit.NeedsDesign, ownHit.DesignReason)
+	}
+}
+
+// The default vocabulary must itself pass the validation a destination's own
+// list passes, and be what the rule and the prompts read when nothing is
+// configured.
+func TestDefaultDesignTriggerWordsAreWellFormed(t *testing.T) {
+	if len(DefaultDesignTriggerWords) == 0 {
+		t.Fatal("the default vocabulary is empty")
+	}
+	if err := (&DesignConfig{TriggerWords: DefaultDesignTriggerWords}).validate(); err != nil {
+		t.Fatalf("the default vocabulary does not validate: %v", err)
+	}
+	var none ConsumerConfig
+	if got := none.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, DefaultDesignTriggerWords) {
+		t.Fatalf("effective vocabulary without configuration = %v, want the default", got)
+	}
+	// The requester-facing docs list the same vocabulary, word for word and
+	// in the same order: the §6 list is cut out and compared whole, so a
+	// word dropped from it is not covered by a mention elsewhere in the file.
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "INVESTIGATING_DESIGNER.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(doc)
+	const head, mid, tail = "`DefaultDesignTriggerWords`。日本語: ", "。英語: ", ")。一致の規則"
+	start := strings.Index(text, head)
+	if start < 0 {
+		t.Fatal("docs/INVESTIGATING_DESIGNER.md no longer carries the §6 vocabulary list")
+	}
+	rest := text[start+len(head):]
+	split, end := strings.Index(rest, mid), strings.Index(rest, tail)
+	if split < 0 || end < 0 || split > end {
+		t.Fatalf("the §6 vocabulary list is not in the expected shape: %.200q", rest)
+	}
+	listed := append(strings.Split(rest[:split], " / "), strings.Split(rest[split+len(mid):end], " / ")...)
+	if !reflect.DeepEqual(listed, DefaultDesignTriggerWords) {
+		t.Fatalf("docs §6 lists %v\nwant %v", listed, DefaultDesignTriggerWords)
+	}
+	own := ConsumerConfig{Design: &DesignConfig{TriggerWords: []string{"slow"}}}
+	if got := own.EffectiveDesignTriggerWords(); !reflect.DeepEqual(got, []string{"slow"}) {
+		t.Fatalf("effective vocabulary with configuration = %v, want the configured list alone", got)
 	}
 }
 
@@ -428,8 +485,11 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 			t.Fatalf("the checker prompt lacks %q", want)
 		}
 	}
-	if readinessPromptVersion != 11 {
-		t.Fatalf("prompt version = %d, want 11 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements)", readinessPromptVersion)
+	if readinessPromptVersion != 12 {
+		t.Fatalf("prompt version = %d, want 12 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary)", readinessPromptVersion)
+	}
+	if strings.Contains(readinessSystemPrompt(), "no skip is possible") || strings.Contains(checker, "no skip is possible") {
+		t.Fatal("the prompts still say an absent vocabulary forbids the skip")
 	}
 }
 
@@ -452,5 +512,85 @@ func TestEveryDesignReasonHasARequesterPhrase(t *testing.T) {
 	}
 	if _, known := DesignReasonKeepsDesign("because"); known {
 		t.Fatal("an unknown reason was classified")
+	}
+}
+
+// The default vocabulary is matched so that a small change request about a
+// dialog, a catalogue, lazy loading, a heading, a UI name, or a finished
+// investigation does not read as a symptom, while the symptoms it is for
+// are found in their usual wording and inflections. ASCII words match whole
+// words case-insensitively; other words match as substrings.
+func TestTriggerWordMatchingRules(t *testing.T) {
+	for body, want := range map[string]string{
+		"確認ダイアログにキャンセルボタンを追加する。":                       "",
+		"商品カタログを PDF で出力する。":                           "",
+		"ブログに新しい記事を投稿できるようにする。":                        "",
+		"画像を遅延読み込みにする。":                                "",
+		"初期表示の描画を遅延する設定を追加する。":                         "",
+		"見出しのあたまに番号を付ける。":                              "",
+		"ファイル一覧を重い順に並べ替える。":                            "",
+		"検索結果に含まれにくい項目を先頭に出す。":                         "",
+		"調査を終えたので、定数を新しい文言に変える。":                       "",
+		"調査しておいた内容に沿って、定数を変える。":                        "",
+		"原因を特定済みなので、定数を変える。":                           "",
+		"一覧にレイテンシの列を追加する。":                             "",
+		"不安定版の API を呼ばないようにする。":                        "",
+		"ユーザー操作を再現できるログ機能を追加する。":                       "",
+		"ビルドを再現性のあるものにする。":                             "",
+		"手元で再現できます。定数を変える。":                            "",
+		"手元で再現できました。定数を変える。":                           "",
+		"Fade the banner in slowly.":                   "",
+		"Add a slow-motion toggle to the player.":      "",
+		"Rebuild the catalogs page.":                   "",
+		"Add a log in button to the header.":           "",
+		"Hide the debug banner in production builds.":  "",
+		"Add a link to the Logs page in the sidebar.":  "",
+		"Rename the Error Log tab to Activity.":        "",
+		"Show the latency column in the table header.": "",
+		"After investigation we decided: change it.":   "",
+		"一覧の表示が遅い。":                                    "が遅い",
+		"表示が遅くなった。":                                    "遅くなった",
+		"動作が不安定になる。":                                   "が不安定",
+		"本番のみ表示が崩れる。":                                  "本番のみ",
+		"原因不明のエラーが出る。":                                 "原因不明",
+		"手元では再現しない。":                                   "再現しない",
+		"手元では再現できない。":                                  "再現できない",
+		"手元では再現できませんでした。":                              "再現できません",
+		"The page is Slow on prod.":                    "slow",
+		"The dashboard is much slower since Monday.":   "slower",
+		"The export fails intermittently.":             "intermittently",
+		"We can't reproduce it locally.":               "can't reproduce",
+		"We can’t reproduce it locally.":               "can’t reproduce",
+	} {
+		_, request, _ := designFixture(t, nil, designApproachBody+" "+body)
+		got, hit := ticketTriggerWord(request, DefaultDesignTriggerWords)
+		if hit != (want != "") || got != want {
+			t.Errorf("%q: matched %q (hit %v), want %q", body, got, hit, want)
+		}
+	}
+	_, request, _ := designFixture(t, nil, designApproachBody+" It is slow.")
+	if _, hit := ticketTriggerWord(request, []string{"slowly"}); hit {
+		t.Error("a configured ASCII word matched inside another word")
+	}
+	if got, hit := ticketTriggerWord(request, []string{"SLOW"}); !hit || got != "SLOW" {
+		t.Error("a configured ASCII word did not match case-insensitively")
+	}
+	// The example configuration lists the inflections the whole-word rule
+	// needs, so the symptoms it was written for are still found under it.
+	example, err := LoadConfig(filepath.Join("..", "..", "config", "m1-consumer.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	words := example.Consumers[0].DesignTriggerWords()
+	for body, want := range map[string]string{
+		"The dashboard is much slower since Monday.":  "slower",
+		"There is noticeable slowness after login.":   "slowness",
+		"The export fails intermittently.":            "intermittently",
+		"We investigated it: the export still fails.": "investigated",
+	} {
+		_, request, _ := designFixture(t, nil, designApproachBody+" "+body)
+		if got, hit := ticketTriggerWord(request, words); !hit || got != want {
+			t.Errorf("example vocabulary: %q matched %q (hit %v), want %q", body, got, hit, want)
+		}
 	}
 }

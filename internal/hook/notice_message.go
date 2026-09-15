@@ -59,7 +59,6 @@ var designReasonPhrases = map[string]string{
 	"design_default_off":     "この納品先の設定で設計工程を使わないため設計を省略",
 	"approach_not_in_ticket": "本文に「どう直すか」が書かれていないため",
 	"target_files_over_two":  "触る予定のファイルが 3 つ以上のため",
-	"trigger_words_unset":    "設計を省略できる語彙が納品先に設定されていないため（安全側）",
 	"trigger_word":           "本文に稼働環境の観測を示す語があるため",
 	"proposer":               "受付の起案役が設計の省略に同意しなかったため",
 	"checker_disagreed":      "受付の確認役が設計の省略に同意しなかったため（起案役と不一致）",
