@@ -319,3 +319,59 @@ func TestOuterCredentialPartDoesNotRemoveTheHost(t *testing.T) {
 		t.Fatalf("stored = %q", stored.Output)
 	}
 }
+
+// A default credential - the connection string's own scheme, user or
+// database name, or a word development setups use - is masked in its shape
+// and nowhere else: image names, variables, links and comments that carry
+// the same word stay readable. A letters-only real password is removed as
+// a word of its own, never from inside another word.
+func TestDefaultCredentialsAreMaskedInTheirShapeOnly(t *testing.T) {
+	compose := "services:\n  db:\n    image: postgres:15\n    environment:\n      POSTGRES_USER: postgres\n      POSTGRES_PASSWORD: postgres\n  app:\n    environment:\n      DATABASE_URL: postgres://postgres:postgres@db:5432/app\n      READ_URL: postgres://db.example.invalid/app\n# see https://www.postgresql.org/docs/\n"
+	_, stored := maskedRead(t, "compose.yml", compose, maskedLimits)
+	want := strings.Replace(compose, "postgres://postgres:postgres@", "[masked:connection-string-with-password]", 1)
+	if stored.Output != want {
+		t.Fatalf("stored = %q, want %q", stored.Output, want)
+	}
+	for name, c := range map[string]struct{ content, keep string }{
+		"minio":       {"MINIO_ROOT_USER=minioadmin\nMINIO_ROOT_PASSWORD=minioadmin\nurl s3://minioadmin:minioadmin@minio:9000/\n", "MINIO_ROOT_USER=minioadmin\n"},
+		"wordpress":   {"image: wordpress:6\nurl mysql://wordpress:wordpress@db/wordpress\n", "image: wordpress:6\n"},
+		"development": {"NODE_ENV=development\n# development settings\nurl postgres://app:development@db/app\n", "NODE_ENV=development\n# development settings\n"},
+		"dbname":      {"url postgres://app:shopdb@db/shopdb\nSCHEMA=shopdb\n", "SCHEMA=shopdb\n"},
+	} {
+		outcome, stored := maskedRead(t, name+".env", c.content, maskedLimits)
+		if !strings.Contains(stored.Output, c.keep) {
+			t.Errorf("%s: %q lost from %q (refused=%v %s)", name, c.keep, stored.Output, outcome.Measurement.Refused, outcome.Measurement.Reason)
+		}
+	}
+	// A real letters-only password goes from a command line, glued to a
+	// flag too.
+	_, stored = maskedRead(t, "run.sh", "url postgres://app:secretpass@db/app\nredis-cli -a secretpass ping\nmysql -psecretpass\n", maskedLimits)
+	if strings.Contains(stored.Output, "secretpass") {
+		t.Fatalf("stored = %q", stored.Output)
+	}
+}
+
+// Lines a script or a document puts after a token are not the rest of it:
+// keywords, numbers, versions, dates and rules do not refuse the output.
+func TestScriptWordsAfterATokenAreNotContinuations(t *testing.T) {
+	for _, next := range []string{"done", "  done", "else", "then", "esac", "true", "null", "1.2.3", "2026-09-15", "----", "42"} {
+		content := "curl -H \"Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\"\n" + next + "\n"
+		outcome, stored := maskedRead(t, "loop.sh", content, maskedLimits)
+		if outcome.Measurement.Refused || !strings.HasSuffix(stored.Output, "\n"+next+"\n") {
+			t.Errorf("%q: refused=%v stored=%q", next, outcome.Measurement.Refused, stored.Output)
+		}
+	}
+	outcome, _ := maskedRead(t, "wrap.txt", "Authorization: Bearer abcdefghijklmnopqrst\nuvwxyz0123456789abcd\n", maskedLimits)
+	if !outcome.Measurement.Refused {
+		t.Fatal("a real continuation was not refused")
+	}
+}
+
+// A PHP or Ruby array key is a key: with the short password "data",
+// ['data' => 'other'] keeps its key while 'value' => 'data' loses the value.
+func TestArrowKeysAreKeys(t *testing.T) {
+	_, stored := maskedRead(t, "config.php", "url postgres://user:data@host/db\n$db = ['data' => 'other', 'value' => 'data'];\n", maskedLimits)
+	if !strings.Contains(stored.Output, "['data' => 'other', 'value' => '[masked:connection-string-with-password]']") {
+		t.Fatalf("stored = %q", stored.Output)
+	}
+}

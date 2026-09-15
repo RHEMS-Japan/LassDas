@@ -55,13 +55,22 @@ var secretShapes = []struct {
 	{"github token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`), true, true},
 	{"chat token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), true, true},
 	{"provider key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`), true, true},
-	// Group 1 is the whole credential part up to the last '@' of the run
-	// (so a raw '@' inside a password does not leave a tail behind); group
-	// 2 is the password as a URL parser reads it, up to the first '@'. The
-	// continuation past the first '@' stops at a closing quote or bracket,
-	// so minified JSON keeps its host and its neighbouring fields.
-	{"connection string with password", regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:(([^\s@/]{4,})@(?:[^\s@"'<>,)\]}]*@)*)`), true, false},
+	// Groups: 1 the scheme, 2 the user, 3 the whole credential part up to
+	// the last '@' of the run (so a raw '@' inside a password does not
+	// leave a tail behind), 4 the password as a URL parser reads it, up to
+	// the first '@'. The continuation past the first '@' stops at a closing
+	// quote or bracket, so minified JSON keeps its host and its
+	// neighbouring fields.
+	{"connection string with password", regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*)://([^\s/:@]+):(([^\s@/]{4,})@(?:[^\s@"'<>,)\]}]*@)*)`), true, false},
 }
+
+// connectionShape is the index of the connection-string shape, whose
+// groups are read by name in pass 1.
+const connectionShape = 8
+
+// dbNamePattern reads the path after a connection string's host: its last
+// segment is the database name.
+var dbNamePattern = regexp.MustCompile(`^[^\s"'<>,)\]}?#]*`)
 
 // maskMarker is what replaces a masked value: it names the kind (hyphenated,
 // so that a marker followed by other text can never spell a shape the way
@@ -94,33 +103,67 @@ var (
 	// masked token it is the rest of a wrapped value. A folded header
 	// indents it, a flowed mail leaves a space before the break, and a
 	// short tail is still a tail.
-	continuation = regexp.MustCompile(`^[ \t]*\r?\n[ \t]*[A-Za-z0-9._~+/-]{4,}=*[ \t]*(?:\r?\n|$)`)
+	continuation = regexp.MustCompile(`^[ \t]*\r?\n[ \t]*([A-Za-z0-9._~+/-]{4,}=*)[ \t]*(?:\r?\n|$)`)
+	// notContinuation is a line the continuation shape would otherwise
+	// take for the rest of a token but that is plainly its own line: a
+	// number, a version, a date, a rule of dashes.
+	notContinuation = regexp.MustCompile(`^(?:[0-9][0-9.-]*|-+|\.+)=*$`)
 )
+
+// continuationWords are whole lines the continuation shape would take for
+// the rest of a token but that are words of a script or a document.
+var continuationWords = map[string]bool{
+	"done": true, "else": true, "then": true, "esac": true, "elif": true, "endif": true,
+	"true": true, "false": true, "null": true, "none": true, "exit": true, "break": true,
+	"return": true, "continue": true, "pass": true, "next": true,
+}
+
+// wrappedAfter says the text after a masked token is the rest of it on the
+// next line.
+func wrappedAfter(rest string) bool {
+	match := continuation.FindStringSubmatch(rest)
+	if match == nil {
+		return false
+	}
+	line := match[1]
+	return !notContinuation.MatchString(line) && !continuationWords[strings.ToLower(strings.TrimRight(line, "="))]
+}
 
 // minValueBytes is the shortest value removed from the rest of the output;
 // minRunBytes the shortest token run inside a value that is removed on its
-// own. A value is removed wherever it occurs unless it is letters only and
-// either shorter than shortValueBytes or one of sampleValues: those are
-// the words prose and configuration use (a sample password like
-// "password" or "changeme", a four-letter word like "data"), and they are
-// removed only where they stand as a word of their own in a value position
-// - right after '=', ':' or a quote, as in PGPASSWORD=changeme or
-// "password": "changeme" - so "set the password", "password:" and
-// data_dir stay readable. A letters-only value of eight bytes or more that
-// is not a sample word is a real, if weak, password and is removed
-// anywhere a command line, a config format or a runbook may put it.
+// own. How a value is removed from the rest of the output depends on what
+// it is:
+//   - a default or sample credential (defaultValues, or a password equal to
+//     the connection string's own scheme, user or database name, as in
+//     postgres://postgres:postgres@db/postgres) is masked in its shape and
+//     nowhere else - it is the service's name, not a secret, and removing
+//     it would take image names, variables and links with it;
+//   - a value with a digit or a symbol in it is removed anywhere, inside
+//     other words too;
+//   - a letters-only value of shortValueBytes or more is a real, if weak,
+//     password and is removed anywhere - a command line (glued to a flag
+//     too), a config format, a runbook, a table;
+//   - a shorter letters-only value ("data", "root") is removed only where
+//     it stands as a word of its own in a value position - right after
+//     '=', ':' or a quote - so data_dir and prose stay readable; such a
+//     value after a command-line flag (-proot) stays, which is accepted
+//     and documented.
 const (
 	minValueBytes   = 4
 	minRunBytes     = 8
 	shortValueBytes = 8
 )
 
-// sampleValues are the placeholder passwords documentation writes in place
-// of a real one; masked in their shape, they are otherwise left to prose.
-var sampleValues = map[string]bool{
-	"password": true, "passwd": true, "changeme": true, "yourpassword": true, "mypassword": true,
-	"placeholder": true, "redacted": true, "examplepassword": true, "testpassword": true,
-	"secretpassword": true, "supersecret": true, "xxxxxxxx": true,
+// defaultValues are the placeholder and default credentials documentation
+// and development setups use in place of a real one.
+var defaultValues = map[string]bool{
+	"password": true, "passwd": true, "changeme": true, "changeit": true, "yourpassword": true,
+	"mypassword": true, "placeholder": true, "redacted": true, "example": true, "sample": true,
+	"dummy": true, "secret": true, "default": true, "development": true, "production": true,
+	"staging": true, "postgres": true, "postgresql": true, "mysql": true, "mariadb": true,
+	"redis": true, "rabbitmq": true, "guest": true, "minioadmin": true, "wordpress": true,
+	"examplepassword": true, "testpassword": true, "secretpassword": true, "supersecret": true,
+	"xxxxxxxx": true, "letmein": true,
 }
 
 // SecretShaped reports whether output carries a key-shaped string or any of
@@ -144,11 +187,13 @@ func SecretShaped(output string, forbiddenLiterals []string) (string, bool) {
 	return "", false
 }
 
-// maskedValue is one form of a value a shape found, and the shape that
-// found it.
+// maskedValue is one form of a value a shape found, the shape that found
+// it, and whether it is a default credential (then it is not removed from
+// the rest of the output at all).
 type maskedValue struct {
-	shape int
-	value string
+	shape  int
+	value  string
+	sample bool
 }
 
 // valueCandidates are the forms of a captured value that are removed from
@@ -220,35 +265,44 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 		}
 		kinds = append(kinds, shape.kind)
 		for _, match := range matches {
-			if shape.token && continuation.MatchString(output[match[1]:]) {
+			if shape.token && wrappedAfter(output[match[1]:]) {
 				// The value goes on after a line break: nothing bounds it.
 				return "", nil, shape.kind
 			}
-			// The value is the innermost group (the password up to the
-			// first '@', the token); its forms are all candidates. An outer
-			// group (the credential part up to the last '@') is a candidate
-			// as a whole only, so the host and path it may carry are not.
-			var groups []string
-			for g := 2; g+1 < len(match); g += 2 {
-				if match[g] >= 0 {
-					groups = append(groups, output[match[g]:match[g+1]])
+			group := func(g int) string {
+				if 2*g+1 < len(match) && match[2*g] >= 0 {
+					return output[match[2*g]:match[2*g+1]]
 				}
+				return ""
 			}
+			// The value is the token, or for a connection string the
+			// password up to the first '@'; its forms are all candidates.
+			// The credential part up to the last '@' is a candidate as a
+			// whole only, so the host and path it may carry are not. A
+			// password that is the connection string's own scheme, user or
+			// database name is a default credential.
+			primary, outer, sample := output[match[0]:match[1]], "", false
+			if i == connectionShape {
+				scheme, user, password := group(1), group(2), group(4)
+				primary, outer = password, strings.TrimSuffix(group(3), "@")
+				dbName := dbNamePattern.FindString(output[match[1]:])
+				dbName = dbName[strings.LastIndex(dbName, "/")+1:]
+				sample = strings.EqualFold(password, scheme) || strings.EqualFold(password, user) || dbName != "" && strings.EqualFold(password, dbName)
+			} else if g := group(1); g != "" {
+				primary = g
+			}
+			sample = sample || defaultValues[strings.ToLower(primary)]
 			add := func(candidate string) {
 				if len(candidate) >= minValueBytes && !seen[candidate] {
 					seen[candidate] = true
-					values = append(values, maskedValue{shape: i, value: candidate})
+					values = append(values, maskedValue{shape: i, value: candidate, sample: sample})
 				}
-			}
-			primary := output[match[0]:match[1]]
-			if len(groups) > 0 {
-				primary = groups[len(groups)-1]
 			}
 			for _, candidate := range valueCandidates(primary) {
 				add(candidate)
 			}
-			for _, outer := range groups[:max(len(groups)-1, 0)] {
-				add(strings.TrimSuffix(outer, "@"))
+			if outer != "" {
+				add(outer)
 			}
 		}
 	}
@@ -266,12 +320,14 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 	// so a value that contains another is removed whole.
 	sort.SliceStable(values, func(i, j int) bool { return len(values[i].value) > len(values[j].value) })
 	for _, v := range values {
-		text = replaceValue(text, v.value, placeholder(v.shape))
+		if !v.sample {
+			text = replaceValue(text, v.value, placeholder(v.shape))
+		}
 	}
 	// The guard, on the placeholder text: no masked value and nothing
 	// shaped may remain.
 	for _, v := range values {
-		if containsValue(text, v.value) {
+		if !v.sample && containsValue(text, v.value) {
 			return "", nil, secretShapes[v.shape].kind
 		}
 	}
@@ -288,26 +344,32 @@ func MaskSecrets(output string, forbiddenLiterals []string) (masked string, kind
 	return masked, kinds, ""
 }
 
-// unbounded says a value is removed wherever it occurs: it carries a digit
-// or a symbol, or it is a letters-only value long enough to be a real
-// password and not a sample word.
-func unbounded(value string) bool {
+// lettersOnly says a value is made of ASCII letters alone: a word, not a
+// token, and so never removed from inside another word.
+func lettersOnly(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
-			return true
+			return false
 		}
 	}
-	return len(value) >= shortValueBytes && !sampleValues[strings.ToLower(value)]
+	return true
 }
 
-// replaceValue removes every occurrence of value from text: anywhere for an
-// unbounded value, only where it stands as a word of its own (no letter,
-// digit or underscore on either side) in a value position otherwise.
-func replaceValue(text, value, with string) string {
-	if unbounded(value) {
-		return strings.ReplaceAll(text, value, with)
+// removable says an occurrence of value at [start, end) in text is one the
+// rules remove: anywhere for a value with a digit or a symbol (every token
+// is one) and for a letters-only value of shortValueBytes or more (a real
+// password glued to a flag, -psecretpass, must go too); as a word of its
+// own in a value position for a shorter letters-only value.
+func removable(text, value string, start, end int) bool {
+	if !lettersOnly(value) || len(value) >= shortValueBytes {
+		return true
 	}
+	return wordBounded(text, start, end) && valuePosition(text, start) && !keyPosition(text, end)
+}
+
+// replaceValue removes every removable occurrence of value from text.
+func replaceValue(text, value, with string) string {
 	var out strings.Builder
 	for i := 0; ; {
 		j := strings.Index(text[i:], value)
@@ -316,7 +378,7 @@ func replaceValue(text, value, with string) string {
 			return out.String()
 		}
 		j += i
-		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) && !keyPosition(text, j+len(value)) {
+		if removable(text, value, j, j+len(value)) {
 			out.WriteString(text[i:j])
 			out.WriteString(with)
 			i = j + len(value)
@@ -328,19 +390,15 @@ func replaceValue(text, value, with string) string {
 	}
 }
 
-// containsValue says whether value still occurs in text under the same rule
-// replaceValue removes it by.
+// containsValue says whether a removable occurrence of value remains.
 func containsValue(text, value string) bool {
-	if unbounded(value) {
-		return strings.Contains(text, value)
-	}
 	for i := 0; ; {
 		j := strings.Index(text[i:], value)
 		if j < 0 {
 			return false
 		}
 		j += i
-		if wordBounded(text, j, j+len(value)) && valuePosition(text, j) && !keyPosition(text, j+len(value)) {
+		if removable(text, value, j, j+len(value)) {
 			return true
 		}
 		_, size := utf8.DecodeRuneInString(text[j:])
@@ -367,7 +425,8 @@ func valuePosition(text string, start int) bool {
 }
 
 // keyPosition says the text ending at end is a key, not a value: a closing
-// quote (if any) and blanks are followed by ':', as in "password": "...".
+// quote (if any) and blanks are followed by ':' or "=>", as in
+// "password": "..." or 'password' => '...'.
 func keyPosition(text string, end int) bool {
 	k := end
 	if k < len(text) && (text[k] == '"' || text[k] == '\'') {
@@ -376,7 +435,7 @@ func keyPosition(text string, end int) bool {
 	for k < len(text) && (text[k] == ' ' || text[k] == '\t') {
 		k++
 	}
-	return k < len(text) && text[k] == ':'
+	return k < len(text) && (text[k] == ':' || strings.HasPrefix(text[k:], "=>"))
 }
 
 func wordBounded(text string, start, end int) bool {
