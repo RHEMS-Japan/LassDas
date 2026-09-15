@@ -53,6 +53,13 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 		output := chatOutput(strings.TrimPrefix(answer, lengthMarker))
 		output.Choices[0].FinishReason = "length"
 		return output, nil
+	case answer == reasoningExhaustedMarker:
+		// The provider ended at the allowance with the whole completion
+		// counted as reasoning and nothing written.
+		output := chatOutput("")
+		output.Choices[0].FinishReason = "length"
+		output.Usage = &ChatUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, CompletionTokensDetails: &ChatCompletionTokensDetails{ReasoningTokens: 5}}
+		return output, nil
 	case strings.HasPrefix(answer, providerErrorMarker):
 		output := chatOutput(strings.TrimPrefix(answer, providerErrorMarker))
 		output.Choices[0].FinishReason = ChatFinishError
@@ -73,14 +80,15 @@ func (f *loopScriptAPI) ChatCompletions(_ context.Context, _ ModelEndpoint, requ
 // block whose total does not add up (the shape the live gateway returned
 // once), no usage block, or an empty assistant message.
 const (
-	malformedUsageMarker = "\x00malformed\x00"
-	noUsageMarker        = "\x00nousage\x00"
-	emptyContentMarker   = "\x00empty\x00"
-	contentFilterMarker  = "\x00filtered\x00"
-	lengthMarker         = "\x00length\x00"
-	providerErrorMarker  = "\x00error\x00"
-	bareErrorMarker      = "\x00bare-error\x00"
-	topLevelErrorMarker  = "\x00top-level-error\x00"
+	malformedUsageMarker     = "\x00malformed\x00"
+	noUsageMarker            = "\x00nousage\x00"
+	emptyContentMarker       = "\x00empty\x00"
+	contentFilterMarker      = "\x00filtered\x00"
+	lengthMarker             = "\x00length\x00"
+	reasoningExhaustedMarker = "\x00reasoning-exhausted\x00"
+	providerErrorMarker      = "\x00error\x00"
+	bareErrorMarker          = "\x00bare-error\x00"
+	topLevelErrorMarker      = "\x00top-level-error\x00"
 )
 
 func investigationFixture(t *testing.T, maxProbes int) (InvestigationInput, string) {
