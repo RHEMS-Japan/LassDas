@@ -1446,3 +1446,23 @@ func TestConverseTurnLowersReasoningEffortWhenNoAnswerBegan(t *testing.T) {
 		t.Fatal("a cutoff that wrote content was taken for an exhausted reasoning")
 	}
 }
+
+// A re-ask with less reasoning that then fails for another reason names
+// the lowering, not a wider allowance it never had; whitespace-only content
+// is no answer.
+func TestLoweredReAskFailingOtherwiseNamesTheLowering(t *testing.T) {
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker}}
+	invoker, _ := NewModelInvoker(api)
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelReasoningExhausted) || len(api.requests) != 2 || !strings.Contains(err.Error(), EffortLoweredPhrase) ||
+		strings.Contains(err.Error(), "wider allowance") || api.requests[1].MaxTokens != api.requests[0].MaxTokens {
+		t.Fatalf("lowered then transport failure: err %v after %d requests", err, len(api.requests))
+	}
+	output := chatOutput(" \n")
+	output.Choices[0].FinishReason = "length"
+	output.Usage.CompletionTokensDetails = &ChatCompletionTokensDetails{ReasoningTokens: output.Usage.CompletionTokens}
+	if !reasoningExhausted(output) {
+		t.Fatal("whitespace-only content was taken for an answer")
+	}
+}

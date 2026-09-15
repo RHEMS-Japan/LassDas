@@ -237,6 +237,10 @@ func receptionCutoffNote(stage, cause string) string {
 	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
 	switch {
+	case strings.Contains(cause, worker.EffortLoweredPhrase):
+		// The first answer never began (all reasoning); the re-ask with
+		// less reasoning wrote one, and that one was too long.
+		note += "最初は考える段階だけで上限を使い切ったので考える深さを下げて聞き直しましたが、その答えが長すぎて途切れました。"
 	case strings.Contains(cause, worker.CutoffAskedAgainPhrase):
 		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
 	case strings.Contains(cause, worker.CutoffAtCeilingPhrase):

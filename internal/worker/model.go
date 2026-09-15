@@ -28,7 +28,8 @@ const (
 	// ChatFinishContentFilter is the provider's refusal classifier declining the turn.
 	ChatFinishContentFilter = "content_filter"
 	// ChatFinishLength is the provider ending the answer at max_tokens; the
-	// same turn can be given more room (converseTurn does, once).
+	// same turn can be given more room (converseTurn does, once), or, when
+	// no answer began, less reasoning (converseTurn does, twice).
 	ChatFinishLength = "length"
 	// ChatFinishError is the provider ending the turn with its own error
 	// inside a 200 response: a transient of the same class as a gateway
@@ -104,7 +105,7 @@ func reasoningExhausted(output *ChatResponse) bool {
 	if output == nil || output.Usage == nil || output.Usage.CompletionTokensDetails == nil || len(output.Choices) != 1 {
 		return false
 	}
-	return output.Choices[0].Message.Content == "" &&
+	return strings.TrimSpace(output.Choices[0].Message.Content) == "" &&
 		output.Usage.CompletionTokensDetails.ReasoningTokens >= output.Usage.CompletionTokens
 }
 
@@ -265,11 +266,11 @@ type ChatCompletionsAPI interface {
 // ended a live run outright (2026-09-08: a 504 on the fourth call of an
 // investigation). The retries live inside the turn's own deadline, so only
 // a "not now" that arrives early benefits. A 429 without Retry-After (a
-// limit no wait lifts) and every other status fail closed at once. Three kinds of answer are asked again by
+// limit no wait lifts) and every other status fail closed at once. Four kinds of answer are asked again by
 // the caller that owns the unchanged conversation: one the contract cannot
 // read (converseJSON, at most modelAnswerAttempts times), one the gateway
 // returned out of shape (converseTurn, once) and one the provider cut off
-// at the output allowance (converseTurn, once with more room).
+// at the output allowance (converseTurn: once with more room, or with less reasoning when no answer began).
 type GatewayClient struct {
 	client *http.Client
 }
@@ -817,21 +818,25 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 	return total
 }
 
-// converseTurn asks one turn. Three kinds of answer are asked again, each on
+// converseTurn asks one turn. Four kinds of answer are asked again, each on
 // the caller's unchanged messages with nothing recorded: a response the
 // gateway returned out of shape (errModelResponseMetadata /
 // errModelResponseContent / errModelResponseRefused) once after
 // malformedTurnDelay; a turn the provider ended with its own error
 // (errModelResponseUpstream, finish_reason=error) up to len(gatewayRetryPauses)
-// times on the gateway's pauses; and a response the provider cut off at the
-// output allowance (errModelResponseTruncated) once with the allowance widened
-// toward MaxConfiguredOutputTokens — a readiness answer long enough to hit
-// the allowance ended a live run as model_failed that the next attempt
-// passed (2026-09-05). At the ceiling there is no room to give, so the
-// cutoff travels at once. One more of any kind than its allowance, or any
-// other error, travels named. The counters are independent, so one turn
-// makes at most 6 calls (3 provider errors, 1 cutoff, 1 malformed, 1
-// final) with 42 s of pauses between them; each call has its own
+// times on the gateway's pauses; a cutoff in which no answer began
+// (errModelReasoningExhausted: the whole allowance went to reasoning) up to
+// effortLowerings times with the reasoning effort a step lower on the same
+// allowance — a live reception died on one such, 32,768 reasoning tokens
+// circling one thought (2026-09-15); and a response the provider cut off at
+// the output allowance (errModelResponseTruncated) once with the allowance
+// widened toward MaxConfiguredOutputTokens — a readiness answer long enough
+// to hit the allowance ended a live run as model_failed that the next
+// attempt passed (2026-09-05). At the ceiling there is no room to give, so
+// the cutoff travels at once. One more of any kind than its allowance, or
+// any other error, travels named. The counters are independent, so one turn
+// makes at most 8 calls (3 provider errors, 2 lowered, 1 cutoff, 1
+// malformed, 1 final) with 42 s of pauses between them; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
 // round's wall (the context) is what ends a turn that keeps failing. A call
 // that spent its allowance (errModelAllowanceSpent) shares the provider's
@@ -893,7 +898,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 				// same allowance, down the ladder as far as it goes.
 				if next, ok := lowerReasoningEffort(endpoint.Effort); ok {
 					lowered++
-					cutoff = err
+					cutoff = fmt.Errorf("%w; %s", err, EffortLoweredPhrase)
 					fmt.Fprintf(os.Stderr, "worker: %s; asking again with reasoning effort %q (retry %d of %d)\n", ReasoningExhaustedPhrase, next, lowered, effortLowerings)
 					endpoint.Effort = next
 					continue
@@ -931,12 +936,17 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	}
 }
 
-// afterCutoff keeps the cutoff that led to a widened re-ask in the error
-// that ends the turn, so it is still named (and still errModelResponseTruncated)
-// when the re-ask failed for another reason.
+// afterCutoff keeps the cutoff that led to a re-ask in the error that ends
+// the turn, so it is still named (and still errModelResponseTruncated) when
+// the re-ask failed for another reason. It says what the re-ask changed: a
+// cutoff stored with EffortLoweredPhrase was asked again with less
+// reasoning, any other with the wider allowance.
 func afterCutoff(cutoff, err error) error {
 	if cutoff == nil {
 		return err
+	}
+	if strings.Contains(cutoff.Error(), EffortLoweredPhrase) {
+		return fmt.Errorf("%w: %v", cutoff, err)
 	}
 	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
 }

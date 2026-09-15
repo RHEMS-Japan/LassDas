@@ -916,3 +916,17 @@ func TestReasoningExhaustedCutoffIsToldAsSuch(t *testing.T) {
 		}
 	}
 }
+
+// A cutoff after a lowering - the first answer never began, the re-ask with
+// less reasoning wrote one that was too long - is told as both, never as "a
+// re-ask was impossible".
+func TestLongAnswerAfterALoweringIsToldAsBoth(t *testing.T) {
+	note := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens); "+worker.EffortLoweredPhrase+"; "+worker.CutoffAtCeilingPhrase+" of 32768 tokens")
+	if !strings.Contains(note, "考える深さを下げて聞き直しましたが") || !strings.Contains(note, "その答えが長すぎて途切れました") ||
+		strings.Contains(note, "聞き直しはできませんでした") || strings.Contains(note, "考える段階だけで出力の上限を使い切ったため、自動処理") {
+		t.Fatalf("long answer after a lowering: %q", note)
+	}
+	if err := hook.ValidateTrailText(note); err != nil {
+		t.Fatalf("the report would refuse the note: %v", err)
+	}
+}
