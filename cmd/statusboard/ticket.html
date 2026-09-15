@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LassDas 票</title>
+<style>
+  :root {
+    --ground: #020A09; --panel: rgba(10, 26, 24, 0.72); --panel-edge: #16403B; --ink: #C9E9E3; --muted: #567D77; --faint: #123230;
+    --cyan: #41E8D2; --cyan-dim: rgba(65, 232, 210, 0.10); --lime: #9BE87A; --lime-dim: rgba(155, 232, 122, 0.10);
+    --amber: #FFC24B; --amber-dim: rgba(255, 194, 75, 0.12); --red: #FF5E4D; --red-dim: rgba(255, 94, 77, 0.12); --white: #EAF7F4;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: "Hiragino Sans", "Noto Sans JP", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.6; }
+  main { max-width: 1120px; margin: 0 auto; padding: 22px 18px 60px; }
+  a { color: var(--cyan); }
+  .top { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-bottom: 14px; }
+  .top a.back { font-family: var(--mono); font-size: 12px; text-decoration: none; }
+  .key { font-family: var(--mono); font-size: 16px; color: var(--white); }
+  .sum { font-size: 15px; font-weight: 600; color: var(--white); flex: 1 1 300px; }
+  .panel { background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 8px; padding: 14px 16px; }
+  .panel + .panel { margin-top: 12px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; white-space: nowrap; border: 1px solid transparent; }
+  .ok { background: var(--lime-dim); color: var(--lime); border-color: rgba(155,232,122,.35); }
+  .warn { background: var(--amber-dim); color: var(--amber); border-color: rgba(255,194,75,.35); }
+  .bad { background: var(--red-dim); color: var(--red); border-color: rgba(255,94,77,.35); }
+  .neutral { background: var(--cyan-dim); color: var(--cyan); border-color: rgba(65,232,210,.3); }
+  .kv { display: grid; grid-template-columns: 8em 1fr; gap: 4px 12px; margin: 8px 0 0; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  ol.tl { list-style: none; margin: 0; padding: 0; }
+  ol.tl li { display: grid; grid-template-columns: 6.5em 1fr; gap: 0 12px; padding: 10px 0; border-top: 1px solid var(--faint); }
+  ol.tl li:first-child { border-top: 0; }
+  .t { font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: 3px; }
+  .title { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .title b { color: var(--white); font-weight: 600; }
+  .why { color: var(--ink); margin: 3px 0 0; white-space: pre-wrap; }
+  details { margin-top: 5px; } summary { cursor: pointer; color: var(--cyan); font-size: 12.5px; }
+  .ev { margin-top: 6px; border-left: 2px solid var(--panel-edge); padding-left: 10px; }
+  .ev dt { color: var(--muted); font-size: 12px; margin-top: 6px; } .ev dd { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .rec { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 8px; }
+  .cost { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-variant-numeric: tabular-nums; }
+  .cost .total { border-top: 1px solid var(--panel-edge); padding-top: 4px; color: var(--white); font-weight: 600; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .empty { color: var(--muted); }
+  pre.trail { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); margin: 6px 0 0; }
+  .err { color: var(--red); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><a class="back" href="/">← 一覧へ</a><span class="key" id="key"></span><span class="sum" id="sum"></span><span id="state"></span></div>
+  <div class="grid">
+    <div>
+      <section class="panel" id="head"><div class="empty">読み込み中…</div></section>
+      <section class="panel"><h2>時系列</h2><ol class="tl" id="timeline"><li class="empty">読み込み中…</li></ol></section>
+    </div>
+    <aside>
+      <section class="panel"><h2>費用</h2><div id="cost" class="empty">—</div></section>
+      <section class="panel"><h2>失敗の中身</h2><div id="failure" class="empty">なし</div></section>
+      <section class="panel"><h2>原本</h2><div id="records" class="empty">—</div></section>
+    </aside>
+  </div>
+</main>
+<script>
+(function () {
+  const key = decodeURIComponent(location.pathname.replace(/^\/tickets\//, "").replace(/\/.*$/, ""));
+  document.getElementById("key").textContent = key;
+  document.title = key + " · LassDas";
+  const TONE = { ok: "ok", warn: "warn", bad: "bad", neutral: "neutral" };
+  const STEP_TONE = { done: "ok", failed: "bad", stopped: "warn", attention: "warn", confirm: "warn", question: "warn" };
+  function el(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function fmt(iso) { if (!iso) return ""; const d = new Date(iso); if (isNaN(d) || d.getFullYear() < 2000) return ""; return d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+  function usd(v) { return "$" + v.toFixed(2); }
+  function trackerURL(base, key) { return base && key ? base.replace(/\/$/, "") + "/view/" + encodeURIComponent(key) : ""; }
+  function renderHead(board, view, trackerBase) {
+    const head = document.getElementById("head"); head.textContent = "";
+    document.getElementById("sum").textContent = board.summary || view.summary || "";
+    const state = document.getElementById("state"); state.textContent = ""; 
+    const badge = el("span", "badge " + (STEP_TONE[board.step] || "neutral"), board.step_title || board.step || "");
+    state.appendChild(badge);
+    const dl = el("dl", "kv");
+    function row(label, node) { dl.appendChild(el("dt", null, label)); const dd = el("dd"); if (typeof node === "string") dd.textContent = node; else dd.appendChild(node); dl.appendChild(dd); }
+    if (board.detail) row("いま", board.detail);
+    if (board.next_action) row("次に動く人", board.next_action);
+    if (board.action_effect) row("操作の効果", board.action_effect);
+    const pr = view.pr_url || board.pr_url;
+    if (pr) { const a = el("a", null, pr); a.href = pr; a.target = "_blank"; a.rel = "noopener"; row("PR", a); }
+    if (view.merge_sha) row("マージ", view.merge_sha.slice(0, 12));
+    const t = trackerURL(trackerBase, key);
+    if (t) { const a = el("a", null, "Backlog " + key); a.href = t; a.target = "_blank"; a.rel = "noopener"; row("票", a); }
+    if (view.repository) row("納品先", view.repository);
+    head.appendChild(dl);
+    if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
+  }
+  function renderTimeline(view) {
+    const list = document.getElementById("timeline"); list.textContent = "";
+    if (!view.timeline || view.timeline.length === 0) { list.appendChild(el("li", "empty", "この票の走行記録はまだありません (受付前か、記録が退避済み)。")); return; }
+    for (const ev of view.timeline) {
+      const li = el("li"); li.appendChild(el("span", "t", fmt(ev.at)));
+      const body = el("div");
+      const title = el("div", "title"); title.appendChild(el("b", null, ev.title || ev.step)); title.appendChild(el("span", "badge " + (TONE[ev.tone] || "neutral"), ev.step));
+      if (ev.record) { const a = el("a", "rec", "原本"); a.href = "/api/tickets/" + encodeURIComponent(key) + "/records/" + ev.record; a.target = "_blank"; a.rel = "noopener"; title.appendChild(a); }
+      body.appendChild(title);
+      if (ev.why) body.appendChild(el("p", "why", ev.why));
+      if (ev.evidence && ev.evidence.length) {
+        const d = el("details"); d.appendChild(el("summary", null, "証拠 " + ev.evidence.length + " 件"));
+        const dl = el("dl", "ev");
+        for (const e of ev.evidence) { dl.appendChild(el("dt", null, e.label)); dl.appendChild(el("dd", null, e.text)); }
+        d.appendChild(dl); body.appendChild(d);
+      }
+      li.appendChild(body); list.appendChild(li);
+    }
+  }
+  function renderSide(view) {
+    const cost = document.getElementById("cost"); cost.textContent = "";
+    if (view.cost && view.cost.lines && view.cost.lines.length) {
+      cost.className = "";
+      const g = el("div", "cost");
+      for (const line of view.cost.lines) { g.appendChild(el("span", null, line.label)); g.appendChild(el("span", null, usd(line.usd))); }
+      g.appendChild(el("span", "total", "記録にある分の合計")); g.appendChild(el("span", "total", usd(view.cost.total_usd)));
+      cost.appendChild(g); if (view.cost.note) cost.appendChild(el("div", "note", view.cost.note));
+    } else { cost.className = "empty"; cost.textContent = "記録に価格が残っている呼び出しはありません"; }
+    const failure = document.getElementById("failure"); failure.textContent = "";
+    if (view.failure) {
+      failure.className = "";
+      failure.appendChild(el("div", "err", "止まった工程: " + view.failure.step));
+      if (view.failure.reason) failure.appendChild(el("div", null, "理由コード: " + view.failure.reason));
+      if (view.failure.detail) { const d = el("details"); d.appendChild(el("summary", null, "票に書かれた説明 (末尾)")); d.appendChild(el("pre", "trail", view.failure.detail)); failure.appendChild(d); }
+    } else { failure.className = "empty"; failure.textContent = "なし"; }
+    const records = document.getElementById("records"); records.textContent = "";
+    if (view.records && view.records.length) {
+      records.className = "";
+      for (const name of view.records) { const a = el("a", "rec", name); a.href = "/api/tickets/" + encodeURIComponent(key) + "/records/" + name; a.target = "_blank"; a.rel = "noopener"; records.appendChild(a); records.appendChild(el("br")); }
+    } else { records.className = "empty"; records.textContent = "—"; }
+  }
+  fetch("/api/tickets/" + encodeURIComponent(key), { headers: { Accept: "application/json" } })
+    .then(r => { if (!r.ok) throw new Error(r.status === 404 ? "この票は盤面にありません" : "読み込みに失敗しました (" + r.status + ")"); return r.json(); })
+    .then(data => { renderHead(data.board || {}, data.view || {}, data.tracker_base || ""); renderTimeline(data.view || {}); renderSide(data.view || {}); })
+    .catch(err => { document.getElementById("head").innerHTML = ""; document.getElementById("head").appendChild(el("div", "err", err.message)); document.getElementById("timeline").textContent = ""; });
+})();
+</script>
+</body>
+</html>

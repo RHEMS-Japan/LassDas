@@ -110,6 +110,8 @@
   .card.tone-bad { --edge: var(--red); }
   .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .tkey { font-family: var(--mono); font-size: 12.5px; color: var(--cyan); letter-spacing: 0.14em; text-decoration: none; }
+  .tdetail { font-family: var(--mono); font-size: 11px; color: var(--cyan); border: 1px solid var(--panel-edge); border-radius: 4px; padding: 1px 7px; text-decoration: none; margin-left: 6px; }
+  .tdetail:hover { background: var(--cyan-dim); }
   a.tkey:hover { text-decoration: underline; }
   .tone-act .tkey { color: var(--lime); }
   .tone-warn .tkey { color: var(--amber); }
@@ -598,6 +600,12 @@ function buildCard(run) {
   const summary = el("span", "tsum", run.summary || "");
   summary.title = run.summary || "";
   head.appendChild(summary);
+  if (run.issue_key) {
+    const detail = el("a", "tdetail", "詳細");
+    detail.href = "/tickets/" + encodeURIComponent(run.issue_key);
+    detail.title = "この票で起きたこと全部と証拠";
+    head.appendChild(detail);
+  }
   const elapsed = el("span", "elapsed", fmtElapsed(run.claimed_at_ms));
   elapsed.dataset.claimed = run.claimed_at_ms || 0;
   head.appendChild(elapsed);
