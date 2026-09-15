@@ -239,8 +239,12 @@ func receptionCutoffNote(stage, cause string) string {
 	switch {
 	case strings.Contains(cause, worker.EffortLoweredPhrase):
 		// The first answer never began (all reasoning); the re-ask with
-		// less reasoning wrote one, and that one was too long.
+		// less reasoning wrote one, and that one was too long - and when
+		// there was room, it was widened once more and cut off again.
 		note += "最初は考える段階だけで上限を使い切ったので考える深さを下げて聞き直しましたが、その答えが長すぎて途切れました。"
+		if strings.Contains(cause, worker.CutoffAskedAgainPhrase) {
+			note += "上限を広げてもう 1 回聞き直しましたが、それでも途切れました。"
+		}
 	case strings.Contains(cause, worker.CutoffAskedAgainPhrase):
 		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
 	case strings.Contains(cause, worker.CutoffAtCeilingPhrase):

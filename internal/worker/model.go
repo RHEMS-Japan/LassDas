@@ -864,6 +864,9 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	allowance := 0
 	lowered := 0
 	widened := false
+	// lastRetry is what the most recent re-ask changed ("lowered" or
+	// "widened"), so a failure after it says the right thing.
+	lastRetry := ""
 	var cutoff error
 	for {
 		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
@@ -876,7 +879,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			// Shares the provider's budget so the turn's bound is unchanged,
 			// and stops first on its own, because its asks cost minutes.
 			if allowance >= allowanceTurnRetries || upstream >= len(gatewayRetryPauses) {
-				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d such calls", err, allowance+1))
+				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d such calls", err, allowance+1))
 			}
 			delay = gatewayRetryPauses[upstream]
 			upstream++
@@ -886,7 +889,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			// The provider's own error inside a 200: the same transient as a
 			// gateway 5xx, asked again on the gateway's schedule.
 			if upstream >= len(gatewayRetryPauses) {
-				return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf("%w after %d provider errors", err, upstream+1))
+				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d provider errors", err, upstream+1))
 			}
 			delay = gatewayRetryPauses[upstream]
 			upstream++
@@ -899,6 +902,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 				if next, ok := lowerReasoningEffort(endpoint.Effort); ok {
 					lowered++
 					cutoff = fmt.Errorf("%w; %s", err, EffortLoweredPhrase)
+					lastRetry = "lowered"
 					fmt.Fprintf(os.Stderr, "worker: %s; asking again with reasoning effort %q (retry %d of %d)\n", ReasoningExhaustedPhrase, next, lowered, effortLowerings)
 					endpoint.Effort = next
 					continue
@@ -915,22 +919,23 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			}
 			cutoff = err
 			widened = true
+			lastRetry = "widened"
 			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
 			continue
 		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
 			if malformed >= malformedTurnRetries {
-				return "", InvocationUsage{}, afterCutoff(cutoff, err)
+				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, err)
 			}
 			malformed++
 		default:
-			return "", InvocationUsage{}, afterCutoff(cutoff, err)
+			return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, err)
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
 			timer.Stop()
-			return "", InvocationUsage{}, afterCutoff(cutoff, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err()))
+			return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err()))
 		case <-timer.C:
 		}
 	}
@@ -938,14 +943,15 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 
 // afterCutoff keeps the cutoff that led to a re-ask in the error that ends
 // the turn, so it is still named (and still errModelResponseTruncated) when
-// the re-ask failed for another reason. It says what the re-ask changed: a
-// cutoff stored with EffortLoweredPhrase was asked again with less
-// reasoning, any other with the wider allowance.
-func afterCutoff(cutoff, err error) error {
+// the re-ask failed for another reason. lastRetry says what the re-ask that
+// failed had changed: "lowered" (the stored cutoff already ends with
+// EffortLoweredPhrase) or "widened" (named here). A cutoff that was first
+// lowered and then widened carries both, in that order.
+func afterCutoff(cutoff error, lastRetry string, err error) error {
 	if cutoff == nil {
 		return err
 	}
-	if strings.Contains(cutoff.Error(), EffortLoweredPhrase) {
+	if lastRetry == "lowered" {
 		return fmt.Errorf("%w: %v", cutoff, err)
 	}
 	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)

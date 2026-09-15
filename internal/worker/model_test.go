@@ -1466,3 +1466,24 @@ func TestLoweredReAskFailingOtherwiseNamesTheLowering(t *testing.T) {
 		t.Fatal("whitespace-only content was taken for an answer")
 	}
 }
+
+// A turn lowered and then widened that fails for another reason names both
+// re-asks, in that order; widened and then lowered names them the other way.
+func TestAfterCutoffNamesWhatTheLastReAskChanged(t *testing.T) {
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker, lengthMarker + `{"partial":`}}
+	invoker, _ := NewModelInvoker(api)
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	text := err.Error()
+	if len(api.requests) != 3 || api.requests[2].MaxTokens != 8192 || api.requests[2].ReasoningEffort != "medium" ||
+		!strings.Contains(text, EffortLoweredPhrase+"; asked again with the wider allowance: model invocation failed") {
+		t.Fatalf("lowered then widened then transport: err %q after %d requests", text, len(api.requests))
+	}
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{"partial":`, reasoningExhaustedMarker}}
+	invoker, _ = NewModelInvoker(api)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "high", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	text = err.Error()
+	if len(api.requests) != 3 || !strings.Contains(text, ReasoningExhaustedPhrase+"; "+EffortLoweredPhrase+": model invocation failed") || strings.Contains(text, "wider allowance") {
+		t.Fatalf("widened then lowered then transport: err %q after %d requests", text, len(api.requests))
+	}
+}

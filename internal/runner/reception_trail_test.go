@@ -930,3 +930,15 @@ func TestLongAnswerAfterALoweringIsToldAsBoth(t *testing.T) {
 		t.Fatalf("the report would refuse the note: %v", err)
 	}
 }
+
+// After a lowering and a widening that was cut off again, the note tells
+// all three steps.
+func TestLoweredThenWidenedCutoffIsToldInFull(t *testing.T) {
+	note := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 8192 tokens); "+worker.EffortLoweredPhrase+"; "+worker.CutoffAskedAgainPhrase)
+	if !strings.Contains(note, "考える深さを下げて聞き直しましたが") || !strings.Contains(note, "上限を広げてもう 1 回聞き直しましたが") {
+		t.Fatalf("lowered then widened: %q", note)
+	}
+	if err := hook.ValidateTrailText(note); err != nil {
+		t.Fatalf("the report would refuse the note: %v", err)
+	}
+}
