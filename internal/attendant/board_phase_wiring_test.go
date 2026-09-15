@@ -29,7 +29,8 @@ import (
 func TestSyncChainsProjectsADeliveredEndOnce(t *testing.T) {
 	root := t.TempDir()
 	config := runtime.Config{
-		Tracker:  runtime.TrackerConfig{SpaceKey: "example", ProjectID: 42, ProjectKey: "TICKET", AllowedCreatorID: 7, AllowedActivityType: 1},
+		Tracker: runtime.TrackerConfig{SpaceKey: "example", ProjectID: 42, ProjectKey: "TICKET", AllowedCreatorID: 7, AllowedActivityType: 1,
+			BoardStatuses: runtime.BoardStatuses{Running: 11, AwaitingAnswer: 12, Delivered: 13, NeedsAttention: 14}},
 		Identity: runtime.IdentityConfig{RepositoryID: 1, Repository: "o/r", WorkflowRef: "o/r/wf@main", EngineSHA: strings.Repeat("a", 40)},
 		Chain: runtime.ChainConfig{RunsRoot: filepath.Join(root, "runs"), Deliver: runtime.DeliverConfig{
 			ChecksProfile: "checks", IntegrateProfile: "integrate", PromoteProfile: "promote",
@@ -84,9 +85,13 @@ func TestSyncChainsProjectsADeliveredEndOnce(t *testing.T) {
 	client, err := backlog.NewClient(backlog.Config{SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20},
 		roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			body, status := "[]", 200
-			if r.Method == http.MethodPost {
+			switch {
+			case r.Method == http.MethodPost:
 				encoded, _ := json.Marshal(map[string]any{"id": 9, "issueId": 30, "content": "", "createdUser": map[string]any{"id": 1}, "created": "2026-09-15T12:00:00Z"})
 				body, status = string(encoded), 201
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v2/issues/30":
+				// The ticket sits in the automation's own "running" status.
+				body = `{"id":30,"status":{"id":11}}`
 			}
 			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 		}))
@@ -137,7 +142,7 @@ func TestSyncChainsProjectsADeliveredEndOnce(t *testing.T) {
 	if err := SyncChains(context.Background(), config, services, hermes, logger); err != nil {
 		t.Fatal(err)
 	}
-	if len(board.phases) != 1 || board.phases[0] != hook.BoardDelivered {
+	if len(board.phases) != 1 || board.phases[0] != "30:delivered" {
 		t.Fatalf("first tick: phases=%v log=%v", board.phases, logger.lines)
 	}
 	if _, ok := readBoardPhase(runDir); !ok {

@@ -148,6 +148,28 @@ func (c *Client) GetIssue(ctx context.Context, issueID int64) (hook.CanonicalIss
 	}, nil
 }
 
+// IssueStatusID reads the issue's current status id: what the tracker says
+// the ticket is in right now, which the board projection consults before it
+// moves a ticket the automation does not own (a ticket a person closed).
+func (c *Client) IssueStatusID(ctx context.Context, issueID int64) (int64, error) {
+	if issueID <= 0 {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_issue_id")
+	}
+	var payload struct {
+		ID     int64 `json:"id"`
+		Status struct {
+			ID int64 `json:"id"`
+		} `json:"status"`
+	}
+	if err := c.getJSON(ctx, "/api/v2/issues/"+strconv.FormatInt(issueID, 10), &payload); err != nil {
+		return 0, err
+	}
+	if payload.ID != issueID || payload.Status.ID <= 0 {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
+	}
+	return payload.Status.ID, nil
+}
+
 // latestComments reads the newest 100 comments of an issue, newest first —
 // the window both comment lookups scan.
 func (c *Client) latestComments(ctx context.Context, issueID int64) ([]commentResponse, error) {
