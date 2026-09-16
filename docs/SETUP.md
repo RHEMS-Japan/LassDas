@@ -15,6 +15,7 @@
 
 ## 1. 始める前に、機械で確かめる
 
+0. 本体の CLI を用意する: 本体 repo (配布者が示す `engine-repository`) を取得し、その中で `go build -o lassdas ./cmd/lassdas` を実行する。以下の `lassdas …` はその実行ファイルのパスで呼ぶ。納品先 repo の中では実行するだけで、本体 repo の中身を納品先に持ち込まない。
 1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。
@@ -29,7 +30,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-| 本体イメージ | 配布者の案内 (digest・本体ソースの SHA・ビルド記録) | `image` `engine-repository` `engine-sha` `build-record` |
+| 本体イメージ | 配布者の案内 (本体 repo、イメージの digest、本体ソースの SHA、ビルド記録、非公開レジストリなら認証の済ませ方) | `image` `engine-repository` `engine-sha` `build-record` |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
 
