@@ -546,17 +546,7 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 			endpoint.Model = value
 			vendor := endpoint.Vendor
 			if vendor == "" {
-				prefix, _, found := strings.Cut(value, "/")
-				if found {
-					switch strings.ToLower(prefix) {
-					case "openai":
-						vendor = "OpenAI"
-					case "anthropic":
-						vendor = "Anthropic"
-					case "google":
-						vendor = "Google"
-					}
-				}
+				vendor = VendorFor(value)
 			}
 			value, err = w.ask(s, role+"-vendor", role+" のモデル提供会社 (接続先ホスト名からは判定しません)", vendor, false)
 			if err != nil {

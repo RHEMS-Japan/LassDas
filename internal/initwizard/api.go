@@ -168,6 +168,13 @@ func containsID(items []NamedID, id int64) bool {
 	return false
 }
 
+// The two confirmations a setup answered from a file needs the person's
+// recorded yes for (AnswersUI's consent gates key on these exact openings).
+const (
+	confirmRequesterKeyPrefix  = "この API キーは起票者本人"
+	confirmTrackerCreatePrefix = "不足する項目だけ作成します"
+)
+
 func (w *Wizard) tracker(ctx context.Context, s *State, secrets Secrets, save func() error) error {
 	key := secrets["BACKLOG_API_KEY"]
 	var bot NamedID
@@ -197,10 +204,15 @@ func (w *Wizard) tracker(ctx context.Context, s *State, secrets Secrets, save fu
 		return errors.New("許可起票者は project の利用者の ID にしてください")
 	}
 	if s.Tracker.AllowedCreatorID == bot.ID {
-		if err := w.confirm(s, fmt.Sprintf("この API キーは起票者本人 (ID: %d) のものです。自動処理のコメントと状態更新も本人名義になり、投稿者 ID では手動操作と区別できません。キーはこの project の runtime.env (0600) に運転用として保存します。この名義で進めますか", bot.ID)); err != nil {
+		if err := w.confirm(s, fmt.Sprintf(confirmRequesterKeyPrefix+" (ID: %d) のものです。自動処理のコメントと状態更新も本人名義になり、投稿者 ID では手動操作と区別できません。キーはこの project の runtime.env (0600) に運転用として保存します。この名義で進めますか", bot.ID)); err != nil {
 			// Run saves entered runtime keys on interruption. A requester key
-			// declined for runtime use must not be included in that save.
-			delete(secrets, "BACKLOG_API_KEY")
+			// declined for runtime use must not be included in that save. A
+			// stop that only waits for the person's yes in the answers file
+			// is not a decline: the key stays for the run that follows it.
+			var consent *ConsentRequired
+			if !errors.As(err, &consent) {
+				delete(secrets, "BACKLOG_API_KEY")
+			}
 			return err
 		}
 	}
@@ -224,7 +236,7 @@ func (w *Wizard) tracker(ctx context.Context, s *State, secrets Secrets, save fu
 		}
 	}
 	if len(missing) > 0 {
-		if err := w.confirm(s, "不足する項目だけ作成します:\n"+strings.Join(missing, "\n")); err != nil {
+		if err := w.confirm(s, confirmTrackerCreatePrefix+":\n"+strings.Join(missing, "\n")); err != nil {
 			return err
 		}
 		adminKey := ""

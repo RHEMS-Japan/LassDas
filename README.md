@@ -88,7 +88,7 @@ AWS 資格情報は通常の解決順 (環境変数 / プロファイル)。実�
 
 ## 導入 (新しいプロジェクトへ)
 
-シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で `lassdas init` から始める。ソース版には Git と Go (`go.mod` の版) も必要。
+導入は、利用者がすでに使っている開発 AI (Claude Code や Codex) に [docs/SETUP.md](docs/SETUP.md) を渡して頼む。AI が repo を調べ、決めることを聞き、`.lassdas/` に合意と回答を書き、`lassdas setup` で本体を起動し、利用者が本人の鍵で試験依頼を 1 本流して完了になる。旧来の対話ウィザード `lassdas init` も残っている。シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で始める。ソース版には Git と Go (`go.mod` の版) も必要。
 
 ```sh
 # エンジンのソースでビルド

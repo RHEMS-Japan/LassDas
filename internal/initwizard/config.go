@@ -19,6 +19,19 @@ const (
 	modelKeysSeparate = "separate"
 )
 
+// ModelKeysShared and ModelKeysSeparate are the two key modes a setup
+// records: one OpenRouter key for every role, or one per role.
+const (
+	ModelKeysShared   = modelKeysShared
+	ModelKeysSeparate = modelKeysSeparate
+)
+
+// KeyName is the environment variable a role's own key lives in.
+func KeyName(role string) string { return keyName(role) }
+
+// ModelRoles lists the roles a setup names a model for.
+func ModelRoles() []string { return append([]string(nil), modelRoles...) }
+
 func keyName(role string) string {
 	return "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"
 }
