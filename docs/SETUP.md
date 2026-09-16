@@ -15,7 +15,7 @@
 
 ## 1. 始める前に、機械で確かめる
 
-0. 本体の CLI を用意する: 本体 repo (配布者が示す `engine-repository`) を取得し、その中で `go build -o lassdas ./cmd/lassdas` を実行する。以下の `lassdas …` はその実行ファイルのパスで呼ぶ。納品先 repo の中では実行するだけで、本体 repo の中身を納品先に持ち込まない。
+0. 本体の CLI と案内: 配布者 (または利用者) が 1 台につき 1 回、本体 repo の中で `lassdas setup install --image … --build-record …` を実行してある。それが CLI を `~/.lassdas/bin/lassdas` に、この文書を `~/.lassdas/SETUP.md` に、配布者の案内 (本体イメージ・本体ソースの SHA・ビルド記録・本体 repo) を `~/.lassdas/distribution.json` に、開発 AI の skill を `~/.claude/skills/lassdas-setup/` に置く。以下の `lassdas …` はその CLI で呼ぶ。`setup.json` の `image` `engine-sha` `build-record` `engine-repository` は案内から自動で埋まるので書かなくてよい。install がまだなら、本体 repo を取得して `go build -o lassdas ./cmd/lassdas` で組み立て、案内は配布者からもらう。納品先 repo の中では CLI を実行するだけで、本体 repo の中身を納品先に持ち込まない。
 1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。
@@ -30,7 +30,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-| 本体イメージ | 配布者の案内 (本体 repo、イメージの digest、本体ソースの SHA、ビルド記録、非公開レジストリなら認証の済ませ方) | `image` `engine-repository` `engine-sha` `build-record` |
+| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内)。無ければ配布者に聞く | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
 
@@ -99,10 +99,10 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 |---|---|---|
 | `repository` | 納品先 repo (owner/name) | git remote から読める。fork や別 remote なら確認する |
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
-| `engine-repository` | 本体イメージの元ソース repo (owner/name) | 配布者の案内 |
-| `image` | 本体イメージ (registry/name@sha256:digest) | 配布者の案内。タグ名から推定しない |
-| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA | 配布者の案内 |
-| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL | 配布者の案内 |
+| `engine-repository` | 本体イメージの元ソース repo (owner/name) | `~/.lassdas/distribution.json` から自動。書けば上書き |
+| `image` | 本体イメージ (registry/name@sha256:digest) | 同上。タグ名から推定しない |
+| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA | 同上 |
+| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL | 同上 |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
