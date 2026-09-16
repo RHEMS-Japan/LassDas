@@ -97,6 +97,9 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		"read-contract", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 		"--raw", p.path("raw-ticket.json"), "--out", p.path("intake.json"),
 	}); err != nil || code != 0 {
+		// The intake is a model turn too: its failure leaves the requester
+		// a note and the run its detail, like the other reception stages.
+		p.noteReceptionCutoff(intakeStage)
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	gaps, err := p.readJSONField("intake.json", "gaps")

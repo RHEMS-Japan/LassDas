@@ -218,6 +218,10 @@ const (
 	// CutoffPhrase begins the failure of a turn the provider ended at the
 	// output allowance.
 	CutoffPhrase = "model response ended before a complete answer"
+	// AttemptsRanOutPhrase is the failure detail's word for a transport
+	// that asked again until its attempts were spent (AttemptsExhaustedPhrase
+	// in the transport's own message); the ticket page keys on it.
+	AttemptsRanOutPhrase = "asked again until the attempts ran out"
 )
 
 // allowanceTurnRetries is how many times one turn asks again after a call
@@ -359,9 +363,20 @@ type SafeModelError struct {
 	// travels, and a caller can ask what kind of failure it was without
 	// reading anything the transport wrote.
 	cause error
+	// status is the gateway's HTTP status when the failure was a status
+	// the transport did not ask again for; zero otherwise. A number, so
+	// the failure detail can carry it without carrying any upstream text.
+	status int
+	// literal marks a message composed only of this package's constants
+	// and numbers - safe to echo into a record. A message that quotes
+	// what the wire carried (a transport error's text) is not literal.
+	literal bool
 }
 
 func (e *SafeModelError) Error() string { return e.message }
+
+// Status is the gateway status behind the failure, or zero.
+func (e *SafeModelError) Status() int { return e.status }
 
 // Unwrap lets a caller ask what the failure was — a spent allowance, a
 // refused connection — without the upstream text reaching a prompt or a
@@ -373,21 +388,33 @@ func (e *SafeModelError) Unwrap() error { return e.cause }
 
 func safeModelError(message string) error { return &SafeModelError{message: message} }
 
+// safeModelLiteral is safeModelError for a message made only of this
+// package's own words and numbers, which the failure detail may echo.
+func safeModelLiteral(message string) error { return &SafeModelError{message: message, literal: true} }
+
+// safeModelErrorFor wraps a cause. The message stays literal only when the
+// cause's own message was: the wrapper adds nothing but a count.
 func safeModelErrorFor(message string, cause error) error {
-	return &SafeModelError{message: message, cause: cause}
+	var inner *SafeModelError
+	literal := errors.As(cause, &inner) && inner.literal
+	return &SafeModelError{message: message, cause: cause, literal: literal}
+}
+
+func safeModelStatusError(message string, status int) error {
+	return &SafeModelError{message: message, status: status, literal: true}
 }
 
 func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	if g == nil || g.client == nil || ctx == nil {
-		return nil, safeModelError("model transport is invalid")
+		return nil, safeModelLiteral("model transport is invalid")
 	}
 	apiKey := os.Getenv(endpoint.APIKeyEnv)
 	if endpoint.APIKeyEnv == "" || apiKey == "" || strings.TrimSpace(apiKey) != apiKey || strings.ContainsAny(apiKey, "\r\n\x00") {
-		return nil, safeModelError("model API key is unavailable")
+		return nil, safeModelLiteral("model API key is unavailable")
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		return nil, safeModelError("model request could not be encoded")
+		return nil, safeModelLiteral("model request could not be encoded")
 	}
 	for attempt := 0; ; attempt++ {
 		// How long the attempt took is what sizes the guard below: another
@@ -432,7 +459,7 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		if status == http.StatusOK {
 			var response ChatResponse
 			if err := json.Unmarshal(body, &response); err != nil {
-				return nil, safeModelError("model response is not valid JSON")
+				return nil, safeModelLiteral("model response is not valid JSON")
 			}
 			return &response, nil
 		}
@@ -461,18 +488,18 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			}
 			if status == http.StatusTooManyRequests {
 				if retryAfter != nil {
-					return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s%s", *retryAfter, RetryAfterTooLongPhrase, attempts))
+					return nil, safeModelStatusError(fmt.Sprintf(TransportFailedPhrase+" with status 429 and a Retry-After of %s, %s%s", *retryAfter, RetryAfterTooLongPhrase, attempts), status)
 				}
-				return nil, safeModelError(TransportFailedPhrase + " with status 429 and no Retry-After (" + LimitNotLiftedPhrase + ")" + attempts)
+				return nil, safeModelStatusError(TransportFailedPhrase+" with status 429 and no Retry-After ("+LimitNotLiftedPhrase+")"+attempts, status)
 			}
 			if attempts != "" {
-				return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d%s", status, attempts))
+				return nil, safeModelStatusError(fmt.Sprintf(TransportFailedPhrase+" with status %d%s", status, attempts), status)
 			}
-			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status))
+			return nil, safeModelStatusError(fmt.Sprintf(TransportFailedPhrase+" with status %d", status), status)
 		}
 		fmt.Fprintf(os.Stderr, "worker: model invocation returned status %d; asking again in %s (retry %d of %d)\n", status, pause, attempt+1, len(gatewayRetryPauses))
 		if !pauseBeforeAskingAgain(ctx, pause) {
-			return nil, safeModelError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status))
+			return nil, safeModelStatusError(fmt.Sprintf(TransportFailedPhrase+" with status %d; the wait before asking again was cancelled", status), status)
 		}
 	}
 }
@@ -532,7 +559,7 @@ func gatewayPause(status int, retryAfter *time.Duration, attempt int) (time.Dura
 func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encoded []byte) ([]byte, int, *time.Duration, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, 0, nil, safeModelError("model request could not be built")
+		return nil, 0, nil, safeModelLiteral("model request could not be built")
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+apiKey)
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -547,12 +574,12 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		if errors.As(err, &urlErr) {
 			return nil, 0, nil, safeModelErrorFor(TransportFailedPhrase+": "+urlErr.Err.Error(), urlErr.Err)
 		}
-		return nil, 0, nil, safeModelError(TransportFailedPhrase)
+		return nil, 0, nil, safeModelLiteral(TransportFailedPhrase)
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
 	if err != nil || len(body) > maxTransportResponseBytes {
-		return nil, 0, nil, safeModelError("model response could not be read")
+		return nil, 0, nil, safeModelLiteral("model response could not be read")
 	}
 	var retryAfter *time.Duration
 	if seconds, err := strconv.Atoi(strings.TrimSpace(httpResponse.Header.Get("Retry-After"))); err == nil && seconds >= 0 {
@@ -864,22 +891,41 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	allowance := 0
 	lowered := 0
 	widened := false
+	calls := 0
 	// lastRetry is what the most recent re-ask changed ("lowered" or
 	// "widened"), so a failure after it says the right thing.
 	lastRetry := ""
 	var cutoff error
+	var last turnObservation
+	// configured is the endpoint as the turn began; the loop below lowers
+	// the effort and widens the allowance on its own copy.
+	configured := endpoint
+	// fail ends the turn: the detail of what it knew goes out on stderr
+	// first, so the runner can keep it beside the failed step.
+	fail := func(err error) (string, InvocationUsage, error) {
+		writeFailureDetail(ModelFailureDetail{
+			Phrase: detailPhrase(err), Model: configured.Model, Effort: configured.Effort, MaxOutputTokens: configured.MaxOutputTokens,
+			FinalEffort: endpoint.Effort, FinalMaxOutputTokens: endpoint.MaxOutputTokens,
+			Calls: calls, Lowered: lowered, Widened: widened, Malformed: malformed, ProviderErrors: upstream, AllowanceSpent: allowance,
+			LastRequestID: last.requestID, LastFinishReason: last.finishReason, LastPromptTokens: last.promptTokens,
+			LastCompletionTokens: last.completionTokens, LastReasoningTokens: last.reasoningTokens, LastHTTPStatus: last.status,
+		})
+		return "", InvocationUsage{}, err
+	}
 	for {
-		response, usage, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
+		calls++
+		response, usage, observed, err := i.converseTurnOnce(ctx, endpoint, messages, schema, maxResponseBytes)
 		if err == nil {
 			return response, usage, nil
 		}
+		last = observed
 		delay := malformedTurnDelay
 		switch {
 		case errors.Is(err, errModelAllowanceSpent):
 			// Shares the provider's budget so the turn's bound is unchanged,
 			// and stops first on its own, because its asks cost minutes.
 			if allowance >= allowanceTurnRetries || upstream >= len(gatewayRetryPauses) {
-				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d such calls", err, allowance+1))
+				return fail(afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d such calls", err, allowance+1)))
 			}
 			delay = gatewayRetryPauses[upstream]
 			upstream++
@@ -889,7 +935,7 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			// The provider's own error inside a 200: the same transient as a
 			// gateway 5xx, asked again on the gateway's schedule.
 			if upstream >= len(gatewayRetryPauses) {
-				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d provider errors", err, upstream+1))
+				return fail(afterCutoff(cutoff, lastRetry, fmt.Errorf("%w after %d provider errors", err, upstream+1)))
 			}
 			delay = gatewayRetryPauses[upstream]
 			upstream++
@@ -912,10 +958,10 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 				err = fmt.Errorf("%w; %s", err, EffortLoweredPhrase)
 			}
 			if widened {
-				return "", InvocationUsage{}, fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase)
+				return fail(fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase))
 			}
 			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
-				return "", InvocationUsage{}, fmt.Errorf("%w; %s of %d tokens", err, CutoffAtCeilingPhrase, MaxConfiguredOutputTokens)
+				return fail(fmt.Errorf("%w; %s of %d tokens", err, CutoffAtCeilingPhrase, MaxConfiguredOutputTokens))
 			}
 			cutoff = err
 			widened = true
@@ -924,18 +970,18 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			continue
 		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
 			if malformed >= malformedTurnRetries {
-				return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, err)
+				return fail(afterCutoff(cutoff, lastRetry, err))
 			}
 			malformed++
 		default:
-			return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, err)
+			return fail(afterCutoff(cutoff, lastRetry, err))
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			// The wall, not the shape, is what ended this turn.
 			timer.Stop()
-			return "", InvocationUsage{}, afterCutoff(cutoff, lastRetry, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err()))
+			return fail(afterCutoff(cutoff, lastRetry, fmt.Errorf(TransportFailedPhrase+": %w", ctx.Err())))
 		case <-timer.C:
 		}
 	}
@@ -951,10 +997,13 @@ func afterCutoff(cutoff error, lastRetry string, err error) error {
 	if cutoff == nil {
 		return err
 	}
+	// Both travel as wrapped errors: the cutoff stays what errors.Is finds
+	// first, and the re-ask's own failure (its class, a safe error's
+	// literal message, the round's wall) stays reachable for the detail.
 	if lastRetry == "lowered" {
-		return fmt.Errorf("%w: %v", cutoff, err)
+		return fmt.Errorf("%w: %w", cutoff, err)
 	}
-	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
+	return fmt.Errorf("%w; asked again with the wider allowance: %w", cutoff, err)
 }
 
 // effortLowerings bounds how many steps down the effort ladder one turn
@@ -972,9 +1021,49 @@ func widenedOutputAllowance(current int32) int32 {
 	return current * 2
 }
 
-func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, error) {
+// turnObservation is what one call showed, kept for the failure detail:
+// the gateway's answer when there was one (id, finish reason, counts), or
+// the status it refused with.
+type turnObservation struct {
+	requestID, finishReason                         string
+	promptTokens, completionTokens, reasoningTokens int32
+	status                                          int
+}
+
+func observe(output *ChatResponse, err error) turnObservation {
+	var observed turnObservation
+	if output != nil {
+		if modelRequestIDPattern.MatchString(output.ID) {
+			observed.requestID = output.ID
+		}
+		if len(output.Choices) > 0 {
+			observed.finishReason = output.Choices[0].FinishReason
+		}
+		if output.Usage != nil {
+			observed.promptTokens, observed.completionTokens = output.Usage.PromptTokens, output.Usage.CompletionTokens
+			if output.Usage.CompletionTokensDetails != nil {
+				observed.reasoningTokens = output.Usage.CompletionTokensDetails.ReasoningTokens
+			}
+		}
+	}
+	var safe *SafeModelError
+	if errors.As(err, &safe) {
+		observed.status = safe.Status()
+	}
+	return observed
+}
+
+func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, turnObservation, error) {
+	response, usage, output, err := i.converseTurnCall(ctx, endpoint, messages, schema, maxResponseBytes)
+	return response, usage, observe(output, err), err
+}
+
+// converseTurnCall makes one call and judges its answer; the answer itself
+// is returned alongside so the caller can record what it saw when the
+// judgment fails.
+func (i *ModelInvoker) converseTurnCall(ctx context.Context, endpoint ModelEndpoint, messages []ChatMessage, schema string, maxResponseBytes int) (string, InvocationUsage, *ChatResponse, error) {
 	if ctx == nil {
-		return "", InvocationUsage{}, errors.New("model invocation context is invalid")
+		return "", InvocationUsage{}, nil, errors.New("model invocation context is invalid")
 	}
 	request := ChatRequest{
 		Model:     endpoint.Model,
@@ -1012,40 +1101,40 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 			// costs ModelInvocationTimeout in real time. A live reception
 			// died on a spent allowance after thirteen runs that did not
 			// (2026-09-09).
-			return "", InvocationUsage{}, errModelAllowanceSpent
+			return "", InvocationUsage{}, output, errModelAllowanceSpent
 		}
 		var safe *SafeModelError
 		if errors.As(err, &safe) {
-			return "", InvocationUsage{}, safe
+			return "", InvocationUsage{}, output, safe
 		}
-		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
+		return "", InvocationUsage{}, output, errors.New(TransportFailedPhrase)
 	}
 	if output == nil {
-		return "", InvocationUsage{}, errors.New(TransportFailedPhrase)
+		return "", InvocationUsage{}, output, errors.New(TransportFailedPhrase)
 	}
 	// The provider's own error inside a 200 is judged before the usage and
 	// content checks: such an answer may carry no usage and no content, and
 	// judged after them it would travel as a malformed response, asked
 	// again once instead of on the gateway's schedule (review of #99).
 	if len(output.Choices) == 1 && output.Choices[0].FinishReason == ChatFinishError {
-		return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseUpstream, ChatFinishError)
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (finish_reason=%s)", errModelResponseUpstream, ChatFinishError)
 	}
 	if len(output.Choices) == 0 && output.Error != nil {
-		return "", InvocationUsage{}, fmt.Errorf("%w (error code %d, no choices)", errModelResponseUpstream, output.Error.Code)
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (error code %d, no choices)", errModelResponseUpstream, output.Error.Code)
 	}
 	if output.Usage == nil {
-		return "", InvocationUsage{}, fmt.Errorf("%w (no usage)", errModelResponseMetadata)
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (no usage)", errModelResponseMetadata)
 	}
 	if output.Usage.PromptTokens <= 0 || output.Usage.CompletionTokens <= 0 ||
 		output.Usage.TotalTokens <= 0 || output.Usage.PromptTokens+output.Usage.CompletionTokens != output.Usage.TotalTokens {
 		// The three counts are the only upstream values named here: numbers
 		// the operator needs to see which condition failed, and nothing the
 		// transport could smuggle.
-		return "", InvocationUsage{}, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", errModelResponseMetadata,
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (usage prompt=%d completion=%d total=%d)", errModelResponseMetadata,
 			output.Usage.PromptTokens, output.Usage.CompletionTokens, output.Usage.TotalTokens)
 	}
 	if len(output.Choices) != 1 || output.Choices[0].Message.Role != "assistant" {
-		return "", InvocationUsage{}, fmt.Errorf("%w (choices=%d, not one assistant message)", errModelResponseContent, len(output.Choices))
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (choices=%d, not one assistant message)", errModelResponseContent, len(output.Choices))
 	}
 	if output.Choices[0].FinishReason != ChatFinishStop {
 		// The finish reason is a provider enum, safe to echo, and it is the
@@ -1057,14 +1146,14 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// is asked once more by converseTurn (live 2026-09-05: one such
 		// verdict ended a seven-measurement round as model_failed).
 		if output.Choices[0].FinishReason == ChatFinishContentFilter {
-			return "", InvocationUsage{}, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, ChatFinishContentFilter)
+			return "", InvocationUsage{}, output, fmt.Errorf("%w (finish_reason=%s)", errModelResponseRefused, ChatFinishContentFilter)
 		}
 		if output.Choices[0].FinishReason == ChatFinishLength {
 			if reasoningExhausted(output) {
-				return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens); %w",
+				return "", InvocationUsage{}, output, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens); %w",
 					errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens, errModelReasoningExhausted)
 			}
-			return "", InvocationUsage{}, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
+			return "", InvocationUsage{}, output, fmt.Errorf("%w: finish_reason=%s (output allowance %d tokens)",
 				errModelResponseTruncated, ChatFinishLength, endpoint.MaxOutputTokens)
 		}
 		// Named by the same constant so the phrase cannot drift, but not
@@ -1072,14 +1161,14 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		// true for a finish_reason that has nothing to do with the output
 		// allowance, and the turn then paid a second call with the allowance
 		// doubled (measured, review of #122).
-		return "", InvocationUsage{}, errors.New(CutoffPhrase + ": finish_reason=" + output.Choices[0].FinishReason)
+		return "", InvocationUsage{}, output, errors.New(CutoffPhrase + ": finish_reason=" + output.Choices[0].FinishReason)
 	}
 	response := output.Choices[0].Message.Content
 	if response == "" || len(response) > maxResponseBytes {
-		return "", InvocationUsage{}, fmt.Errorf("%w (content %d bytes, limit %d)", errModelResponseContent, len(response), maxResponseBytes)
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (content %d bytes, limit %d)", errModelResponseContent, len(response), maxResponseBytes)
 	}
 	if !modelRequestIDPattern.MatchString(output.ID) {
-		return "", InvocationUsage{}, fmt.Errorf("%w (request id outside its pattern)", errModelResponseMetadata)
+		return "", InvocationUsage{}, output, fmt.Errorf("%w (request id outside its pattern)", errModelResponseMetadata)
 	}
 	cost := output.Usage.Cost
 	if cost < 0 {
@@ -1089,7 +1178,7 @@ func (i *ModelInvoker) converseTurnOnce(ctx context.Context, endpoint ModelEndpo
 		RequestedModel: endpoint.Model, RequestID: output.ID, StopReason: output.Choices[0].FinishReason,
 		InputTokens: output.Usage.PromptTokens, OutputTokens: output.Usage.CompletionTokens, TotalTokens: output.Usage.TotalTokens,
 		LatencyMillis: latency, CostUSD: cost,
-	}, nil
+	}, output, nil
 }
 
 func candidateJSONSchema(request TicketRequest) string {

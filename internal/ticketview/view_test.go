@@ -426,3 +426,122 @@ func TestBuildIgnoresStageRecordsThatAreNotVerdicts(t *testing.T) {
 		t.Fatalf("the empty attempt is still a record the operator can open: %v", view.Records)
 	}
 }
+
+// The gateway's billing reading and the worker's failure detail, once the
+// engine keeps them beside the run, reach the page: the billed figures per
+// role with the key's name, and the failed turn's numbers with a sentence
+// that says what they mean.
+func TestBuildReadsTheBilledSpendAndTheModelFailureDetail(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "delivery_evidence")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"spend.json":                `{"read_at":"2026-09-15T03:10:05Z","since":"2026-09-15T03:07:21Z","complete":false,"total_usd":2.62,"keys":[{"key_env":"MODEL_API_KEY_IMPL","key_name":"automation-impl","roles":["実装","受付"],"spend_usd":0.48},{"key_env":"MODEL_API_KEY_REVIEW_A","key_name":"automation-review-a","roles":["レビュー review-a"],"spend_usd":2.13,"unpriced_requests":1},{"key_env":"MODEL_API_KEY_X","spend_usd":0.01}],"text":"合計: $2.62"}`,
+		"failed-step.txt":           "AI による受付の判定",
+		"model-failure-detail.json": `{"step":"AI による受付の判定","recorded_at":"2026-09-15T03:10:04Z","phrase":"model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the whole allowance went to reasoning; TOKEN=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd","model":"vendor/model-a","effort":"medium","max_output_tokens":32768,"calls":3,"lowered":2,"last_request_id":"gen-abc123","last_finish_reason":"length","last_prompt_tokens":900,"last_completion_tokens":32768,"last_reasoning_tokens":32768}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	billed := view.Cost.Billed
+	if billed == nil || billed.Complete || len(billed.Lines) != 3 || billed.TotalUSD != 2.62 {
+		t.Fatalf("billed = %+v", billed)
+	}
+	if billed.Lines[0].Label != "実装 / 受付" || billed.Lines[0].KeyName != "automation-impl" || billed.Lines[1].Unpriced != 1 || billed.Lines[2].Label != "MODEL_API_KEY_X" {
+		t.Fatalf("billed lines = %+v", billed.Lines)
+	}
+	if view.Failure == nil || view.Failure.Model == nil {
+		t.Fatalf("failure detail not read: %+v", view.Failure)
+	}
+	m := view.Failure.Model
+	if m.Calls != 3 || m.LastReasoningTokens != 32768 || m.LastRequestID != "gen-abc123" || !strings.Contains(m.Summary, "考える段階だけで出力の上限 32768 トークンを使い切った") || !strings.Contains(m.Summary, "2 段下げて") {
+		t.Fatalf("model failure = %+v", m)
+	}
+	raw, _ := json.Marshal(view)
+	if strings.Contains(string(raw), "KLMNOPQRSTUVWXYZ0123456789abcd") || !strings.Contains(m.Phrase, "[masked:") {
+		t.Fatalf("the phrase must pass the secret scan: %s", raw)
+	}
+	var end *Event
+	for i := range view.Timeline {
+		if view.Timeline[i].Step == "end" {
+			end = &view.Timeline[i]
+		}
+	}
+	if end == nil || end.Why != m.Summary {
+		t.Fatalf("the ending should say what the detail means: %+v", end)
+	}
+	for _, want := range []string{"spend", "model-failure-detail"} {
+		if !contains(view.Records, want) {
+			t.Fatalf("records should list %q: %v", want, view.Records)
+		}
+	}
+}
+
+func TestModelFailureSummaryNamesEachCase(t *testing.T) {
+	for name, test := range map[string]struct {
+		detail ModelFailure
+		want   string
+	}{
+		"budget":    {ModelFailure{Calls: 2, LastHTTPStatus: 429}, "上限 (429)"},
+		"gateway":   {ModelFailure{Calls: 4, LastHTTPStatus: 503}, "503 を返し"},
+		"refused":   {ModelFailure{Calls: 1, LastHTTPStatus: 401}, "401 で断った"},
+		"reasoning": {ModelFailure{Calls: 3, LastFinishReason: "length", LastCompletionTokens: 100, LastReasoningTokens: 100}, "考える段階だけで"},
+		"long":      {ModelFailure{Calls: 2, LastFinishReason: "length", MaxOutputTokens: 8192, LastCompletionTokens: 8192, LastReasoningTokens: 10}, "長すぎて"},
+		"filter":    {ModelFailure{Calls: 2, LastFinishReason: "content_filter"}, "内容を理由に"},
+		"timeout":   {ModelFailure{Calls: 2, AllowanceSpent: 1}, "制限時間内に"},
+		"other":     {ModelFailure{Calls: 1, Phrase: "the gateway's bookkeeping"}, "bookkeeping"},
+	} {
+		if got := modelFailureSummary(test.detail); !strings.Contains(got, test.want) {
+			t.Errorf("%s: %q lacks %q", name, got, test.want)
+		}
+	}
+}
+
+// A reception that failed before the readiness gate records no failed
+// step; the detail names the stage, and the page still shows the failure.
+// The key's name in the billing record is the gateway's word and is
+// scanned before it is shown.
+func TestBuildShowsAFailureRecordedOnlyInTheDetailAndScansKeyNames(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "delivery_intake_failure")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"model-failure-detail.json": `{"step":"依頼の読み取り","recorded_at":"2026-09-16T01:00:00Z","phrase":"model invocation failed with status 429; a limit that a wait does not lift","model":"vendor/model-a","calls":1,"last_http_status":429}`,
+		"spend.json":                `{"read_at":"2026-09-16T01:00:05Z","complete":true,"total_usd":0.1,"keys":[{"key_env":"MODEL_API_KEY_X","key_name":"sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd","spend_usd":0.1}]}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Failure == nil || view.Failure.Step != "依頼の読み取り" || view.Failure.Model == nil || !strings.Contains(view.Failure.Model.Summary, "429") {
+		t.Fatalf("failure = %+v", view.Failure)
+	}
+	if len(view.Timeline) != 1 || view.Timeline[0].Step != "end" || view.Timeline[0].Record != "model-failure-detail" || !view.Timeline[0].At.Equal(time.Date(2026, 9, 16, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("ending = %+v", view.Timeline)
+	}
+	raw, _ := json.Marshal(view)
+	if strings.Contains(string(raw), "KLMNOPQRSTUVWXYZ0123456789abcd") || !strings.Contains(string(raw), "[masked:") {
+		t.Fatalf("the key name must pass the secret scan: %s", raw)
+	}
+}
+
+func TestModelFailureSummarySaysAskedAgainOnlyWhenItWas(t *testing.T) {
+	once := modelFailureSummary(ModelFailure{Calls: 1, LastHTTPStatus: 503, Phrase: "model invocation failed with status 503"})
+	again := modelFailureSummary(ModelFailure{Calls: 1, LastHTTPStatus: 503, Phrase: "model invocation failed with status 503; asked again until the attempts ran out"})
+	if strings.Contains(once, "聞き直しても") || !strings.Contains(again, "聞き直しても") {
+		t.Fatalf("once=%q again=%q", once, again)
+	}
+}

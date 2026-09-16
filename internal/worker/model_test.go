@@ -647,7 +647,7 @@ func TestGatewayClientRetriesA429OnlyWithRetryAfter(t *testing.T) {
 func TestASpentAllowanceJoinsTheProvidersRetryLadder(t *testing.T) {
 	var calls int
 	invoker := &ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &calls}}
-	_, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	_, _, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if err == nil || !errors.Is(err, errModelAllowanceSpent) {
 		t.Fatalf("a spent allowance was classified as %v", err)
 	}
@@ -661,7 +661,7 @@ func TestASpentAllowanceJoinsTheProvidersRetryLadder(t *testing.T) {
 	var afterGivingUp int
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err = (&ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &afterGivingUp}}).converseTurnOnce(cancelled, ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
+	_, _, _, err = (&ModelInvoker{api: &timeoutChatAPI{fail: 1, calls: &afterGivingUp}}).converseTurnOnce(cancelled, ModelEndpoint{Model: "m"}, []ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if err == nil || errors.Is(err, errModelAllowanceSpent) {
 		t.Fatalf("a finished caller was invited to ask again: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestAProviderErrorKeepsItsOwnLadder(t *testing.T) {
 func TestATransportsOwnTimeLimitIsAlsoASpentAllowance(t *testing.T) {
 	var calls int
 	invoker := &ModelInvoker{api: &dialTimeoutChatAPI{calls: &calls}}
-	_, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"},
+	_, _, _, err := invoker.converseTurnOnce(context.Background(), ModelEndpoint{Model: "m"},
 		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("this stand-in must not reach the context half of the check")
@@ -1107,7 +1107,7 @@ func TestTheFailureSaysHowManyAttemptsItTook(t *testing.T) {
 		t.Fatal(err)
 	}
 	invoker := &ModelInvoker{api: client}
-	_, _, turnErr := invoker.converseTurnOnce(context.Background(),
+	_, _, _, turnErr := invoker.converseTurnOnce(context.Background(),
 		ModelEndpoint{Model: "m", BaseURL: "http://" + listener.Addr().String(), APIKeyEnv: "LASSDAS_TEST_KEY"},
 		[]ChatMessage{{Role: "user", Content: "q"}}, "", 1024)
 	if turnErr == nil {

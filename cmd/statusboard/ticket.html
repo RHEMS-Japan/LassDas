@@ -117,18 +117,49 @@
   }
   function renderSide(view) {
     const cost = document.getElementById("cost"); cost.textContent = "";
+    const billed = view.cost && view.cost.billed;
+    if (billed && billed.lines && billed.lines.length) {
+      cost.className = "";
+      cost.appendChild(el("div", "note", "ゲートウェイの請求 (票コメントと同じ数字)"));
+      const g = el("div", "cost");
+      for (const line of billed.lines) {
+        const label = el("span", null, line.label); if (line.key_name) label.title = "鍵: " + line.key_name;
+        g.appendChild(label); g.appendChild(el("span", null, usd(line.usd) + (line.unpriced ? " ※" + line.unpriced + " 件未計上" : "")));
+      }
+      g.appendChild(el("span", "total", billed.complete ? "合計" : "合計 (一部読めず・実際はこれより大きいことがある)")); g.appendChild(el("span", "total", usd(billed.total_usd)));
+      cost.appendChild(g);
+      const keys = billed.lines.filter(l => l.key_name).map(l => l.label + " = " + l.key_name);
+      if (keys.length) cost.appendChild(el("div", "note", "鍵: " + keys.join("、")));
+    }
     if (view.cost && view.cost.lines && view.cost.lines.length) {
       cost.className = "";
+      cost.appendChild(el("div", "note", billed ? "記録上の呼び出し価格 (参考)" : "記録上の呼び出し価格"));
       const g = el("div", "cost");
       for (const line of view.cost.lines) { g.appendChild(el("span", null, line.label)); g.appendChild(el("span", null, usd(line.usd))); }
       g.appendChild(el("span", "total", "記録にある分の合計")); g.appendChild(el("span", "total", usd(view.cost.total_usd)));
       cost.appendChild(g); if (view.cost.note) cost.appendChild(el("div", "note", view.cost.note));
-    } else { cost.className = "empty"; cost.textContent = "記録に価格が残っている呼び出しはありません"; }
+    }
+    if (!cost.childNodes.length) { cost.className = "empty"; cost.textContent = "費用の記録はありません"; }
     const failure = document.getElementById("failure"); failure.textContent = "";
     if (view.failure) {
       failure.className = "";
       failure.appendChild(el("div", "err", "止まった工程: " + view.failure.step));
       if (view.failure.reason) failure.appendChild(el("div", null, "理由コード: " + view.failure.reason));
+      const m = view.failure.model;
+      if (m) {
+        if (m.summary) failure.appendChild(el("p", "why", m.summary));
+        const dl = el("dl", "ev");
+        const effort = m.effort ? (m.final_effort && m.final_effort !== m.effort ? "考える深さ " + m.effort + " → " + m.final_effort : "考える深さ " + m.effort) : "";
+        const allowance = m.max_output_tokens ? (m.final_max_output_tokens && m.final_max_output_tokens !== m.max_output_tokens ? "出力上限 " + m.max_output_tokens + " → " + m.final_max_output_tokens : "出力上限 " + m.max_output_tokens) : "";
+        const rows = [["モデル", (m.model || "(記録なし)") + (effort ? " (" + effort + ")" : "")], ["呼び出し", m.calls + " 回" + (m.lowered ? "・深さを下げ " + m.lowered : "") + (m.widened ? "・上限を広げ 1" : "") + (m.provider_errors ? "・提供元の失敗 " + m.provider_errors : "") + (m.malformed ? "・形の崩れ " + m.malformed : "") + (m.allowance_spent ? "・時間切れ " + m.allowance_spent : "")]];
+        if (m.last_http_status) rows.push(["最後の応答", "HTTP " + m.last_http_status]);
+        if (m.last_finish_reason) rows.push(["finish_reason", m.last_finish_reason]);
+        if (m.last_completion_tokens || m.last_prompt_tokens) rows.push(["トークン", "入力 " + (m.last_prompt_tokens || 0) + " / 出力 " + (m.last_completion_tokens || 0) + (m.last_reasoning_tokens ? " (うち思考 " + m.last_reasoning_tokens + ")" : "") + (allowance ? " / " + allowance : "")]);
+        if (m.last_request_id) rows.push(["request id", m.last_request_id]);
+        rows.push(["本体の記録", m.phrase]);
+        for (const [k, v] of rows) { dl.appendChild(el("dt", null, k)); dl.appendChild(el("dd", null, v)); }
+        failure.appendChild(dl);
+      }
       if (view.failure.detail) { const d = el("details"); d.appendChild(el("summary", null, "票に書かれた説明 (末尾)")); d.appendChild(el("pre", "trail", view.failure.detail)); failure.appendChild(d); }
     } else { failure.className = "empty"; failure.textContent = "なし"; }
     const records = document.getElementById("records"); records.textContent = "";

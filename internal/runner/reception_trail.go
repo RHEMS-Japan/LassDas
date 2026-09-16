@@ -38,12 +38,19 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 	if err := p.writeReceptionTrail(receptionNote(stage, p.lastStepStderr)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
+	// The same stderr carries the worker's own detail of the failed turn,
+	// kept as a record for the ticket page.
+	p.recordModelFailureDetail(stage)
 }
 
 // deriveStage is the reception stage whose failure the no-file note explains.
 // The note names what to do about a derivation, so it must not appear under
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
+
+// intakeStage is the reception stage that reads the ticket into the
+// contract (read-contract), the first model turn of a run.
+const intakeStage = "依頼の読み取り"
 
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
