@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"automation.internal/ticket-ingress/internal/initsmoke"
@@ -18,8 +19,16 @@ import (
 )
 
 const help = `使用方法:
+  lassdas setup check [--repo-root PATH]
+  lassdas setup secrets --project NAME [--repo-root PATH]
+  lassdas setup apply --project NAME [--repo-root PATH]
+  lassdas setup smoke --project NAME [--repo-root PATH]
   lassdas init [--project NAME] [--repo-root PATH] [--redo STAGE]
   lassdas run start|stop|status|logs --project NAME
+setup は、開発 AI が docs/SETUP.md に従って書いた .lassdas/setup.json から
+導入を進めます。check は回答の不足を示すだけで何も動かしません。secrets と
+smoke は利用者が実行します (鍵の入力と、本人名義の試験依頼)。apply は AI が
+実行し、本体の起動まで進めます。
 
 init は納品先 repo で実行します。外で取得した鍵を対話画面へ入力し、
 設定・起動・本人名義の依頼から最初の PR の照合まで進めます。
@@ -47,6 +56,13 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	command := args[0]
 	rest := args[1:]
+	if command == "setup" {
+		if len(rest) == 0 {
+			return errors.New("setup の操作名が必要です。lassdas --help を参照してください")
+		}
+		command = "setup " + rest[0]
+		rest = rest[1:]
+	}
 	if command == "run" {
 		if len(rest) == 0 {
 			return errors.New("run の操作名が必要です。lassdas --help を参照してください")
@@ -55,7 +71,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		rest = rest[1:]
 	}
 	switch command {
-	case "init", "run start", "run stop", "run status", "run logs":
+	case "init", "run start", "run stop", "run status", "run logs", "setup check", "setup secrets", "setup apply", "setup smoke":
 	default:
 		return errors.New("コマンドが不明です。lassdas --help を参照してください")
 	}
@@ -63,8 +79,10 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	project := flags.String("project", "", "")
 	var repoRoot, redo string
-	if command == "init" {
+	if command == "init" || strings.HasPrefix(command, "setup ") {
 		flags.StringVar(&repoRoot, "repo-root", "", "")
+	}
+	if command == "init" {
 		flags.StringVar(&redo, "redo", "", "")
 	}
 	if err := flags.Parse(rest); err != nil {
@@ -82,6 +100,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	manager := localrun.Manager{}
+	if strings.HasPrefix(command, "setup ") {
+		return runSetup(ctx, command, *project, repoRoot, home, manager, output)
+	}
 	if command == "init" {
 		ui := initwizard.TerminalUI{}
 		if *project == "" {
