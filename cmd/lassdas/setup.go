@@ -164,6 +164,9 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 	if state.ModelKeyMode != "" && state.ModelKeyMode != mode {
 		return fmt.Errorf("この project の鍵の持ち方は %s で作られています。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.ModelKeyMode, project)
 	}
+	if state.Completed["models"] != "" && state.SeparateDesignReviews != separateDesign {
+		return fmt.Errorf("この project の設計レビューの構成 (separate-design=%v) は確定済みです。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.SeparateDesignReviews, project)
+	}
 	state.ModelKeyMode, state.SeparateDesignReviews = mode, separateDesign
 	names := secretPlan(answers)
 	terminal := initwizard.TerminalUI{}

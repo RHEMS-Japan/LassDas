@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -339,6 +340,16 @@ func (a Answers) Check(repoRoot string) []string {
 	for _, requirement := range RequiredAnswers() {
 		if _, ok := a.Value(requirement.ID); !ok {
 			problems = append(problems, fmt.Sprintf("回答がありません: %s (%s)。%s", requirement.ID, requirement.Label, requirement.How))
+		}
+	}
+	// The tracker origin's shape is checked here, before a key is stored
+	// against it: https, a host, nothing after it.
+	if origin, ok := a.Value("tracker-origin"); ok {
+		if parsed, err := url.Parse(origin); err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.Port() != "" ||
+			(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			problems = append(problems, fmt.Sprintf("tracker-origin の形が違います: %q (https://<space>.backlog.com のように、https でホスト名だけ。末尾の / や path は付けない)", origin))
+		} else if strings.HasSuffix(origin, "/") {
+			problems = append(problems, fmt.Sprintf("tracker-origin の末尾の / を外してください: %q", origin))
 		}
 	}
 	// Without go.mod or package.json the wizard proposes nothing for the

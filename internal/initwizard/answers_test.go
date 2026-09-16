@@ -105,7 +105,7 @@ func TestAnswersCheckNamesWhatIsMissingAndWhatIsUnknown(t *testing.T) {
 func TestACompleteAnswersFilePassesCheck(t *testing.T) {
 	root := t.TempDir()
 	var fields []string
-	models := map[string]string{"implementer-model": "deepseek/a", "review-a-model": "anthropic/b", "review-b-model": "openai/c", "readiness-assessor-model": "google/d", "readiness-checker-model": "openai/e", "designer-model": "anthropic/f", "applier-model": "deepseek/g"}
+	models := map[string]string{"implementer-model": "deepseek/a", "review-a-model": "anthropic/b", "review-b-model": "openai/c", "readiness-assessor-model": "google/d", "readiness-checker-model": "openai/e", "designer-model": "anthropic/f", "applier-model": "deepseek/g", "tracker-origin": "https://example.backlog.com"}
 	for _, requirement := range RequiredAnswers() {
 		value := "x"
 		if m, ok := models[requirement.ID]; ok {
@@ -295,5 +295,27 @@ func TestAConsentStopInTheTrackerStageKeepsTheKey(t *testing.T) {
 	secrets = Secrets{"BACKLOG_API_KEY": "key-value"}
 	if err := w.tracker(context.Background(), s, secrets, func() error { return nil }); !errors.As(err, &consent) || consent.ID != "tracker-create" {
 		t.Fatalf("want the tracker-create gate: %v", err)
+	}
+}
+
+// The tracker origin is checked for shape before a key is stored against
+// it: https and a bare host; a trailing slash or a path is named.
+func TestAnswersCheckNamesABadTrackerOrigin(t *testing.T) {
+	root := t.TempDir()
+	for origin, want := range map[string]string{
+		`"https://example.backlog.com"`:     "",
+		`"https://example.backlog.com/"`:    "末尾の /",
+		`"http://example.backlog.com"`:      "形が違います",
+		`"https://example.backlog.com/api"`: "形が違います",
+	} {
+		writeAnswers(t, root, `{"answers":{"tracker-origin":`+origin+`}}`)
+		answers, _ := LoadAnswers(root)
+		joined := strings.Join(answers.Check(""), "\n")
+		if want == "" && strings.Contains(joined, "tracker-origin の") {
+			t.Fatalf("%s should pass: %s", origin, joined)
+		}
+		if want != "" && !strings.Contains(joined, want) {
+			t.Fatalf("%s should say %q: %s", origin, want, joined)
+		}
 	}
 }
