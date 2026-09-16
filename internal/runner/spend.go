@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -40,10 +41,72 @@ func (t *Terminal) loadRunSpendText(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
+	return t.readAndRecordSpend(ctx, config, reader, since)
+}
+
+// readAndRecordSpend reads every configured key's figure since the run
+// began, keeps the reading beside the run, and renders it for the requester.
+func (t *Terminal) readAndRecordSpend(ctx context.Context, config worker.Config, reader worker.SpendReader, since time.Time) string {
 	readCtx, cancel := context.WithTimeout(ctx, spendReadTimeout)
 	defer cancel()
 	spend := worker.ReadRunSpend(readCtx, reader, config, since)
-	return worker.ComposeSpendText(spend, worker.RolesByKeyEnv(config))
+	roles := worker.RolesByKeyEnv(config)
+	text := worker.ComposeSpendText(spend, roles)
+	t.recordSpend(spend, roles, since, text)
+	return text
+}
+
+// SpendRecordFile keeps the billing reading beside the run: the same
+// figures the terminal comment carries, per key with the roles that key
+// serves, so the ticket page shows what a run cost - a failed one too -
+// without asking the gateway again. Written on every report, so a report
+// posted again carries the latest reading.
+const SpendRecordFile = "spend.json"
+
+type spendRecord struct {
+	ReadAt   time.Time        `json:"read_at"`
+	Since    time.Time        `json:"since"`
+	Complete bool             `json:"complete"`
+	TotalUSD float64          `json:"total_usd"`
+	Keys     []spendRecordKey `json:"keys"`
+	Text     string           `json:"text"`
+}
+
+type spendRecordKey struct {
+	// KeyEnv names the environment variable, never the key; KeyName is
+	// what the gateway calls the key.
+	KeyEnv   string   `json:"key_env"`
+	KeyName  string   `json:"key_name,omitempty"`
+	Roles    []string `json:"roles,omitempty"`
+	SpendUSD float64  `json:"spend_usd"`
+	Unpriced int      `json:"unpriced_requests,omitempty"`
+}
+
+// recordSpend writes the reading, or removes a stale record when there was
+// none. Best-effort: the report never waits on it. The file is removed
+// before the write so a link left at the path cannot carry the record
+// outside the workspace.
+func (t *Terminal) recordSpend(spend worker.RunSpend, roles map[string][]string, since time.Time, text string) {
+	path := t.workspace + "/" + SpendRecordFile
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if len(spend.Keys) == 0 {
+		return
+	}
+	record := spendRecord{ReadAt: time.Now().UTC(), Since: since, Complete: spend.Complete, TotalUSD: spend.TotalUSD, Text: text}
+	for _, key := range spend.Keys {
+		entry := spendRecordKey{KeyEnv: key.KeyEnv, KeyName: key.KeyName, SpendUSD: key.SpendUSD, Unpriced: key.Unpriced}
+		for _, env := range append([]string{key.KeyEnv}, key.AlsoKeyEnvs...) {
+			entry.Roles = append(entry.Roles, roles[env]...)
+		}
+		record.Keys = append(record.Keys, entry)
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, encoded, 0o600)
 }
 
 // loadRunStart reads the moment this run started working, as recorded when it

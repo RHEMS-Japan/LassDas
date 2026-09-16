@@ -61,6 +61,26 @@ type Cost struct {
 	Lines    []CostLine `json:"lines"`
 	TotalUSD float64    `json:"total_usd"`
 	Note     string     `json:"note,omitempty"`
+	// Billed is what the gateway billed the run's keys, read at the end of
+	// the run and kept in spend.json - the same figures the terminal
+	// comment carries, for a failed run too.
+	Billed *Billed `json:"billed,omitempty"`
+}
+
+// Billed is the gateway's own reading of what the run cost.
+type Billed struct {
+	ReadAt   time.Time    `json:"read_at"`
+	Complete bool         `json:"complete"`
+	TotalUSD float64      `json:"total_usd"`
+	Lines    []BilledLine `json:"lines"`
+}
+
+// BilledLine is one key's figure with the roles it serves.
+type BilledLine struct {
+	Label    string  `json:"label"`
+	KeyName  string  `json:"key_name,omitempty"`
+	USD      float64 `json:"usd"`
+	Unpriced int     `json:"unpriced,omitempty"`
 }
 
 type CostLine struct {
@@ -73,6 +93,32 @@ type Failure struct {
 	Step   string `json:"step"`
 	Reason string `json:"reason,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// Model is what the worker knew when a reception model turn gave up
+	// (model-failure-detail.json): the phrase, the calls, the last answer.
+	Model *ModelFailure `json:"model,omitempty"`
+}
+
+// ModelFailure is the recorded detail of a failed model turn.
+type ModelFailure struct {
+	RecordedAt           time.Time `json:"recorded_at"`
+	Phrase               string    `json:"phrase"`
+	Model                string    `json:"model,omitempty"`
+	Effort               string    `json:"effort,omitempty"`
+	MaxOutputTokens      int32     `json:"max_output_tokens,omitempty"`
+	Calls                int       `json:"calls"`
+	Lowered              int       `json:"lowered,omitempty"`
+	Widened              bool      `json:"widened,omitempty"`
+	Malformed            int       `json:"malformed,omitempty"`
+	ProviderErrors       int       `json:"provider_errors,omitempty"`
+	AllowanceSpent       int       `json:"allowance_spent,omitempty"`
+	LastRequestID        string    `json:"last_request_id,omitempty"`
+	LastFinishReason     string    `json:"last_finish_reason,omitempty"`
+	LastPromptTokens     int32     `json:"last_prompt_tokens,omitempty"`
+	LastCompletionTokens int32     `json:"last_completion_tokens,omitempty"`
+	LastReasoningTokens  int32     `json:"last_reasoning_tokens,omitempty"`
+	LastHTTPStatus       int       `json:"last_http_status,omitempty"`
+	// Summary says in the requester's words what the numbers mean.
+	Summary string `json:"summary,omitempty"`
 }
 
 // RecordNames are the run-directory files the raw record endpoint may
@@ -88,6 +134,8 @@ var RecordNames = map[string]string{
 	"deliver-production-report": "deliver-production-report.json",
 	"board-outcome":             "board-outcome.json",
 	"model-failure":             "model-failure.json",
+	"model-failure-detail":      "model-failure-detail.json",
+	"spend":                     "spend.json",
 	"failed-step":               "failed-step.txt",
 	"trail":                     "m1-trail.txt",
 	"measurements":              "measurements.jsonl",
@@ -179,6 +227,7 @@ func Build(runDir string) (View, error) {
 	view.readValidation(runDir)
 	view.readDelivery(runDir)
 	view.readEnding(runDir)
+	view.readSpend(runDir)
 	view.readMeasurements(runDir)
 	sort.SliceStable(view.Timeline, func(i, j int) bool { return view.Timeline[i].At.Before(view.Timeline[j].At) })
 	for name := range RecordNames {
@@ -745,14 +794,81 @@ func (v *View) readEnding(runDir string) {
 	if readJSON(filepath.Join(runDir, "model-failure.json"), &record) {
 		failure.Reason = record.Reason
 	}
+	var detail ModelFailure
+	if readJSON(filepath.Join(runDir, "model-failure-detail.json"), &detail) && detail.Phrase != "" {
+		detail.Phrase = shown(detail.Phrase)
+		detail.Summary = modelFailureSummary(detail)
+		failure.Model = &detail
+	}
 	if trail, err := os.ReadFile(filepath.Join(runDir, "m1-trail.txt")); err == nil {
 		failure.Detail = shownTail(strings.TrimSpace(string(trail)), 1200)
 	}
 	v.Failure = failure
+	why := failureWord(failure.Reason)
+	if why == "" && failure.Model != nil {
+		why = failure.Model.Summary
+	}
 	v.Timeline = append(v.Timeline, Event{
 		At: fileTime(filepath.Join(runDir, "failed-step.txt")), Step: "end", Tone: "bad",
-		Title: "失敗で終了: " + failure.Step, Why: failureWord(failure.Reason), Record: "failed-step",
+		Title: "失敗で終了: " + failure.Step, Why: why, Record: "failed-step",
 	})
+}
+
+// modelFailureSummary says what the recorded numbers mean, in the
+// requester's words: the cases the reception's own notes distinguish.
+func modelFailureSummary(d ModelFailure) string {
+	switch {
+	case d.LastHTTPStatus == 429:
+		return fmt.Sprintf("AI の鍵が利用の上限 (429) で断られた (呼び出し %d 回)", d.Calls)
+	case d.LastHTTPStatus >= 500:
+		return fmt.Sprintf("ゲートウェイが %d を返し続けた (呼び出し %d 回)", d.LastHTTPStatus, d.Calls)
+	case d.LastHTTPStatus > 0:
+		return fmt.Sprintf("ゲートウェイが %d で断った", d.LastHTTPStatus)
+	case d.LastFinishReason == "length" && d.LastReasoningTokens > 0 && d.LastReasoningTokens >= d.LastCompletionTokens:
+		text := fmt.Sprintf("AI が答えを書き始める前に、考える段階だけで出力の上限 %d トークンを使い切った", d.LastCompletionTokens)
+		if d.Lowered > 0 {
+			text += fmt.Sprintf(" (考える深さを %d 段下げて聞き直しても同じ)", d.Lowered)
+		}
+		return text
+	case d.LastFinishReason == "length":
+		return fmt.Sprintf("AI の答えが長すぎて出力の上限 %d トークンで途切れた", d.MaxOutputTokens)
+	case d.LastFinishReason == "content_filter":
+		return "AI が依頼文の内容を理由に答えを断った"
+	case d.AllowanceSpent > 0 && d.LastRequestID == "":
+		return fmt.Sprintf("AI が制限時間内に答えを返さなかった (呼び出し %d 回)", d.Calls)
+	}
+	return fmt.Sprintf("AI の失敗 (呼び出し %d 回): %s", d.Calls, d.Phrase)
+}
+
+// readSpend reads the gateway's billing reading kept at the end of the run.
+func (v *View) readSpend(runDir string) {
+	var record struct {
+		ReadAt   time.Time `json:"read_at"`
+		Complete bool      `json:"complete"`
+		TotalUSD float64   `json:"total_usd"`
+		Keys     []struct {
+			KeyEnv   string   `json:"key_env"`
+			KeyName  string   `json:"key_name"`
+			Roles    []string `json:"roles"`
+			SpendUSD float64  `json:"spend_usd"`
+			Unpriced int      `json:"unpriced_requests"`
+		} `json:"keys"`
+	}
+	if !readJSON(filepath.Join(runDir, "spend.json"), &record) || len(record.Keys) == 0 {
+		return
+	}
+	billed := &Billed{ReadAt: record.ReadAt, Complete: record.Complete, TotalUSD: record.TotalUSD}
+	for _, key := range record.Keys {
+		label := strings.Join(key.Roles, " / ")
+		if label == "" {
+			label = key.KeyName
+		}
+		if label == "" {
+			label = key.KeyEnv
+		}
+		billed.Lines = append(billed.Lines, BilledLine{Label: label, KeyName: key.KeyName, USD: key.SpendUSD, Unpriced: key.Unpriced})
+	}
+	v.Cost.Billed = billed
 }
 
 func failureWord(reason string) string {

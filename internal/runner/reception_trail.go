@@ -38,6 +38,9 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 	if err := p.writeReceptionTrail(receptionNote(stage, p.lastStepStderr)); err != nil {
 		p.Logger.Error("reception trail not written", "error", err.Error())
 	}
+	// The same stderr carries the worker's own detail of the failed turn,
+	// kept as a record for the ticket page.
+	p.recordModelFailureDetail(stage)
 }
 
 // deriveStage is the reception stage whose failure the no-file note explains.
