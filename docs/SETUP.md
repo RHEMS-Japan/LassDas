@@ -77,6 +77,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 ## 6. 環境を整える
 
+0. 本体イメージが非公開レジストリにあるなら、利用者が自分の端末で先にログインする (案内 `~/.lassdas/distribution.json` の `registry_login` のコマンド。AI は実行しない。パスワードは含まれていない)。
 1. 利用者が実行: `lassdas setup secrets --project <name>` — 納品先 GitHub のトークン、Backlog の API キー、OpenRouter の API キー (役ごとに分ける設定ならその本数) を入れる。`~/.lassdas/<name>/` に 0600 で保存され、repo にも会話にも出ない。終わりに Backlog の鍵の持ち主 (名前と利用者 ID) が表示される。起票する本人がその人なら `creator-id` にその ID を書き、鍵を本人名義で使うことの承認 `requester-key-ok` を利用者にもらう。
 2. AI が実行: `lassdas setup apply --project <name>` — 回答から設定を組み立て、repo と枝の実在、編集範囲と検証コマンドのイメージ内での試走、課題管理の接続と受付カテゴリ・状態、各役のモデルの疎通 (少額の API 利用料がかかる)、本体の起動と起動時検査、を順に通す。止まったら、出力が示す不足 (回答・鍵・承認) を直して再実行する。済んだ段は飛ばして続きから再開する。ある段の回答を変えるときは `--redo <段>` (prepare / consumer / tracker / models / runtime)。
 3. 本体はローカルのコンテナで動く。板は `http://127.0.0.1:<board-port>` (認証なし)。
@@ -99,14 +100,19 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 |---|---|---|
 | `repository` | 納品先 repo (owner/name) | git remote から読める。fork や別 remote なら確認する |
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
-| `engine-repository` | 本体イメージの元ソース repo (owner/name) | `~/.lassdas/distribution.json` から自動。書けば上書き |
-| `image` | 本体イメージ (registry/name@sha256:digest) | 同上。タグ名から推定しない |
-| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA | 同上 |
-| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL | 同上 |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
+
+配布者の案内 (`~/.lassdas/distribution.json`、`lassdas setup install` が置く) から自動で埋まるもの。書けば上書きできる:
+
+| 項目 | 意味 |
+|---|---|
+| `engine-repository` | 本体イメージの元ソース repo (owner/name) |
+| `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
+| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
+| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 

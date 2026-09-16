@@ -19,14 +19,14 @@ import (
 )
 
 const help = `使用方法:
-  lassdas setup install --image IMAGE@sha256:… --build-record URL [--engine-sha SHA] [--engine-repository OWNER/NAME] [--registry-login CMD]
+  lassdas setup install --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--skills-dir DIR]
   lassdas setup check [--repo-root PATH]
   lassdas setup secrets --project NAME [--repo-root PATH]
   lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
   lassdas setup smoke --project NAME [--repo-root PATH]
   lassdas init [--project NAME] [--repo-root PATH] [--redo STAGE]
   lassdas run start|stop|status|logs --project NAME
-setup は、開発 AI が docs/SETUP.md に従って書いた .lassdas/setup.json から
+setup は、開発 AI が導入指示 (~/.lassdas/SETUP.md) に従って書いた .lassdas/setup.json から
 導入を進めます。install は 1 台に 1 回、本体 repo の中で実行し、CLI・導入指示・
 配布者の案内・開発 AI の skill を利用者のホームに置きます。以後は新しい会話で
 「LassDas をこのプロジェクトに導入して」と頼むだけで始まります。check は回答の
@@ -114,11 +114,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	manager := localrun.Manager{}
 	if command == "setup install" {
 		if install.skillsDir == "" {
-			install.skillsDir = filepath.Join(home, ".claude", "skills")
+			configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+			if configDir == "" {
+				configDir = filepath.Join(home, ".claude")
+			}
+			install.skillsDir = filepath.Join(configDir, "skills")
 		}
 		root, err := repositoryRoot(ctx, repoRoot)
 		if err != nil {
-			return err
+			return errors.New("本体 repo の中で実行するか、--repo-root で本体 repo を指定してください")
 		}
 		return setupInstall(ctx, root, home, install, output)
 	}

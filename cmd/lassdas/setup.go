@@ -137,7 +137,7 @@ func setupCheck(root, home string, output io.Writer) error {
 		problems = append(problems, answers.Check(root)...)
 		for _, name := range []string{"agreement.md", "progress.md"} {
 			if _, err := os.Stat(filepath.Join(root, ".lassdas", name)); err != nil {
-				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (docs/SETUP.md の 4 段を参照)", name))
+				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (~/%s の 5 段を参照)", name, initwizard.InstalledInstruction))
 			}
 		}
 	}

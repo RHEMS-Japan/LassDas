@@ -31,14 +31,17 @@ type installOptions struct {
 // "LassDas をこのプロジェクトに導入して" is the whole request.
 func setupInstall(ctx context.Context, engineRoot, home string, options installOptions, output io.Writer) error {
 	module, err := os.ReadFile(filepath.Join(engineRoot, "go.mod"))
-	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress") {
+	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress\n") {
 		return errors.New("本体 repo の中で実行してください (go.mod が見つからないか、別の module です)")
 	}
 	if options.engineRepository == "" {
 		options.engineRepository = originRepository(ctx, engineRoot)
 	}
+	// The source sha is the distributor's word, taken from the build
+	// record, never this checkout's HEAD: what runs is the image, and the
+	// checkout may be newer or older than what it was built from.
 	if options.engineSHA == "" {
-		options.engineSHA = headSHA(ctx, engineRoot)
+		return errors.New("--engine-sha が必要です: そのイメージを作った本体ソースの 40 桁 SHA を、ビルド記録から写してください (手元の checkout の HEAD とは限りません)")
 	}
 	base := filepath.Join(home, ".lassdas")
 	cli := filepath.Join(base, "bin", "lassdas")
@@ -46,6 +49,12 @@ func setupInstall(ctx context.Context, engineRoot, home string, options installO
 		BuildRecord: options.buildRecord, RegistryLogin: options.registryLogin, CLI: cli, InstalledAt: time.Now().UTC()}
 	if err := distribution.Validate(); err != nil {
 		return fmt.Errorf("配布者の案内が足りません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
+	}
+	previous, hadPrevious, _ := initwizard.LoadDistribution(home)
+	// The instruction, the note and the skill first, the CLI last: a build
+	// that fails leaves the pointers consistent, and a re-run repairs.
+	if err := installFiles(home, engineRoot, options.skillsDir, distribution); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(cli), 0o700); err != nil {
 		return err
@@ -55,11 +64,12 @@ func setupInstall(ctx context.Context, engineRoot, home string, options installO
 	if out, err := build.CombinedOutput(); err != nil {
 		return fmt.Errorf("CLI を組み立てられませんでした: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
-	if err := installFiles(home, engineRoot, options.skillsDir, distribution); err != nil {
-		return err
-	}
 	skill := filepath.Join(options.skillsDir, "lassdas-setup", "SKILL.md")
-	_, err = fmt.Fprintf(output, "入れました:\n- CLI: %s\n- 導入指示: %s\n- 配布者の案内: %s\n- skill: %s\n\n以後は、どの repo でも新しい会話で「LassDas をこのプロジェクトに導入して」と頼むだけで始まります。\n", cli, filepath.Join(base, "SETUP.md"), filepath.Join(home, filepath.FromSlash(initwizard.DistributionFile)), skill)
+	if hadPrevious && (previous.Image != distribution.Image || previous.EngineSHA != distribution.EngineSHA) {
+		_, _ = fmt.Fprintf(output, "配布者の案内を置き換えました (前: image %s / engine-sha %s)\n", previous.Image, previous.EngineSHA)
+	}
+	_, err = fmt.Fprintf(output, "入れました:\n- CLI: %s (この checkout %s から組み立て)\n- 導入指示と参照文書: %s\n- 配布者の案内: %s (image %s / engine-sha %s)\n- skill: %s\n\n以後は、どの repo でも新しい会話で「LassDas をこのプロジェクトに導入して」と頼むだけで始まります。\n",
+		cli, headSHA(ctx, engineRoot), filepath.Join(base, "SETUP.md"), filepath.Join(home, filepath.FromSlash(initwizard.DistributionFile)), distribution.Image, distribution.EngineSHA, skill)
 	return err
 }
 
@@ -71,12 +81,16 @@ func installFiles(home, engineRoot, skillsDir string, distribution initwizard.Di
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return err
 	}
-	instruction, err := os.ReadFile(filepath.Join(engineRoot, "docs", "SETUP.md"))
-	if err != nil {
-		return errors.New("docs/SETUP.md が見つかりません")
-	}
-	if err := os.WriteFile(filepath.Join(base, "SETUP.md"), instruction, 0o644); err != nil {
-		return err
+	// The instruction and the documents it links to, side by side, so
+	// its relative links still resolve where the AI reads it.
+	for _, name := range installedDocs {
+		content, err := os.ReadFile(filepath.Join(engineRoot, "docs", name))
+		if err != nil {
+			return fmt.Errorf("docs/%s が見つかりません (本体 repo の checkout が古いか、場所が違います)", name)
+		}
+		if err := os.WriteFile(filepath.Join(base, name), content, 0o644); err != nil {
+			return err
+		}
 	}
 	if err := initwizard.WriteDistribution(home, distribution); err != nil {
 		return err
@@ -87,6 +101,9 @@ func installFiles(home, engineRoot, skillsDir string, distribution initwizard.Di
 	}
 	return os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(strings.ReplaceAll(skillTemplate, "{{HOME}}", home)), 0o644)
 }
+
+// installedDocs are the instruction and every document it links to.
+var installedDocs = []string{"SETUP.md", "PRODUCT_DIRECTION.md", "INIT_DECISIONS.md", "RUNTIME_POD.md"}
 
 func originRepository(ctx context.Context, root string) string {
 	command := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")

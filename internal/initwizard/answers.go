@@ -33,7 +33,7 @@ func LoadAnswers(repoRoot string) (Answers, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Answers{}, fmt.Errorf("%s がありません。導入の指示 (docs/SETUP.md) に従って回答を書いてください", AnswersFile)
+			return Answers{}, fmt.Errorf("%s がありません。導入の指示 (~/%s) に従って回答を書いてください", AnswersFile, InstalledInstruction)
 		}
 		return Answers{}, err
 	}
@@ -117,7 +117,7 @@ type MissingAnswer struct {
 }
 
 func (m *MissingAnswer) Error() string {
-	return fmt.Sprintf("%s に %q の回答がありません (%s)。docs/SETUP.md の回答表を見て書いてください", AnswersFile, m.ID, m.Label)
+	return fmt.Sprintf("%s に %q の回答がありません (%s)。~/%s の回答表を見て書いてください", AnswersFile, m.ID, m.Label, InstalledInstruction)
 }
 
 // AnswersUI answers the wizard from the file instead of a terminal. A
@@ -180,10 +180,10 @@ func RequiredAnswers() []Requirement {
 	requirements := []Requirement{
 		{"repository", "納品先 repo (owner/name)", "git remote から読める。fork や別 remote なら確認する"},
 		{"branch", "取り込み枝 (PR の宛先。default branch とは限らない)", "repo の規則 (AGENTS.md / CLAUDE.md / CONTRIBUTING.md) と最近の PR の宛先から確かめる"},
-		{"engine-repository", "本体イメージの元ソース repo (owner/name)", "配布者の案内"},
-		{"image", "本体イメージ (registry/name@sha256:digest)", "配布者の案内。タグ名から推定しない"},
-		{"engine-sha", "そのイメージに対応する本体ソースの 40 桁 SHA", "配布者の案内"},
-		{"build-record", "イメージと SHA の対応を確認できるビルド記録の URL", "配布者の案内"},
+		{"engine-repository", "本体イメージの元ソース repo (owner/name)", "配布者の案内 (~/" + DistributionFile + "、`lassdas setup install` が置く)。無ければ install が未実行"},
+		{"image", "本体イメージ (registry/name@sha256:digest)", "同上。タグ名から推定しない"},
+		{"engine-sha", "そのイメージに対応する本体ソースの 40 桁 SHA", "同上"},
+		{"build-record", "イメージと SHA の対応を確認できるビルド記録の URL", "同上"},
 		{"tracker-origin", "課題管理 (Backlog) の接続先 URL", "利用者に確認"},
 		{"tracker-project", "Backlog の project キー", "利用者に確認"},
 		{"creator-id", "起票を許可する本人の Backlog 利用者 ID (数値)", "`lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認"},

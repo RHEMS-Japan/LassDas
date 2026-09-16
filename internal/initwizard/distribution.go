@@ -28,6 +28,10 @@ type Distribution struct {
 // DistributionFile is where the note lives under the person's home.
 const DistributionFile = ".lassdas/distribution.json"
 
+// InstalledInstruction is where `setup install` puts the setup
+// instruction, beside the documents it links to.
+const InstalledInstruction = ".lassdas/SETUP.md"
+
 // distributionAnswers maps the note's fields to the wizard's questions.
 var distributionAnswers = []struct {
 	id    string
@@ -44,8 +48,11 @@ func (d Distribution) Validate() error {
 	if !strings.Contains(d.EngineRepository, "/") || strings.ContainsAny(d.EngineRepository, " \t\r\n") {
 		return errors.New("engine-repository は owner/name の形です")
 	}
-	if !strings.Contains(d.Image, "@sha256:") {
-		return errors.New("image は registry/name@sha256:digest の形です (タグ名では受け付けません)")
+	if !imagePattern.MatchString(d.Image) {
+		return errors.New("image は registry/name@sha256:<64 桁の小文字 16 進> の形です (タグ名では受け付けません)")
+	}
+	if login := strings.ToLower(d.RegistryLogin); strings.Contains(login, "--password ") || strings.Contains(login, "--password=") || strings.Contains(login, " -p ") {
+		return errors.New("registry-login にパスワードを含めないでください (--password-stdin に別コマンドの出力を渡す形にする)")
 	}
 	if len(d.EngineSHA) != 40 || strings.Trim(d.EngineSHA, "0123456789abcdef") != "" {
 		return errors.New("engine-sha は 40 桁の小文字 16 進です")
