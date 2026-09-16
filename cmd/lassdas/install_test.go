@@ -23,7 +23,10 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(engine, "docs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range installedDocs {
+	// The instruction and the three documents it links to, by name: the
+	// list in the code must cover them, whatever it is.
+	linked := []string{"SETUP.md", "PRODUCT_DIRECTION.md", "INIT_DECISIONS.md", "RUNTIME_POD.md"}
+	for _, name := range linked {
 		if err := os.WriteFile(filepath.Join(engine, "docs", name), []byte("# "+name+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -33,7 +36,7 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 	if err := installFiles(home, engine, skills, note); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range installedDocs {
+	for _, name := range linked {
 		if raw, err := os.ReadFile(filepath.Join(home, ".lassdas", name)); err != nil || string(raw) != "# "+name+"\n" {
 			t.Fatalf("installed %s: %q %v", name, raw, err)
 		}
