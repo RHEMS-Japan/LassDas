@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/initsmoke"
 	"automation.internal/ticket-ingress/internal/initwizard"
@@ -51,7 +53,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 			if err != nil {
 				return err
 			}
-			if problems := answers.Check(); len(problems) > 0 {
+			if problems := answers.Check(root); len(problems) > 0 {
 				return errors.New("回答が足りません。`lassdas setup check` の指摘を直してください:\n" + strings.Join(problems, "\n"))
 			}
 			ui = &initwizard.AnswersUI{Answers: answers, Project: project, Out: func(line string) { _, _ = fmt.Fprintln(output, line) }}
@@ -102,7 +104,10 @@ func setupCheck(root string, output io.Writer) error {
 		}
 	}
 	if _, err := exec.LookPath("docker"); err == nil {
-		info := exec.Command("docker", "info", "--format", "{{.ServerVersion}}")
+		// Bounded: a stuck daemon must not hang a check that runs nothing.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		info := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
 		if out, err := info.Output(); err != nil || strings.TrimSpace(string(out)) == "" {
 			problems = append(problems, "Docker が動いていません (Docker Desktop を起動してください)")
 		}
@@ -111,7 +116,7 @@ func setupCheck(root string, output io.Writer) error {
 	if err != nil {
 		problems = append(problems, err.Error())
 	} else {
-		problems = append(problems, answers.Check()...)
+		problems = append(problems, answers.Check(root)...)
 		for _, name := range []string{"agreement.md", "progress.md"} {
 			if _, err := os.Stat(filepath.Join(root, ".lassdas", name)); err != nil {
 				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (docs/SETUP.md の 4 段を参照)", name))
@@ -152,8 +157,14 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 	state.Project, state.RepoRoot = project, root
 	answers, _ := initwizard.LoadAnswers(root)
 	// The key mode is the file's decision, written down here so the
-	// wizard never infers "separate" from the presence of a stored key.
-	state.ModelKeyMode, state.SeparateDesignReviews = keyMode(answers)
+	// wizard never infers "separate" from the presence of a stored key. A
+	// project set up the other way keeps its keys: changing the mode is
+	// the wizard's own path, never a silent overwrite.
+	mode, separateDesign := keyMode(answers)
+	if state.ModelKeyMode != "" && state.ModelKeyMode != mode {
+		return fmt.Errorf("この project の鍵の持ち方は %s で作られています。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.ModelKeyMode, project)
+	}
+	state.ModelKeyMode, state.SeparateDesignReviews = mode, separateDesign
 	names := secretPlan(answers)
 	terminal := initwizard.TerminalUI{}
 	for _, entry := range names {
@@ -182,15 +193,11 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 	// The key's owner is the usual requester: shown here so the agent can
 	// write creator-id from it, or ask the person for someone else's.
 	if origin, ok := answers.Value("tracker-origin"); ok && secrets["BACKLOG_API_KEY"] != "" {
-		state.Tracker.Origin = origin
-		var owner struct {
-			ID   int64  `json:"id"`
-			Name string `json:"name"`
-		}
-		if err := (initwizard.API{}).Tracker(ctx, state, secrets["BACKLOG_API_KEY"], "GET", "/api/v2/users/myself", nil, &owner); err != nil || owner.ID <= 0 {
-			_, _ = fmt.Fprintln(output, "Backlog の鍵の持ち主を確認できませんでした (接続先か鍵を確認)。creator-id は利用者に確認して書いてください")
+		id, name, err := trackerOwner(ctx, initwizard.API{}, origin, secrets["BACKLOG_API_KEY"])
+		if err != nil {
+			_, _ = fmt.Fprintln(output, "Backlog の鍵の持ち主を確認できませんでした ("+err.Error()+")。creator-id は利用者に確認して書いてください")
 		} else {
-			_, _ = fmt.Fprintf(output, "Backlog の鍵の持ち主: %s (利用者 ID %d)。起票する本人がこの人なら、setup.json の creator-id に %d を書きます\n", owner.Name, owner.ID, owner.ID)
+			_, _ = fmt.Fprintf(output, "Backlog の鍵の持ち主: %s (利用者 ID %d)。起票する本人がこの人なら、setup.json の creator-id に %d を書きます\n", name, id, id)
 		}
 	}
 	_, err = fmt.Fprintf(output, "次は AI が `lassdas setup apply --project %s` を実行します\n", project)
@@ -229,4 +236,29 @@ func secretPlan(answers initwizard.Answers) []secretEntry {
 		names = append(names, secretEntry{initwizard.KeyName(role), role + " 専用の OpenRouter API キー"})
 	}
 	return names
+}
+
+// trackerOwner asks the tracker who the key belongs to: the usual
+// requester, shown so the agent can write creator-id. The space key is
+// the origin's first host label, as the wizard derives it; the call fails
+// softly and the key never leaves the process.
+func trackerOwner(ctx context.Context, api initwizard.API, origin, key string) (int64, string, error) {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Hostname() == "" {
+		return 0, "", errors.New("接続先の URL が読めません")
+	}
+	state := &initwizard.State{}
+	state.Tracker.Origin = origin
+	state.Tracker.SpaceKey = strings.Split(parsed.Hostname(), ".")[0]
+	var owner struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := api.Tracker(ctx, state, key, "GET", "/api/v2/users/myself", nil, &owner); err != nil {
+		return 0, "", err
+	}
+	if owner.ID <= 0 {
+		return 0, "", errors.New("持ち主の ID がありません")
+	}
+	return owner.ID, owner.Name, nil
 }

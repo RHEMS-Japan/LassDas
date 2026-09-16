@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,3 +142,28 @@ func TestSecretPlanFollowsTheFilesChoices(t *testing.T) {
 		t.Fatalf("separate plan has %d entries", len(plan))
 	}
 }
+
+// `setup secrets` shows who the tracker key belongs to, deriving the
+// space key from the origin the way the wizard does; the key travels only
+// in the query the tracker expects.
+func TestTrackerOwnerDerivesTheSpaceKeyFromTheOrigin(t *testing.T) {
+	var seen *http.Request
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seen = r
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":7,"name":"person"}`)), Request: r}, nil
+	})}
+	id, name, err := trackerOwner(context.Background(), initwizard.API{HTTP: client}, "https://example.backlog.com", "key-value")
+	if err != nil || id != 7 || name != "person" {
+		t.Fatalf("owner: %d %q %v", id, name, err)
+	}
+	if seen == nil || seen.URL.Host != "example.backlog.com" || !strings.HasSuffix(seen.URL.Path, "/users/myself") {
+		t.Fatalf("request: %+v", seen)
+	}
+	if _, _, err := trackerOwner(context.Background(), initwizard.API{HTTP: client}, "not a url", "key-value"); err == nil {
+		t.Fatal("a broken origin fails softly")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

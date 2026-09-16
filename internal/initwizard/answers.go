@@ -64,8 +64,10 @@ func (a Answers) Value(id string) (string, bool) {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		// Trimmed as a terminal would: a stray space around a branch or
-		// a digest must not fail the lookup with a generic message.
-		return strings.TrimSpace(text), true
+		// a digest must not fail the lookup with a generic message. An
+		// empty string is "not answered", like null.
+		text = strings.TrimSpace(text)
+		return text, text != ""
 	}
 	return trimmed, true
 }
@@ -84,7 +86,7 @@ type MissingSecret struct {
 
 func (m *MissingSecret) Error() string {
 	if m.Name == "tracker-admin-key" {
-		return fmt.Sprintf("課題管理の project に受付のカテゴリか状態が無く、保存された鍵では作れません (直前の行が理由)。利用者が Backlog の画面でその項目を作るか、`lassdas init --project %s --redo tracker` を利用者が対話で実行して管理者の鍵を一度だけ入力してください。AI は鍵を扱いません", m.Project)
+		return fmt.Sprintf("課題管理の project に受付のカテゴリか状態が無く、保存された鍵では作れません (直前の行が理由)。利用者が Backlog の画面でその項目を作って再実行するか、`lassdas init --project %s --redo tracker` を利用者が対話で実行して管理者の鍵を入力し (tracker 段が終わったら Ctrl-C で抜けてよい)、そのあと `lassdas setup apply` に戻ってください。AI は鍵を扱いません", m.Project)
 	}
 	return fmt.Sprintf("鍵 %s (%s) が未保存か、直前の行の理由で使えませんでした。利用者が `lassdas setup secrets --project %s` を実行して入れ直してください。AI はこの値を扱いません", m.Name, m.Label, m.Project)
 }
@@ -94,8 +96,8 @@ func (m *MissingSecret) Error() string {
 // agent records the person's yes in the answers file, and the run stops
 // here without it.
 var consentGates = []struct{ prefix, id, what string }{
-	{"不足する項目だけ作成します", "tracker-create", "課題管理の project にカテゴリ・状態を作る"},
-	{"この API キーは起票者本人", "requester-key-ok", "自動処理のコメントと状態更新が起票者本人の名義になる"},
+	{confirmTrackerCreatePrefix, "tracker-create", "課題管理の project にカテゴリ・状態を作る"},
+	{confirmRequesterKeyPrefix, "requester-key-ok", "自動処理のコメントと状態更新が起票者本人の名義になる"},
 }
 
 // ConsentRequired ends a run at a confirmation the file does not carry.
@@ -332,11 +334,21 @@ func (a Answers) checkModels() []string {
 // Check reports what the file lacks, in plain words, without running
 // anything: the missing required answers and the answers whose id the
 // wizard never asks (a typo, or a question from another version).
-func (a Answers) Check() []string {
+func (a Answers) Check(repoRoot string) []string {
 	var problems []string
 	for _, requirement := range RequiredAnswers() {
 		if _, ok := a.Value(requirement.ID); !ok {
 			problems = append(problems, fmt.Sprintf("回答がありません: %s (%s)。%s", requirement.ID, requirement.Label, requirement.How))
+		}
+	}
+	// Without go.mod or package.json the wizard proposes nothing for the
+	// scope, the toolchain, the install and the verify commands: the file
+	// must carry all four, and the check says so before any stage runs.
+	if repoRoot != "" && !exists(filepath.Join(repoRoot, "go.mod")) && !exists(filepath.Join(repoRoot, "package.json")) {
+		for _, id := range []string{"scope", "toolchain", "install", "verify"} {
+			if _, ok := a.Value(id); !ok {
+				problems = append(problems, fmt.Sprintf("回答がありません: %s (go.mod も package.json も無い repo では本体が提案できません。toolchain と install は不要なら [] と書く)", id))
+			}
 		}
 	}
 	problems = append(problems, a.checkModels()...)
@@ -362,4 +374,9 @@ func (a Answers) Check() []string {
 
 func allRolesWithDesign() []string {
 	return append(append([]string(nil), modelRoles...), "design-review-a", "design-review-b")
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

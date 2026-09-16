@@ -1,11 +1,16 @@
 package initwizard
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 func writeAnswers(t *testing.T, root, body string) {
@@ -76,7 +81,7 @@ func TestAnswersCheckNamesWhatIsMissingAndWhatIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	problems := answers.Check()
+	problems := answers.Check("")
 	joined := strings.Join(problems, "\n")
 	for _, want := range []string{"image", "engine-sha", "build-record", "tracker-origin", "tracker-project", "implementer-model", "applier-model", "綴りを確認): reposiory"} {
 		if !strings.Contains(joined, want) {
@@ -113,7 +118,7 @@ func TestACompleteAnswersFilePassesCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if problems := answers.Check(); len(problems) != 0 {
+	if problems := answers.Check(""); len(problems) != 0 {
 		t.Fatalf("a complete file must pass: %v", problems)
 	}
 	for _, role := range modelRoles {
@@ -198,7 +203,7 @@ func TestAnswersCheckMirrorsTheModelRules(t *testing.T) {
 	base := `"repository":"e/a","branch":"main","engine-repository":"e/b","image":"r/e@sha256:0","engine-sha":"a","build-record":"u","tracker-origin":"https://x.backlog.com","tracker-project":"P","creator-id":7`
 	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"anthropic/claude-sonnet-4","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"anthropic/claude-sonnet-4","readiness-assessor-model":"anthropic/claude-sonnet-4","readiness-checker-model":"anthropic/claude-sonnet-4","designer-model":"anthropic/claude-sonnet-4","applier-model":"anthropic/claude-sonnet-4"}}`)
 	answers, _ := LoadAnswers(root)
-	joined := strings.Join(answers.Check(), "\n")
+	joined := strings.Join(answers.Check(""), "\n")
 	for _, want := range []string{"review-a と review-b は別のモデル", "別の提供会社", "readiness-assessor と readiness-checker", "implementer と同じモデルにできるレビュー役は 1 つまで"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("check should say %q: %s", want, joined)
@@ -206,7 +211,7 @@ func TestAnswersCheckMirrorsTheModelRules(t *testing.T) {
 	}
 	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"deepseek/deepseek-chat","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"openai/gpt-5","readiness-assessor-model":"google/gemini-2.5-pro","readiness-checker-model":"openai/gpt-5-mini","designer-model":"anthropic/claude-opus-4","applier-model":"somevendor/model-x","separate-design":true,"design-review-a-model":"openai/gpt-5"}}`)
 	answers, _ = LoadAnswers(root)
-	joined = strings.Join(answers.Check(), "\n")
+	joined = strings.Join(answers.Check(""), "\n")
 	if !strings.Contains(joined, "applier-vendor") || !strings.Contains(joined, "design-review-b-model") || strings.Contains(joined, "implementer-vendor") {
 		t.Fatalf("vendor and design reviewer requirements: %s", joined)
 	}
@@ -215,7 +220,80 @@ func TestAnswersCheckMirrorsTheModelRules(t *testing.T) {
 	}
 	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"deepseek/deepseek-chat","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"openai/gpt-5","readiness-assessor-model":"google/gemini-2.5-pro","readiness-checker-model":"openai/gpt-5-mini","designer-model":"anthropic/claude-opus-4","applier-model":"somevendor/model-x","applier-vendor":"SomeVendor"}}`)
 	answers, _ = LoadAnswers(root)
-	if problems := answers.Check(); len(problems) != 0 {
+	if problems := answers.Check(""); len(problems) != 0 {
 		t.Fatalf("a sound combination must pass: %v", problems)
+	}
+}
+
+// Without go.mod or package.json the four proposals the wizard cannot
+// make are required; an explicit empty string is "not answered".
+func TestAnswersCheckRequiresWhatTheRepoCannotPropose(t *testing.T) {
+	root := t.TempDir()
+	writeAnswers(t, root, `{"answers":{"scope":["docs/"],"verify":[["true"]],"creator-id":""}}`)
+	answers, _ := LoadAnswers(root)
+	joined := strings.Join(answers.Check(root), "\n")
+	for _, want := range []string{"回答がありません: toolchain", "回答がありません: install", "回答がありません: creator-id"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("check should say %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "回答がありません: scope") || strings.Contains(joined, "回答がありません: verify") {
+		t.Fatalf("answered ones are not listed: %s", joined)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(answers.Check(root), "\n"); strings.Contains(joined, "toolchain") {
+		t.Fatalf("with a manifest the wizard proposes them: %s", joined)
+	}
+}
+
+// A run stopped at the requester-key consent gate keeps the stored
+// tracker key; only a decline by the person removes it.
+func TestAConsentStopInTheTrackerStageKeepsTheKey(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := "{}"
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/users/myself"):
+			body = `{"id":7,"name":"person"}`
+		case strings.HasSuffix(r.URL.Path, "/projects/P"):
+			body = `{"id":11,"projectKey":"P"}`
+		case strings.HasSuffix(r.URL.Path, "/projects/11/users"):
+			body = `[{"id":7,"name":"person"}]`
+		case strings.HasSuffix(r.URL.Path, "/categories"), strings.HasSuffix(r.URL.Path, "/statuses"):
+			body = `[]`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	root := t.TempDir()
+	writeAnswers(t, root, `{"answers":{}}`)
+	answers, _ := LoadAnswers(root)
+	ui := &AnswersUI{Answers: answers, Project: "sample"}
+	w := &Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: transport}}}
+	s := &State{Models: map[string]worker.ModelEndpoint{}, Completed: map[string]string{}, Pins: map[string]string{}}
+	s.Tracker.Origin, s.Tracker.SpaceKey, s.Tracker.ProjectKey, s.Tracker.AllowedCreatorID = "https://example.backlog.com", "example", "P", 7
+	s.Category, s.StatusNames = "自動処理", [4]string{"a", "b", "c", "d"}
+	secrets := Secrets{"BACKLOG_API_KEY": "key-value"}
+	err := w.tracker(context.Background(), s, secrets, func() error { return nil })
+	var consent *ConsentRequired
+	if !errors.As(err, &consent) || consent.ID != "requester-key-ok" {
+		t.Fatalf("want the requester-key gate: %v", err)
+	}
+	if secrets["BACKLOG_API_KEY"] != "key-value" {
+		t.Fatal("a consent stop must keep the stored key")
+	}
+	// The person's decline (the terminal's "no") still removes it.
+	w.UI = &fakeUI{approve: false}
+	secrets = Secrets{"BACKLOG_API_KEY": "key-value"}
+	if err := w.tracker(context.Background(), s, secrets, func() error { return nil }); err == nil || secrets["BACKLOG_API_KEY"] != "" {
+		t.Fatalf("a decline removes the key: %v %q", err, secrets["BACKLOG_API_KEY"])
+	}
+	// With the yes recorded, the next gate is the tracker write.
+	writeAnswers(t, root, `{"answers":{"requester-key-ok":true}}`)
+	answers, _ = LoadAnswers(root)
+	w.UI = &AnswersUI{Answers: answers, Project: "sample"}
+	secrets = Secrets{"BACKLOG_API_KEY": "key-value"}
+	if err := w.tracker(context.Background(), s, secrets, func() error { return nil }); !errors.As(err, &consent) || consent.ID != "tracker-create" {
+		t.Fatalf("want the tracker-create gate: %v", err)
 	}
 }
