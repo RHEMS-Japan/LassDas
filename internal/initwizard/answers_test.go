@@ -54,7 +54,7 @@ func TestAnswersUIAnswersFromTheFileAndStopsAtWhatOnlyAPersonGives(t *testing.T)
 	}
 	_, err = ui.Ask("image", "イメージ", "", false)
 	var missing *MissingAnswer
-	if !errors.As(err, &missing) || missing.ID != "image" || !strings.Contains(err.Error(), "docs/SETUP.md") {
+	if !errors.As(err, &missing) || missing.ID != "image" || !strings.Contains(err.Error(), "SETUP.md") {
 		t.Fatalf("a question with no proposal must end the run naming it: %v", err)
 	}
 	_, err = ui.Ask("TARGET_GITHUB_TOKEN", "GitHub トークン", "", true)
@@ -95,7 +95,7 @@ func TestAnswersCheckNamesWhatIsMissingAndWhatIsUnknown(t *testing.T) {
 	if _, err := LoadAnswers(root); err == nil || !strings.Contains(err.Error(), "読めません") {
 		t.Fatalf("unknown top-level fields must be refused: %v", err)
 	}
-	if _, err := LoadAnswers(t.TempDir()); err == nil || !strings.Contains(err.Error(), "docs/SETUP.md") {
+	if _, err := LoadAnswers(t.TempDir()); err == nil || !strings.Contains(err.Error(), "SETUP.md") {
 		t.Fatalf("a missing file must point at the instruction: %v", err)
 	}
 }

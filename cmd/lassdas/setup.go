@@ -33,7 +33,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 	}
 	switch command {
 	case "setup check":
-		return setupCheck(root, output)
+		return setupCheck(root, home, output)
 	case "setup secrets":
 		return setupSecrets(ctx, project, root, home, output)
 	case "setup apply", "setup smoke":
@@ -49,7 +49,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 		var ui initwizard.UI
 		var smoke initwizard.SmokeFunc
 		if command == "setup apply" {
-			answers, err := initwizard.LoadAnswers(root)
+			answers, err := loadAnswersWithDistribution(root, home)
 			if err != nil {
 				return err
 			}
@@ -94,7 +94,25 @@ func repositoryRoot(ctx context.Context, repoRoot string) (string, error) {
 // setupCheck says, without running anything, what the setup still lacks:
 // the tools the body needs on this machine, and the answers the file does
 // not carry. It never asks for a key.
-func setupCheck(root string, output io.Writer) error {
+// loadAnswersWithDistribution reads the file and fills the four answers
+// the distributor's note carries (image, engine sha, build record, body
+// repository) where the file leaves them out.
+func loadAnswersWithDistribution(root, home string) (initwizard.Answers, error) {
+	answers, err := initwizard.LoadAnswers(root)
+	if err != nil {
+		return initwizard.Answers{}, err
+	}
+	distribution, found, err := initwizard.LoadDistribution(home)
+	if err != nil {
+		return initwizard.Answers{}, err
+	}
+	if found {
+		answers = answers.WithDistribution(distribution)
+	}
+	return answers, nil
+}
+
+func setupCheck(root, home string, output io.Writer) error {
 	var problems []string
 	// The same three the wizard requires before it starts (source build,
 	// clone, container), named here so the gap is known before anything runs.
@@ -112,14 +130,14 @@ func setupCheck(root string, output io.Writer) error {
 			problems = append(problems, "Docker が動いていません (Docker Desktop を起動してください)")
 		}
 	}
-	answers, err := initwizard.LoadAnswers(root)
+	answers, err := loadAnswersWithDistribution(root, home)
 	if err != nil {
 		problems = append(problems, err.Error())
 	} else {
 		problems = append(problems, answers.Check(root)...)
 		for _, name := range []string{"agreement.md", "progress.md"} {
 			if _, err := os.Stat(filepath.Join(root, ".lassdas", name)); err != nil {
-				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (docs/SETUP.md の 4 段を参照)", name))
+				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (~/%s の 5 段を参照)", name, initwizard.InstalledInstruction))
 			}
 		}
 	}

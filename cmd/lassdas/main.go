@@ -19,16 +19,19 @@ import (
 )
 
 const help = `使用方法:
+  lassdas setup install --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--skills-dir DIR]
   lassdas setup check [--repo-root PATH]
   lassdas setup secrets --project NAME [--repo-root PATH]
   lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
   lassdas setup smoke --project NAME [--repo-root PATH]
   lassdas init [--project NAME] [--repo-root PATH] [--redo STAGE]
   lassdas run start|stop|status|logs --project NAME
-setup は、開発 AI が docs/SETUP.md に従って書いた .lassdas/setup.json から
-導入を進めます。check は回答の不足を示すだけで何も動かしません。secrets と
-smoke は利用者が実行します (鍵の入力と、本人名義の試験依頼)。apply は AI が
-実行し、本体の起動まで進めます。
+setup は、開発 AI が導入指示 (~/.lassdas/SETUP.md) に従って書いた .lassdas/setup.json から
+導入を進めます。install は 1 台に 1 回、本体 repo の中で実行し、CLI・導入指示・
+配布者の案内・開発 AI の skill を利用者のホームに置きます。以後は新しい会話で
+「LassDas をこのプロジェクトに導入して」と頼むだけで始まります。check は回答の
+不足を示すだけで何も動かしません。secrets と smoke は利用者が実行します (鍵の
+入力と、本人名義の試験依頼)。apply は AI が実行し、本体の起動まで進めます。
 
 init は納品先 repo で実行します。外で取得した鍵を対話画面へ入力し、
 設定・起動・本人名義の依頼から最初の PR の照合まで進めます。
@@ -71,7 +74,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		rest = rest[1:]
 	}
 	switch command {
-	case "init", "run start", "run stop", "run status", "run logs", "setup check", "setup secrets", "setup apply", "setup smoke":
+	case "init", "run start", "run stop", "run status", "run logs", "setup install", "setup check", "setup secrets", "setup apply", "setup smoke":
 	default:
 		return errors.New("コマンドが不明です。lassdas --help を参照してください")
 	}
@@ -84,6 +87,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if command == "init" || command == "setup apply" {
 		flags.StringVar(&redo, "redo", "", "")
+	}
+	var install installOptions
+	if command == "setup install" {
+		flags.StringVar(&install.image, "image", "", "")
+		flags.StringVar(&install.engineSHA, "engine-sha", "", "")
+		flags.StringVar(&install.buildRecord, "build-record", "", "")
+		flags.StringVar(&install.engineRepository, "engine-repository", "", "")
+		flags.StringVar(&install.registryLogin, "registry-login", "", "")
+		flags.StringVar(&install.skillsDir, "skills-dir", "", "")
 	}
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -100,6 +112,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	manager := localrun.Manager{}
+	if command == "setup install" {
+		if install.skillsDir == "" {
+			configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+			if configDir == "" {
+				configDir = filepath.Join(home, ".claude")
+			}
+			install.skillsDir = filepath.Join(configDir, "skills")
+		}
+		root, err := repositoryRoot(ctx, repoRoot)
+		if err != nil {
+			return errors.New("本体 repo の中で実行するか、--repo-root で本体 repo を指定してください")
+		}
+		return setupInstall(ctx, root, home, install, output)
+	}
 	if strings.HasPrefix(command, "setup ") {
 		return runSetup(ctx, command, *project, repoRoot, home, redo, manager, output)
 	}

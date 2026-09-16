@@ -15,7 +15,7 @@
 
 ## 1. 始める前に、機械で確かめる
 
-0. 本体の CLI を用意する: 本体 repo (配布者が示す `engine-repository`) を取得し、その中で `go build -o lassdas ./cmd/lassdas` を実行する。以下の `lassdas …` はその実行ファイルのパスで呼ぶ。納品先 repo の中では実行するだけで、本体 repo の中身を納品先に持ち込まない。
+0. 本体の CLI と案内: 配布者 (または利用者) が 1 台につき 1 回、本体 repo の中で `lassdas setup install --image <registry/name@sha256:digest> --engine-sha <40 桁> --build-record <URL>` を実行してある。それが CLI を `~/.lassdas/bin/lassdas` に、この文書と本体 repo の docs/ にある文書 (参照先を含む) を `~/.lassdas/` に、配布者の案内 (本体イメージ・本体ソースの SHA・ビルド記録・本体 repo) を `~/.lassdas/distribution.json` に、開発 AI の skill を `~/.claude/skills/lassdas-setup/` に置く。以下の `lassdas …` はその CLI で呼ぶ。`setup.json` の `image` `engine-sha` `build-record` `engine-repository` は案内から自動で埋まるので書かなくてよい。install がまだなら、本体 repo を取得して `go build -o lassdas ./cmd/lassdas` で組み立て、案内は配布者からもらう。納品先 repo の中では CLI を実行するだけで、本体 repo の中身を納品先に持ち込まない。
 1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。
@@ -30,7 +30,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-| 本体イメージ | 配布者の案内 (本体 repo、イメージの digest、本体ソースの SHA、ビルド記録、非公開レジストリなら認証の済ませ方) | `image` `engine-repository` `engine-sha` `build-record` |
+| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内)。無ければ install が未実行なので、配布者の案内をもらって install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
 
@@ -77,6 +77,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 ## 6. 環境を整える
 
+0. 本体イメージが非公開レジストリにあるなら、利用者が自分の端末で先にログインする (案内 `~/.lassdas/distribution.json` の `registry_login` のコマンド。AI は実行しない。案内にパスワードは含めない決まりで、install が代表的な形を弾く)。
 1. 利用者が実行: `lassdas setup secrets --project <name>` — 納品先 GitHub のトークン、Backlog の API キー、OpenRouter の API キー (役ごとに分ける設定ならその本数) を入れる。`~/.lassdas/<name>/` に 0600 で保存され、repo にも会話にも出ない。終わりに Backlog の鍵の持ち主 (名前と利用者 ID) が表示される。起票する本人がその人なら `creator-id` にその ID を書き、鍵を本人名義で使うことの承認 `requester-key-ok` を利用者にもらう。
 2. AI が実行: `lassdas setup apply --project <name>` — 回答から設定を組み立て、repo と枝の実在、編集範囲と検証コマンドのイメージ内での試走、課題管理の接続と受付カテゴリ・状態、各役のモデルの疎通 (少額の API 利用料がかかる)、本体の起動と起動時検査、を順に通す。止まったら、出力が示す不足 (回答・鍵・承認) を直して再実行する。済んだ段は飛ばして続きから再開する。ある段の回答を変えるときは `--redo <段>` (prepare / consumer / tracker / models / runtime)。
 3. 本体はローカルのコンテナで動く。板は `http://127.0.0.1:<board-port>` (認証なし)。
@@ -99,14 +100,19 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 |---|---|---|
 | `repository` | 納品先 repo (owner/name) | git remote から読める。fork や別 remote なら確認する |
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
-| `engine-repository` | 本体イメージの元ソース repo (owner/name) | 配布者の案内 |
-| `image` | 本体イメージ (registry/name@sha256:digest) | 配布者の案内。タグ名から推定しない |
-| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA | 配布者の案内 |
-| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL | 配布者の案内 |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
+
+配布者の案内 (`~/.lassdas/distribution.json`、`lassdas setup install` が置く) から自動で埋まるもの。書けば上書きできる:
+
+| 項目 | 意味 |
+|---|---|
+| `engine-repository` | 本体イメージの元ソース repo (owner/name) |
+| `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
+| `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
+| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 
