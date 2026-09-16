@@ -137,8 +137,14 @@ func detailPhrase(err error) string {
 	} else if errors.As(err, &safe) && safe.Status() != 0 {
 		add(fmt.Sprintf("with status %d", safe.Status()))
 	}
+	// A re-ask that ended on a safe error with a literal message (an
+	// unreadable response, a missing key variable): echoed like a first
+	// failure would be.
+	if errors.As(err, &safe) && safe.literal {
+		add(safe.message)
+	}
 	if strings.Contains(message, AttemptsExhaustedPhrase) {
-		add("asked again until the attempts ran out")
+		add(AttemptsRanOutPhrase)
 	}
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):

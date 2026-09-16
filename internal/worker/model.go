@@ -218,6 +218,10 @@ const (
 	// CutoffPhrase begins the failure of a turn the provider ended at the
 	// output allowance.
 	CutoffPhrase = "model response ended before a complete answer"
+	// AttemptsRanOutPhrase is the failure detail's word for a transport
+	// that asked again until its attempts were spent (AttemptsExhaustedPhrase
+	// in the transport's own message); the ticket page keys on it.
+	AttemptsRanOutPhrase = "asked again until the attempts ran out"
 )
 
 // allowanceTurnRetries is how many times one turn asks again after a call
@@ -993,10 +997,13 @@ func afterCutoff(cutoff error, lastRetry string, err error) error {
 	if cutoff == nil {
 		return err
 	}
+	// Both travel as wrapped errors: the cutoff stays what errors.Is finds
+	// first, and the re-ask's own failure (its class, a safe error's
+	// literal message, the round's wall) stays reachable for the detail.
 	if lastRetry == "lowered" {
-		return fmt.Errorf("%w: %v", cutoff, err)
+		return fmt.Errorf("%w: %w", cutoff, err)
 	}
-	return fmt.Errorf("%w; asked again with the wider allowance: %v", cutoff, err)
+	return fmt.Errorf("%w; asked again with the wider allowance: %w", cutoff, err)
 }
 
 // effortLowerings bounds how many steps down the effort ladder one turn

@@ -841,7 +841,7 @@ func modelFailureSummary(d ModelFailure) string {
 		return "AI の鍵が利用の上限 (429) で断られ、待つよう指定された時間が自動処理の待てる長さを超えていた"
 	case d.LastHTTPStatus == 429:
 		return fmt.Sprintf("AI の鍵が利用の上限 (429) で断られた (呼び出し %d 回)", d.Calls)
-	case d.LastHTTPStatus >= 500 && strings.Contains(d.Phrase, "attempts ran out"):
+	case d.LastHTTPStatus >= 500 && strings.Contains(d.Phrase, worker.AttemptsRanOutPhrase):
 		return fmt.Sprintf("ゲートウェイが %d を返し、聞き直しても通らなかった", d.LastHTTPStatus)
 	case d.LastHTTPStatus >= 500:
 		return fmt.Sprintf("ゲートウェイが %d を返した", d.LastHTTPStatus)

@@ -205,6 +205,12 @@ func TestTheDetailPhraseKeepsEveryClassOfARetriedTurn(t *testing.T) {
 		"literal setting failure":    {safeModelLiteral("model API key is unavailable"), []string{"model API key is unavailable"}},
 		"quoted wire is not literal": {safeModelErrorFor(TransportFailedPhrase+`: malformed HTTP response "sk-live-SECRET"`, errors.New("x")), []string{TransportFailedPhrase}},
 		"the round's wall":           {fmt.Errorf(TransportFailedPhrase+": %w", context.DeadlineExceeded), []string{TransportFailedPhrase, "wall"}},
+		// After a cutoff, the re-ask's own ending is still named: a literal
+		// safe message and the round's wall are reachable through the wrap.
+		"cutoff then unreadable": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+			safeModelLiteral("model response is not valid JSON")), []string{"finish_reason=length", "model response is not valid JSON"}},
+		"cutoff then the wall": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "lowered",
+			fmt.Errorf(TransportFailedPhrase+": %w", context.DeadlineExceeded)), []string{"finish_reason=length", "wall"}},
 	}
 	for name, test := range cases {
 		phrase := detailPhrase(test.err)
