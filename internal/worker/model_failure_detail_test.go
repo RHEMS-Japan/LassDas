@@ -224,3 +224,14 @@ func TestTheDetailPhraseKeepsEveryClassOfARetriedTurn(t *testing.T) {
 		}
 	}
 }
+
+// A literal ending after a cutoff is echoed once: the words it already
+// carries (the status, the limit) are not added again behind it.
+func TestTheDetailPhraseDoesNotRepeatWhatTheLiteralEndingSays(t *testing.T) {
+	err := afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+		safeModelStatusError(TransportFailedPhrase+" with status 429 and no Retry-After ("+LimitNotLiftedPhrase+")", 429))
+	phrase := detailPhrase(err)
+	if strings.Count(phrase, "with status 429") != 1 || strings.Count(phrase, LimitNotLiftedPhrase) != 1 || !strings.Contains(phrase, "finish_reason=length") {
+		t.Fatalf("phrase = %q", phrase)
+	}
+}

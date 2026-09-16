@@ -123,6 +123,13 @@ func detailPhrase(err error) string {
 	default:
 		add("the turn failed")
 	}
+	// A re-ask that ended on a safe error with a literal message (an
+	// unreadable response, a status with its count): echoed whole, before
+	// the scans below, so the shorter words it already carries are not
+	// added a second time.
+	if errors.As(err, &safe) && safe.literal {
+		add(safe.message)
+	}
 	// Every other class the message names (a re-ask that failed for a
 	// reason of its own) and what the turn did about it: each a constant
 	// of this package, so its presence is safe to echo.
@@ -136,12 +143,6 @@ func detailPhrase(err error) string {
 		add("with status " + m[1])
 	} else if errors.As(err, &safe) && safe.Status() != 0 {
 		add(fmt.Sprintf("with status %d", safe.Status()))
-	}
-	// A re-ask that ended on a safe error with a literal message (an
-	// unreadable response, a missing key variable): echoed like a first
-	// failure would be.
-	if errors.As(err, &safe) && safe.literal {
-		add(safe.message)
 	}
 	if strings.Contains(message, AttemptsExhaustedPhrase) {
 		add(AttemptsRanOutPhrase)
