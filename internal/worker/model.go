@@ -881,11 +881,15 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 	lastRetry := ""
 	var cutoff error
 	var last turnObservation
+	// configured is the endpoint as the turn began; the loop below lowers
+	// the effort and widens the allowance on its own copy.
+	configured := endpoint
 	// fail ends the turn: the detail of what it knew goes out on stderr
 	// first, so the runner can keep it beside the failed step.
 	fail := func(err error) (string, InvocationUsage, error) {
 		writeFailureDetail(ModelFailureDetail{
-			Phrase: err.Error(), Model: endpoint.Model, Effort: endpoint.Effort, MaxOutputTokens: endpoint.MaxOutputTokens,
+			Phrase: detailPhrase(err), Model: configured.Model, Effort: configured.Effort, MaxOutputTokens: configured.MaxOutputTokens,
+			FinalEffort: endpoint.Effort, FinalMaxOutputTokens: endpoint.MaxOutputTokens,
 			Calls: calls, Lowered: lowered, Widened: widened, Malformed: malformed, ProviderErrors: upstream, AllowanceSpent: allowance,
 			LastRequestID: last.requestID, LastFinishReason: last.finishReason, LastPromptTokens: last.promptTokens,
 			LastCompletionTokens: last.completionTokens, LastReasoningTokens: last.reasoningTokens, LastHTTPStatus: last.status,

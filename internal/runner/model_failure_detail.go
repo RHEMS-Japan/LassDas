@@ -41,5 +41,16 @@ func (p *Pipeline) recordModelFailureDetail(stage string) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, encoded, 0o600)
+	_ = writeRecordAtomically(path, encoded)
+}
+
+// writeRecordAtomically writes a record the status board reads from
+// another process: the whole file appears at once (temp file + rename),
+// never a half-written one.
+func writeRecordAtomically(path string, encoded []byte) error {
+	temp := path + ".tmp"
+	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temp, path)
 }

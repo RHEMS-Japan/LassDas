@@ -156,3 +156,39 @@ func TestTheSpendReadingIsKeptBesideTheRun(t *testing.T) {
 		t.Fatalf("an empty reading must leave no record: %v", err)
 	}
 }
+
+// The intake (read-contract) is a model turn too: its failure leaves the
+// detail like the readiness stages do. (The derivation already did.)
+func TestAnIntakeModelFailureKeepsTheDetailToo(t *testing.T) {
+	detail, _ := json.Marshal(worker.ModelFailureDetail{Phrase: "model invocation failed with status 429", Model: "vendor/model-a", Calls: 1, LastHTTPStatus: 429})
+	stub := receptionStubWorkerLines(t, "read-contract", worker.FailureDetailLinePrefix+string(detail)+"\nworker: contract intake failed: model invocation failed with status 429 and no Retry-After (a limit that a wait does not lift)")
+	pipeline := receptionPipeline(t, stub)
+	if _, outcome, err := pipeline.pretrip(context.Background()); err == nil && outcome.Code != "internal_failed" {
+		t.Fatalf("pretrip should fail on the intake: %+v", outcome)
+	}
+	raw, err := os.ReadFile(pipeline.path(ModelFailureDetailFile))
+	if err != nil {
+		t.Fatalf("no detail record for the intake: %v", err)
+	}
+	if !strings.Contains(string(raw), `"step":"依頼の読み取り"`) || !strings.Contains(string(raw), `"last_http_status":429`) {
+		t.Fatalf("record = %s", raw)
+	}
+	if _, err := os.Stat(pipeline.path(ModelFailureDetailFile) + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("the temp file must not remain")
+	}
+}
+
+// Two variables of one key that serve the same role name once: the record
+// lists the role once, as the comment does.
+func TestSpendRolesAreListedOnce(t *testing.T) {
+	terminal := &Terminal{workspace: t.TempDir(), logger: trailTestLogger{}}
+	spend := worker.RunSpend{Complete: true, TotalUSD: 1, Keys: []worker.KeySpend{{KeyEnv: "A", KeyName: "k", SpendUSD: 1, AlsoKeyEnvs: []string{"B"}}}}
+	terminal.recordSpend(spend, map[string][]string{"A": {"受付"}, "B": {"受付"}}, time.Now(), "t")
+	raw, err := os.ReadFile(filepath.Join(terminal.workspace, SpendRecordFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"roles":["受付"]`) {
+		t.Fatalf("roles must be listed once: %s", raw)
+	}
+}

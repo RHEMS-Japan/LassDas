@@ -503,3 +503,37 @@ func TestModelFailureSummaryNamesEachCase(t *testing.T) {
 		}
 	}
 }
+
+// A reception that failed before the readiness gate records no failed
+// step; the detail names the stage, and the page still shows the failure.
+// The key's name in the billing record is the gateway's word and is
+// scanned before it is shown.
+func TestBuildShowsAFailureRecordedOnlyInTheDetailAndScansKeyNames(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "delivery_intake_failure")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"model-failure-detail.json": `{"step":"依頼の読み取り","recorded_at":"2026-09-16T01:00:00Z","phrase":"model invocation failed with status 429; a limit that a wait does not lift","model":"vendor/model-a","calls":1,"last_http_status":429}`,
+		"spend.json":                `{"read_at":"2026-09-16T01:00:05Z","complete":true,"total_usd":0.1,"keys":[{"key_env":"MODEL_API_KEY_X","key_name":"sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd","spend_usd":0.1}]}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Failure == nil || view.Failure.Step != "依頼の読み取り" || view.Failure.Model == nil || !strings.Contains(view.Failure.Model.Summary, "429") {
+		t.Fatalf("failure = %+v", view.Failure)
+	}
+	if len(view.Timeline) != 1 || view.Timeline[0].Step != "end" || view.Timeline[0].Record != "model-failure-detail" || !view.Timeline[0].At.Equal(time.Date(2026, 9, 16, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("ending = %+v", view.Timeline)
+	}
+	raw, _ := json.Marshal(view)
+	if strings.Contains(string(raw), "KLMNOPQRSTUVWXYZ0123456789abcd") || !strings.Contains(string(raw), "[masked:") {
+		t.Fatalf("the key name must pass the secret scan: %s", raw)
+	}
+}

@@ -48,6 +48,10 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 // the readiness stages even if their models write the same words.
 const deriveStage = "契約の導出"
 
+// intakeStage is the reception stage that reads the ticket into the
+// contract (read-contract), the first model turn of a run.
+const intakeStage = "依頼の読み取り"
+
 // workerLinePrefix begins every line the worker writes about its own failure.
 const workerLinePrefix = "worker: "
 

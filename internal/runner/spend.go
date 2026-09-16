@@ -97,8 +97,14 @@ func (t *Terminal) recordSpend(spend worker.RunSpend, roles map[string][]string,
 	record := spendRecord{ReadAt: time.Now().UTC(), Since: since, Complete: spend.Complete, TotalUSD: spend.TotalUSD, Text: text}
 	for _, key := range spend.Keys {
 		entry := spendRecordKey{KeyEnv: key.KeyEnv, KeyName: key.KeyName, SpendUSD: key.SpendUSD, Unpriced: key.Unpriced}
+		seen := map[string]bool{}
 		for _, env := range append([]string{key.KeyEnv}, key.AlsoKeyEnvs...) {
-			entry.Roles = append(entry.Roles, roles[env]...)
+			for _, role := range roles[env] {
+				if !seen[role] {
+					seen[role] = true
+					entry.Roles = append(entry.Roles, role)
+				}
+			}
 		}
 		record.Keys = append(record.Keys, entry)
 	}
@@ -106,7 +112,7 @@ func (t *Terminal) recordSpend(spend worker.RunSpend, roles map[string][]string,
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, encoded, 0o600)
+	_ = writeRecordAtomically(path, encoded)
 }
 
 // loadRunStart reads the moment this run started working, as recorded when it

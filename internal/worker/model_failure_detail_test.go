@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -54,6 +55,14 @@ func TestATurnThatGivesUpLeavesItsDetailOnOneLine(t *testing.T) {
 	if detail.Model != "vendor/model-a" || detail.Calls < 1 || detail.LastFinishReason != ChatFinishLength || detail.LastReasoningTokens != 32768 ||
 		detail.LastCompletionTokens != 32768 || detail.LastRequestID != "gen-abc123" || !strings.Contains(detail.Phrase, "finish_reason=length") || detail.Lowered != 2 {
 		t.Fatalf("detail = %+v", detail)
+	}
+	// The configured effort and allowance, and what the last call used
+	// after the turn lowered and widened them.
+	if detail.Effort != "high" || detail.FinalEffort != "low" || detail.MaxOutputTokens != MaxConfiguredOutputTokens || detail.FinalMaxOutputTokens != MaxConfiguredOutputTokens {
+		t.Fatalf("configured vs final: %+v", detail)
+	}
+	if !strings.Contains(detail.Phrase, ReasoningExhaustedPhrase) || !strings.Contains(detail.Phrase, EffortLoweredPhrase) {
+		t.Fatalf("the phrase should name the class and what the turn did: %q", detail.Phrase)
 	}
 	if strings.Contains(buffer.String(), "TEST_MODEL_API_KEY") || strings.Contains(buffer.String(), "Bearer") {
 		t.Fatalf("no credential may reach the line: %q", buffer.String())
@@ -109,11 +118,66 @@ func TestParseFailureDetailLineIsStrict(t *testing.T) {
 		"phrase too long": `{"phrase":"` + strings.Repeat("a", 601) + `","calls":1}`,
 		"non-ascii":       `{"phrase":"鍵 sk-live","calls":1}`,
 		"bad request id":  `{"phrase":"p","calls":1,"last_request_id":"has space"}`,
+		"bad word":        `{"phrase":"p","calls":1,"model":"a b"}`,
 		"not json":        `phrase`,
 		"absent":          ``,
 	} {
 		if _, ok := ParseFailureDetailLine(FailureDetailLinePrefix + line); ok {
 			t.Errorf("%s: must be refused", name)
 		}
+	}
+}
+
+// A transport failure's message quotes what the wire carried (Go's HTTP
+// client quotes a malformed status line); none of it may reach the record.
+// The phrase is composed from the turn's own words.
+func TestTheDetailPhraseCarriesNoUpstreamText(t *testing.T) {
+	buffer := captureFailureDetail(t)
+	wire := `sk-live-SECRETVALUE0123456789abcdef`
+	api := &fakeChatAPI{err: safeModelErrorFor(TransportFailedPhrase+`: net/http: HTTP/1.x transport connection broken: malformed HTTP response "`+wire+`" after 4`+AttemptsExhaustedPhrase, errors.New("broken"))}
+	invoker, _ := NewModelInvoker(api)
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, []ChatMessage{{Role: "user", Content: "u"}}, "", 1024)
+	if err == nil {
+		t.Fatal("the turn should have failed")
+	}
+	if strings.Contains(buffer.String(), "SECRETVALUE") || strings.Contains(buffer.String(), "malformed") {
+		t.Fatalf("upstream text reached the line: %q", buffer.String())
+	}
+	detail, ok := ParseFailureDetailLine(buffer.String())
+	if !ok || !strings.HasPrefix(detail.Phrase, TransportFailedPhrase) || !strings.Contains(detail.Phrase, "attempts ran out") {
+		t.Fatalf("detail = %+v (ok=%v)", detail, ok)
+	}
+	for _, err := range []error{
+		fmt.Errorf("%w: finish_reason=%s (output allowance 100 tokens); %w", errModelResponseTruncated, ChatFinishLength, errModelReasoningExhausted),
+		errors.New(CutoffPhrase + `: finish_reason=weird "quoted" value`),
+		fmt.Errorf("%w (finish_reason=error)", errModelResponseUpstream),
+		safeModelStatusError(TransportFailedPhrase+" with status 429 and no Retry-After ("+LimitNotLiftedPhrase+")", 429),
+	} {
+		phrase := detailPhrase(err)
+		if strings.Contains(phrase, "quoted") || strings.Contains(phrase, "weird") || !failureDetailPhrasePattern.MatchString(phrase) {
+			t.Errorf("phrase for %v = %q", err, phrase)
+		}
+	}
+	if got := detailPhrase(safeModelStatusError("x", 429)); !strings.Contains(got, "with status 429") {
+		t.Errorf("status phrase = %q", got)
+	}
+}
+
+// One field outside its shape costs that field, not the record: a Vertex
+// model name is kept (the pattern admits it), a finish reason with a space
+// is blanked, and the line is still written.
+func TestOneOddFieldDoesNotCostTheWholeDetail(t *testing.T) {
+	buffer := captureFailureDetail(t)
+	odd := &ChatResponse{ID: "gen/with/slashes", Choices: []ChatChoice{{FinishReason: "stop early", Message: ChatMessage{Role: "assistant", Content: "x"}}},
+		Usage: &ChatUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}}
+	api := &fakeChatAPI{output: odd}
+	invoker, _ := NewModelInvoker(api)
+	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "claude-3-5-sonnet@20240620", MaxOutputTokens: 4096}, []ChatMessage{{Role: "user", Content: "u"}}, "", 1024)
+	if err == nil {
+		t.Fatal("the turn should have failed")
+	}
+	detail, ok := ParseFailureDetailLine(buffer.String())
+	if !ok || detail.Model != "claude-3-5-sonnet@20240620" || detail.LastFinishReason != "" || detail.LastRequestID != "gen/with/slashes" {
+		t.Fatalf("detail = %+v (ok=%v) line=%q", detail, ok, buffer.String())
 	}
 }

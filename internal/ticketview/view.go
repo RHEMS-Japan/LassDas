@@ -105,6 +105,8 @@ type ModelFailure struct {
 	Model                string    `json:"model,omitempty"`
 	Effort               string    `json:"effort,omitempty"`
 	MaxOutputTokens      int32     `json:"max_output_tokens,omitempty"`
+	FinalEffort          string    `json:"final_effort,omitempty"`
+	FinalMaxOutputTokens int32     `json:"final_max_output_tokens,omitempty"`
 	Calls                int       `json:"calls"`
 	Lowered              int       `json:"lowered,omitempty"`
 	Widened              bool      `json:"widened,omitempty"`
@@ -784,21 +786,33 @@ func (v *View) readEnding(runDir string) {
 		v.Timeline = append(v.Timeline, Event{At: outcome.At, Step: "end", Tone: tone, Title: title + " — 票に報告済み", Record: "board-outcome"})
 	}
 	step, _ := os.ReadFile(filepath.Join(runDir, "failed-step.txt"))
-	if len(step) == 0 {
+	var detail struct {
+		Step string `json:"step"`
+		ModelFailure
+	}
+	haveDetail := readJSON(filepath.Join(runDir, "model-failure-detail.json"), &detail) && detail.Phrase != ""
+	if len(step) == 0 && !haveDetail {
 		return
 	}
+	// A reception that failed before the readiness gate (the intake, the
+	// derivation) records no failed step; the detail names the stage.
 	failure := &Failure{Step: strings.TrimSpace(string(step))}
+	endAt := fileTime(filepath.Join(runDir, "failed-step.txt"))
+	if failure.Step == "" {
+		failure.Step, endAt = shown(detail.Step), detail.RecordedAt
+	}
 	var record struct {
 		Reason string `json:"model_failure_reason"`
 	}
 	if readJSON(filepath.Join(runDir, "model-failure.json"), &record) {
 		failure.Reason = record.Reason
 	}
-	var detail ModelFailure
-	if readJSON(filepath.Join(runDir, "model-failure-detail.json"), &detail) && detail.Phrase != "" {
-		detail.Phrase = shown(detail.Phrase)
-		detail.Summary = modelFailureSummary(detail)
-		failure.Model = &detail
+	if haveDetail {
+		model := detail.ModelFailure
+		model.Phrase, model.Model, model.Effort, model.FinalEffort = shown(model.Phrase), shown(model.Model), shown(model.Effort), shown(model.FinalEffort)
+		model.LastFinishReason, model.LastRequestID = shown(model.LastFinishReason), shown(model.LastRequestID)
+		model.Summary = modelFailureSummary(model)
+		failure.Model = &model
 	}
 	if trail, err := os.ReadFile(filepath.Join(runDir, "m1-trail.txt")); err == nil {
 		failure.Detail = shownTail(strings.TrimSpace(string(trail)), 1200)
@@ -808,9 +822,13 @@ func (v *View) readEnding(runDir string) {
 	if why == "" && failure.Model != nil {
 		why = failure.Model.Summary
 	}
+	source := "failed-step"
+	if len(step) == 0 {
+		source = "model-failure-detail"
+	}
 	v.Timeline = append(v.Timeline, Event{
-		At: fileTime(filepath.Join(runDir, "failed-step.txt")), Step: "end", Tone: "bad",
-		Title: "失敗で終了: " + failure.Step, Why: why, Record: "failed-step",
+		At: endAt, Step: "end", Tone: "bad",
+		Title: "失敗で終了: " + failure.Step, Why: why, Record: source,
 	})
 }
 
@@ -818,10 +836,12 @@ func (v *View) readEnding(runDir string) {
 // requester's words: the cases the reception's own notes distinguish.
 func modelFailureSummary(d ModelFailure) string {
 	switch {
+	case d.LastHTTPStatus == 429 && strings.Contains(d.Phrase, "longer than a turn waits"):
+		return "AI の鍵が利用の上限 (429) で断られ、待つよう指定された時間が自動処理の待てる長さを超えていた"
 	case d.LastHTTPStatus == 429:
 		return fmt.Sprintf("AI の鍵が利用の上限 (429) で断られた (呼び出し %d 回)", d.Calls)
 	case d.LastHTTPStatus >= 500:
-		return fmt.Sprintf("ゲートウェイが %d を返し続けた (呼び出し %d 回)", d.LastHTTPStatus, d.Calls)
+		return fmt.Sprintf("ゲートウェイが %d を返し、聞き直しても通らなかった", d.LastHTTPStatus)
 	case d.LastHTTPStatus > 0:
 		return fmt.Sprintf("ゲートウェイが %d で断った", d.LastHTTPStatus)
 	case d.LastFinishReason == "length" && d.LastReasoningTokens > 0 && d.LastReasoningTokens >= d.LastCompletionTokens:
@@ -831,9 +851,15 @@ func modelFailureSummary(d ModelFailure) string {
 		}
 		return text
 	case d.LastFinishReason == "length":
-		return fmt.Sprintf("AI の答えが長すぎて出力の上限 %d トークンで途切れた", d.MaxOutputTokens)
+		limit := d.FinalMaxOutputTokens
+		if limit == 0 {
+			limit = d.MaxOutputTokens
+		}
+		return fmt.Sprintf("AI の答えが長すぎて出力の上限 %d トークンで途切れた", limit)
 	case d.LastFinishReason == "content_filter":
 		return "AI が依頼文の内容を理由に答えを断った"
+	case d.LastFinishReason == "error" || strings.HasPrefix(d.Phrase, "the provider ended the turn"):
+		return fmt.Sprintf("モデルの提供元側の失敗で答えが返らなかった (呼び出し %d 回)", d.Calls)
 	case d.AllowanceSpent > 0 && d.LastRequestID == "":
 		return fmt.Sprintf("AI が制限時間内に答えを返さなかった (呼び出し %d 回)", d.Calls)
 	}
@@ -866,7 +892,9 @@ func (v *View) readSpend(runDir string) {
 		if label == "" {
 			label = key.KeyEnv
 		}
-		billed.Lines = append(billed.Lines, BilledLine{Label: label, KeyName: key.KeyName, USD: key.SpendUSD, Unpriced: key.Unpriced})
+		// The key's name is the gateway's word, not ours: scanned like any
+		// other text before it is shown.
+		billed.Lines = append(billed.Lines, BilledLine{Label: shown(label), KeyName: shown(key.KeyName), USD: key.SpendUSD, Unpriced: key.Unpriced})
 	}
 	v.Cost.Billed = billed
 }
