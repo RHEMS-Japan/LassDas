@@ -181,3 +181,40 @@ func TestOneOddFieldDoesNotCostTheWholeDetail(t *testing.T) {
 		t.Fatalf("detail = %+v (ok=%v) line=%q", detail, ok, buffer.String())
 	}
 }
+
+// A turn cut off, asked again with a wider allowance and then refused for
+// a reason of its own carries both in its phrase: the cutoff and the
+// refusal's class and status - what the runner's own line says.
+func TestTheDetailPhraseKeepsEveryClassOfARetriedTurn(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want []string
+	}{
+		"cutoff then 429": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+			safeModelStatusError(TransportFailedPhrase+" with status 429 and no Retry-After ("+LimitNotLiftedPhrase+")", 429)),
+			[]string{"finish_reason=length", "with status 429", LimitNotLiftedPhrase}},
+		"cutoff then provider errors": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+			fmt.Errorf("%w after 4 provider errors", errModelResponseUpstream)),
+			[]string{"finish_reason=length", ProviderEndedTurnPhrase}},
+		"cutoff then no usage": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+			fmt.Errorf("%w (no usage)", errModelResponseMetadata)),
+			[]string{"finish_reason=length", GatewayBookkeepingPhrase}},
+		"cutoff then spent allowance": {afterCutoff(fmt.Errorf("%w: finish_reason=length", errModelResponseTruncated), "widened",
+			fmt.Errorf("%w after 2 such calls", errModelAllowanceSpent)),
+			[]string{"finish_reason=length", SpentAllowancePhrase}},
+		"literal setting failure":    {safeModelLiteral("model API key is unavailable"), []string{"model API key is unavailable"}},
+		"quoted wire is not literal": {safeModelErrorFor(TransportFailedPhrase+`: malformed HTTP response "sk-live-SECRET"`, errors.New("x")), []string{TransportFailedPhrase}},
+		"the round's wall":           {fmt.Errorf(TransportFailedPhrase+": %w", context.DeadlineExceeded), []string{TransportFailedPhrase, "wall"}},
+	}
+	for name, test := range cases {
+		phrase := detailPhrase(test.err)
+		for _, want := range test.want {
+			if !strings.Contains(phrase, want) {
+				t.Errorf("%s: %q lacks %q", name, phrase, want)
+			}
+		}
+		if strings.Contains(phrase, "SECRET") || !failureDetailPhrasePattern.MatchString(phrase) {
+			t.Errorf("%s: phrase %q is not safe", name, phrase)
+		}
+	}
+}

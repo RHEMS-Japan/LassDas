@@ -363,6 +363,10 @@ type SafeModelError struct {
 	// the transport did not ask again for; zero otherwise. A number, so
 	// the failure detail can carry it without carrying any upstream text.
 	status int
+	// literal marks a message composed only of this package's constants
+	// and numbers - safe to echo into a record. A message that quotes
+	// what the wire carried (a transport error's text) is not literal.
+	literal bool
 }
 
 func (e *SafeModelError) Error() string { return e.message }
@@ -380,25 +384,33 @@ func (e *SafeModelError) Unwrap() error { return e.cause }
 
 func safeModelError(message string) error { return &SafeModelError{message: message} }
 
+// safeModelLiteral is safeModelError for a message made only of this
+// package's own words and numbers, which the failure detail may echo.
+func safeModelLiteral(message string) error { return &SafeModelError{message: message, literal: true} }
+
+// safeModelErrorFor wraps a cause. The message stays literal only when the
+// cause's own message was: the wrapper adds nothing but a count.
 func safeModelErrorFor(message string, cause error) error {
-	return &SafeModelError{message: message, cause: cause}
+	var inner *SafeModelError
+	literal := errors.As(cause, &inner) && inner.literal
+	return &SafeModelError{message: message, cause: cause, literal: literal}
 }
 
 func safeModelStatusError(message string, status int) error {
-	return &SafeModelError{message: message, status: status}
+	return &SafeModelError{message: message, status: status, literal: true}
 }
 
 func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpoint, request ChatRequest) (*ChatResponse, error) {
 	if g == nil || g.client == nil || ctx == nil {
-		return nil, safeModelError("model transport is invalid")
+		return nil, safeModelLiteral("model transport is invalid")
 	}
 	apiKey := os.Getenv(endpoint.APIKeyEnv)
 	if endpoint.APIKeyEnv == "" || apiKey == "" || strings.TrimSpace(apiKey) != apiKey || strings.ContainsAny(apiKey, "\r\n\x00") {
-		return nil, safeModelError("model API key is unavailable")
+		return nil, safeModelLiteral("model API key is unavailable")
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		return nil, safeModelError("model request could not be encoded")
+		return nil, safeModelLiteral("model request could not be encoded")
 	}
 	for attempt := 0; ; attempt++ {
 		// How long the attempt took is what sizes the guard below: another
@@ -443,7 +455,7 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		if status == http.StatusOK {
 			var response ChatResponse
 			if err := json.Unmarshal(body, &response); err != nil {
-				return nil, safeModelError("model response is not valid JSON")
+				return nil, safeModelLiteral("model response is not valid JSON")
 			}
 			return &response, nil
 		}
@@ -543,7 +555,7 @@ func gatewayPause(status int, retryAfter *time.Duration, attempt int) (time.Dura
 func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encoded []byte) ([]byte, int, *time.Duration, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
-		return nil, 0, nil, safeModelError("model request could not be built")
+		return nil, 0, nil, safeModelLiteral("model request could not be built")
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+apiKey)
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -558,12 +570,12 @@ func (g *GatewayClient) post(ctx context.Context, baseURL, apiKey string, encode
 		if errors.As(err, &urlErr) {
 			return nil, 0, nil, safeModelErrorFor(TransportFailedPhrase+": "+urlErr.Err.Error(), urlErr.Err)
 		}
-		return nil, 0, nil, safeModelError(TransportFailedPhrase)
+		return nil, 0, nil, safeModelLiteral(TransportFailedPhrase)
 	}
 	defer func() { _ = httpResponse.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxTransportResponseBytes+1))
 	if err != nil || len(body) > maxTransportResponseBytes {
-		return nil, 0, nil, safeModelError("model response could not be read")
+		return nil, 0, nil, safeModelLiteral("model response could not be read")
 	}
 	var retryAfter *time.Duration
 	if seconds, err := strconv.Atoi(strings.TrimSpace(httpResponse.Header.Get("Retry-After"))); err == nil && seconds >= 0 {

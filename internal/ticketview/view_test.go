@@ -537,3 +537,11 @@ func TestBuildShowsAFailureRecordedOnlyInTheDetailAndScansKeyNames(t *testing.T)
 		t.Fatalf("the key name must pass the secret scan: %s", raw)
 	}
 }
+
+func TestModelFailureSummarySaysAskedAgainOnlyWhenItWas(t *testing.T) {
+	once := modelFailureSummary(ModelFailure{Calls: 1, LastHTTPStatus: 503, Phrase: "model invocation failed with status 503"})
+	again := modelFailureSummary(ModelFailure{Calls: 1, LastHTTPStatus: 503, Phrase: "model invocation failed with status 503; asked again until the attempts ran out"})
+	if strings.Contains(once, "聞き直しても") || !strings.Contains(again, "聞き直しても") {
+		t.Fatalf("once=%q again=%q", once, again)
+	}
+}

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,55 +73,85 @@ var (
 	failureDetailSinkMu sync.Mutex
 )
 
-// detailPhrase names the failure from the error's class, in the package's
-// own words: the constants the runner's notes already key on, the status as
-// a number, and nothing an error message may have quoted from the wire.
+// detailPhrase names the failure in the package's own words: the class
+// the error is (errors.Is/As), then every other class and step this
+// package's constants name in the message - a turn that was cut off, asked
+// again and then refused carries both - and a gateway status as a number.
+// A safe error whose message is literal (constants and numbers only) is
+// echoed as it is; one that quotes the wire is named by its class alone.
 func detailPhrase(err error) string {
 	if err == nil {
 		return ""
 	}
 	message := err.Error()
 	var parts []string
+	add := func(phrase string) {
+		for _, present := range parts {
+			if strings.Contains(present, phrase) {
+				return
+			}
+		}
+		parts = append(parts, phrase)
+	}
 	var safe *SafeModelError
 	switch {
 	case errors.Is(err, errModelResponseTruncated):
-		parts = append(parts, CutoffPhrase+": finish_reason="+ChatFinishLength)
+		add(CutoffPhrase + ": finish_reason=" + ChatFinishLength)
 		if errors.Is(err, errModelReasoningExhausted) {
-			parts = append(parts, ReasoningExhaustedPhrase)
+			add(ReasoningExhaustedPhrase)
 		}
 	case errors.Is(err, errModelAllowanceSpent):
-		parts = append(parts, TransportFailedPhrase+": "+SpentAllowancePhrase)
+		add(TransportFailedPhrase + ": " + SpentAllowancePhrase)
 	case errors.Is(err, errModelResponseUpstream):
-		parts = append(parts, ProviderEndedTurnPhrase)
+		add(ProviderEndedTurnPhrase)
 	case errors.Is(err, errModelResponseRefused):
-		parts = append(parts, DeclinedOverContentPhrase)
+		add(DeclinedOverContentPhrase)
 	case errors.Is(err, errModelResponseMetadata):
-		parts = append(parts, GatewayBookkeepingPhrase)
+		add(GatewayBookkeepingPhrase)
 	case errors.Is(err, errModelResponseContent):
-		parts = append(parts, AnswerUnusablePhrase)
+		add(AnswerUnusablePhrase)
+	case errors.As(err, &safe) && safe.literal:
+		add(safe.message)
 	case errors.As(err, &safe) && safe.Status() != 0:
-		parts = append(parts, fmt.Sprintf("%s with status %d", TransportFailedPhrase, safe.Status()))
+		add(fmt.Sprintf("%s with status %d", TransportFailedPhrase, safe.Status()))
 	case errors.As(err, &safe), strings.HasPrefix(message, TransportFailedPhrase):
-		parts = append(parts, TransportFailedPhrase)
+		add(TransportFailedPhrase)
 	case strings.HasPrefix(message, CutoffPhrase):
 		// A finish reason outside the provider's enum ended the turn; the
 		// reason itself is a provider string and travels only as its class.
-		parts = append(parts, CutoffPhrase)
+		add(CutoffPhrase)
 	default:
-		parts = append(parts, "the turn failed")
+		add("the turn failed")
 	}
-	// What the turn did about it, in the words the message carries - each
-	// one a constant of this package, so its presence is safe to echo.
-	for _, phrase := range []string{EffortLoweredPhrase, CutoffAskedAgainPhrase, CutoffAtCeilingPhrase, LimitNotLiftedPhrase, RetryAfterTooLongPhrase} {
-		if strings.Contains(message, phrase) && !strings.Contains(strings.Join(parts, "; "), phrase) {
-			parts = append(parts, phrase)
+	// Every other class the message names (a re-ask that failed for a
+	// reason of its own) and what the turn did about it: each a constant
+	// of this package, so its presence is safe to echo.
+	for _, phrase := range []string{SpentAllowancePhrase, ProviderEndedTurnPhrase, DeclinedOverContentPhrase, GatewayBookkeepingPhrase, AnswerUnusablePhrase,
+		ReasoningExhaustedPhrase, EffortLoweredPhrase, CutoffAskedAgainPhrase, CutoffAtCeilingPhrase, LimitNotLiftedPhrase, RetryAfterTooLongPhrase} {
+		if strings.Contains(message, phrase) {
+			add(phrase)
 		}
 	}
+	if m := detailStatusPattern.FindStringSubmatch(message); m != nil {
+		add("with status " + m[1])
+	} else if errors.As(err, &safe) && safe.Status() != 0 {
+		add(fmt.Sprintf("with status %d", safe.Status()))
+	}
 	if strings.Contains(message, AttemptsExhaustedPhrase) {
-		parts = append(parts, "asked again until the attempts ran out")
+		add("asked again until the attempts ran out")
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		add("the round's wall ended the turn")
+	case errors.Is(err, context.Canceled):
+		add("the turn was cancelled")
 	}
 	return strings.Join(parts, "; ")
 }
+
+// detailStatusPattern finds the status the transport named in a message
+// ("with status 429"): a number, never text.
+var detailStatusPattern = regexp.MustCompile(`with status ([1-9][0-9]{2})`)
 
 // sanitized blanks every field that is outside its shape and clamps the
 // counts, so one odd value costs that field and not the record. The phrase

@@ -49,6 +49,11 @@ func (p *Pipeline) recordModelFailureDetail(stage string) {
 // never a half-written one.
 func writeRecordAtomically(path string, encoded []byte) error {
 	temp := path + ".tmp"
+	// Removed first for the same reason the final path is: a link left
+	// there must not carry the write elsewhere.
+	if err := os.Remove(temp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
 		return err
 	}

@@ -20,6 +20,7 @@ import (
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/probe"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // View is the ticket page's data.
@@ -836,12 +837,14 @@ func (v *View) readEnding(runDir string) {
 // requester's words: the cases the reception's own notes distinguish.
 func modelFailureSummary(d ModelFailure) string {
 	switch {
-	case d.LastHTTPStatus == 429 && strings.Contains(d.Phrase, "longer than a turn waits"):
+	case d.LastHTTPStatus == 429 && strings.Contains(d.Phrase, worker.RetryAfterTooLongPhrase):
 		return "AI の鍵が利用の上限 (429) で断られ、待つよう指定された時間が自動処理の待てる長さを超えていた"
 	case d.LastHTTPStatus == 429:
 		return fmt.Sprintf("AI の鍵が利用の上限 (429) で断られた (呼び出し %d 回)", d.Calls)
-	case d.LastHTTPStatus >= 500:
+	case d.LastHTTPStatus >= 500 && strings.Contains(d.Phrase, "attempts ran out"):
 		return fmt.Sprintf("ゲートウェイが %d を返し、聞き直しても通らなかった", d.LastHTTPStatus)
+	case d.LastHTTPStatus >= 500:
+		return fmt.Sprintf("ゲートウェイが %d を返した", d.LastHTTPStatus)
 	case d.LastHTTPStatus > 0:
 		return fmt.Sprintf("ゲートウェイが %d で断った", d.LastHTTPStatus)
 	case d.LastFinishReason == "length" && d.LastReasoningTokens > 0 && d.LastReasoningTokens >= d.LastCompletionTokens:
@@ -858,7 +861,7 @@ func modelFailureSummary(d ModelFailure) string {
 		return fmt.Sprintf("AI の答えが長すぎて出力の上限 %d トークンで途切れた", limit)
 	case d.LastFinishReason == "content_filter":
 		return "AI が依頼文の内容を理由に答えを断った"
-	case d.LastFinishReason == "error" || strings.HasPrefix(d.Phrase, "the provider ended the turn"):
+	case d.LastFinishReason == "error" || strings.Contains(d.Phrase, worker.ProviderEndedTurnPhrase):
 		return fmt.Sprintf("モデルの提供元側の失敗で答えが返らなかった (呼び出し %d 回)", d.Calls)
 	case d.AllowanceSpent > 0 && d.LastRequestID == "":
 		return fmt.Sprintf("AI が制限時間内に答えを返さなかった (呼び出し %d 回)", d.Calls)
