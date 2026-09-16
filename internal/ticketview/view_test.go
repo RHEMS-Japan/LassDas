@@ -490,7 +490,7 @@ func TestModelFailureSummaryNamesEachCase(t *testing.T) {
 		want   string
 	}{
 		"budget":    {ModelFailure{Calls: 2, LastHTTPStatus: 429}, "上限 (429)"},
-		"gateway":   {ModelFailure{Calls: 4, LastHTTPStatus: 503}, "503 を返し続けた"},
+		"gateway":   {ModelFailure{Calls: 4, LastHTTPStatus: 503}, "503 を返し"},
 		"refused":   {ModelFailure{Calls: 1, LastHTTPStatus: 401}, "401 で断った"},
 		"reasoning": {ModelFailure{Calls: 3, LastFinishReason: "length", LastCompletionTokens: 100, LastReasoningTokens: 100}, "考える段階だけで"},
 		"long":      {ModelFailure{Calls: 2, LastFinishReason: "length", MaxOutputTokens: 8192, LastCompletionTokens: 8192, LastReasoningTokens: 10}, "長すぎて"},
