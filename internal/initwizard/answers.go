@@ -56,11 +56,24 @@ func (a Answers) Value(id string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "null" {
+		// null is "not answered", never an answer of "null".
+		return "", false
+	}
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
-		return text, true
+		// Trimmed as a terminal would: a stray space around a branch or
+		// a digest must not fail the lookup with a generic message.
+		return strings.TrimSpace(text), true
 	}
-	return strings.TrimSpace(string(raw)), true
+	return trimmed, true
+}
+
+// Flag reads a yes/no answer; absent or unreadable is false.
+func (a Answers) Flag(id string) bool {
+	value, ok := a.Value(id)
+	return ok && (value == "true" || value == "yes")
 }
 
 // MissingSecret ends a run that reached a question only a person answers:
@@ -70,7 +83,28 @@ type MissingSecret struct {
 }
 
 func (m *MissingSecret) Error() string {
-	return fmt.Sprintf("鍵 %s (%s) が保存されていません。利用者が `lassdas setup secrets --project %s` を実行して入力してください。AI はこの値を扱いません", m.Name, m.Label, m.Project)
+	if m.Name == "tracker-admin-key" {
+		return fmt.Sprintf("課題管理の project に受付のカテゴリか状態が無く、保存された鍵では作れません (直前の行が理由)。利用者が Backlog の画面でその項目を作るか、`lassdas init --project %s --redo tracker` を利用者が対話で実行して管理者の鍵を一度だけ入力してください。AI は鍵を扱いません", m.Project)
+	}
+	return fmt.Sprintf("鍵 %s (%s) が未保存か、直前の行の理由で使えませんでした。利用者が `lassdas setup secrets --project %s` を実行して入れ直してください。AI はこの値を扱いません", m.Name, m.Label, m.Project)
+}
+
+// consentGates are the confirmations a person must give before the setup
+// writes outside the repository or accepts a naming it cannot undo; the
+// agent records the person's yes in the answers file, and the run stops
+// here without it.
+var consentGates = []struct{ prefix, id, what string }{
+	{"不足する項目だけ作成します", "tracker-create", "課題管理の project にカテゴリ・状態を作る"},
+	{"この API キーは起票者本人", "requester-key-ok", "自動処理のコメントと状態更新が起票者本人の名義になる"},
+}
+
+// ConsentRequired ends a run at a confirmation the file does not carry.
+type ConsentRequired struct {
+	ID, What, Label string
+}
+
+func (c *ConsentRequired) Error() string {
+	return fmt.Sprintf("利用者の承認が要る操作です: %s。利用者に「%s」を確認し、承認されたら %s に %q: true を書いてから再実行してください", c.What, strings.ReplaceAll(c.Label, "\n", " / "), AnswersFile, c.ID)
 }
 
 // MissingAnswer ends a run at a question the file does not answer and the
@@ -107,7 +141,9 @@ func (u *AnswersUI) Ask(id, label, fallback string, secret bool) (string, error)
 	if value, ok := u.Answers.Value(id); ok {
 		return value, nil
 	}
-	if fallback != "" {
+	// "0" and "null" are the wizard's way of proposing nothing (an unset
+	// id, an empty list); they are not answers.
+	if fallback != "" && fallback != "0" && fallback != "null" {
 		u.Defaulted = append(u.Defaulted, id)
 		u.say(fmt.Sprintf("回答なし: %s (%s) → 本体の提案 %q を採用", id, label, fallback))
 		return fallback, nil
@@ -116,6 +152,11 @@ func (u *AnswersUI) Ask(id, label, fallback string, secret bool) (string, error)
 }
 
 func (u *AnswersUI) Confirm(label string) (bool, error) {
+	for _, gate := range consentGates {
+		if strings.HasPrefix(label, gate.prefix) && !u.Answers.Flag(gate.id) {
+			return false, &ConsentRequired{ID: gate.id, What: gate.what, Label: label}
+		}
+	}
 	u.Confirmed = append(u.Confirmed, label)
 	u.say("確認済みとして進めます: " + strings.ReplaceAll(label, "\n", " / "))
 	return true, nil
@@ -142,6 +183,7 @@ func RequiredAnswers() []Requirement {
 		{"build-record", "イメージと SHA の対応を確認できるビルド記録の URL", "配布者の案内"},
 		{"tracker-origin", "課題管理 (Backlog) の接続先 URL", "利用者に確認"},
 		{"tracker-project", "Backlog の project キー", "利用者に確認"},
+		{"creator-id", "起票を許可する本人の Backlog 利用者 ID (数値)", "`lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認"},
 	}
 	for _, role := range modelRoles {
 		requirements = append(requirements, Requirement{role + "-model", role + " のモデル名 (OpenRouter の名前)", "品質と費用の希望を聞いて推奨を出し、利用者が確定"})
@@ -168,7 +210,6 @@ func OptionalAnswers() []Requirement {
 		{"max-total-bytes", "合計 byte 上限", "既定でよい"},
 		{"max-changed-lines", "変更行数の上限", "既定でよい"},
 		{"max-changed-bytes", "変更 byte の上限", "既定でよい"},
-		{"creator-id", "起票を許可する本人の数値 ID", "鍵の持ち主から提案される"},
 		{"category", "受付のカテゴリ名", "既定は 自動処理"},
 		{"status-0", "自動処理中 に対応する状態名", "既定あり"},
 		{"status-1", "回答待ち に対応する状態名", "既定あり"},
@@ -176,8 +217,116 @@ func OptionalAnswers() []Requirement {
 		{"status-3", "要確認 に対応する状態名", "既定あり"},
 		{"separate-model-keys", "役ごとに別の API キーを使うか (true/false)", "既定は false (1 本を共用)"},
 		{"separate-design", "設計レビューを別の 2 モデルにするか (true/false)", "既定は false"},
+		{"design-review-a-model", "設計レビュー A のモデル名 (separate-design が true のとき必須)", "利用者が確定"},
+		{"design-review-b-model", "設計レビュー B のモデル名 (separate-design が true のとき必須)", "利用者が確定"},
+		{"tracker-create", "受付のカテゴリ・状態が無いとき、課題管理の project に作ってよいか (true/false)", "利用者に確認してから書く"},
+		{"requester-key-ok", "自動処理の鍵が起票者本人のもので、コメントと状態更新が本人名義になってよいか (true/false)", "利用者に確認してから書く"},
 		{"board-port", "板を 127.0.0.1 で開く port", "既定は 9200"},
 	}
+}
+
+// VendorFor is the model provider the wizard proposes from a model's
+// prefix (OpenRouter names models vendor/model); "" when it cannot tell,
+// and the answer <role>-vendor is then required.
+func VendorFor(model string) string {
+	prefix, _, found := strings.Cut(model, "/")
+	if !found {
+		return ""
+	}
+	switch strings.ToLower(prefix) {
+	case "openai":
+		return "OpenAI"
+	case "anthropic":
+		return "Anthropic"
+	case "google":
+		return "Google"
+	case "deepseek":
+		return "DeepSeek"
+	case "x-ai":
+		return "xAI"
+	case "meta-llama":
+		return "Meta"
+	case "mistralai":
+		return "Mistral"
+	case "qwen":
+		return "Qwen"
+	case "moonshotai":
+		return "Moonshot"
+	case "z-ai":
+		return "Z.ai"
+	case "cohere":
+		return "Cohere"
+	case "amazon":
+		return "Amazon"
+	}
+	return ""
+}
+
+// checkModels mirrors, offline, what the body's configuration refuses
+// later (internal/worker Config.Validate), so a combination that cannot
+// run is named before any stage runs: every role needs a vendor, the two
+// reviewers must be different models from two vendors, at most one of them
+// may share the implementer's model (and the designer's), the readiness
+// assessor and checker must be different vendors, and design reviewers,
+// when separate, follow the reviewers' rules.
+func (a Answers) checkModels() []string {
+	var problems []string
+	roles := append([]string(nil), modelRoles...)
+	if a.Flag("separate-design") {
+		roles = append(roles, "design-review-a", "design-review-b")
+	}
+	model := map[string]string{}
+	vendor := map[string]string{}
+	for _, role := range roles {
+		name, ok := a.Value(role + "-model")
+		if !ok || name == "" {
+			if role == "design-review-a" || role == "design-review-b" {
+				problems = append(problems, fmt.Sprintf("回答がありません: %s-model (separate-design が true なので必須)", role))
+			}
+			continue
+		}
+		model[role] = strings.ToLower(name)
+		if v, ok := a.Value(role + "-vendor"); ok && v != "" {
+			vendor[role] = strings.ToLower(v)
+		} else if v := VendorFor(name); v != "" {
+			vendor[role] = strings.ToLower(v)
+		} else {
+			problems = append(problems, fmt.Sprintf("回答がありません: %s-vendor (モデル名 %q からは提供会社を判定できません)", role, name))
+		}
+	}
+	pair := func(a, b, what string) {
+		if model[a] == "" || model[b] == "" {
+			return
+		}
+		if model[a] == model[b] {
+			problems = append(problems, fmt.Sprintf("%s と %s は別のモデルにしてください (%s)", a, b, what))
+		}
+		if vendor[a] != "" && vendor[a] == vendor[b] {
+			problems = append(problems, fmt.Sprintf("%s と %s は別の提供会社にしてください (%s)", a, b, what))
+		}
+	}
+	pair("review-a", "review-b", "レビューは 2 社で行う")
+	pair("readiness-assessor", "readiness-checker", "受付の起案と確認は別の会社で行う")
+	shared := func(owner string, reviewers ...string) {
+		if model[owner] == "" {
+			return
+		}
+		count := 0
+		for _, reviewer := range reviewers {
+			if model[reviewer] != "" && model[reviewer] == model[owner] {
+				count++
+			}
+		}
+		if count > 1 {
+			problems = append(problems, fmt.Sprintf("%s と同じモデルにできるレビュー役は 1 つまでです", owner))
+		}
+	}
+	shared("implementer", "review-a", "review-b")
+	shared("designer", "review-a", "review-b")
+	if a.Flag("separate-design") {
+		pair("design-review-a", "design-review-b", "設計レビューは 2 社で行う")
+	}
+	return problems
 }
 
 // Check reports what the file lacks, in plain words, without running
@@ -190,12 +339,10 @@ func (a Answers) Check() []string {
 			problems = append(problems, fmt.Sprintf("回答がありません: %s (%s)。%s", requirement.ID, requirement.Label, requirement.How))
 		}
 	}
+	problems = append(problems, a.checkModels()...)
 	known := map[string]bool{}
 	for _, requirement := range append(RequiredAnswers(), OptionalAnswers()...) {
 		known[requirement.ID] = true
-	}
-	for _, role := range []string{"design-review-a", "design-review-b"} {
-		known[role+"-model"] = true
 	}
 	for _, role := range allRolesWithDesign() {
 		known[role+"-vendor"] = true

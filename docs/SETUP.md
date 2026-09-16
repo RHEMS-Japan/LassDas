@@ -15,7 +15,7 @@
 
 ## 1. 始める前に、機械で確かめる
 
-1. 道具: `git`、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いものを示す (G02)。
+1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。
 
@@ -53,7 +53,9 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 | 質問 | 行き先 |
 |---|---|
-| 誰の依頼を受けるか (起票を許可する本人) | `creator-id` (D03) |
+| 誰の依頼を受けるか (起票を許可する本人) | `creator-id` (D03)。`lassdas setup secrets` が鍵の持ち主の ID を表示するので、本人ならそれを書く |
+| 課題管理の鍵が起票者本人のものでよいか (コメントと状態更新が本人名義になる) | `requester-key-ok` (利用者の承認) |
+| 受付のカテゴリ・状態が無いとき、課題管理の project に作ってよいか | `tracker-create` (利用者の承認。鍵に作成権限が無ければ利用者が画面で作る) |
 | PR の宛先の枝。マージは誰がするか | `branch`。マージの担当は `agreement.md` (E02 E03 E05) |
 | 検証は何を・どこで・いつ・何をもって合格とするか | `verify` と `agreement.md` (F01 F02 F07) |
 | 自動で進める範囲と、依頼 1 件の完了地点 | `agreement.md` (E08 I04) |
@@ -66,7 +68,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 3 つのファイルを作る。鍵の値は入れない。
 
-- `setup.json` — 本体が読む回答。形は `{"answers": {"<項目>": 値}}`。値は文字列か、配列・真偽値・数値の JSON。項目は末尾の回答表。
+- `setup.json` — 本体が読む回答。形は `{"answers": {"<項目>": 値}}`。値は文字列か、配列・真偽値・数値の JSON。項目は末尾の回答表。go.mod も package.json も無い repo では、本体が `scope` `install` `verify` を提案できないので必ず書く。
 - `agreement.md` — 人が読む合意。進め方、完了地点、自動で進める範囲、人が判断する場面、マージの担当、検証の合格条件、上限、送ってはいけない path、既存文書の在り処 (参照先。全文を写さない)。本体がまだ機械で守れない項目は「本体は未対応・人が守る」と明記する。
 - `progress.md` — 済んだこと、未解決、次に誰が何をするか。会話を閉じても別の AI が続きから再開できるように書く。
 
@@ -74,13 +76,13 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 ## 6. 環境を整える
 
-1. 利用者が実行: `lassdas setup secrets --project <name>` — 納品先 GitHub のトークン、Backlog の API キー、OpenRouter の API キーを入れる。`~/.lassdas/<name>/` に 0600 で保存され、repo にも会話にも出ない。
-2. AI が実行: `lassdas setup apply --project <name>` — 回答から設定を組み立て、repo と枝の実在、編集範囲と検証コマンドのイメージ内での試走、課題管理の接続と受付カテゴリ・状態、各役のモデルの疎通、本体の起動と起動時検査、を順に通す。止まったら、出力が示す不足 (回答・鍵・権限) を直して再実行する。同じコマンドで続きから再開する。
+1. 利用者が実行: `lassdas setup secrets --project <name>` — 納品先 GitHub のトークン、Backlog の API キー、OpenRouter の API キー (役ごとに分ける設定ならその本数) を入れる。`~/.lassdas/<name>/` に 0600 で保存され、repo にも会話にも出ない。終わりに Backlog の鍵の持ち主 (名前と利用者 ID) が表示される。起票する本人がその人なら `creator-id` にその ID を書き、鍵を本人名義で使うことの承認 `requester-key-ok` を利用者にもらう。
+2. AI が実行: `lassdas setup apply --project <name>` — 回答から設定を組み立て、repo と枝の実在、編集範囲と検証コマンドのイメージ内での試走、課題管理の接続と受付カテゴリ・状態、各役のモデルの疎通 (少額の API 利用料がかかる)、本体の起動と起動時検査、を順に通す。止まったら、出力が示す不足 (回答・鍵・承認) を直して再実行する。済んだ段は飛ばして続きから再開する。ある段の回答を変えるときは `--redo <段>` (prepare / consumer / tracker / models / runtime)。
 3. 本体はローカルのコンテナで動く。板は `http://127.0.0.1:<board-port>` (認証なし)。
 
 ## 7. 試す
 
-1. 利用者が実行: `lassdas setup smoke --project <name>` — 本人の鍵 (保存しない) で、1 ファイルに 1 行足す小さな依頼を起票し、PR ができるまで見届ける。
+1. 利用者が実行: `lassdas setup smoke --project <name>` — 済んだ段の確認 (名義や疎通) にいくつか答えたあと、本人の鍵 (保存しない) で、1 ファイルに 1 行足す小さな依頼を起票し、PR ができるまで見届ける。
 2. AI は結果を確かめる: PR が実在し、依頼の内容と差分が合っていること。板の記録に受付・実装・レビュー・検証が残っていること。
 3. 通ったら `progress.md` に「導入完了」と、確認した範囲を書く。通らなかったら原因を調べ、`.lassdas/` の範囲で直して再確認する。プロジェクト側の修正は別の開発作業、本体の未対応は要望として残す (I05 L02)。試せなかった工程は「未検証」と明記し、確認済みの範囲だけで使い始める (I04)。
 
@@ -102,7 +104,15 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `build-record` | イメージと SHA の対応を確認できるビルド記録の URL | 配布者の案内 |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
+| `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
+
+モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
+
+- `review-a` と `review-b` は別のモデルで、別の提供会社。`implementer` と同じモデルにできるレビュー役は 1 つまで (`designer` も同じ)。
+- `readiness-assessor` と `readiness-checker` は別の提供会社。
+- 提供会社はモデル名の接頭辞から本体が判定する (openai / anthropic / google / deepseek / x-ai / meta-llama / mistralai / qwen / moonshotai / z-ai / cohere / amazon)。それ以外の接頭辞は `<役>-vendor` に会社名を書く。
+- `separate-design` を true にしたら `design-review-a-model` `design-review-b-model` も必須で、同じ規則 (別モデル・別会社)。
 
 書かなければ本体の提案で進むもの (提案は apply の出力に「本体の提案」として残る):
 
@@ -114,11 +124,13 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `verify` | 検証コマンド 1〜4 本 (JSON 二重配列) | 同上 |
 | `verify-directory` | 検証する repo 内ディレクトリ | repo の root |
 | `max-files` `max-file-bytes` `max-total-bytes` `max-changed-lines` `max-changed-bytes` | 1 依頼の変更の上限 | 本体の既定 |
-| `creator-id` | 起票を許可する本人の数値 ID | 鍵の持ち主から提案 |
 | `category` | 受付のカテゴリ名 | `自動処理` |
 | `status-0` `status-1` `status-2` `status-3` | 自動処理中 / 回答待ち / 納品済み / 要確認 に対応する状態名 | 既定あり。無ければ確認後に作る |
 | `separate-model-keys` | 役ごとに別の API キーを使うか (true/false) | false (1 本を共用) |
 | `separate-design` | 設計レビューを別の 2 モデルにするか (true/false) | false |
+| `design-review-a-model` `design-review-b-model` | 設計レビューのモデル名 | `separate-design` が true のとき必須 |
+| `tracker-create` | 受付のカテゴリ・状態が無いとき、課題管理の project に作ってよいか (true/false) | 利用者に確認してから書く。無ければ apply がその場で止まる |
+| `requester-key-ok` | 自動処理の鍵が起票者本人のもので、コメントと状態更新が本人名義になってよいか (true/false) | 利用者に確認してから書く。無ければ apply がその場で止まる |
 | `<役>-vendor` | モデルの提供会社 | モデル名から提案 |
 | `board-port` | 板を 127.0.0.1 で開く port | 9200 |
 

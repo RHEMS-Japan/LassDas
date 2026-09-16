@@ -21,7 +21,7 @@ import (
 const help = `使用方法:
   lassdas setup check [--repo-root PATH]
   lassdas setup secrets --project NAME [--repo-root PATH]
-  lassdas setup apply --project NAME [--repo-root PATH]
+  lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
   lassdas setup smoke --project NAME [--repo-root PATH]
   lassdas init [--project NAME] [--repo-root PATH] [--redo STAGE]
   lassdas run start|stop|status|logs --project NAME
@@ -82,7 +82,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if command == "init" || strings.HasPrefix(command, "setup ") {
 		flags.StringVar(&repoRoot, "repo-root", "", "")
 	}
-	if command == "init" {
+	if command == "init" || command == "setup apply" {
 		flags.StringVar(&redo, "redo", "", "")
 	}
 	if err := flags.Parse(rest); err != nil {
@@ -101,7 +101,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	manager := localrun.Manager{}
 	if strings.HasPrefix(command, "setup ") {
-		return runSetup(ctx, command, *project, repoRoot, home, manager, output)
+		return runSetup(ctx, command, *project, repoRoot, home, redo, manager, output)
 	}
 	if command == "init" {
 		ui := initwizard.TerminalUI{}

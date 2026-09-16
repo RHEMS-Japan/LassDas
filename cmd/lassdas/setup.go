@@ -18,13 +18,13 @@ import (
 // errSmokePending ends `setup apply` where the person takes over: the body
 // is running, and the test request is filed under the person's own name
 // with a key the agent never sees.
-var errSmokePending = errors.New("本体は起動しました。次は利用者が `lassdas setup smoke --project <name>` を実行し、本人の鍵で試験依頼を 1 本流してください。導入はまだ完了していません")
+var errSmokePending = fmt.Errorf("本体は起動しました。次は利用者が `lassdas setup smoke --project <name>` を実行し、本人の鍵で試験依頼を 1 本流してください。導入はまだ完了していません (%w)", initsmoke.ErrPending)
 
 // runSetup is the entry an agent uses. check reads the answers file and
 // says what is missing without running anything; apply runs the wizard's
 // stages with the file's answers up to the running body; secrets and smoke
 // are the person's two turns (keys, and the test request in their name).
-func runSetup(ctx context.Context, command, project, repoRoot, home string, manager localrun.Manager, output io.Writer) error {
+func runSetup(ctx context.Context, command, project, repoRoot, home, redo string, manager localrun.Manager, output io.Writer) error {
 	root, err := repositoryRoot(ctx, repoRoot)
 	if err != nil {
 		return err
@@ -33,7 +33,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home string, mana
 	case "setup check":
 		return setupCheck(root, output)
 	case "setup secrets":
-		return setupSecrets(project, root, home, output)
+		return setupSecrets(ctx, project, root, home, output)
 	case "setup apply", "setup smoke":
 		if project == "" {
 			return errors.New("--project NAME が必要です (この本体の保存名。英小文字・数字・ハイフン)")
@@ -65,7 +65,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home string, mana
 			smoke = runner.Run
 		}
 		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke}
-		_, err = wizard.Run(ctx, initwizard.Options{Project: project, Home: home, RepoRoot: root})
+		_, err = wizard.Run(ctx, initwizard.Options{Project: project, Home: home, RepoRoot: root, Redo: redo})
 		return err
 	}
 	return errors.New("setup の操作名が不明です")
@@ -101,6 +101,12 @@ func setupCheck(root string, output io.Writer) error {
 			problems = append(problems, fmt.Sprintf("道具がありません: %s (ローカルで本体を動かすのに必要)", name))
 		}
 	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		info := exec.Command("docker", "info", "--format", "{{.ServerVersion}}")
+		if out, err := info.Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+			problems = append(problems, "Docker が動いていません (Docker Desktop を起動してください)")
+		}
+	}
 	answers, err := initwizard.LoadAnswers(root)
 	if err != nil {
 		problems = append(problems, err.Error())
@@ -125,7 +131,7 @@ func setupCheck(root string, output io.Writer) error {
 // setupSecrets is the person's turn: the keys the setup needs, typed here
 // and stored under the project directory (0600), never in the repository
 // and never through the agent.
-func setupSecrets(project, root, home string, output io.Writer) error {
+func setupSecrets(ctx context.Context, project, root, home string, output io.Writer) error {
 	if project == "" {
 		return errors.New("--project NAME が必要です (この本体の保存名。英小文字・数字・ハイフン)")
 	}
@@ -145,19 +151,10 @@ func setupSecrets(project, root, home string, output io.Writer) error {
 	}
 	state.Project, state.RepoRoot = project, root
 	answers, _ := initwizard.LoadAnswers(root)
-	separate, _ := answers.Value("separate-model-keys")
-	names := []struct{ name, label string }{
-		{"TARGET_GITHUB_TOKEN", "納品先 repo に PR を出す GitHub アクセストークン (Contents と Pull requests の書き込み権限)"},
-		{"BACKLOG_API_KEY", "自動処理に使う Backlog API キー (個人設定 → API)"},
-		{"LASSDAS_INTAKE_TARGET_KEY", "OpenRouter API キー (既定では全役で共用)"},
-	}
-	if separate == "true" || separate == "yes" {
-		names = names[:2]
-		names = append(names, struct{ name, label string }{"LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の OpenRouter API キー"})
-		for _, role := range initwizard.ModelRoles() {
-			names = append(names, struct{ name, label string }{initwizard.KeyName(role), role + " 専用の OpenRouter API キー"})
-		}
-	}
+	// The key mode is the file's decision, written down here so the
+	// wizard never infers "separate" from the presence of a stored key.
+	state.ModelKeyMode, state.SeparateDesignReviews = keyMode(answers)
+	names := secretPlan(answers)
 	terminal := initwizard.TerminalUI{}
 	for _, entry := range names {
 		if secrets[entry.name] != "" {
@@ -178,6 +175,58 @@ func setupSecrets(project, root, home string, output io.Writer) error {
 	if err := initwizard.Save(dir, state, secrets); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "鍵を %s に保存しました (0600)。値は repo にも会話にも出ません。次は AI が `lassdas setup apply --project %s` を実行します\n", dir, project)
+	_, err = fmt.Fprintf(output, "鍵を %s に保存しました (0600)。値は repo にも会話にも出ません。\n", dir)
+	if err != nil {
+		return err
+	}
+	// The key's owner is the usual requester: shown here so the agent can
+	// write creator-id from it, or ask the person for someone else's.
+	if origin, ok := answers.Value("tracker-origin"); ok && secrets["BACKLOG_API_KEY"] != "" {
+		state.Tracker.Origin = origin
+		var owner struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := (initwizard.API{}).Tracker(ctx, state, secrets["BACKLOG_API_KEY"], "GET", "/api/v2/users/myself", nil, &owner); err != nil || owner.ID <= 0 {
+			_, _ = fmt.Fprintln(output, "Backlog の鍵の持ち主を確認できませんでした (接続先か鍵を確認)。creator-id は利用者に確認して書いてください")
+		} else {
+			_, _ = fmt.Fprintf(output, "Backlog の鍵の持ち主: %s (利用者 ID %d)。起票する本人がこの人なら、setup.json の creator-id に %d を書きます\n", owner.Name, owner.ID, owner.ID)
+		}
+	}
+	_, err = fmt.Fprintf(output, "次は AI が `lassdas setup apply --project %s` を実行します\n", project)
 	return err
+}
+
+type secretEntry struct{ name, label string }
+
+// keyMode reads the file's two choices that decide which keys exist.
+func keyMode(answers initwizard.Answers) (string, bool) {
+	mode := initwizard.ModelKeysShared
+	if answers.Flag("separate-model-keys") {
+		mode = initwizard.ModelKeysSeparate
+	}
+	return mode, answers.Flag("separate-design")
+}
+
+// secretPlan lists exactly the keys the wizard will look for under the
+// file's choices: one OpenRouter key shared by every role, or one per
+// role - the design reviewers included when they are separate.
+func secretPlan(answers initwizard.Answers) []secretEntry {
+	names := []secretEntry{
+		{"TARGET_GITHUB_TOKEN", "納品先 repo に PR を出す GitHub アクセストークン (Contents と Pull requests の書き込み権限)"},
+		{"BACKLOG_API_KEY", "自動処理に使う Backlog API キー (個人設定 → API)"},
+	}
+	mode, separateDesign := keyMode(answers)
+	if mode == initwizard.ModelKeysShared {
+		return append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "OpenRouter API キー (既定では全役で共用)"})
+	}
+	names = append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の OpenRouter API キー"})
+	roles := initwizard.ModelRoles()
+	if separateDesign {
+		roles = append(roles, "design-review-a", "design-review-b")
+	}
+	for _, role := range roles {
+		names = append(names, secretEntry{initwizard.KeyName(role), role + " 専用の OpenRouter API キー"})
+	}
+	return names
 }

@@ -100,8 +100,13 @@ func TestAnswersCheckNamesWhatIsMissingAndWhatIsUnknown(t *testing.T) {
 func TestACompleteAnswersFilePassesCheck(t *testing.T) {
 	root := t.TempDir()
 	var fields []string
+	models := map[string]string{"implementer-model": "deepseek/a", "review-a-model": "anthropic/b", "review-b-model": "openai/c", "readiness-assessor-model": "google/d", "readiness-checker-model": "openai/e", "designer-model": "anthropic/f", "applier-model": "deepseek/g"}
 	for _, requirement := range RequiredAnswers() {
-		fields = append(fields, `"`+requirement.ID+`":"x"`)
+		value := "x"
+		if m, ok := models[requirement.ID]; ok {
+			value = m
+		}
+		fields = append(fields, `"`+requirement.ID+`":"`+value+`"`)
 	}
 	writeAnswers(t, root, `{"answers":{`+strings.Join(fields, ",")+`}}`)
 	answers, err := LoadAnswers(root)
@@ -119,5 +124,98 @@ func TestACompleteAnswersFilePassesCheck(t *testing.T) {
 		if !found {
 			t.Fatalf("every model role must be required: %s", role)
 		}
+	}
+}
+
+// The wizard's "nothing" proposals ("0" for an unset id, "null" for an
+// empty list) are not answers: the run stops naming the question instead
+// of adopting them. A null in the file is "not answered"; a string is
+// trimmed as a terminal would.
+func TestAnswersUIDoesNotAdoptEmptyProposals(t *testing.T) {
+	root := t.TempDir()
+	writeAnswers(t, root, `{"answers":{"branch":" main ","scope":null}}`)
+	answers, err := LoadAnswers(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &AnswersUI{Answers: answers, Project: "sample"}
+	if v, _ := ui.Ask("branch", "枝", "", false); v != "main" {
+		t.Fatalf("strings are trimmed: %q", v)
+	}
+	var missing *MissingAnswer
+	if _, err := ui.Ask("creator-id", "起票者", "0", false); !errors.As(err, &missing) {
+		t.Fatalf("\"0\" is not a proposal: %v", err)
+	}
+	if _, err := ui.Ask("scope", "範囲", "null", false); !errors.As(err, &missing) {
+		t.Fatalf("\"null\" is not a proposal, and null in the file is not an answer: %v", err)
+	}
+	if len(ui.Defaulted) != 0 {
+		t.Fatalf("nothing was defaulted: %v", ui.Defaulted)
+	}
+}
+
+// Writing to the tracker and accepting the requester's own key as the
+// bot's are the person's decisions: without their yes in the file the
+// run stops and says what to ask; with it, the confirmation is recorded.
+func TestAnswersUIHoldsConsentGatesForThePerson(t *testing.T) {
+	root := t.TempDir()
+	writeAnswers(t, root, `{"answers":{}}`)
+	answers, _ := LoadAnswers(root)
+	ui := &AnswersUI{Answers: answers, Project: "sample"}
+	var consent *ConsentRequired
+	if ok, err := ui.Confirm("不足する項目だけ作成します:\nカテゴリ: 自動処理"); ok || !errors.As(err, &consent) || consent.ID != "tracker-create" || !strings.Contains(err.Error(), `"tracker-create": true`) {
+		t.Fatalf("tracker writes need consent: %v %v", ok, err)
+	}
+	if ok, err := ui.Confirm("この API キーは起票者本人 (ID: 7) のものです。…"); ok || !errors.As(err, &consent) || consent.ID != "requester-key-ok" {
+		t.Fatalf("the naming needs consent: %v %v", ok, err)
+	}
+	if ok, err := ui.Confirm("納品先 x の main へ PR を出す設定で進めます"); !ok || err != nil {
+		t.Fatalf("other confirmations are recorded: %v %v", ok, err)
+	}
+	writeAnswers(t, root, `{"answers":{"tracker-create":true,"requester-key-ok":"yes"}}`)
+	answers, _ = LoadAnswers(root)
+	ui = &AnswersUI{Answers: answers, Project: "sample"}
+	if ok, err := ui.Confirm("不足する項目だけ作成します:\n状態: 回答待ち"); !ok || err != nil {
+		t.Fatalf("with consent the write proceeds: %v %v", ok, err)
+	}
+	if ok, err := ui.Confirm("この API キーは起票者本人 (ID: 7) のものです"); !ok || err != nil {
+		t.Fatalf("with consent the naming proceeds: %v %v", ok, err)
+	}
+	// The admin key can never come from the file; the message names the
+	// person's two ways out, not a command that would not ask for it.
+	_, err := ui.Ask("tracker-admin-key", "管理者の鍵", "", true)
+	if err == nil || !strings.Contains(err.Error(), "--redo tracker") || strings.Contains(err.Error(), "setup secrets") {
+		t.Fatalf("admin key message: %v", err)
+	}
+}
+
+// The model rules the body enforces later are checked from the file
+// first, in plain words: a vendor the name does not tell, two reviewers
+// of one company or one model, the same model for the assessor and the
+// checker, and design reviewers required when they are separate.
+func TestAnswersCheckMirrorsTheModelRules(t *testing.T) {
+	root := t.TempDir()
+	base := `"repository":"e/a","branch":"main","engine-repository":"e/b","image":"r/e@sha256:0","engine-sha":"a","build-record":"u","tracker-origin":"https://x.backlog.com","tracker-project":"P","creator-id":7`
+	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"anthropic/claude-sonnet-4","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"anthropic/claude-sonnet-4","readiness-assessor-model":"anthropic/claude-sonnet-4","readiness-checker-model":"anthropic/claude-sonnet-4","designer-model":"anthropic/claude-sonnet-4","applier-model":"anthropic/claude-sonnet-4"}}`)
+	answers, _ := LoadAnswers(root)
+	joined := strings.Join(answers.Check(), "\n")
+	for _, want := range []string{"review-a と review-b は別のモデル", "別の提供会社", "readiness-assessor と readiness-checker", "implementer と同じモデルにできるレビュー役は 1 つまで"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("check should say %q: %s", want, joined)
+		}
+	}
+	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"deepseek/deepseek-chat","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"openai/gpt-5","readiness-assessor-model":"google/gemini-2.5-pro","readiness-checker-model":"openai/gpt-5-mini","designer-model":"anthropic/claude-opus-4","applier-model":"somevendor/model-x","separate-design":true,"design-review-a-model":"openai/gpt-5"}}`)
+	answers, _ = LoadAnswers(root)
+	joined = strings.Join(answers.Check(), "\n")
+	if !strings.Contains(joined, "applier-vendor") || !strings.Contains(joined, "design-review-b-model") || strings.Contains(joined, "implementer-vendor") {
+		t.Fatalf("vendor and design reviewer requirements: %s", joined)
+	}
+	if VendorFor("deepseek/deepseek-chat") != "DeepSeek" || VendorFor("x-ai/grok-4") != "xAI" || VendorFor("nobody/x") != "" || VendorFor("plain") != "" {
+		t.Fatal("vendor derivation")
+	}
+	writeAnswers(t, root, `{"answers":{`+base+`,"implementer-model":"deepseek/deepseek-chat","review-a-model":"anthropic/claude-sonnet-4","review-b-model":"openai/gpt-5","readiness-assessor-model":"google/gemini-2.5-pro","readiness-checker-model":"openai/gpt-5-mini","designer-model":"anthropic/claude-opus-4","applier-model":"somevendor/model-x","applier-vendor":"SomeVendor"}}`)
+	answers, _ = LoadAnswers(root)
+	if problems := answers.Check(); len(problems) != 0 {
+		t.Fatalf("a sound combination must pass: %v", problems)
 	}
 }
