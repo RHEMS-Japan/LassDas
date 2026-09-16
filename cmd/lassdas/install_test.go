@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -23,13 +24,19 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(engine, "docs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The instruction and the three documents it links to, by name: the
-	// list in the code must cover them, whatever it is.
+	// Every Markdown document beside the instruction travels with it (a
+	// directory and a non-Markdown file do not).
 	linked := []string{"SETUP.md", "PRODUCT_DIRECTION.md", "INIT_DECISIONS.md", "RUNTIME_POD.md"}
 	for _, name := range linked {
 		if err := os.WriteFile(filepath.Join(engine, "docs", name), []byte("# "+name+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.MkdirAll(filepath.Join(engine, "docs", "mockups"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(engine, "docs", "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	skills := filepath.Join(home, ".claude", "skills")
 	note := initwizard.Distribution{EngineRepository: "example/engine", Image: "registry.example/engine@sha256:" + strings.Repeat("a", 64), EngineSHA: strings.Repeat("b", 40), BuildRecord: "https://example/build/1", RegistryLogin: "docker login registry.example", CLI: filepath.Join(home, ".lassdas", "bin", "lassdas")}
@@ -40,6 +47,9 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 		if raw, err := os.ReadFile(filepath.Join(home, ".lassdas", name)); err != nil || string(raw) != "# "+name+"\n" {
 			t.Fatalf("installed %s: %q %v", name, raw, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".lassdas", "notes.txt")); !os.IsNotExist(err) {
+		t.Fatal("only Markdown documents are installed")
 	}
 	skill, err := os.ReadFile(filepath.Join(skills, "lassdas-setup", "SKILL.md"))
 	if err != nil {
@@ -187,5 +197,31 @@ func TestSetupApplyTakesTheDistributorsNote(t *testing.T) {
 	var secret *initwizard.MissingSecret
 	if !errors.As(err, &secret) || secret.Name != "TARGET_GITHUB_TOKEN" {
 		t.Fatalf("apply should reach the person's first turn, got: %v", err)
+	}
+}
+
+// Every link between the body's own documents resolves after install:
+// the set installed is the whole docs directory, so a new link never
+// dangles where the AI reads it.
+func TestInstalledDocumentsLinkOnlyToEachOther(t *testing.T) {
+	names, err := installedDocs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]bool{}
+	for _, name := range names {
+		present[name] = true
+	}
+	link := regexp.MustCompile(`\]\(([A-Za-z0-9_.-]+\.md)(?:#[^)]*)?\)`)
+	for _, name := range names {
+		raw, err := os.ReadFile(filepath.Join("../../docs", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range link.FindAllStringSubmatch(string(raw), -1) {
+			if !present[match[1]] {
+				t.Errorf("%s links to %s, which is not installed beside it", name, match[1])
+			}
+		}
 	}
 }

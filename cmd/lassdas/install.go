@@ -51,6 +51,11 @@ func setupInstall(ctx context.Context, engineRoot, home string, options installO
 		return fmt.Errorf("配布者の案内が足りません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
 	}
 	previous, hadPrevious, _ := initwizard.LoadDistribution(home)
+	if hadPrevious && (previous.Image != distribution.Image || previous.EngineSHA != distribution.EngineSHA) {
+		// Said before anything is written, so a build that fails below
+		// does not hide that the note changed.
+		_, _ = fmt.Fprintf(output, "配布者の案内を置き換えます (前: image %s / engine-sha %s)\n", previous.Image, previous.EngineSHA)
+	}
 	// The instruction, the note and the skill first, the CLI last: a build
 	// that fails leaves the pointers consistent, and a re-run repairs.
 	if err := installFiles(home, engineRoot, options.skillsDir, distribution); err != nil {
@@ -65,12 +70,21 @@ func setupInstall(ctx context.Context, engineRoot, home string, options installO
 		return fmt.Errorf("CLI を組み立てられませんでした: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 	skill := filepath.Join(options.skillsDir, "lassdas-setup", "SKILL.md")
-	if hadPrevious && (previous.Image != distribution.Image || previous.EngineSHA != distribution.EngineSHA) {
-		_, _ = fmt.Fprintf(output, "配布者の案内を置き換えました (前: image %s / engine-sha %s)\n", previous.Image, previous.EngineSHA)
+	built := headSHA(ctx, engineRoot)
+	if dirty(ctx, engineRoot) {
+		built += " (未コミットの変更あり)"
 	}
 	_, err = fmt.Fprintf(output, "入れました:\n- CLI: %s (この checkout %s から組み立て)\n- 導入指示と参照文書: %s\n- 配布者の案内: %s (image %s / engine-sha %s)\n- skill: %s\n\n以後は、どの repo でも新しい会話で「LassDas をこのプロジェクトに導入して」と頼むだけで始まります。\n",
-		cli, headSHA(ctx, engineRoot), filepath.Join(base, "SETUP.md"), filepath.Join(home, filepath.FromSlash(initwizard.DistributionFile)), distribution.Image, distribution.EngineSHA, skill)
+		cli, built, filepath.Join(base, "SETUP.md"), filepath.Join(home, filepath.FromSlash(initwizard.DistributionFile)), distribution.Image, distribution.EngineSHA, skill)
 	return err
+}
+
+// dirty reports uncommitted changes in the checkout the CLI was built from.
+func dirty(ctx context.Context, root string) bool {
+	command := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	command.Dir = root
+	out, err := command.Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // installFiles places what the skill points at: the instruction, the
@@ -81,12 +95,16 @@ func installFiles(home, engineRoot, skillsDir string, distribution initwizard.Di
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return err
 	}
-	// The instruction and the documents it links to, side by side, so
-	// its relative links still resolve where the AI reads it.
-	for _, name := range installedDocs {
+	// The instruction and every document beside it, so the links between
+	// them still resolve where the AI reads them.
+	names, err := installedDocs(engineRoot)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
 		content, err := os.ReadFile(filepath.Join(engineRoot, "docs", name))
 		if err != nil {
-			return fmt.Errorf("docs/%s が見つかりません (本体 repo の checkout が古いか、場所が違います)", name)
+			return fmt.Errorf("docs/%s を読めません: %v", name, err)
 		}
 		if err := os.WriteFile(filepath.Join(base, name), content, 0o644); err != nil {
 			return err
@@ -102,8 +120,28 @@ func installFiles(home, engineRoot, skillsDir string, distribution initwizard.Di
 	return os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(strings.ReplaceAll(skillTemplate, "{{HOME}}", home)), 0o644)
 }
 
-// installedDocs are the instruction and every document it links to.
-var installedDocs = []string{"SETUP.md", "PRODUCT_DIRECTION.md", "INIT_DECISIONS.md", "RUNTIME_POD.md"}
+// installedDocs lists the documents installed beside the instruction:
+// every Markdown file at the top of the body's docs directory, so no
+// link between them is left dangling. The instruction itself must be
+// among them.
+func installedDocs(engineRoot string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(engineRoot, "docs"))
+	if err != nil {
+		return nil, errors.New("docs/ が見つかりません (本体 repo の checkout が古いか、場所が違います)")
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			names = append(names, entry.Name())
+		}
+	}
+	for _, name := range names {
+		if name == "SETUP.md" {
+			return names, nil
+		}
+	}
+	return nil, errors.New("docs/SETUP.md が見つかりません (本体 repo の checkout が古いか、場所が違います)")
+}
 
 func originRepository(ctx context.Context, root string) string {
 	command := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
