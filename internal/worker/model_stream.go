@@ -18,6 +18,9 @@ import (
 // longer line is answering something other than a chat completion.
 const maxStreamEventBytes = 1 << 20
 
+// maxStreamChoices bounds how many candidates one streamed answer may carry.
+const maxStreamChoices = 7
+
 // postStreaming makes the same call post makes, asks for the answer in
 // pieces, and hands back the one response those pieces add up to. The rest
 // of the transport is unchanged: the caller cannot tell how the answer
@@ -131,6 +134,12 @@ func readChatStream(body io.Reader, live liveWriter) (*ChatResponse, error) {
 			response.Usage = chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
+			// The index comes from the wire. A turn asks for one answer and
+			// no provider returns eight; anything else would size an
+			// allocation from a number a stranger chose (review of #187).
+			if choice.Index < 0 || choice.Index > maxStreamChoices {
+				continue
+			}
 			if choice.FinishReason != "" {
 				finishes[choice.Index] = choice.FinishReason
 			}

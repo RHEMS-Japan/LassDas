@@ -23,12 +23,8 @@ const PathEnv = "LASSDAS_LIVE_LOG"
 const Dir = "live"
 
 // maxUnterminatedLine is how much of a line without an end is held before it
-// is shown anyway; secretTailBytes is what is kept back from that flush, so
-// no secret shape can be split across two masks.
-const (
-	maxUnterminatedLine = 16 * 1024
-	secretTailBytes     = 512
-)
+// is shown anyway.
+const maxUnterminatedLine = 16 * 1024
 
 // MaxBytes bounds one step's live log. An agent that loops can produce
 // megabytes; past the bound the file keeps its beginning, says it was cut,
@@ -92,19 +88,27 @@ func (s *Sink) Write(p []byte) (int, error) {
 			end = i + 1
 		}
 	}
+	forced := false
 	if end == 0 {
 		// A line that never ends would never be shown; past a reasonable
-		// length it is flushed as it stands, minus a tail long enough to
-		// hold any secret shape. Flushing the whole of it would let a value
-		// straddle two flushes and be masked as two halves of nothing
-		// (review of #187).
+		// length it is shown anyway, cut at the last space before the
+		// bound. Every secret shape is delimited by whitespace, so a cut
+		// there cannot split one - a cut at a fixed offset merely moved
+		// where the split happened (review of #187).
 		if len(s.pending) < maxUnterminatedLine {
 			return len(p), nil
 		}
-		end = len(s.pending) - secretTailBytes
+		end = lastSpaceBefore(s.pending, maxUnterminatedLine)
+		forced = true
 	}
 	chunk := string(s.pending[:end])
 	s.pending = append([]byte(nil), s.pending[end:]...)
+	if forced {
+		// The file keeps whole lines only: a reader serves it a line at a
+		// time, and a region with no line in it can never be served (review
+		// of #187).
+		chunk += "\n"
+	}
 	s.append(chunk)
 	return len(p), nil
 }
@@ -151,4 +155,20 @@ func (s *Sink) append(chunk string) {
 	if n, err := file.WriteString(masked); err == nil {
 		s.written += n
 	}
+}
+
+// lastSpaceBefore is where a line may be cut without splitting a word: the
+// last space at or before limit, or limit itself when the whole of it is one
+// unbroken run (no secret shape this masks is that long).
+func lastSpaceBefore(pending []byte, limit int) int {
+	if limit > len(pending) {
+		limit = len(pending)
+	}
+	for i := limit - 1; i > 0; i-- {
+		switch pending[i] {
+		case ' ', '\t', '\r':
+			return i + 1
+		}
+	}
+	return limit
 }

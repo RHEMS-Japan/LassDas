@@ -784,7 +784,7 @@ function renderBoard() {
   // Every card is rebuilt on each payload; a live pane still following a
   // step would keep asking for it from a card nobody can see (review of
   // #187).
-  for (const pane of runsBox.querySelectorAll(".livepane")) liveStop(pane);
+  for (const pane of runsBox.querySelectorAll(".livepane")) liveClose(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
     runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));

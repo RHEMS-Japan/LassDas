@@ -104,17 +104,16 @@ func read(t *testing.T, path string) string {
 	return string(raw)
 }
 
-// A line that never ends is shown eventually, but the flush stops short of
-// its tail: a secret arriving in small pieces would otherwise have its
-// first bytes written raw, where no scan recognises them (review of #187).
-func TestAnEndlessLineIsFlushedWithoutItsTail(t *testing.T) {
+// A line that never ends is shown eventually, cut at a space: every secret
+// shape is delimited by whitespace, so a cut there cannot split one. A cut
+// at a fixed offset merely moved where the split happened (review of #187).
+func TestAnEndlessLineIsCutAtASpace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "live", "stream.log")
 	sink := openAt(t, path)
 	secret := "TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-	// Enough filler that the flush threshold is crossed 20 bytes into the
-	// secret: without the held-back tail those 20 bytes go to the file on
-	// their own, and 20 bytes of a token match no shape.
-	filler := strings.Repeat("x", maxUnterminatedLine-20)
+	// A space before the token, and enough filler that the flush threshold
+	// falls inside the token itself.
+	filler := strings.Repeat("x", maxUnterminatedLine-20) + " "
 	for i := 0; i < len(filler); i += 64 {
 		end := i + 64
 		if end > len(filler) {
@@ -130,7 +129,7 @@ func TestAnEndlessLineIsFlushedWithoutItsTail(t *testing.T) {
 		_, _ = sink.Write([]byte(secret[i:end]))
 	}
 	if body := read(t, path); strings.Contains(body, "ghp_") {
-		t.Fatalf("part of the token was flushed before its line ended: %q", body[max(0, len(body)-80):])
+		t.Fatalf("part of the token was flushed: %q", body[max(0, len(body)-80):])
 	}
 	_, _ = sink.Write([]byte("\n"))
 	body := read(t, path)
@@ -139,6 +138,29 @@ func TestAnEndlessLineIsFlushedWithoutItsTail(t *testing.T) {
 	}
 	if !strings.Contains(body, "[masked:") {
 		t.Fatalf("the finished line was written without masking: %q", body[max(0, len(body)-80):])
+	}
+}
+
+// The file holds whole lines only, whatever a step writes: a reader serves
+// it a line at a time, so a region with no line in it could never be shown
+// at all (review of #187).
+func TestNoRegionWithoutALineSurvives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live", "endless.log")
+	sink := openAt(t, path)
+	for i := 0; i < 6; i++ {
+		_, _ = sink.Write([]byte(strings.Repeat("a", maxUnterminatedLine/2) + " "))
+	}
+	body := read(t, path)
+	if body == "" {
+		t.Fatal("nothing was flushed")
+	}
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if len(line) > maxUnterminatedLine {
+			t.Fatalf("a line of %d bytes cannot be served", len(line))
+		}
+	}
+	if !strings.HasSuffix(body, "\n") {
+		t.Fatalf("the file does not end at a line: %q", body[max(0, len(body)-40):])
 	}
 }
 

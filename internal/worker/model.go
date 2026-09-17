@@ -462,6 +462,10 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			if errors.Is(err, errStreamUnsupported) {
 				// The endpoint does not stream. The question is asked again
 				// in one piece, and this process stops asking for streams.
+				// The asking starts over: this call may pay one more round
+				// of the gateway's waits, and the streamed attempt that
+				// came back unusable may already have been billed. It
+				// happens at most once per process.
 				g.streamOff = true
 				plain := request
 				plain.Stream, plain.StreamOptions = false, nil

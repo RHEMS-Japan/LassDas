@@ -133,6 +133,9 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	if err := os.Setenv(livelog.PathEnv, livePath); err != nil {
 		p.Logger.Error("live log path not set", "error", err.Error())
 	}
+	// It belongs to this step only: the clone and the terminal phase run
+	// outside any step and must not append to the last one's file.
+	defer func() { _ = os.Unsetenv(livelog.PathEnv) }()
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = p.Workspace
 	live := livelog.Open()
