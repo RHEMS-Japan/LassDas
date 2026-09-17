@@ -216,3 +216,68 @@ func TestBoardPageRendersTheIntakeHoldNotice(t *testing.T) {
 		}
 	}
 }
+
+// A deployment that cannot post to the tracker can still link to it: the
+// origin is in the engine's own configuration, and reading a ticket needs
+// no credential.
+func TestTrackerBaseFallsBackToTheRuntimeConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	good := write("runtime.json", `{"tracker":{"origin":"https://example.backlog.jp","space_key":"example"}}`)
+	if got := trackerBaseFromRuntimeConfig(good); got != "https://example.backlog.jp" {
+		t.Fatalf("tracker base = %q", got)
+	}
+	for name, body := range map[string]string{
+		"insecure.json":   `{"tracker":{"origin":"http://example.backlog.jp"}}`,
+		"credential.json": `{"tracker":{"origin":"https://user:pass@example.backlog.jp"}}`,
+		"path.json":       `{"tracker":{"origin":"https://example.backlog.jp/view/X-1"}}`,
+		"empty.json":      `{"tracker":{}}`,
+		"broken.json":     `not json`,
+	} {
+		if got := trackerBaseFromRuntimeConfig(write(name, body)); got != "" {
+			t.Errorf("%s yielded %q, want no link", name, got)
+		}
+	}
+	if got := trackerBaseFromRuntimeConfig(filepath.Join(dir, "absent.json")); got != "" {
+		t.Errorf("a missing configuration yielded %q", got)
+	}
+	if got := trackerBaseFromRuntimeConfig(""); got != "" {
+		t.Errorf("an unset path yielded %q", got)
+	}
+}
+
+// The board reads this file before it starts listening, so a path that is
+// not a plain file must not be read at all (review of #192).
+func TestTrackerBaseRefusesWhatIsNotAPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	if got := trackerBaseFromRuntimeConfig(dir); got != "" {
+		t.Fatalf("a directory yielded %q", got)
+	}
+	target := filepath.Join(dir, "runtime.json")
+	if err := os.WriteFile(target, []byte(`{"tracker":{"origin":"https://example.backlog.jp"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A ConfigMap mounts its files as links to the data behind them, so a
+	// link to a plain file is the deployment shape, not an attack.
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := trackerBaseFromRuntimeConfig(link); got != "https://example.backlog.jp" {
+		t.Fatalf("a mounted configuration yielded %q", got)
+	}
+	// A link to something that is not a plain file is still refused.
+	loop := filepath.Join(dir, "loop.json")
+	if err := os.Symlink(dir, loop); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := trackerBaseFromRuntimeConfig(loop); got != "" {
+		t.Fatalf("a link to a directory yielded %q", got)
+	}
+}

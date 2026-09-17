@@ -161,7 +161,12 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 			}
 			continue
 		}
-		if !answerCandidatePattern.MatchString(strings.TrimSpace(body)) {
+		// A comment takes part only when it is addressed to the question:
+		// it opens with the answer marker, or - when one question is on the
+		// table - it is nothing but one of that question's choices. Every
+		// other comment on the ticket is a conversation between people and
+		// is left alone.
+		if !answerCandidatePattern.MatchString(strings.TrimSpace(body)) && !bareChoiceAnswer(questions, body) {
 			continue
 		}
 		answers, missing, ok := parseAnswerBody(body, input.Question.QuestionRevision, questions)
@@ -268,9 +273,27 @@ func decodeIntakeQuestions(encoded string) ([]answerQuestion, error) {
 // normalizeAnswerBody applies the format rescue for hand-typed Japanese input:
 // full-width spaces and colons become their ASCII forms. Nothing else is
 // rewritten; the sealed digest is always taken over the raw body.
+// normalizeAnswerBody rescues what a Japanese keyboard produces when the
+// requester is typing an answer rather than prose: a full-width space, a
+// full-width colon, and the full-width letters a choice id is written with
+// in 全角英数 mode. Without the letters, "ａ" was ignored exactly as the
+// bare "a" used to be (review of #192).
 func normalizeAnswerBody(body string) string {
-	return strings.NewReplacer("　", " ", "：", ":").Replace(body)
+	return fullWidthAnswerRunes.Replace(body)
 }
+
+var fullWidthAnswerRunes = strings.NewReplacer(
+	"　", " ", "：", ":",
+	// The letters a choice id is written with (ids are a, b, c, d), the
+	// letters the markers use, and the digits of a revision or a question
+	// number. Rewriting them is what lets 「回答 Ｃ１ Ｑ１：ａ」 and
+	// 「中止Ｃ１」 be read at all.
+	"ａ", "a", "ｂ", "b", "ｃ", "c", "ｄ", "d",
+	"Ａ", "A", "Ｂ", "B", "Ｃ", "C", "Ｄ", "D",
+	"Ｑ", "Q", "ｑ", "q",
+	"０", "0", "１", "1", "２", "2", "３", "3", "４", "4",
+	"５", "5", "６", "6", "７", "7", "８", "8", "９", "9",
+)
 
 func firstContentLine(body string) string {
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
@@ -299,15 +322,22 @@ func revisionMarker(revision int) string {
 // pasted lines are not punished for it.
 func parseAnswerBody(body string, revision int, questions []answerQuestion) (map[string]string, []string, bool) {
 	marker := revisionMarker(revision)
-	lines := []string{}
-	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			lines = append(lines, trimmed)
-		}
-	}
+	lines := contentLines(body)
 	if len(lines) == 0 {
 		return nil, nil, false
+	}
+	// One question, one line, and that line names one of its choices: the
+	// answer is the choice. Requiring "回答 C1 Q1:a" from a person facing a
+	// single question with two options is a format demand, not a question -
+	// a requester answered "a" and was ignored, and the run waited on
+	// (live 2026-09-17: 「質問文は 回答 C1 Q1:a、馬鹿だな、解釈しろし」).
+	// Only the current question's own choices are accepted, and only for a
+	// comment posted after that question, so a bare word can never be read
+	// as an answer to a question it was not shown.
+	if len(questions) == 1 && len(lines) == 1 {
+		if choice, ok := soleChoice(questions[0], lines[0]); ok {
+			return map[string]string{questions[0].id: choice}, []string{}, true
+		}
 	}
 	answers := map[string]string{}
 	sawHeader := false
@@ -376,4 +406,46 @@ func resolveAnswerPair(questions []answerQuestion, number, choiceToken string) (
 		return "", "", false
 	}
 	return "", "", false
+}
+
+// soleChoice reads a line that names nothing but one of the question's
+// choices: "a", "A", "a." or "a。" - the shapes a person types when there is
+// one question in front of them. Anything else is not an answer here.
+func soleChoice(question answerQuestion, line string) (string, bool) {
+	trimmed := strings.TrimRight(strings.TrimSpace(line), ".。、,)）")
+	trimmed = strings.TrimSpace(strings.TrimLeft(trimmed, "(（"))
+	if trimmed == "" {
+		return "", false
+	}
+	for _, choice := range question.choices {
+		if strings.EqualFold(trimmed, choice) {
+			return choice, true
+		}
+	}
+	return "", false
+}
+
+// bareChoiceAnswer reports whether the whole comment is one of the sole
+// question's choices.
+func bareChoiceAnswer(questions []answerQuestion, body string) bool {
+	if len(questions) != 1 {
+		return false
+	}
+	lines := contentLines(body)
+	if len(lines) != 1 {
+		return false
+	}
+	_, ok := soleChoice(questions[0], lines[0])
+	return ok
+}
+
+// contentLines is the comment's non-empty lines, trimmed.
+func contentLines(body string) []string {
+	lines := []string{}
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
 }

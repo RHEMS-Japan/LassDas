@@ -225,3 +225,22 @@ func TestCommentMarkerIsAnchoredToTheFinalLine(t *testing.T) {
 		t.Fatal("a body was validated against a marker it does not carry")
 	}
 }
+
+// A single question says so: the requester may answer with the choice
+// itself, and the question is where they learn that.
+func TestQuestionCommentOffersTheShortAnswerForASingleQuestion(t *testing.T) {
+	single, err := QuestionCommentContent(intakeTestRecord(questionTestSetJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(single, "選択肢の記号 (例: a) だけをコメントしても受け付けます") {
+		t.Fatalf("the single question does not offer the short answer:\n%s", single)
+	}
+	many, err := QuestionCommentContent(intakeTestRecord(intakeTwoQuestionSet))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(many, "だけをコメントしても受け付けます") {
+		t.Fatalf("a two-question set offered an answer that cannot be read:\n%s", many)
+	}
+}

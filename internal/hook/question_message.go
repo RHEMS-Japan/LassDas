@@ -80,6 +80,9 @@ func QuestionCommentContent(record QuestionRecord) (string, error) {
 	fmt.Fprintf(&builder, "【確認のお願い %s】回答期限: %s\n\n", tag, formatQuestionInstant(record.AnswerDeadlineAt))
 	builder.WriteString("このチケットの自動処理を進めるために、以下の確認が必要です。対象リポジトリと本番環境には、まだ何も変更を加えていません。\n")
 	builder.WriteString("回答は、選びたい選択肢の下にある「回答 " + tag + " ...」の行を、そのままコメントに貼り付けて投稿してください。質問が複数ある場合は、各質問の行を 1 つのコメントにまとめてください。\n")
+	if len(items) == 1 && len(items[0].Choices) > 0 {
+		builder.WriteString("この質問は 1 問だけなので、選択肢の記号 (例: " + items[0].Choices[0].ID + ") だけをコメントしても受け付けます。\n")
+	}
 	for _, item := range items {
 		fmt.Fprintf(&builder, "\n%s. %s\n", item.ID, item.Question)
 		if item.WhyBlocking != "" {

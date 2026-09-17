@@ -111,6 +111,13 @@ func run() error {
 	if poster == nil {
 		logger.Info("board actions disabled (no requester credential configured)")
 	}
+	if trackerBase == "" {
+		// Reading the ticket needs no credential, and the guidance on every
+		// card tells the requester to open it. Without a link they were
+		// asked to find the ticket themselves - space, project, issue,
+		// then the right comment (live 2026-09-17).
+		trackerBase = trackerBaseFromRuntimeConfig(os.Getenv("LASSDAS_RUNTIME_CONFIG"))
+	}
 
 	board := &boardServer{
 		statusDir: statusDir, trackerBase: trackerBase,
@@ -234,6 +241,47 @@ func envOr(name, fallback string) string {
 // buildPoster assembles the requester-credential comment poster. All three
 // pieces (origin, space, key) must be present; a partial configuration is
 // a refused start, not a silently read-only board.
+// trackerBaseFromRuntimeConfig reads the tracker's own origin from the
+// engine's runtime configuration, so a deployment that cannot post can still
+// link to the ticket. Best-effort: anything unreadable, or an origin that is
+// not a plain https host, yields no link rather than a wrong one.
+func trackerBaseFromRuntimeConfig(path string) string {
+	if path == "" {
+		return ""
+	}
+	// Checked before it is read: a path that is not a plain file of a
+	// sensible size is not this configuration, and the board must not block
+	// on it - the read happens before the server starts listening (review
+	// of #192).
+	// Stat, not Lstat: a configuration mounted from a ConfigMap is a link
+	// to the data behind it, and refusing that would take the ticket link
+	// off every card in a deployment that mounts it that way. Following the
+	// link still reports a pipe or a directory, which is what this check is
+	// for (review of #192).
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var config struct {
+		Tracker struct {
+			Origin string `json:"origin"`
+		} `json:"tracker"`
+	}
+	if json.Unmarshal(raw, &config) != nil {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(config.Tracker.Origin))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || strings.Trim(parsed.Path, "/") != "" {
+		return ""
+	}
+	return "https://" + parsed.Host
+}
+
 func buildPoster() (*backlog.Client, string, error) {
 	origin := os.Getenv("LASSDAS_BOARD_TRACKER_ORIGIN")
 	space := os.Getenv("LASSDAS_BOARD_TRACKER_SPACE")
