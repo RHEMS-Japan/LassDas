@@ -45,5 +45,7 @@ func runDeliver(ctx context.Context, arguments []string) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	pipeline := &runner.Pipeline{Config: config, Workspace: workspace, TargetToken: token, Logger: logger}
+	// The card is done when this returns; nothing is running.
+	defer runner.ClearCurrentStep(workspace)
 	return pipeline.RunDeliver(ctx, *until)
 }

@@ -247,6 +247,11 @@
   .livepane pre { margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); }
   .node { cursor: default; }
   .node.hasLive .nname { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; cursor: pointer; }
+  /* While a pane is pinned the other rails do not answer a hover, so they
+     stop offering to: an underline and a pointer cursor on something that
+     does nothing reads as broken (review of #200). */
+  body.livePinned .node.hasLive .nname { text-decoration: none; cursor: default; }
+  body.livePinned .card.pinnedHost .node.hasLive .nname { text-decoration: underline dotted var(--muted); cursor: pointer; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip {
     display: inline-flex; align-items: center; gap: 8px;
@@ -388,6 +393,59 @@ function setTrack(container, stepID, round, stage) {
    Hovering a stage of the rail opens its output; clicking pins it open so a
    reader can scroll it. Only whole lines arrive, already masked by the
    engine that wrote them. */
+// pointerAt is where the pointer was last seen. Until it has moved once
+// there is nothing to ask, and an unpinned pane is not restored - the
+// reader is not there as far as anything can tell.
+let pointerAt = null;
+const rememberPointer = event => { pointerAt = { x: event.clientX, y: event.clientY }; };
+document.addEventListener("mousemove", rememberPointer, { passive: true });
+// A reader whose cursor was already over the rail when the page loaded has
+// moved nothing, and without a position an unpinned pane would be given up
+// on the first refresh. Entering a rail node is itself a position (review
+// of #200).
+document.addEventListener("mouseover", rememberPointer, { passive: true });
+
+function pointerIsOver(node) {
+  if (!pointerAt || !document.elementFromPoint) return false;
+  const under = document.elementFromPoint(pointerAt.x, pointerAt.y);
+  return !!under && (under === node || node.contains(under));
+}
+
+// closeOtherPanes stops every pane but this one.
+function closeOtherPanes(keep) {
+  const runsBox = document.getElementById("runs");
+  if (!runsBox) return;
+  for (const pane of runsBox.querySelectorAll(".livepane")) {
+    if (pane !== keep && pane.classList.contains("on")) {
+      pane.state.pinned = false;
+      liveDetach(pane);
+    }
+  }
+}
+
+// maxCarriedText bounds what a pane keeps across refreshes. Without it the
+// text carried forward grew by everything that arrived between refreshes
+// and nothing ever cut it back: a stage is up to a dozen steps of a
+// megabyte each, and a pinned pane read the whole accumulation out and
+// wrote it back about once a minute (review of #200).
+const maxCarriedText = 64 * 1024;
+
+// trimForCarry keeps the end of what the reader has, from a line boundary,
+// and says that the beginning was dropped.
+function trimForCarry(text) {
+  if (text.length <= maxCarriedText) return text;
+  const tail = text.slice(text.length - maxCarriedText);
+  const start = tail.indexOf("\n");
+  return "── 以前の分は表示から外しました ──\n" + (start < 0 ? tail : tail.slice(start + 1));
+}
+
+// deliveryIDOf names the card a pane belongs to, which is what the follow
+// is keyed on.
+function deliveryIDOf(pane) {
+  const card = pane.closest(".card");
+  return (card && card.dataset.delivery) || "";
+}
+
 function buildLivePane() {
   const pane = el("div", "livepane");
   const head = el("div", "lphead");
@@ -396,7 +454,7 @@ function buildLivePane() {
   head.appendChild(el("span", "pin", ""));
   pane.appendChild(head);
   pane.appendChild(el("pre"));
-  pane.state = { timer: null, from: 0, step: null, pinned: false, stage: null };
+  pane.state = { timer: null, from: 0, step: null, header: null, idle: false, offsets: {}, rendered: false, pinned: false, stage: null };
   return pane;
 }
 
@@ -405,50 +463,251 @@ function liveStop(pane) {
   pane.state.timer = null;
 }
 
+// liveFollow is the stage the reader is watching, kept outside the cards
+// because every card is rebuilt whenever the server sends a payload. Without
+// it the pane a reader was reading vanished on the next refresh — about once
+// a minute, and immediately on any event — which looks exactly like a stage
+// whose live output does not work (live 2026-09-17).
+let liveFollow = null; // {deliveryID, issueKey, stage, stageName, pinned}
+
 function liveClose(pane) {
+  // Only this pane's own follow is given up here. A pinned pane is the
+  // reader saying "keep this open", and a pointer leaving a different
+  // ticket's rail must not take it back - the pointer that left was never
+  // on it (review of #200).
+  if (liveFollow && !liveFollow.pinned && liveFollow.deliveryID === deliveryIDOf(pane)) {
+    setFollow(null);
+  }
+  liveDetach(pane);
+}
+
+// liveDetach stops a pane without forgetting what it was following, for the
+// rebuild: liveRestore opens the new card's pane on the same stage.
+function liveDetach(pane) {
+  // What the reader had. Every card is rebuilt on every payload, so
+  // without this a pinned pane went back to "読み込み中…" about once a
+  // minute and re-read its log from the beginning, losing the place the
+  // reader had scrolled to (review of #200).
+  if (liveFollow && liveFollow.deliveryID === deliveryIDOf(pane) && pane.classList.contains("on") && pane.state.rendered) {
+    // Only real output is carried. The pane's other two states are
+    // sentences - "読み込み中…" and "この工程の実況はまだありません。" -
+    // and carrying one left it sitting above the output that arrived
+    // afterwards, with nothing left to clear it (review of #200).
+    const body = pane.querySelector("pre");
+    liveFollow.resume = {
+      text: trimForCarry(body.textContent), step: pane.state.step, from: pane.state.from,
+      offsets: pane.state.offsets, scrollTop: body.scrollTop,
+      atBottom: body.scrollTop + body.clientHeight >= body.scrollHeight - 24,
+    };
+  }
   liveStop(pane);
   pane.classList.remove("on");
   pane.state.step = null;
   pane.state.stage = null;
   pane.state.from = 0;
+  pane.state.header = null;
+  pane.state.idle = false;
+  pane.state.offsets = {};
+  pane.state.rendered = false;
   pane.querySelector("pre").textContent = "";
 }
 
-function liveOpen(pane, issueKey, stage, stageName) {
+// liveRestore reopens the followed stage on the rebuilt card. A run that has
+// left the board takes its pane with it, and the follow ends there.
+// markPinned tells the page whether a pane is pinned, so the rails that
+// will not answer a hover stop offering to.
+function markPinned() {
+  const pinned = !!(liveFollow && liveFollow.pinned);
+  document.body.classList.toggle("livePinned", pinned);
+  const runsBox = document.getElementById("runs");
+  if (!runsBox) return;
+  for (const card of runsBox.querySelectorAll(".card")) {
+    card.classList.toggle("pinnedHost", pinned && card.dataset.delivery === liveFollow.deliveryID);
+  }
+}
+
+// setFollow is the only way the follow changes, so what the page shows can
+// never drift from it. Updating it by hand in two places left every rail
+// looking inert for ever once a pinned ticket left the board (review of
+// #200).
+function setFollow(value) {
+  liveFollow = value;
+  markPinned();
+}
+
+function liveRestore(runsBox) {
+  if (!liveFollow) return;
+  const follow = liveFollow;
+  // By delivery, not by ticket: the same ticket can have two deliveries on
+  // the board, and the first card with that key is not necessarily the one
+  // the reader was on (review of #200).
+  const card = runsBox.querySelector('.card[data-delivery="' + CSS.escape(follow.deliveryID) + '"]');
+  const pane = card && card.querySelector(".livepane");
+  const node = card && card.querySelector('.node[data-step="' + CSS.escape(follow.stage) + '"]');
+  if (!pane || !node) {
+    setFollow(null);
+    return;
+  }
+  // An unpinned pane belongs to the pointer. After a rebuild the old nodes
+  // are gone without a mouseleave and a focused one never blurs, so the
+  // pointer is the only thing that still says whether the reader is there.
+  //
+  // It is asked by coordinate, not by asking the new node whether it is
+  // hovered: the rebuild and this call are one synchronous task, and the
+  // browser has had no chance to move its hover chain onto elements
+  // created three lines ago. elementFromPoint hit-tests on demand and
+  // answers about the tree as it is now (review of #200).
+  if (!follow.pinned && !pointerIsOver(node)) {
+    setFollow(null);
+    return;
+  }
+  pane.state.pinned = follow.pinned;
+  const resume = follow.resume;
+  follow.resume = null;
+  liveOpen(pane, follow.issueKey, follow.stage, follow.stageName, resume);
+}
+
+function liveOpen(pane, issueKey, stage, stageName, resume) {
+  // One pane at a time. Two open panes each poll, each say "固定中", and
+  // the next refresh keeps whichever the follow names and drops the other
+  // without the reader asking (review of #200).
+  closeOtherPanes(pane);
+  // A pinned pane elsewhere is not displaced by a pointer wandering over
+  // another rail; the reader unpins it or clicks somewhere else.
+  if (!liveFollow || !liveFollow.pinned || pane.state.pinned) {
+    setFollow({
+      deliveryID: deliveryIDOf(pane), issueKey: issueKey,
+      stage: stage, stageName: stageName, pinned: pane.state.pinned,
+    });
+  }
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
-  pane.state = Object.assign(pane.state, { from: 0, step: null, stage: stage });
+  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, idle: false, offsets: {}, rendered: false, stage: stage });
   pane.classList.add("on");
   pane.querySelector(".lphead b").textContent = stageName;
   pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
+  if (resume) {
+    // Carried across the rebuild: the same text, the same place in each
+    // step's file, the same place on the page, and no "読み込み中…" in
+    // between.
+    const body = pane.querySelector("pre");
+    body.textContent = resume.text;
+    pane.state.step = resume.step;
+    pane.state.from = resume.from;
+    pane.state.offsets = resume.offsets || {};
+    pane.state.rendered = true;
+    // The index is asked on the first tick after a carry: a step can
+    // finish while the board is rebuilding, and a pane that kept its step
+    // and never looked again sat on dead output for ever (review of #200).
+    pane.state.idle = true;
+    if (resume.atBottom) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = resume.scrollTop || 0;
+    }
+    liveTick(pane, issueKey, stage, false);
+    return;
+  }
   pane.querySelector("pre").textContent = "読み込み中…";
   liveTick(pane, issueKey, stage, true);
 }
 
 function liveTick(pane, issueKey, stage, first) {
   const body = pane.querySelector("pre");
-  const pick = pane.state.step
+  // The newest writer of this stage, asked again every tick. A stage is
+  // several steps one after another, and following only the one that was
+  // newest when the pane opened left the reader watching a step that had
+  // finished while the stage carried on (live 2026-09-17).
+  const unreachable = {};
+  // The index is asked when there is no step yet, and after that only when
+  // the one being followed has stopped growing. A stage is several steps in
+  // a row, so the pane has to notice the hand-over - but asking every tick
+  // doubled the requests and made the newest writer flip back and forth
+  // (review of #200).
+  //
+  // The hand-over is therefore noticed a tick late, and not at all while
+  // the step being followed writes something every single second and
+  // another step of the same stage runs beside it. Both at once is rare;
+  // a step that writes less often than the tick leaves a quiet tick, which
+  // is when the pane looks again.
+  const pick = (pane.state.step && !pane.state.idle)
     ? Promise.resolve(pane.state.step)
     : fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
-        .then(r => r.ok ? r.json() : { steps: [] })
-        .then(index => {
-          const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
-          return match ? match.step : null;
-        });
+      .then(r => r.ok ? r.json() : unreachable)
+      .then(index => {
+        if (index === unreachable) return unreachable;
+        // Ties broken by name, because two files written in the same
+        // millisecond otherwise came back in whichever order the sort
+        // happened to produce, and the pane announced a hand-over each
+        // time it changed its mind (review of #200).
+        const match = (index.steps || []).filter(s => s.stage === stage)
+          .sort((a, b) => b.updated_at_ms - a.updated_at_ms || a.step.localeCompare(b.step))[0];
+        return match ? match.step : pane.state.step;
+      })
+      .catch(() => unreachable);
   pick.then(step => {
     if (pane.state.stage !== stage) return;
+    if (step === unreachable) {
+      // The board could not be reached. That is not "this stage has
+      // produced nothing"; saying so would put the very sentence this
+      // pane exists to remove in front of a reader whose network blinked
+      // (review of #200).
+      if (first) body.textContent = "読み込み中…";
+      pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, first), 4000);
+      return;
+    }
     if (!step) {
       if (first) body.textContent = "この工程の実況はまだありません。";
       pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 3000);
       return;
     }
+    if (pane.state.step && pane.state.step !== step) {
+      // The stage moved on. It resumes where this step was left rather
+      // than at its beginning: the newest writer can be one the reader
+      // already watched - a step is appended to by more than one phase -
+      // and starting again pasted its whole output a second time (review
+      // of #200). What is already in the pane stays: a stage is six steps
+      // in a row at its longest, and clearing on each one emptied a pinned
+      // pane under the reader.
+      pane.state.from = pane.state.offsets[step] || 0;
+      pane.state.header = step;
+    }
     pane.state.step = step;
     return fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live/" + encodeURIComponent(step) + "?from=" + pane.state.from, { headers: { Accept: "application/json" } })
       .then(r => r.ok ? r.json() : null)
       .then(chunk => {
-        if (!chunk || pane.state.stage !== stage) return;
-        if (first || pane.state.from === 0) body.textContent = "";
+        if (pane.state.stage !== stage) return;
+        if (!chunk) {
+          // Same reasoning: try again rather than stop for ever.
+          pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, first), 4000);
+          return;
+        }
+        // Cleared when the pane opens, and when the server rewound us
+        // because the file it was reading was replaced by a newer run. Not
+        // on a step change: a step that has started and written nothing
+        // yet is the ordinary case, and clearing there emptied the pane
+        // under the reader one tick after the hand-over (review of #200).
+        const rewound = chunk.from === 0 && (pane.state.offsets[step] || 0) > 0;
+        // The answer starts later than what was asked for: the log is
+        // already longer than one answer carries. Noted after the clear
+        // below, not before it - written first, the clear took it away in
+        // the one case that needs it most, opening a pane on a log that
+        // was long before anybody looked (review of #200).
+        const skipped = chunk.from > pane.state.from;
+        if (first || rewound) body.textContent = "";
+        if (skipped) {
+          body.appendChild(document.createTextNode("── 中略 (表示できる量を超えたため、途中を飛ばしました) ──\n"));
+          pane.state.rendered = true;
+        }
+        if (pane.state.header) {
+          // The pane may still be showing the sentence it waits behind;
+          // the incoming step's name goes on its own, not after it.
+          if (!pane.state.rendered) body.textContent = "";
+          body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
+          pane.state.header = null;
+        }
         if (chunk.text) {
+          pane.state.rendered = true;
           const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
           body.appendChild(document.createTextNode(chunk.text));
           if (atBottom) body.scrollTop = body.scrollHeight;
@@ -456,9 +715,17 @@ function liveTick(pane, issueKey, stage, first) {
           body.textContent = "この工程の実況はまだありません。";
         }
         pane.state.from = chunk.next;
+        pane.state.offsets[step] = chunk.next;
+        // Nothing new: ask the index again next time in case the stage has
+        // handed over to another step.
+        pane.state.idle = !chunk.text;
         pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 1000);
       });
   }).catch(() => {
+    // The same guard the success paths carry: a pane closed while its
+    // request was in flight must not schedule another one, or a board that
+    // is briefly unreachable leaves one unstoppable loop per refresh.
+    if (pane.state.stage !== stage) return;
     pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 4000);
   });
 }
@@ -466,20 +733,36 @@ function liveTick(pane, issueKey, stage, first) {
 function wireLive(node, issueKey, stage, stageName, pane) {
   node.classList.add("hasLive");
   node.tabIndex = 0;
-  const open = () => { if (!pane.state.pinned) liveOpen(pane, issueKey, stage, stageName); };
+  // A pinned pane anywhere holds the view: the pointer wandering over
+  // another rail neither displaces it nor opens a second one beside it.
+  // Clicking still pins the new stage, which is the reader asking.
+  const open = () => {
+    if (pane.state.pinned) return;
+    if (liveFollow && liveFollow.pinned) return;
+    liveOpen(pane, issueKey, stage, stageName);
+  };
   node.addEventListener("mouseenter", open);
   node.addEventListener("focus", open);
   node.addEventListener("mouseleave", () => { if (!pane.state.pinned) liveClose(pane); });
   node.addEventListener("blur", () => { if (!pane.state.pinned) liveClose(pane); });
   node.addEventListener("click", () => {
     if (pane.state.pinned && pane.state.stage === stage) {
+      // Both halves: the pane stops being pinned and the follow goes with
+      // it. Leaving the follow pinned made the pane reopen on the next
+      // refresh, pinned, so the reader could never put it away (review of
+      // #200).
       pane.state.pinned = false;
+      setFollow(null);
       liveClose(pane);
       return;
     }
     pane.state.pinned = false;
     liveOpen(pane, issueKey, stage, stageName);
     pane.state.pinned = true;
+    setFollow({
+      deliveryID: deliveryIDOf(pane), issueKey: issueKey,
+      stage: stage, stageName: stageName, pinned: true,
+    });
     pane.querySelector(".lphead .pin").textContent = "固定中 (もう一度クリックで解除)";
   });
   node.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.click(); } });
@@ -694,6 +977,8 @@ function buildResolveRow(run) {
 
 function buildCard(run) {
   const card = el("div", "card");
+  if (run.issue_key) card.dataset.issueKey = run.issue_key;
+  // One attribute for the delivery, read by the live pane's follow.
   card.dataset.delivery = run.delivery_id;
   const tone = TONE[run.step];
   if (tone) card.classList.add(tone);
@@ -784,13 +1069,14 @@ function renderBoard() {
   // Every card is rebuilt on each payload; a live pane still following a
   // step would keep asking for it from a card nobody can see (review of
   // #187).
-  for (const pane of runsBox.querySelectorAll(".livepane")) liveClose(pane);
+  for (const pane of runsBox.querySelectorAll(".livepane")) liveDetach(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
     runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));
   } else {
     for (const run of active) runsBox.appendChild(buildCard(run));
   }
+  liveRestore(runsBox);
 
   const chips = document.getElementById("chips");
   chips.replaceChildren();

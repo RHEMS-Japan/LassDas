@@ -57,5 +57,11 @@ func runChainStage(ctx context.Context, arguments []string) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	pipeline := &runner.Pipeline{Config: config, Workspace: workspace, TargetToken: token, Logger: logger}
+	// Whatever this card was running is no longer running when it returns.
+	// Only the one-process mode cleared this, so in the cards the record
+	// outlived every card and the ticket page kept a pulsing "いま動いて
+	// います" beside a run that had finished, for two hours (review of
+	// #200).
+	defer runner.ClearCurrentStep(workspace)
 	return pipeline.RunChainStage(ctx, *stage)
 }

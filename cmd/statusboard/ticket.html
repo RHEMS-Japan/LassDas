@@ -49,6 +49,7 @@
     .live { margin-top: 10px; display: flex; gap: 10px; align-items: baseline; }
     .live b::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--ok, #2f9e44); animation: pulse 1.6s ease-in-out infinite; }
     .live .since { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .live .stepname { color: var(--muted); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
     @media (prefers-reduced-motion: reduce) { .live b::before { animation: none; } }
   pre.trail { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); margin: 6px 0 0; }
@@ -100,9 +101,22 @@
     if (view.repository) row("納品先", view.repository);
     head.appendChild(dl);
     if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
-    if (view.running) {
+    // The record that says which step is running is cleared when a card
+    // ends, but a card killed from outside leaves one behind. A run the
+    // board calls finished or waiting is not running whatever the record
+    // says, and a pulsing "いま動いています" beside 「失敗で終了」 is the
+    // page arguing with itself (review of #200).
+    const resting = ["done", "failed", "stopped", "question", "confirm", "attention"].includes(board.step);
+    if (view.running && !resting) {
       const live = el("div", "live");
-      live.appendChild(el("b", null, "いま動いています: " + view.running.step));
+      // What the board says, read from the board's own row, so the two
+      // screens cannot give one ticket two different answers. The step's
+      // own name goes after it for anyone reading the records, in its own
+      // class - the two-second refresh writes the first ".since" it finds,
+      // which was overwriting the step name with a second elapsed counter
+      // and freezing the real one (review of #200).
+      live.appendChild(el("b", null, "いま動いています: " + (board.step_title || view.running.step)));
+      if (board.step_title) live.appendChild(el("span", "stepname", view.running.step));
       const since = el("span", "since", elapsed(view.running.started_at));
       live.appendChild(since);
       head.appendChild(live);
