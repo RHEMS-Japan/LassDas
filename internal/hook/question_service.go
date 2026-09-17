@@ -863,6 +863,18 @@ func (s *QuestionTickService) completeLostIngest(ctx context.Context) Result {
 	advanced := cursor
 	matched := 0
 	stalled := false
+	// The cursor stops where the first unsettled ticket is and does not
+	// move again in this scan, whatever comes after it - including
+	// activities this automation does not own. Advancing on one of those
+	// carried the cursor past a ticket that was waiting its turn, and the
+	// scan reads only what is newer than the cursor, so that ticket was
+	// never read again: filed, acknowledged nowhere, and silently gone
+	// (measured live 2026-09-17).
+	advance := func(id int64) {
+		if !stalled {
+			advanced = id
+		}
+	}
 	for _, hint := range hints {
 		if hint.ActivityID <= advanced {
 			continue
@@ -870,7 +882,7 @@ func (s *QuestionTickService) completeLostIngest(ctx context.Context) Result {
 		if hint.ActivityType != s.config.AllowedActivityType || hint.ProjectID != s.config.ProjectID ||
 			hint.CreatorID != s.config.AllowedCreatorID {
 			// Conclusively not a ticket this automation owns.
-			advanced = hint.ActivityID
+			advance(hint.ActivityID)
 			continue
 		}
 		matched++
@@ -891,9 +903,7 @@ func (s *QuestionTickService) completeLostIngest(ctx context.Context) Result {
 			stalled = true
 			continue
 		}
-		if !stalled {
-			advanced = hint.ActivityID
-		}
+		advance(hint.ActivityID)
 	}
 	if advanced > cursor {
 		if err := s.store.StoreIngestCursor(ctx, s.config, advanced); err != nil {
