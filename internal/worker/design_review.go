@@ -173,11 +173,12 @@ func ConfirmTreeUnchanged(root string) error {
 }
 
 // ValidateDesignReviewSet checks that a decision's reviews come from this
-// configuration's reviewers, one review each: two reviewers of different
-// vendors for a design (the same veto structure as a code review), the
-// evidence reviewer alone for an investigation report.
+// configuration's reviewers, one review each: one review per configured
+// judge for a design - two of different vendors where two are configured,
+// the same veto structure as a code review - and the evidence reviewer
+// alone for an investigation report.
 func ValidateDesignReviewSet(config Config, subject investigate.ReviewSubject, reviews []investigate.DesignReview) error {
-	if expected := investigate.ReviewsRequired(subject.Kind); len(reviews) != expected {
+	if expected := investigate.ReviewsRequired(subject.Kind, len(config.Models.DesignJudges())); len(reviews) != expected {
 		return fmt.Errorf("a %s decision needs %d reviews and was given %d", subject.Kind, expected, len(reviews))
 	}
 	seen := make(map[string]struct{}, len(reviews))

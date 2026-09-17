@@ -88,9 +88,16 @@ func Sections(subject string) []string {
 }
 
 // ReviewsRequired is how many reviews a decision on the subject needs.
-func ReviewsRequired(subject string) int {
+// judges is how many judges the configuration names. One judge writes one
+// review, and a decision on it is a decision on one review. A caller that
+// does not know answers zero, and the original two are required, so a
+// decision is never accepted with fewer reviews than were meant to exist.
+func ReviewsRequired(subject string, judges int) int {
 	if subject == SubjectInvestigation {
 		return ReviewsPerInvestigation
+	}
+	if judges == 1 {
+		return 1
 	}
 	return DesignReviewsPerDesign
 }
@@ -414,8 +421,8 @@ type DesignDecision struct {
 // when any review objects at the last round. round is the caller's own
 // count and must be the subject's; maxRounds comes from the configuration
 // the identity is bound to.
-func DecideDesign(identity Identity, subject ReviewSubject, reviews []DesignReview, round, maxRounds int) (DesignDecision, error) {
-	digests, outcome, err := deriveDesignOutcome(identity, subject, reviews, round, maxRounds)
+func DecideDesign(identity Identity, subject ReviewSubject, reviews []DesignReview, round, maxRounds, judges int) (DesignDecision, error) {
+	digests, outcome, err := deriveDesignOutcome(identity, subject, reviews, round, maxRounds, judges)
 	if err != nil {
 		return DesignDecision{}, err
 	}
@@ -428,7 +435,7 @@ func DecideDesign(identity Identity, subject ReviewSubject, reviews []DesignRevi
 		return DesignDecision{}, errors.New("design decision could not be sealed")
 	}
 	decision.DecisionSHA256 = digest
-	if err := decision.Validate(identity, subject, reviews, maxRounds); err != nil {
+	if err := decision.Validate(identity, subject, reviews, maxRounds, judges); err != nil {
 		return DesignDecision{}, err
 	}
 	return decision, nil
@@ -436,12 +443,12 @@ func DecideDesign(identity Identity, subject ReviewSubject, reviews []DesignRevi
 
 // Validate re-derives the outcome from the reviews and the round limit and
 // checks the binding and the fingerprint.
-func (d DesignDecision) Validate(identity Identity, subject ReviewSubject, reviews []DesignReview, maxRounds int) error {
+func (d DesignDecision) Validate(identity Identity, subject ReviewSubject, reviews []DesignReview, maxRounds, judges int) error {
 	if d.SchemaVersion != SchemaVersion || d.Identity != identity || d.Round != subject.Round ||
 		d.Subject != subject.Kind || d.SubjectSHA256 != subject.SHA256 {
 		return errors.New("design decision is not bound to this subject")
 	}
-	digests, outcome, err := deriveDesignOutcome(identity, subject, reviews, d.Round, maxRounds)
+	digests, outcome, err := deriveDesignOutcome(identity, subject, reviews, d.Round, maxRounds, judges)
 	if err != nil {
 		return err
 	}
@@ -465,14 +472,14 @@ func (d DesignDecision) Validate(identity Identity, subject ReviewSubject, revie
 
 // deriveDesignOutcome validates the review set and derives the digests, in
 // reviewer-id order, and the outcome.
-func deriveDesignOutcome(identity Identity, subject ReviewSubject, reviews []DesignReview, round, maxRounds int) ([]string, string, error) {
+func deriveDesignOutcome(identity Identity, subject ReviewSubject, reviews []DesignReview, round, maxRounds, judges int) ([]string, string, error) {
 	if err := subject.validate(); err != nil {
 		return nil, "", err
 	}
 	if maxRounds < 1 || round != subject.Round || round > maxRounds {
 		return nil, "", errors.New("design decision round is invalid")
 	}
-	if expected := ReviewsRequired(subject.Kind); len(reviews) != expected {
+	if expected := ReviewsRequired(subject.Kind, judges); len(reviews) != expected {
 		return nil, "", fmt.Errorf("a %s decision needs %d reviews and was given %d", subject.Kind, expected, len(reviews))
 	}
 	ordered := append([]DesignReview(nil), reviews...)

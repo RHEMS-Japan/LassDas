@@ -243,3 +243,70 @@ func TestOrchestrationValidation(t *testing.T) {
 		}
 	}
 }
+
+// One configured judge runs one review card, not two. Two judges have to
+// agree before anything ships, and on 2026-09-17 two live deliveries died
+// deadlocked over a judgement call - whether to document a flag the target
+// repository accepts but never acts on - that a single model settles in one
+// pass. A consumer that did not say keeps the original two cards.
+func TestTheReviewCardsFollowTheConfiguredJudges(t *testing.T) {
+	chain := chainTestConfig()
+	chain.Profiles.Investigate = "lassdas-investigate"
+	chain.Profiles.DesignReviewA = "lassdas-design-review-a"
+	chain.Profiles.DesignReviewB = "lassdas-design-review-b"
+	chain.Profiles.DesignDecide = "lassdas-design-decide"
+	chain.Profiles.Applier = "lassdas-applier"
+
+	names := func(stages []ChainStage) []string {
+		out := make([]string, 0, len(stages))
+		for _, stage := range stages {
+			out = append(out, stage.Name)
+		}
+		return out
+	}
+	same := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	one := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement, Reviewers: 1}))
+	if want := []string{StageImplement, StageReviewA, StageValidate, StagePublish}; !same(one, want) {
+		t.Errorf("one judge: %v, want %v", one, want)
+	}
+	two := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement, Reviewers: 2}))
+	if want := []string{StageImplement, StageReviewA, StageReviewB, StageValidate, StagePublish}; !same(two, want) {
+		t.Errorf("two judges: %v, want %v", two, want)
+	}
+	// More judges than review profiles still runs two cards.
+	four := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement, Reviewers: 4}))
+	if !same(four, two) {
+		t.Errorf("four judges: %v, want the same two cards as %v", four, two)
+	}
+	// A caller that did not say keeps the original chain.
+	unset := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement}))
+	if !same(unset, two) {
+		t.Errorf("unset: %v, want the original %v", unset, two)
+	}
+	if !same(names(ChainStages(chain)), two) {
+		t.Errorf("ChainStages lost a card: %v", names(ChainStages(chain)))
+	}
+
+	// The design chain drops its second judge the same way, and keeps
+	// everything that follows the reviews.
+	designOne := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeDesign, Reviewers: 1}))
+	wantDesign := []string{StageInvestigate, StageDesignReviewA, StageDesignDecide, StageApply, StageReviewA, StageValidate, StagePublish}
+	if !same(designOne, wantDesign) {
+		t.Errorf("design with one judge: %v, want %v", designOne, wantDesign)
+	}
+	designTwo := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeDesign, Reviewers: 2}))
+	if len(designTwo) != 9 || designTwo[2] != StageDesignReviewB {
+		t.Errorf("design with two judges: %v", designTwo)
+	}
+}

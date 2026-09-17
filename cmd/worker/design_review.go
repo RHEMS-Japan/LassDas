@@ -202,7 +202,7 @@ func runDecideDesign(args []string) error {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "design review set was rejected", err)
 		return errors.New("design review set was rejected")
 	}
-	decision, err := investigate.DecideDesign(inputs.identity, inputs.subject, reviews, *round, config.DesignRounds())
+	decision, err := investigate.DecideDesign(inputs.identity, inputs.subject, reviews, *round, config.DesignRounds(), len(config.Models.DesignJudges()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "design decision was rejected", err)
 		return errors.New("design decision was rejected")

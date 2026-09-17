@@ -1142,8 +1142,13 @@ func (c ModelConfig) validate() error {
 	if err := c.Implementer.validate(false); err != nil {
 		return fmt.Errorf("implementer: %w", err)
 	}
-	if len(c.Reviewers) < 2 || len(c.Reviewers) > 4 {
-		return errors.New("reviewer count must be between 2 and 4")
+	// One judge is a legal configuration. A second opinion on a change only
+	// pays for itself where being wrong is expensive; where it is not, the
+	// two judges have to agree before anything ships, and two live
+	// deliveries died deadlocked on 2026-09-17 over a judgement call a
+	// single model settles in one pass.
+	if len(c.Reviewers) < 1 || len(c.Reviewers) > 4 {
+		return errors.New("reviewer count must be between 1 and 4")
 	}
 	ids := map[string]struct{}{c.Implementer.ID: {}}
 	vendors := make(map[string]struct{}, len(c.Reviewers))
@@ -1178,7 +1183,10 @@ func (c ModelConfig) validate() error {
 		}
 		models[modelKey] = struct{}{}
 	}
-	if len(vendors) < 2 {
+	// Two judges must not share a vendor, or one vendor's blind spot is
+	// every judge's blind spot. A single judge has no one to differ from,
+	// and the rule has nothing to say about it.
+	if len(c.Reviewers) > 1 && len(vendors) < 2 {
 		return errors.New("reviewers must use at least two vendors")
 	}
 	if c.Designer != nil {

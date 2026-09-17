@@ -168,7 +168,7 @@ func validateProof(files map[string]json.RawMessage, config worker.Config, recor
 	if investigation.ValidateBinding(identity) != nil || design.ValidateBinding(identity, investigation) != nil {
 		return proof, errors.New("調査と設計の確定記録が一致しません")
 	}
-	if designDecision.Validate(identity, investigate.DesignSubject(design), designReviews, config.DesignRounds()) != nil || worker.ValidateDesignBinding(candidate, design, worker.DesignDecisionSummary{Subject: designDecision.Subject, SubjectSHA256: designDecision.SubjectSHA256, Outcome: designDecision.Outcome}) != nil {
+	if designDecision.Validate(identity, investigate.DesignSubject(design), designReviews, config.DesignRounds(), len(config.Models.DesignJudges())) != nil || worker.ValidateDesignBinding(candidate, design, worker.DesignDecisionSummary{Subject: designDecision.Subject, SubjectSHA256: designDecision.SubjectSHA256, Outcome: designDecision.Outcome}) != nil {
 		return proof, errors.New("設計レビューの合格と納品候補が一致しません")
 	}
 	checkedBase := validation.CheckedOutSHA
