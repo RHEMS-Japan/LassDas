@@ -707,7 +707,18 @@ func (s *DynamoStore) resolveRunRoute(ctx context.Context, route hook.ReportRout
 	return rebound, nil
 }
 
-var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,8}$`)
+// issueRunIDPattern is the shape of a run id that names a ticket. It bounds
+// what the pending row may rebind the route to; the prefix check above is
+// what ties it to this project.
+//
+// Underscores belong here: a tracker project key may carry one, and the
+// ingest that writes these run ids accepts them. While this pattern did not,
+// every question asked on such a project went unanswerable - the route was
+// never rebound, so the tick found no waiting run, and the answer sat there
+// for ever (live 2026-09-17, project key RHEMS_TEST: ten minutes of
+// question_tick_idle after the answer was posted, reproduced from the
+// instance's own ledger).
+var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,99}-[1-9][0-9]{0,8}$`)
 
 // ClaimOwner is LocalStore.ClaimOwner for the DynamoDB store: the owner
 // identity the run row was written with at claim.
