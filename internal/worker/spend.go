@@ -134,22 +134,26 @@ func SpendKeyEnvs(config Config) []string {
 	return envs
 }
 
-// RolesByKeyEnv names the roles each key pays for, so a report can say which
-// seats a figure covers instead of printing an environment variable.
 // agentKeyEnvs names every key an agent launch reads, by the seat it pays
 // for. An agent names its credential in SecretEnv: the variable the launch
 // reads, and the variable this process holds it in.
-func agentKeyEnvs(config Config) map[string]string {
-	envs := map[string]string{}
+func agentKeyEnvs(config Config) map[string][]string {
+	envs := map[string][]string{}
 	add := func(agent AgentConfig, role string) {
 		for _, source := range agent.SecretEnv {
 			if source != "" {
-				envs[source] = role
+				envs[source] = append(envs[source], role)
 			}
 		}
 	}
 	add(config.Agents.Implementer, "実装")
-	add(config.Agents.Reviewer, "レビュー")
+	if len(config.Agents.ReviewerAgents) == 0 {
+		// The shared reviewer launch is used only when no reviewer has its
+		// own; a deployment that gives each one a launch never sets this
+		// one's key, and asking for it marked every run's figures
+		// incomplete (review of #196).
+		add(config.Agents.Reviewer, "レビュー")
+	}
 	if config.Agents.Applier != nil {
 		add(*config.Agents.Applier, "設計に沿った実装")
 	}
@@ -170,6 +174,8 @@ func agentKeyEnvs(config Config) map[string]string {
 	return envs
 }
 
+// RolesByKeyEnv names the roles each key pays for, so a report can say which
+// seats a figure covers instead of printing an environment variable.
 func RolesByKeyEnv(config Config) map[string][]string {
 	roles := map[string][]string{}
 	add := func(endpoint ModelEndpoint, role string) {
@@ -198,8 +204,8 @@ func RolesByKeyEnv(config Config) map[string][]string {
 		}
 		add(judge, "設計レビュー "+name)
 	}
-	for env, role := range agentKeyEnvs(config) {
-		roles[env] = append(roles[env], role)
+	for env, seats := range agentKeyEnvs(config) {
+		roles[env] = append(roles[env], seats...)
 	}
 	for env, list := range roles {
 		roles[env] = dedupeStrings(list)
@@ -256,14 +262,15 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 		return RunSpend{}
 	}
 	spend := RunSpend{Complete: true}
-	// Two environment variables routinely name the same key: the implementer's
-	// key also drafts readiness, so the gateway bills one key that this loop
-	// would otherwise read - and add up - twice. Distinct variable names are no
-	// evidence of distinct keys; only the name the gateway answers with is. The
-	// first variable to reach a key keeps it, and later ones fold their roles in.
-	seen := map[string]int{}
-	for _, env := range envs {
-		key, err := reader.SpendSince(ctx, baseURL, env, since)
+	// Several environment variables routinely hold one key: the default
+	// setup gives every seat the same one. Folding them by the key this
+	// process actually holds is what keeps one bill from being counted
+	// once per variable - the name the gateway answers with cannot do it,
+	// because an empty name folds unrelated keys together and a shared name
+	// hides distinct ones (review of #196: $3 read as $27, and $18 read as
+	// $2).
+	for _, group := range foldByHeldKey(envs) {
+		key, err := reader.SpendSince(ctx, baseURL, group[0], since)
 		if err != nil {
 			spend.Complete = false
 			continue
@@ -271,13 +278,7 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 		if key.Unpriced > 0 {
 			spend.Complete = false
 		}
-		if index, duplicate := seen[key.KeyName]; duplicate && key.KeyName != "" {
-			spend.Keys[index].AlsoKeyEnvs = append(spend.Keys[index].AlsoKeyEnvs, env)
-			continue
-		}
-		if key.KeyName != "" {
-			seen[key.KeyName] = len(spend.Keys)
-		}
+		key.AlsoKeyEnvs = append(key.AlsoKeyEnvs, group[1:]...)
 		spend.Keys = append(spend.Keys, key)
 		spend.TotalUSD += key.SpendUSD
 	}
@@ -345,4 +346,27 @@ func formatSpendJPY(amount float64) string {
 		return "1 円未満"
 	}
 	return "約 " + strconv.FormatFloat(yen, 'f', 0, 64) + " 円"
+}
+
+// foldByHeldKey groups the variables that hold one and the same key, in the
+// order the variables were given. A variable this process does not hold is
+// its own group: the read then fails and says the reading is incomplete,
+// which is what a missing credential is.
+func foldByHeldKey(envs []string) [][]string {
+	groups := [][]string{}
+	index := map[string]int{}
+	for _, env := range envs {
+		value := os.Getenv(env)
+		if value == "" {
+			groups = append(groups, []string{env})
+			continue
+		}
+		if at, ok := index[value]; ok {
+			groups[at] = append(groups[at], env)
+			continue
+		}
+		index[value] = len(groups)
+		groups = append(groups, []string{env})
+	}
+	return groups
 }

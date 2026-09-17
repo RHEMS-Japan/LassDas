@@ -88,7 +88,9 @@ func receptionStubWorkerLines(t *testing.T, failing, stderr string) string {
 func TestTheSpendReadingIsKeptBesideTheRun(t *testing.T) {
 	t.Setenv("TEST_SPEND_IMPL_KEY", "impl-key-value")
 	t.Setenv("TEST_SPEND_REVIEW_KEY", "review-key-value")
-	t.Setenv("TEST_SPEND_ASSESS_KEY", "assess-key-value")
+	// The same key under a second variable name: that is what "one key,
+	// two seats" is, and it is what the record must fold.
+	t.Setenv("TEST_SPEND_ASSESS_KEY", "impl-key-value")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/key/spend" || r.URL.Query().Get("since") == "" {
 			http.NotFound(w, r)
@@ -96,10 +98,6 @@ func TestTheSpendReadingIsKeptBesideTheRun(t *testing.T) {
 		}
 		switch r.Header.Get("Authorization") {
 		case "Bearer impl-key-value":
-			_, _ = w.Write([]byte(`{"key_name":"automation-impl","spend_usd":0.54,"unpriced_requests":0}`))
-		case "Bearer assess-key-value":
-			// A second variable that resolves to the implementer's key: the
-			// gateway bills one key, and the record must fold the role in.
 			_, _ = w.Write([]byte(`{"key_name":"automation-impl","spend_usd":0.54,"unpriced_requests":0}`))
 		case "Bearer review-key-value":
 			_, _ = w.Write([]byte(`{"key_name":"automation-review-a","spend_usd":2.23,"unpriced_requests":0}`))

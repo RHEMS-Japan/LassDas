@@ -262,6 +262,16 @@ func TestReadRunSpendCountsSharedKeyOnce(t *testing.T) {
 	// 受付は実装役/レビュー A と「別の変数名」で「同じ鍵」を使う
 	config.Models.Readiness.Assessor.APIKeyEnv = "READINESS_IMPL_KEY"
 	config.Models.Readiness.Checker.APIKeyEnv = "READINESS_REVIEW_KEY"
+	// The variables this process holds are what say which of them are one
+	// key: the name a gateway answers with folds unrelated keys together
+	// when it is empty, and hides distinct ones when it repeats.
+	for env, value := range map[string]string{
+		"IMPL_KEY": "sk-gemini", "READINESS_IMPL_KEY": "sk-gemini",
+		"REVIEW_A_KEY": "sk-deepseek", "READINESS_REVIEW_KEY": "sk-deepseek",
+		"REVIEW_B_KEY": "sk-luna",
+	} {
+		t.Setenv(env, value)
+	}
 
 	reader := &stubSpendReader{byEnv: map[string]KeySpend{
 		"IMPL_KEY":             {SpendUSD: 0.92, KeyName: "automation-cheap-gemini"},
@@ -345,6 +355,58 @@ func TestSpendCoversTheSeatsThatRunAsAgents(t *testing.T) {
 	if len(roles["LASSDAS_IMPLEMENTER_KEY"]) == 0 || len(roles["LASSDAS_APPLIER_KEY"]) == 0 {
 		t.Fatalf("a figure would print an environment variable instead of a seat: %v", roles)
 	}
+	// One variable may pay for several seats; the report names all of them.
+	shared := config
+	one := AgentConfig{ID: "shared", Command: "sh", SecretEnv: map[string]string{"AGENT_TOKEN": "LASSDAS_TEAM_KEY"}, TimeoutSeconds: 600}
+	other := one
+	other.ID = "shared-b"
+	shared.Agents = AgentSet{Implementer: one, Reviewer: other, ReviewerAgents: []ReviewerAgent{{ReviewerID: "review-a", Agent: other}}}
+	if seats := RolesByKeyEnv(shared)["LASSDAS_TEAM_KEY"]; len(seats) < 2 {
+		t.Fatalf("a shared key named only %v", seats)
+	}
+}
+
+// The shared reviewer launch is used only when no reviewer has its own. A
+// deployment that gives each reviewer a launch never sets that key, and
+// asking for it marked every run's figures incomplete (review of #196).
+func TestTheUnusedReviewerLaunchIsNotAskedFor(t *testing.T) {
+	config := spendFixtureConfig()
+	for _, env := range SpendKeyEnvs(config) {
+		if env == "LASSDAS_REVIEWER_UNUSED_KEY" {
+			t.Fatalf("a key no launch reads is asked for: %v", SpendKeyEnvs(config))
+		}
+	}
+	// With no per-reviewer launches, the shared one is what reviews cost.
+	shared := config
+	shared.Agents.ReviewerAgents = nil
+	found := false
+	for _, env := range SpendKeyEnvs(shared) {
+		if env == "LASSDAS_REVIEWER_UNUSED_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the shared reviewer launch pays for reviews and is not read: %v", SpendKeyEnvs(shared))
+	}
+}
+
+// One bill is counted once, however many variables hold that key, and a
+// variable this process does not hold is reported as unreadable rather than
+// folded into another key's figure.
+func TestSpendFoldsVariablesThatHoldOneKey(t *testing.T) {
+	t.Setenv("LASSDAS_ONE_KEY", "sk-same")
+	t.Setenv("LASSDAS_TWO_KEY", "sk-same")
+	t.Setenv("LASSDAS_THREE_KEY", "sk-other")
+	groups := foldByHeldKey([]string{"LASSDAS_ONE_KEY", "LASSDAS_TWO_KEY", "LASSDAS_THREE_KEY", "LASSDAS_ABSENT_KEY"})
+	if len(groups) != 3 {
+		t.Fatalf("groups = %v", groups)
+	}
+	if len(groups[0]) != 2 || groups[0][0] != "LASSDAS_ONE_KEY" || groups[0][1] != "LASSDAS_TWO_KEY" {
+		t.Fatalf("the two variables holding one key were not folded: %v", groups)
+	}
+	if len(groups[1]) != 1 || len(groups[2]) != 1 {
+		t.Fatalf("a distinct key or an unheld variable was folded: %v", groups)
+	}
 }
 
 func spendFixtureConfig() Config {
@@ -352,7 +414,11 @@ func spendFixtureConfig() Config {
 		return ModelEndpoint{ID: id, Vendor: "OpenAI", Model: "vendor/model", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: env, MaxOutputTokens: 1024}
 	}
 	agent := func(role string) AgentConfig {
-		return AgentConfig{ID: role, Command: "sh", SecretEnv: map[string]string{"LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY": "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"}, TimeoutSeconds: 600}
+		// The launch reads AGENT_TOKEN; this process holds the key in the
+		// role's own variable. Naming them the same in a fixture hides a
+		// reader that takes the wrong one (review of #196).
+		source := "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"
+		return AgentConfig{ID: role, Command: "sh", SecretEnv: map[string]string{"AGENT_TOKEN": source}, TimeoutSeconds: 600}
 	}
 	applier := agent("applier")
 	return Config{

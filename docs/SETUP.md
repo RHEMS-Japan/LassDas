@@ -32,8 +32,6 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-
-実装役と適用役は「モデルの設定」ではなく実行基盤の役として動くので、消費側の設定 (`m1-consumer.json`) の `models` には出てこない。鍵は役ごとの `LASSDAS_<役>_KEY` を使い、費用の集計もその鍵で読む。疎通確認に出てくる役名と `models` の項目が一対一でないのはこのため。
 | 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内。元は本体 repo の `docs/DISTRIBUTION.json`)。無ければ install が未実行なので、本体 repo を取得して 1.0 のとおり install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
@@ -118,6 +116,8 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
 | `build-record` | イメージと SHA の対応の記録の URL。通常は、そのイメージを作って push した GitHub Actions の実行 (main の image workflow が `docs/DISTRIBUTION.json` を書く) |
 
+
+実装役・適用役・レビュー役は、モデルの設定ではなく実行基盤の役 (launch) として動く。鍵は役ごとの `LASSDAS_<役>_KEY` を読み、費用の集計もその鍵で行う。疎通確認に出てくる役名と `models` の項目が一対一に並ばないのはこのため。
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 
 - `review-a` と `review-b` は別のモデルで、別の提供会社。`implementer` と同じモデルにできるレビュー役は 1 つまで (`designer` も同じ)。
