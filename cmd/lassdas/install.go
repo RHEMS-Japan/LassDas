@@ -40,10 +40,10 @@ func noteFor(engineRoot string, options installOptions) (initwizard.Distribution
 		note = read
 	} else if options.note != "" || (options.image == "" && options.engineSHA == "" && options.buildRecord == "") {
 		return initwizard.Distribution{}, err
-	} else if _, statErr := os.Stat(path); statErr == nil {
-		// The file is there but unreadable: the flags alone must then
-		// carry a whole note, and the message says why.
-		return initwizard.Distribution{}, fmt.Errorf("%v。直すか、--image / --engine-sha / --build-record / --engine-repository を全部渡してください", err)
+	} else if _, statErr := os.Stat(path); statErr == nil && (options.image == "" || options.engineSHA == "" || options.buildRecord == "" || options.engineRepository == "") {
+		// The file is there but unreadable, and the flags do not carry a
+		// whole note of their own: the message says why and the ways out.
+		return initwizard.Distribution{}, fmt.Errorf("%v。直すか消すか、--note PATH で別の案内を渡すか、--image / --engine-sha / --build-record / --engine-repository の 4 つを全部渡してください", err)
 	}
 	if options.engineRepository != "" {
 		note.EngineRepository = options.engineRepository

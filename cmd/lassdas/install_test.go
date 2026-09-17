@@ -273,6 +273,9 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	if _, err := noteFor(engine, installOptions{image: digest}); err == nil || !strings.Contains(err.Error(), "読めません") {
 		t.Fatalf("install with a broken note and a flag must name the file: %v", err)
 	}
+	if whole, err := noteFor(engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "u", engineRepository: "e/a"}); err != nil || whole.Image != digest {
+		t.Fatalf("all four flags carry a whole note past a broken file: %+v %v", whole, err)
+	}
 	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err == nil {
 		t.Fatal("still broken: the person removes it first")
 	}
