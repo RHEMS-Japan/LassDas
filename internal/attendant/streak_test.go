@@ -178,6 +178,14 @@ func TestAMixedStreakDoesNotClaimTheEndingsWereTheSame(t *testing.T) {
 	if strings.Contains(posted, "設計のレビューが収束せず終了") {
 		t.Errorf("the notice names one ending as though all three ended that way: %q", posted)
 	}
+	// An operator's next move is to look the failures up, so the notice
+	// carries the codes and how many ended each way (review of #201).
+	if !strings.Contains(posted, "design_rounds_spent 2 件") || !strings.Contains(posted, "design_nonconverged 1 件") {
+		t.Errorf("the notice does not say how the three runs ended: %q", posted)
+	}
+	if strings.Contains(posted, "受付停止（同じ失敗の連続）") {
+		t.Errorf("the seven-item block still calls a mixed run the same failure: %q", posted)
+	}
 	if banner := streakNotice(mixed); strings.Contains(banner, "設計のレビューが収束せず終了") {
 		t.Errorf("the board's banner names one ending: %q", banner)
 	}

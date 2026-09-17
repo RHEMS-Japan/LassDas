@@ -66,6 +66,9 @@ type failureStreak struct {
 	// They are one problem, and the notice says that instead of naming the
 	// newest one as though all of them ended that way (review of #201).
 	Mixed bool
+	// Breakdown counts how many of the run ended each way, which is what an
+	// operator looks the failures up by.
+	Breakdown map[string]int
 }
 
 // family is what the notice describes when the endings differ.
@@ -97,6 +100,10 @@ func detectFailureStreak(runs []state.RunOverview, limit int, resolved func(stat
 		if run.TerminalCode != streak.Code {
 			streak.Mixed = true
 		}
+		if streak.Breakdown == nil {
+			streak.Breakdown = map[string]int{}
+		}
+		streak.Breakdown[run.TerminalCode]++
 		streak.Count++
 	}
 	streak.Active = limit > 0 && streak.Count >= limit
@@ -164,7 +171,7 @@ func holdForStreak(ctx context.Context, tracker runtime.TrackerConfig, backlog o
 // streakHoldContent is the notice posted on the newest failed ticket.
 func streakHoldContent(streak failureStreak) string {
 	if streak.Mixed {
-		return hook.FailureStreakFamilyContent(streak.Newest.RunID, streak.family(), streak.Count)
+		return hook.FailureStreakFamilyContent(streak.Newest.RunID, streak.family(), streak.Count, streak.Breakdown)
 	}
 	return hook.FailureStreakContent(streak.Newest.RunID, streak.Code, streak.Count)
 }

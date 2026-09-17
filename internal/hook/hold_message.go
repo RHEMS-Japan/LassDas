@@ -2,6 +2,7 @@ package hook
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -132,14 +133,39 @@ func FailureStreakContent(runID, code string, count int) string {
 // one problem with more than one ending. Naming the newest one would send an
 // operator to look for a disagreement two of the three runs never had
 // (review of #201).
-func FailureStreakFamilyContent(runID, family string, count int) string {
+func FailureStreakFamilyContent(runID, family string, count int, breakdown map[string]int) string {
 	body := fmt.Sprintf(
 		"【同じところで %d 回連続】直近の自動処理が %d 回続けて同じところで止まりました — %s。"+
-			"終わり方の内訳は一つではありませんが、原因は同じ工程にあります。"+
+			"終わり方の内訳は %s です。原因は同じ工程にあります。"+
 			"仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n"+
 			"確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",
-		count, count, DescribeStreakFamily(family))
-	return body + streakFacts(runID)
+		count, count, DescribeStreakFamily(family), describeBreakdown(breakdown))
+	return body + streakFactsFor(runID, "受付停止（同じところでの失敗の連続）")
+}
+
+// describeBreakdown lists how many runs ended each way, with the machine
+// code, because that is what an operator types into the ledger next. The
+// family sentence says where the runs stopped; without this it said the
+// endings differed and then did not say how (review of #201).
+func describeBreakdown(breakdown map[string]int) string {
+	codes := make([]string, 0, len(breakdown))
+	for code := range breakdown {
+		codes = append(codes, code)
+	}
+	sort.Slice(codes, func(a, b int) bool {
+		if breakdown[codes[a]] != breakdown[codes[b]] {
+			return breakdown[codes[a]] > breakdown[codes[b]]
+		}
+		return codes[a] < codes[b]
+	})
+	parts := make([]string, 0, len(codes))
+	for _, code := range codes {
+		parts = append(parts, fmt.Sprintf("%s %d 件", code, breakdown[code]))
+	}
+	if len(parts) == 0 {
+		return "読み取れませんでした"
+	}
+	return strings.Join(parts, " / ")
 }
 
 // DescribeStreakFamily names what a run of mixed endings has in common.
@@ -158,8 +184,12 @@ func DescribeStreakFamily(family string) string {
 const StreakFamilyDesign = "design"
 
 func streakFacts(runID string) string {
+	return streakFactsFor(runID, "受付停止（同じ失敗の連続）")
+}
+
+func streakFactsFor(runID, state string) string {
 	return CommentFacts{
-		State:      "受付停止（同じ失敗の連続）",
+		State:      state,
 		NextActor:  "運用担当者",
 		Operation:  "原因を確認し、このチケットに「確認済み」とコメント",
 		NextEvent:  "「確認済み」を検知した時点で受付を再開（以後の自動通知はありません）",
