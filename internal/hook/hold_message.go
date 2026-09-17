@@ -31,6 +31,8 @@ func DescribeTerminalCode(code string) string {
 		return "調査結果のレビューが収束せず終了 (investigation_nonconverged)"
 	case TerminalDesignNonconverged:
 		return "設計のレビューが収束せず終了 (design_nonconverged)"
+	case TerminalDesignRoundsSpent:
+		return "設計をやり直す回数を使い切って終了 (design_rounds_spent)"
 	case TerminalModelFailed:
 		return "AI の応答が得られず終了 (model_failed)"
 	case TerminalNonconverged:

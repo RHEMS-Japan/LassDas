@@ -64,6 +64,14 @@ const (
 	TerminalInvestigationIncomplete   TerminalCode = "investigation_incomplete"
 	TerminalInvestigationNonconverged TerminalCode = "investigation_nonconverged"
 	TerminalDesignNonconverged        TerminalCode = "design_nonconverged"
+	// TerminalDesignRoundsSpent is the other way a delivery can run out of
+	// design: the design's own judges agreed, the change was written, and
+	// then a reviewer of that change - or the applier - said the plan
+	// itself was wrong, with no design round left to change it. Reporting
+	// that as design_nonconverged sent a requester whose design reviews all
+	// passed looking for a disagreement that never happened (live
+	// 2026-09-17).
+	TerminalDesignRoundsSpent TerminalCode = "design_rounds_spent"
 )
 
 // Valid reports whether c is one of the terminal codes the automation ends
@@ -71,18 +79,29 @@ const (
 // accepted everywhere a report travels.
 func (c TerminalCode) Valid() bool { return c.valid() }
 
-func (c TerminalCode) valid() bool {
-	switch c {
-	case TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,
+// AllTerminalCodes is every ending the automation can reach, in one place so
+// the checks that must cover all of them enumerate this rather than a list
+// each keeps by hand. Two such lists had already fallen four codes behind
+// (live 2026-09-17).
+func AllTerminalCodes() []TerminalCode {
+	return []TerminalCode{
+		TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,
 		TerminalReadinessUnresolved, TerminalClarificationExpired, TerminalCancelled,
 		TerminalModelFailed, TerminalNonconverged,
 		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
 		TerminalProductionVerificationFailed, TerminalInternalFailed,
-		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged, TerminalDesignNonconverged:
-		return true
-	default:
-		return false
+		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged,
+		TerminalDesignNonconverged, TerminalDesignRoundsSpent,
 	}
+}
+
+func (c TerminalCode) valid() bool {
+	for _, known := range AllTerminalCodes() {
+		if c == known {
+			return true
+		}
+	}
+	return false
 }
 
 // Delivery names how far a run travels without a person. The hook holds it per

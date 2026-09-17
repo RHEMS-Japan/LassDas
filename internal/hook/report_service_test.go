@@ -242,13 +242,7 @@ func TestTerminalReportServiceRejectsInvalidRouteBeforeStateOrBacklog(t *testing
 
 func TestEveryFiniteTerminalCodeHasADedicatedUserFacingMessage(t *testing.T) {
 	const fallback = "自動処理は終了しました。詳細は実行履歴を参照してください。"
-	for _, code := range []TerminalCode{
-		TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,
-		TerminalReadinessUnresolved, TerminalClarificationExpired, TerminalCancelled,
-		TerminalModelFailed, TerminalNonconverged,
-		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
-		TerminalProductionVerificationFailed, TerminalInternalFailed,
-	} {
+	for _, code := range AllTerminalCodes() {
 		comment := TerminalCommentContent(terminalTestRequest(code), strings.Repeat("f", 64))
 		if strings.Contains(comment, fallback) {
 			t.Fatalf("code %q fell back to the generic message", code)

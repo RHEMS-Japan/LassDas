@@ -473,7 +473,7 @@ func advanceClaimedRun(
 		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
 			if _, decided := readField(runDir, fmt.Sprintf("history/design-%d/decision.json", view.designRound+1), "outcome"); decided != nil {
 				logger.Info("resuming an interrupted objection transition", "run", run.RunID, "design_round", view.designRound)
-				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design (resumed)", logger)
+				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, designCalledWrongLater, "the applier objected to the design (resumed)", logger)
 			}
 		}
 	}
@@ -710,6 +710,12 @@ func handleChainFailure(
 	}, func() (string, error) {
 		return readField(runDir, "history/question/decision.json", "outcome")
 	})
+	// What the tick decided, beside the card it found. The card is only
+	// where the chain stopped moving: a validate card blocked because the
+	// round was sent back reads as "the failure is validate" unless the
+	// decision that sent it back is in the record too (live 2026-09-17).
+	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName,
+		"action", action.String(), "code", string(code))
 	switch action {
 	case actionRegenerate:
 		limit, limitErr := consumerMaxStages(config.ConsumerConfigPath)
@@ -744,9 +750,11 @@ func handleChainFailure(
 					"delivery_id", run.DeliveryID, "round", view.round, "error", readErr.Error())
 				code, stopReason = unreadableReviewsOutcome(view.round)
 			case designWrong:
-				// At the design-round limit this ends the run as
-				// nonconverged instead of returning the limit error every tick.
-				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "a review found the design itself wrong", logger)
+				logger.Info("a review found the design itself wrong; the delivery goes back to the designer",
+					"run", run.RunID, "round", view.round, "design_round", view.designRound)
+				// At the design-round limit this ends the run as rounds
+				// spent instead of returning the limit error every tick.
+				return nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, designCalledWrongLater, "a review found the design itself wrong", logger)
 			default:
 				return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
 			}
@@ -801,6 +809,19 @@ const (
 	// actionAskQuestion routes the sealed impasse question to the requester.
 	actionAskQuestion
 )
+
+// String names the action for the record. The type is an int, so a plain
+// conversion would log one unprintable rune.
+func (a failureAction) String() string {
+	switch a {
+	case actionRegenerate:
+		return "regenerate"
+	case actionAskQuestion:
+		return "ask_question"
+	default:
+		return "report"
+	}
+}
 
 // classifyChainFailure reads a failed card into an action. The card's state
 // is only the alarm; the sealed artifacts are the classification: a decided
