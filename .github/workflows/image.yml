@@ -34,10 +34,22 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
           go-version-file: go.mod
+      - name: Skip a commit that carries only the note
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")" = "docs/DISTRIBUTION.json" ]; then
+            echo "this commit carries only the distributor's note; nothing to build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Log in to the public registry
+        if: steps.gate.outputs.skip != 'true'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
       - name: Build and push (arm64, no cache)
         id: build
+        if: steps.gate.outputs.skip != 'true'
         run: |
           set -euo pipefail
           repo="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')/runtime"
@@ -53,6 +65,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "pushed $digest"
       - name: Prove the image pulls without a credential
+        if: steps.gate.outputs.skip != 'true'
         # The note will say no login is needed; that is checked here, not
         # assumed. The first push creates the package private: until a
         # person makes it public in the package settings, the note is not
@@ -60,12 +73,13 @@ jobs:
         run: |
           set -euo pipefail
           docker logout ghcr.io
-          if ! docker manifest inspect "${{ steps.build.outputs.digest }}" >/dev/null 2>&1; then
-            echo "::error::the image cannot be pulled anonymously; make the package public once (organisation packages → lassdas/runtime → settings → visibility) and re-run this workflow. The note was not written."
+          if ! reason="$(docker manifest inspect "${{ steps.build.outputs.digest }}" 2>&1 >/dev/null)"; then
+            echo "::error::the image cannot be pulled anonymously (${reason}); if that says denied, make the package public once (organisation packages → lassdas/runtime → settings → visibility) and re-run this workflow. The note was not written."
             exit 1
           fi
           echo "anonymous pull confirmed"
       - name: Write the distributor's note
+        if: steps.gate.outputs.skip != 'true'
         run: |
           set -euo pipefail
           go run ./cmd/lassdas setup note \
@@ -75,6 +89,7 @@ jobs:
             --public
           cat docs/DISTRIBUTION.json
       - name: Commit the note to main
+        if: steps.gate.outputs.skip != 'true'
         run: |
           set -euo pipefail
           [ "${GITHUB_REF}" = "refs/heads/main" ] || { echo "not main: ${GITHUB_REF}" >&2; exit 1; }

@@ -82,10 +82,10 @@ repo_slug="$(git remote get-url origin | sed -E 's#\.git$##; s#.*[:/]([^/]+/[^/]
 # commit it sits on, since the note changes no code. Only the ci workflow
 # is a verdict; the image workflow's own run is not.
 ci_commit="$engine_sha"
-if [[ "$(git diff-tree --no-commit-id --name-only -r "$engine_sha")" == "docs/DISTRIBUTION.json" ]]; then
-  ci_commit="$(git rev-parse "$engine_sha~1")"
-  echo "$engine_sha only carries the distributor's note; judging its parent $ci_commit"
-fi
+while [[ "$(git diff-tree --no-commit-id --name-only -r "$ci_commit")" == "docs/DISTRIBUTION.json" ]]; do
+  ci_commit="$(git rev-parse "$ci_commit~1")"
+  echo "$engine_sha carries only the distributor's note above $ci_commit; judging that"
+done
 ci_verdict="$(gh run list --repo "$repo_slug" --workflow ci.yml --commit "$ci_commit" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
 echo "${ci_verdict:-no run found}"
 [[ "$ci_verdict" == "completed/success" ]] || {
