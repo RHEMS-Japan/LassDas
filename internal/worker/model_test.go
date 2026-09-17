@@ -528,11 +528,15 @@ func TestConverseTurnAsksAgainWithMoreRoomAfterACutOff(t *testing.T) {
 			len(api.requests), api.requests[0].MaxTokens, api.requests[len(api.requests)-1].MaxTokens)
 	}
 
-	api = &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	// The doubled ask cut off too: the rest of the ceiling goes to the third
+	// ask (128 -> 256 -> 32,768), and only a cutoff there ends the turn.
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
 	invoker, _ = NewModelInvoker(api)
 	_, err := invoker.Preflight(context.Background(), config.Models.Implementer)
-	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") {
-		t.Fatalf("two cutoffs: err = %v after %d requests, want the cutoff named after 2", err, len(api.requests))
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 3 || !strings.Contains(err.Error(), "finish_reason=length") ||
+		api.requests[2].MaxTokens != MaxConfiguredOutputTokens {
+		t.Fatalf("three cutoffs: err = %v after %d requests (last allowance %d), want the cutoff named after 3 at the ceiling",
+			err, len(api.requests), api.requests[len(api.requests)-1].MaxTokens)
 	}
 
 	api = &loopScriptAPI{answers: []string{lengthMarker + `{}`, `{}`}}
@@ -1519,5 +1523,38 @@ func TestAfterCutoffNamesWhatTheLastReAskChanged(t *testing.T) {
 	text = err.Error()
 	if len(api.requests) != 3 || !strings.Contains(text, ReasoningExhaustedPhrase+"; "+EffortLoweredPhrase+": model invocation failed") || strings.Contains(text, "wider allowance") {
 		t.Fatalf("widened then lowered then transport: err %q after %d requests", text, len(api.requests))
+	}
+}
+
+// A role configured below the ceiling that reasons its whole allowance away
+// is asked again with more room until the ceiling is reached, rather than
+// giving up with most of the ceiling unused. Live 2026-09-17: the reception's
+// readiness check was configured at 4,096 tokens, was widened once to 8,192,
+// was cut off there as well, and ended the delivery as model_failed while
+// 32,768 tokens were available to it.
+func TestACutoffIsWidenedAllTheWayToTheCeiling(t *testing.T) {
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ := NewModelInvoker(api)
+	response, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if err != nil || response != `{"status":"ready"}` {
+		t.Fatalf("the answer written with the rest of the ceiling was not taken: err %v response %q", err, response)
+	}
+	want := []int32{4096, 8192, MaxConfiguredOutputTokens}
+	if len(api.requests) != len(want) {
+		t.Fatalf("%d requests, want %d", len(api.requests), len(want))
+	}
+	for i, allowance := range want {
+		if int32(api.requests[i].MaxTokens) != allowance {
+			t.Errorf("request %d asked with %d tokens, want %d", i+1, api.requests[i].MaxTokens, allowance)
+		}
+	}
+
+	// Cut off at the ceiling too: the turn ends there, naming the wider ask.
+	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 3 || !strings.Contains(err.Error(), CutoffAskedAgainPhrase) {
+		t.Fatalf("cut off at the ceiling: err %v after %d requests", err, len(api.requests))
 	}
 }
