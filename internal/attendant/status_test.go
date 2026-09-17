@@ -469,6 +469,9 @@ func TestWaitingForAnAnswerSaysHowToWithdraw(t *testing.T) {
 		{State: "terminal", TerminalCode: "cancelled"},
 		{State: "terminal", TerminalCode: "model_failed"},
 		{State: "terminal", TerminalCode: "clarification_expired"},
+		{State: "terminal_report_pending"},
+		{State: "question_report_pending"},
+		{State: "a state this board does not know"},
 	} {
 		other := classifyRun(runtime.Config{}, ending, nil)
 		if strings.Contains(other.ActionEffect, "中止") || strings.Contains(other.NextAction, "中止") {

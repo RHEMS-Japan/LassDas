@@ -209,7 +209,7 @@ func ReceiptCommentContent(record QuestionRecord, answerCommentID int64) (string
 	if answerCommentID <= 0 {
 		return "", fmt.Errorf("receipt answer comment is invalid")
 	}
-	tag := questionRevisionTag(record.QuestionRevision)
+	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【回答受領 %s】回答（コメント #%d)を受領し、その内容で自動処理を再開しました。\n\n", tag, answerCommentID)
 	builder.WriteString("選択いただいた内容は実装とレビューの判断に反映されます。追加のご対応は不要です。\n")
