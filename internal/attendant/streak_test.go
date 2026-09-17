@@ -150,3 +150,46 @@ func TestTheTwoDesignEndingsAreOneFailureForTheHold(t *testing.T) {
 		t.Fatalf("unrelated failures were counted together: count=%d active=%v", apart.Count, apart.Active)
 	}
 }
+
+// A run of failures that ended two different ways is one problem, and the
+// notice says that. Naming the newest ending made the operator look for a
+// disagreement two of the three runs never had (review of #201).
+func TestAMixedStreakDoesNotClaimTheEndingsWereTheSame(t *testing.T) {
+	never := func(state.RunOverview) bool { return false }
+	run := func(id string, claimed int64, code string) state.RunOverview {
+		return state.RunOverview{RunID: id, DeliveryID: id, State: "terminal", ClaimedAt: claimed, TerminalCode: code}
+	}
+	nonconverged := string(hook.TerminalDesignNonconverged)
+	roundsSpent := string(hook.TerminalDesignRoundsSpent)
+
+	mixed := detectFailureStreak([]state.RunOverview{
+		run("a", 1, roundsSpent), run("b", 2, roundsSpent), run("c", 3, nonconverged),
+	}, 3, never)
+	if !mixed.Mixed {
+		t.Fatal("a run of two different endings was not recognised as mixed")
+	}
+	posted := streakHoldContent(mixed)
+	if strings.Contains(posted, "同じ結果") {
+		t.Errorf("the notice claims the endings were the same: %q", posted)
+	}
+	if !strings.Contains(posted, "設計の段が") {
+		t.Errorf("the notice does not say what the three runs had in common: %q", posted)
+	}
+	if strings.Contains(posted, "設計のレビューが収束せず終了") {
+		t.Errorf("the notice names one ending as though all three ended that way: %q", posted)
+	}
+	if banner := streakNotice(mixed); strings.Contains(banner, "設計のレビューが収束せず終了") {
+		t.Errorf("the board's banner names one ending: %q", banner)
+	}
+
+	// Three of the same ending still read as they did.
+	same := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, nonconverged), run("c", 3, nonconverged),
+	}, 3, never)
+	if same.Mixed {
+		t.Fatal("three identical endings were called mixed")
+	}
+	if posted := streakHoldContent(same); !strings.Contains(posted, "同じ結果") {
+		t.Errorf("an unmixed streak lost its own words: %q", posted)
+	}
+}

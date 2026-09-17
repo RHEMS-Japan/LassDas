@@ -125,7 +125,40 @@ func FailureStreakContent(runID, code string, count int) string {
 	body := fmt.Sprintf(
 		"【同じ失敗が %d 回連続】直近の自動処理が %d 回続けて同じ結果 — %s — になりました。仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",
 		count, count, DescribeTerminalCode(code))
-	return body + CommentFacts{
+	return body + streakFacts(runID)
+}
+
+// FailureStreakFamilyContent is the same hold for a run of failures that are
+// one problem with more than one ending. Naming the newest one would send an
+// operator to look for a disagreement two of the three runs never had
+// (review of #201).
+func FailureStreakFamilyContent(runID, family string, count int) string {
+	body := fmt.Sprintf(
+		"【同じところで %d 回連続】直近の自動処理が %d 回続けて同じところで止まりました — %s。"+
+			"終わり方の内訳は一つではありませんが、原因は同じ工程にあります。"+
+			"仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n"+
+			"確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",
+		count, count, DescribeStreakFamily(family))
+	return body + streakFacts(runID)
+}
+
+// DescribeStreakFamily names what a run of mixed endings has in common.
+func DescribeStreakFamily(family string) string {
+	switch family {
+	case StreakFamilyDesign:
+		return "設計の段が、決められた回数のうちに通る計画を出せませんでした"
+	default:
+		return "同じ工程で止まりました"
+	}
+}
+
+// StreakFamilyDesign groups the two design endings: the design reviews never
+// agreed, and an agreed design called wrong from downstream with no round
+// left. Either way the design stage could not produce a plan that passed.
+const StreakFamilyDesign = "design"
+
+func streakFacts(runID string) string {
+	return CommentFacts{
 		State:      "受付停止（同じ失敗の連続）",
 		NextActor:  "運用担当者",
 		Operation:  "原因を確認し、このチケットに「確認済み」とコメント",

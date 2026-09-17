@@ -720,7 +720,9 @@ func handleChainFailure(
 	// a question - and the value classifyChainFailure carries alongside
 	// them is a placeholder. Logged here it named model_failed for the very
 	// run that ends as design_rounds_spent, which is the misreading this
-	// line exists to prevent (review of #201).
+	// line exists to prevent. The code the run does end with is on the
+	// "chain terminalized" line, which is written after the report is
+	// accepted rather than before it (review of #201).
 	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName, "action", action.String())
 	switch action {
 	case actionRegenerate:
@@ -776,8 +778,6 @@ func handleChainFailure(
 		}
 		return archiveChain(ctx, hermes, view.all)
 	}
-	// Past the switch the code is the one the run actually ends with.
-	logger.Info("chain failure reported", "run", run.RunID, "stage", stageName, "code", string(code))
 	// The failure report carries the same round record a delivery would
 	// have (#10); composition failure never blocks the report.
 	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-1")); err == nil {

@@ -51,9 +51,9 @@ var streakExemptCodes = map[string]bool{
 func streakFamily(code string) string {
 	switch hook.TerminalCode(code) {
 	case hook.TerminalDesignNonconverged, hook.TerminalDesignRoundsSpent:
-		return "design"
+		return hook.StreakFamilyDesign
 	default:
-		return code
+		return "code:" + code
 	}
 }
 
@@ -62,7 +62,14 @@ type failureStreak struct {
 	Count  int
 	Newest state.RunOverview
 	Active bool
+	// Mixed is set when the run of failures holds more than one ending.
+	// They are one problem, and the notice says that instead of naming the
+	// newest one as though all of them ended that way (review of #201).
+	Mixed bool
 }
+
+// family is what the notice describes when the endings differ.
+func (s failureStreak) family() string { return streakFamily(s.Code) }
 
 // detectFailureStreak walks the terminal runs newest-first and counts how
 // many in a row ended with the same failure. A run an operator has
@@ -86,6 +93,9 @@ func detectFailureStreak(runs []state.RunOverview, limit int, resolved func(stat
 		}
 		if streakFamily(run.TerminalCode) != streakFamily(streak.Code) {
 			break
+		}
+		if run.TerminalCode != streak.Code {
+			streak.Mixed = true
 		}
 		streak.Count++
 	}
@@ -116,7 +126,7 @@ func holdForStreak(ctx context.Context, tracker runtime.TrackerConfig, backlog o
 	recordStreakCheck(runDir, time.Now())
 	holdID, posted := commentIDWithMarker(comments, hook.CommentMarker(string(hook.RunCommentStreakHold), streak.Newest.RunID))
 	if !posted {
-		if _, err := backlog.AddComment(ctx, streak.Newest.IssueID, hook.FailureStreakContent(streak.Newest.RunID, streak.Code, streak.Count)); err != nil {
+		if _, err := backlog.AddComment(ctx, streak.Newest.IssueID, streakHoldContent(streak)); err != nil {
 			logger.Error("failure streak: notice post failed", "run", streak.Newest.RunID, "error", err.Error())
 		} else {
 			logger.Info("failure streak: intake held", "run", streak.Newest.RunID, "code", streak.Code, "count", streak.Count)
@@ -151,10 +161,22 @@ func holdForStreak(ctx context.Context, tracker runtime.TrackerConfig, backlog o
 	return false
 }
 
+// streakHoldContent is the notice posted on the newest failed ticket.
+func streakHoldContent(streak failureStreak) string {
+	if streak.Mixed {
+		return hook.FailureStreakFamilyContent(streak.Newest.RunID, streak.family(), streak.Count)
+	}
+	return hook.FailureStreakContent(streak.Newest.RunID, streak.Code, streak.Count)
+}
+
 // streakNotice is the board's one-line banner while intake is held.
 func streakNotice(streak failureStreak) string {
-	return fmt.Sprintf("同じ失敗 (%s) が %d 回連続 — 運用担当者の確認待ち。%s に「確認済み」と書くと受付を再開します",
-		hook.DescribeTerminalCode(streak.Code), streak.Count, streak.Newest.IssueKey)
+	what := "同じ失敗 (" + hook.DescribeTerminalCode(streak.Code) + ")"
+	if streak.Mixed {
+		what = "同じところでの失敗 (" + hook.DescribeStreakFamily(streak.family()) + ")"
+	}
+	return fmt.Sprintf("%s が %d 回連続 — 運用担当者の確認待ち。%s に「確認済み」と書くと受付を再開します",
+		what, streak.Count, streak.Newest.IssueKey)
 }
 
 func streakCheckedRecently(runDir string, now time.Time) bool {
