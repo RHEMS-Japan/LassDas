@@ -53,6 +53,10 @@ type Wizard struct {
 	Process Process
 	Runtime Runtime
 	Smoke   SmokeFunc
+	// RegistryLogin is the distributor's login command from the installed
+	// note, shown verbatim when the registry denies the image pull. Empty for
+	// a public image.
+	RegistryLogin string
 }
 type Options struct{ Project, Home, RepoRoot, Redo string }
 

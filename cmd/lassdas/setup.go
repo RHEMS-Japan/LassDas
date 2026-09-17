@@ -66,7 +66,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 			runner := initsmoke.Runner{UI: terminal, API: api, Observer: initsmoke.RuntimeObserver{Manager: manager, Process: process, API: api, Dir: dir}}
 			smoke = runner.Run
 		}
-		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke}
+		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke, RegistryLogin: noteRegistryLogin(home)}
 		_, err = wizard.Run(ctx, initwizard.Options{Project: project, Home: home, RepoRoot: root, Redo: redo})
 		return err
 	}
@@ -282,4 +282,16 @@ func trackerOwner(ctx context.Context, api initwizard.API, origin, key string) (
 		return 0, "", errors.New("持ち主の ID がありません")
 	}
 	return owner.ID, owner.Name, nil
+}
+
+// noteRegistryLogin returns the login command the distributor put in the
+// installed note, if any, so a denied pull can show it. A missing or broken
+// note yields "" here, and the denial message then says the command could not
+// be found rather than that none exists.
+func noteRegistryLogin(home string) string {
+	distribution, found, err := initwizard.LoadDistribution(home)
+	if err != nil || !found {
+		return ""
+	}
+	return distribution.RegistryLogin
 }
