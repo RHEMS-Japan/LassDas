@@ -111,6 +111,13 @@ func run() error {
 	if poster == nil {
 		logger.Info("board actions disabled (no requester credential configured)")
 	}
+	if trackerBase == "" {
+		// Reading the ticket needs no credential, and the guidance on every
+		// card tells the requester to open it. Without a link they were
+		// asked to find the ticket themselves - space, project, issue,
+		// then the right comment (live 2026-09-17).
+		trackerBase = trackerBaseFromRuntimeConfig(os.Getenv("LASSDAS_RUNTIME_CONFIG"))
+	}
 
 	board := &boardServer{
 		statusDir: statusDir, trackerBase: trackerBase,
@@ -234,6 +241,34 @@ func envOr(name, fallback string) string {
 // buildPoster assembles the requester-credential comment poster. All three
 // pieces (origin, space, key) must be present; a partial configuration is
 // a refused start, not a silently read-only board.
+// trackerBaseFromRuntimeConfig reads the tracker's own origin from the
+// engine's runtime configuration, so a deployment that cannot post can still
+// link to the ticket. Best-effort: anything unreadable, or an origin that is
+// not a plain https host, yields no link rather than a wrong one.
+func trackerBaseFromRuntimeConfig(path string) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) > 1<<20 {
+		return ""
+	}
+	var config struct {
+		Tracker struct {
+			Origin string `json:"origin"`
+		} `json:"tracker"`
+	}
+	if json.Unmarshal(raw, &config) != nil {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(config.Tracker.Origin))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || strings.Trim(parsed.Path, "/") != "" {
+		return ""
+	}
+	return "https://" + parsed.Host
+}
+
 func buildPoster() (*backlog.Client, string, error) {
 	origin := os.Getenv("LASSDAS_BOARD_TRACKER_ORIGIN")
 	space := os.Getenv("LASSDAS_BOARD_TRACKER_SPACE")

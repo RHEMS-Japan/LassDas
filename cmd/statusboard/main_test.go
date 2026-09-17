@@ -216,3 +216,38 @@ func TestBoardPageRendersTheIntakeHoldNotice(t *testing.T) {
 		}
 	}
 }
+
+// A deployment that cannot post to the tracker can still link to it: the
+// origin is in the engine's own configuration, and reading a ticket needs
+// no credential.
+func TestTrackerBaseFallsBackToTheRuntimeConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	good := write("runtime.json", `{"tracker":{"origin":"https://example.backlog.jp","space_key":"example"}}`)
+	if got := trackerBaseFromRuntimeConfig(good); got != "https://example.backlog.jp" {
+		t.Fatalf("tracker base = %q", got)
+	}
+	for name, body := range map[string]string{
+		"insecure.json":   `{"tracker":{"origin":"http://example.backlog.jp"}}`,
+		"credential.json": `{"tracker":{"origin":"https://user:pass@example.backlog.jp"}}`,
+		"path.json":       `{"tracker":{"origin":"https://example.backlog.jp/view/X-1"}}`,
+		"empty.json":      `{"tracker":{}}`,
+		"broken.json":     `not json`,
+	} {
+		if got := trackerBaseFromRuntimeConfig(write(name, body)); got != "" {
+			t.Errorf("%s yielded %q, want no link", name, got)
+		}
+	}
+	if got := trackerBaseFromRuntimeConfig(filepath.Join(dir, "absent.json")); got != "" {
+		t.Errorf("a missing configuration yielded %q", got)
+	}
+	if got := trackerBaseFromRuntimeConfig(""); got != "" {
+		t.Errorf("an unset path yielded %q", got)
+	}
+}

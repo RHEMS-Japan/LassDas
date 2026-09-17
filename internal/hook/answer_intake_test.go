@@ -307,3 +307,57 @@ func TestAdoptedAnswersSealIntoAClarificationRound(t *testing.T) {
 		t.Fatalf("adopted answer does not seal into a clarification round: %v", err)
 	}
 }
+
+// One question, one line naming one of its choices: that is the answer. A
+// person facing a single question with two options wrote "a" and was
+// ignored while the run waited (live 2026-09-17).
+func TestAnswerIntakeAdoptsABareChoiceForASingleQuestion(t *testing.T) {
+	record := intakeTestRecord(questionTestSetJSON)
+	for _, body := range []string{"a", "A", " a ", "a。", "(a)"} {
+		decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, body)))
+		if err != nil {
+			t.Fatalf("body %q: EvaluateAnswerIntake() error = %v", body, err)
+		}
+		if decision.Adopted == nil || len(decision.Replies) != 0 {
+			t.Fatalf("body %q: decision = %+v, want adoption", body, decision)
+		}
+		if decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
+			t.Fatalf("body %q: answers = %s", body, decision.Adopted.AnswersJSON)
+		}
+	}
+}
+
+// The short form is only for the case where it is unambiguous. With two
+// questions on the table a bare word says nothing, and a word that is not a
+// choice of the question asked is not an answer to it.
+func TestAnswerIntakeRefusesABareWordThatCouldMeanAnything(t *testing.T) {
+	two := intakeTestRecord(intakeTwoQuestionSet)
+	decision, err := EvaluateAnswerIntake(intakeTestInput(two, intakeComment(101, "a")))
+	if err != nil {
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+	}
+	if decision.Adopted != nil {
+		t.Fatalf("a bare choice answered a two-question set: %+v", decision)
+	}
+	// Ordinary conversation on the ticket stays a conversation: it is
+	// neither adopted nor answered with a correction.
+	one := intakeTestRecord(questionTestSetJSON)
+	for _, body := range []string{"z", "ありがとう", "a b", "a\nb", "はい、a でお願いします"} {
+		decision, err := EvaluateAnswerIntake(intakeTestInput(one, intakeComment(101, body)))
+		if err != nil {
+			t.Fatalf("body %q: EvaluateAnswerIntake() error = %v", body, err)
+		}
+		if decision.Adopted != nil || len(decision.Replies) != 0 {
+			t.Fatalf("body %q was treated as an answer attempt: %+v", body, decision)
+		}
+	}
+	// An attempt that names the marker and gets the rest wrong is still
+	// answered, as before.
+	decision, err = EvaluateAnswerIntake(intakeTestInput(one, intakeComment(101, "回答 C1 Q1:z")))
+	if err != nil {
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+	}
+	if len(decision.Replies) != 1 || decision.Replies[0].Kind != AnswerReplyGuidance {
+		t.Fatalf("a malformed attempt was not answered: %+v", decision.Replies)
+	}
+}
