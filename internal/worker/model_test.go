@@ -533,8 +533,12 @@ func TestConverseTurnAsksAgainWithMoreRoomAfterACutOff(t *testing.T) {
 	api = &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
 	invoker, _ = NewModelInvoker(api)
 	_, err := invoker.Preflight(context.Background(), config.Models.Implementer)
+	// The words must say the allowance was widened up to the ceiling, not
+	// that it began there: a requester is told different things by each,
+	// and only one of them is true here (review of #209).
 	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 3 || !strings.Contains(err.Error(), "finish_reason=length") ||
-		api.requests[2].MaxTokens != MaxConfiguredOutputTokens {
+		api.requests[2].MaxTokens != MaxConfiguredOutputTokens ||
+		!strings.Contains(err.Error(), CutoffAskedAgainPhrase) || strings.Contains(err.Error(), CutoffAtCeilingPhrase) {
 		t.Fatalf("three cutoffs: err = %v after %d requests (last allowance %d), want the cutoff named after 3 at the ceiling",
 			err, len(api.requests), api.requests[len(api.requests)-1].MaxTokens)
 	}
@@ -1547,6 +1551,21 @@ func TestACutoffIsWidenedAllTheWayToTheCeiling(t *testing.T) {
 	for i, allowance := range want {
 		if int32(api.requests[i].MaxTokens) != allowance {
 			t.Errorf("request %d asked with %d tokens, want %d", i+1, api.requests[i].MaxTokens, allowance)
+		}
+	}
+
+	// The same for an answer that began and ran long, which is the cutoff
+	// this widening exists for. The reasoning case above never writes a
+	// character; this one does, and takes the other branch to get here.
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{"status":"ready"}`, lengthMarker + `{"status":"ready"}`, `{"status":"ready"}`}}
+	invoker, _ = NewModelInvoker(api)
+	response, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if err != nil || response != `{"status":"ready"}` || len(api.requests) != 3 {
+		t.Fatalf("a long answer was not given the rest of the ceiling: err %v response %q after %d requests", err, response, len(api.requests))
+	}
+	for i, allowance := range want {
+		if int32(api.requests[i].MaxTokens) != allowance {
+			t.Errorf("long answer, request %d asked with %d tokens, want %d", i+1, api.requests[i].MaxTokens, allowance)
 		}
 	}
 

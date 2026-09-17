@@ -53,7 +53,7 @@ func TestReadinessCutOffLeavesTheRequesterTheReasonInTheTrail(t *testing.T) {
 	// 答えが長すぎて names the cause; without it the note says an output was
 	// cut off and never says by what (review of #131).
 	if !strings.Contains(text, "答えが長すぎて出力の上限で途切れた") || !strings.Contains(text, "自動処理を止めました") ||
-		!strings.Contains(text, "受付の判定") || !strings.Contains(text, "1 回聞き直しましたが") ||
+		!strings.Contains(text, "受付の判定") || !strings.Contains(text, "上限いっぱいまで広げて聞き直しましたが") ||
 		!strings.Contains(text, "それでも途切れました") || !strings.Contains(text, "動かし直しても同じ結果になる可能性") {
 		t.Fatalf("the trail does not name the cause in the requester's words: %q", text)
 	}
@@ -135,10 +135,26 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	// 「〜しましたが」 promises an outcome; without 「それでも途切れました」 the
 	// sentence hands the contrast to the advice that follows and says
 	// nothing about what the second ask did (review of #133).
-	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "1 回聞き直しましたが") ||
-		!strings.Contains(again, "それでも途切れました") ||
-		!strings.Contains(again, "運用担当者が受付モデルの出力上限を確認します") || strings.Contains(again, "最大値") {
+	// The note must not count the re-asks: a role below half the ceiling is
+	// widened twice and one above it once, and this sentence cannot tell
+	// them apart. Every shipped role is the twice kind, so 「1 回」 was
+	// simply false for all of them (review of #209).
+	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "上限いっぱいまで広げて聞き直しましたが") ||
+		!strings.Contains(again, "それでも途切れました") || strings.Contains(again, "1 回聞き直し") {
 		t.Fatalf("cut off again: %q", again)
+	}
+	// And the advice must not send a person to raise a limit that is
+	// already at its maximum: the worker has just used all 32,768 of it.
+	if !strings.Contains(again, "これ以上広げられない") || strings.Contains(again, "出力上限を確認します") {
+		t.Fatalf("cut off again, advice: %q", again)
+	}
+	// A widened re-ask that never came back at all - it ran out its five
+	// minutes, or the provider failed it. Before this branch existed the
+	// requester read a note with no explanation in it whatsoever, and the
+	// wider ask this change added makes that more likely to happen.
+	failed := receptionNote("受付の判定", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 8192 tokens); "+worker.CutoffWiderAskFailedPhrase+"the call spent its allowance without answering")
+	if !strings.Contains(failed, "その問い合わせ自体が答えを返しませんでした") {
+		t.Fatalf("the wider ask failed with no explanation: %q", failed)
 	}
 	ceiling := receptionNote("受付の確認", "worker: readiness check failed: model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the allowance is already at the ceiling of 32768 tokens")
 	// And the reason it could not: without 「上限は既に最大値だったため、」 the
@@ -202,7 +218,7 @@ func TestReceptionTrailIsWhatTheTerminalReportAttaches(t *testing.T) {
 	}
 	terminal := NewTerminal(pipeline.Config, nil, hook.DispatchEnvelope{}, 1, pipeline.Workspace, trailTestLogger{})
 	trail, err := terminal.loadTrail(hook.TerminalModelFailed)
-	if err != nil || !strings.Contains(trail, "1 回聞き直しましたが") {
+	if err != nil || !strings.Contains(trail, "上限いっぱいまで広げて聞き直しましたが") {
 		t.Fatalf("loadTrail() = %q, %v", trail, err)
 	}
 }
@@ -935,7 +951,7 @@ func TestLongAnswerAfterALoweringIsToldAsBoth(t *testing.T) {
 // all three steps.
 func TestLoweredThenWidenedCutoffIsToldInFull(t *testing.T) {
 	note := receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 8192 tokens); "+worker.EffortLoweredPhrase+"; "+worker.CutoffAskedAgainPhrase)
-	if !strings.Contains(note, "考える深さを下げて聞き直しましたが") || !strings.Contains(note, "上限を広げてもう 1 回聞き直しましたが") {
+	if !strings.Contains(note, "考える深さを下げて聞き直しましたが") || !strings.Contains(note, "上限いっぱいまで広げて聞き直しましたが") {
 		t.Fatalf("lowered then widened: %q", note)
 	}
 	if err := hook.ValidateTrailText(note); err != nil {

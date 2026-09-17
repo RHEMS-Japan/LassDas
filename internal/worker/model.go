@@ -42,7 +42,11 @@ const (
 	// cutoff error carries about what converseTurn could do; the runner
 	// reads them from the worker's stderr to tell the requester the same.
 	CutoffAskedAgainPhrase = "asked again with the wider allowance and cut off again"
-	CutoffAtCeilingPhrase  = "the allowance is already at the ceiling"
+	// CutoffWiderAskFailedPhrase names a re-ask that was given more room
+	// and then failed for some other reason, so a reader can tell it from
+	// one that was cut off again.
+	CutoffWiderAskFailedPhrase = "asked again with the wider allowance: "
+	CutoffAtCeilingPhrase      = "the allowance is already at the ceiling"
 	// ReasoningExhaustedPhrase names a cutoff in which the whole allowance
 	// went to the model's reasoning and no answer was begun: more room is
 	// not the remedy, less reasoning is, and converseTurn asks again with
@@ -1101,7 +1105,7 @@ func afterCutoff(cutoff error, lastRetry string, err error) error {
 	if lastRetry == "lowered" {
 		return fmt.Errorf("%w: %w", cutoff, err)
 	}
-	return fmt.Errorf("%w; asked again with the wider allowance: %w", cutoff, err)
+	return fmt.Errorf("%w; %s%w", cutoff, CutoffWiderAskFailedPhrase, err)
 }
 
 // effortLowerings bounds how many steps down the effort ladder one turn

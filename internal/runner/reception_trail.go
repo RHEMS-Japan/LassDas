@@ -243,23 +243,48 @@ func receptionCutoffNote(stage, cause string) string {
 		return note
 	}
 	note := "受付の AI (" + stage + ") の答えが長すぎて出力の上限で途切れたため、自動処理を止めました。"
+	// atCeiling is whether the allowance had nowhere left to go. The
+	// closing advice turns on it: raising a limit that is already at its
+	// maximum is not something a person can do.
+	atCeiling := false
 	switch {
 	case strings.Contains(cause, worker.EffortLoweredPhrase):
 		// The first answer never began (all reasoning); the re-ask with
 		// less reasoning wrote one, and that one was too long - and when
-		// there was room, it was widened once more and cut off again.
+		// there was room, it was widened as far as it goes and cut off.
 		note += "最初は考える段階だけで上限を使い切ったので考える深さを下げて聞き直しましたが、その答えが長すぎて途切れました。"
 		if strings.Contains(cause, worker.CutoffAskedAgainPhrase) {
-			note += "上限を広げてもう 1 回聞き直しましたが、それでも途切れました。"
+			note += cutoffWidenedToCeilingNote
+			atCeiling = true
 		}
 	case strings.Contains(cause, worker.CutoffAskedAgainPhrase):
-		note += "上限を広げて 1 回聞き直しましたが、それでも途切れました。"
+		note += cutoffWidenedToCeilingNote
+		atCeiling = true
 	case strings.Contains(cause, worker.CutoffAtCeilingPhrase):
 		note += "上限は既に最大値だったため、聞き直しはできませんでした。"
+		atCeiling = true
+	case strings.Contains(cause, worker.CutoffWiderAskFailedPhrase):
+		// The wider re-ask never came back with an answer at all: it timed
+		// out, or the provider failed it. Without this the requester read a
+		// note with no explanation in it whatsoever.
+		note += "上限を広げて聞き直しましたが、その問い合わせ自体が答えを返しませんでした。"
 	}
-	note += "同じ依頼を動かし直しても同じ結果になる可能性が高いです。運用担当者が受付モデルの出力上限を確認します。\n"
+	note += "同じ依頼を動かし直しても同じ結果になる可能性が高いです。"
+	if atCeiling {
+		note += "出力の上限はこれ以上広げられないため、運用担当者が受付モデルそのものを見直します。\n"
+	} else {
+		note += "運用担当者が受付モデルの出力上限を確認します。\n"
+	}
 	return note
 }
+
+// cutoffWidenedToCeilingNote is what a requester is told when the allowance
+// was widened as far as it goes and the answer was still cut off. It does
+// not count the re-asks: a role configured below half the ceiling is
+// widened twice and one above it once, and which of those happened is not
+// what the requester needs to know. What they need is that there is no
+// room left.
+const cutoffWidenedToCeilingNote = "出力の上限いっぱいまで広げて聞き直しましたが、それでも途切れました。"
 
 // noFileChosenNote is what a requester is told when the derivation had no
 // file to change: the one reception failure whose remedy is in the ticket.
