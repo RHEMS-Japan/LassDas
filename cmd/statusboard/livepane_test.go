@@ -18,13 +18,14 @@ func TestLivePaneBehaviour(t *testing.T) {
 		t.Skip("node is not installed; the live pane's behaviour was not checked")
 	}
 	output, err := exec.Command(node, "testdata/livepane_check.mjs", "board.html").CombinedOutput()
-	passed := 0
+	ran := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		switch {
 		case strings.HasPrefix(line, "FAIL"):
 			t.Error(line)
+			ran++
 		case strings.HasPrefix(line, "PASS"):
-			passed++
+			ran++
 		}
 	}
 	if err != nil && !strings.Contains(string(output), "FAIL") {
@@ -32,9 +33,11 @@ func TestLivePaneBehaviour(t *testing.T) {
 	}
 	// A harness that stops checking says nothing and leaves no FAIL line,
 	// so the count is what says it ran: replacing the whole file with one
-	// empty print passed before this (review of #200).
-	if passed < 20 {
-		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", passed, output)
+	// empty print passed before this. A failure counts as having run, or
+	// one behaviour going wrong produced a second, untrue complaint that
+	// the harness had stopped (review of #200).
+	if ran < 21 {
+		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", ran, output)
 	}
 }
 

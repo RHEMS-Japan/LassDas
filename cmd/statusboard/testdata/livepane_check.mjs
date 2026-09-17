@@ -90,17 +90,23 @@ const documentStub = {
   createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
   addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
   getElementById: id => registry[id] || null,
+  // Resolved by position: which card is at that place on the board now,
+  // and which rail node within it. Resolving by delivery instead made the
+  // pointer follow a card wherever it moved, which no pointer does - and
+  // the one case that matters, cards re-sorting under a pointer that did
+  // not move, could not be written down at all (review of #200).
   elementFromPoint: () => {
     if (!pointerPosition) return null;
-    return runsBox.querySelector('.card[data-delivery="' + pointerPosition.delivery +
-      '"] .node[data-step="' + pointerPosition.stage + '"]');
+    const card = runsBox.children[pointerPosition.slot];
+    return card ? card.querySelector('.node[data-step="' + pointerPosition.stage + '"]') : null;
   },
 };
 const registry = {};
-// Move the pointer to the rail node of one delivery's stage, or off the
-// board entirely.
-const movePointerTo = (delivery, stage) => {
-  pointerPosition = delivery ? { delivery, stage } : null;
+// Move the pointer over the rail node of whichever card sits at that place
+// on the board, or off the board entirely. The pointer stays where it is
+// put; what is under it is whatever the board puts there.
+const movePointerTo = (slot, stage) => {
+  pointerPosition = slot === null ? null : { slot, stage };
   (listeners.mousemove || []).forEach(fn => fn({ clientX: 1, clientY: 1 }));
 };
 const live = new Function("CSS", "setTimeout", "clearTimeout", "fetch", "document", "el",
@@ -181,12 +187,18 @@ live.reset();
 {
   const a = card("d1", "TICKET-1");
   box(a);
-  movePointerTo("d1", "design");
+  movePointerTo(0, "design");
   fire(node(a, "design"), "mouseenter");
+  // The pointer does not move; the board re-sorts under it. What is at
+  // that place is now another ticket's rail, so the pane that was open
+  // does not come back on the card that moved away from the pointer.
   const moved = card("d1", "TICKET-1");
-  movePointerTo(null);
   rebuild(card("d2", "TICKET-2"), moved);
-  check("no pane opens on a card the pointer left", pane(moved).classList.has("on"), false);
+  check("no pane opens on a card that moved out from under the pointer",
+    pane(moved).classList.has("on"), false);
+  const arrived = runsBox.children[0];
+  check("and none opens on the card that took its place",
+    pane(arrived).classList.has("on"), false);
 }
 
 // Two deliveries of one ticket: the pane belongs to the one hovered.
@@ -194,7 +206,7 @@ live.reset();
 {
   const first = card("d-old", "TICKET-1"), second = card("d-new", "TICKET-1");
   box(first, second);
-  movePointerTo("d-new", "design");
+  movePointerTo(1, "design");
   fire(node(second, "design"), "mouseenter");
   const stillFirst = card("d-old", "TICKET-1"), stillSecond = card("d-new", "TICKET-1");
   rebuild(stillFirst, stillSecond);
@@ -307,7 +319,7 @@ live.reset();
   check("and the one left open is the one just pinned", open[0] === pane(b), true);
 }
 
-if (checks < 20) {
+if (checks < 21) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }

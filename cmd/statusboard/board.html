@@ -392,9 +392,13 @@ function setTrack(container, stepID, round, stage) {
 // there is nothing to ask, and an unpinned pane is not restored - the
 // reader is not there as far as anything can tell.
 let pointerAt = null;
-document.addEventListener("mousemove", event => {
-  pointerAt = { x: event.clientX, y: event.clientY };
-}, { passive: true });
+const rememberPointer = event => { pointerAt = { x: event.clientX, y: event.clientY }; };
+document.addEventListener("mousemove", rememberPointer, { passive: true });
+// A reader whose cursor was already over the rail when the page loaded has
+// moved nothing, and without a position an unpinned pane would be given up
+// on the first refresh. Entering a rail node is itself a position (review
+// of #200).
+document.addEventListener("mouseover", rememberPointer, { passive: true });
 
 function pointerIsOver(node) {
   if (!pointerAt || !document.elementFromPoint) return false;
