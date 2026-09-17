@@ -1471,7 +1471,7 @@ func TestConverseTurnLowersReasoningEffortWhenNoAnswerBegan(t *testing.T) {
 	// Below the ceiling with no effort to lower, the room logic still runs.
 	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, `{"status":"ready"}`}}
 	invoker, _ = NewModelInvoker(api)
-	if _, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16); err != nil ||
+	if _, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "low", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16); err != nil ||
 		len(api.requests) != 2 || api.requests[1].MaxTokens != 8192 {
 		t.Fatalf("no effort to lower below the ceiling: err %v, %d requests, allowance %d", err, len(api.requests), api.requests[len(api.requests)-1].MaxTokens)
 	}
@@ -1536,7 +1536,7 @@ func TestACutoffIsWidenedAllTheWayToTheCeiling(t *testing.T) {
 	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
 	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
 	invoker, _ := NewModelInvoker(api)
-	response, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	response, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "low", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
 	if err != nil || response != `{"status":"ready"}` {
 		t.Fatalf("the answer written with the rest of the ceiling was not taken: err %v response %q", err, response)
 	}
@@ -1553,8 +1553,41 @@ func TestACutoffIsWidenedAllTheWayToTheCeiling(t *testing.T) {
 	// Cut off at the ceiling too: the turn ends there, naming the wider ask.
 	api = &loopScriptAPI{answers: []string{reasoningExhaustedMarker, reasoningExhaustedMarker, reasoningExhaustedMarker, `{"status":"ready"}`}}
 	invoker, _ = NewModelInvoker(api)
-	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", Effort: "low", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
 	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 3 || !strings.Contains(err.Error(), CutoffAskedAgainPhrase) {
 		t.Fatalf("cut off at the ceiling: err %v after %d requests", err, len(api.requests))
+	}
+}
+
+// A role that configures no reasoning effort is the common case, and the
+// remedy for a model that reasons its whole allowance away - ask again with
+// less reasoning - was unreachable for it, because the ladder had no step
+// from unset. Live 2026-09-17: the reception's readiness check carried no
+// effort, spent 8,192 tokens on reasoning, wrote no answer, lowered nothing,
+// and ended the delivery as model_failed.
+func TestAnUnsetReasoningEffortStillHasAStepDown(t *testing.T) {
+	messages := []ChatMessage{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}}
+	api := &loopScriptAPI{answers: []string{reasoningExhaustedMarker, `{"status":"ready"}`}}
+	invoker, _ := NewModelInvoker(api)
+	response, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: MaxConfiguredOutputTokens}, messages, `{"type":"object"}`, 1<<16)
+	if err != nil || response != `{"status":"ready"}` {
+		t.Fatalf("a turn with no configured effort was not asked again with less reasoning: err %v response %q", err, response)
+	}
+	if len(api.requests) != 2 || api.requests[0].ReasoningEffort != "" || api.requests[1].ReasoningEffort != "medium" {
+		t.Fatalf("%d requests, efforts %q -> %q", len(api.requests), api.requests[0].ReasoningEffort, api.requests[len(api.requests)-1].ReasoningEffort)
+	}
+	// The allowance is untouched: room is not the remedy for reasoning.
+	if api.requests[1].MaxTokens != MaxConfiguredOutputTokens {
+		t.Errorf("the allowance moved to %d", api.requests[1].MaxTokens)
+	}
+	// Two steps below unset, the same count a configured "high" gets.
+	if next, ok := lowerReasoningEffort(""); !ok || next != "medium" {
+		t.Errorf("unset -> %q %v", next, ok)
+	}
+	if next, ok := lowerReasoningEffort("medium"); !ok || next != "low" {
+		t.Errorf("medium -> %q %v", next, ok)
+	}
+	if _, ok := lowerReasoningEffort("low"); ok {
+		t.Error("low still has somewhere to go")
 	}
 }

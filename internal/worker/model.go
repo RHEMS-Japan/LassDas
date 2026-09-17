@@ -136,6 +136,17 @@ func lowerReasoningEffort(effort string) (string, bool) {
 		return "medium", true
 	case "medium":
 		return "low", true
+	case "":
+		// Unset is not "nothing to lower": it means the provider's own
+		// default, which on a reasoning model is high enough to spend a
+		// whole allowance on thought. A role that configures no effort is
+		// the common case, so leaving unset off the ladder made the remedy
+		// for an exhausted allowance unreachable exactly where it was most
+		// needed - live 2026-09-17, a reception's readiness check carried no
+		// effort, reasoned 8,192 tokens away, lowered nothing, and ended the
+		// delivery. Two steps remain below this one, the same as a
+		// configured "high".
+		return "medium", true
 	}
 	return "", false
 }
