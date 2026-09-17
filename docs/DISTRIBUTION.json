@@ -1,7 +1,6 @@
 {
   "engine_repository": "RHEMS-Japan/LassDas",
-  "image": "787262016705.dkr.ecr.ap-northeast-1.amazonaws.com/lassdas/runtime@sha256:51cf2b6a635a65589c416fcec0a6cdf012fbedd47ff9fffa7a69544836525af7",
-  "engine_sha": "8c0abd60c39085a4c0acd9caeb86962d35553eb2",
-  "build_record": "https://github.com/RHEMS-Japan/LassDas/commits/main/docs/DISTRIBUTION.json",
-  "registry_login": "aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin 787262016705.dkr.ecr.ap-northeast-1.amazonaws.com"
+  "image": "ghcr.io/rhems-japan/lassdas/runtime@sha256:d705f1561e64ff6f7bc049ae217a23dd8a5ab8baf7e034b663ab562786900cf7",
+  "engine_sha": "623fa3f3de29314a9968d083f20a0a2959150c41",
+  "build_record": "https://github.com/RHEMS-Japan/LassDas/actions/runs/35177230243"
 }
