@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -44,7 +45,9 @@ func (s *boardServer) serveTicketLive(w http.ResponseWriter, r *http.Request, ru
 		return
 	}
 	path := filepath.Join(dir, step+".log")
-	info, err := os.Stat(path)
+	// Lstat, not Stat: the run directory is the agent's own workspace, so a
+	// link planted there must not be followed out of it (review of #187).
+	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "この工程の実況はありません", http.StatusNotFound)
 		return
@@ -58,17 +61,29 @@ func (s *boardServer) serveTicketLive(w http.ResponseWriter, r *http.Request, ru
 	if info.Size()-from > maxLiveChunk {
 		from = info.Size() - maxLiveChunk
 	}
-	file, err := os.Open(path)
+	// The window must begin at a line, not at a byte the caller chose. A
+	// window opened inside a masked value would serve the rest of it, and
+	// the mask below would no longer recognise what it is looking at: a
+	// caller who asked for from=12 got the tail of a key (review of #187).
+	if from > 0 {
+		aligned, err := alignToLine(file(path), from)
+		if err != nil {
+			http.Error(w, "この工程の実況は読めませんでした", http.StatusNotFound)
+			return
+		}
+		from = aligned
+	}
+	handle, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "この工程の実況は読めませんでした", http.StatusNotFound)
 		return
 	}
-	defer func() { _ = file.Close() }()
-	if _, err := file.Seek(from, io.SeekStart); err != nil {
+	defer func() { _ = handle.Close() }()
+	if _, err := handle.Seek(from, io.SeekStart); err != nil {
 		http.Error(w, "この工程の実況は読めませんでした", http.StatusNotFound)
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxLiveChunk))
+	raw, err := io.ReadAll(io.LimitReader(handle, maxLiveChunk))
 	if err != nil {
 		http.Error(w, "この工程の実況は読めませんでした", http.StatusNotFound)
 		return
@@ -106,7 +121,7 @@ func (s *boardServer) serveLiveIndex(w http.ResponseWriter, dir string) {
 				continue
 			}
 			info, err := entry.Info()
-			if err != nil {
+			if err != nil || !info.Mode().IsRegular() {
 				continue
 			}
 			steps = append(steps, liveStep{Step: name, Stage: ticketview.LiveStage(name), Bytes: info.Size(), UpdatedAt: info.ModTime().UnixMilli()})
@@ -121,4 +136,37 @@ func (s *boardServer) serveLiveIndex(w http.ResponseWriter, dir string) {
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// file opens the live log for a second read; a path that cannot be opened
+// yields a reader that fails, which alignToLine reports.
+func file(path string) func() (*os.File, error) {
+	return func() (*os.File, error) { return os.Open(path) }
+}
+
+// alignToLine moves an offset forward to the start of the next line, so a
+// window never begins in the middle of one. Reading back at most one window
+// is enough: the writer never leaves a line longer than its own flush bound.
+func alignToLine(open func() (*os.File, error), from int64) (int64, error) {
+	handle, err := open()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = handle.Close() }()
+	if _, err := handle.Seek(from, io.SeekStart); err != nil {
+		return 0, err
+	}
+	probe := make([]byte, maxLiveChunk)
+	read, err := io.ReadFull(handle, probe)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return 0, err
+	}
+	index := bytes.IndexByte(probe[:read], '\n')
+	if index < 0 {
+		// The line has not ended yet. The offset stays where it is: moving
+		// past the unfinished part would serve its tail once it does end,
+		// which is the leak this alignment exists to prevent.
+		return from, nil
+	}
+	return from + int64(index) + 1, nil
 }

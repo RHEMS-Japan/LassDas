@@ -66,12 +66,21 @@ func (g *GatewayClient) postStreaming(ctx context.Context, baseURL, apiKey strin
 	return body, http.StatusOK, retryAfter, nil
 }
 
+// errStreamUnsupported marks an answer that did not arrive as a stream at
+// all: a gateway that ignored the request, or one whose pieces cannot be
+// read. The caller asks the same question again in one piece and stops
+// asking for streams - without that, a gateway that ignores streaming
+// failed every model call of every run, because the live view asks for one
+// on every step (review of #187).
+var errStreamUnsupported = errors.New("model endpoint did not stream")
+
 // streamChunk is one piece of a streamed answer.
 type streamChunk struct {
 	ID      string             `json:"id"`
 	Error   *ChatResponseError `json:"error,omitempty"`
 	Usage   *ChatUsage         `json:"usage"`
 	Choices []struct {
+		Index        int    `json:"index"`
 		FinishReason string `json:"finish_reason"`
 		Delta        struct {
 			Role      string `json:"role"`
@@ -91,8 +100,12 @@ type liveWriter interface{ Write([]byte) (int, error) }
 func readChatStream(body io.Reader, live liveWriter) (*ChatResponse, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamEventBytes)
-	var answer strings.Builder
-	response := &ChatResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant"}}}}
+	// One answer per choice index: a turn that asks for one gets one, and a
+	// provider that sends several must not have them read as one answer
+	// with somebody else's finish reason (review of #187).
+	answers := map[int]*strings.Builder{}
+	finishes := map[int]string{}
+	response := &ChatResponse{}
 	pieces := 0
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -105,7 +118,7 @@ func readChatStream(body io.Reader, live liveWriter) (*ChatResponse, error) {
 		}
 		var chunk streamChunk
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			return nil, safeModelLiteral("model response is not valid JSON")
+			return nil, errStreamUnsupported
 		}
 		pieces++
 		if chunk.ID != "" {
@@ -119,26 +132,56 @@ func readChatStream(body io.Reader, live liveWriter) (*ChatResponse, error) {
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
-				response.Choices[0].FinishReason = choice.FinishReason
+				finishes[choice.Index] = choice.FinishReason
 			}
 			if choice.Delta.Content == "" {
 				continue
 			}
-			answer.WriteString(choice.Delta.Content)
-			if live != nil {
+			if answers[choice.Index] == nil {
+				answers[choice.Index] = &strings.Builder{}
+			}
+			answers[choice.Index].WriteString(choice.Delta.Content)
+			// Only the answer a single-choice turn is reading is shown: a
+			// second candidate on the same screen would read as one text.
+			if live != nil && choice.Index == 0 {
 				_, _ = live.Write([]byte(choice.Delta.Content))
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, safeModelLiteral("model response could not be read")
+		// A line longer than the bound is not a chat completion; so is a
+		// body that could not be read as a stream.
+		return nil, errStreamUnsupported
 	}
 	if pieces == 0 {
-		return nil, safeModelLiteral("model response carried no pieces")
+		return nil, errStreamUnsupported
 	}
-	if live != nil {
+	if live != nil && answers[0] != nil {
 		_, _ = live.Write([]byte("\n"))
 	}
-	response.Choices[0].Message.Content = answer.String()
+	highest := -1
+	for index := range answers {
+		if index > highest {
+			highest = index
+		}
+	}
+	for index := range finishes {
+		if index > highest {
+			highest = index
+		}
+	}
+	for index := 0; index <= highest; index++ {
+		content := ""
+		if builder := answers[index]; builder != nil {
+			content = builder.String()
+		}
+		response.Choices = append(response.Choices, ChatChoice{
+			FinishReason: finishes[index],
+			Message:      ChatMessage{Role: "assistant", Content: content},
+		})
+	}
+	// A provider's own error with nothing else is exactly the shape the
+	// caller judges as the provider ending the turn; an invented empty
+	// answer would be judged as a malformed one instead.
 	return response, nil
 }

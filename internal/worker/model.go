@@ -459,6 +459,14 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		}
 		lastAttempt := time.Since(startedAttempt)
 		if err != nil {
+			if errors.Is(err, errStreamUnsupported) {
+				// The endpoint does not stream. The question is asked again
+				// in one piece, and this process stops asking for streams.
+				g.streamOff = true
+				plain := request
+				plain.Stream, plain.StreamOptions = false, nil
+				return g.ChatCompletions(ctx, endpoint, plain)
+			}
 			// A gateway that answered a status gets the ladder below; one
 			// that could not be reached at all gets the same ladder here,
 			// because the moment that stopped it passes the same way.

@@ -615,3 +615,32 @@ func toneOfStep(v View, step string) string {
 	}
 	return ""
 }
+
+// A runner that was killed leaves its current-step record behind. Past the
+// longest a step may take, the page must stop claiming work is happening -
+// otherwise a dead run reads as a working one, which is the confusion this
+// record exists to end (review of #187).
+func TestARecordLeftByAKilledRunnerIsNotRunning(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(dir, "current-step.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"step":"implement","started_at":"` + time.Now().Add(-5*time.Minute).UTC().Format(time.RFC3339) + `"}`)
+	fresh, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Running == nil {
+		t.Fatal("a step started five minutes ago is running")
+	}
+	write(`{"step":"implement","started_at":"` + time.Now().Add(-25*time.Hour).UTC().Format(time.RFC3339) + `"}`)
+	stale, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Running != nil {
+		t.Fatalf("a day-old record still claimed work: %+v", stale.Running)
+	}
+}

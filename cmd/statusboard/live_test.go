@@ -78,8 +78,29 @@ func TestLiveServesFromTheOffsetAndKeepsWholeLines(t *testing.T) {
 	if code != 200 || second["text"] != "" {
 		t.Fatalf("a follow-up read returned %v (status %d), want nothing new", second["text"], code)
 	}
-	if int64(second["from"].(float64)) != next {
-		t.Fatalf("from = %v, want the offset the caller carried", second["from"])
+	if int64(second["from"].(float64)) != next || int64(second["next"].(float64)) != next {
+		t.Fatalf("from/next = %v/%v, want the unfinished line left where it is", second["from"], second["next"])
+	}
+}
+
+// An offset the caller chose inside a line is moved to the next line, so a
+// window can never open in the middle of a masked value: asking from=12 of
+// "export KEY=sk-…" returned the rest of the key (review of #187).
+func TestLiveRefusesToServeFromInsideALine(t *testing.T) {
+	secret := "sk-" + strings.Repeat("C", 40)
+	server := liveFixture(t, map[string]string{"agent-review.log": "export KEY=" + secret + "\n次の行\n"})
+	for _, from := range []int64{1, 12, 20, 40} {
+		code, payload := liveGet(t, server, "/api/tickets/PROJ-7/live/agent-review?from="+itoa(from))
+		if code != 200 {
+			t.Fatalf("from=%d: status %d", from, code)
+		}
+		text := payload["text"].(string)
+		if strings.Contains(text, "C"+strings.Repeat("C", 20)) || strings.Contains(text, "sk-") {
+			t.Fatalf("from=%d served part of the key: %q", from, text)
+		}
+		if text != "次の行\n" {
+			t.Fatalf("from=%d served %q, want the next whole line", from, text)
+		}
 	}
 }
 
@@ -111,4 +132,29 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return digits
+}
+
+// The run directory is the agent's own workspace, so a link planted in it
+// must not be followed out of the run (review of #187).
+func TestLiveRefusesALinkInTheLiveDirectory(t *testing.T) {
+	server := liveFixture(t, map[string]string{"real.log": "本物です\n"})
+	dir := filepath.Join(filepath.Dir(filepath.Clean(server.statusDir)), "runs", "delivery_abc", "live")
+	outside := filepath.Join(t.TempDir(), "host-file")
+	if err := os.WriteFile(outside, []byte("HOST FILE CONTENTS\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "planted.log")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	server.serveTicketAPI(rec, httptest.NewRequest("GET", "/api/tickets/PROJ-7/live/planted", nil))
+	if rec.Code == 200 {
+		t.Fatalf("a link was served: %s", rec.Body)
+	}
+	_, index := liveGet(t, server, "/api/tickets/PROJ-7/live")
+	for _, entry := range index["steps"].([]any) {
+		if entry.(map[string]any)["step"] == "planted" {
+			t.Fatal("a link was listed as a step")
+		}
+	}
 }

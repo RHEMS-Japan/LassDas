@@ -28,6 +28,7 @@ var ticketPage []byte
 
 // ticketKeyPattern is the engine's own issue key shape (worker config).
 var ticketKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]*$`)
+
 // liveStepPattern is the file-name shape the engine writes live output
 // under: one path segment of the characters runner.LiveLogName produces.
 var liveStepPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,80}$`)

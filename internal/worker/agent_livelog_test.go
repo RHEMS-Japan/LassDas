@@ -60,3 +60,20 @@ func TestAgentSecretsDoNotReachTheLiveFile(t *testing.T) {
 		t.Fatalf("a token reached the live file: %q", raw)
 	}
 }
+
+// An agent killed mid-line still shows what it said: the last line is
+// usually the one explaining the failure (review of #187).
+func TestAgentsLastLineSurvivesWithoutANewline(t *testing.T) {
+	root, _ := buildAgentRepository(t)
+	path := filepath.Join(t.TempDir(), "live", "implement.log")
+	t.Setenv(livelog.PathEnv, path)
+	name, _ := writeFakeAgent(t, "printf '最後の行に改行はありません'")
+	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "secret-value")
+	if _, err := RunAgent(context.Background(), fixtureAgentConfig("author-agent", name), root, "do the thing", []string{"client/src/"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "最後の行に改行はありません") {
+		t.Fatalf("the last line was lost: %q (%v)", raw, err)
+	}
+}

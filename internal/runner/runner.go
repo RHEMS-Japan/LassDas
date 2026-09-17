@@ -124,12 +124,22 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	// Every step is told where to append what it is producing, so a reader
 	// can watch the work instead of waiting for the record that lands when
 	// the step ends.
-	extraEnv = append(extraEnv, livelog.PathEnv+"="+LiveLogPath(p.Workspace, name))
+	// The step's own child processes append to the same file, so what a
+	// step produced survives the container that produced it: until now the
+	// only copy of a failed step's output was the container's log, and a
+	// rebuilt container took the reason with it.
+	livePath := LiveLogPath(p.Workspace, name)
+	extraEnv = append(extraEnv, livelog.PathEnv+"="+livePath)
+	if err := os.Setenv(livelog.PathEnv, livePath); err != nil {
+		p.Logger.Error("live log path not set", "error", err.Error())
+	}
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = p.Workspace
-	command.Stdout = os.Stdout
+	live := livelog.Open()
+	defer live.Close()
+	command.Stdout = live.Tee(os.Stdout)
 	stderrTail := &tailBuffer{limit: stepStderrTailBytes}
-	command.Stderr = io.MultiWriter(os.Stderr, stderrTail)
+	command.Stderr = live.Tee(io.MultiWriter(os.Stderr, stderrTail))
 	defer func() { p.lastStepStderr = stderrTail.String() }()
 	command.Env = append(os.Environ(), extraEnv...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -858,6 +858,11 @@ func (v *View) readEnding(runDir string) {
 	})
 }
 
+// maxRunningStepAge is how long a started step may still be called running.
+// The implement stage's own bound is 90 minutes (internal/runtime chain), so
+// anything older than that plus a margin is a record nobody cleared.
+const maxRunningStepAge = 2 * time.Hour
+
 // readRunning reads the step the runner started last and has not replaced.
 // The record is removed when the run stops running steps, so its presence is
 // what "still working" means here.
@@ -868,6 +873,13 @@ func (v *View) readRunning(runDir string) {
 	}
 	record.Step = shown(record.Step)
 	if record.Step == "" || record.StartedAt.IsZero() {
+		return
+	}
+	// A runner that was killed leaves its record behind. Past the longest a
+	// step may take, "still running" would be a claim nobody is making: the
+	// page would pulse for ever and an unsealed round would read as in
+	// progress instead of dead (review of #187).
+	if time.Since(record.StartedAt) > maxRunningStepAge {
 		return
 	}
 	v.Running = &record

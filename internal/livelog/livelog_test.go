@@ -103,3 +103,58 @@ func read(t *testing.T, path string) string {
 	}
 	return string(raw)
 }
+
+// A line that never ends is shown eventually, but the flush stops short of
+// its tail: a secret arriving in small pieces would otherwise have its
+// first bytes written raw, where no scan recognises them (review of #187).
+func TestAnEndlessLineIsFlushedWithoutItsTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live", "stream.log")
+	sink := openAt(t, path)
+	secret := "TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	// Enough filler that the flush threshold is crossed 20 bytes into the
+	// secret: without the held-back tail those 20 bytes go to the file on
+	// their own, and 20 bytes of a token match no shape.
+	filler := strings.Repeat("x", maxUnterminatedLine-20)
+	for i := 0; i < len(filler); i += 64 {
+		end := i + 64
+		if end > len(filler) {
+			end = len(filler)
+		}
+		_, _ = sink.Write([]byte(filler[i:end]))
+	}
+	for i := 0; i < len(secret); i += 8 {
+		end := i + 8
+		if end > len(secret) {
+			end = len(secret)
+		}
+		_, _ = sink.Write([]byte(secret[i:end]))
+	}
+	if body := read(t, path); strings.Contains(body, "ghp_") {
+		t.Fatalf("part of the token was flushed before its line ended: %q", body[max(0, len(body)-80):])
+	}
+	_, _ = sink.Write([]byte("\n"))
+	body := read(t, path)
+	if strings.Contains(body, "ghp_abcdefghijklmnopqrstuvwxyz0123456789") {
+		t.Fatal("the token reached the file whole")
+	}
+	if !strings.Contains(body, "[masked:") {
+		t.Fatalf("the finished line was written without masking: %q", body[max(0, len(body)-80):])
+	}
+}
+
+// The bound belongs to the file: a step opens more than one sink on it (the
+// agent's output and the model's answer), and a bound counted per sink let
+// the file grow past it.
+func TestTwoSinksShareOneBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live", "shared.log")
+	t.Setenv(PathEnv, path)
+	first, second := Open(), Open()
+	line := strings.Repeat("a", 1024) + "\n"
+	for i := 0; i < (MaxBytes/len(line))+8; i++ {
+		_, _ = first.Write([]byte(line))
+		_, _ = second.Write([]byte(line))
+	}
+	if size := len(read(t, path)); size > MaxBytes+2*len(cutNotice) {
+		t.Fatalf("two sinks wrote %d bytes into a %d-byte bound", size, MaxBytes)
+	}
+}

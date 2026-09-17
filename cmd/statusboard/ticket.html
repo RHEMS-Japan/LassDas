@@ -198,6 +198,7 @@
   // opened it. Hidden tabs do not poll.
   let lastBody = "";
   let timer = null;
+  let failures = 0;
   function load(first) {
     return fetch("/api/tickets/" + encodeURIComponent(key), { headers: { Accept: "application/json" } })
       .then(r => { if (!r.ok) throw new Error(r.status === 404 ? "この票は盤面にありません" : "読み込みに失敗しました (" + r.status + ")"); return r.text(); })
@@ -205,6 +206,7 @@
         const data = JSON.parse(body);
         const view = data.view || {};
         const stable = JSON.stringify([data.board, Object.assign({}, view, { built_at: null })]);
+        failures = 0;
         if (stable !== lastBody) {
           lastBody = stable;
           renderHead(data.board || {}, view, data.tracker_base || "");
@@ -222,7 +224,10 @@
           document.getElementById("head").appendChild(el("div", "err", err.message));
           document.getElementById("timeline").textContent = "";
         }
-        schedule(true);
+        // A page that cannot read its票 stops asking: a run that ended, a
+        // board that was retired, a network that is gone.
+        failures += 1;
+        schedule(failures < 5);
       });
   }
   function schedule(active) {

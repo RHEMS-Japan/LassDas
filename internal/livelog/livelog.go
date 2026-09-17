@@ -22,6 +22,14 @@ const PathEnv = "LASSDAS_LIVE_LOG"
 // Dir is the run-directory subdirectory the files live in.
 const Dir = "live"
 
+// maxUnterminatedLine is how much of a line without an end is held before it
+// is shown anyway; secretTailBytes is what is kept back from that flush, so
+// no secret shape can be split across two masks.
+const (
+	maxUnterminatedLine = 16 * 1024
+	secretTailBytes     = 512
+)
+
 // MaxBytes bounds one step's live log. An agent that loops can produce
 // megabytes; past the bound the file keeps its beginning, says it was cut,
 // and stops growing. The run's own transcript record is unaffected.
@@ -50,7 +58,14 @@ func Open() *Sink {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil
 	}
-	return &Sink{path: path}
+	sink := &Sink{path: path}
+	// The bound belongs to the file, not to this sink: a step opens more
+	// than one (the agent's output and the model's answer), and a bound
+	// counted per sink let the file grow past it (review of #187).
+	if info, err := os.Stat(path); err == nil {
+		sink.written = int(info.Size())
+	}
+	return sink
 }
 
 // Tee returns w when there is no live file, and a writer that feeds both
@@ -79,11 +94,14 @@ func (s *Sink) Write(p []byte) (int, error) {
 	}
 	if end == 0 {
 		// A line that never ends would never be shown; past a reasonable
-		// length it is flushed as it stands.
-		if len(s.pending) < 16*1024 {
+		// length it is flushed as it stands, minus a tail long enough to
+		// hold any secret shape. Flushing the whole of it would let a value
+		// straddle two flushes and be masked as two halves of nothing
+		// (review of #187).
+		if len(s.pending) < maxUnterminatedLine {
 			return len(p), nil
 		}
-		end = len(s.pending)
+		end = len(s.pending) - secretTailBytes
 	}
 	chunk := string(s.pending[:end])
 	s.pending = append([]byte(nil), s.pending[end:]...)
@@ -116,6 +134,11 @@ func (s *Sink) append(chunk string) {
 	masked, _, refusal := probe.MaskSecrets(chunk, nil)
 	if refusal != "" {
 		masked = "[秘密の形 (" + refusal + ") を含む行は表示しません]\n"
+	}
+	if info, err := os.Stat(s.path); err == nil && int(info.Size()) > s.written {
+		// Another sink on the same file has written since; the bound counts
+		// what the file holds.
+		s.written = int(info.Size())
 	}
 	if s.written+len(masked) > MaxBytes {
 		masked, s.cut = cutNotice, true
