@@ -302,7 +302,14 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 	case validateLeft:
 		status.place("checks", "変更内容の検査中", detail)
 	case publishLeft:
-		status.place("reporting", "PR の公開処理中", detail)
+		// Publishing the pull request happens after the checks that judge
+		// the change and before the checks the branch itself runs, and
+		// both of those are 検査. A position the rail does not draw left
+		// it dark for the whole of publishing; STG would have said the
+		// change was deployed and then gone backwards when the branch's
+		// CI took over. Between two 検査 there is one placement that is
+		// neither untrue nor a step back (review of #203).
+		status.place("checks", "PR の公開処理中", detail)
 	default:
 		status.place("implement", "次の工程を準備中", detail)
 	}

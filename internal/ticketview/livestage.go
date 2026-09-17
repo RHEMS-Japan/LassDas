@@ -87,24 +87,20 @@ var liveStages = map[string]string{
 	"verify-applied":      "checks",
 	"verify-publish-gate": "checks",
 	"impasse-question":    "checks",
+	// The publish card runs these, and the rail is lit at 検査 while it
+	// does: publishing happens between the checks that judge the change
+	// and the checks the branch runs (review of #203).
+	"create-feature-pr": "checks",
+	"publish-feature":   "checks",
+	"compose-trail":     "checks",
 
-	// STG — the publish card: the branch, the merge, and the wait for the
-	// staging deployment.
-	//
-	// Three of these run while the attendant places "reporting", which the
-	// rail does not draw at all, so the rail is dark then and a reader has
-	// no lit stage to hover: create-feature-pr, publish-feature and
-	// compose-trail. They sit here because STG is what they are doing. The
-	// missing rail stage is older than this table.
+	// STG — the merge and the wait for the staging deployment.
 	//
 	// Six more are re-run from that same card when the integration branch
 	// moved under the delivery - baseline, the git checkout, apply,
 	// run-validation, verify-applied and verify-publish-gate - and they
 	// stay where their first, lit card puts them: 受付 for the first two,
 	// 検査 for the rest.
-	"create-feature-pr":   "staging",
-	"publish-feature":     "staging",
-	"compose-trail":       "staging",
 	"merge-feature":       "staging",
 	"await-staging":       "staging",
 	"read-merged-feature": "staging",

@@ -39,9 +39,9 @@ var pinnedStages = map[string]string{
 
 	"decide": "checks", "apply": "checks", "run-validation": "checks",
 	"verify-applied": "checks", "verify-publish-gate": "checks", "impasse-question": "checks",
-	"wait-feature": "checks",
+	"wait-feature":      "checks",
+	"create-feature-pr": "checks", "publish-feature": "checks", "compose-trail": "checks",
 
-	"create-feature-pr": "staging", "publish-feature": "staging", "compose-trail": "staging",
 	"merge-feature": "staging", "await-staging": "staging",
 	"read-merged-feature": "staging", "promotion-delta": "staging", "browsercheck-staging": "staging",
 
@@ -222,10 +222,8 @@ var scannedWrappers = map[string]bool{"worker": true, "step": true, "controller"
 // derivation takes on trust; everything else below is read out of the
 // engine.
 //
-// The publish card is absent on purpose: the attendant places "reporting"
-// for it, which the board's rail does not draw at all, so a step reached
-// only from there has no lit stage to belong to. That gap is older than
-// this table and is named in it.
+// The publish card lights 検査, because publishing sits between the checks
+// that judge the change and the checks the branch runs (review of #203).
 // It is an approximation: status.go does not hold a per-card table, it
 // picks from the cards that are open. These nine hold while one card is
 // open and nothing is failing or waiting. They stop holding when a card
