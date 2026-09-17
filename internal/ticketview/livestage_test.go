@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/runner"
+	"sort"
 )
 
 // stepCall finds every step the runner starts, with the step name as it is
@@ -172,4 +173,224 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 		}
 	}
 	return names, prefixes
+}
+
+// cardRailStage is where the attendant puts the rail while one chain card
+// runs (internal/attendant/status.go). Nine lines, and the only thing this
+// derivation takes on trust; everything else below is read out of the
+// engine.
+//
+// The publish card is absent on purpose: the attendant places "reporting"
+// for it, which the board's rail does not draw at all, so a step reached
+// only from there has no lit stage to belong to. That gap is older than
+// this table and is named in it.
+var cardRailStage = map[string]string{
+	"investigate":     "investigate",
+	"design-review-a": "design",
+	"design-review-b": "design",
+	"design-decide":   "design",
+	"implement":       "implement",
+	"apply":           "implement",
+	"review-a":        "review",
+	"review-b":        "review",
+	"validate":        "checks",
+}
+
+// TestTheTableAgreesWithTheCardThatRunsEachStep is the rule measured rather
+// than restated. pinnedStages is a second copy of the same judgement and
+// moves with the table; this walks the engine instead — the card
+// orchestration's own switch says which function runs a card, the call
+// graph says which steps that function can reach, and the table has to
+// agree. A step moved to the wrong stage fails here even if both copies
+// were changed together (review of #200).
+func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
+	calls, steps := runnerCallGraph(t)
+	entries := cardEntryFunctions(t)
+	if len(entries) < 9 {
+		t.Fatalf("only %d cards were found in the orchestration's switch", len(entries))
+	}
+	// Which cards can reach each step, and which functions start it.
+	reached := map[string]map[string]bool{}
+	underACard := map[string]bool{}
+	for card, entry := range entries {
+		for _, fn := range reachableFrom(entry, calls) {
+			underACard[fn] = true
+			for _, step := range steps[fn] {
+				if reached[step] == nil {
+					reached[step] = map[string]bool{}
+				}
+				reached[step][card] = true
+			}
+		}
+	}
+	// A step the reception or a delivery helper also starts is not decided
+	// by the cards alone: the reception is not a card, and its work is most
+	// of what a reader watches under 受付. The table decides those, and its
+	// comment says why.
+	startedOutside := map[string]bool{}
+	for fn, started := range steps {
+		if underACard[fn] {
+			continue
+		}
+		for _, step := range started {
+			startedOutside[step] = true
+		}
+	}
+	if len(reached) < 15 {
+		t.Fatalf("only %d steps were reached from the cards; the walk is not working", len(reached))
+	}
+	decided := 0
+	for step, cards := range reached {
+		if startedOutside[step] {
+			continue
+		}
+		want := map[string]bool{}
+		for card := range cards {
+			if rail, known := cardRailStage[card]; known {
+				want[rail] = true
+			}
+		}
+		if len(want) == 0 {
+			// Every card that reaches it lights no rail stage; the table
+			// decides, and its comment says so.
+			continue
+		}
+		decided++
+		if got := LiveStage(runnerLogName(step)); !want[got] {
+			t.Errorf("step %q is offered under %q, but the cards that run it put the rail at %v",
+				step, got, keysOf(want))
+		}
+	}
+	// How much of the table this decides. The rest is decided by hand and
+	// says why in the table: the reception is not a card, the publish card
+	// lights no rail stage, and two steps are started from outside the
+	// orchestration. Dropping below this is coverage quietly going away,
+	// which is how a check stops being one.
+	if decided < 9 {
+		t.Errorf("the walk decided only %d steps; it decided 9 when it was written", decided)
+	}
+}
+
+// cardEntryFunctions reads the card orchestration's own switch: which
+// function runs which card.
+func cardEntryFunctions(t *testing.T) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile("../runner/chain_stage.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// case runtime.StageX:\n\t\treturn p.fnName(
+	pattern := regexp.MustCompile(`case runtime\.(Stage\w+):\s*\n\s*return p\.(\w+)\(`)
+	names := stageConstantValues(t)
+	entries := map[string]string{}
+	for _, match := range pattern.FindAllStringSubmatch(string(body), -1) {
+		value, known := names[match[1]]
+		if !known {
+			t.Errorf("the orchestration names %s, which internal/runtime does not define", match[1])
+			continue
+		}
+		entries[value] = match[2]
+	}
+	return entries
+}
+
+// stageConstantValues reads the card names themselves out of the runtime.
+func stageConstantValues(t *testing.T) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile("../runtime/chain.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, match := range regexp.MustCompile(`(Stage\w+)\s*=\s*"([a-z-]+)"`).FindAllStringSubmatch(string(body), -1) {
+		values[match[1]] = match[2]
+	}
+	return values
+}
+
+// runnerCallGraph reads every function in the runner: which functions on
+// the pipeline it calls, and which steps it starts itself.
+func runnerCallGraph(t *testing.T) (calls map[string][]string, steps map[string][]string) {
+	t.Helper()
+	calls, steps = map[string][]string{}, map[string][]string{}
+	entries, err := os.ReadDir("../runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	define := regexp.MustCompile(`(?m)^func (?:\(p \*Pipeline\) )?(\w+)`)
+	call := regexp.MustCompile(`p\.(\w+)\(`)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join("../runner", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := string(body)
+		bounds := define.FindAllStringSubmatchIndex(source, -1)
+		for index, at := range bounds {
+			name := source[at[2]:at[3]]
+			end := len(source)
+			if index+1 < len(bounds) {
+				end = bounds[index+1][0]
+			}
+			fnBody := source[at[1]:end]
+			for _, c := range call.FindAllStringSubmatch(fnBody, -1) {
+				calls[name] = append(calls[name], c[1])
+			}
+			for _, at := range stepCall.FindAllStringIndex(fnBody, -1) {
+				argument := strings.TrimLeft(fnBody[at[1]:], " \t\n")
+				if !strings.HasPrefix(argument, `"`) {
+					continue
+				}
+				close := strings.Index(argument[1:], `"`)
+				if close < 0 {
+					continue
+				}
+				if strings.HasPrefix(strings.TrimLeft(argument[close+2:], " \t\n"), "+") {
+					// A name the engine builds from what the step acts on
+					// ("git ", "browsercheck-"). It is a family, not a
+					// step, and the table covers each family with its own
+					// rule and its own reason.
+					continue
+				}
+				steps[name] = append(steps[name], argument[1:close+1])
+			}
+		}
+	}
+	return calls, steps
+}
+
+// reachableFrom walks the call graph from one entry function.
+func reachableFrom(entry string, calls map[string][]string) []string {
+	seen, queue := map[string]bool{entry: true}, []string{entry}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		for _, next := range calls[fn] {
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for fn := range seen {
+		out = append(out, fn)
+	}
+	return out
+}
+
+// runnerLogName is the step's name as its live file is named, repeating
+// runner.LiveLogName's rule for the one case that differs (a space).
+func runnerLogName(step string) string { return runner.LiveLogName(step) }
+
+func keysOf(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
