@@ -765,3 +765,26 @@ func TestAnUnclassifiedQueueFailureIsAskedAgainOnlyWhileTheTicketIsYoung(t *test
 		t.Fatal("the scan would hold its cursor in front of this ticket for ever")
 	}
 }
+
+// A ticket filed while another delivery is running is waiting for its
+// turn, not failing. The project holds one delivery slot, released when
+// that delivery reports, so this ticket is asked about until then -
+// bounding it dropped tickets filed during a run, and a run takes half an
+// hour (完遂率を最優先、発注者指示 2026-09-17).
+func TestATicketWaitingForTheDeliveryBeforeItIsNeverDropped(t *testing.T) {
+	busy := func() *fakeStore {
+		return &fakeStore{enqueueErr: NewExternalFailure("store", FailureRetryable, queueSlotBusyReason)}
+	}
+	fresh := newTestService(t, nil, busy(), nil)
+	if result := fresh.Process(context.Background(), testHint()); result.Decision != DecisionRetryRequested || result.Code != "queue_waiting" {
+		t.Fatalf("a waiting ticket was not recognised: %+v", result)
+	}
+	// Still waiting long after any bound on a stuck write would have
+	// dropped it: the slot frees when the delivery before it reports.
+	patient := newTestService(t, nil, busy(), nil)
+	patient.now = func() time.Time { return time.Now().UTC().Add(4 * queueRetryWindow) }
+	result := patient.Process(context.Background(), testHint())
+	if result.Decision != DecisionRetryRequested || result.Code != "queue_waiting" {
+		t.Fatalf("a ticket waiting its turn was dropped: %+v", result)
+	}
+}
