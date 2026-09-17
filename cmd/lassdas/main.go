@@ -43,9 +43,16 @@ stop は対象の本体だけを止め、台帳と作業記録を保持します
 `
 
 func main() {
+	// A closed reader on the progress output must not end the work. Piping
+	// setup into `head` or a pager killed it partway through: the instance
+	// was left stopped, and the shell reported the pager's success, so
+	// nobody could tell (reported live 2026-09-17). Ignoring the signal
+	// turns a closed pipe into a write error, and every progress line is
+	// written best-effort already.
+	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	if err := run(ctx, os.Args[1:], quietWriter{os.Stdout}); err != nil {
 		fmt.Fprintln(os.Stderr, "lassdas:", err)
 		if errors.Is(err, initsmoke.ErrPending) {
 			os.Exit(2)
@@ -221,4 +228,14 @@ func (r runtimeAdapter) Start(ctx context.Context, s *initwizard.State, dir stri
 }
 func (r runtimeAdapter) Stop(ctx context.Context, s *initwizard.State, dir string) error {
 	return r.manager.Stop(ctx, instance(s, dir))
+}
+
+// quietWriter carries the progress lines. A write that fails - the reader
+// went away - is not the work failing, so the error is dropped here rather
+// than travelling into a step's result.
+type quietWriter struct{ to io.Writer }
+
+func (w quietWriter) Write(p []byte) (int, error) {
+	_, _ = w.to.Write(p)
+	return len(p), nil
 }
