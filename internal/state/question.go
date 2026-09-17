@@ -262,7 +262,7 @@ func (s *DynamoStore) LoadQuestionWait(ctx context.Context, route hook.ReportRou
 		!terminalStateShapeValid(binding.runItem) ||
 		snapshot.SpaceKey != route.SpaceKey || snapshot.ProjectID != route.ProjectID || snapshot.ProjectKey != route.ProjectKey ||
 		snapshot.CreatorID != route.AllowedCreatorID || snapshot.ActivityType != route.AllowedActivityType ||
-		snapshot.RunID != route.ExpectedRunID || snapshot.Target != route.Target {
+		snapshot.RunID != route.ExpectedRunID || !snapshot.Target.SameDelivery(route.Target) {
 		return hook.QuestionWaitSnapshot{}, false, hook.NewExternalFailure("dynamodb", hook.FailureRejected, "question_wait_binding_invalid")
 	}
 	recordJSON, _ := attributeString(binding.runItem, "question_record_json")
@@ -295,7 +295,7 @@ func questionBindingMatches(binding terminalStoredBinding, record hook.QuestionR
 		terminalStateShapeValid(binding.runItem) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		record.DeliveryID == binding.envelope.DeliveryID && record.InputSHA256 == snapshot.InputSHA256 &&
 		record.AutomationRunID == snapshot.RunID && record.RepositoryID == route.RepositoryID &&
 		attributeInt64Equals(binding.runItem, "repository_id", record.RepositoryID) &&

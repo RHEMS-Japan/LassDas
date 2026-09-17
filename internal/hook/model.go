@@ -74,6 +74,19 @@ type DeliveryTarget struct {
 	WorkflowRefSHA256 string `json:"workflow_ref_sha256"`
 }
 
+// SameDelivery reports whether two targets name the same delivery. The
+// repository is what identifies it; the workflow reference carries the
+// engine's revision, and a ticket outlives revisions - it is claimed under
+// one, asked a question, and answered days later under another. Comparing
+// the whole target stranded every ticket in flight across an upgrade: the
+// tick refused the run it had just found, and the answer was never adopted
+// (live 2026-09-17, measured on the instance's ledger). What the revision
+// must still bind is a terminal report, and that binds through the run row
+// the claim wrote, not through this.
+func (t DeliveryTarget) SameDelivery(other DeliveryTarget) bool {
+	return t.RepositoryID == other.RepositoryID
+}
+
 func (t DeliveryTarget) Validate() error {
 	if t.RepositoryID <= 0 || !validIdentityDigest(t.WorkflowRefSHA256) {
 		return errors.New("delivery target is invalid")

@@ -918,10 +918,6 @@ func TestPullEnforcesFixedSelectorsAndSnapshotAllowlist(t *testing.T) {
 			request.Target.RepositoryID++
 			request.Owner.RepositoryID = request.Target.RepositoryID
 		},
-		"workflow ref": func(request *hook.PullClaimRequest) {
-			request.Target.WorkflowRefSHA256 = strings.Repeat("e", 64)
-			request.Owner.WorkflowRefSHA256 = request.Target.WorkflowRefSHA256
-		},
 	}
 	for name, mutate := range allowlistTests {
 		t.Run("allowlist "+name, func(t *testing.T) {
@@ -934,6 +930,24 @@ func TestPullEnforcesFixedSelectorsAndSnapshotAllowlist(t *testing.T) {
 			assertFailure(t, envelope, disposition, err, hook.FailureRejected, "pull_envelope_invalid", "")
 		})
 	}
+
+	// A ticket outlives the engine's revisions: it is queued under one and
+	// claimed under the next after an upgrade. The claim binds it to the
+	// delivery repository, and records the claiming engine on the run row -
+	// which is what a terminal report binds to. Refusing it here stranded
+	// every ticket in flight across an upgrade (live 2026-09-17).
+	t.Run("a newer engine claims a ticket queued by an older one", func(t *testing.T) {
+		api := newMemoryDynamo()
+		store := testStore(t, api)
+		enqueueForTest(t, store)
+		request := testPullRequest(t)
+		request.Target.WorkflowRefSHA256 = strings.Repeat("e", 64)
+		request.Owner.WorkflowRefSHA256 = request.Target.WorkflowRefSHA256
+		envelope, disposition, err := store.Pull(context.Background(), request)
+		if err != nil || disposition != hook.PullAcquired || envelope.DeliveryID == "" {
+			t.Fatalf("disposition = %s, err = %v, envelope = %+v", disposition, err, envelope)
+		}
+	})
 
 	shapeTests := map[string]func(*hook.PullClaimRequest){
 		"owner repository differs from target": func(request *hook.PullClaimRequest) { request.Owner.RepositoryID++ },

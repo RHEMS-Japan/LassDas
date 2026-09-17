@@ -641,7 +641,7 @@ func localTerminalBindingMatches(binding localTerminalBinding, report hook.Termi
 		localTerminalStateShapeValid(binding.runRow) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		report.DeliveryID == binding.envelope.DeliveryID && report.InputSHA256 == snapshot.InputSHA256 &&
 		report.AutomationRunID == snapshot.RunID && report.RepositoryID == route.RepositoryID &&
 		binding.runRow.int64Equals("repository_id", report.RepositoryID) &&
@@ -892,7 +892,7 @@ func localQuestionBindingMatches(binding localTerminalBinding, record hook.Quest
 		localTerminalStateShapeValid(binding.runRow) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		record.DeliveryID == binding.envelope.DeliveryID && record.InputSHA256 == snapshot.InputSHA256 &&
 		record.AutomationRunID == snapshot.RunID && record.RepositoryID == route.RepositoryID &&
 		binding.runRow.int64Equals("repository_id", record.RepositoryID) &&
@@ -1053,7 +1053,7 @@ func (s *LocalStore) LoadQuestionWait(ctx context.Context, route hook.ReportRout
 		!localTerminalStateShapeValid(binding.runRow) ||
 		snapshot.SpaceKey != route.SpaceKey || snapshot.ProjectID != route.ProjectID || snapshot.ProjectKey != route.ProjectKey ||
 		snapshot.CreatorID != route.AllowedCreatorID || snapshot.ActivityType != route.AllowedActivityType ||
-		snapshot.RunID != route.ExpectedRunID || snapshot.Target != route.Target {
+		snapshot.RunID != route.ExpectedRunID || !snapshot.Target.SameDelivery(route.Target) {
 		return hook.QuestionWaitSnapshot{}, false, localFailure(hook.FailureRejected, "question_wait_binding_invalid")
 	}
 	recordJSON, _ := binding.runRow.str("question_record_json")
@@ -1093,7 +1093,7 @@ func localResumeBindingMatches(binding localTerminalBinding, record hook.Clarifi
 		localTerminalStateShapeValid(binding.runRow) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		record.DeliveryID == binding.envelope.DeliveryID && record.InputSHA256 == snapshot.InputSHA256 &&
 		record.AutomationRunID == snapshot.RunID && record.RepositoryID == route.RepositoryID
 }
@@ -1470,7 +1470,7 @@ func localRunCommentBindingMatches(binding localTerminalBinding, route hook.Repo
 		localTerminalStateShapeValid(binding.runRow) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target)
 }
 
 func localRunCommentMarkerMatches(marker item, runKey string, kind hook.RunCommentKind) bool {
