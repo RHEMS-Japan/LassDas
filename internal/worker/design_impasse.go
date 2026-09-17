@@ -37,9 +37,14 @@ func (i *ModelInvoker) AskDesignImpasse(
 	}
 	digests := make([]string, 0, len(reviews))
 	standing := make([]investigate.DesignFinding, 0, 8)
+	subject := investigate.DesignSubject(design)
 	for _, review := range reviews {
-		if review.SubjectSHA256 != design.DesignSHA256 {
-			return ImpasseDecision{}, errors.New("a review judged another design")
+		// The whole record, not only the subject it names: a review read
+		// from the run directory carries its own seal and its own binding
+		// to this run, and a finding rewritten in place would otherwise
+		// reach the question (review of #199).
+		if err := review.Validate(design.Identity, subject); err != nil {
+			return ImpasseDecision{}, errors.New("a design review was rejected")
 		}
 		digests = append(digests, review.ReviewSHA256)
 		if review.Verdict == "revise" {

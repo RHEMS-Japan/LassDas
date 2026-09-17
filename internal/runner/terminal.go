@@ -218,6 +218,11 @@ func (t *Terminal) loadTrail(hook.TerminalCode) (string, error) {
 // and the record derives its round from the sealed clarification in the
 // envelope — never from a counter the runner keeps.
 func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
+	if t == nil || t.services == nil || t.services.Question == nil {
+		// A deployment without the question poster cannot ask; saying so
+		// beats crashing the process that was trying to.
+		return errors.New("this deployment has no question poster")
+	}
 	questionsJSON, decisionDigest, err := loadQuestionDecision(decisionPath)
 	if err != nil {
 		return err

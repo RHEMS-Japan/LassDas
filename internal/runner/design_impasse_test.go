@@ -39,7 +39,7 @@ func TestAskDesignImpasseWritesTheQuestionForTheNewestRound(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"investigation.json", "design.json", "decision.json", "review-a-design-review.json"} {
+		for _, name := range []string{"investigation.json", "design.json", "decision.json", "review-a-design-review.json", "review-b-design-review.json"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -63,8 +63,8 @@ func TestAskDesignImpasseWritesTheQuestionForTheNewestRound(t *testing.T) {
 			t.Fatalf("argv lacks %q: %s", want, argv)
 		}
 	}
-	if strings.Contains(string(argv), "review-b-design-review.json") {
-		t.Fatalf("a review nobody sealed was passed: %s", argv)
+	if !strings.Contains(string(argv), "review-b-design-review.json") {
+		t.Fatalf("a sealed review was left out: %s", argv)
 	}
 
 	// A decision that asks nothing leaves the run ending as before.
@@ -74,5 +74,31 @@ func TestAskDesignImpasseWritesTheQuestionForTheNewestRound(t *testing.T) {
 	asked, err = pipeline.AskDesignImpasse(context.Background(), []string{"review-a"})
 	if err != nil || asked {
 		t.Fatalf("a spent decision was posted as a question: %v %v", asked, err)
+	}
+}
+
+// Half a round's reviews is half the disagreement: a question built on one
+// of two judges would put the wrong choice to the requester.
+func TestAskDesignImpasseWaitsForEveryReview(t *testing.T) {
+	workspace := t.TempDir()
+	script := filepath.Join(t.TempDir(), "worker")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := runtime.Config{WorkerBin: script, ConsumerConfigPath: filepath.Join(workspace, "consumer.json")}
+	config.Identity.EngineSHA = strings.Repeat("ab", 20)
+	pipeline := &Pipeline{Config: config, Workspace: workspace, Logger: trailTestLogger{}}
+	dir := filepath.Join(workspace, "history", "design-1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"investigation.json", "design.json", "decision.json", "review-a-design-review.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asked, err := pipeline.AskDesignImpasse(context.Background(), []string{"review-a", "review-b"})
+	if err != nil || asked {
+		t.Fatalf("a half-sealed round was asked about: %v %v", asked, err)
 	}
 }

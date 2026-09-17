@@ -153,6 +153,11 @@ func (i *ModelInvoker) AskImpasse(
 }
 
 func sealImpasseDecision(decision ImpasseDecision) (ImpasseDecision, error) {
+	if (decision.CandidateSHA256 == "") == (decision.DesignSHA256 == "") {
+		// One subject, named once: a change or a plan, never both and never
+		// neither (review of #199).
+		return ImpasseDecision{}, errors.New("an impasse decision names one subject")
+	}
 	decision.DecisionSHA256 = ""
 	digest, err := sealedDigest(decision)
 	if err != nil {

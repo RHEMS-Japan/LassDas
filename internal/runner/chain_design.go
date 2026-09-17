@@ -510,9 +510,13 @@ func (p *Pipeline) AskDesignImpasse(ctx context.Context, reviewers []string) (bo
 	}
 	for _, reviewer := range reviewers {
 		review := filepath.Join(roundDir, reviewer+"-design-review.json")
-		if _, err := os.Stat(review); err == nil {
-			args = append(args, "--review", review)
+		if _, err := os.Stat(review); err != nil {
+			// Half a round's reviews is half the disagreement, and a
+			// question built on half of it would put the wrong choice to
+			// the requester (review of #199).
+			return false, nil
 		}
+		args = append(args, "--review", review)
 	}
 	args = append(args, p.clarificationArgs()...)
 	if err := os.MkdirAll(p.path("history/question"), 0o755); err != nil {
