@@ -215,9 +215,11 @@ func TestInvestigateObjectsToUnsupportedReportsAndBudgetOverruns(t *testing.T) {
 			t.Errorf("conversation lacks %q", want)
 		}
 	}
-	// Three refused answers in a row end the round honestly.
+	// Three refused answers in a row are asked once more for the record,
+	// and three more after that end the round honestly.
 	input2, _ := investigationFixture(t, 5)
-	api2 := &loopScriptAPI{answers: []string{`nope`, `{"probe":{},"report":{}}`, `{"design":{}}`}}
+	api2 := &loopScriptAPI{answers: []string{`nope`, `{"probe":{},"report":{}}`, `{"design":{}}`,
+		`nope`, `{"probe":{},"report":{}}`, `{"design":{}}`}}
 	invoker2, _ := NewModelInvoker(api2)
 	result2, err := invoker2.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input2, time.Now())
 	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result2.Incomplete, "contract") {
@@ -545,7 +547,7 @@ func TestInvestigateKeepsTheLastRefusedAnswer(t *testing.T) {
 	input, _ := investigationFixture(t, 10)
 	long := `{"report":{"questions":["q"],"findings":[{"claim":"` + strings.Repeat("x", 601) + `","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`
 	last := strings.Replace(long, strings.Repeat("x", 601), strings.Repeat("y", 602), 1)
-	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, last}}
+	api := &loopScriptAPI{answers: []string{`{"probe":{"probe":"repo.list"}}`, long, long, long, long, long, last}}
 	invoker, _ := NewModelInvoker(api)
 	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
 	if !errors.Is(err, ErrInvestigationIncomplete) || !strings.Contains(result.Incomplete, "claim is 602 bytes (limit 600)") {
@@ -898,5 +900,67 @@ func TestTheDesignContractStatesWhatTheReviewersKeepRejecting(t *testing.T) {
 		if strings.Contains(report, rule) {
 			t.Errorf("the investigation-only contract carries a design rule: %q", rule)
 		}
+	}
+}
+
+// A role stuck on one thing is asked once more for the record it can
+// write, and the round finishes instead of ending the whole delivery.
+// Measured live: a role asked three times to read a measurement that did
+// not exist, and a delivery that had read the repository twelve times died
+// with nothing (完遂率を最優先、発注者指示 2026-09-17).
+func TestARoleStuckOnOneThingIsAskedForWhatItHas(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	stuck := `{"read":{"id":"m-0099","offset":0}}`
+	record := `{"report":{"questions":["q"],"findings":[{"claim":"c","evidence":["m-0001"],"confidence":"measured"}],"unknowns":["読めなかった記録がある"],"next":"n"}}`
+	api := &loopScriptAPI{answers: []string{
+		`{"probe":{"probe":"repo.list"}}`, stuck, stuck, stuck, record,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	result, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now())
+	if err != nil {
+		t.Fatalf("the round did not finish: %v (%q)", err, result.Incomplete)
+	}
+	if len(result.Investigation.Findings) == 0 {
+		t.Fatal("the round finished with no record")
+	}
+	// The ask names what it was refused for, so the role does not answer
+	// the same way again, and says an unfinished record is accepted.
+	final := api.requests[len(api.requests)-1].Messages
+	last := final[len(final)-1].Content
+	for _, want := range []string{"Do not try that again", "unknowns"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("the ask does not say %q: %s", want, last)
+		}
+	}
+}
+
+// The refusal says what is on record. Told only that an id is unknown, a
+// role has no way to name a different one - it asked for the same one
+// until the round was spent (完遂率を最優先、発注者指示 2026-09-17).
+func TestAReadRefusalSaysWhatIsOnRecord(t *testing.T) {
+	input, _ := investigationFixture(t, 10)
+	api := &loopScriptAPI{answers: []string{
+		`{"read":{"id":"m-0099","offset":0}}`,
+		`{"probe":{"probe":"repo.list"}}`,
+		`{"read":{"id":"m-0099","offset":0}}`,
+		`{"report":{"questions":["q"],"findings":[{"claim":"c","evidence":["m-0001"],"confidence":"measured"}],"unknowns":[],"next":"n"}}`,
+	}}
+	invoker, _ := NewModelInvoker(api)
+	if _, err := invoker.Investigate(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, input, time.Now()); err != nil {
+		t.Fatalf("the round did not finish: %v", err)
+	}
+	joined := ""
+	for _, request := range api.requests {
+		for _, message := range request.Messages {
+			joined += message.Content + "\n"
+		}
+	}
+	// Nothing recorded yet: say so, and say what to do instead.
+	if !strings.Contains(joined, "nothing has been recorded yet") || !strings.Contains(joined, "Answer with a probe") {
+		t.Error("the first refusal does not say that nothing is recorded, nor what to do")
+	}
+	// One measurement recorded: name the range that exists.
+	if !strings.Contains(joined, "The recorded ids are m-0001 to m-0001") {
+		t.Error("the second refusal does not name the ids that exist")
 	}
 }
