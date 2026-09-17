@@ -40,6 +40,10 @@ func noteFor(engineRoot string, options installOptions) (initwizard.Distribution
 		note = read
 	} else if options.note != "" || (options.image == "" && options.engineSHA == "" && options.buildRecord == "") {
 		return initwizard.Distribution{}, err
+	} else if _, statErr := os.Stat(path); statErr == nil {
+		// The file is there but unreadable: the flags alone must then
+		// carry a whole note, and the message says why.
+		return initwizard.Distribution{}, fmt.Errorf("%v。直すか、--image / --engine-sha / --build-record / --engine-repository を全部渡してください", err)
 	}
 	if options.engineRepository != "" {
 		note.EngineRepository = options.engineRepository
@@ -68,11 +72,23 @@ func setupNote(ctx context.Context, engineRoot string, options installOptions, o
 	if err := bodyRepository(engineRoot); err != nil {
 		return err
 	}
+	repoNote := filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
 	out := options.out
 	if out == "" {
-		out = filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
+		out = repoNote
 	}
-	note, _ := initwizard.DecodeDistributionFile(out)
+	// The starting point is always the checkout's note, so a release that
+	// restates only the image, sha and record keeps the login and the
+	// repository. A note that exists but cannot be read is not silently
+	// replaced: it is named, and the person decides.
+	var note initwizard.Distribution
+	if _, err := os.Stat(repoNote); err == nil {
+		decoded, err := initwizard.DecodeDistributionFile(repoNote)
+		if err != nil {
+			return fmt.Errorf("既存の案内を読めないので上書きしません: %v。直すか消してから再実行してください", err)
+		}
+		note = decoded
+	}
 	note.CLI, note.InstalledAt = "", time.Time{}
 	if options.engineRepository != "" {
 		note.EngineRepository = options.engineRepository

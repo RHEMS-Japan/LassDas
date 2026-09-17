@@ -112,7 +112,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-repository` | 本体イメージの元ソース repo (owner/name) |
 | `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
-| `build-record` | イメージと SHA の対応の記録の URL。通常は本体 repo の `docs/DISTRIBUTION.json` 自身 (配布者がリリースのたびに書き、その履歴が記録) |
+| `build-record` | イメージと SHA の対応の記録の URL。通常は本体 repo の `docs/DISTRIBUTION.json` の履歴 (配布者がリリースのたびに書く。`…/commits/main/docs/DISTRIBUTION.json`) |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 

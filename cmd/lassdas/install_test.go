@@ -255,6 +255,33 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	if err := setupNote(context.Background(), engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1"}, &out); err != nil {
 		t.Fatal(err)
 	}
+	// Written elsewhere, it still starts from the checkout's note.
+	elsewhere := filepath.Join(t.TempDir(), "note.json")
+	if err := setupNote(context.Background(), engine, installOptions{out: elsewhere, image: next, engineSHA: strings.Repeat("e", 40), buildRecord: "https://example/build/2"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if copied, err := initwizard.ReadDistributionFile(elsewhere); err != nil || copied.RegistryLogin != "docker login --password-stdin registry" {
+		t.Fatalf("--out keeps the checkout's login: %+v %v", copied, err)
+	}
+	// A note that exists but cannot be read is not replaced silently.
+	if err := os.WriteFile(filepath.Join(engine, "docs", "DISTRIBUTION.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "u"}, &out); err == nil || !strings.Contains(err.Error(), "上書きしません") {
+		t.Fatalf("a broken note must not be overwritten silently: %v", err)
+	}
+	if _, err := noteFor(engine, installOptions{image: digest}); err == nil || !strings.Contains(err.Error(), "読めません") {
+		t.Fatalf("install with a broken note and a flag must name the file: %v", err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err == nil {
+		t.Fatal("still broken: the person removes it first")
+	}
+	if err := os.Remove(filepath.Join(engine, "docs", "DISTRIBUTION.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out.String(), "docs/DISTRIBUTION.json") {
 		t.Fatalf("note output: %q", out.String())
 	}
