@@ -673,7 +673,7 @@ func (s *LocalStore) resolveRunRoute(ctx context.Context, route hook.ReportRoute
 		return route, localFailure(hook.FailureRetryable, "run_route_read_failed")
 	}
 	runID, ok := pendingRow.str("run_id")
-	if !ok || !strings.HasPrefix(runID, route.ProjectKey+"-") || !issueRunIDPattern.MatchString(runID) {
+	if !ok || !reboundRunID(route, runID) {
 		return route, nil
 	}
 	rebound := route
