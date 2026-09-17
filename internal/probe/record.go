@@ -138,7 +138,17 @@ func (r *Recorder) Lookup(id string) (Measurement, error) {
 		index, _ = strconv.Atoi(id[2:])
 	}
 	if index < 1 || index > r.count {
-		return Measurement{}, fmt.Errorf("%w: %q is not a recorded measurement id", ErrReadRefused, id)
+		// What is on record, not only that this is not. Told merely that an
+		// id is unknown, a role has no way to name a different one and asks
+		// for the same one again until the round is spent - measured live:
+		// three identical asks for m-0002 when nothing at all had been
+		// recorded (完遂率を最優先、発注者指示 2026-09-17).
+		if r.count == 0 {
+			return Measurement{}, fmt.Errorf("%w: %q is not a recorded measurement id, and nothing has been recorded yet. "+
+				"Answer with a probe to make a measurement; there is nothing to read until one succeeds", ErrReadRefused, id)
+		}
+		return Measurement{}, fmt.Errorf("%w: %q is not a recorded measurement id. The recorded ids are %s to %s",
+			ErrReadRefused, id, measurementID(1), measurementID(r.count))
 	}
 	measurements, err := ReadPrefix(r.path, index)
 	if err != nil {

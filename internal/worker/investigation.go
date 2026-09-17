@@ -135,6 +135,24 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 	phase := ModeInvestigation
 	rejections := 0
 	budgetWarned := false
+	// A round used to end the whole delivery the moment the role's answers
+	// were refused three times running. The role was usually still able to
+	// write down what it had - it was stuck on one thing, not unable to
+	// work - and the delivery died with a record nobody ever saw. Asked
+	// once more, plainly, for the record it can write, a great many of
+	// those rounds finish. The ask itself is bounded: spend the refusals
+	// again after it and the round ends as it did (完遂率を最優先、発注者
+	// 指示 2026-09-17).
+	asked := false
+	giveUp := func(reason string) (InvestigationResult, error) {
+		if asked {
+			return incomplete(reason)
+		}
+		asked = true
+		rejections = 0
+		conversation.append(conversation.lastAnswer, lastChanceInstruction(phase, reason))
+		return InvestigationResult{}, errKeepGoing
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return incomplete("the wall ended the round before a record was sealed")
@@ -153,7 +171,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			rejections++
 			conversation.objection(response, objection.Error())
 			if rejections >= modelAnswerAttempts {
-				return incomplete("the model's answers kept falling outside the contract: " + objection.Error())
+				if out, err := giveUp("the model's answers kept falling outside the contract: " + objection.Error()); err != errKeepGoing {
+					return out, err
+				}
 			}
 			continue
 		}
@@ -164,7 +184,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, "the read budget is spent; no more windows can be shown. Answer with your record, marking what you could not read as unknown.")
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the read budget is spent and the model asked for another window")
+					if out, err := giveUp("the read budget is spent and the model asked for another window"); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -178,7 +200,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, err.Error())
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the model kept asking to read what is not recorded: " + err.Error())
+					if out, err := giveUp("the model kept asking to read what is not recorded: " + err.Error()); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -192,7 +216,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 			rejections++
 			conversation.objection(response, "the investigation is sealed; no more measurements this round. Answer with the design, citing the ids your measured findings already carry.")
 			if rejections >= modelAnswerAttempts {
-				return incomplete("the model kept asking for measurements after the report was sealed")
+				if out, err := giveUp("the model kept asking for measurements after the report was sealed"); err != errKeepGoing {
+					return out, err
+				}
 			}
 		case answer.Probe != nil:
 			outcome, err := input.Session.Run(ctx, *answer.Probe)
@@ -218,7 +244,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, "the report is not the contract's JSON: "+err.Error())
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the model's report could not be read: " + err.Error())
+					if out, err := giveUp("the model's report could not be read: " + err.Error()); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -229,7 +257,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, "the report was refused: "+err.Error())
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the model's report kept failing the checks: " + err.Error())
+					if out, err := giveUp("the model's report kept failing the checks: " + err.Error()); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -247,7 +277,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, "the design is not the contract's JSON: "+err.Error())
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the model's design could not be read: " + err.Error())
+					if out, err := giveUp("the model's design could not be read: " + err.Error()); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -256,7 +288,9 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 				rejections++
 				conversation.objection(response, "the design was refused: "+err.Error())
 				if rejections >= modelAnswerAttempts {
-					return incomplete("the model's design kept failing the checks: " + err.Error())
+					if out, err := giveUp("the model's design kept failing the checks: " + err.Error()); err != errKeepGoing {
+						return out, err
+					}
 				}
 				continue
 			}
@@ -295,6 +329,34 @@ func decodeTurnAnswer(encoded []byte, phase string) (turnAnswer, error) {
 		return turnAnswer{}, errors.New("the investigation report must be sealed before a design")
 	}
 	return answer, nil
+}
+
+// errKeepGoing is the give-up path saying "not yet": the role has been
+// asked once more for the record it can write, and the loop continues.
+var errKeepGoing = errors.New("keep going")
+
+// lastChanceInstruction is that ask. It names what the round could not get
+// past, because a role that is told only "answer now" tends to answer the
+// same way again, and it says what an unfinished record may contain so the
+// role does not think it has to invent the part it could not establish.
+func lastChanceInstruction(phase, reason string) string {
+	what := "your investigation record"
+	if phase == ModeDesign {
+		what = "your design"
+	}
+	return `{"instruction":"Your last answers were refused: ` + jsonEscape(reason) +
+		`. Do not try that again. Answer now with ` + what +
+		`, using only what you have already established. Anything you could not measure or read belongs in unknowns, not in a claim; an incomplete record that says what is missing is accepted, a claim without evidence is not."}`
+}
+
+// jsonEscape puts a refusal reason inside the instruction without breaking
+// it: the reason is the engine's own words, but it quotes the role's.
+func jsonEscape(text string) string {
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return "refused"
+	}
+	return string(encoded[1 : len(encoded)-1])
 }
 
 // investigationConversation keeps the messages and the excerpt budget.
