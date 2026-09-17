@@ -552,3 +552,41 @@ func TestQuestionFlowExpiresEvenWhileANoticeIsStuck(t *testing.T) {
 		t.Fatalf("state = %s, want %s", state, stateTerminal)
 	}
 }
+
+// A ticket waiting its turn is not passed over because something else
+// happened afterwards. The scan reads only what is newer than its cursor,
+// so a cursor carried past a waiting ticket loses it for good: filed,
+// acknowledged nowhere, never started. Measured live - a comment on
+// another issue moved the cursor past a ticket that had been waiting
+// twenty-seven minutes for the delivery before it (完遂率を最優先、発注者
+// 指示 2026-09-17).
+func TestAWaitingTicketIsNotPassedOverByWhatComesAfterIt(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	harness.backlog.activities = []hook.WebhookHint{
+		// Ours, and waiting for the delivery before it.
+		{ActivityID: 41, ActivityType: harness.route.AllowedActivityType, ProjectID: harness.route.ProjectID, ProjectKey: harness.route.ProjectKey, CreatorID: harness.route.AllowedCreatorID, IssueID: 8001, IssueKeyID: 501},
+		// Not ours: a comment on another issue, filed afterwards.
+		{ActivityID: 99, ActivityType: 99, ProjectID: harness.route.ProjectID, ProjectKey: harness.route.ProjectKey, CreatorID: harness.route.AllowedCreatorID, IssueID: 8009, IssueKeyID: 509},
+	}
+	harness.ingest.failWith = hook.DecisionRetryRequested
+
+	if result := harness.tick(t); result.Code != "question_tick_ingest_incomplete" {
+		t.Fatalf("tick = %+v", result)
+	}
+	// The next scan must read 41 again. If the cursor moved past it, the
+	// ticket is gone.
+	harness.ingest.failWith = ""
+	if result := harness.tick(t); result.Code != "question_tick_ingested" {
+		t.Fatalf("retry tick = %+v", result)
+	}
+	seen := 0
+	for _, id := range harness.ingest.seen {
+		if id == 41 {
+			seen++
+		}
+	}
+	if seen < 2 {
+		t.Fatalf("the waiting ticket was read %d time(s); the cursor was carried past it: %v", seen, harness.ingest.seen)
+	}
+}
