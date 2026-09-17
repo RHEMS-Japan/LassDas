@@ -143,13 +143,18 @@ func (s *Service) Process(ctx context.Context, hint WebhookHint) Result {
 		s.logger.Error("the ticket could not be queued",
 			"activity_id", hint.ActivityID, "issue_key", issue.IssueKey,
 			"delivery_id", deliveryID, "class", string(class), "reason", code, "error", err.Error())
-		// A failure the store calls retryable is asked again, and so is one
-		// nobody classified - but only while the ticket is young. Retrying
-		// held the scan's cursor in front of this one ticket, so every
-		// ticket filed after it went untaken as well: one request nobody
-		// could queue stopped intake altogether, invisibly, for as long as
-		// the deployment lived (live 2026-09-17).
-		if class == FailureRetryable || (class != FailureRejected && s.now().UTC().Sub(envelope.Snapshot.CreatedAt) < queueRetryWindow) {
+		// Asked again while the ticket is young, whatever the failure was
+		// called. Retrying held the scan's cursor in front of this one
+		// ticket, so every ticket filed after it went untaken as well: one
+		// request nobody could queue stopped intake altogether, invisibly,
+		// for as long as the deployment lived (live 2026-09-17).
+		//
+		// The bound covers the retryable class too. A write that is going
+		// to clear clears in seconds; one that has not cleared in ten
+		// minutes is a store that is stuck, and waiting on it costs every
+		// ticket behind this one. Better to stop this ticket and keep
+		// taking the others in.
+		if class != FailureRejected && s.now().UTC().Sub(envelope.Snapshot.CreatedAt) < queueRetryWindow {
 			return s.result(DecisionRetryRequested, "queue_failed", hint, issue.IssueKey, deliveryID)
 		}
 		// Out of patience, or refused outright. It ends here, and the board

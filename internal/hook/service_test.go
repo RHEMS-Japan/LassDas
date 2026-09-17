@@ -727,6 +727,24 @@ func TestARefusedTicketStopsInsteadOfHoldingUpEveryLaterOne(t *testing.T) {
 	}
 }
 
+// Even a failure the store calls retryable stops once the ticket is old:
+// a write that is going to clear clears in seconds, and one that has not
+// cleared in ten minutes is a store that is stuck - which must not cost
+// every ticket behind this one (live 2026-09-17).
+func TestEvenARetryableFailureStopsOnceTheTicketIsOld(t *testing.T) {
+	store := &fakeStore{enqueueErr: NewExternalFailure("store", FailureRetryable, "queue_write_failed")}
+	service := newTestService(t, nil, store, nil)
+	if result := service.Process(context.Background(), testHint()); result.Decision != DecisionRetryRequested {
+		t.Fatalf("a fresh ticket was not asked about again: %+v", result)
+	}
+	old := newTestService(t, nil, &fakeStore{enqueueErr: NewExternalFailure("store", FailureRetryable, "queue_write_failed")}, nil)
+	old.now = func() time.Time { return time.Now().UTC().Add(queueRetryWindow + time.Minute) }
+	result := old.Process(context.Background(), testHint())
+	if result.Decision != DecisionInvalid || !ingestOutcomeConclusive(result.Decision) {
+		t.Fatalf("a stuck store still holds up every later ticket: %+v", result)
+	}
+}
+
 // An unclassified failure is asked about again while the ticket is young,
 // because a transient write clears in seconds - and stops once it is old,
 // because by then it is not going to clear.
