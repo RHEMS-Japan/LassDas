@@ -65,10 +65,10 @@ func TestImplementRoundPassesTheTargets(t *testing.T) {
 	if err := os.WriteFile(pipeline.path("readiness-ticket.json"), []byte(`{"target_files":["README.md"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	args := append([]string{"implement"}, pipeline.targetArgs()...)
-	if code, err := pipeline.worker(context.Background(), "implement", args); err != nil || code != 9 {
-		t.Fatalf("step returned %d, %v", code, err)
-	}
+	// The real path, not a hand-built argument list: the round is what must
+	// carry the targets. The fake worker fails, so the round ends at its
+	// first step; what it was called with is the point.
+	_, _ = pipeline.implementRounds(context.Background(), filepath.Join(workspace, "target-repo"), filepath.Join(workspace, "target-base"), strings.Repeat("c", 40))
 	argv, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatal(err)
