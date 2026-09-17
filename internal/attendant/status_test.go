@@ -428,3 +428,21 @@ func TestBudgetHoldShowsAtIntakeAsAttention(t *testing.T) {
 		}
 	}
 }
+
+// A requester who does not want to answer - because the question's premise
+// is wrong - had nothing to do but wait for a deadline days away. The board
+// says the other way out now (reported live 2026-09-17).
+func TestWaitingForAnAnswerSaysHowToWithdraw(t *testing.T) {
+	status := classifyRun(runtime.Config{}, state.RunOverview{State: "awaiting_answer"}, nil)
+	if status.Step != "question" {
+		t.Fatalf("step = %q", status.Step)
+	}
+	for _, want := range []string{"中止 C1", "変更を加えずにこの依頼を終了"} {
+		if !strings.Contains(status.ActionEffect, want) {
+			t.Fatalf("the board does not say how to withdraw (%q): %q", want, status.ActionEffect)
+		}
+	}
+	if !strings.Contains(status.NextAction, "選択肢の記号") {
+		t.Fatalf("the board does not offer the short answer: %q", status.NextAction)
+	}
+}

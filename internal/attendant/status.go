@@ -172,8 +172,12 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		status.place("intake", "受付待ち", "")
 	case "awaiting_answer":
 		status.place("question", "質問への回答待ち", "依頼者の返信を待っています")
-		status.NextAction = "依頼者がチケットの最新の質問を開き、そこに記載された回答例に沿ってコメントしてください。"
-		status.ActionEffect = "回答を受け取ると、追加の調査・設計または実装へ進みます。回答まで作業は再開しません。"
+		status.NextAction = "依頼者がチケットの最新の質問を開き、そこに記載された回答例に沿ってコメントしてください。質問が 1 問だけなら、選択肢の記号 (例: a) だけでも受け付けます。"
+		// The other way out, which the board never said: a requester who
+		// does not want to answer - because the question's premise is wrong,
+		// or because they would rather re-file - had nothing to do but wait
+		// for the deadline, days away (reported live 2026-09-17).
+		status.ActionEffect = "回答を受け取ると、追加の調査・設計または実装へ進みます。回答まで作業は再開しません。この依頼を取り下げるときは、質問コメントの見出しにある番号を使って「中止 C1」のようにコメントしてください。取り下げると、変更を加えずにこの依頼を終了します。"
 	case "claimed":
 		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
 			break
