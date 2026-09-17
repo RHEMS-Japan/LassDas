@@ -119,11 +119,16 @@ const documentStub = {
     for (const card of runsBox.children) {
       const height = card.height === undefined ? 100 : card.height;
       if (pointerY >= top && pointerY < top + height) {
-        // The rail sits in the first twenty of a card's height, one node
-        // per stage; below it is the pane and the rest of the card.
-        if (pointerY - top >= 20) return card.querySelector(".livepane") || card;
+        // The rail is a twenty-high band inside the card, below a head
+        // whose height depends on the words in it - the ticket's summary
+        // and the line saying what is happening now. So the rail can move
+        // while the card does not, which is the other half of the case a
+        // model keyed on "which card" could not express (review of #200).
+        const railTop = card.railTop === undefined ? 0 : card.railTop;
+        const withinRail = pointerY - top - railTop;
+        if (withinRail < 0 || withinRail >= 20) return card.querySelector(".livepane") || card;
         const nodes = card.querySelectorAll(".node");
-        return nodes[Math.min(nodes.length - 1, Math.floor((pointerY - top) / 20 * nodes.length))] || card;
+        return nodes[Math.min(nodes.length - 1, Math.floor(withinRail / 20 * nodes.length))] || card;
       }
       top += height;
     }
@@ -171,6 +176,7 @@ const runsBox = new Node("div", "runs");
 registry.runs = runsBox;
 const box = (...cards) => { runsBox.replaceChildren(...cards); return runsBox; };
 const setHeights = (...heights) => { runsBox.children.forEach((c, i) => (c.height = heights[i])); };
+const setRailTops = (...tops) => { runsBox.children.forEach((c, i) => (c.railTop = tops[i])); };
 // What renderBoard does, in its order: stop every pane, replace the cards,
 // then restore.
 const rebuild = (...cards) => {
@@ -439,7 +445,122 @@ startScenario();
   check("and both lines are still there", shown.includes("はじめの行") && shown.includes("ずっと後の行"), true);
 }
 
-if (checks < 29) {
+// A pinned ticket finishes and leaves the board. Every other rail has to
+// go back to looking like something a reader can open.
+startScenario();
+{
+  const a = card("d1", "TICKET-1"), b = card("d2", "TICKET-2");
+  box(a, b);
+  node(a, "design").click();
+  check("pinning marks the page", bodyNode.classList.has("livePinned"), true);
+  check("and the pinned card keeps its own rail readable", a.classList.has("pinnedHost"), true);
+  check("while the other card's rail does not offer one", b.classList.has("pinnedHost"), false);
+  // d1 is done and gone; only d2 is rebuilt.
+  movePointerToY(null);
+  rebuild(card("d2", "TICKET-2"));
+  check("and the mark goes when the pinned ticket leaves the board",
+    bodyNode.classList.has("livePinned"), false);
+}
+
+// Pinned before anything was written: the sentence the pane shows while
+// it waits must not be carried across the refresh as though it were output.
+startScenario();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  answer = url => Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes("/live/")
+    ? { step: "s", from: 0, next: 0, size: 0, text: "" }
+    : { steps: [{ step: "s", stage: "design", bytes: 0, updated_at_ms: 1 }] }) });
+  node(a, "design").click();
+  await settle();
+  check("the pane says the stage has produced nothing yet",
+    pane(a).querySelector("pre").textContent.includes("まだありません"), true);
+  const after = card("d1", "TICKET-1");
+  answer = url => Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes("/live/")
+    ? { step: "s", from: 0, next: 8, size: 8, text: "実際の出力\n" }
+    : { steps: [{ step: "s", stage: "design", bytes: 8, updated_at_ms: 2 }] }) });
+  rebuild(after);
+  await settle();
+  const shown = after.querySelector(".livepane pre").textContent;
+  check("and the sentence is gone once real output arrives", shown.includes("まだありません"), false);
+  check("leaving the output alone", shown.includes("実際の出力"), true);
+}
+
+// Opening a pane on a log that was already long: the server answers from
+// later than byte zero, and that is exactly when the reader needs telling.
+startScenario();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  answer = url => Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes("/live/")
+    ? { step: "s", from: 70000, next: 70010, size: 70010, text: "末尾の行\n" }
+    : { steps: [{ step: "s", stage: "design", bytes: 70010, updated_at_ms: 1 }] }) });
+  live.liveOpen(pane(a), "TICKET-1", "design", "設計");
+  await settle();
+  const shown = pane(a).querySelector("pre").textContent;
+  check("a pane opened on a long log says the beginning was skipped", shown.includes("中略"), true);
+  check("and shows the end of it", shown.includes("末尾の行"), true);
+}
+
+// A carried pane whose step has finished: the stage moved on while the
+// board was rebuilding, and the pane must notice rather than sit on the
+// output of a step nobody is writing to.
+startScenario();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  const written = { decide: "決定\n", apply: "候補を適用します\n" };
+  let newest = "decide", alive = ["decide"];
+  answer = url => {
+    const asked = url.match(/\/live\/([^?]+)\?from=(\d+)/);
+    if (!asked) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        steps: alive.map(step => ({ step, stage: "design", bytes: written[step].length,
+          updated_at_ms: step === newest ? 100 : 1 })) }) });
+    }
+    const step = decodeURIComponent(asked[1]), from = Number(asked[2]);
+    if (!alive.includes(step)) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+    const all = written[step];
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      step, from, next: all.length, size: all.length, text: all.slice(from) }) });
+  };
+  node(a, "design").click();
+  await settle();
+  check("the pinned pane follows the step that is writing", pane(a).state.step, "decide");
+  // decide's file is gone and the stage has moved to apply.
+  newest = "apply"; alive = ["apply"];
+  const after = card("d1", "TICKET-1");
+  rebuild(after);
+  await settle();
+  runTimers(); await settle();
+  check("and moves on when that step is gone", pane(after).state.step, "apply");
+  check("showing what the new step wrote",
+    pane(after).querySelector("pre").textContent.includes("候補を適用します"), true);
+}
+
+// The card stays where it is and its rail moves down, because the line
+// saying what is happening now grew a second line. The pointer did not
+// move, so it is no longer over the rail.
+startScenario();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  setHeights(200);
+  setRailTops(40);
+  movePointerToY(40 + 10);
+  fire(node(a, "design"), "mouseenter");
+  check("the pane opens with the pointer on the rail", pane(a).classList.has("on"), true);
+  for (const p of runsBox.querySelectorAll(".livepane")) live.liveDetach(p);
+  const taller = card("d1", "TICKET-1");
+  runsBox.replaceChildren(taller);
+  taller.height = 200;
+  taller.railTop = 80;
+  live.liveRestore(runsBox);
+  check("and closes when the rail moves down inside a card that did not move",
+    pane(taller).classList.has("on"), false);
+}
+
+if (checks < 43) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }
