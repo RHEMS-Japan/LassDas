@@ -388,11 +388,37 @@ function setTrack(container, stepID, round, stage) {
    Hovering a stage of the rail opens its output; clicking pins it open so a
    reader can scroll it. Only whole lines arrive, already masked by the
    engine that wrote them. */
+// pointerAt is where the pointer was last seen. Until it has moved once
+// there is nothing to ask, and an unpinned pane is not restored - the
+// reader is not there as far as anything can tell.
+let pointerAt = null;
+document.addEventListener("mousemove", event => {
+  pointerAt = { x: event.clientX, y: event.clientY };
+}, { passive: true });
+
+function pointerIsOver(node) {
+  if (!pointerAt || !document.elementFromPoint) return false;
+  const under = document.elementFromPoint(pointerAt.x, pointerAt.y);
+  return !!under && (under === node || node.contains(under));
+}
+
+// closeOtherPanes stops every pane but this one.
+function closeOtherPanes(keep) {
+  const runsBox = document.getElementById("runs");
+  if (!runsBox) return;
+  for (const pane of runsBox.querySelectorAll(".livepane")) {
+    if (pane !== keep && pane.classList.contains("on")) {
+      pane.state.pinned = false;
+      liveDetach(pane);
+    }
+  }
+}
+
 // deliveryIDOf names the card a pane belongs to, which is what the follow
 // is keyed on.
 function deliveryIDOf(pane) {
   const card = pane.closest(".card");
-  return (card && card.dataset.deliveryId) || "";
+  return (card && card.dataset.delivery) || "";
 }
 
 function buildLivePane() {
@@ -451,7 +477,7 @@ function liveRestore(runsBox) {
   // By delivery, not by ticket: the same ticket can have two deliveries on
   // the board, and the first card with that key is not necessarily the one
   // the reader was on (review of #200).
-  const card = runsBox.querySelector('.card[data-delivery-id="' + CSS.escape(follow.deliveryID) + '"]');
+  const card = runsBox.querySelector('.card[data-delivery="' + CSS.escape(follow.deliveryID) + '"]');
   const pane = card && card.querySelector(".livepane");
   const node = card && card.querySelector('.node[data-step="' + CSS.escape(follow.stage) + '"]');
   if (!pane || !node) {
@@ -459,11 +485,15 @@ function liveRestore(runsBox) {
     return;
   }
   // An unpinned pane belongs to the pointer. After a rebuild the old nodes
-  // are gone without a mouseleave and a focused one never blurs, so asking
-  // the browser where the pointer is now is what keeps a pane from
-  // reopening on a card nobody is pointing at - or for ever, on a rail
-  // somebody tabbed past (review of #200).
-  if (!follow.pinned && !node.matches(":hover")) {
+  // are gone without a mouseleave and a focused one never blurs, so the
+  // pointer is the only thing that still says whether the reader is there.
+  //
+  // It is asked by coordinate, not by asking the new node whether it is
+  // hovered: the rebuild and this call are one synchronous task, and the
+  // browser has had no chance to move its hover chain onto elements
+  // created three lines ago. elementFromPoint hit-tests on demand and
+  // answers about the tree as it is now (review of #200).
+  if (!follow.pinned && !pointerIsOver(node)) {
     liveFollow = null;
     return;
   }
@@ -472,6 +502,10 @@ function liveRestore(runsBox) {
 }
 
 function liveOpen(pane, issueKey, stage, stageName) {
+  // One pane at a time. Two open panes each poll, each say "固定中", and
+  // the next refresh keeps whichever the follow names and drops the other
+  // without the reader asking (review of #200).
+  closeOtherPanes(pane);
   // A pinned pane elsewhere is not displaced by a pointer wandering over
   // another rail; the reader unpins it or clicks somewhere else.
   if (!liveFollow || !liveFollow.pinned || pane.state.pinned) {
@@ -570,14 +604,26 @@ function liveTick(pane, issueKey, stage, first) {
 function wireLive(node, issueKey, stage, stageName, pane) {
   node.classList.add("hasLive");
   node.tabIndex = 0;
-  const open = () => { if (!pane.state.pinned) liveOpen(pane, issueKey, stage, stageName); };
+  // A pinned pane anywhere holds the view: the pointer wandering over
+  // another rail neither displaces it nor opens a second one beside it.
+  // Clicking still pins the new stage, which is the reader asking.
+  const open = () => {
+    if (pane.state.pinned) return;
+    if (liveFollow && liveFollow.pinned) return;
+    liveOpen(pane, issueKey, stage, stageName);
+  };
   node.addEventListener("mouseenter", open);
   node.addEventListener("focus", open);
   node.addEventListener("mouseleave", () => { if (!pane.state.pinned) liveClose(pane); });
   node.addEventListener("blur", () => { if (!pane.state.pinned) liveClose(pane); });
   node.addEventListener("click", () => {
     if (pane.state.pinned && pane.state.stage === stage) {
+      // Both halves: the pane stops being pinned and the follow goes with
+      // it. Leaving the follow pinned made the pane reopen on the next
+      // refresh, pinned, so the reader could never put it away (review of
+      // #200).
       pane.state.pinned = false;
+      liveFollow = null;
       liveClose(pane);
       return;
     }
@@ -803,7 +849,7 @@ function buildResolveRow(run) {
 function buildCard(run) {
   const card = el("div", "card");
   if (run.issue_key) card.dataset.issueKey = run.issue_key;
-  if (run.delivery_id) card.dataset.deliveryId = run.delivery_id;
+  // One attribute for the delivery, read by the live pane's follow.
   card.dataset.delivery = run.delivery_id;
   const tone = TONE[run.step];
   if (tone) card.classList.add(tone);

@@ -58,10 +58,11 @@ var pinnedStages = map[string]string{
 // 2026-09-17).
 func TestEveryRunnerStepHasAStage(t *testing.T) {
 	names, prefixes := runnerStepNames(t)
-	// The engine starts more than forty steps. A scan that suddenly finds
-	// far fewer is not a smaller engine, it is a scan that stopped seeing
-	// call sites (review of #200).
-	if len(names) < 40 {
+	// The engine starts this many steps. A scan that finds fewer is not a
+	// smaller engine, it is a scan that stopped seeing call sites, or an
+	// engine that lost one - and a lost step is how a rail stage went empty
+	// (review of #200).
+	if len(names) < 44 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
@@ -106,12 +107,17 @@ func TestPinnedStagesAndTheTableAgree(t *testing.T) {
 // reader hovers and is told there is nothing, for ever — which is how 確認
 // behaved while the wait it shows ran under a step filed at STG.
 func TestEveryRailStageHasItsSteps(t *testing.T) {
+	// Counted from the steps the engine actually starts, not from the
+	// table's own entries: counting the table meant the engine could lose
+	// its only 確認 step and every check stayed green - the regression this
+	// change fixed, restorable in silence (review of #200).
+	names, prefixes := runnerStepNames(t)
 	counted := map[string]int{}
-	for _, stage := range liveStages {
-		counted[stage]++
+	for _, name := range names {
+		counted[LiveStage(runner.LiveLogName(name))]++
 	}
-	for _, rule := range liveStagePrefixes {
-		counted[rule.stage]++
+	for _, prefix := range prefixes {
+		counted[LiveStage(runner.LiveLogName(prefix+"anything"))]++
 	}
 	for _, stage := range []string{
 		"intake", "investigate", "design", "implement", "review", "checks", "staging", "confirm", "production",

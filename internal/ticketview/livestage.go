@@ -91,11 +91,17 @@ var liveStages = map[string]string{
 	// STG — the publish card: the branch, the merge, and the wait for the
 	// staging deployment.
 	//
-	// Four of these run while the attendant places "reporting", which the
+	// Three of these run while the attendant places "reporting", which the
 	// rail does not draw at all, so the rail is dark then and a reader has
-	// no lit stage to hover: create-feature-pr, publish-feature,
-	// compose-trail and the re-baseline. They sit here because STG is what
-	// they are doing. The missing rail stage is older than this table.
+	// no lit stage to hover: create-feature-pr, publish-feature and
+	// compose-trail. They sit here because STG is what they are doing. The
+	// missing rail stage is older than this table.
+	//
+	// Six more are re-run from that same card when the integration branch
+	// moved under the delivery - baseline, the git checkout, apply,
+	// run-validation, verify-applied and verify-publish-gate - and they
+	// stay where their first, lit card puts them: 受付 for the first two,
+	// 検査 for the rest.
 	"create-feature-pr": "staging",
 	"publish-feature":   "staging",
 	"compose-trail":     "staging",

@@ -10,8 +10,22 @@ import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
 const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n");
-const body = script.slice(script.indexOf("function deliveryIDOf"), script.indexOf("function fmtElapsed"));
-if (!body) { console.log("FAIL harness: the live pane code was not found in board.html"); process.exit(1); }
+// The live pane's own code, from the first of its declarations to the one
+// after it. Every name the checks drive is required to be inside the slice:
+// a declaration moved out of it would otherwise be silently untested, which
+// is how a harness stops testing the thing it names (review of #200).
+const from = script.indexOf("let pointerAt");
+const to = script.indexOf("function fmtElapsed");
+const body = from < 0 || to < 0 || to < from ? "" : script.slice(from, to);
+const required = [
+  "pointerIsOver", "closeOtherPanes", "deliveryIDOf", "buildLivePane", "liveStop",
+  "liveFollow", "liveClose", "liveDetach", "liveRestore", "liveOpen", "liveTick", "wireLive",
+];
+const missing = required.filter(name => !body.includes(name === "liveFollow" ? "let liveFollow" : "function " + name));
+if (!body || missing.length) {
+  console.log("FAIL harness: the live pane code is not all in one place; missing " + JSON.stringify(missing));
+  process.exit(1);
+}
 
 function tokens(cls) {
   const set = new Set(cls ? cls.split(" ") : []);
@@ -35,6 +49,8 @@ class Node {
   get textContent() { return this.text + this.children.map(c => c.textContent).join(""); }
   set textContent(v) { this.text = v; this.children = []; }
   matches(sel) { return sel === ":hover" ? this.hovered : false; }
+  contains(other) { let n = other; while (n) { if (n === this) return true; n = n.parent; } return false; }
+  replaceChildren(...next) { this.children.forEach(c => (c.parent = null)); this.children = []; next.forEach(c => this.appendChild(c)); }
   closest(sel) { let n = this; const want = sel.replace(".", "");
     while (n) { if (n.classList.has(want)) return n; n = n.parent; } return null; }
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
@@ -60,17 +76,43 @@ const clearTimer = id => pending.delete(id);
 const runTimers = () => { const due = [...pending]; pending.clear(); due.forEach(([, fn]) => fn()); };
 let answer = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ steps: [] }) });
 const fetchStub = url => answer(url);
+// The page asks the document where the pointer is, by coordinate. The
+// harness answers by hit-test against a node the check nominates, which is
+// the shape of the real API: it is asked after the tree changed and it
+// answers about the tree as it is now.
+// The pointer is a position, not a node: elementFromPoint answers with
+// whatever is at that position in the tree as it is now. Modelling it as a
+// flag on a node let the check assign the answer it wanted after a rebuild
+// (review of #200).
+let pointerPosition = null;
+const listeners = {};
+const documentStub = {
+  createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
+  addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+  getElementById: id => registry[id] || null,
+  elementFromPoint: () => {
+    if (!pointerPosition) return null;
+    return runsBox.querySelector('.card[data-delivery="' + pointerPosition.delivery +
+      '"] .node[data-step="' + pointerPosition.stage + '"]');
+  },
+};
+const registry = {};
+// Move the pointer to the rail node of one delivery's stage, or off the
+// board entirely.
+const movePointerTo = (delivery, stage) => {
+  pointerPosition = delivery ? { delivery, stage } : null;
+  (listeners.mousemove || []).forEach(fn => fn({ clientX: 1, clientY: 1 }));
+};
 const live = new Function("CSS", "setTimeout", "clearTimeout", "fetch", "document", "el",
-  body + "\n return { liveOpen, liveClose, liveDetach, liveRestore, wireLive, buildLivePane, liveTick," +
+  body + "\n return { liveOpen, liveClose, liveDetach, liveRestore, wireLive, buildLivePane, liveTick, closeOtherPanes," +
   " get follow() { return liveFollow; }, reset() { liveFollow = null; } };")(
-  { escape: s => s }, setTimer, clearTimer, fetchStub,
-  { createTextNode: t => { const n = new Node("#text"); n.text = t; return n; } }, el);
+  { escape: s => s }, setTimer, clearTimer, fetchStub, documentStub, el);
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
 const STEPS = [["intake", "受付"], ["design", "設計"], ["implement", "実装"]];
 function card(deliveryID, issueKey) {
   const c = new Node("div", "card");
-  c.dataset.deliveryId = deliveryID; c.dataset.issueKey = issueKey;
+  c.dataset.delivery = deliveryID; c.dataset.issueKey = issueKey;
   const pane = live.buildLivePane();
   const track = new Node("div", "track");
   for (const [id, name] of STEPS) {
@@ -83,10 +125,24 @@ function card(deliveryID, issueKey) {
 const node = (c, stage) => c.querySelector('.node[data-step="' + stage + '"]');
 const pane = c => c.querySelector(".livepane");
 const fire = (n, type) => (n.handlers[type] || []).forEach(h => h());
-const box = (...cards) => { const b = new Node("div", "runs"); cards.forEach(c => b.appendChild(c)); return b; };
+// The board's own container, registered under the id the page looks it up
+// by, and rebuilt the way renderBoard rebuilds it.
+const runsBox = new Node("div", "runs");
+registry.runs = runsBox;
+const box = (...cards) => { runsBox.replaceChildren(...cards); return runsBox; };
+// What renderBoard does, in its order: stop every pane, replace the cards,
+// then restore.
+const rebuild = (...cards) => {
+  for (const pane of runsBox.querySelectorAll(".livepane")) live.liveDetach(pane);
+  runsBox.replaceChildren(...cards);
+  live.liveRestore(runsBox);
+  return runsBox;
+};
 
 let failed = 0;
+let checks = 0;
 function check(name, got, want) {
+  checks++;
   if (got === want) { console.log("PASS " + name); return; }
   console.log("FAIL " + name + ": got " + JSON.stringify(got) + ", want " + JSON.stringify(want));
   failed++;
@@ -113,10 +169,11 @@ live.reset();
   box(a);
   fire(node(a, "design"), "focus");
   check("the keyboard opens a pane", pane(a).classList.has("on"), true);
-  const rebuilt = box(card("d1", "TICKET-1"));
-  live.liveRestore(rebuilt);
+  movePointerTo(null);
+  const survivor = card("d1", "TICKET-1");
+  rebuild(survivor);
   check("and a refresh closes it when the pointer is elsewhere",
-    pane(rebuilt.querySelector(".card")).classList.has("on"), false);
+    pane(survivor).classList.has("on"), false);
 }
 
 // The board re-sorts. A pane must not open on a card nobody points at.
@@ -124,11 +181,11 @@ live.reset();
 {
   const a = card("d1", "TICKET-1");
   box(a);
-  node(a, "design").hovered = true;
+  movePointerTo("d1", "design");
   fire(node(a, "design"), "mouseenter");
   const moved = card("d1", "TICKET-1");
-  const rebuilt = box(card("d2", "TICKET-2"), moved);
-  live.liveRestore(rebuilt);
+  movePointerTo(null);
+  rebuild(card("d2", "TICKET-2"), moved);
   check("no pane opens on a card the pointer left", pane(moved).classList.has("on"), false);
 }
 
@@ -137,11 +194,11 @@ live.reset();
 {
   const first = card("d-old", "TICKET-1"), second = card("d-new", "TICKET-1");
   box(first, second);
-  node(second, "design").hovered = true;
+  movePointerTo("d-new", "design");
   fire(node(second, "design"), "mouseenter");
   const stillFirst = card("d-old", "TICKET-1"), stillSecond = card("d-new", "TICKET-1");
-  node(stillSecond, "design").hovered = true;
-  live.liveRestore(box(stillFirst, stillSecond));
+  rebuild(stillFirst, stillSecond);
+  rebuild(stillFirst, stillSecond);
   check("the older delivery's pane stays shut", pane(stillFirst).classList.has("on"), false);
   check("the hovered delivery's pane reopens", pane(stillSecond).classList.has("on"), true);
 }
@@ -189,4 +246,39 @@ live.reset();
     p.querySelector("pre").textContent.includes("まだありません"), false);
 }
 
+// Unpinning puts the pane away for good. Leaving the follow pinned made it
+// come back, pinned, on the next refresh - so the reader could never put it
+// away at all.
+live.reset();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  const design = node(a, "design");
+  design.click();
+  check("a click pins the pane", pane(a).state.pinned, true);
+  design.click();
+  check("a second click closes it", pane(a).classList.has("on"), false);
+  movePointerTo(null);
+  const after = card("d1", "TICKET-1");
+  rebuild(after);
+  check("and it stays closed", pane(after).classList.has("on"), false);
+}
+
+// One pane at a time. Two open panes each poll and each say 固定中, and the
+// next refresh drops one of them without the reader asking.
+live.reset();
+{
+  const a = card("d1", "TICKET-1"), b = card("d2", "TICKET-2");
+  box(a, b);
+  node(a, "design").click();
+  node(b, "implement").click();
+  const open = runsBox.querySelectorAll(".livepane").filter(p => p.classList.has("on"));
+  check("pinning a second pane closes the first", open.length, 1);
+  check("and the one left open is the one just pinned", open[0] === pane(b), true);
+}
+
+if (checks < 17) {
+  console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
+  failed++;
+}
 process.exit(failed === 0 ? 0 : 1);
