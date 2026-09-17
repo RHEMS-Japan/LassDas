@@ -181,6 +181,17 @@ docker push "$tag" >/dev/null
 digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$image_repo@sha256:" | head -n 1)"
 [[ "$digest" == "$image_repo@sha256:"* ]] || { echo "could not read the pushed digest for $image_repo" >&2; exit 1; }
 say "pushed $digest"
+# ---- the distributor's note: the record of which source this image is ----
+# docs/DISTRIBUTION.json is what a person handed only the repository's URL
+# reads (README); its history, written here at every release, is the record
+# that ties the digest to the source sha. The operator commits it.
+say "distributor's note"
+note_record="https://github.com/$(git remote get-url origin | sed -E 's#^(git@github.com:|https://github.com/|ssh://git@github.com/)##; s#\.git$##')/blob/main/docs/DISTRIBUTION.json"
+if go run ./cmd/lassdas setup note --image "$digest" --engine-sha "$engine_sha" --build-record "$note_record"; then
+  echo "commit docs/DISTRIBUTION.json (image $digest / engine-sha $engine_sha) and push it with this release"
+else
+  echo "the distributor's note could not be written; write it by hand: ./lassdas setup note --image $digest --engine-sha $engine_sha --build-record $note_record" >&2
+fi
 
 # ---- 6. pins and toolchain, read from the image itself --------------------
 say "tool pins from the image"

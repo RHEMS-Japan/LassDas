@@ -2,6 +2,9 @@
 /controller
 /worker
 
+# the CLI built by the README's setup steps
+/lassdas
+
 # setup wizard resumable state (per-operator, never committed)
 lassdas-setup.state.json
 

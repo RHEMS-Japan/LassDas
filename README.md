@@ -8,7 +8,7 @@
 
 「このプロジェクトで https://github.com/RHEMS-Japan/LassDas をセットアップして」と頼まれたら、いまいる repo (納品先) の外で、次を順に行う。
 
-1. この repo を作業用の場所へ取得する: `git clone https://github.com/RHEMS-Japan/LassDas.git /tmp/lassdas-src`
+1. この repo を作業用の場所へ取得する: `git clone https://github.com/RHEMS-Japan/LassDas.git /tmp/lassdas-src` (既にあれば `git -C /tmp/lassdas-src pull`)
 2. CLI を組み立て、準備を 1 回実行する: `cd /tmp/lassdas-src && go build -o lassdas ./cmd/lassdas && ./lassdas setup install` — 配布者の案内 (どのイメージを動かすか) は同じ repo の [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) から読まれる。引数は要らない
 3. 出力に示された `~/.lassdas/SETUP.md` を最初から最後まで読み、その指示に従う。以後の `lassdas …` は `~/.lassdas/bin/lassdas`
 4. 本体イメージのレジストリが非公開なら、案内の `registry_login` のコマンドを **利用者が** 実行する。AI は鍵を扱わない

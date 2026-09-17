@@ -30,7 +30,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内)。無ければ install が未実行なので、配布者の案内をもらって install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
+| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内。元は本体 repo の `docs/DISTRIBUTION.json`)。無ければ install が未実行なので、本体 repo を取得して 1.0 のとおり install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
 
@@ -112,7 +112,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-repository` | 本体イメージの元ソース repo (owner/name) |
 | `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
-| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL |
+| `build-record` | イメージと SHA の対応の記録の URL。通常は本体 repo の `docs/DISTRIBUTION.json` 自身 (配布者がリリースのたびに書き、その履歴が記録) |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 

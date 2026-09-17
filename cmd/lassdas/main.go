@@ -20,7 +20,7 @@ import (
 
 const help = `使用方法:
   lassdas setup install [--note PATH] [--image IMAGE@sha256:…] [--engine-sha SHA] [--build-record URL] [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--skills-dir DIR]
-  lassdas setup note --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD] [--out PATH]
+  lassdas setup note --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--out PATH]
   lassdas setup check [--repo-root PATH]
   lassdas setup secrets --project NAME [--repo-root PATH]
   lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
@@ -125,7 +125,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return errors.New("本体 repo の中で実行するか、--repo-root で本体 repo を指定してください")
 		}
-		return setupNote(root, install, output)
+		return setupNote(ctx, root, install, output)
 	}
 	if command == "setup install" {
 		if install.skillsDir == "" {

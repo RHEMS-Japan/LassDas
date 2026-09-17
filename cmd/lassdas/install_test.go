@@ -233,7 +233,26 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	engine := t.TempDir()
 	digest := "registry/engine@sha256:" + strings.Repeat("a", 64)
 	var out bytes.Buffer
-	if err := setupNote(engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
+	// The note is never written into a repository that is not the body's.
+	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "u"}, &out); err == nil || !strings.Contains(err.Error(), "本体 repo の中で") {
+		t.Fatalf("setup note outside the body: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(engine, "go.mod"), []byte("module automation.internal/ticket-ingress\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	// A release rewrites image, sha and record and keeps the login it was
+	// not given.
+	next := "registry/engine@sha256:" + strings.Repeat("d", 64)
+	if err := setupNote(context.Background(), engine, installOptions{image: next, engineSHA: strings.Repeat("e", 40), buildRecord: "https://example/build/2"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := initwizard.ReadDistributionFile(filepath.Join(engine, "docs", "DISTRIBUTION.json")); err != nil || kept.Image != next || kept.RegistryLogin != "docker login --password-stdin registry" || kept.EngineRepository != "e/a" {
+		t.Fatalf("a later note keeps the login and the repository: %+v %v", kept, err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1"}, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "docs/DISTRIBUTION.json") {
@@ -254,8 +273,40 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	if _, err := noteFor(t.TempDir(), installOptions{note: filepath.Join(t.TempDir(), "missing.json")}); err == nil {
 		t.Fatal("an explicit --note that cannot be read is an error")
 	}
-	if err := setupNote(engine, installOptions{engineRepository: "e/a", image: "registry/engine:latest", engineSHA: strings.Repeat("b", 40), buildRecord: "u"}, &out); err == nil {
+	if err := setupNote(context.Background(), engine, installOptions{engineRepository: "e/a", image: "registry/engine:latest", engineSHA: strings.Repeat("b", 40), buildRecord: "u"}, &out); err == nil {
 		t.Fatal("a tag is refused by setup note too")
+	}
+	// One bad field in the checkout's note is corrected by its flag: the
+	// rest of the file still counts.
+	broken := filepath.Join(engine, "docs", "DISTRIBUTION.json")
+	if err := os.WriteFile(broken, []byte(`{"engine_repository":"e/a","image":"registry/engine:latest","engine_sha":"`+strings.Repeat("b", 40)+`","build_record":"u","registry_login":"docker login --password-stdin registry"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := noteFor(engine, installOptions{image: digest})
+	if err != nil || fixed.Image != digest || fixed.EngineSHA != strings.Repeat("b", 40) || fixed.RegistryLogin == "" {
+		t.Fatalf("a flag corrects one field of a broken note: %+v %v", fixed, err)
+	}
+	if err := fixed.Validate(); err != nil {
+		t.Fatalf("the corrected note is whole: %v", err)
+	}
+}
+
+// The README's build step leaves a binary the tree must ignore, and the
+// clone step says what to do when the directory exists.
+func TestTheReadmeStepsLeaveNothingBehind(t *testing.T) {
+	ignore, err := os.ReadFile("../../.gitignore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ignore), "\n/lassdas\n") {
+		t.Fatal(".gitignore must ignore the CLI the README builds")
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), "git -C /tmp/lassdas-src pull") {
+		t.Fatal("the README must say what to do when the clone exists")
 	}
 }
 

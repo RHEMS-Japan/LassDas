@@ -35,8 +35,22 @@ const DistributionFile = ".lassdas/distribution.json"
 const RepoDistributionFile = "docs/DISTRIBUTION.json"
 
 // ReadDistributionFile reads a note wherever it is (the repository's, or
-// one given by path); CLI and InstalledAt are set by install, not here.
+// one given by path) and validates it; CLI and InstalledAt are set by
+// install, not here.
 func ReadDistributionFile(path string) (Distribution, error) {
+	d, err := DecodeDistributionFile(path)
+	if err != nil {
+		return Distribution{}, err
+	}
+	if err := d.Validate(); err != nil {
+		return Distribution{}, fmt.Errorf("配布者の案内 %s: %v", path, err)
+	}
+	return d, nil
+}
+
+// DecodeDistributionFile reads a note without validating it, so a caller
+// can overlay corrections before judging the whole.
+func DecodeDistributionFile(path string) (Distribution, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Distribution{}, fmt.Errorf("配布者の案内 %s を読めません: %v", path, err)
@@ -46,9 +60,6 @@ func ReadDistributionFile(path string) (Distribution, error) {
 	var d Distribution
 	if err := decoder.Decode(&d); err != nil {
 		return Distribution{}, fmt.Errorf("配布者の案内 %s を読めません: %v", path, err)
-	}
-	if err := d.Validate(); err != nil {
-		return Distribution{}, fmt.Errorf("配布者の案内 %s: %v", path, err)
 	}
 	return d, nil
 }

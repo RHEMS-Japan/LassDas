@@ -34,7 +34,9 @@ func noteFor(engineRoot string, options installOptions) (initwizard.Distribution
 	if path == "" {
 		path = filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
 	}
-	if read, err := initwizard.ReadDistributionFile(path); err == nil {
+	// Decoded, not judged: a flag may be the correction to one bad field,
+	// and the whole is validated once the flags are laid over it.
+	if read, err := initwizard.DecodeDistributionFile(path); err == nil {
 		note = read
 	} else if options.note != "" || (options.image == "" && options.engineSHA == "" && options.buildRecord == "") {
 		return initwizard.Distribution{}, err
@@ -58,15 +60,37 @@ func noteFor(engineRoot string, options installOptions) (initwizard.Distribution
 }
 
 // setupNote is the distributor's turn at a release: it writes the
-// repository's note from the release's image, sha and build record.
-func setupNote(engineRoot string, options installOptions, output io.Writer) error {
+// repository's note from the release's image, sha and build record,
+// keeping what the previous note said where a flag says nothing (the
+// registry login, the body repository). It runs only in the body's own
+// repository: the note is never written into a delivery repository.
+func setupNote(ctx context.Context, engineRoot string, options installOptions, output io.Writer) error {
+	if err := bodyRepository(engineRoot); err != nil {
+		return err
+	}
 	out := options.out
 	if out == "" {
 		out = filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
 	}
-	note := initwizard.Distribution{EngineRepository: options.engineRepository, Image: options.image, EngineSHA: options.engineSHA, BuildRecord: options.buildRecord, RegistryLogin: options.registryLogin}
+	note, _ := initwizard.DecodeDistributionFile(out)
+	note.CLI, note.InstalledAt = "", time.Time{}
+	if options.engineRepository != "" {
+		note.EngineRepository = options.engineRepository
+	}
 	if note.EngineRepository == "" {
-		note.EngineRepository = originRepository(context.Background(), engineRoot)
+		note.EngineRepository = originRepository(ctx, engineRoot)
+	}
+	if options.image != "" {
+		note.Image = options.image
+	}
+	if options.engineSHA != "" {
+		note.EngineSHA = options.engineSHA
+	}
+	if options.buildRecord != "" {
+		note.BuildRecord = options.buildRecord
+	}
+	if options.registryLogin != "" {
+		note.RegistryLogin = options.registryLogin
 	}
 	if err := initwizard.WriteDistributionFile(out, note); err != nil {
 		return fmt.Errorf("配布者の案内を書けません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
@@ -75,15 +99,23 @@ func setupNote(engineRoot string, options installOptions, output io.Writer) erro
 	return err
 }
 
+// bodyRepository refuses any checkout that is not the body's own module.
+func bodyRepository(engineRoot string) error {
+	module, err := os.ReadFile(filepath.Join(engineRoot, "go.mod"))
+	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress\n") {
+		return errors.New("本体 repo の中で実行してください (go.mod が見つからないか、別の module です)")
+	}
+	return nil
+}
+
 // setupInstall is run once per machine, from a checkout of the body's
 // repository: it builds the CLI under ~/.lassdas/bin, copies the setup
 // instruction, stores the distributor's note, and installs the skill the
 // person's development AI picks up when asked to set LassDas up - so
 // "LassDas をこのプロジェクトに導入して" is the whole request.
 func setupInstall(ctx context.Context, engineRoot, home string, options installOptions, output io.Writer) error {
-	module, err := os.ReadFile(filepath.Join(engineRoot, "go.mod"))
-	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress\n") {
-		return errors.New("本体 repo の中で実行してください (go.mod が見つからないか、別の module です)")
+	if err := bodyRepository(engineRoot); err != nil {
+		return err
 	}
 	// The note is the checkout's own docs/DISTRIBUTION.json unless flags
 	// say otherwise. The source sha is the distributor's word, taken from
