@@ -76,26 +76,37 @@ var liveStages = map[string]string{
 	"review":         "review",
 	"seal-candidate": "review",
 
-	// 検査 — the validate card: it seals the round's verdict, applies the
-	// candidate into a sandbox, runs the project's checks, and asks the
-	// requester when the reviews never agreed.
+	// 検査 — the validate card and the checks card: the round's verdict,
+	// the candidate applied into a sandbox, the project's own checks, the
+	// wait for the branch's CI, and the question asked when the reviews
+	// never agreed.
 	"decide":              "checks",
+	"wait-feature":        "checks",
 	"apply":               "checks",
 	"run-validation":      "checks",
 	"verify-applied":      "checks",
 	"verify-publish-gate": "checks",
 	"impasse-question":    "checks",
 
-	// STG — the publish card: the branch, its checks, the merge, and the
-	// wait for the staging deployment.
+	// STG — the publish card: the branch, the merge, and the wait for the
+	// staging deployment.
+	//
+	// Four of these run while the attendant places "reporting", which the
+	// rail does not draw at all, so the rail is dark then and a reader has
+	// no lit stage to hover: create-feature-pr, publish-feature,
+	// compose-trail and the re-baseline. They sit here because STG is what
+	// they are doing. The missing rail stage is older than this table.
 	"create-feature-pr": "staging",
 	"publish-feature":   "staging",
 	"compose-trail":     "staging",
 	"merge-feature":     "staging",
-	"wait-feature":      "staging",
 	"await-staging":     "staging",
-	"read-merged":       "staging",
-	"promotion-delta":   "staging",
+	// read-merged is asked twice, once for the staging branch and once for
+	// the promotion. The live file is one per step name and appended to, so
+	// both readings land in the staging pane; the promotion's own steps are
+	// below.
+	"read-merged":     "staging",
+	"promotion-delta": "staging",
 
 	// 確認 — the e2e card: the wait for a person to merge and for staging
 	// to carry the change. It is the one stage a reader watches for a long
@@ -115,6 +126,9 @@ var liveStages = map[string]string{
 var liveStagePrefixes = []struct{ prefix, stage string }{
 	{"browsercheck-production", "production"},
 	{"browsercheck-", "staging"},
+	// The reception clones and checks out, and so does the validate card
+	// before it applies a candidate. Both append to one file, offered where
+	// the reception's own work is.
 	{"git-", "intake"},
 }
 

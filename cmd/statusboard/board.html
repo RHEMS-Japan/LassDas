@@ -388,6 +388,13 @@ function setTrack(container, stepID, round, stage) {
    Hovering a stage of the rail opens its output; clicking pins it open so a
    reader can scroll it. Only whole lines arrive, already masked by the
    engine that wrote them. */
+// deliveryIDOf names the card a pane belongs to, which is what the follow
+// is keyed on.
+function deliveryIDOf(pane) {
+  const card = pane.closest(".card");
+  return (card && card.dataset.deliveryId) || "";
+}
+
 function buildLivePane() {
   const pane = el("div", "livepane");
   const head = el("div", "lphead");
@@ -410,10 +417,16 @@ function liveStop(pane) {
 // it the pane a reader was reading vanished on the next refresh — about once
 // a minute, and immediately on any event — which looks exactly like a stage
 // whose live output does not work (live 2026-09-17).
-let liveFollow = null; // {issueKey, stage, stageName, pinned}
+let liveFollow = null; // {deliveryID, issueKey, stage, stageName, pinned}
 
 function liveClose(pane) {
-  liveFollow = null;
+  // Only this pane's own follow is given up here. A pinned pane is the
+  // reader saying "keep this open", and a pointer leaving a different
+  // ticket's rail must not take it back - the pointer that left was never
+  // on it (review of #200).
+  if (liveFollow && !liveFollow.pinned && liveFollow.deliveryID === deliveryIDOf(pane)) {
+    liveFollow = null;
+  }
   liveDetach(pane);
 }
 
@@ -434,9 +447,22 @@ function liveDetach(pane) {
 function liveRestore(runsBox) {
   if (!liveFollow) return;
   const follow = liveFollow;
-  const card = runsBox.querySelector('.card[data-issue-key="' + CSS.escape(follow.issueKey) + '"]');
+  // By delivery, not by ticket: the same ticket can have two deliveries on
+  // the board, and the first card with that key is not necessarily the one
+  // the reader was on (review of #200).
+  const card = runsBox.querySelector('.card[data-delivery-id="' + CSS.escape(follow.deliveryID) + '"]');
   const pane = card && card.querySelector(".livepane");
-  if (!pane) {
+  const node = card && card.querySelector('.node[data-step="' + CSS.escape(follow.stage) + '"]');
+  if (!pane || !node) {
+    liveFollow = null;
+    return;
+  }
+  // An unpinned pane belongs to the pointer. After a rebuild the old nodes
+  // are gone without a mouseleave and a focused one never blurs, so asking
+  // the browser where the pointer is now is what keeps a pane from
+  // reopening on a card nobody is pointing at - or for ever, on a rail
+  // somebody tabbed past (review of #200).
+  if (!follow.pinned && !node.matches(":hover")) {
     liveFollow = null;
     return;
   }
@@ -445,7 +471,14 @@ function liveRestore(runsBox) {
 }
 
 function liveOpen(pane, issueKey, stage, stageName) {
-  liveFollow = { issueKey: issueKey, stage: stage, stageName: stageName, pinned: pane.state.pinned };
+  // A pinned pane elsewhere is not displaced by a pointer wandering over
+  // another rail; the reader unpins it or clicks somewhere else.
+  if (!liveFollow || !liveFollow.pinned || pane.state.pinned) {
+    liveFollow = {
+      deliveryID: deliveryIDOf(pane), issueKey: issueKey,
+      stage: stage, stageName: stageName, pinned: pane.state.pinned,
+    };
+  }
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
   pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, stage: stage });
@@ -504,6 +537,10 @@ function liveTick(pane, issueKey, stage, first) {
         pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 1000);
       });
   }).catch(() => {
+    // The same guard the success paths carry: a pane closed while its
+    // request was in flight must not schedule another one, or a board that
+    // is briefly unreachable leaves one unstoppable loop per refresh.
+    if (pane.state.stage !== stage) return;
     pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 4000);
   });
 }
@@ -525,7 +562,10 @@ function wireLive(node, issueKey, stage, stageName, pane) {
     pane.state.pinned = false;
     liveOpen(pane, issueKey, stage, stageName);
     pane.state.pinned = true;
-    liveFollow.pinned = true;
+    liveFollow = {
+      deliveryID: deliveryIDOf(pane), issueKey: issueKey,
+      stage: stage, stageName: stageName, pinned: true,
+    };
     pane.querySelector(".lphead .pin").textContent = "固定中 (もう一度クリックで解除)";
   });
   node.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.click(); } });
@@ -741,6 +781,7 @@ function buildResolveRow(run) {
 function buildCard(run) {
   const card = el("div", "card");
   if (run.issue_key) card.dataset.issueKey = run.issue_key;
+  if (run.delivery_id) card.dataset.deliveryId = run.delivery_id;
   card.dataset.delivery = run.delivery_id;
   const tone = TONE[run.step];
   if (tone) card.classList.add(tone);
