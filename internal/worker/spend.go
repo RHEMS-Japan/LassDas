@@ -352,7 +352,7 @@ func ComposeSpendText(spend RunSpend, roles map[string][]string) string {
 		// The difference cannot separate this ticket from anything else
 		// billed to the same key while it ran.
 		builder.WriteString("この金額は、依頼の開始時と終了時の利用額の差です。" +
-			"同じ鍵を使う別の依頼が同時に動いていた場合、その分も含まれます。\n")
+			"この間に同じ鍵が使われた分は、別の依頼でも手作業でも、すべてこの金額に含まれます。\n")
 	}
 	builder.WriteString("為替は 1 ドル " + strconv.Itoa(SpendFXRateUSDJPY) + " 円の固定換算です。\n")
 	return builder.String()

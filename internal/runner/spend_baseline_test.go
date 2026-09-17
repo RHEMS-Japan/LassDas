@@ -12,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
+	"errors"
+	"regexp"
 )
 
 // The run records what each key had been billed before it spent anything,
@@ -172,6 +175,16 @@ func TestTheBaselineIsTakenBeforeTheRunPaysForAnything(t *testing.T) {
 	if baselineAt < 0 {
 		t.Fatal("the reception never reads what the keys had been billed, so no run can report a cost")
 	}
+	// Prepare clears the workspace. A reading taken before it is written
+	// and then deleted seconds later, which looks like the feature working
+	// and is the feature doing nothing (review of #202).
+	clearedAt := strings.Index(reception, "p.Prepare()")
+	if clearedAt < 0 {
+		t.Fatal("the reception no longer clears the workspace; this check is looking in the wrong place")
+	}
+	if baselineAt < clearedAt {
+		t.Fatal("the reading is taken before the workspace is cleared, so the record it writes is deleted")
+	}
 	firstPaidCall := strings.Index(reception, "p.worker(ctx,")
 	if firstPaidCall < 0 {
 		t.Fatal("the reception starts no model step; this check is looking in the wrong place")
@@ -179,4 +192,120 @@ func TestTheBaselineIsTakenBeforeTheRunPaysForAnything(t *testing.T) {
 	if baselineAt > firstPaidCall {
 		t.Fatal("the reading is taken after the run has already paid for something, so that spend is inside it")
 	}
+}
+
+// The entry point production uses, not only the helper underneath it: it
+// reads the destination's configuration, builds its own client, and writes
+// the record. Tested through a stand-in transport, because a real
+// configuration may only name an https endpoint with no port.
+func TestTheReceptionsOwnBaselineReadingWritesTheRecord(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("SPEND_KEY", "a-key")
+	var asked int
+	pipeline := &Pipeline{
+		Workspace: workspace,
+		Config:    runtime.Config{ConsumerConfigPath: consumerConfigFile(t, "https://gateway.example", "SPEND_KEY")},
+		usageTransport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/key" {
+				return nil, errors.New("asked for " + r.URL.Path)
+			}
+			asked++
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"usage":8.25}}`)), Header: http.Header{}}, nil
+		}),
+	}
+	pipeline.recordSpendBaseline(context.Background())
+
+	if asked == 0 {
+		t.Fatal("the reception never asked what the keys had been billed")
+	}
+	baseline, found := loadSpendBaseline(workspace)
+	if !found {
+		t.Fatal("the reception asked and wrote nothing")
+	}
+	if len(baseline.Keys) == 0 || baseline.Keys[0].UsageUSD != 8.25 {
+		t.Fatalf("baseline = %+v", baseline)
+	}
+}
+
+// A destination whose configuration cannot be read leaves no record, and
+// the run starts anyway.
+func TestAnUnreadableConfigurationLeavesNoBaseline(t *testing.T) {
+	workspace := t.TempDir()
+	pipeline := &Pipeline{Workspace: workspace, Config: runtime.Config{
+		ConsumerConfigPath: filepath.Join(t.TempDir(), "absent.json"),
+	}}
+	pipeline.recordSpendBaseline(context.Background())
+	if _, found := loadSpendBaseline(workspace); found {
+		t.Fatal("a baseline was written without a configuration to read")
+	}
+}
+
+// consumerConfigFile is the shipped example destination configuration with
+// its model endpoints pointed at one gateway and one key variable. Built
+// from the real file so the fixture cannot drift from what the loader
+// requires; the URL stays a legal one, and the transport stands in.
+func consumerConfigFile(t *testing.T, baseURL, keyEnv string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "m1-consumer.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := regexp.MustCompile(`"base_url"\s*:\s*"[^"]*"`).ReplaceAllString(string(raw), `"base_url": "`+baseURL+`"`)
+	body = regexp.MustCompile(`"api_key_env"\s*:\s*"[^"]*"`).ReplaceAllString(body, `"api_key_env": "`+keyEnv+`"`)
+	path := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A run that dies during intake has already paid for the call that would
+// have written the intake record. Its cost was reported as nothing at all,
+// because the window was read from that record (review of #202).
+func TestARunThatDiesInIntakeStillReportsWhatItSpent(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("SPEND_KEY", "a-key")
+	if err := os.WriteFile(filepath.Join(workspace, SpendBaselineFile), mustJSON(t, worker.UsageBaseline{
+		TakenAt: time.Now().UTC().Add(-10 * time.Minute),
+		Keys:    []worker.KeyUsage{{KeyEnv: "SPEND_KEY", UsageUSD: 6.0}},
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No intake.json: the call that writes it is the one that died.
+	if _, err := os.Stat(filepath.Join(workspace, "intake.json")); err == nil {
+		t.Fatal("the fixture has an intake record")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/key":
+			_, _ = io.WriteString(w, `{"data":{"usage":9.0}}`)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	terminal := &Terminal{
+		workspace: workspace,
+		config:    runtime.Config{ConsumerConfigPath: consumerConfigFile(t, "https://gateway.example", "SPEND_KEY")},
+		logger:    &baselineTestLogger{},
+	}
+	text := terminal.readSpendWith(context.Background(), oneSeatConfig(server.URL, "SPEND_KEY"),
+		server.Client(), terminal.spendWindowStart())
+	if !strings.Contains(text, "$3.00") {
+		t.Fatalf("the requester was told nothing about what the run spent: %q", text)
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

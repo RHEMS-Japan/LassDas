@@ -36,7 +36,9 @@ func (p *Pipeline) recordSpendBaseline(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	reader, err := worker.NewGatewayUsageReader(&http.Client{Timeout: spendBaselineTimeout})
+	reader, err := worker.NewGatewayUsageReader(&http.Client{
+		Timeout: spendBaselineTimeout, Transport: p.usageTransport,
+	})
 	if err != nil {
 		return
 	}

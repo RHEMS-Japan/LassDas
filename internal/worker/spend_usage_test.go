@@ -179,6 +179,16 @@ func TestTheCostLineSaysWhenTheFigureIsADifference(t *testing.T) {
 	if !strings.Contains(approximate, "差です") || !strings.Contains(approximate, "別の依頼") {
 		t.Errorf("a difference was printed as though it were exact: %q", approximate)
 	}
+	// The difference holds everything billed to that key inside the
+	// window, not only what ran at the same time. Saying "at the same
+	// time" would let a requester rule out a delivery that ran and
+	// finished inside the window, which is in the number (review of #202).
+	if strings.Contains(approximate, "同時") {
+		t.Errorf("the line limits the figure to concurrent work, which is narrower than what it holds: %q", approximate)
+	}
+	if !strings.Contains(approximate, "すべてこの金額に含まれます") {
+		t.Errorf("the line does not say everything billed in the window is inside it: %q", approximate)
+	}
 }
 
 // A run whose figures are differences says so in the total it keeps too.

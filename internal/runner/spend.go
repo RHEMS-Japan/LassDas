@@ -29,8 +29,8 @@ const maxIntakeBytes = 1 << 20
 // deliberately not used: a ticket filed days before it is processed would make
 // the window swallow every other run's spend in between.
 func (t *Terminal) loadRunSpendText(ctx context.Context) string {
-	since, ok := t.loadRunStart()
-	if !ok {
+	since := t.spendWindowStart()
+	if since.IsZero() {
 		return ""
 	}
 	config, err := worker.LoadConfig(t.config.ConsumerConfigPath)
@@ -38,6 +38,23 @@ func (t *Terminal) loadRunSpendText(ctx context.Context) string {
 		return ""
 	}
 	return t.readSpendWith(ctx, config, &http.Client{Timeout: spendReadTimeout}, since)
+}
+
+// spendWindowStart is the moment this run began working. The intake record
+// is the first choice: it is written when the run read the ticket. But that
+// record is the output of a paid model call, so a run that died during
+// intake has spent money and has none — and reported no cost at all. The
+// baseline was taken before that call, so its own timestamp is the window
+// for exactly those runs (review of #202). A zero time means neither
+// exists and there is nothing to report.
+func (t *Terminal) spendWindowStart() time.Time {
+	if since, ok := t.loadRunStart(); ok {
+		return since
+	}
+	if baseline, found := loadSpendBaseline(t.workspace); found {
+		return baseline.TakenAt
+	}
+	return time.Time{}
 }
 
 // readSpendWith is the whole reading with the transport handed in: which
