@@ -11,6 +11,8 @@ import (
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"io"
+	"log/slog"
 )
 
 // A design whose rounds are spent puts the disagreement to its requester,
@@ -50,6 +52,16 @@ func TestDesignNonconvergenceAsksInsteadOfEnding(t *testing.T) {
 	}
 	config := fixture.config
 	config.WorkerBin = script
+	// The poster the ask goes through, and a ticket that accepts the
+	// question. Without them the fixture would post nothing for reasons of
+	// its own, and the assertion below would hold whatever the code did
+	// (review of #199).
+	poster := &designQuestionFakes{}
+	question, err := hook.NewQuestionReportService(fixture.services.Route, poster, poster, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.services.Question = question
 
 	var envelope hook.DispatchEnvelope
 	if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
@@ -65,17 +77,39 @@ func TestDesignNonconvergenceAsksInsteadOfEnding(t *testing.T) {
 	if !handled {
 		t.Fatalf("the failure was not handled: err=%v", err)
 	}
+	if err != nil {
+		t.Fatalf("the ask failed: %v", err)
+	}
 	if _, statErr := os.Stat(decision); statErr != nil {
-		t.Fatalf("no question was written: %v (handler err=%v)", statErr, err)
+		t.Fatalf("no question was written: %v", statErr)
 	}
-	// This fixture wires no question poster, so the ask reports that and
-	// the run does not end instead: the point is the ordering - the ask
-	// comes first, and the ending is not also posted.
-	if err == nil || !strings.Contains(err.Error(), "question poster") {
-		t.Fatalf("the ask did not reach the poster: %v", err)
+	// Exactly the question, and nothing else: the ask replaces the ending
+	// rather than joining it.
+	if len(poster.posted) != 1 || !strings.Contains(poster.posted[0], "どちらにしますか") {
+		t.Fatalf("questions posted = %q", poster.posted)
 	}
-	// The ask replaces the ending: nothing else is posted to the ticket.
 	if len(fixture.comments.posted) != 0 {
 		t.Fatalf("the run both asked and ended: %q", fixture.comments.posted)
 	}
+}
+
+// designQuestionFakes is the ticket and the ledger as the question poster
+// needs them: it accepts the question and remembers what was posted.
+type designQuestionFakes struct{ posted []string }
+
+func (f *designQuestionFakes) BeginQuestion(_ context.Context, request hook.QuestionBeginRequest) (hook.TerminalBinding, hook.QuestionBeginDisposition, error) {
+	return hook.TerminalBinding{IssueID: 4242, IssueKey: "TKT-4242"}, hook.QuestionBeginAcquired, nil
+}
+
+func (f *designQuestionFakes) CompleteQuestion(context.Context, hook.QuestionCompleteRequest) (hook.QuestionCompleteDisposition, error) {
+	return hook.QuestionCompleted, nil
+}
+
+func (f *designQuestionFakes) FindExactComment(context.Context, int64, string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+func (f *designQuestionFakes) AddCommentNotifying(_ context.Context, _ int64, content string, _ []int64) (int64, error) {
+	f.posted = append(f.posted, content)
+	return int64(700 + len(f.posted)), nil
 }

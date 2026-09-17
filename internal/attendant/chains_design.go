@@ -655,11 +655,18 @@ func askDesignImpasse(
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
+		// The question is written but unposted; the run stays where it is
+		// and the next tick tries again. Said out loud so a deployment that
+		// cannot post is visible rather than quiet.
+		logger.Error("the design question could not be posted", "run", run.RunID, "error", err.Error())
 		return false, err
 	}
 	logger.Info("design rounds spent; the requester was asked", "run", run.RunID)
 	return true, archiveChain(ctx, hermes, view.all)
 }
 
-// designImpasseTimeout bounds that one call inside the attendant's tick.
-const designImpasseTimeout = 5 * time.Minute
+// designImpasseTimeout bounds that one call inside the attendant's tick,
+// which runs every minute. A question author that cannot answer inside it
+// leaves the run ending as it did, which is better than holding every other
+// run's tick behind it (review of #199).
+const designImpasseTimeout = 2 * time.Minute
