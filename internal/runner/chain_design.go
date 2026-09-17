@@ -485,3 +485,58 @@ func (p *Pipeline) requiredDesign() (string, int, error) {
 func (p *Pipeline) designObjectionPath(designRound int) string {
 	return filepath.Join(p.designRoundDir(designRound), "objection.json")
 }
+
+// AskDesignImpasse writes the question a design that would not converge puts
+// to its requester, from the last round's sealed design and reviews. It
+// reports whether a question was written: false means the run ends as it
+// did before, with the rounds spent and nothing asked.
+//
+// A run whose implementation rounds ran out has always asked; one whose
+// design rounds ran out ended without a word, so the same requester met two
+// different automations depending on which half disagreed (live 2026-09-17).
+func (p *Pipeline) AskDesignImpasse(ctx context.Context, reviewers []string) (bool, error) {
+	// The newest round that sealed a design, not the next one to run: at
+	// this point every round has a decision, so "the first without one" is
+	// an empty directory.
+	round := p.LatestDesignRound()
+	roundDir := p.designRoundDir(round)
+	design := filepath.Join(roundDir, "design.json")
+	if _, err := os.Stat(design); err != nil {
+		return false, nil
+	}
+	args := []string{
+		"design-impasse-question", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+		"--ticket", p.path("readiness-ticket.json"), "--design", design,
+	}
+	for _, reviewer := range reviewers {
+		review := filepath.Join(roundDir, reviewer+"-design-review.json")
+		if _, err := os.Stat(review); err == nil {
+			args = append(args, "--review", review)
+		}
+	}
+	args = append(args, p.clarificationArgs()...)
+	if err := os.MkdirAll(p.path("history/question"), 0o755); err != nil {
+		return false, err
+	}
+	out := p.path("history/question/decision.json")
+	if _, err := os.Stat(out); err == nil {
+		// A re-dispatched card finds the decision it already wrote, which
+		// may be one that asks nothing.
+		return p.questionDecisionAsks(), nil
+	}
+	args = append(args, "--out", out)
+	// Best effort, like the implementation's own impasse: a question author
+	// that dies must not hide the nonconvergence it was asked about.
+	if code, err := p.worker(ctx, "design-impasse-question", args, p.modelKeyEnv()...); err != nil || code != 0 {
+		return false, nil
+	}
+	return p.questionDecisionAsks(), nil
+}
+
+// questionDecisionAsks reports whether the written decision carries a
+// question to post. A decision that asks nothing - the rounds of questions
+// are spent - leaves the run ending as it did.
+func (p *Pipeline) questionDecisionAsks() bool {
+	outcome, err := p.readJSONField("history/question/decision.json", "outcome")
+	return err == nil && outcome == "clarification_required"
+}

@@ -393,6 +393,26 @@ func nextDesignRoundOrEnd(
 		repository = ""
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	if code == hook.TerminalDesignNonconverged {
+		// The rounds are spent and the reviews still disagree. A run whose
+		// implementation rounds ran out asks its requester; this one used
+		// to end without a word (live 2026-09-17).
+		if reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath); err == nil {
+			pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
+			asked, askErr := pipeline.AskDesignImpasse(ctx, reviewers)
+			if askErr != nil {
+				logger.Error("design question not written; the run ends as nonconverged",
+					"run", run.RunID, "error", askErr.Error())
+			}
+			if asked {
+				if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
+					return err
+				}
+				logger.Info("design rounds spent; the requester was asked", "run", run.RunID, "why", why)
+				return archiveChain(ctx, hermes, view.all)
+			}
+		}
+	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
 		return err
 	}
