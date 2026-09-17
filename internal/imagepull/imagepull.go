@@ -15,8 +15,9 @@ const (
 	// Denied means the registry refused access: the image is private (or the
 	// login expired). Retrying without registry access cannot succeed.
 	Denied
-	// Missing means the registry has no such manifest: the digest in the
-	// distributor's note does not exist there.
+	// Missing means the registry has no such manifest for linux/arm64: the
+	// digest in the distributor's note does not exist there (or has no arm64
+	// variant).
 	Missing
 	// Network means the transfer was interrupted or never connected. Retrying
 	// resumes from the layers docker already holds.
@@ -34,12 +35,14 @@ var rules = []struct {
 	{Daemon, []string{"cannot connect to the docker daemon", "is the docker daemon running", "docker desktop is not running"}},
 	{Disk, []string{"no space left on device"}},
 	{Denied, []string{"denied", "unauthorized", "authentication required", "no basic auth credentials", "forbidden"}},
-	{Missing, []string{"manifest unknown", "not found", "does not exist"}},
-	{Network, []string{"timeout", "timed out", "deadline exceeded", "connection reset", "connection refused", "unexpected eof", "eof", "tls handshake", "no such host", "network is unreachable", "context canceled", "temporary failure", "broken pipe", "i/o error", "dial tcp", "proxyconnect"}},
+	{Missing, []string{"manifest unknown", "not found", "does not exist", "no matching manifest"}},
+	{Network, []string{"timeout", "timed out", "deadline exceeded", "connection reset", "connection refused", "unexpected eof", "tls handshake", "no such host", "network is unreachable", "context canceled", "temporary failure", "broken pipe", "i/o error", "dial tcp", "proxyconnect"}},
 }
 
-// Explain classifies docker's output. Rules are checked in a fixed order so a
-// message naming both a timeout and a denial reads as the daemon/denial it is.
+// Explain classifies docker's output. Rules are checked in a fixed order so
+// docker's "pull access denied for X, repository does not exist or may require
+// 'docker login'" reads as the denial it is, not as a missing image. Hints are
+// plain substrings; none may be short enough to occur inside an image name.
 func Explain(output string) Class {
 	lower := strings.ToLower(output)
 	for _, rule := range rules {

@@ -104,7 +104,7 @@ func (d Distribution) Validate() error {
 	if !imagePattern.MatchString(d.Image) {
 		return errors.New("image は registry/name@sha256:<64 桁の小文字 16 進> の形です (タグ名では受け付けません)")
 	}
-	if login := strings.ToLower(d.RegistryLogin); strings.Contains(login, "--password ") || strings.Contains(login, "--password=") || strings.Contains(login, " -p ") {
+	if loginCarriesPassword(d.RegistryLogin) {
 		return errors.New("registry-login にパスワードを含めないでください (--password-stdin に別コマンドの出力を渡す形にする)")
 	}
 	if len(d.EngineSHA) != 40 || strings.Trim(d.EngineSHA, "0123456789abcdef") != "" {
@@ -169,4 +169,20 @@ func (a Answers) WithDistribution(d Distribution) Answers {
 		}
 	}
 	return merged
+}
+
+// loginCarriesPassword reports whether a registry login command carries the
+// password inline: `--password X`, `--password=X`, `-p X` or `-pX`. Only
+// `--password-stdin` (fed by another command) is accepted.
+func loginCarriesPassword(login string) bool {
+	for _, token := range strings.Fields(login) {
+		lower := strings.ToLower(token)
+		if lower == "--password" || strings.HasPrefix(lower, "--password=") {
+			return true
+		}
+		if strings.HasPrefix(lower, "-p") && !strings.HasPrefix(lower, "--") {
+			return true
+		}
+	}
+	return false
 }

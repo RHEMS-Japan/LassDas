@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/imagepull"
 )
 
 type scriptedDocker struct {
@@ -51,11 +53,43 @@ func TestPullRetriesNetworkOnce(t *testing.T) {
 	}
 }
 
-func TestPullUnknownShowsLastLine(t *testing.T) {
-	d := &scriptedDocker{outputs: [][]byte{[]byte("Pulling\nError response from daemon: something else\n")}}
+func TestPullUnknownNamesTheCommandNotTheOutput(t *testing.T) {
+	d := &scriptedDocker{outputs: [][]byte{[]byte("Pulling\nError response from daemon: something else at /Users/someone/.docker\n")}}
 	m := Manager{Docker: d}
-	err := m.pull(context.Background(), Instance{Image: "x@sha256:" + strings.Repeat("a", 64)})
-	if err == nil || !strings.HasSuffix(err.Error(), "something else") {
-		t.Fatalf("unknown reason not surfaced: %v", err)
+	image := "x@sha256:" + strings.Repeat("a", 64)
+	err := m.pull(context.Background(), Instance{Image: image})
+	if err == nil || strings.Contains(err.Error(), "something else") || strings.Contains(err.Error(), "/Users/") {
+		t.Fatalf("raw docker output must not be echoed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "docker --context desktop-linux pull --platform linux/arm64 "+image) {
+		t.Fatalf("unknown case should name the command to run: %v", err)
+	}
+}
+
+func TestPullCancelledIsNotNetwork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d := &scriptedDocker{outputs: [][]byte{[]byte("context canceled"), []byte("context canceled")}}
+	m := Manager{Docker: d}
+	err := m.pull(ctx, Instance{Image: "x@sha256:" + strings.Repeat("a", 64)})
+	if !errors.Is(err, context.Canceled) || len(d.calls) != 1 {
+		t.Fatalf("cancelled pull should return the context error without retry: %v (%d calls)", err, len(d.calls))
+	}
+}
+
+func TestPullFailureWording(t *testing.T) {
+	args := []string{"--context", "desktop-linux", "pull", "x"}
+	cases := map[imagepull.Class]string{
+		imagepull.Denied:  "denied by the registry",
+		imagepull.Missing: "not in the registry for linux/arm64",
+		imagepull.Network: "network, not authentication",
+		imagepull.Daemon:  "start Docker Desktop",
+		imagepull.Disk:    "no disk space left",
+		imagepull.Unknown: "run `docker --context desktop-linux pull x` to read it",
+	}
+	for class, want := range cases {
+		if got := pullFailure(class, args); !strings.Contains(got, want) {
+			t.Errorf("class %v: %q lacks %q", class, got, want)
+		}
 	}
 }

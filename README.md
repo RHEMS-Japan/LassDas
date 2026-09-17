@@ -126,7 +126,9 @@ GitHub・トラッカー・モデルの鍵は、それぞれのサービスで�
 
 workflow が失敗したときは案内は書き換わらず、利用側は前の image を使い続ける (`deploy/pod/release.sh` の CI 判定も同じ古い案内を読む)。失敗した段の名前 (build / push / 匿名取得の証明) がそのまま原因で、匿名取得の失敗はパッケージが非公開に戻っていないか確認する。
 
-image を非公開のまま配るときは、案内にログイン手順を載せる: `lassdas setup note --registry-login '<docker login のコマンド>'` (パスワードを含む形は受け付けない)。利用側の取得が registry に拒否されたとき、案内の `registry_login` があればその手順が表示される。
+image を非公開のまま配るときは、案内にログイン手順を載せる: `lassdas setup note --registry-login '<docker login のコマンド>'` (`--password` `-p` でパスワードを書いた形は受け付けない。`--password-stdin` に別コマンドの出力を渡す)。利用側の取得が registry に拒否されたとき、setup は案内の `registry_login` をそのまま表示する。
+
+案内を書く段は、実行中に main が先へ進んでいたとき (superseded) や digest が変わらなかったときは何も commit せずに成功で終わる。案内が更新されたかは `docs/DISTRIBUTION.json` の `build_record` がその実行の URL かで分かる。
 
 ## 現在の状態
 

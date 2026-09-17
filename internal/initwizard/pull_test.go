@@ -31,8 +31,13 @@ func TestPullExplainsDenialWithoutRetry(t *testing.T) {
 	w := &Wizard{Process: p}
 	s := &State{Image: "ghcr.io/x/runtime@sha256:" + strings.Repeat("a", 64), DockerContext: "desktop-linux"}
 	err := w.pull(context.Background(), s)
-	if err == nil || !strings.Contains(err.Error(), "拒否") || !strings.Contains(err.Error(), "registry_login") {
-		t.Fatalf("denial not explained: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "拒否") || !strings.Contains(err.Error(), "registry_login") || strings.Contains(err.Error(), "docker login") {
+		t.Fatalf("denial without a note login should point at the distributor: %v", err)
+	}
+	w = &Wizard{Process: &explainingProcess{pullStderr: []string{"denied"}}, RegistryLogin: "gh auth token | docker login ghcr.io -u me --password-stdin"}
+	err = w.pull(context.Background(), s)
+	if err == nil || !strings.HasSuffix(err.Error(), "gh auth token | docker login ghcr.io -u me --password-stdin") || strings.Contains(err.Error(), "registry_login") {
+		t.Fatalf("denial with a note login should show that command: %v", err)
 	}
 	if p.pulls != 1 {
 		t.Fatalf("denial retried: %d pulls", p.pulls)
@@ -74,8 +79,20 @@ func TestPullShowsUnknownReasonAndMissingDigest(t *testing.T) {
 	p = &explainingProcess{pullStderr: []string{"Error response from daemon: manifest unknown"}}
 	w = &Wizard{Process: p}
 	err = w.pull(context.Background(), s)
-	if err == nil || !strings.Contains(err.Error(), "存在しません") || p.pulls != 1 {
+	if err == nil || !strings.Contains(err.Error(), "存在しないか") || p.pulls != 1 {
 		t.Fatalf("missing digest not explained: %v (%d pulls)", err, p.pulls)
+	}
+}
+
+func TestPullCancelledIsNotNetwork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &explainingProcess{pullStderr: []string{"context canceled", "context canceled"}}
+	w := &Wizard{Process: p}
+	s := &State{Image: "ghcr.io/x/runtime@sha256:" + strings.Repeat("a", 64)}
+	err := w.pull(ctx, s)
+	if !errors.Is(err, context.Canceled) || p.pulls != 1 {
+		t.Fatalf("cancelled pull should return the context error without retry or network wording: %v (%d pulls)", err, p.pulls)
 	}
 }
 

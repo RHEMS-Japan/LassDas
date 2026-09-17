@@ -165,7 +165,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		api := initwizard.API{}
 		process := initwizard.ExecProcess{}
 		smoke := initsmoke.Runner{UI: ui, API: api, Observer: initsmoke.RuntimeObserver{Manager: manager, Process: process, API: api, Dir: dir}}
-		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke.Run}
+		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke.Run, RegistryLogin: noteRegistryLogin(home)}
 		_, err = wizard.Run(ctx, initwizard.Options{Project: *project, Home: home, RepoRoot: repoRoot, Redo: redo})
 		return err
 	}

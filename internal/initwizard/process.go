@@ -57,11 +57,17 @@ func (ExecProcess) RunExplained(ctx context.Context, name string, args []string,
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
-	if err != nil {
-		return nil, stderr.String(), fmt.Errorf("%s の実行に失敗しました", name)
+	detail := stderr.String()
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
+		detail = strings.ReplaceAll(detail, home, "~")
 	}
-	return output, stderr.String(), nil
+	if err != nil {
+		return nil, detail, fmt.Errorf("%s の実行に失敗しました", name)
+	}
+	return output, detail, nil
 }
+
+var _ Explainer = ExecProcess{}
 
 // Explainer is implemented by a Process that can hand back a command's
 // diagnostic text; the wizard uses it only for `docker pull`.
@@ -101,23 +107,31 @@ func (w *Wizard) pull(ctx context.Context, s *State) error {
 		if err == nil {
 			return nil
 		}
+		if ctx.Err() != nil {
+			// The person stopped the pull; docker's "context canceled" must
+			// not be read as network trouble.
+			return ctx.Err()
+		}
 		class := imagepull.Explain(detail)
-		if class == imagepull.Network && attempt == 1 && ctx.Err() == nil {
+		if class == imagepull.Network && attempt == 1 {
 			continue
 		}
-		return errors.New(pullFailure(class, detail))
+		return errors.New(pullFailure(class, detail, w.RegistryLogin))
 	}
 }
 
 // pullFailure words a pull failure for the person running setup. Authentication
 // is mentioned only when the registry actually refused access, so a public
 // image whose transfer merely broke is not sent looking for a login.
-func pullFailure(class imagepull.Class, detail string) string {
+func pullFailure(class imagepull.Class, detail string, registryLogin string) string {
 	switch class {
 	case imagepull.Denied:
-		return "固定 image の取得を registry が拒否しました (denied)。配布者の案内 (~/.lassdas/distribution.json) に registry_login があればその手順で認証してから再実行してください。無ければ配布者に image の公開設定を確認してください"
+		if registryLogin != "" {
+			return "固定 image の取得を registry が拒否しました (denied)。配布者の案内のログイン手順を利用者に実行してもらってから再実行してください: " + registryLogin
+		}
+		return "固定 image の取得を registry が拒否しました (denied)。配布者の案内 (~/.lassdas/distribution.json) にログイン手順 (registry_login) が無いので、配布者に image の公開設定を確認してください"
 	case imagepull.Missing:
-		return "固定 image が registry に存在しません (digest が一致しない)。配布者の案内が本体 repo の main の docs/DISTRIBUTION.json と同じか確認し、古ければ install をやり直してください"
+		return "固定 image が registry に存在しないか、linux/arm64 用がありません。配布者の案内が本体 repo の main の docs/DISTRIBUTION.json と同じか確認し、古ければ install をやり直してください"
 	case imagepull.Network:
 		return "固定 image の取得が途中で切れました (ネットワーク)。認証の問題ではありません。接続を確認して再実行してください。取得済みの層は再利用されます"
 	case imagepull.Daemon:
