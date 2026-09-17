@@ -118,9 +118,6 @@ func TestEveryRailStageHasItsSteps(t *testing.T) {
 		if counted[stage] == 0 {
 			t.Errorf("rail stage %q has no step at all", stage)
 		}
-		if StageName(stage) == "" {
-			t.Errorf("rail stage %q has no name a requester reads", stage)
-		}
 	}
 }
 
@@ -175,17 +172,4 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 		}
 	}
 	return names, prefixes
-}
-
-// The copy of the file-naming rule in this package has to agree with the
-// engine's, or a stage is looked up under a name no file ever has.
-func TestLiveLogNamesAgree(t *testing.T) {
-	for _, step := range []string{
-		"git checkout", "agent-design-review", "run-instruction", "browsercheck-production",
-		"", "...", strings.Repeat("x", 100), "a b/c:d", "decide", "実装",
-	} {
-		if mine, theirs := liveLogName(step), runner.LiveLogName(step); mine != theirs {
-			t.Errorf("%q: this package names the file %q, the engine names it %q", step, mine, theirs)
-		}
-	}
 }

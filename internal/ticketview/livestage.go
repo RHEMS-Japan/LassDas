@@ -131,35 +131,3 @@ var liveStagePrefixes = []struct{ prefix, stage string }{
 	// the reception's own work is.
 	{"git-", "intake"},
 }
-
-// StageName is the stage as a requester reads it on the rail. An unknown
-// stage has no name and the caller shows what it has.
-func StageName(stage string) string { return liveStageNames[stage] }
-
-var liveStageNames = map[string]string{
-	"intake": "受付", "investigate": "調査", "design": "設計", "implement": "実装",
-	"review": "審査", "checks": "検査", "staging": "STG", "confirm": "確認", "production": "本番",
-}
-
-// liveLogName is a step's name as its live file is named. It repeats
-// runner.LiveLogName rather than importing it: the runner is the engine and
-// this package is read by the board, which must not pull the engine in.
-// TestLiveLogNamesAgree measures the two against each other.
-func liveLogName(step string) string {
-	name := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			return r
-		default:
-			return '-'
-		}
-	}, step)
-	name = strings.Trim(name, "-.")
-	if len(name) > 80 {
-		return name[:80]
-	}
-	if name == "" {
-		return "step"
-	}
-	return name
-}

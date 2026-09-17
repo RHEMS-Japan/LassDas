@@ -49,6 +49,7 @@
     .live { margin-top: 10px; display: flex; gap: 10px; align-items: baseline; }
     .live b::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--ok, #2f9e44); animation: pulse 1.6s ease-in-out infinite; }
     .live .since { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .live .stepname { color: var(--muted); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
     @media (prefers-reduced-motion: reduce) { .live b::before { animation: none; } }
   pre.trail { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); margin: 6px 0 0; }
@@ -102,10 +103,14 @@
     if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
     if (view.running) {
       const live = el("div", "live");
-      // The stage is what a requester recognises; the step's own name goes
-      // after it for anyone reading the records.
-      live.appendChild(el("b", null, "いま動いています: " + (view.running.stage || view.running.step)));
-      if (view.running.stage) live.appendChild(el("span", "since", view.running.step));
+      // What the board says, read from the board's own row, so the two
+      // screens cannot give one ticket two different answers. The step's
+      // own name goes after it for anyone reading the records, in its own
+      // class - the two-second refresh writes the first ".since" it finds,
+      // which was overwriting the step name with a second elapsed counter
+      // and freezing the real one (review of #200).
+      live.appendChild(el("b", null, "いま動いています: " + (board.step_title || view.running.step)));
+      if (board.step_title) live.appendChild(el("span", "stepname", view.running.step));
       const since = el("span", "since", elapsed(view.running.started_at));
       live.appendChild(since);
       head.appendChild(live);

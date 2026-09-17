@@ -403,7 +403,7 @@ function buildLivePane() {
   head.appendChild(el("span", "pin", ""));
   pane.appendChild(head);
   pane.appendChild(el("pre"));
-  pane.state = { timer: null, from: 0, step: null, header: null, pinned: false, stage: null };
+  pane.state = { timer: null, from: 0, step: null, header: null, keep: false, pinned: false, stage: null };
   return pane;
 }
 
@@ -439,6 +439,7 @@ function liveDetach(pane) {
   pane.state.stage = null;
   pane.state.from = 0;
   pane.state.header = null;
+  pane.state.keep = false;
   pane.querySelector("pre").textContent = "";
 }
 
@@ -481,7 +482,7 @@ function liveOpen(pane, issueKey, stage, stageName) {
   }
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
-  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, stage: stage });
+  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, keep: false, stage: stage });
   pane.classList.add("on");
   pane.querySelector(".lphead b").textContent = stageName;
   pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
@@ -495,15 +496,26 @@ function liveTick(pane, issueKey, stage, first) {
   // several steps one after another, and following only the one that was
   // newest when the pane opened left the reader watching a step that had
   // finished while the stage carried on (live 2026-09-17).
+  const unreachable = {};
   const pick = fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
-    .then(r => r.ok ? r.json() : { steps: [] })
+    .then(r => r.ok ? r.json() : unreachable)
     .then(index => {
+      if (index === unreachable) return unreachable;
       const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
       return match ? match.step : pane.state.step;
     })
-    .catch(() => pane.state.step);
+    .catch(() => unreachable);
   pick.then(step => {
     if (pane.state.stage !== stage) return;
+    if (step === unreachable) {
+      // The board could not be reached. That is not "this stage has
+      // produced nothing"; saying so would put the very sentence this
+      // pane exists to remove in front of a reader whose network blinked
+      // (review of #200).
+      if (first) body.textContent = "読み込み中…";
+      pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, first), 4000);
+      return;
+    }
     if (!step) {
       if (first) body.textContent = "この工程の実況はまだありません。";
       pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 3000);
@@ -512,16 +524,26 @@ function liveTick(pane, issueKey, stage, first) {
     if (pane.state.step && pane.state.step !== step) {
       // The stage moved on. The new step starts at its own beginning, not
       // at an offset belonging to the previous one, and says its name so
-      // the reader knows the output changed hands.
+      // the reader knows the output changed hands. What is already in the
+      // pane stays: a stage is six steps in a row at its longest, and
+      // clearing on each one emptied a pinned pane under the reader
+      // (review of #200).
       pane.state.from = 0;
       pane.state.header = step;
+      pane.state.keep = true;
     }
     pane.state.step = step;
     return fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live/" + encodeURIComponent(step) + "?from=" + pane.state.from, { headers: { Accept: "application/json" } })
       .then(r => r.ok ? r.json() : null)
       .then(chunk => {
-        if (!chunk || pane.state.stage !== stage) return;
-        if (first || pane.state.from === 0) body.textContent = "";
+        if (pane.state.stage !== stage) return;
+        if (!chunk) {
+          // Same reasoning: try again rather than stop for ever.
+          pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, first), 4000);
+          return;
+        }
+        if ((first || pane.state.from === 0) && !pane.state.keep) body.textContent = "";
+        pane.state.keep = false;
         if (pane.state.header) {
           body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
           pane.state.header = null;
