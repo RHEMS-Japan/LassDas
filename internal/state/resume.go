@@ -197,7 +197,7 @@ func resumeBindingMatches(binding terminalStoredBinding, record hook.Clarificati
 		terminalStateShapeValid(binding.runItem) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		record.DeliveryID == binding.envelope.DeliveryID && record.InputSHA256 == snapshot.InputSHA256 &&
 		record.AutomationRunID == snapshot.RunID && record.RepositoryID == route.RepositoryID
 }

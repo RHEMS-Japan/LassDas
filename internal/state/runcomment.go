@@ -248,7 +248,7 @@ func runCommentBindingMatches(binding terminalStoredBinding, route hook.ReportRo
 		terminalStateShapeValid(binding.runItem) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target)
 }
 
 func runCommentMarkerMatches(marker map[string]types.AttributeValue, runKey string, kind hook.RunCommentKind) bool {

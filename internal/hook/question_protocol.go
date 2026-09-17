@@ -105,8 +105,14 @@ func (r QuestionRecord) ValidateRoute(config ReportRouteConfig) error {
 	if err := r.ValidateShape(); err != nil {
 		return err
 	}
+	// The engine's revision is deliberately not compared: this record was
+	// sealed by whichever revision asked, and it is read again whenever the
+	// requester answers - days later, possibly after the body has been
+	// replaced. Binding it to the revision stranded every waiting ticket
+	// across an upgrade (live 2026-09-17). What must hold is the delivery
+	// repository and the run this record belongs to.
 	if r.RepositoryID != config.RepositoryID || r.RepositorySHA256 != config.RepositorySHA256 ||
-		r.WorkflowRefSHA256 != config.WorkflowRefSHA256 || r.AutomationRunID != config.ExpectedRunID {
+		r.AutomationRunID != config.ExpectedRunID {
 		return errors.New("question route is not allowed")
 	}
 	if !runReferenceSchemeAllowed(r.RunURL, config.RunReferenceScheme) {

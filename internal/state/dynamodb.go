@@ -799,7 +799,7 @@ func terminalBindingMatches(binding terminalStoredBinding, report hook.TerminalR
 		terminalStateShapeValid(binding.runItem) &&
 		snapshot.SpaceKey == route.SpaceKey && snapshot.ProjectID == route.ProjectID && snapshot.ProjectKey == route.ProjectKey &&
 		snapshot.CreatorID == route.AllowedCreatorID && snapshot.ActivityType == route.AllowedActivityType &&
-		snapshot.RunID == route.ExpectedRunID && snapshot.Target == route.Target &&
+		snapshot.RunID == route.ExpectedRunID && snapshot.Target.SameDelivery(route.Target) &&
 		report.DeliveryID == binding.envelope.DeliveryID && report.InputSHA256 == snapshot.InputSHA256 &&
 		report.AutomationRunID == snapshot.RunID && report.RepositoryID == route.RepositoryID &&
 		attributeInt64Equals(binding.runItem, "repository_id", report.RepositoryID) &&
@@ -1109,7 +1109,7 @@ func runItemMatches(item map[string]types.AttributeValue, envelope hook.Dispatch
 func snapshotAllowed(snapshot hook.TicketSnapshot, request hook.PullClaimRequest) bool {
 	return snapshot.SpaceKey == request.SpaceKey && snapshot.ProjectID == request.ProjectID &&
 		snapshot.ProjectKey == request.ProjectKey && snapshot.CreatorID == request.AllowedCreatorID &&
-		snapshot.ActivityType == request.AllowedActivityType && snapshot.Target == request.Target &&
+		snapshot.ActivityType == request.AllowedActivityType && snapshot.Target.SameDelivery(request.Target) &&
 		(request.RunID == "" || snapshot.RunID == request.RunID)
 }
 

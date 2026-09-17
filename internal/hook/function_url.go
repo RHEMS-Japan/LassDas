@@ -390,7 +390,7 @@ func snapshotMatchesRoute(snapshot TicketSnapshot, config PullRouteConfig) bool 
 	// run id of its own issue, never a value configured on either side.
 	return snapshot.SpaceKey == config.SpaceKey && snapshot.ProjectID == config.ProjectID &&
 		snapshot.ProjectKey == config.ProjectKey && snapshot.CreatorID == config.AllowedCreatorID &&
-		snapshot.ActivityType == config.AllowedActivityType && snapshot.RunID == snapshot.IssueKey && snapshot.Target == config.Target
+		snapshot.ActivityType == config.AllowedActivityType && snapshot.RunID == snapshot.IssueKey && snapshot.Target.SameDelivery(config.Target)
 }
 
 type backlogWebhookPayload struct {
