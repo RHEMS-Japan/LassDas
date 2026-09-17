@@ -273,9 +273,23 @@ func decodeIntakeQuestions(encoded string) ([]answerQuestion, error) {
 // normalizeAnswerBody applies the format rescue for hand-typed Japanese input:
 // full-width spaces and colons become their ASCII forms. Nothing else is
 // rewritten; the sealed digest is always taken over the raw body.
+// normalizeAnswerBody rescues what a Japanese keyboard produces when the
+// requester is typing an answer rather than prose: a full-width space, a
+// full-width colon, and the full-width letters a choice id is written with
+// in 全角英数 mode. Without the letters, "ａ" was ignored exactly as the
+// bare "a" used to be (review of #192).
 func normalizeAnswerBody(body string) string {
-	return strings.NewReplacer("　", " ", "：", ":").Replace(body)
+	return fullWidthAnswerRunes.Replace(body)
 }
+
+var fullWidthAnswerRunes = strings.NewReplacer(
+	"　", " ", "：", ":",
+	"ａ", "a", "ｂ", "b", "ｃ", "c", "ｄ", "d", "ｅ", "e", "ｆ", "f",
+	"Ａ", "A", "Ｂ", "B", "Ｃ", "C", "Ｄ", "D", "Ｅ", "E", "Ｆ", "F",
+	"０", "0", "１", "1", "２", "2", "３", "3", "４", "4", "５", "5",
+	"６", "6", "７", "7", "８", "8", "９", "9",
+	"Ｑ", "Q", "ｑ", "q", "Ｃ", "C", "ｃ", "c",
+)
 
 func firstContentLine(body string) string {
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
@@ -395,7 +409,7 @@ func resolveAnswerPair(questions []answerQuestion, number, choiceToken string) (
 // one question in front of them. Anything else is not an answer here.
 func soleChoice(question answerQuestion, line string) (string, bool) {
 	trimmed := strings.TrimRight(strings.TrimSpace(line), ".。、,)）")
-	trimmed = strings.TrimLeft(trimmed, "(（")
+	trimmed = strings.TrimSpace(strings.TrimLeft(trimmed, "(（"))
 	if trimmed == "" {
 		return "", false
 	}

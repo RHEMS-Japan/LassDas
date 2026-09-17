@@ -249,8 +249,16 @@ func trackerBaseFromRuntimeConfig(path string) string {
 	if path == "" {
 		return ""
 	}
+	// Checked before it is read: a path that is not a plain file of a
+	// sensible size is not this configuration, and the board must not block
+	// on it - the read happens before the server starts listening (review
+	// of #192).
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return ""
+	}
 	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) > 1<<20 {
+	if err != nil {
 		return ""
 	}
 	var config struct {

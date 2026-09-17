@@ -251,3 +251,23 @@ func TestTrackerBaseFallsBackToTheRuntimeConfig(t *testing.T) {
 		t.Errorf("an unset path yielded %q", got)
 	}
 }
+
+// The board reads this file before it starts listening, so a path that is
+// not a plain file must not be read at all (review of #192).
+func TestTrackerBaseRefusesWhatIsNotAPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	if got := trackerBaseFromRuntimeConfig(dir); got != "" {
+		t.Fatalf("a directory yielded %q", got)
+	}
+	target := filepath.Join(dir, "runtime.json")
+	if err := os.WriteFile(target, []byte(`{"tracker":{"origin":"https://example.backlog.jp"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := trackerBaseFromRuntimeConfig(link); got != "" {
+		t.Fatalf("a link yielded %q", got)
+	}
+}

@@ -313,7 +313,7 @@ func TestAdoptedAnswersSealIntoAClarificationRound(t *testing.T) {
 // ignored while the run waited (live 2026-09-17).
 func TestAnswerIntakeAdoptsABareChoiceForASingleQuestion(t *testing.T) {
 	record := intakeTestRecord(questionTestSetJSON)
-	for _, body := range []string{"a", "A", " a ", "a。", "(a)"} {
+	for _, body := range []string{"a", "A", " a ", "a。", "(a)", "（ a ）", "ａ", "Ａ", "ａ。"} {
 		decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, body)))
 		if err != nil {
 			t.Fatalf("body %q: EvaluateAnswerIntake() error = %v", body, err)
@@ -336,8 +336,11 @@ func TestAnswerIntakeRefusesABareWordThatCouldMeanAnything(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if decision.Adopted != nil {
-		t.Fatalf("a bare choice answered a two-question set: %+v", decision)
+	if decision.Adopted != nil || len(decision.Replies) != 0 {
+		// Not only "not adopted": an unsolicited 「回答書式のご案内」 would
+		// spend the one guidance reply a revision gets, on a comment that
+		// was never an answer attempt (review of #192).
+		t.Fatalf("a bare choice was treated as an attempt on a two-question set: %+v", decision)
 	}
 	// Ordinary conversation on the ticket stays a conversation: it is
 	// neither adopted nor answered with a correction.
