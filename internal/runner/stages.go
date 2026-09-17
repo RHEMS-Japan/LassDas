@@ -607,6 +607,9 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 			)
 		}
 		implementArgs = append(implementArgs, p.clarificationArgs()...)
+		if p.exists("derivation.json") {
+			implementArgs = append(implementArgs, "--derivation", p.path("derivation.json"))
+		}
 		implementArgs = append(implementArgs,
 			"--run-out", stageDir+"/implement-run.json",
 			"--ticket-out", stageDir+"/ticket.json",

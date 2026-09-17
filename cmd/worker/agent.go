@@ -30,6 +30,7 @@ func runImplement(ctx context.Context, args []string) error {
 	knowledgeRoot := flags.String("knowledge-root", "", "")
 	stage := flags.Int("stage", 0, "")
 	clarificationPath := flags.String("clarification", "", "")
+	derivationPath := flags.String("derivation", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	runOutPath := flags.String("run-out", "", "")
@@ -69,7 +70,11 @@ func runImplement(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
+	targets, err := readDerivedTargets(*derivationPath)
+	if err != nil {
+		return err
+	}
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot, targets)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -519,6 +524,7 @@ func implementPrompt(
 	clarification *worker.ClarificationContext,
 	findings []worker.ModelFinding,
 	repoRoot string,
+	targets []string,
 ) (string, error) {
 	sections := []string{
 		"あなたはこのリポジトリで、依頼された変更を実装します。",
@@ -568,6 +574,22 @@ func implementPrompt(
 		if omitted > 0 {
 			sections = append(sections, fmt.Sprintf("- (指摘が多いため先頭 %d 件のみ掲載、%d 件省略)", len(findings)-omitted, omitted))
 		}
+	}
+	if len(targets) > 0 {
+		// The reception already decided, from the ticket itself, which files
+		// this ticket changes. Without it here the implementer had only the
+		// project's writable scope, and a documentation ticket grew into a
+		// new tar extractor over two rounds - security-sensitive code the
+		// requester never asked to review (live 2026-09-17).
+		sections = append(sections,
+			"",
+			"## この依頼が変えるファイル (受付が依頼文から判定したもの)",
+			"",
+			"- "+strings.Join(targets, "\n- "),
+			"",
+			"これ以外のファイルは変更しないでください。他のファイルを読むのは自由です (事実の出典として読んでください)。",
+			"依頼を果たすには他のファイルも変える必要がある、と判断した場合は、**変えずに** 何をなぜ変える必要があるかを報告して終了してください。その判断は依頼者に返します。前提を自分で直して先に進めないでください。",
+		)
 	}
 	sections = append(sections,
 		"",
@@ -648,4 +670,26 @@ func environmentSection(agent worker.AgentConfig) string {
 			"  索引から読んでください。ここは納品先のコードではないので、変更してはいけません。")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// readDerivedTargets reads the files the reception decided this ticket
+// changes. An absent path means the caller has no derivation to hand (the
+// chat mode, and every older orchestration), and the instruction then says
+// nothing about target files rather than inventing a bound.
+func readDerivedTargets(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	var derivation struct {
+		TargetFiles []string `json:"target_files"`
+	}
+	if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &derivation); err != nil {
+		return nil, errors.New("derived contract could not be read")
+	}
+	for _, file := range derivation.TargetFiles {
+		if file == "" || strings.ContainsAny(file, "\n\r") {
+			return nil, errors.New("derived contract names an invalid file")
+		}
+	}
+	return derivation.TargetFiles, nil
 }
