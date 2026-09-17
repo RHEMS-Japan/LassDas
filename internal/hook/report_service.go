@@ -277,6 +277,7 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalInvestigationIncomplete:        incompleteMessage(report),
 		TerminalInvestigationNonconverged:      "調査報告が根拠のレビューを規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
 		TerminalDesignNonconverged:             "直し方の設計がレビューで規定回数内に合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
+		TerminalDesignRoundsSpent:              "直し方の設計は合意できましたが、その設計で作業に入った後、「設計そのものを変えるべき」という判断になりました。設計をやり直せる回数を使い切っていたため、リポジトリは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 	}[report.Code]
 	if message == "" {
 		message = "自動処理は終了しました。詳細は実行履歴を参照してください。"

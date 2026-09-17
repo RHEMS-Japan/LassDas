@@ -30,6 +30,36 @@ const defaultDesignMaxRounds = 3
 // nonconverged instead of starting another round.
 var errDesignRoundLimit = errors.New("design round limit reached")
 
+// designReturnCause says who sent the delivery back to the designer. The two
+// answers end the run as different things, and a requester reads the
+// difference: their design reviews never agreed, or their design reviews
+// agreed and the change written from it was judged to need a different plan.
+// Before this was carried, both ended as design_nonconverged and a requester
+// whose three design rounds all passed was told the design reviews had not
+// converged (live 2026-09-17).
+type designReturnCause int
+
+const (
+	// designReviewsDisagreed: the design's own judges never agreed.
+	designReviewsDisagreed designReturnCause = iota
+	// designCalledWrongLater: the design was agreed, and the applier or a
+	// review of the written change said the plan itself was wrong.
+	designCalledWrongLater
+)
+
+// terminalCode is how the run ends when this cause meets a spent round
+// budget. An investigation carries no implementation, so only its own
+// reviews can disagree and only the one code can arise.
+func (c designReturnCause) terminalCode(shape runtime.ChainShape) hook.TerminalCode {
+	if shape == runtime.ShapeInvestigation {
+		return hook.TerminalInvestigationNonconverged
+	}
+	if c == designCalledWrongLater {
+		return hook.TerminalDesignRoundsSpent
+	}
+	return hook.TerminalDesignNonconverged
+}
+
 // consumerDesignMaxRounds reads the destination's design round limit
 // leniently: absent means the default.
 func consumerDesignMaxRounds(consumerConfigPath string) int {
@@ -128,7 +158,7 @@ func handleDesignChainFailure(
 		case err != nil:
 			code = hook.TerminalModelFailed
 		case outcome == "revise":
-			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "design review asked for a revision", logger)
+			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, designReviewsDisagreed, "design review asked for a revision", logger)
 		case outcome == "nonconverged" && plan.Shape == runtime.ShapeInvestigation:
 			code = hook.TerminalInvestigationNonconverged
 		case outcome == "nonconverged":
@@ -153,7 +183,7 @@ func handleDesignChainFailure(
 		// the applier's work, when the file was left in the run directory.
 		// Either way the design round's record is what says so.
 		if objected, err := designObjectionRecorded(runDir, view.designRound); err == nil && objected {
-			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, "the applier objected to the design", logger)
+			return true, nextDesignRoundOrEnd(ctx, config, services, hermes, envelope, run, view, plan, designCalledWrongLater, "the applier objected to the design", logger)
 		}
 		return false, nil
 	default:
@@ -367,6 +397,7 @@ func nextDesignRoundOrEnd(
 	run state.RunOverview,
 	view chainView,
 	plan runtime.ChainPlan,
+	cause designReturnCause,
 	why string,
 	logger Logger,
 ) error {
@@ -392,15 +423,17 @@ func nextDesignRoundOrEnd(
 	if !errors.Is(err, errDesignRoundLimit) {
 		return err
 	}
-	code := hook.TerminalDesignNonconverged
-	if plan.Shape == runtime.ShapeInvestigation {
-		code = hook.TerminalInvestigationNonconverged
-	}
+	code := cause.terminalCode(plan.Shape)
 	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
 	if readErr != nil {
 		repository = ""
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	// The question is built from the design reviews' standing objections, so
+	// it exists only for the ending those objections produced. The other
+	// ending's objections are the implementation reviewer's or the
+	// applier's, which the design question does not carry; that requester is
+	// told what happened and a person picks it up.
 	if code == hook.TerminalDesignNonconverged {
 		if asked, askErr := askDesignImpasse(ctx, config, services, envelope, run, hermes, view, logger); askErr != nil || asked {
 			return askErr

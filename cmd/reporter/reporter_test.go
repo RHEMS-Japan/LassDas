@@ -588,13 +588,8 @@ func TestValidTerminalCodeAndEvidenceCoverProtocolFiniteSetOnly(t *testing.T) {
 		hook.TerminalProductionDeploymentUnverified: true,
 		hook.TerminalProductionVerificationFailed:   true,
 	}
-	for _, code := range []hook.TerminalCode{
-		hook.TerminalSuccess, hook.TerminalInputRejected, hook.TerminalReadinessRejected, hook.TerminalClarificationRequired,
-		hook.TerminalReadinessUnresolved, hook.TerminalClarificationExpired, hook.TerminalCancelled,
-		hook.TerminalModelFailed, hook.TerminalNonconverged,
-		hook.TerminalValidationFailed, hook.TerminalReleaseFailed, hook.TerminalProductionDeploymentUnverified,
-		hook.TerminalProductionVerificationFailed, hook.TerminalInternalFailed,
-	} {
+	// Every ending, from the one list (review of #201).
+	for _, code := range hook.AllTerminalCodes() {
 		if !validTerminalCode(code) {
 			t.Fatalf("finite code %q rejected by reporter", code)
 		}

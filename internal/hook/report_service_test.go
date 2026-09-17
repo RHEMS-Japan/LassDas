@@ -242,13 +242,7 @@ func TestTerminalReportServiceRejectsInvalidRouteBeforeStateOrBacklog(t *testing
 
 func TestEveryFiniteTerminalCodeHasADedicatedUserFacingMessage(t *testing.T) {
 	const fallback = "自動処理は終了しました。詳細は実行履歴を参照してください。"
-	for _, code := range []TerminalCode{
-		TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,
-		TerminalReadinessUnresolved, TerminalClarificationExpired, TerminalCancelled,
-		TerminalModelFailed, TerminalNonconverged,
-		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
-		TerminalProductionVerificationFailed, TerminalInternalFailed,
-	} {
+	for _, code := range AllTerminalCodes() {
 		comment := TerminalCommentContent(terminalTestRequest(code), strings.Repeat("f", 64))
 		if strings.Contains(comment, fallback) {
 			t.Fatalf("code %q fell back to the generic message", code)
@@ -393,5 +387,24 @@ func TestTerminalReportRetryKeepsThePostedCommentWhenDeliveryConfigurationChange
 	}
 	if store.beginRequests[0].ReportSHA256 != store.beginRequests[1].ReportSHA256 || comments.markerLookups[0] != comments.markerLookups[1] {
 		t.Fatal("retry changed report or marker identity")
+	}
+}
+
+// The design-rounds-spent ending is reached three ways, and only one of
+// them writes a change: the applier's objection is sealed only when the
+// working copy was left untouched. A sentence that asserts a change was
+// written is false on two of the three (review of #201).
+func TestTheRoundsSpentSentenceAssertsNothingThatDidNotHappen(t *testing.T) {
+	comment := TerminalCommentContent(terminalTestRequest(TerminalDesignRoundsSpent), strings.Repeat("f", 64))
+	for _, claim := range []string{"書いた変更", "その通りに書いた"} {
+		if strings.Contains(comment, claim) {
+			t.Errorf("the sentence asserts %q, which does not happen when the applier objected: %q", claim, comment)
+		}
+	}
+	if !strings.Contains(comment, "変更せず停止しました") {
+		t.Errorf("the sentence does not tell the requester their repository is untouched: %q", comment)
+	}
+	if !strings.Contains(comment, "設計をやり直せる回数を使い切っていた") {
+		t.Errorf("the sentence does not say why the run stopped: %q", comment)
 	}
 }

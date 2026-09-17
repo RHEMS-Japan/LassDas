@@ -110,13 +110,7 @@ func TestTerminalReportRecordIsStableAcrossAuthenticatedRetries(t *testing.T) {
 }
 
 func TestTerminalReportAllowsOnlyFiniteCodes(t *testing.T) {
-	for _, code := range []TerminalCode{
-		TerminalSuccess, TerminalInputRejected, TerminalReadinessRejected, TerminalClarificationRequired,
-		TerminalReadinessUnresolved, TerminalClarificationExpired, TerminalCancelled,
-		TerminalModelFailed, TerminalNonconverged,
-		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
-		TerminalProductionVerificationFailed, TerminalInternalFailed,
-	} {
+	for _, code := range AllTerminalCodes() {
 		request := terminalTestRequest(code)
 		if err := request.ValidateRoute(terminalTestConfig()); err != nil {
 			t.Fatalf("code %q rejected: %v", code, err)

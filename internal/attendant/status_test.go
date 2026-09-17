@@ -29,7 +29,7 @@ func TestStatusExplainsRecordedFailureAndNoActionWhileRunning(t *testing.T) {
 		"model_failed", "nonconverged", "validation_failed", "release_failed", "internal_failed",
 		"production_deployment_unverified", "production_verification_failed",
 		"input_rejected", "readiness_rejected", "clarification_required", "readiness_unresolved", "clarification_expired",
-		"investigation_incomplete", "investigation_nonconverged", "design_nonconverged",
+		"investigation_incomplete", "investigation_nonconverged", "design_nonconverged", "design_rounds_spent",
 	} {
 		got := classifyRun(config, state.RunOverview{DeliveryID: delivery, State: "terminal", TerminalCode: code}, nil)
 		if strings.HasPrefix(got.Detail, code) || !strings.Contains(got.Detail, "AI による変更のレビュー") || !strings.Contains(got.NextAction, "運用担当者") || !strings.Contains(got.ActionEffect, "自動では再実行しません") || got.CanGo || got.CanResolve {

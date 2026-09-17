@@ -11,10 +11,9 @@ import (
 // after its comment was posted (the investigating designer's four endings
 // were the first to show it).
 func TestLedgerAcceptsEveryTerminalCodeTheHookAccepts(t *testing.T) {
-	for _, code := range []hook.TerminalCode{
-		hook.TerminalSuccess, hook.TerminalModelFailed, hook.TerminalNonconverged, hook.TerminalInternalFailed,
-		hook.TerminalInvestigated, hook.TerminalInvestigationIncomplete, hook.TerminalInvestigationNonconverged, hook.TerminalDesignNonconverged,
-	} {
+	// Every ending, from the one list, so a code added later is checked
+	// here without anybody remembering to add it (review of #201).
+	for _, code := range hook.AllTerminalCodes() {
 		if !code.Valid() {
 			t.Errorf("hook refuses %s", code)
 		}

@@ -120,3 +120,84 @@ func TestHoldForStreakPostsOnceAndLiftsOnConfirmation(t *testing.T) {
 		t.Fatalf("notice = %q", notice)
 	}
 }
+
+// A delivery that needed a different plan and ran out of room to make one
+// can end two ways. They are one thing going wrong, and the hold that stops
+// intake counts them as one: three broken deliveries in a row hold the
+// intake whichever of the two each ended as (review of #201).
+func TestTheTwoDesignEndingsAreOneFailureForTheHold(t *testing.T) {
+	never := func(state.RunOverview) bool { return false }
+	run := func(id string, claimed int64, code string) state.RunOverview {
+		return state.RunOverview{RunID: id, DeliveryID: id, State: "terminal", ClaimedAt: claimed, TerminalCode: code}
+	}
+	nonconverged := string(hook.TerminalDesignNonconverged)
+	roundsSpent := string(hook.TerminalDesignRoundsSpent)
+
+	mixed := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, roundsSpent), run("c", 3, nonconverged),
+	}, 3, never)
+	if !mixed.Active || mixed.Count != 3 {
+		t.Fatalf("three design failures in a row did not hold intake: count=%d active=%v", mixed.Count, mixed.Active)
+	}
+	if mixed.Newest.RunID != "c" {
+		t.Errorf("the notice would go to %q, not the newest failure", mixed.Newest.RunID)
+	}
+	// Two unrelated failures still end the count where they differ.
+	apart := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, string(hook.TerminalModelFailed)), run("c", 3, nonconverged),
+	}, 3, never)
+	if apart.Active || apart.Count != 1 {
+		t.Fatalf("unrelated failures were counted together: count=%d active=%v", apart.Count, apart.Active)
+	}
+}
+
+// A run of failures that ended two different ways is one problem, and the
+// notice says that. Naming the newest ending made the operator look for a
+// disagreement two of the three runs never had (review of #201).
+func TestAMixedStreakDoesNotClaimTheEndingsWereTheSame(t *testing.T) {
+	never := func(state.RunOverview) bool { return false }
+	run := func(id string, claimed int64, code string) state.RunOverview {
+		return state.RunOverview{RunID: id, DeliveryID: id, State: "terminal", ClaimedAt: claimed, TerminalCode: code}
+	}
+	nonconverged := string(hook.TerminalDesignNonconverged)
+	roundsSpent := string(hook.TerminalDesignRoundsSpent)
+
+	mixed := detectFailureStreak([]state.RunOverview{
+		run("a", 1, roundsSpent), run("b", 2, roundsSpent), run("c", 3, nonconverged),
+	}, 3, never)
+	if !mixed.Mixed {
+		t.Fatal("a run of two different endings was not recognised as mixed")
+	}
+	posted := streakHoldContent(mixed)
+	if strings.Contains(posted, "同じ結果") {
+		t.Errorf("the notice claims the endings were the same: %q", posted)
+	}
+	if !strings.Contains(posted, "設計の段が") {
+		t.Errorf("the notice does not say what the three runs had in common: %q", posted)
+	}
+	if strings.Contains(posted, "設計のレビューが収束せず終了") {
+		t.Errorf("the notice names one ending as though all three ended that way: %q", posted)
+	}
+	// An operator's next move is to look the failures up, so the notice
+	// carries the codes and how many ended each way (review of #201).
+	if !strings.Contains(posted, "design_rounds_spent 2 件") || !strings.Contains(posted, "design_nonconverged 1 件") {
+		t.Errorf("the notice does not say how the three runs ended: %q", posted)
+	}
+	if strings.Contains(posted, "受付停止（同じ失敗の連続）") {
+		t.Errorf("the seven-item block still calls a mixed run the same failure: %q", posted)
+	}
+	if banner := streakNotice(mixed); strings.Contains(banner, "設計のレビューが収束せず終了") {
+		t.Errorf("the board's banner names one ending: %q", banner)
+	}
+
+	// Three of the same ending still read as they did.
+	same := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, nonconverged), run("c", 3, nonconverged),
+	}, 3, never)
+	if same.Mixed {
+		t.Fatal("three identical endings were called mixed")
+	}
+	if posted := streakHoldContent(same); !strings.Contains(posted, "同じ結果") {
+		t.Errorf("an unmixed streak lost its own words: %q", posted)
+	}
+}
