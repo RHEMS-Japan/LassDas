@@ -429,7 +429,7 @@ function buildLivePane() {
   head.appendChild(el("span", "pin", ""));
   pane.appendChild(head);
   pane.appendChild(el("pre"));
-  pane.state = { timer: null, from: 0, step: null, header: null, keep: false, pinned: false, stage: null };
+  pane.state = { timer: null, from: 0, step: null, header: null, idle: false, offsets: {}, pinned: false, stage: null };
   return pane;
 }
 
@@ -465,7 +465,8 @@ function liveDetach(pane) {
   pane.state.stage = null;
   pane.state.from = 0;
   pane.state.header = null;
-  pane.state.keep = false;
+  pane.state.idle = false;
+  pane.state.offsets = {};
   pane.querySelector("pre").textContent = "";
 }
 
@@ -516,7 +517,7 @@ function liveOpen(pane, issueKey, stage, stageName) {
   }
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
-  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, keep: false, stage: stage });
+  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, idle: false, offsets: {}, stage: stage });
   pane.classList.add("on");
   pane.querySelector(".lphead b").textContent = stageName;
   pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
@@ -531,14 +532,21 @@ function liveTick(pane, issueKey, stage, first) {
   // newest when the pane opened left the reader watching a step that had
   // finished while the stage carried on (live 2026-09-17).
   const unreachable = {};
-  const pick = fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
-    .then(r => r.ok ? r.json() : unreachable)
-    .then(index => {
-      if (index === unreachable) return unreachable;
-      const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
-      return match ? match.step : pane.state.step;
-    })
-    .catch(() => unreachable);
+  // The index is asked when there is no step yet, and after that only when
+  // the one being followed has stopped growing. A stage is several steps in
+  // a row, so the pane has to notice the hand-over - but asking every tick
+  // doubled the requests and made the newest writer flip back and forth
+  // (review of #200).
+  const pick = (pane.state.step && !pane.state.idle)
+    ? Promise.resolve(pane.state.step)
+    : fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
+      .then(r => r.ok ? r.json() : unreachable)
+      .then(index => {
+        if (index === unreachable) return unreachable;
+        const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
+        return match ? match.step : pane.state.step;
+      })
+      .catch(() => unreachable);
   pick.then(step => {
     if (pane.state.stage !== stage) return;
     if (step === unreachable) {
@@ -556,15 +564,15 @@ function liveTick(pane, issueKey, stage, first) {
       return;
     }
     if (pane.state.step && pane.state.step !== step) {
-      // The stage moved on. The new step starts at its own beginning, not
-      // at an offset belonging to the previous one, and says its name so
-      // the reader knows the output changed hands. What is already in the
-      // pane stays: a stage is six steps in a row at its longest, and
-      // clearing on each one emptied a pinned pane under the reader
-      // (review of #200).
-      pane.state.from = 0;
+      // The stage moved on. It resumes where this step was left rather
+      // than at its beginning: the newest writer can be one the reader
+      // already watched - a step is appended to by more than one phase -
+      // and starting again pasted its whole output a second time (review
+      // of #200). What is already in the pane stays: a stage is six steps
+      // in a row at its longest, and clearing on each one emptied a pinned
+      // pane under the reader.
+      pane.state.from = pane.state.offsets[step] || 0;
       pane.state.header = step;
-      pane.state.keep = true;
     }
     pane.state.step = step;
     return fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live/" + encodeURIComponent(step) + "?from=" + pane.state.from, { headers: { Accept: "application/json" } })
@@ -576,8 +584,13 @@ function liveTick(pane, issueKey, stage, first) {
           pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, first), 4000);
           return;
         }
-        if ((first || pane.state.from === 0) && !pane.state.keep) body.textContent = "";
-        pane.state.keep = false;
+        // Cleared when the pane opens, and when the server rewound us
+        // because the file it was reading was replaced by a newer run. Not
+        // on a step change: a step that has started and written nothing
+        // yet is the ordinary case, and clearing there emptied the pane
+        // under the reader one tick after the hand-over (review of #200).
+        const rewound = chunk.from === 0 && (pane.state.offsets[step] || 0) > 0;
+        if (first || rewound) body.textContent = "";
         if (pane.state.header) {
           body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
           pane.state.header = null;
@@ -590,6 +603,10 @@ function liveTick(pane, issueKey, stage, first) {
           body.textContent = "この工程の実況はまだありません。";
         }
         pane.state.from = chunk.next;
+        pane.state.offsets[step] = chunk.next;
+        // Nothing new: ask the index again next time in case the stage has
+        // handed over to another step.
+        pane.state.idle = !chunk.text;
         pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 1000);
       });
   }).catch(() => {

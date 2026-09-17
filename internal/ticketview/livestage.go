@@ -102,17 +102,13 @@ var liveStages = map[string]string{
 	// run-validation, verify-applied and verify-publish-gate - and they
 	// stay where their first, lit card puts them: 受付 for the first two,
 	// 検査 for the rest.
-	"create-feature-pr": "staging",
-	"publish-feature":   "staging",
-	"compose-trail":     "staging",
-	"merge-feature":     "staging",
-	"await-staging":     "staging",
-	// read-merged is asked twice, once for the staging branch and once for
-	// the promotion. The live file is one per step name and appended to, so
-	// both readings land in the staging pane; the promotion's own steps are
-	// below.
-	"read-merged":     "staging",
-	"promotion-delta": "staging",
+	"create-feature-pr":   "staging",
+	"publish-feature":     "staging",
+	"compose-trail":       "staging",
+	"merge-feature":       "staging",
+	"await-staging":       "staging",
+	"read-merged-feature": "staging",
+	"promotion-delta":     "staging",
 
 	// 確認 — the e2e card: the wait for a person to merge and for staging
 	// to carry the change. It is the one stage a reader watches for a long
@@ -123,6 +119,9 @@ var liveStages = map[string]string{
 	"create-promotion-pr": "production",
 	"merge-promotion":     "production",
 	"await-production":    "production",
+	// The promotion's own merge reading, named apart from the staging
+	// branch's so the two do not share one file under one stage.
+	"read-merged-promotion": "production",
 }
 
 // liveStagePrefixes covers the two steps the runner names for what they act

@@ -164,7 +164,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 			// post-merge verification is fallible). Read the pull request
 			// back so the report never claims "not merged" about a branch
 			// that moved.
-			switch p.probeMerged(ctx, stageDir, "feature-pr.json", "payload", "pull_request", "Number") {
+			switch p.probeMerged(ctx, "read-merged-feature", stageDir, "feature-pr.json", "payload", "pull_request", "Number") {
 			case "merged":
 				return p.sealDeliverReport(DeliverReport{
 					Phase: "staging", Verdict: "deploy_failed",
@@ -423,7 +423,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 					Detail: "本番ブランチへの反映自体は成立しましたが、その後の確認を続行できませんでした。",
 				})
 			}
-			switch p.probeMerged(ctx, stageDir, DeliverPromotionFile, "payload", "pull_request", "Number") {
+			switch p.probeMerged(ctx, "read-merged-promotion", stageDir, DeliverPromotionFile, "payload", "pull_request", "Number") {
 			case "merged":
 				return p.sealDeliverReport(DeliverReport{
 					Phase: "production", Verdict: "deploy_failed",
@@ -516,7 +516,12 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 // probeMerged asks GitHub whether the pull request named in the artifact
 // actually merged. Used ONLY after a merge verb failed; every failure to
 // answer is an honest "unknown", never a guess.
-func (p *Pipeline) probeMerged(ctx context.Context, stageDir, artifact string, keys ...string) string {
+// probeMerged asks whether one pull request has been merged. The step is
+// named for which one, because the live output of a step is one file per
+// name and the board offers it under one stage: naming both the staging
+// branch and the promotion "read-merged" put the promotion's own reading
+// under STG, a stage the rail had already left (review of #200).
+func (p *Pipeline) probeMerged(ctx context.Context, step, stageDir, artifact string, keys ...string) string {
 	number, err := p.readJSONField(artifact, keys...)
 	if err != nil || number == "" {
 		return "unknown"
@@ -524,7 +529,7 @@ func (p *Pipeline) probeMerged(ctx context.Context, stageDir, artifact string, k
 	if err := os.Remove(p.path("merge-probe.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "unknown"
 	}
-	code, err := p.controller(ctx, "read-merged", append([]string{"read-merged"},
+	code, err := p.controller(ctx, step, append([]string{"read-merged"},
 		p.deliverCommon(stageDir, "--number", number, "--out", p.path("merge-probe.json"))...))
 	if err != nil || code != 0 {
 		return "unknown"

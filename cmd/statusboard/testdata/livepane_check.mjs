@@ -204,26 +204,56 @@ live.reset();
 }
 
 // A stage is several steps in a row. Moving to the next one must not empty
-// the pane under a reader who pinned it.
+// the pane under a reader who pinned it - and the next step has usually
+// written nothing yet when it starts, which is when the pane used to give
+// up the reader's text and claim the stage was empty.
 live.reset();
 {
   const a = card("d1", "TICKET-1");
   box(a);
   const p = pane(a);
-  let step = "decide";
-  answer = url => Promise.resolve(url.includes("/live/")
-    ? { ok: true, json: () => Promise.resolve({ step, from: 0, next: 10, size: 10, text: step + " の出力\n" }) }
-    : { ok: true, json: () => Promise.resolve({ steps: [{ step, stage: "design", bytes: 10, updated_at_ms: 1 }] }) });
+  // What each step has written, and which step is newest.
+  const written = { decide: "決定: 収束\n", apply: "" };
+  let newest = "decide";
+  answer = url => {
+    const asked = url.match(/\/live\/([^?]+)\?from=(\d+)/);
+    if (!asked) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        steps: Object.keys(written).map((step, index) => ({
+          step, stage: "design", bytes: written[step].length,
+          updated_at_ms: step === newest ? 100 : index,
+        })),
+      }) });
+    }
+    const step = decodeURIComponent(asked[1]), from = Number(asked[2]);
+    const all = written[step] || "";
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      step, from, next: all.length, size: all.length, text: all.slice(from),
+    }) });
+  };
   live.liveOpen(p, "TICKET-1", "design", "設計");
   await settle();
-  const before = p.querySelector("pre").textContent;
-  step = "apply";
+  check("the first step's output is shown", p.querySelector("pre").textContent.includes("決定: 収束"), true);
+
+  // decide finishes and apply becomes newest, with nothing written yet.
+  newest = "apply";
+  runTimers(); await settle();   // notices decide added nothing
+  runTimers(); await settle();   // picks up apply
+  runTimers(); await settle();   // and again, with apply still silent
+  const quiet = p.querySelector("pre").textContent;
+  check("what the reader was reading survives the stage moving on", quiet.includes("決定: 収束"), true);
+  check("and the new step says its name", quiet.includes("── apply ──"), true);
+  check("and the pane does not claim the stage is empty", quiet.includes("まだありません"), false);
+
+  // apply writes, and then the stage hands back to a step already read.
+  written.apply = "候補を適用します\n";
   runTimers(); await settle();
-  const after = p.querySelector("pre").textContent;
-  check("what the reader was reading survives the stage moving on",
-    after.includes("decide の出力"), true);
-  check("and the new step says its name", after.includes("── apply ──"), true);
-  if (!before.includes("decide")) { console.log("FAIL harness: the first step never rendered"); failed++; }
+  newest = "decide";
+  runTimers(); await settle();
+  runTimers(); await settle();
+  const back = p.querySelector("pre").textContent;
+  const times = back.split("決定: 収束").length - 1;
+  check("a step already read is not pasted a second time", times, 1);
 }
 
 // A board that cannot be reached has not told us the stage produced
@@ -277,7 +307,7 @@ live.reset();
   check("and the one left open is the one just pinned", open[0] === pane(b), true);
 }
 
-if (checks < 17) {
+if (checks < 20) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }

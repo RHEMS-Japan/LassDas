@@ -43,12 +43,13 @@ var pinnedStages = map[string]string{
 
 	"create-feature-pr": "staging", "publish-feature": "staging", "compose-trail": "staging",
 	"merge-feature": "staging", "await-staging": "staging",
-	"read-merged": "staging", "promotion-delta": "staging", "browsercheck-staging": "staging",
+	"read-merged-feature": "staging", "promotion-delta": "staging", "browsercheck-staging": "staging",
 
 	"await-merged-staging": "confirm",
 
 	"create-promotion-pr": "production", "merge-promotion": "production",
 	"await-production": "production", "browsercheck-production": "production",
+	"read-merged-promotion": "production",
 }
 
 // TestEveryRunnerStepHasAStage measures the stage table against the runner's
@@ -139,6 +140,8 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 	if err != nil {
 		t.Fatalf("the runner's sources could not be read: %v", err)
 	}
+	forwarded, helpers := forwardedStepNames(t)
+	names = append(names, helpers...)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
@@ -151,11 +154,13 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 		for _, at := range stepCall.FindAllStringIndex(source, -1) {
 			argument := strings.TrimLeft(source[at[1]:], " \t\n")
 			if !strings.HasPrefix(argument, `"`) {
-				// The forwarding wrappers pass the name they were given;
-				// anything else is a step this scan cannot see.
+				// A name the enclosing function was handed. The wrappers
+				// forward "name"; a helper that is given the step to start
+				// is resolved from its own callers below, and anything
+				// else is a step this scan cannot see.
 				if field := strings.FieldsFunc(argument, func(r rune) bool {
 					return r == ',' || r == ' ' || r == '\n' || r == '\t'
-				}); len(field) > 0 && field[0] == "name" {
+				}); len(field) > 0 && (field[0] == "name" || forwarded[field[0]]) {
 					continue
 				}
 				head := argument
@@ -229,13 +234,21 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 			}
 		}
 	}
-	// A step the reception or a delivery helper also starts is not decided
-	// by the cards alone: the reception is not a card, and its work is most
-	// of what a reader watches under 受付. The table decides those, and its
-	// comment says why.
+	// The reception is not a card, and its work is most of what a reader
+	// watches under 受付, so a step it starts is the table's call. Only the
+	// reception: the one-process mode runs the same stages without cards,
+	// and letting that abstain took the review steps out of the derivation
+	// entirely - agent-review could be moved anywhere and stay green
+	// (review of #200).
+	reception := map[string]bool{}
+	for _, entry := range []string{"pretrip", "readinessGate"} {
+		for _, fn := range reachableFrom(entry, calls) {
+			reception[fn] = true
+		}
+	}
 	startedOutside := map[string]bool{}
 	for fn, started := range steps {
-		if underACard[fn] {
+		if !reception[fn] {
 			continue
 		}
 		for _, step := range started {
@@ -245,7 +258,7 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 	if len(reached) < 15 {
 		t.Fatalf("only %d steps were reached from the cards; the walk is not working", len(reached))
 	}
-	decided := 0
+	decided := []string{}
 	for step, cards := range reached {
 		if startedOutside[step] {
 			continue
@@ -261,20 +274,34 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 			// decides, and its comment says so.
 			continue
 		}
-		decided++
+		decided = append(decided, step)
 		if got := LiveStage(runnerLogName(step)); !want[got] {
 			t.Errorf("step %q is offered under %q, but the cards that run it put the rail at %v",
 				step, got, keysOf(want))
 		}
 	}
-	// How much of the table this decides. The rest is decided by hand and
-	// says why in the table: the reception is not a card, the publish card
-	// lights no rail stage, and two steps are started from outside the
-	// orchestration. Dropping below this is coverage quietly going away,
-	// which is how a check stops being one.
-	if decided < 9 {
-		t.Errorf("the walk decided only %d steps; it decided 9 when it was written", decided)
+	// Which steps this decides, not how many: one entering and one leaving
+	// left the count where it was while a step slipped back to being
+	// checked by nothing but a second hand-written copy (review of #200).
+	//
+	// What is missing from this list is decided by hand and says why in the
+	// table: the reception is not a card, the publish card lights no rail
+	// stage, the delivery and confirmation cards are not in the
+	// orchestration's switch, and a name the engine builds from what it
+	// acts on is a family rather than a step.
+	sort.Strings(decided)
+	if strings.Join(decided, " ") != strings.Join(derivedSteps, " ") {
+		t.Errorf("the walk decides %v; it decided %v when it was written", decided, derivedSteps)
 	}
+}
+
+// derivedSteps is every step whose stage the walk settles. Adding to it is
+// coverage growing; removing from it is coverage going away, and either has
+// to be a deliberate edit here.
+var derivedSteps = []string{
+	"agent-design-review", "agent-review", "apply", "decide", "decide-design",
+	"impasse-question", "investigate", "run-instruction", "run-validation",
+	"seal-candidate", "verify-applied", "verify-publish-gate",
 }
 
 // cardEntryFunctions reads the card orchestration's own switch: which
@@ -366,6 +393,67 @@ func runnerCallGraph(t *testing.T) (calls map[string][]string, steps map[string]
 		}
 	}
 	return calls, steps
+}
+
+// forwardedStepNames finds the helpers that are handed the step they
+// start, and reads the names their callers hand them. Without this a
+// helper shared by two phases could only start one step under one name,
+// and both phases' output landed in one file under one stage (review of
+// #200).
+func forwardedStepNames(t *testing.T) (map[string]bool, []string) {
+	t.Helper()
+	sources := runnerSources(t)
+	forwarded := map[string]bool{}
+	byHelper := map[string]string{}
+	define := regexp.MustCompile(`(?m)^func \(p \*Pipeline\) (\w+)\(ctx context\.Context, (\w+)[ ,]`)
+	for _, source := range sources {
+		for _, at := range define.FindAllStringSubmatchIndex(source, -1) {
+			fn, param := source[at[2]:at[3]], source[at[4]:at[5]]
+			end := len(source)
+			if next := regexp.MustCompile(`(?m)^func `).FindStringIndex(source[at[1]:]); next != nil {
+				end = at[1] + next[0]
+			}
+			// Only when the helper actually starts a step with that name.
+			if regexp.MustCompile(`p\.(?:worker|step|controller)\(ctx,\s*` + param + `\b`).MatchString(source[at[1]:end]) {
+				forwarded[param] = true
+				byHelper[fn] = param
+			}
+		}
+	}
+	var found []string
+	for helper := range byHelper {
+		call := regexp.MustCompile(`p\.` + helper + `\(ctx,\s*"([^"]+)"`)
+		for _, source := range sources {
+			for _, match := range call.FindAllStringSubmatch(source, -1) {
+				found = append(found, match[1])
+			}
+		}
+		if len(found) == 0 {
+			t.Errorf("%s is handed the step it starts and no caller names one", helper)
+		}
+	}
+	return forwarded, found
+}
+
+// runnerSources reads every non-test source of the runner.
+func runnerSources(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir("../runner")
+	if err != nil {
+		t.Fatalf("the runner's sources could not be read: %v", err)
+	}
+	var sources []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join("../runner", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources = append(sources, string(body))
+	}
+	return sources
 }
 
 // reachableFrom walks the call graph from one entry function.

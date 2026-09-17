@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,7 +33,23 @@ func TestLivePaneBehaviour(t *testing.T) {
 	// A harness that stops checking says nothing and leaves no FAIL line,
 	// so the count is what says it ran: replacing the whole file with one
 	// empty print passed before this (review of #200).
-	if passed < 17 {
+	if passed < 20 {
 		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", passed, output)
+	}
+}
+
+// Every card entry point clears the record that says which step is
+// running. Only the one-process mode did, so in the cards the record
+// outlived the card and the ticket page pulsed "いま動いています" beside a
+// finished run until the two-hour bound expired (review of #200).
+func TestEveryCardEntryPointClearsTheRunningStep(t *testing.T) {
+	for _, file := range []string{"chain_stage.go", "e2e.go", "deliver.go"} {
+		body, err := os.ReadFile(filepath.Join("..", "runner", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "ClearCurrentStep(workspace)") {
+			t.Errorf("cmd/runner/%s runs a card and never clears the running step", file)
+		}
 	}
 }
