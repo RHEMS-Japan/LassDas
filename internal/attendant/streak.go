@@ -43,6 +43,20 @@ var streakExemptCodes = map[string]bool{
 	string(hook.TerminalReadinessUnresolved):   true,
 }
 
+// streakFamily is what "the same failure" means when one failure has more
+// than one ending. The two design endings are one thing going wrong - the
+// delivery needed a different plan and ran out of room to make one - and
+// counting them apart let three broken deliveries in a row pass the hold
+// unnoticed, because no single code reached three (review of #201).
+func streakFamily(code string) string {
+	switch hook.TerminalCode(code) {
+	case hook.TerminalDesignNonconverged, hook.TerminalDesignRoundsSpent:
+		return "design"
+	default:
+		return code
+	}
+}
+
 type failureStreak struct {
 	Code   string
 	Count  int
@@ -70,7 +84,7 @@ func detectFailureStreak(runs []state.RunOverview, limit int, resolved func(stat
 		if streak.Count == 0 {
 			streak.Code, streak.Newest = run.TerminalCode, run
 		}
-		if run.TerminalCode != streak.Code {
+		if streakFamily(run.TerminalCode) != streakFamily(streak.Code) {
 			break
 		}
 		streak.Count++

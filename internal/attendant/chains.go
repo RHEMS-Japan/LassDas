@@ -714,8 +714,14 @@ func handleChainFailure(
 	// where the chain stopped moving: a validate card blocked because the
 	// round was sent back reads as "the failure is validate" unless the
 	// decision that sent it back is in the record too (live 2026-09-17).
-	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName,
-		"action", action.String(), "code", string(code))
+	//
+	// The code is deliberately not on this line. Two of the three actions
+	// never report it - regenerate starts another round, ask-question posts
+	// a question - and the value classifyChainFailure carries alongside
+	// them is a placeholder. Logged here it named model_failed for the very
+	// run that ends as design_rounds_spent, which is the misreading this
+	// line exists to prevent (review of #201).
+	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName, "action", action.String())
 	switch action {
 	case actionRegenerate:
 		limit, limitErr := consumerMaxStages(config.ConsumerConfigPath)
@@ -770,6 +776,8 @@ func handleChainFailure(
 		}
 		return archiveChain(ctx, hermes, view.all)
 	}
+	// Past the switch the code is the one the run actually ends with.
+	logger.Info("chain failure reported", "run", run.RunID, "stage", stageName, "code", string(code))
 	// The failure report carries the same round record a delivery would
 	// have (#10); composition failure never blocks the report.
 	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-1")); err == nil {
@@ -811,15 +819,18 @@ const (
 )
 
 // String names the action for the record. The type is an int, so a plain
-// conversion would log one unprintable rune.
+// conversion would log one unprintable rune. A fourth action added without
+// a name here says so rather than borrowing one (review of #201).
 func (a failureAction) String() string {
 	switch a {
+	case actionReport:
+		return "report"
 	case actionRegenerate:
 		return "regenerate"
 	case actionAskQuestion:
 		return "ask_question"
 	default:
-		return "report"
+		return "unknown"
 	}
 }
 

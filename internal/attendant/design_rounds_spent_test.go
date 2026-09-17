@@ -17,6 +17,8 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"fmt"
+	"log/slog"
 )
 
 // A delivery whose design was agreed, written, and then judged to need a
@@ -135,12 +137,7 @@ func TestAReviewFindingTheDesignWrongAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 		}
 	}
 	config := fixture.config
-	config.Chain.Profiles = runtime.ChainProfiles{
-		Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b",
-		Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate",
-		DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b",
-		DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier",
-	}
+	config.Chain.Profiles = designTestProfiles()
 	if err := os.WriteFile(config.ConsumerConfigPath, []byte(
 		`{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"agents":{"applier":{"command":"true"}}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -193,5 +190,159 @@ func TestAReviewFindingTheDesignWrongAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 	}
 	if strings.Contains(posted, "合意に至らなかった") {
 		t.Errorf("the requester was told the design reviews disagreed, which they did not: %q", posted)
+	}
+}
+
+// The third way back to the designer: an objection transition that died
+// between archiving the round and creating the next one, resumed on a later
+// tick with no design round left. It reaches the ending through a different
+// function again, and without this the cause could be mislabelled there
+// alone with the whole suite green (review of #201).
+func TestAResumedObjectionAtTheLimitEndsAsRoundsSpent(t *testing.T) {
+	fixture := newPendingFixture(t, "")
+	runDir := runDirectory(fixture.config, fixture.deliveryID)
+	for _, dir := range []string{"history/readiness", "history/design-3"} {
+		if err := os.MkdirAll(filepath.Join(runDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "history/readiness/decision.json"),
+		[]byte(`{"request_kind":"change","needs_design":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "history/design-3/objection.json"),
+		[]byte(`{"reason":"the label is not in that file","section":"files"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "ticket-envelope.json"),
+		[]byte(fixture.run.EnvelopeJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.Chain.Profiles = designTestProfiles()
+	if err := os.WriteFile(config.ConsumerConfigPath, []byte(
+		`{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"agents":{"applier":{"command":"true"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var envelope hook.DispatchEnvelope
+	if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	terminal := runner.NewTerminal(config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &recordingLogger{})
+	digest, err := terminal.ReportDigest(context.Background(), hook.TerminalDesignRoundsSpent,
+		runner.Outcome{Code: hook.TerminalDesignRoundsSpent}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.expected = digest
+
+	// Only the done design cards remain: the implementation cards were
+	// archived and the next design round was never created.
+	card := func(id, stage string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: "done", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, round)}
+	}
+	view := chainViewFor([]runtime.BoardTask{
+		card("t_i3", runtime.StageInvestigate, 3), card("t_a3", runtime.StageDesignReviewA, 3),
+		card("t_b3", runtime.StageDesignReviewB, 3), card("t_d3", runtime.StageDesignDecide, 3),
+	}, fixture.deliveryID)
+	if view.round != 0 || view.designRound != 3 {
+		t.Fatalf("view rounds: %+v", view.rounds())
+	}
+
+	hermes, _ := fakeBoard(t)
+	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if err := advanceClaimedRun(context.Background(), config, fixture.services, hermes, run, view, &recordingLogger{}); err != nil {
+		t.Fatalf("the resumed transition failed: %v", err)
+	}
+	if len(fixture.comments.posted) != 1 {
+		t.Fatalf("comments posted = %d, want 1: %q", len(fixture.comments.posted), fixture.comments.posted)
+	}
+	if !strings.Contains(fixture.comments.posted[0], "設計をやり直せる回数を使い切っていた") {
+		t.Errorf("the requester was not told why the run stopped: %q", fixture.comments.posted[0])
+	}
+}
+
+// designTestProfiles is a pod with every design card's profile configured.
+func designTestProfiles() runtime.ChainProfiles {
+	return runtime.ChainProfiles{
+		Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b",
+		Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate",
+		DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b",
+		DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier",
+	}
+}
+
+// The impasse question is built from the design reviews' standing
+// objections, so it belongs to the ending those objections produce. Here
+// the design's judges agreed and the objection came from the applier: the
+// requester gets the ending, not a question about a design nobody
+// objected to. The whole question machinery is wired so the guard is what
+// is measured, not its absence (review of #201).
+func TestARoundsSpentEndingDoesNotAskTheDesignQuestion(t *testing.T) {
+	fixture, envelope, view, runDir := designSpentFixture(t)
+	// All three rounds, each with the records the question is built from:
+	// the newest round is found by walking from the first, so a fixture
+	// holding only the last one makes the question refuse itself and the
+	// guard below untested (review of #201).
+	for number := 1; number <= 3; number++ {
+		round := filepath.Join(runDir, "history", fmt.Sprintf("design-%d", number))
+		if err := os.MkdirAll(round, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range map[string]string{
+			"decision.json":               `{"outcome":"approved"}`,
+			"design.json":                 `{}`,
+			"investigation.json":          `{}`,
+			"review-a-design-review.json": `{}`,
+			"review-b-design-review.json": `{}`,
+		} {
+			if err := os.WriteFile(filepath.Join(round, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.WriteFile(fixture.config.ConsumerConfigPath,
+		[]byte(`{"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A worker that would write a question, and a ticket that would accept
+	// it. If the guard were gone, both would be used.
+	decision := filepath.Join(runDir, "history", "question", "decision.json")
+	script := filepath.Join(t.TempDir(), "worker")
+	body := "#!/bin/sh\nmkdir -p " + filepath.Dir(decision) +
+		"\nprintf '%s' '{\"outcome\":\"clarification_required\",\"questions\":[{\"id\":\"Q1\",\"question\":\"どちらにしますか\",\"why_blocking\":\"決められません\",\"dimension\":\"user_visible_behavior\",\"choices\":[{\"id\":\"a\",\"label\":\"A\",\"effect\":\"あ\"},{\"id\":\"b\",\"label\":\"B\",\"effect\":\"い\"}]}],\"decision_sha256\":\"" + strings.Repeat("d", 64) + "\"}' > " + decision + "\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.config
+	config.WorkerBin = script
+	poster := &designQuestionFakes{}
+	question, err := hook.NewQuestionReportService(fixture.services.Route, poster, poster, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.services.Question = question
+
+	terminal := runner.NewTerminal(config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &recordingLogger{})
+	digest, err := terminal.ReportDigest(context.Background(), hook.TerminalDesignRoundsSpent,
+		runner.Outcome{Code: hook.TerminalDesignRoundsSpent}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.expected = digest
+
+	hermes, _ := fakeBoard(t)
+	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	handled, err := handleDesignChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.ChainPlan{Shape: runtime.ShapeDesign}, runtime.StageApply, &recordingLogger{})
+	if !handled || err != nil {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if len(poster.posted) != 0 {
+		t.Fatalf("a question was asked about a design its judges agreed on: %q", poster.posted)
+	}
+	if len(fixture.comments.posted) != 1 {
+		t.Fatalf("comments posted = %d, want 1: %q", len(fixture.comments.posted), fixture.comments.posted)
 	}
 }

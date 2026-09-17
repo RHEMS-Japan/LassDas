@@ -120,3 +120,33 @@ func TestHoldForStreakPostsOnceAndLiftsOnConfirmation(t *testing.T) {
 		t.Fatalf("notice = %q", notice)
 	}
 }
+
+// A delivery that needed a different plan and ran out of room to make one
+// can end two ways. They are one thing going wrong, and the hold that stops
+// intake counts them as one: three broken deliveries in a row hold the
+// intake whichever of the two each ended as (review of #201).
+func TestTheTwoDesignEndingsAreOneFailureForTheHold(t *testing.T) {
+	never := func(state.RunOverview) bool { return false }
+	run := func(id string, claimed int64, code string) state.RunOverview {
+		return state.RunOverview{RunID: id, DeliveryID: id, State: "terminal", ClaimedAt: claimed, TerminalCode: code}
+	}
+	nonconverged := string(hook.TerminalDesignNonconverged)
+	roundsSpent := string(hook.TerminalDesignRoundsSpent)
+
+	mixed := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, roundsSpent), run("c", 3, nonconverged),
+	}, 3, never)
+	if !mixed.Active || mixed.Count != 3 {
+		t.Fatalf("three design failures in a row did not hold intake: count=%d active=%v", mixed.Count, mixed.Active)
+	}
+	if mixed.Newest.RunID != "c" {
+		t.Errorf("the notice would go to %q, not the newest failure", mixed.Newest.RunID)
+	}
+	// Two unrelated failures still end the count where they differ.
+	apart := detectFailureStreak([]state.RunOverview{
+		run("a", 1, nonconverged), run("b", 2, string(hook.TerminalModelFailed)), run("c", 3, nonconverged),
+	}, 3, never)
+	if apart.Active || apart.Count != 1 {
+		t.Fatalf("unrelated failures were counted together: count=%d active=%v", apart.Count, apart.Active)
+	}
+}
