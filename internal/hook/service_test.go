@@ -710,3 +710,40 @@ func TestProcessIgnoresTicketAlreadyReported(t *testing.T) {
 		t.Fatalf("unreported ticket: Process() = %s/%s asked=%d, want queue_created after one lookup", result.Decision, result.Code, len(backlog.reportPrefixes))
 	}
 }
+
+// A ticket the store refuses outright is not asked about again. Retrying
+// it held the scan's cursor in front of it, so every ticket filed
+// afterwards went untaken too - one request nobody could queue stopped
+// intake altogether, with the reason nowhere on the machine (live
+// 2026-09-17).
+func TestARefusedTicketStopsInsteadOfHoldingUpEveryLaterOne(t *testing.T) {
+	store := &fakeStore{enqueueErr: NewExternalFailure("store", FailureRejected, "invalid_queue_request")}
+	result := newTestService(t, nil, store, nil).Process(context.Background(), testHint())
+	if result.Decision != DecisionInvalid || result.Code != "queue_rejected" {
+		t.Fatalf("Process() = %+v; want the ticket to stop here", result)
+	}
+	if !ingestOutcomeConclusive(result.Decision) {
+		t.Fatal("the scan would hold its cursor in front of this ticket for ever")
+	}
+}
+
+// An unclassified failure is asked about again while the ticket is young,
+// because a transient write clears in seconds - and stops once it is old,
+// because by then it is not going to clear.
+func TestAnUnclassifiedQueueFailureIsAskedAgainOnlyWhileTheTicketIsYoung(t *testing.T) {
+	store := &fakeStore{enqueueErr: errors.New("ambiguous write")}
+	fresh := newTestService(t, nil, store, nil)
+	if result := fresh.Process(context.Background(), testHint()); result.Decision != DecisionRetryRequested {
+		t.Fatalf("a fresh ticket was not asked about again: %+v", result)
+	}
+
+	old := newTestService(t, nil, &fakeStore{enqueueErr: errors.New("ambiguous write")}, nil)
+	old.now = func() time.Time { return time.Now().UTC().Add(queueRetryWindow + time.Minute) }
+	result := old.Process(context.Background(), testHint())
+	if result.Decision != DecisionInvalid || result.Code != "queue_rejected" {
+		t.Fatalf("an old ticket is still being asked about: %+v", result)
+	}
+	if !ingestOutcomeConclusive(result.Decision) {
+		t.Fatal("the scan would hold its cursor in front of this ticket for ever")
+	}
+}

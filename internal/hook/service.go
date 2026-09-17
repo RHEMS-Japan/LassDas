@@ -135,7 +135,27 @@ func (s *Service) Process(ctx context.Context, hint WebhookHint) Result {
 
 	disposition, err := s.store.Enqueue(ctx, QueueRequest{Envelope: envelope, QueuedAt: s.now().UTC()})
 	if err != nil {
-		return s.result(DecisionRetryRequested, "queue_failed", hint, issue.IssueKey, deliveryID)
+		class, code := FailureDetails(err)
+		// Said out loud, always. This error used to be dropped where it
+		// was received, so a ticket that could not be queued retried every
+		// minute for ever with the reason nowhere on the machine - not in
+		// the log, not on the board, not on the ticket (live 2026-09-17).
+		s.logger.Error("the ticket could not be queued",
+			"activity_id", hint.ActivityID, "issue_key", issue.IssueKey,
+			"delivery_id", deliveryID, "class", string(class), "reason", code, "error", err.Error())
+		// A failure the store calls retryable is asked again, and so is one
+		// nobody classified - but only while the ticket is young. Retrying
+		// held the scan's cursor in front of this one ticket, so every
+		// ticket filed after it went untaken as well: one request nobody
+		// could queue stopped intake altogether, invisibly, for as long as
+		// the deployment lived (live 2026-09-17).
+		if class == FailureRetryable || (class != FailureRejected && s.now().UTC().Sub(envelope.Snapshot.CreatedAt) < queueRetryWindow) {
+			return s.result(DecisionRetryRequested, "queue_failed", hint, issue.IssueKey, deliveryID)
+		}
+		// Out of patience, or refused outright. It ends here, and the board
+		// says the ticket did not start.
+		projectBoard(ctx, s.board, s.logger, envelope.Snapshot.IssueID, BoardNeedsAttention)
+		return s.result(DecisionInvalid, "queue_rejected", hint, issue.IssueKey, deliveryID)
 	}
 	switch disposition {
 	case QueueCreated:
@@ -287,6 +307,12 @@ func (s *Service) externalResult(operation string, err error, hint WebhookHint) 
 		return s.result(DecisionInternal, operation+"_internal", hint, "", "")
 	}
 }
+
+// queueRetryWindow is how long a ticket nobody could queue keeps being
+// asked about. A transient write clears in seconds; past this the cause is
+// not going away on its own, and holding the scan's cursor there costs
+// every ticket filed afterwards.
+const queueRetryWindow = 10 * time.Minute
 
 func (s *Service) result(decision Decision, code string, hint WebhookHint, issueKey, deliveryID string) Result {
 	attributes := []any{
