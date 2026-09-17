@@ -21,6 +21,7 @@ func runImplementInstruction(args []string) error {
 	toolSHA := flags.String("tool-sha", "", "")
 	draftPath := flags.String("draft", "", "")
 	clarificationPath := flags.String("clarification", "", "")
+	derivationPath := flags.String("targets", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	outputPath := flags.String("out", "", "")
@@ -54,7 +55,11 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
+	targets, err := readDerivedTargets(*derivationPath, draft, config)
+	if err != nil {
+		return err
+	}
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot, targets)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}

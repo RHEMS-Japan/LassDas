@@ -467,6 +467,18 @@ func (p *Pipeline) modelKeyEnv() []string {
 	}
 }
 
+// targetArgs appends --targets when the reception has sealed which files
+// this ticket changes. Both receptions write that ticket: the one that
+// derives the files from the request, and the one that locates them from
+// the wording promise. A run without one (the chat orchestrations) passes
+// nothing, and the instruction then names no files.
+func (p *Pipeline) targetArgs() []string {
+	if p.exists("readiness-ticket.json") {
+		return []string{"--targets", p.path("readiness-ticket.json")}
+	}
+	return nil
+}
+
 // clarificationArgs appends --clarification when the claimed envelope
 // carried adopted answers.
 func (p *Pipeline) clarificationArgs() []string {
@@ -607,6 +619,7 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 			)
 		}
 		implementArgs = append(implementArgs, p.clarificationArgs()...)
+		implementArgs = append(implementArgs, p.targetArgs()...)
 		implementArgs = append(implementArgs,
 			"--run-out", stageDir+"/implement-run.json",
 			"--ticket-out", stageDir+"/ticket.json",

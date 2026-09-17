@@ -30,6 +30,7 @@ func runImplement(ctx context.Context, args []string) error {
 	knowledgeRoot := flags.String("knowledge-root", "", "")
 	stage := flags.Int("stage", 0, "")
 	clarificationPath := flags.String("clarification", "", "")
+	derivationPath := flags.String("targets", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	runOutPath := flags.String("run-out", "", "")
@@ -69,7 +70,11 @@ func runImplement(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
+	targets, err := readDerivedTargets(*derivationPath, draft, config)
+	if err != nil {
+		return err
+	}
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot, targets)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -78,6 +83,13 @@ func runImplement(ctx context.Context, args []string) error {
 	}
 
 	outcome, runErr := worker.RunAgent(ctx, config.Agents.Implementer, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts)
+	// What the round changed beyond the ticket's own files is said out loud.
+	// The instruction asks the agent to stop and report instead of widening
+	// the work; when it widens the work anyway, the reviews and the ticket's
+	// own record should not have to infer it from a diff (review of #193).
+	if outside := filesOutsideTargets(outcome.ChangedFiles, targets); len(outside) > 0 {
+		fmt.Fprintf(os.Stderr, "worker: この依頼の対象外のファイルを変更しました: %s\n", strings.Join(outside, ", "))
+	}
 	run, sealErr := worker.SealAgentRun(worker.AgentRun{
 		SchemaVersion: worker.ArtifactSchemaVersion, Stage: *stage,
 		DeliveryID: draft.DeliveryID, InputSHA256: draft.InputSHA256,
@@ -509,9 +521,10 @@ func readPreviousFindings(filePaths []string) ([]worker.ModelFinding, error) {
 	return findings, nil
 }
 
-// implementPrompt states the request and the boundaries. It deliberately does
-// not name files: finding them is the agent's work, and naming them would put
-// the requester back in the position of having to know the codebase.
+// implementPrompt states the request and the boundaries. It names the files
+// the reception decided this ticket changes when the run has that decision,
+// and otherwise leaves finding them to the agent - the requester is never
+// asked to know the codebase either way.
 func implementPrompt(
 	draft worker.TicketDraft,
 	consumer worker.ConsumerConfig,
@@ -519,6 +532,7 @@ func implementPrompt(
 	clarification *worker.ClarificationContext,
 	findings []worker.ModelFinding,
 	repoRoot string,
+	targets []string,
 ) (string, error) {
 	sections := []string{
 		"あなたはこのリポジトリで、依頼された変更を実装します。",
@@ -569,12 +583,40 @@ func implementPrompt(
 			sections = append(sections, fmt.Sprintf("- (指摘が多いため先頭 %d 件のみ掲載、%d 件省略)", len(findings)-omitted, omitted))
 		}
 	}
-	sections = append(sections,
+	if len(targets) > 0 {
+		// The reception already decided, from the ticket itself, which files
+		// this ticket changes. Without it here the implementer had only the
+		// project's writable scope, and a documentation ticket grew into a
+		// new tar extractor over two rounds - security-sensitive code the
+		// requester never asked to review (live 2026-09-17).
+		sections = append(sections,
+			"",
+			"## この依頼が変えるファイル (受付が依頼文から判定したもの)",
+			"",
+			"- "+strings.Join(targets, "\n- "),
+			"",
+			"これ以外のファイルは変更しないでください。他のファイルを読むのは自由です (事実の出典として読んでください)。",
+			"依頼を果たすには他のファイルも変える必要がある、と判断した場合は、**変えずに** 何をなぜ変える必要があるかを報告して終了してください。その判断は依頼者に返します。前提を自分で直して先に進めないでください。",
+		)
+	}
+	rules := []string{
 		"",
 		"## 守ること",
-		"- 変更してよいのは "+strings.Join(consumer.Mode.AllowedFilePrefixes, " / ")+" の下だけです。それ以外を変更した実行は破棄されます。",
-		"- 変更するファイルは最大 "+itoa(consumer.Mode.MaxFiles)+" 個までです。",
-		"- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。",
+		"- 変更してよいのは " + strings.Join(consumer.Mode.AllowedFilePrefixes, " / ") + " の下だけです。それ以外を変更した実行は破棄されます。",
+		"- 変更するファイルは最大 " + itoa(consumer.Mode.MaxFiles) + " 個までです。",
+	}
+	if len(targets) == 0 {
+		rules = append(rules, "- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。")
+	} else {
+		// With the ticket's own files named above, "new files anywhere in
+		// the scope" would take the bound back four lines after giving it
+		// (review of #193).
+		rules = append(rules,
+			"- 上に挙げたファイルのうち、まだ存在しないものは新しく作ってください。",
+			"- 上に挙げたファイル以外は、新しく作るのも変更に当たります。作らないでください。")
+	}
+	sections = append(sections, rules...)
+	sections = append(sections,
 		"- 依頼に書かれていない改善・整理はしないでください。依頼を満たす最小の変更にしてください。",
 		"- 事実や操作手順を書く前に、根拠の実装・依存先・記録を読み、関係する条件分岐・対象範囲・副作用を記述と突き合わせてください。引用された行だけでなく、その主張が成立する条件と成立しない通常の経路も確認し、必要な条件や影響を説明から落とさないでください。",
 		"- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
@@ -648,4 +690,60 @@ func environmentSection(agent worker.AgentConfig) string {
 			"  索引から読んでください。ここは納品先のコードではないので、変更してはいけません。")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// readDerivedTargets reads the files the reception decided this ticket
+// changes, from the reception ticket. Both receptions write it - the one
+// that derives the files from the request and the one that locates them
+// from the wording promise.
+//
+// It is checked against this run (delivery, input, config, tool,
+// repository) and against the consumer's own contract, because the file
+// sits in the run directory, which the agent of an earlier round can write
+// to. Those checks stop another run's ticket and a path outside the
+// writable scope; they cannot prove the reception wrote it, because the
+// record carries no seal. A round that rewrote it with other files inside
+// the scope would be believed here, and the reviews remain the gate for
+// that (review of #193).
+//
+// An absent path means the caller has no reception ticket to hand (the chat
+// mode, and every older orchestration), and the instruction then says
+// nothing about target files rather than inventing a bound.
+func readDerivedTargets(path string, draft worker.TicketDraft, config worker.Config) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	var ticket worker.TicketRequest
+	if err := worker.ReadJSONFile(path, worker.MaxTicketJSONBytes, &ticket); err != nil {
+		return nil, errors.New("reception ticket could not be read")
+	}
+	if ticket.DeliveryID != draft.DeliveryID || ticket.InputSHA256 != draft.InputSHA256 ||
+		ticket.ConfigSHA256 != draft.ConfigSHA256 || ticket.ToolSHA != draft.ToolSHA ||
+		ticket.Repository != draft.Repository {
+		return nil, errors.New("reception ticket belongs to another run")
+	}
+	if err := ticket.Validate(config); err != nil {
+		return nil, errors.New("reception ticket does not meet the consumer contract")
+	}
+	return ticket.TargetFiles, nil
+}
+
+// filesOutsideTargets is what a round changed that the ticket's own files do
+// not name. Empty when the run has no targets: there is nothing to be
+// outside of.
+func filesOutsideTargets(changed, targets []string) []string {
+	if len(targets) == 0 {
+		return nil
+	}
+	named := make(map[string]struct{}, len(targets))
+	for _, file := range targets {
+		named[file] = struct{}{}
+	}
+	var outside []string
+	for _, file := range changed {
+		if _, ok := named[file]; !ok {
+			outside = append(outside, file)
+		}
+	}
+	return outside
 }
