@@ -652,7 +652,7 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 	if err != nil {
 		return s.result(DecisionInvalid, "question_tick_notice_invalid", deliveryID), true
 	}
-	qualifier := questionRevisionTag(question.QuestionRevision) + ":" + fmt.Sprintf("%d", lastRound.AnswerCommentID)
+	qualifier := QuestionRevisionTag(question.QuestionRevision) + ":" + fmt.Sprintf("%d", lastRound.AnswerCommentID)
 	posted, err = s.store.RunCommentState(ctx, s.config, RunCommentReceipt, qualifier)
 	if err != nil {
 		return s.failure("question_tick_notice_state", err, deliveryID), true

@@ -60,7 +60,10 @@ func formatQuestionInstant(unixMilli int64) string {
 	return time.UnixMilli(unixMilli).In(questionZone).Format("2006-01-02 15:04")
 }
 
-func questionRevisionTag(revision int) string {
+// QuestionRevisionTag is the number a requester types after 回答 or 中止:
+// the round they are being asked about. A board that names a round the run
+// is not on sends the requester to a comment nobody reads.
+func QuestionRevisionTag(revision int) string {
 	return fmt.Sprintf("C%d", revision)
 }
 
@@ -75,7 +78,7 @@ func QuestionCommentContent(record QuestionRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tag := questionRevisionTag(record.QuestionRevision)
+	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【確認のお願い %s】回答期限: %s\n\n", tag, formatQuestionInstant(record.AnswerDeadlineAt))
 	builder.WriteString("このチケットの自動処理を進めるために、以下の確認が必要です。対象リポジトリと本番環境には、まだ何も変更を加えていません。\n")
@@ -113,7 +116,7 @@ func QuestionCommentContent(record QuestionRecord) (string, error) {
 // GuidanceCommentContent is the one-time format rescue for a comment that
 // starts like an answer but cannot be interpreted (README 585).
 func GuidanceCommentContent(record QuestionRecord) string {
-	tag := questionRevisionTag(record.QuestionRevision)
+	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【回答書式のご案内 %s】\n\n", tag)
 	builder.WriteString("いただいたコメントを回答として読み取れませんでした。\n")
@@ -151,7 +154,7 @@ func ShortfallCommentContent(record QuestionRecord, triggerCommentID int64, miss
 	for _, id := range missingQuestionIDs {
 		missing[id] = true
 	}
-	tag := questionRevisionTag(record.QuestionRevision)
+	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【回答の不足 %s】(コメント #%d への返信)\n\n", tag, triggerCommentID)
 	builder.WriteString("回答ありがとうございます。次の質問への回答がまだ揃っていません。\n")
@@ -195,7 +198,7 @@ func NotifyCommentContent(record QuestionRecord, index int) (string, error) {
 	if index < 1 || index > QuestionNotifyCount {
 		return "", errors.New("notify index is invalid")
 	}
-	tag := questionRevisionTag(record.QuestionRevision)
+	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【再通知 %d/%d %s】回答期限: %s\n\n", index, QuestionNotifyCount, tag, formatQuestionInstant(record.AnswerDeadlineAt))
 	builder.WriteString("確認事項への回答をお待ちしています。質問コメントの選択肢の下にある「回答 " + tag + " ...」の行を、そのままコメントに貼り付けて投稿してください。\n")
