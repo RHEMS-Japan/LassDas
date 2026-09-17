@@ -439,7 +439,7 @@ func TestBuildReadsTheBilledSpendAndTheModelFailureDetail(t *testing.T) {
 	files := map[string]string{
 		"spend.json":                `{"read_at":"2026-09-15T03:10:05Z","since":"2026-09-15T03:07:21Z","complete":false,"total_usd":2.62,"keys":[{"key_env":"MODEL_API_KEY_IMPL","key_name":"automation-impl","roles":["実装","受付"],"spend_usd":0.48},{"key_env":"MODEL_API_KEY_REVIEW_A","key_name":"automation-review-a","roles":["レビュー review-a"],"spend_usd":2.13,"unpriced_requests":1},{"key_env":"MODEL_API_KEY_X","spend_usd":0.01}],"text":"合計: $2.62"}`,
 		"failed-step.txt":           "AI による受付の判定",
-		"model-failure-detail.json": `{"step":"AI による受付の判定","recorded_at":"2026-09-15T03:10:04Z","phrase":"model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the whole allowance went to reasoning; TOKEN=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd","model":"vendor/model-a","effort":"medium","max_output_tokens":32768,"calls":3,"lowered":2,"last_request_id":"gen-abc123","last_finish_reason":"length","last_prompt_tokens":900,"last_completion_tokens":32768,"last_reasoning_tokens":32768}`,
+		"model-failure-detail.json": `{"step":"AI による受付の判定","recorded_at":"2026-09-15T03:10:04Z","phrase":"model response ended before a complete answer: finish_reason=length (output allowance 32768 tokens); the whole allowance went to reasoning; TOKEN=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd","model":"vendor/model-a","effort":"medium","max_output_tokens":32768,"calls":3,"lowered":2,"last_request_id":"gen-abc123","last_finish_reason":"length","last_prompt_tokens":900,"last_completion_tokens":32768,"last_reasoning_tokens":32768,"objection":"model intake output is invalid: TOKEN=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"}`,
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -465,8 +465,8 @@ func TestBuildReadsTheBilledSpendAndTheModelFailureDetail(t *testing.T) {
 		t.Fatalf("model failure = %+v", m)
 	}
 	raw, _ := json.Marshal(view)
-	if strings.Contains(string(raw), "KLMNOPQRSTUVWXYZ0123456789abcd") || !strings.Contains(m.Phrase, "[masked:") {
-		t.Fatalf("the phrase must pass the secret scan: %s", raw)
+	if strings.Contains(string(raw), "KLMNOPQRSTUVWXYZ0123456789abcd") || !strings.Contains(m.Phrase, "[masked:") || !strings.Contains(m.Objection, "[masked:") {
+		t.Fatalf("the phrase and the objection must pass the secret scan: %s", raw)
 	}
 	var end *Event
 	for i := range view.Timeline {
@@ -553,5 +553,10 @@ func TestModelFailureSummaryShowsTheObjectionForRefusedAnswers(t *testing.T) {
 	}
 	if got := modelFailureSummary(ModelFailure{Phrase: "p", Calls: 1}); strings.Contains(got, "決められた形") {
 		t.Fatalf("a detail without an objection must not claim refused answers: %q", got)
+	}
+	// An objection can also ride on a failure whose answers were never
+	// refused; only the count of refused answers may say they were.
+	if got := modelFailureSummary(ModelFailure{Phrase: "p", Calls: 2, Objection: "x"}); strings.Contains(got, "決められた形") {
+		t.Fatalf("a failure with no refused answers claimed them: %q", got)
 	}
 }

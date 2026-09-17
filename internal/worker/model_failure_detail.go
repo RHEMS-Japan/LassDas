@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // ModelFailureDetail is what a turn knew when it gave up: the class of
@@ -285,10 +286,13 @@ const maxObjectionRunes = 400
 // maxObjectionRunes on a character boundary.
 func objectionText(text string) string {
 	fields := strings.Fields(strings.Map(func(r rune) rune {
-		if r < ' ' || r == 0x7f {
-			return ' '
+		// Graphic runes only: control characters, and the format effectors
+		// that reorder a line (RLO and friends), are not text a reader
+		// should be shown.
+		if r == ' ' || (unicode.IsGraphic(r) && !unicode.Is(unicode.Cf, r)) {
+			return r
 		}
-		return r
+		return ' '
 	}, text))
 	joined := strings.Join(fields, " ")
 	if runes := []rune(joined); len(runes) > maxObjectionRunes {
