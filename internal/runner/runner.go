@@ -29,6 +29,7 @@ import (
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
+	"net/http"
 )
 
 // Pipeline drives one claimed envelope through the stages.
@@ -55,6 +56,10 @@ type Pipeline struct {
 	// destination repository; nil means the real github.com clone.
 	// Production never sets it.
 	cloneTarget func(ctx context.Context, destination string) error
+	// usageTransport lets package tests stand in for the billing endpoint
+	// the baseline is read from; nil means the real network. Production
+	// never sets it.
+	usageTransport http.RoundTripper
 	// prepared is set once Prepare has cleared the workspace, so nothing
 	// left by an earlier dispatch can pass for this run's history.
 	prepared bool

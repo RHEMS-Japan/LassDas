@@ -12,6 +12,7 @@ import (
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
+	"net/http"
 )
 
 // Terminal closes a run the way cmd/reporter and cmd/questioner did over
@@ -30,6 +31,10 @@ type Terminal struct {
 		Info(string, ...any)
 		Error(string, ...any)
 	}
+	// spendTransport lets package tests stand in for the billing endpoints
+	// the cost line is read from; nil means the real network. Production
+	// never sets it.
+	spendTransport http.RoundTripper
 }
 
 func NewTerminal(config runtime.Config, services *runtime.Services, envelope hook.DispatchEnvelope, hermesRunID int64, workspace string, logger interface {
