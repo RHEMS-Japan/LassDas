@@ -96,6 +96,22 @@ func (s *Service) Process(ctx context.Context, hint WebhookHint) Result {
 		return s.result(DecisionIgnored, "run_id_not_allowed", hint, issue.IssueKey, "")
 	}
 
+	// A ticket the automation has already reported on is never opened again.
+	// The terminal report on the ticket is the record that outlives the
+	// ledger: a rebuilt instance starts with an empty ledger, and its
+	// lost-webhook sweep then re-read every recent ticket and opened a second
+	// pull request for one delivered eight days earlier (live 2026-09-17).
+	// Every terminal code counts, not only success: after a failed run a
+	// person decides what happens next, and that decision is a new ticket.
+	marker, reported, err := s.backlog.FindCommentWithMarkerPrefix(ctx, issue.ID, TerminalMarkerPrefix(runID))
+	if err != nil {
+		return s.externalResult("report_lookup", err, hint)
+	}
+	if reported {
+		s.logger.Info("ticket already reported", "issue_key", issue.IssueKey, "terminal_code", TerminalCodeFromMarker(marker))
+		return s.result(DecisionIgnored, "already_reported", hint, issue.IssueKey, "")
+	}
+
 	snapshot, err := s.snapshot(activity, issue, runID)
 	if err != nil {
 		return s.result(DecisionInternal, "snapshot_failed", hint, issue.IssueKey, "")

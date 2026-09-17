@@ -243,6 +243,38 @@ func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marke
 	return 0, false, nil
 }
 
+// FindCommentWithMarkerPrefix answers the marker of the newest comment, among
+// the issue's latest 100, whose final-line marker starts with prefix. The
+// prefix must itself be the opening of a marker and end with a separator, so
+// one run's prefix cannot match a longer run id.
+func (c *Client) FindCommentWithMarkerPrefix(ctx context.Context, issueID int64, prefix string) (string, bool, error) {
+	if issueID <= 0 || !validCommentMarkerPrefix(prefix) {
+		return "", false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
+	}
+	comments, err := c.latestComments(ctx, issueID)
+	if err != nil {
+		return "", false, err
+	}
+	for _, comment := range comments {
+		if marker := hook.ExtractCommentMarker(comment.Content); marker != "" && strings.HasPrefix(marker, prefix) {
+			return marker, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func validCommentMarkerPrefix(prefix string) bool {
+	if len(prefix) < 8 || len(prefix) > 256 || prefix[0] != '[' || prefix[len(prefix)-1] != ':' {
+		return false
+	}
+	for _, r := range prefix {
+		if r <= ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
+}
+
 // validCommentMarker accepts the bracketed one-line tag the automation
 // writes: printable ASCII, no whitespace, bounded.
 func validCommentMarker(marker string) bool {

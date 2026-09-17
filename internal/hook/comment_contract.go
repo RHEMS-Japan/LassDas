@@ -27,6 +27,29 @@ func CommentMarker(kind, runID string, qualifiers ...string) string {
 	return "[" + strings.Join(parts, ":") + "]"
 }
 
+// TerminalMarkerPrefix is the start shared by every terminal-report marker of
+// one run, whatever code and digest the report carried: a ticket whose
+// comments end with such a marker has been reported on by an earlier run, on
+// this instance or on one that ran before it. The trailing colon keeps
+// "RUN-1:" from matching "RUN-10:".
+func TerminalMarkerPrefix(runID string) string {
+	return "[" + commentMarkerPrefix + ":terminal:" + runID + ":"
+}
+
+// TerminalCodeFromMarker returns the terminal code a terminal-report marker
+// carries ("success", "model_failed", ...), or "" for any other marker.
+func TerminalCodeFromMarker(marker string) string {
+	if commentMarkerPattern.FindString(marker) != marker {
+		return ""
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(marker, "["), "]"), ":")
+	// prefix (2 parts) + kind + run + code + digest
+	if len(parts) < 6 || parts[2] != "terminal" {
+		return ""
+	}
+	return parts[4]
+}
+
 // ExtractCommentMarker returns the machine marker of a comment, which is
 // always its final line. Anchoring to the end is what keeps the identifier
 // trustworthy: question text comes from a model and comment bodies come from

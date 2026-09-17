@@ -491,3 +491,34 @@ func TestGetIssueParsesCategoryIDs(t *testing.T) {
 		t.Fatalf("category ids = %v", issue.CategoryIDs)
 	}
 }
+
+// The prefix lookup finds a terminal report whatever code and digest it
+// carried, still anchored to the final line, and never lets one run's prefix
+// match a longer run id.
+func TestFindCommentWithMarkerPrefixFindsAnyTerminalReport(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const marker = "[ticket-automation:v1:terminal:TICKET-50:success:" + digest + "]"
+	const longer = "[ticket-automation:v1:terminal:TICKET-505:model_failed:" + digest + "]"
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v2/issues/404/comments" {
+			t.Fatalf("unexpected request: method=%s path=%s", request.Method, request.URL.Path)
+		}
+		return response(200, `[`+
+			`{"id":812,"issueId":404,"content":"> `+marker+`\n引用です"},`+
+			`{"id":811,"issueId":404,"content":"別の依頼の報告\n`+longer+`"},`+
+			`{"id":810,"issueId":404,"content":"自動処理が完了しました\n`+marker+`"},`+
+			`{"id":809,"issueId":404,"content":"受付しました\n[ticket-automation:v1:ack:TICKET-50]"}]`), nil
+	})
+	got, found, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-50:")
+	if err != nil || !found || got != marker {
+		t.Fatalf("got=%q found=%v err=%v; want the terminal report of TICKET-50", got, found, err)
+	}
+	if got, found, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-5:"); err != nil || found {
+		t.Fatalf("TICKET-5 has no report but got=%q found=%v err=%v", got, found, err)
+	}
+	for _, bad := range []string{"", "[ticket-automation:v1:terminal:TICKET-50", "ticket-automation:v1:terminal:TICKET-50:", "[ticket automation:v1:terminal:T:"} {
+		if _, _, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, bad); err == nil {
+			t.Fatalf("an unshaped prefix was accepted: %q", bad)
+		}
+	}
+}

@@ -24,6 +24,21 @@ type fakeBacklog struct {
 	issueErr      error
 	activityCalls int
 	issueCalls    int
+	// reportMarker is the terminal-report marker an earlier run left on the
+	// ticket ("" = none); reportPrefixes records what intake asked for.
+	reportMarker   string
+	reportErr      error
+	reportPrefixes []string
+}
+
+func (f *fakeBacklog) FindCommentWithMarkerPrefix(_ context.Context, _ int64, prefix string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reportPrefixes = append(f.reportPrefixes, prefix)
+	if f.reportErr != nil {
+		return "", false, f.reportErr
+	}
+	return f.reportMarker, f.reportMarker != "", nil
 }
 
 func (f *fakeBacklog) GetActivity(_ context.Context, _ int64) (CanonicalActivity, error) {
@@ -637,5 +652,46 @@ func TestProcessSettlesADeletedIssueAndStallsOnOtherRejections(t *testing.T) {
 	}, &fakeStore{}, nil)
 	if result := authBroken.Process(context.Background(), testHint()); result.Decision != DecisionDependencyFailed {
 		t.Fatalf("auth failure: %+v", result)
+	}
+}
+
+// A ticket that already carries a terminal report - from this instance or
+// from one that ran before the ledger was rebuilt - is ignored before anything
+// is queued, whatever the report's code was. A failed lookup is retried, never
+// read as "no report".
+func TestProcessIgnoresTicketAlreadyReported(t *testing.T) {
+	digest := strings.Repeat("b", 64)
+	for _, code := range []TerminalCode{TerminalSuccess, TerminalModelFailed} {
+		store := &fakeStore{}
+		backlog := &fakeBacklog{activity: testActivity(), issue: testIssue(), reportMarker: CommentMarker("terminal", testIssue().IssueKey, string(code), digest)}
+		var logs bytes.Buffer
+		service := newTestService(t, backlog, store, &logs)
+		result := service.Process(context.Background(), testHint())
+		if result.Decision != DecisionIgnored || result.Code != "already_reported" {
+			t.Fatalf("code %s: Process() = %s/%s, want ignored/already_reported", code, result.Decision, result.Code)
+		}
+		if len(store.requests) != 0 {
+			t.Fatalf("code %s: a reported ticket was queued", code)
+		}
+		if len(backlog.reportPrefixes) != 1 || backlog.reportPrefixes[0] != TerminalMarkerPrefix(testIssue().IssueKey) {
+			t.Fatalf("intake asked for %v, want the ticket's terminal prefix", backlog.reportPrefixes)
+		}
+		if !strings.Contains(logs.String(), "terminal_code="+string(code)) {
+			t.Fatalf("log lacks the earlier report's code: %s", logs.String())
+		}
+	}
+
+	store := &fakeStore{}
+	backlog := &fakeBacklog{activity: testActivity(), issue: testIssue(), reportErr: NewExternalFailure("backlog", FailureRetryable, "timeout")}
+	result := newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
+	if result.Decision != DecisionRetryRequested || result.Code != "report_lookup_failed" || len(store.requests) != 0 {
+		t.Fatalf("lookup failure: Process() = %s/%s queued=%d, want retry without queueing", result.Decision, result.Code, len(store.requests))
+	}
+
+	store = &fakeStore{}
+	backlog = &fakeBacklog{activity: testActivity(), issue: testIssue()}
+	result = newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
+	if result.Decision != DecisionAccepted || result.Code != "queue_created" || len(backlog.reportPrefixes) != 1 {
+		t.Fatalf("unreported ticket: Process() = %s/%s asked=%d, want queue_created after one lookup", result.Decision, result.Code, len(backlog.reportPrefixes))
 	}
 }
