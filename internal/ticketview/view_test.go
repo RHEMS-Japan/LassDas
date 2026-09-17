@@ -585,7 +585,9 @@ func TestUnsealedRoundIsInProgressWhileTheRunnerWorks(t *testing.T) {
 		t.Fatalf("a stopped run must say the round sealed nothing: %q / %q", got, toneOfStep(stopped, "implement"))
 	}
 
-	write(filepath.Join(dir, "current-step.json"), `{"step":"lassdas-review-a","started_at":"2026-09-17T07:26:30Z"}`)
+	// A step that started just now: the record is only believed while the
+	// step could still be running.
+	write(filepath.Join(dir, "current-step.json"), `{"step":"lassdas-review-a","started_at":"`+time.Now().Add(-30*time.Second).UTC().Format(time.RFC3339)+`"}`)
 	working, err := Build(dir)
 	if err != nil {
 		t.Fatal(err)
