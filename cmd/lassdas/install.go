@@ -111,6 +111,9 @@ func setupNote(ctx context.Context, engineRoot string, options installOptions, o
 	if options.registryLogin != "" {
 		note.RegistryLogin = options.registryLogin
 	}
+	if options.public && options.registryLogin != "" {
+		return errors.New("--public と --registry-login は同時に指定できません (公開イメージにログインは要りません)")
+	}
 	if options.public {
 		note.RegistryLogin = ""
 	}

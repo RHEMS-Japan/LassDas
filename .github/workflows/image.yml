@@ -78,6 +78,14 @@ jobs:
         run: |
           set -euo pipefail
           [ "${GITHUB_REF}" = "refs/heads/main" ] || { echo "not main: ${GITHUB_REF}" >&2; exit 1; }
+          # A newer commit on main has its own run that writes the note
+          # from its own tree; this run's note would only be overwritten,
+          # and a rebase onto it would conflict on the same lines.
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "${GITHUB_SHA}" ]; then
+            echo "superseded: main moved to $(git rev-parse --short origin/main); its run writes the note"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --quiet -- docs/DISTRIBUTION.json; then

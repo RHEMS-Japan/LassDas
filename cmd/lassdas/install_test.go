@@ -266,6 +266,9 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	if err := setupNote(context.Background(), engine, installOptions{registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
 		t.Fatal(err)
 	}
+	if err := setupNote(context.Background(), engine, installOptions{public: true, registryLogin: "docker login --password-stdin registry"}, &out); err == nil {
+		t.Fatal("--public and --registry-login together must be refused")
+	}
 	// Written elsewhere, it still starts from the checkout's note.
 	elsewhere := filepath.Join(t.TempDir(), "note.json")
 	if err := setupNote(context.Background(), engine, installOptions{out: elsewhere, image: next, engineSHA: strings.Repeat("e", 40), buildRecord: "https://example/build/2"}, &out); err != nil {
