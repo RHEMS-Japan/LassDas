@@ -49,13 +49,18 @@ type ModelImpasseOutput struct {
 // questions and decision_sha256; the remaining fields keep the derivation
 // auditable next to every other sealed artifact.
 type ImpasseDecision struct {
-	SchemaVersion       int                 `json:"schema_version"`
-	PromptVersion       int                 `json:"prompt_version"`
-	DeliveryID          string              `json:"delivery_id"`
-	InputSHA256         string              `json:"input_sha256"`
-	ConfigSHA256        string              `json:"config_sha256"`
-	ToolSHA             string              `json:"tool_sha"`
-	CandidateSHA256     string              `json:"candidate_sha256"`
+	SchemaVersion int    `json:"schema_version"`
+	PromptVersion int    `json:"prompt_version"`
+	DeliveryID    string `json:"delivery_id"`
+	InputSHA256   string `json:"input_sha256"`
+	ConfigSHA256  string `json:"config_sha256"`
+	ToolSHA       string `json:"tool_sha"`
+	// CandidateSHA256 names the change the reviews refused; DesignSHA256
+	// names the plan they refused. A decision carries exactly one of them:
+	// a run's implementation rounds and its design rounds each reach their
+	// own impasse.
+	CandidateSHA256     string              `json:"candidate_sha256,omitempty"`
+	DesignSHA256        string              `json:"design_sha256,omitempty"`
 	ReviewSHA256s       []string            `json:"review_sha256s"`
 	ClarificationSHA256 string              `json:"clarification_sha256"`
 	Outcome             string              `json:"outcome"`
@@ -148,6 +153,11 @@ func (i *ModelInvoker) AskImpasse(
 }
 
 func sealImpasseDecision(decision ImpasseDecision) (ImpasseDecision, error) {
+	if (decision.CandidateSHA256 == "") == (decision.DesignSHA256 == "") {
+		// One subject, named once: a change or a plan, never both and never
+		// neither (review of #199).
+		return ImpasseDecision{}, errors.New("an impasse decision names one subject")
+	}
 	decision.DecisionSHA256 = ""
 	digest, err := sealedDigest(decision)
 	if err != nil {

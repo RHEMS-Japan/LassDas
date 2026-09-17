@@ -15,6 +15,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
 	"automation.internal/ticket-ingress/internal/worker/investigate"
+	"time"
 )
 
 // The investigating designer's shapes end and fail in their own ways
@@ -131,6 +132,13 @@ func handleDesignChainFailure(
 		case outcome == "nonconverged" && plan.Shape == runtime.ShapeInvestigation:
 			code = hook.TerminalInvestigationNonconverged
 		case outcome == "nonconverged":
+			// This is where a design's rounds actually end: the decide verb
+			// turns the final round's revise into nonconverged, so the
+			// revise branch above is never taken at the limit. The ask
+			// belonged here (review of #199).
+			if asked, err := askDesignImpasse(ctx, config, services, envelope, run, hermes, view, logger); err != nil || asked {
+				return true, err
+			}
 			code = hook.TerminalDesignNonconverged
 		default:
 			// Approved and still failed: the applier's instruction could not
@@ -393,6 +401,11 @@ func nextDesignRoundOrEnd(
 		repository = ""
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	if code == hook.TerminalDesignNonconverged {
+		if asked, askErr := askDesignImpasse(ctx, config, services, envelope, run, hermes, view, logger); askErr != nil || asked {
+			return askErr
+		}
+	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
 		return err
 	}
@@ -602,3 +615,58 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 	}
 	return ids, omitted
 }
+
+// askDesignImpasse puts the disagreement to the requester when a design's
+// rounds are spent, and reports whether a question was posted. A run whose
+// implementation rounds ran out has always asked; this half ended without a
+// word (live 2026-09-17).
+//
+// Every failure here is only a question not asked: the caller then ends the
+// run as it did before, which is the honest fallback.
+func askDesignImpasse(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	envelope hook.DispatchEnvelope,
+	run state.RunOverview,
+	hermes *runtime.Hermes,
+	view chainView,
+	logger Logger,
+) (bool, error) {
+	reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath)
+	if err != nil {
+		logger.Error("design question not written; the run ends as nonconverged", "run", run.RunID, "error", err.Error())
+		return false, nil
+	}
+	runDir := runDirectory(config, run.DeliveryID)
+	// The question is one model call, and this is the attendant's own loop:
+	// without a deadline a slow assessor holds every other run's tick
+	// (review of #199).
+	askCtx, cancel := context.WithTimeout(ctx, designImpasseTimeout)
+	defer cancel()
+	pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
+	asked, err := pipeline.AskDesignImpasse(askCtx, reviewers)
+	if err != nil {
+		logger.Error("design question not written; the run ends as nonconverged", "run", run.RunID, "error", err.Error())
+		return false, nil
+	}
+	if !asked {
+		return false, nil
+	}
+	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+	if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
+		// The question is written but unposted; the run stays where it is
+		// and the next tick tries again. Said out loud so a deployment that
+		// cannot post is visible rather than quiet.
+		logger.Error("the design question could not be posted", "run", run.RunID, "error", err.Error())
+		return false, err
+	}
+	logger.Info("design rounds spent; the requester was asked", "run", run.RunID)
+	return true, archiveChain(ctx, hermes, view.all)
+}
+
+// designImpasseTimeout bounds that one call inside the attendant's tick,
+// which runs every minute. A question author that cannot answer inside it
+// leaves the run ending as it did, which is better than holding every other
+// run's tick behind it (review of #199).
+const designImpasseTimeout = 2 * time.Minute

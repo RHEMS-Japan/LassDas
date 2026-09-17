@@ -90,6 +90,8 @@ func run(ctx context.Context, args []string) error {
 		return runDecideDesign(args[1:])
 	case "impasse-question":
 		return runImpasseQuestion(ctx, args[1:])
+	case "design-impasse-question":
+		return runDesignImpasseQuestion(ctx, args[1:])
 	case "compose-trail":
 		return runComposeTrail(args[1:])
 	case "preserve-answers":
@@ -1006,6 +1008,65 @@ func runImpasseQuestion(ctx context.Context, args []string) error {
 	}
 	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReviewJSONBytes); err != nil {
 		return errors.New("impasse decision could not be written")
+	}
+	return nil
+}
+
+// runDesignImpasseQuestion writes the question a design that would not
+// converge puts to its requester. It is the design half of
+// runImpasseQuestion: the same decision file, read by the same poster.
+func runDesignImpasseQuestion(ctx context.Context, args []string) error {
+	flags := commandFlags("design-impasse-question")
+	configPath := flags.String("config", "", "")
+	toolSHA := flags.String("tool-sha", "", "")
+	ticketPath := flags.String("ticket", "", "")
+	designPath := flags.String("design", "", "")
+	clarificationPath := flags.String("clarification", "", "")
+	outputPath := flags.String("out", "", "")
+	var reviewPaths stringList
+	flags.Var(&reviewPaths, "review", "")
+	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *designPath, *outputPath) ||
+		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 {
+		return errors.New("design-impasse-question arguments are invalid")
+	}
+	config, err := readConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	var request worker.TicketRequest
+	if err := worker.ReadJSONFile(*ticketPath, worker.MaxTicketJSONBytes, &request); err != nil {
+		return errors.New("reception ticket could not be read")
+	}
+	if request.ToolSHA != *toolSHA || request.Validate(config) != nil {
+		return errors.New("reception ticket is not bound to this run")
+	}
+	design, err := investigate.ReadDesign(*designPath)
+	if err != nil {
+		return errors.New("design could not be read")
+	}
+	reviews := make([]investigate.DesignReview, 0, len(reviewPaths))
+	for _, path := range reviewPaths {
+		review, err := investigate.ReadDesignReview(path)
+		if err != nil {
+			return errors.New("design review could not be read")
+		}
+		reviews = append(reviews, review)
+	}
+	clarification, err := readClarificationContext(*clarificationPath)
+	if err != nil {
+		return err
+	}
+	invoker, err := newModelInvoker(ctx, config.Models.Readiness.Assessor)
+	if err != nil {
+		return err
+	}
+	decision, err := invoker.AskDesignImpasse(ctx, design, reviews, clarification, request, config, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "design impasse question failed", err)
+		return errors.New("design impasse question failed")
+	}
+	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReviewJSONBytes); err != nil {
+		return errors.New("design impasse decision could not be written")
 	}
 	return nil
 }
