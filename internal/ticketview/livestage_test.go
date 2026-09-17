@@ -99,6 +99,30 @@ func TestPinnedStagesAndTheTableAgree(t *testing.T) {
 			t.Errorf("the table files %q under %q, and nothing pins it", step, stage)
 		}
 	}
+	// And the other way: every pinned step is one the scan still finds in
+	// the engine. Counting names caught a step that stopped being
+	// collected only while nothing else was added in its place; this
+	// catches it either way (review of #200).
+	names, prefixes := runnerStepNames(t)
+	found := map[string]bool{}
+	for _, name := range names {
+		found[runner.LiveLogName(name)] = true
+	}
+	for step := range pinnedStages {
+		if found[step] {
+			continue
+		}
+		covered := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(step, runner.LiveLogName(prefix + "x")[:len(runner.LiveLogName(prefix+"x"))-1]) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("%q is pinned to a stage and the scan no longer finds the engine starting it", step)
+		}
+	}
 	if stage := LiveStage("a-step-nobody-wrote"); stage != "" {
 		t.Errorf("an unknown step claimed stage %q", stage)
 	}
@@ -438,7 +462,11 @@ func forwardedStepNames(t *testing.T) map[string][]string {
 				end = at[1] + next[0]
 			}
 			// Only when the helper actually starts a step with that name.
-			if regexp.MustCompile(`p\.(?:worker|step|controller)\(ctx,\s*` + param + `\b`).MatchString(source[at[1]:end]) {
+			// The same shape the step scan uses, because gofmt wraps a
+			// long call and a pattern that needed "(ctx," on one line
+			// quietly stopped seeing it (review of #200).
+			starts := regexp.MustCompile(`(?s)p\.(?:worker|step|controller)\(\s*ctx\s*,\s*` + param + `\b`)
+			if starts.MatchString(source[at[1]:end]) {
 				byHelper[fn] = param
 				forwardedParam[fn] = param
 			}
@@ -453,7 +481,7 @@ func forwardedStepNames(t *testing.T) map[string][]string {
 	found := map[string][]string{}
 	for helper := range byHelper {
 		found[helper] = nil
-		call := regexp.MustCompile(`p\.` + helper + `\(ctx,\s*"([^"]+)"`)
+		call := regexp.MustCompile(`(?s)p\.` + helper + `\(\s*ctx\s*,\s*"([^"]+)"`)
 		for _, source := range sources {
 			for _, match := range call.FindAllStringSubmatch(source, -1) {
 				found[helper] = append(found[helper], match[1])
