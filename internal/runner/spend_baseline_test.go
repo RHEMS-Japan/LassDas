@@ -250,8 +250,16 @@ func consumerConfigFile(t *testing.T, baseURL, keyEnv string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := regexp.MustCompile(`"base_url"\s*:\s*"[^"]*"`).ReplaceAllString(string(raw), `"base_url": "`+baseURL+`"`)
-	body = regexp.MustCompile(`"api_key_env"\s*:\s*"[^"]*"`).ReplaceAllString(body, `"api_key_env": "`+keyEnv+`"`)
+	urls := regexp.MustCompile(`"base_url"\s*:\s*"[^"]*"`)
+	keys := regexp.MustCompile(`"api_key_env"\s*:\s*"[^"]*"`)
+	// A silent no-op here would leave the fixture pointing at the real
+	// endpoints while the stand-in transport answered anyway, and the test
+	// would pass having measured nothing (review of #202).
+	if len(urls.FindAllString(string(raw), -1)) == 0 || len(keys.FindAllString(string(raw), -1)) == 0 {
+		t.Fatal("the shipped configuration no longer names base_url or api_key_env; this fixture is rewriting nothing")
+	}
+	body := urls.ReplaceAllString(string(raw), `"base_url": "`+baseURL+`"`)
+	body = keys.ReplaceAllString(body, `"api_key_env": "`+keyEnv+`"`)
 	path := filepath.Join(t.TempDir(), "consumer.json")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -269,8 +277,9 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 func TestARunThatDiesInIntakeStillReportsWhatItSpent(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("SPEND_KEY", "a-key")
+	baselineTakenAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
 	if err := os.WriteFile(filepath.Join(workspace, SpendBaselineFile), mustJSON(t, worker.UsageBaseline{
-		TakenAt: time.Now().UTC().Add(-10 * time.Minute),
+		TakenAt: baselineTakenAt,
 		Keys:    []worker.KeyUsage{{KeyEnv: "SPEND_KEY", UsageUSD: 6.0}},
 	}), 0o600); err != nil {
 		t.Fatal(err)
@@ -279,25 +288,42 @@ func TestARunThatDiesInIntakeStillReportsWhatItSpent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "intake.json")); err == nil {
 		t.Fatal("the fixture has an intake record")
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/key":
-			_, _ = io.WriteString(w, `{"data":{"usage":9.0}}`)
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
+	// Through loadRunSpendText, the function the report actually calls:
+	// testing the helpers under it left the one line that reaches them
+	// revertible with the whole suite green (review of #202).
 	terminal := &Terminal{
 		workspace: workspace,
 		config:    runtime.Config{ConsumerConfigPath: consumerConfigFile(t, "https://gateway.example", "SPEND_KEY")},
 		logger:    &baselineTestLogger{},
+		spendTransport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/key":
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"usage":9.0}}`)), Header: http.Header{}}, nil
+			default:
+				return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+			}
+		}),
 	}
-	text := terminal.readSpendWith(context.Background(), oneSeatConfig(server.URL, "SPEND_KEY"),
-		server.Client(), terminal.spendWindowStart())
+	text := terminal.loadRunSpendText(context.Background())
 	if !strings.Contains(text, "$3.00") {
 		t.Fatalf("the requester was told nothing about what the run spent: %q", text)
+	}
+	// The window is the baseline's own moment, not "now": the precise
+	// reading is still tried first, and on a gateway that has it, a window
+	// starting now would return nothing for exactly these runs (review of
+	// #202).
+	raw, err := os.ReadFile(filepath.Join(workspace, SpendRecordFile))
+	if err != nil {
+		t.Fatalf("no spend record was kept: %v", err)
+	}
+	var record struct {
+		Since time.Time `json:"since"`
+	}
+	if json.Unmarshal(raw, &record) != nil {
+		t.Fatalf("the record could not be read: %s", raw)
+	}
+	if drift := record.Since.Sub(baselineTakenAt); drift < -time.Second || drift > time.Second {
+		t.Errorf("the window starts at %v, not where the baseline was taken (%v)", record.Since, baselineTakenAt)
 	}
 }
 

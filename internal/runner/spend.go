@@ -37,7 +37,7 @@ func (t *Terminal) loadRunSpendText(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	return t.readSpendWith(ctx, config, &http.Client{Timeout: spendReadTimeout}, since)
+	return t.readSpendWith(ctx, config, &http.Client{Timeout: spendReadTimeout, Transport: t.spendTransport}, since)
 }
 
 // spendWindowStart is the moment this run began working. The intake record
