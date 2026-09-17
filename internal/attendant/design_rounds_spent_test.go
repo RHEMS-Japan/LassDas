@@ -430,3 +430,63 @@ func TestAChangeIsWrittenAgainWhenTheDesignCannotBe(t *testing.T) {
 		t.Errorf("no second implementation round was created: %v", created)
 	}
 }
+
+// A delivery whose records were written by another engine is recognised,
+// and the reception is what decides it - checked before anything that
+// would read one of those records. Every stage refuses a draft written by
+// a different engine, so such a delivery could not take another step, and
+// the failed card was healed and dispatched again every minute for ever:
+// measured live, thirty-one minutes in 工程の復旧処理中 after an upgrade
+// (完遂率を最優先、発注者指示 2026-09-17).
+func TestADeliveryCaughtByAnEngineUpdateIsRecognised(t *testing.T) {
+	runDir := t.TempDir()
+	running := strings.Repeat("b", 40)
+	config := runtime.Config{Identity: runtime.IdentityConfig{EngineSHA: running}}
+
+	// No draft yet: nothing to compare, and the run carries on.
+	if _, changed := engineChangedUnderRun(config, runDir); changed {
+		t.Error("a delivery with no draft was called interrupted")
+	}
+	write := func(sha string) {
+		if err := os.WriteFile(filepath.Join(runDir, "ticket-draft.json"),
+			[]byte(`{"tool_sha":"`+sha+`","repository":"example/consumer"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(running)
+	if _, changed := engineChangedUnderRun(config, runDir); changed {
+		t.Error("a delivery written by the engine that is running was called interrupted")
+	}
+	write(strings.Repeat("a", 40))
+	wrote, changed := engineChangedUnderRun(config, runDir)
+	if !changed || wrote != strings.Repeat("a", 40) {
+		t.Fatalf("an interrupted delivery was not recognised: %q %v", wrote, changed)
+	}
+}
+
+// And it is decided before anything reads a record that would refuse it.
+func TestTheEngineCheckComesFirst(t *testing.T) {
+	body, err := os.ReadFile("chains.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	start := strings.Index(source, "func advanceClaimedRun(")
+	if start < 0 {
+		t.Fatal("the function was not found; this check is looking in the wrong place")
+	}
+	end := strings.Index(source[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("the function does not end")
+	}
+	within := source[start : start+end]
+	checked := strings.Index(within, "engineChangedUnderRun(")
+	if checked < 0 {
+		t.Fatal("a delivery caught by an engine update is no longer recognised, so it would be healed for ever")
+	}
+	// readEnvelope is the first record read, and the plan after it; both
+	// belong to the engine that wrote them.
+	if reads := strings.Index(within, "readEnvelope("); reads >= 0 && reads < checked {
+		t.Error("a record is read before the engine is compared, so the delivery fails on it instead of starting again")
+	}
+}

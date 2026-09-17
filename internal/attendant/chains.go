@@ -426,6 +426,16 @@ func consumerHasApplier(consumerConfigPath string) (bool, error) {
 // to the requester, everything else becomes an honest terminal. A claim
 // with no chain at all is a preparation that died between claiming and
 // creating cards; the run goes back to the queue and restarts cleanly.
+// engineChangedUnderRun answers whether this delivery's records were
+// written by an engine other than the one running now, and names it.
+func engineChangedUnderRun(config runtime.Config, runDir string) (string, bool) {
+	sha, err := readField(runDir, "ticket-draft.json", "tool_sha")
+	if err != nil || sha == "" || config.Identity.EngineSHA == "" {
+		return "", false
+	}
+	return sha, sha != config.Identity.EngineSHA
+}
+
 func advanceClaimedRun(
 	ctx context.Context,
 	config runtime.Config,
@@ -440,6 +450,28 @@ func advanceClaimedRun(
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
 	runDir := runDirectory(config, run.DeliveryID)
+	// Every stage refuses a draft written by a different engine, because a
+	// record has to re-derive under the engine that reads it. So a
+	// delivery that was in flight when the engine was updated could not
+	// take another step - and the failed card was healed and dispatched
+	// again, every minute, for ever. Measured live: a delivery sat in
+	// "工程の復旧処理中" for thirty-one minutes after an upgrade, saying
+	// "ticket draft could not be read" each time.
+	//
+	// It starts again instead. The work so far is redone under the engine
+	// that is running, which costs a few minutes; the alternative is a
+	// delivery that never ends and never reports (完遂率を最優先、発注者
+	// 指示 2026-09-17).
+	if wrote, changed := engineChangedUnderRun(config, runDir); changed {
+		logger.Info("the engine changed under this delivery; starting it again",
+			"run", run.RunID, "wrote", wrote, "running", config.Identity.EngineSHA)
+		for _, task := range view.all {
+			if err := hermes.Archive(ctx, task.ID); err != nil {
+				return err
+			}
+		}
+		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
+	}
 	envelope, err := readEnvelope(runDir, run.DeliveryID)
 	if err != nil {
 		// Without the sealed envelope nothing can be reported; a fresh
