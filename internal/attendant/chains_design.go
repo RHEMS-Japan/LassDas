@@ -423,6 +423,26 @@ func nextDesignRoundOrEnd(
 	if !errors.Is(err, errDesignRoundLimit) {
 		return err
 	}
+	// The designer cannot be asked again. When the delivery still has
+	// implementation rounds, that is not the end of it: the design was
+	// approved, the change exists, and the reviewers who objected to the
+	// plan are the ones who will read the next attempt. Writing it again
+	// under the design it has is the only work left, and it is work that
+	// finishes - measured live, a delivery with an approved design, a
+	// written change and objecting reviewers died here with nothing
+	// delivered (完遂率を最優先、発注者指示 2026-09-17).
+	// Only where there is written work to revise. The applier's objection
+	// arrives before it writes anything - it refused to carry out the
+	// design - so asking it again under the same design gets the same
+	// refusal; that delivery has nothing left to try.
+	_, candidateSealed := os.Stat(filepath.Join(runDir, fmt.Sprintf("history/stage-%d/candidate.json", view.round)))
+	if cause == designCalledWrongLater && plan.Shape == runtime.ShapeDesign && candidateSealed == nil {
+		if limit, limitErr := consumerMaxStages(config.ConsumerConfigPath); limitErr == nil && view.round < limit {
+			logger.Info("design rounds spent; the change is written again under the design it has",
+				"run", run.RunID, "round", view.round+1, "of", limit, "why", why)
+			return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
+		}
+	}
 	code := cause.terminalCode(plan.Shape)
 	repository, readErr := readField(runDir, "ticket-draft.json", "repository")
 	if readErr != nil {

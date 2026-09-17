@@ -136,6 +136,17 @@ func (s *Service) Process(ctx context.Context, hint WebhookHint) Result {
 	disposition, err := s.store.Enqueue(ctx, QueueRequest{Envelope: envelope, QueuedAt: s.now().UTC()})
 	if err != nil {
 		class, code := FailureDetails(err)
+		// A ticket that cannot be queued because this project's delivery
+		// slot is held by another run is not failing: it is waiting its
+		// turn, and its turn comes when that run reports. It is asked
+		// about again for as long as that takes. Bounding it dropped
+		// tickets filed while a delivery was running - and a delivery runs
+		// for half an hour (live 2026-09-17).
+		if code == queueSlotBusyReason {
+			s.logger.Info("the ticket is waiting for the delivery before it",
+				"activity_id", hint.ActivityID, "issue_key", issue.IssueKey, "delivery_id", deliveryID)
+			return s.result(DecisionRetryRequested, "queue_waiting", hint, issue.IssueKey, deliveryID)
+		}
 		// Said out loud, always. This error used to be dropped where it
 		// was received, so a ticket that could not be queued retried every
 		// minute for ever with the reason nowhere on the machine - not in
@@ -318,6 +329,12 @@ func (s *Service) externalResult(operation string, err error, hint WebhookHint) 
 // not going away on its own, and holding the scan's cursor there costs
 // every ticket filed afterwards.
 const queueRetryWindow = 10 * time.Minute
+
+// queueSlotBusyReason is the store's word for "this project already has a
+// delivery in flight". It is the one failure that is not a failure: the
+// slot is released when that delivery reports, so the ticket behind it is
+// asked about until then rather than bounded like a stuck write.
+const queueSlotBusyReason = "queue_conflict_unresolved"
 
 func (s *Service) result(decision Decision, code string, hint WebhookHint, issueKey, deliveryID string) Result {
 	attributes := []any{

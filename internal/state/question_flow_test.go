@@ -491,25 +491,29 @@ func TestQuestionFlowNeverSkipsATicketWhoseIngestFailed(t *testing.T) {
 	}
 	harness.ingest.failWith = hook.DecisionRetryRequested
 
-	// The first scan hits the transient failure on 41 and stops there.
+	// The first scan hits the transient failure on 41 and reads 42 anyway.
+	// Stopping at 41 meant a ticket waiting its turn kept every ticket
+	// filed after it from being read at all - measured live: a ticket filed
+	// three minutes after a stuck one produced not one line of log for as
+	// long as the stall lasted (完遂率を最優先、発注者指示 2026-09-17).
 	if result := harness.tick(t); result.Code != "question_tick_ingest_incomplete" || result.Decision != hook.DecisionRetryRequested {
 		t.Fatalf("tick with a failing ingest = %+v", result)
 	}
-	if len(harness.ingest.seen) != 1 || harness.ingest.seen[0] != 41 {
-		t.Fatalf("processed = %v, want only 41", harness.ingest.seen)
+	if len(harness.ingest.seen) != 2 || harness.ingest.seen[0] != 41 || harness.ingest.seen[1] != 42 {
+		t.Fatalf("processed = %v, want 41 then 42", harness.ingest.seen)
 	}
 
-	// The next scan retries the very ticket that failed, then continues.
+	// And the cursor did not move past 41, so the next scan starts there.
 	if result := harness.tick(t); result.Code != "question_tick_ingested" {
 		t.Fatalf("retry tick = %+v", result)
 	}
-	if len(harness.ingest.seen) != 3 || harness.ingest.seen[1] != 41 || harness.ingest.seen[2] != 42 {
+	if len(harness.ingest.seen) != 4 || harness.ingest.seen[2] != 41 || harness.ingest.seen[3] != 42 {
 		t.Fatalf("processed = %v, want 41 retried then 42", harness.ingest.seen)
 	}
 	if result := harness.tick(t); result.Code != "question_tick_idle" {
 		t.Fatalf("settled tick = %+v", result)
 	}
-	if len(harness.ingest.seen) != 3 {
+	if len(harness.ingest.seen) != 4 {
 		t.Fatalf("processed = %v, want no re-feeding once settled", harness.ingest.seen)
 	}
 }

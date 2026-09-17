@@ -882,10 +882,18 @@ func (s *QuestionTickService) completeLostIngest(ctx context.Context) Result {
 			// and this scan is the only net under a lost webhook: the
 			// requester would wait forever with no acknowledgement, no
 			// question and no final report.
+			//
+			// The scan carries on to the activities behind it. Stopping
+			// here meant one ticket waiting its turn kept every ticket
+			// filed after it from being read at all - measured live: a
+			// ticket filed three minutes after a stuck one produced not
+			// one line of log for as long as the stall lasted.
 			stalled = true
-			break
+			continue
 		}
-		advanced = hint.ActivityID
+		if !stalled {
+			advanced = hint.ActivityID
+		}
 	}
 	if advanced > cursor {
 		if err := s.store.StoreIngestCursor(ctx, s.config, advanced); err != nil {
