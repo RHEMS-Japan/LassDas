@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -106,5 +107,48 @@ func TestTheStylesheetAndTheScriptAgreeOnTheirClasses(t *testing.T) {
 	}
 	if strings.Contains(page, "body.livePinned .livepane.on .node.hasLive .nname") {
 		t.Error("the exception is written as a descendant of the pane, which the rail is not")
+	}
+}
+
+// Every stage the attendant can place has somewhere to go on the rail.
+// The board draws nine, and one the attendant placed was not among them,
+// so the whole rail went dark while a pull request was being published
+// (review of #200).
+func TestEveryPlacedStageIsDrawnOnTheRail(t *testing.T) {
+	status, err := os.ReadFile(filepath.Join("..", "..", "internal", "attendant", "status.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := os.ReadFile("board.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drawn := map[string]bool{}
+	for _, match := range regexp.MustCompile(`\["([a-z]+)", "[^"]+"\]`).FindAllStringSubmatch(string(page), -1) {
+		drawn[match[1]] = true
+	}
+	if len(drawn) < 9 {
+		t.Fatalf("only %d rail stages were found in the page; this check is looking in the wrong place", len(drawn))
+	}
+	// Resting and waiting states are not rail positions; the rail shows
+	// where a run that is working has got to.
+	resting := map[string]bool{"done": true, "failed": true, "stopped": true, "question": true, "attention": true}
+	placed := map[string]bool{}
+	for _, match := range regexp.MustCompile(`place(?:At)?\("([a-z_]+)"`).FindAllStringSubmatch(string(status), -1) {
+		placed[match[1]] = true
+	}
+	if len(placed) < 9 {
+		t.Fatalf("only %d placed stages were found; this check is looking in the wrong place", len(placed))
+	}
+	for stage := range placed {
+		if resting[stage] || drawn[stage] {
+			continue
+		}
+		// One exception, named: the run has finished every stage and is
+		// writing its report, which the rail shows as all done.
+		if stage == "reporting" && strings.Contains(string(page), `stepID === "reporting"`) {
+			continue
+		}
+		t.Errorf("the attendant places %q and the rail does not draw it, so the rail goes dark", stage)
 	}
 }

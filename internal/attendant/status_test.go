@@ -180,11 +180,15 @@ func TestClassifyRunNamesEveryPipelinePosition(t *testing.T) {
 		"apply before reviews":       {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("apply", 1, "running"), chainCard("review-a", 1, "todo"), chainCard("validate", 1, "todo")}, wantStep: "implement"},
 		"review after apply":         {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("apply", 1, "done"), chainCard("review-a", 1, "done"), chainCard("review-b", 1, "running"), chainCard("validate", 1, "todo"), chainCard("publish", 1, "todo")}, wantStep: "review"},
 		"validation before publish":  {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("review-a", 1, "done"), chainCard("review-b", 1, "done"), chainCard("validate", 1, "running"), chainCard("publish", 1, "todo")}, wantStep: "checks"},
-		"PR publication":             {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("validate", 1, "done"), chainCard("publish", 1, "running")}, wantStep: "reporting"},
-		"cancelled":                  {run: state.RunOverview{State: "terminal", TerminalCode: "cancelled"}, wantStep: "stopped"},
-		"failed terminal":            {run: state.RunOverview{State: "terminal", TerminalCode: "validation_failed"}, wantStep: "failed"},
-		"checks waiting":             {run: state.RunOverview{State: "terminal", TerminalCode: "success"}, tasks: []runtime.BoardTask{deliverTask("checks", "running")}, wantStep: "checks"},
-		"integrate running":          {run: state.RunOverview{State: "terminal", TerminalCode: "success"}, tasks: []runtime.BoardTask{deliverTask("checks", "done"), deliverTask("integrate", "running")}, wantStep: "staging"},
+		// Publishing is the STG stage: the card makes the pull request,
+		// publishes the branch and waits for the deployment. It used to be
+		// placed on a stage the board's rail does not draw, which left the
+		// rail dark for the whole of it (review of #200).
+		"PR publication":    {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("validate", 1, "done"), chainCard("publish", 1, "running")}, wantStep: "staging"},
+		"cancelled":         {run: state.RunOverview{State: "terminal", TerminalCode: "cancelled"}, wantStep: "stopped"},
+		"failed terminal":   {run: state.RunOverview{State: "terminal", TerminalCode: "validation_failed"}, wantStep: "failed"},
+		"checks waiting":    {run: state.RunOverview{State: "terminal", TerminalCode: "success"}, tasks: []runtime.BoardTask{deliverTask("checks", "running")}, wantStep: "checks"},
+		"integrate running": {run: state.RunOverview{State: "terminal", TerminalCode: "success"}, tasks: []runtime.BoardTask{deliverTask("checks", "done"), deliverTask("integrate", "running")}, wantStep: "staging"},
 		"go awaited": {run: state.RunOverview{State: "terminal", TerminalCode: "success"},
 			artifact: map[string]string{"deliver-staging-report.json": `{"verdict":"pass"}`}, wantStep: "confirm"},
 		"promotion held": {run: state.RunOverview{State: "terminal", TerminalCode: "success"},

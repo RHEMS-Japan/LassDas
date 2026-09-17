@@ -377,6 +377,13 @@ function setTrack(container, stepID, round, stage) {
     current = STEP_INDEX[stage];
     held = true;
   }
+  if (current === undefined && stepID === "reporting") {
+    // The run has finished its work and is writing its report. Every
+    // stage behind it is done; none is running. Without this the rail
+    // went dark at the end of a delivery that had completed all of them
+    // (review of #200).
+    current = STEPS.length;
+  }
   container.classList.toggle("idle", current === undefined);
   container.querySelectorAll(".node").forEach((node, index) => {
     node.classList.toggle("done", current !== undefined && index < current);

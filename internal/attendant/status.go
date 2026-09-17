@@ -302,7 +302,12 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 	case validateLeft:
 		status.place("checks", "変更内容の検査中", detail)
 	case publishLeft:
-		status.place("reporting", "PR の公開処理中", detail)
+		// The publish card creates the pull request, publishes the branch
+		// and waits for the staging deployment - that is the STG stage,
+		// and the steps it runs are offered under STG. Placing a stage the
+		// board's rail does not draw left the whole rail dark for the
+		// whole of publishing (review of #200).
+		status.place("staging", "PR の公開処理中", detail)
 	default:
 		status.place("implement", "次の工程を準備中", detail)
 	}
