@@ -58,8 +58,11 @@ func TestSpendKeyEnvsDeduplicatesSharedKeys(t *testing.T) {
 
 func TestRolesByKeyEnvNamesEverySeatOnAKey(t *testing.T) {
 	roles := RolesByKeyEnv(spendTestConfig())
-	if got := strings.Join(roles["IMPL_KEY"], "|"); got != "実装|受付" {
-		t.Errorf("IMPL_KEY roles = %q, want 実装|受付", got)
+	// The endpoint the engine calls itself and the launch that implements
+	// are two seats; a deployment that gives them different keys must be
+	// able to tell the two figures apart (review of #196).
+	if got := strings.Join(roles["IMPL_KEY"], "|"); got != "実装 (本体からの直接呼び出し)|受付" {
+		t.Errorf("IMPL_KEY roles = %q, want 実装 (本体からの直接呼び出し)|受付", got)
 	}
 	if got := strings.Join(roles["REVIEW_B_KEY"], "|"); got != "レビュー review-b" {
 		t.Errorf("REVIEW_B_KEY roles = %q, want レビュー review-b", got)
@@ -141,7 +144,7 @@ func TestComposeSpendTextRendersRolesAndTotal(t *testing.T) {
 
 	text := ComposeSpendText(spend, RolesByKeyEnv(config))
 
-	for _, want := range []string{"合計: $0.85", "約 128 円", "実装 / 受付", "レビュー review-b", "$0.0080"} {
+	for _, want := range []string{"合計: $0.85", "約 128 円", "実装 (本体からの直接呼び出し) / 受付", "レビュー review-b", "$0.0080"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text missing %q:\n%s", want, text)
 		}
@@ -305,7 +308,7 @@ func TestComposeSpendTextFoldsRolesOfASharedKey(t *testing.T) {
 
 	text := ComposeSpendText(spend, RolesByKeyEnv(config))
 
-	if !strings.Contains(text, "実装 / 受付:") {
+	if !strings.Contains(text, "実装 (本体からの直接呼び出し) / 受付:") {
 		t.Errorf("a key serving two seats must list both:\n%s", text)
 	}
 	if !strings.Contains(text, "レビュー review-a / 受付:") {
@@ -339,6 +342,9 @@ func TestSpendListsTheDesignerAndTheDesignJudges(t *testing.T) {
 // reviewing seats are usually the larger half (reported live 2026-09-17).
 func TestSpendCoversTheSeatsThatRunAsAgents(t *testing.T) {
 	config := spendFixtureConfig()
+	if err := config.Agents.validate(); err != nil {
+		t.Fatalf("the fixture is not a configuration the engine would load: %v", err)
+	}
 	envs := SpendKeyEnvs(config)
 	for _, want := range []string{"LASSDAS_IMPLEMENTER_KEY", "LASSDAS_APPLIER_KEY", "LASSDAS_REVIEW_A_KEY"} {
 		found := false
@@ -357,9 +363,9 @@ func TestSpendCoversTheSeatsThatRunAsAgents(t *testing.T) {
 	}
 	// One variable may pay for several seats; the report names all of them.
 	shared := config
-	one := AgentConfig{ID: "shared", Command: "sh", SecretEnv: map[string]string{"AGENT_TOKEN": "LASSDAS_TEAM_KEY"}, TimeoutSeconds: 600}
+	one := AgentConfig{ID: "shared", Command: "sh", Args: []string{"--profile", "lassdas-shared"}, Profile: "lassdas-shared", SecretEnv: map[string]string{"AGENT_TOKEN": "LASSDAS_TEAM_KEY"}, TimeoutSeconds: 600}
 	other := one
-	other.ID = "shared-b"
+	other.ID, other.Profile, other.Args = "shared-b", "lassdas-shared-b", []string{"--profile", "lassdas-shared-b"}
 	shared.Agents = AgentSet{Implementer: one, Reviewer: other, ReviewerAgents: []ReviewerAgent{{ReviewerID: "review-a", Agent: other}}}
 	if seats := RolesByKeyEnv(shared)["LASSDAS_TEAM_KEY"]; len(seats) < 2 {
 		t.Fatalf("a shared key named only %v", seats)
@@ -418,7 +424,11 @@ func spendFixtureConfig() Config {
 		// role's own variable. Naming them the same in a fixture hides a
 		// reader that takes the wrong one (review of #196).
 		source := "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"
-		return AgentConfig{ID: role, Command: "sh", SecretEnv: map[string]string{"AGENT_TOKEN": source}, TimeoutSeconds: 600}
+		// Same program, distinct profiles: what the configuration's own
+		// validation requires, so these tests describe a deployment the
+		// engine would actually load (review of #196).
+		profile := "lassdas-" + role
+		return AgentConfig{ID: role, Command: "sh", Args: []string{"--profile", profile}, Profile: profile, SecretEnv: map[string]string{"AGENT_TOKEN": source}, TimeoutSeconds: 600}
 	}
 	applier := agent("applier")
 	return Config{
@@ -434,5 +444,29 @@ func spendFixtureConfig() Config {
 			Applier:        &applier,
 			ReviewerAgents: []ReviewerAgent{{ReviewerID: "review-a", Agent: agent("review-a")}},
 		},
+	}
+}
+
+// A gateway that answers with one key's name for two variables holding
+// different values contradicts itself. Folding them would lose money and
+// keeping them apart may count one bill twice, so the total stops claiming
+// to be whole (review of #196).
+func TestSpendSaysSoWhenTheGatewayNamesOneKeyForTwo(t *testing.T) {
+	t.Setenv("ALPHA_KEY", "sk-alpha")
+	t.Setenv("BETA_KEY", "sk-beta")
+	config := Config{Models: ModelConfig{
+		Implementer: ModelEndpoint{ID: "implementer", Model: "m", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "ALPHA_KEY"},
+		Readiness:   ReadinessModels{Assessor: ModelEndpoint{ID: "readiness-assessor", Model: "m", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: "BETA_KEY"}},
+	}}
+	reader := &stubSpendReader{byEnv: map[string]KeySpend{
+		"ALPHA_KEY": {SpendUSD: 2, KeyName: "one-billed-key"},
+		"BETA_KEY":  {SpendUSD: 2, KeyName: "one-billed-key"},
+	}}
+	spend := ReadRunSpend(context.Background(), reader, config, time.Now().Add(-time.Hour))
+	if spend.Complete {
+		t.Fatalf("a contradictory reading was reported as whole: %+v", spend)
+	}
+	if len(spend.Keys) != 2 {
+		t.Fatalf("keys = %d, want both kept (folding them would lose the difference)", len(spend.Keys))
 	}
 }

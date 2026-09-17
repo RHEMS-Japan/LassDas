@@ -184,7 +184,7 @@ func RolesByKeyEnv(config Config) map[string][]string {
 		}
 		roles[endpoint.APIKeyEnv] = append(roles[endpoint.APIKeyEnv], role)
 	}
-	add(config.Models.Implementer, "実装")
+	add(config.Models.Implementer, "実装 (本体からの直接呼び出し)")
 	for index, reviewer := range config.Models.Reviewers {
 		name := reviewer.ID
 		if name == "" {
@@ -284,6 +284,21 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 	}
 	if len(spend.Keys) == 0 {
 		return RunSpend{}
+	}
+	// The variables held different values, and the gateway answered with one
+	// key's name for more than one of them. Folding them would lose the
+	// difference and keeping them apart may count one bill twice, so the
+	// total stops claiming to be whole and says so (review of #196).
+	named := map[string]struct{}{}
+	for _, key := range spend.Keys {
+		if key.KeyName == "" {
+			continue
+		}
+		if _, repeated := named[key.KeyName]; repeated {
+			spend.Complete = false
+			break
+		}
+		named[key.KeyName] = struct{}{}
 	}
 	return spend
 }
