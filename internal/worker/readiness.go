@@ -597,7 +597,7 @@ func validateSealedDesign(kind string, approachInTicket bool, excerpt string, ne
 
 func validateModelReadinessCheckOutput(output ModelReadinessCheckOutput) error {
 	if output.Verdict != "pass" && output.Verdict != "fail" {
-		return errors.New("readiness check verdict is invalid")
+		return fmt.Errorf("readiness check verdict is invalid: %q is not pass or fail", output.Verdict)
 	}
 	if len(output.Reasons) > 8 || output.Verdict == "pass" && len(output.Reasons) != 0 || output.Verdict == "fail" && len(output.Reasons) == 0 {
 		return errors.New("readiness check reasons do not match verdict")

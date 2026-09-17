@@ -387,6 +387,7 @@ func TestConverseJSONAsksAgainWhenTheAnswerIsUnreadable(t *testing.T) {
 // readable afterwards without the artifact that was never written.
 func TestConverseJSONGivesUpAfterThreeUnreadableAnswers(t *testing.T) {
 	config, _, _ := validArtifactFixture(t)
+	captured := captureFailureDetail(t)
 	api := &sequenceChatAPI{outputs: []*ChatResponse{chatOutput("I cannot answer in JSON, sorry.\nSecond line.")}}
 	invoker, _ := NewModelInvoker(api)
 	usage, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func(answer []byte, _ InvocationUsage) error {
@@ -403,6 +404,39 @@ func TestConverseJSONGivesUpAfterThreeUnreadableAnswers(t *testing.T) {
 	}
 	if usage.TotalTokens != 45 {
 		t.Fatalf("usage was not summed across the attempts: %+v", usage)
+	}
+	// The failure opens with the phrase the runner's note knows, and the
+	// detail line says what was objected to, so the ticket is not told only
+	// that the stage "could not be completed".
+	if !strings.HasPrefix(err.Error(), AnswerUnusablePhrase+": ") || !errors.Is(err, errModelResponseContent) {
+		t.Fatalf("the final error does not open with %q: %v", AnswerUnusablePhrase, err)
+	}
+	detail, ok := ParseFailureDetailLine(captured.String())
+	if !ok {
+		t.Fatalf("no failure detail line was written: %q", captured.String())
+	}
+	if detail.Calls != modelAnswerAttempts || detail.Malformed != modelAnswerAttempts || detail.LastRequestID != "request-123" || !strings.Contains(detail.Phrase, AnswerUnusablePhrase) {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if !strings.Contains(detail.Objection, "invalid character") || !strings.Contains(detail.Objection, "answer 3 of 3") || !strings.Contains(detail.Objection, "began: I cannot answer in JSON, sorry. Second line.") {
+		t.Fatalf("detail objection lacks the decoder's reason and the answer head: %q", detail.Objection)
+	}
+}
+
+func TestObjectionTextIsOneBoundedPrintableLine(t *testing.T) {
+	if got := objectionText("a\nb\t\x00c   d"); got != "a b c d" {
+		t.Fatalf("control characters and runs of whitespace: %q", got)
+	}
+	long := strings.Repeat("あ", maxObjectionRunes+5)
+	if got := objectionText(long); len([]rune(got)) != maxObjectionRunes+1 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("not cut on a character boundary: %d runes", len([]rune(got)))
+	}
+	detail := ModelFailureDetail{Phrase: "x", Calls: 1, Objection: "raw\nline"}
+	if err := detail.Validate(); err == nil {
+		t.Fatal("an objection with a control character validated")
+	}
+	if err := detail.sanitized().Validate(); err != nil {
+		t.Fatalf("the sanitised objection did not validate: %v", err)
 	}
 }
 

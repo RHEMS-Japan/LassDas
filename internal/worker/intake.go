@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -484,7 +485,7 @@ func resolveIntakeRepository(read string, config Config, gaps *[]IntakeGap) stri
 func DecodeModelIntakeOutput(encoded []byte) (ModelIntakeOutput, error) {
 	var output ModelIntakeOutput
 	if err := decodeStrictJSON(encoded, &output); err != nil {
-		return ModelIntakeOutput{}, errors.New("model intake output is invalid")
+		return ModelIntakeOutput{}, fmt.Errorf("model intake output is invalid: %v", err)
 	}
 	return output, nil
 }

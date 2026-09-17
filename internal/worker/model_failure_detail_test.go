@@ -235,3 +235,25 @@ func TestTheDetailPhraseDoesNotRepeatWhatTheLiteralEndingSays(t *testing.T) {
 		t.Fatalf("phrase = %q", phrase)
 	}
 }
+
+func TestObjectionTextDropsFormatEffectorsAndHoldsItsBound(t *testing.T) {
+	// Each effector becomes a space rather than vanishing: joining the
+	// text around it would invent a word nobody wrote.
+	if got := objectionText("a‮b​c⁦d"); got != "a b c d" {
+		t.Fatalf("format effectors survived: %q", got)
+	}
+	for _, effector := range []string{"\u202e", "\u200b", "\u2066", "\u009f"} {
+		if strings.Contains(objectionText("前"+effector+"後"), effector) {
+			t.Fatalf("%q survived", effector)
+		}
+	}
+	if got := objectionText("日本語 の 指摘"); got != "日本語 の 指摘" {
+		t.Fatalf("ordinary text was damaged: %q", got)
+	}
+	// The bound is 400 runes and the test says so itself: written against
+	// the constant, the bound could be raised to any value and nothing
+	// would notice (review of #184).
+	if got := objectionText(strings.Repeat("あ", 500)); len([]rune(got)) != 401 {
+		t.Fatalf("the objection is not bounded at 400 runes: %d", len([]rune(got)))
+	}
+}

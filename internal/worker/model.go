@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/probe"
 )
 
 const (
@@ -801,12 +803,14 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 	}
 	var total InvocationUsage
 	var last error
+	var lastUsage InvocationUsage
 	for attempt := 1; attempt <= modelAnswerAttempts; attempt++ {
 		response, usage, err := i.converseTurn(ctx, endpoint, messages, schema, maxResponseBytes)
 		if err != nil {
 			return total, err
 		}
 		total = sumInvocationUsage(total, usage)
+		lastUsage = usage
 		objection := accept([]byte(response), total)
 		if objection == nil {
 			return total, nil
@@ -818,13 +822,44 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 				"\n指摘された点を直し、説明文や Markdown のコードフェンスを付けず、契約で決められた JSON オブジェクトだけをもう一度返してください。"},
 		)
 	}
-	return total, last
+	// Every answer arrived and none could be used. The failure opens with
+	// the phrase the runner's note knows, and the detail line carries what
+	// the contract objected to: without both, a ticket that died here was
+	// told only that the stage "could not be completed" (live 2026-09-17,
+	// three answers refused for a reason nobody recorded).
+	err := fmt.Errorf("%w: %v", errModelResponseContent, last)
+	if dispatchPhrase(last.Error()) {
+		// A caller dispatches on the head of this message. Putting the
+		// class in front of it replaced a fixable instruction to the
+		// requester ("name the file to change") with "ask an operator"
+		// (review of #184), so the objection keeps the front and the class
+		// travels behind it.
+		err = fmt.Errorf("%s (%w)", last.Error(), errModelResponseContent)
+	}
+	writeFailureDetail(ModelFailureDetail{
+		// The phrase names the class only: the objection carries the head
+		// of a model answer, and a ticket's own words reach that answer -
+		// keyed on the message, an answer could name its own failure class.
+		Phrase: detailPhrase(errModelResponseContent), Model: endpoint.Model, Effort: endpoint.Effort, MaxOutputTokens: endpoint.MaxOutputTokens,
+		Calls: modelAnswerAttempts, Malformed: modelAnswerAttempts,
+		LastRequestID: lastUsage.RequestID, LastFinishReason: lastUsage.StopReason, LastCompletionTokens: lastUsage.OutputTokens,
+		Objection: last.Error(),
+	})
+	return total, err
 }
 
 // answerHead is the first line-collapsed 240 bytes of an answer, cut on a
 // character boundary, for an error message that must stay readable.
 func answerHead(answer string) string {
-	head := strings.Join(strings.Fields(answer), " ")
+	// Masked before it is cut, never after: a value split across the cut is
+	// no longer recognisable, and half of a key is still half of a key. The
+	// head travels into the run's failure record and the job log, both of
+	// which outlive the turn.
+	masked, _, refusal := probe.MaskSecrets(answer, nil)
+	if refusal != "" {
+		return "[秘密の形 (" + refusal + ") を含むため答えの冒頭は伏せます]"
+	}
+	head := strings.Join(strings.Fields(masked), " ")
 	if len(head) > 240 {
 		head = strings.ToValidUTF8(head[:240], "") + "…"
 	}
@@ -1284,4 +1319,18 @@ func reviewPrompt(candidate Candidate, source SourceSnapshot, request TicketRequ
 		return "", errors.New("review prompt is too large")
 	}
 	return string(encoded), nil
+}
+
+// dispatchPhrases are the worker's own openings that a caller reads the head
+// of a failure for. A failure that already opens with one keeps that
+// opening: the caller's answer to it is more specific than the class.
+var dispatchPhrases = []string{NoTargetFileChosen}
+
+func dispatchPhrase(message string) bool {
+	for _, phrase := range dispatchPhrases {
+		if strings.HasPrefix(message, phrase) {
+			return true
+		}
+	}
+	return false
 }

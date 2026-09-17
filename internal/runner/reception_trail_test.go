@@ -942,3 +942,40 @@ func TestLoweredThenWidenedCutoffIsToldInFull(t *testing.T) {
 		t.Fatalf("the report would refuse the note: %v", err)
 	}
 }
+
+// The intake's three refused answers arrive as the worker's unusable-answer
+// failure with the decoder's reason inside; the note names the shape of the
+// answer, not the unnamed "could not be completed" (live 2026-09-17: a
+// ticket whose request was five Markdown headings died here with no reason).
+func TestReceptionNoteNamesTheIntakeAnswerThatCouldNotBeUsed(t *testing.T) {
+	stderr := "worker: contract intake failed: " + worker.AnswerUnusablePhrase +
+		": model intake output is invalid: invalid character '\\n' in string literal (answer 3 of 3, request gen-1, began: {\"request\":\"README を拡充し\")\n" +
+		"worker: contract intake failed\n"
+	note := receptionNote(intakeStage, stderr)
+	for _, want := range []string{"受付の AI (" + intakeStage + ")", "決められた形になりませんでした", "聞き直しても同じでした"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q lacks %q", note, want)
+		}
+	}
+	if note == unnamedReceptionNote(intakeStage) {
+		t.Fatal("the intake failure fell through to the unnamed note")
+	}
+}
+
+// The runner's half of the seam: a failure that opens with the derivation's
+// own phrase and carries the class behind it still chooses the derivation's
+// note, so a requester is told to name the file rather than to ask an
+// operator. The worker's half - that it puts the phrase there at all - is
+// held by TestConverseJSONKeepsADispatchPhraseAtTheHead in that package;
+// neither test alone would catch the regression (review of #184).
+func TestDeriveNoteSurvivesTheAnswerUnusableClass(t *testing.T) {
+	stderr := "worker: contract derivation failed: " + worker.NoTargetFileChosen +
+		" (answer 3 of 3, request gen-1, began: {\"files\":[]}) (" + worker.AnswerUnusablePhrase + ")\n"
+	note := receptionNote(deriveStage, stderr)
+	if note != noFileChosenNote(deriveStage) {
+		t.Fatalf("the derivation's own note was lost:\n%s", note)
+	}
+	if strings.Contains(note, "決められた形になりませんでした") {
+		t.Fatalf("the class overruled the phrase:\n%s", note)
+	}
+}
