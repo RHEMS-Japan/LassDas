@@ -423,6 +423,22 @@ function closeOtherPanes(keep) {
   }
 }
 
+// maxCarriedText bounds what a pane keeps across refreshes. Without it the
+// text carried forward grew by everything that arrived between refreshes
+// and nothing ever cut it back: a stage is up to a dozen steps of a
+// megabyte each, and a pinned pane read the whole accumulation out and
+// wrote it back about once a minute (review of #200).
+const maxCarriedText = 64 * 1024;
+
+// trimForCarry keeps the end of what the reader has, from a line boundary,
+// and says that the beginning was dropped.
+function trimForCarry(text) {
+  if (text.length <= maxCarriedText) return text;
+  const tail = text.slice(text.length - maxCarriedText);
+  const start = tail.indexOf("\n");
+  return "── 以前の分は表示から外しました ──\n" + (start < 0 ? tail : tail.slice(start + 1));
+}
+
 // deliveryIDOf names the card a pane belongs to, which is what the follow
 // is keyed on.
 function deliveryIDOf(pane) {
@@ -479,7 +495,7 @@ function liveDetach(pane) {
     // afterwards, with nothing left to clear it (review of #200).
     const body = pane.querySelector("pre");
     liveFollow.resume = {
-      text: body.textContent, step: pane.state.step, from: pane.state.from,
+      text: trimForCarry(body.textContent), step: pane.state.step, from: pane.state.from,
       offsets: pane.state.offsets, scrollTop: body.scrollTop,
       atBottom: body.scrollTop + body.clientHeight >= body.scrollHeight - 24,
     };
@@ -684,6 +700,9 @@ function liveTick(pane, issueKey, stage, first) {
           pane.state.rendered = true;
         }
         if (pane.state.header) {
+          // The pane may still be showing the sentence it waits behind;
+          // the incoming step's name goes on its own, not after it.
+          if (!pane.state.rendered) body.textContent = "";
           body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
           pane.state.header = null;
         }

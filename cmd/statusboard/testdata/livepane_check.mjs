@@ -560,7 +560,73 @@ startScenario();
     pane(taller).classList.has("on"), false);
 }
 
-if (checks < 43) {
+// A pinned pane read across many refreshes must not grow without end. The
+// carry used to hand the whole text forward and add to it, so the pane
+// held everything the stage had ever written and read it back every
+// refresh.
+startScenario();
+{
+  let held = "";
+  const line = "x".repeat(200) + "\n";
+  answer = url => {
+    if (!url.includes("/live/")) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        steps: [{ step: "s", stage: "design", bytes: held.length + line.length, updated_at_ms: 1 }] }) });
+    }
+    const from = Number(url.match(/from=(\d+)/)[1]);
+    held += line;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      step: "s", from, next: from + line.length, size: from + line.length, text: line }) });
+  };
+  let a = card("d1", "TICKET-1");
+  box(a);
+  node(a, "design").click();
+  await settle();
+  for (let refresh = 0; refresh < 6; refresh++) {
+    for (let tick = 0; tick < 200; tick++) { runTimers(); await settle(); }
+    const next = card("d1", "TICKET-1");
+    rebuild(next);
+    await settle();
+    a = next;
+  }
+  const size = pane(a).querySelector("pre").textContent.length;
+  check("a pinned pane read for a long time stays bounded", size <= 80 * 1024, true);
+  check("and says that the beginning was dropped",
+    pane(a).querySelector("pre").textContent.includes("以前の分は表示から外しました"), true);
+}
+
+// The sentence a pane waits behind is not left standing in front of the
+// incoming step's name.
+startScenario();
+{
+  const a = card("d1", "TICKET-1");
+  box(a);
+  const written = { first: "", second: "" };
+  let newest = "first";
+  answer = url => {
+    const asked = url.match(/\/live\/([^?]+)\?from=(\d+)/);
+    if (!asked) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        steps: Object.keys(written).map(step => ({ step, stage: "design",
+          bytes: written[step].length, updated_at_ms: step === newest ? 100 : 1 })) }) });
+    }
+    const step = decodeURIComponent(asked[1]), from = Number(asked[2]);
+    const all = written[step];
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      step, from, next: all.length, size: all.length, text: all.slice(from) }) });
+  };
+  live.liveOpen(pane(a), "TICKET-1", "design", "設計");
+  await settle();
+  check("the pane is waiting", pane(a).querySelector("pre").textContent.includes("まだありません"), true);
+  newest = "second";
+  runTimers(); await settle();
+  runTimers(); await settle();
+  const shown = pane(a).querySelector("pre").textContent;
+  check("and the incoming step's name is not written after that sentence",
+    shown.includes("まだありません── "), false);
+}
+
+if (checks < 47) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }
