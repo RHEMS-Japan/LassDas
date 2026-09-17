@@ -962,10 +962,12 @@ func TestReceptionNoteNamesTheIntakeAnswerThatCouldNotBeUsed(t *testing.T) {
 	}
 }
 
-// The seam between the worker's own phrase and the note a requester reads:
-// the derivation's "no target file chosen" must keep its place at the head
-// of the failure even now that the class travels with it, or the requester
-// is told to ask an operator instead of naming the file (review of #184).
+// The runner's half of the seam: a failure that opens with the derivation's
+// own phrase and carries the class behind it still chooses the derivation's
+// note, so a requester is told to name the file rather than to ask an
+// operator. The worker's half - that it puts the phrase there at all - is
+// held by TestConverseJSONKeepsADispatchPhraseAtTheHead in that package;
+// neither test alone would catch the regression (review of #184).
 func TestDeriveNoteSurvivesTheAnswerUnusableClass(t *testing.T) {
 	stderr := "worker: contract derivation failed: " + worker.NoTargetFileChosen +
 		" (answer 3 of 3, request gen-1, began: {\"files\":[]}) (" + worker.AnswerUnusablePhrase + ")\n"
