@@ -801,12 +801,14 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 	}
 	var total InvocationUsage
 	var last error
+	var lastUsage InvocationUsage
 	for attempt := 1; attempt <= modelAnswerAttempts; attempt++ {
 		response, usage, err := i.converseTurn(ctx, endpoint, messages, schema, maxResponseBytes)
 		if err != nil {
 			return total, err
 		}
 		total = sumInvocationUsage(total, usage)
+		lastUsage = usage
 		objection := accept([]byte(response), total)
 		if objection == nil {
 			return total, nil
@@ -818,7 +820,19 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 				"\n指摘された点を直し、説明文や Markdown のコードフェンスを付けず、契約で決められた JSON オブジェクトだけをもう一度返してください。"},
 		)
 	}
-	return total, last
+	// Every answer arrived and none could be used. The failure opens with
+	// the phrase the runner's note knows, and the detail line carries what
+	// the contract objected to: without both, a ticket that died here was
+	// told only that the stage "could not be completed" (live 2026-09-17,
+	// three answers refused for a reason nobody recorded).
+	err := fmt.Errorf("%w: %v", errModelResponseContent, last)
+	writeFailureDetail(ModelFailureDetail{
+		Phrase: detailPhrase(err), Model: endpoint.Model, Effort: endpoint.Effort, MaxOutputTokens: endpoint.MaxOutputTokens,
+		Calls: modelAnswerAttempts, Malformed: modelAnswerAttempts,
+		LastRequestID: lastUsage.RequestID, LastFinishReason: lastUsage.StopReason, LastCompletionTokens: lastUsage.OutputTokens,
+		Objection: last.Error(),
+	})
+	return total, err
 }
 
 // answerHead is the first line-collapsed 240 bytes of an answer, cut on a

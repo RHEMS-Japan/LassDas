@@ -545,3 +545,13 @@ func TestModelFailureSummarySaysAskedAgainOnlyWhenItWas(t *testing.T) {
 		t.Fatalf("once=%q again=%q", once, again)
 	}
 }
+
+func TestModelFailureSummaryShowsTheObjectionForRefusedAnswers(t *testing.T) {
+	got := modelFailureSummary(ModelFailure{Phrase: "model response content is invalid", Calls: 3, Malformed: 3, Objection: "model intake output is invalid: invalid character '\\n' in string literal (answer 3 of 3)"})
+	if !strings.Contains(got, "決められた形にならなかった (3 回とも)") || !strings.Contains(got, "invalid character") {
+		t.Fatalf("summary = %q", got)
+	}
+	if got := modelFailureSummary(ModelFailure{Phrase: "p", Calls: 1}); strings.Contains(got, "決められた形") {
+		t.Fatalf("a detail without an objection must not claim refused answers: %q", got)
+	}
+}

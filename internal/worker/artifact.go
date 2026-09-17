@@ -552,7 +552,7 @@ func validateModelCandidateOutput(output ModelCandidateOutput, request TicketReq
 
 func validateModelReviewOutput(output ModelReviewOutput, request TicketRequest) error {
 	if output.Verdict != "pass" && output.Verdict != "revise" {
-		return errors.New("model review verdict is invalid")
+		return fmt.Errorf("model review verdict is invalid: %q is not pass or revise", output.Verdict)
 	}
 	if len(output.Findings) > 16 || output.Verdict == "pass" && len(output.Findings) != 0 || output.Verdict == "revise" && len(output.Findings) == 0 {
 		return errors.New("model review findings do not match verdict")

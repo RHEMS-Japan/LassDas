@@ -50,6 +50,11 @@ type ModelFailureDetail struct {
 	LastCompletionTokens int32  `json:"last_completion_tokens,omitempty"`
 	LastReasoningTokens  int32  `json:"last_reasoning_tokens,omitempty"`
 	LastHTTPStatus       int    `json:"last_http_status,omitempty"`
+	// Objection is what the contract said about the last answer when a turn
+	// answered but the answer could not be used (the decoder's message, the
+	// attempt count, the head of the answer). Empty when the turn never
+	// answered.
+	Objection string `json:"objection,omitempty"`
 }
 
 // FailureDetailLinePrefix begins the one stderr line that carries the
@@ -183,6 +188,7 @@ func (d ModelFailureDetail) sanitized() ModelFailureDetail {
 		return n
 	}
 	d.Model, d.Effort, d.FinalEffort, d.LastFinishReason = word(d.Model), word(d.Effort), word(d.FinalEffort), word(d.LastFinishReason)
+	d.Objection = objectionText(d.Objection)
 	if !modelRequestIDPattern.MatchString(d.LastRequestID) {
 		d.LastRequestID = ""
 	}
@@ -219,6 +225,9 @@ func (d ModelFailureDetail) Validate() error {
 	}
 	if d.LastRequestID != "" && !modelRequestIDPattern.MatchString(d.LastRequestID) {
 		return errors.New("model failure detail request id is invalid")
+	}
+	if d.Objection != objectionText(d.Objection) {
+		return errors.New("model failure detail objection is invalid")
 	}
 	if d.MaxOutputTokens < 0 || d.FinalMaxOutputTokens < 0 || d.Calls < 1 || d.Calls > 64 || d.Lowered < 0 || d.Malformed < 0 || d.ProviderErrors < 0 || d.AllowanceSpent < 0 ||
 		d.LastPromptTokens < 0 || d.LastCompletionTokens < 0 || d.LastReasoningTokens < 0 || d.LastHTTPStatus < 0 || d.LastHTTPStatus > 999 {
@@ -265,4 +274,25 @@ func ParseFailureDetailLine(stderr string) (ModelFailureDetail, bool) {
 		return ModelFailureDetail{}, false
 	}
 	return detail, true
+}
+
+// maxObjectionRunes bounds the objection kept in a detail: the decoder's
+// message and the head of one answer fit; a whole answer does not belong here.
+const maxObjectionRunes = 400
+
+// objectionText is the objection as the detail carries it: whitespace
+// collapsed to single spaces, control characters dropped, cut to
+// maxObjectionRunes on a character boundary.
+func objectionText(text string) string {
+	fields := strings.Fields(strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, text))
+	joined := strings.Join(fields, " ")
+	if runes := []rune(joined); len(runes) > maxObjectionRunes {
+		return string(runes[:maxObjectionRunes]) + "…"
+	}
+	return joined
 }

@@ -120,6 +120,9 @@ type ModelFailure struct {
 	LastCompletionTokens int32     `json:"last_completion_tokens,omitempty"`
 	LastReasoningTokens  int32     `json:"last_reasoning_tokens,omitempty"`
 	LastHTTPStatus       int       `json:"last_http_status,omitempty"`
+	// Objection is what the contract said about the last answer when the
+	// AI answered but the answer could not be used.
+	Objection string `json:"objection,omitempty"`
 	// Summary says in the requester's words what the numbers mean.
 	Summary string `json:"summary,omitempty"`
 }
@@ -812,6 +815,7 @@ func (v *View) readEnding(runDir string) {
 		model := detail.ModelFailure
 		model.Phrase, model.Model, model.Effort, model.FinalEffort = shown(model.Phrase), shown(model.Model), shown(model.Effort), shown(model.FinalEffort)
 		model.LastFinishReason, model.LastRequestID = shown(model.LastFinishReason), shown(model.LastRequestID)
+		model.Objection = shown(model.Objection)
 		model.Summary = modelFailureSummary(model)
 		failure.Model = &model
 	}
@@ -865,6 +869,8 @@ func modelFailureSummary(d ModelFailure) string {
 		return fmt.Sprintf("モデルの提供元側の失敗で答えが返らなかった (呼び出し %d 回)", d.Calls)
 	case d.AllowanceSpent > 0 && d.LastRequestID == "":
 		return fmt.Sprintf("AI が制限時間内に答えを返さなかった (呼び出し %d 回)", d.Calls)
+	case d.Malformed > 0 && d.Objection != "":
+		return fmt.Sprintf("AI は答えたが、その答えが決められた形にならなかった (%d 回とも)。最後の答えへの指摘: %s", d.Malformed, d.Objection)
 	}
 	return fmt.Sprintf("AI の失敗 (呼び出し %d 回): %s", d.Calls, d.Phrase)
 }

@@ -156,6 +156,7 @@
         if (m.last_finish_reason) rows.push(["finish_reason", m.last_finish_reason]);
         if (m.last_completion_tokens || m.last_prompt_tokens) rows.push(["トークン", "入力 " + (m.last_prompt_tokens || 0) + " / 出力 " + (m.last_completion_tokens || 0) + (m.last_reasoning_tokens ? " (うち思考 " + m.last_reasoning_tokens + ")" : "") + (allowance ? " / " + allowance : "")]);
         if (m.last_request_id) rows.push(["request id", m.last_request_id]);
+        if (m.objection) rows.push(["答えへの指摘", m.objection]);
         rows.push(["本体の記録", m.phrase]);
         for (const [k, v] of rows) { dl.appendChild(el("dt", null, k)); dl.appendChild(el("dd", null, v)); }
         failure.appendChild(dl);
