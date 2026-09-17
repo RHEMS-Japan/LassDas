@@ -16,7 +16,7 @@ import (
 // such a project could never be answered: the tick found no waiting run and
 // said "idle" for ever (live 2026-09-17).
 func TestQuestionWaitIsFoundWhenTheProjectKeyCarriesAnUnderscore(t *testing.T) {
-	for _, projectKey := range []string{"TICKET", "RHEMS_TEST"} {
+	for _, projectKey := range []string{"TICKET", "RHEMS_TEST", "A"} {
 		t.Run(projectKey, func(t *testing.T) {
 			store := newLocalForTest(t)
 			ctx := context.Background()
@@ -84,7 +84,10 @@ func underscoreEnvelope(t *testing.T, projectKey string) hook.DispatchEnvelope {
 	snapshot := testEnvelope(t).Snapshot
 	snapshot.DeliveryID, snapshot.InputSHA256 = "", ""
 	snapshot.ProjectKey = projectKey
-	snapshot.IssueKey = projectKey + "-501"
+	// A ticket key must be at least eight characters (ValidateEnvelope), so
+	// the number here is one a one-character project key can carry too.
+	snapshot.IssueKeyID = 12345678
+	snapshot.IssueKey = projectKey + "-12345678"
 	snapshot.RunID = snapshot.IssueKey
 	envelope, err := hook.SealSnapshot(snapshot)
 	if err != nil {
@@ -106,4 +109,66 @@ func underscoreRoute(t *testing.T, envelope hook.DispatchEnvelope, runID string)
 	route.Target = envelope.Snapshot.Target
 	route.ExpectedRunID = runID
 	return route
+}
+
+// The gate both stores ask before they rebind a route. It admits exactly the
+// ticket names of this project: everything before the single dash is pinned
+// by the prefix, and the shape is the one the ingest can write.
+func TestReboundRunIDAdmitsOnlyThisProjectsTickets(t *testing.T) {
+	route := testTerminalRoute(t)
+	route.ProjectKey = "TICKET"
+	admitted := []string{"TICKET-1", "TICKET-501", "TICKET-999999999"}
+	refused := []string{
+		"", "TICKET", "TICKET-", "TICKET-0", "TICKET-09", "TICKET-1-EXTRA", "TICKET-1 ", "TICKET-x",
+		"TICKET_QA-9",         // another project whose key begins the same way
+		"OTHER-1", "ticket-1", // another project, and a shape the ingest never writes
+		"TICKET-1234567890", // more digits than a tracker issue number
+	}
+	for _, runID := range admitted {
+		if !reboundRunID(route, runID) {
+			t.Errorf("refused a ticket of this project: %q", runID)
+		}
+	}
+	for _, runID := range refused {
+		if reboundRunID(route, runID) {
+			t.Errorf("admitted %q", runID)
+		}
+	}
+	// A project key that is a prefix of another must not reach its tickets.
+	other := route
+	other.ProjectKey = "TICKET_QA"
+	if !reboundRunID(other, "TICKET_QA-9") || reboundRunID(other, "TICKET-9") {
+		t.Fatal("the prefix no longer ties a run id to its project")
+	}
+	// The shape is the tracker's: keys are upper case, with no spaces. A
+	// route naming anything else rebinds to nothing, whatever its own
+	// prefix says.
+	for _, odd := range []struct{ key, runID string }{
+		{"ticket", "ticket-1"},
+		{"TICK ET", "TICK ET-1"},
+		{"TICKET.QA", "TICKET.QA-1"},
+	} {
+		wrong := route
+		wrong.ProjectKey = odd.key
+		if reboundRunID(wrong, odd.runID) {
+			t.Errorf("admitted a run id of a shape the tracker never writes: %q", odd.runID)
+		}
+	}
+	// A one-character key is a real tracker key, and a hundred-character one
+	// is the bound.
+	short := route
+	short.ProjectKey = "A"
+	if !reboundRunID(short, "A-12345678") {
+		t.Fatal("a one-character project key was refused")
+	}
+	long := route
+	long.ProjectKey = "B" + strings.Repeat("C", 99)
+	if !reboundRunID(long, long.ProjectKey+"-1") {
+		t.Fatal("a hundred-character project key was refused")
+	}
+	tooLong := route
+	tooLong.ProjectKey = "B" + strings.Repeat("C", 100)
+	if reboundRunID(tooLong, tooLong.ProjectKey+"-1") {
+		t.Fatal("the length bound does not hold")
+	}
 }

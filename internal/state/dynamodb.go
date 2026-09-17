@@ -699,7 +699,7 @@ func (s *DynamoStore) resolveRunRoute(ctx context.Context, route hook.ReportRout
 		return route, hook.NewExternalFailure("dynamodb", hook.FailureRetryable, "run_route_read_failed")
 	}
 	runID, ok := attributeString(output.Item, "run_id")
-	if !ok || !strings.HasPrefix(runID, route.ProjectKey+"-") || !issueRunIDPattern.MatchString(runID) {
+	if !ok || !reboundRunID(route, runID) {
 		return route, nil
 	}
 	rebound := route
@@ -707,18 +707,27 @@ func (s *DynamoStore) resolveRunRoute(ctx context.Context, route hook.ReportRout
 	return rebound, nil
 }
 
-// issueRunIDPattern is the shape of a run id that names a ticket. It bounds
-// what the pending row may rebind the route to; the prefix check above is
-// what ties it to this project.
+// reboundRunID reports whether the pending row's run id may become this
+// route's run id: it must name a ticket of this very project. Both stores
+// ask this one question, so the two copies of the rebinding cannot drift.
 //
-// Underscores belong here: a tracker project key may carry one, and the
-// ingest that writes these run ids accepts them. While this pattern did not,
-// every question asked on such a project went unanswerable - the route was
-// never rebound, so the tick found no waiting run, and the answer sat there
-// for ever (live 2026-09-17, project key RHEMS_TEST: ten minutes of
-// question_tick_idle after the answer was posted, reproduced from the
-// instance's own ledger).
-var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,99}-[1-9][0-9]{0,8}$`)
+// The prefix is what ties the id to the project; the shape is what keeps it
+// a ticket's name. A project key holds no dash, so the id carries exactly
+// one and everything before it is pinned by the prefix.
+func reboundRunID(route hook.ReportRouteConfig, runID string) bool {
+	return strings.HasPrefix(runID, route.ProjectKey+"-") && issueRunIDPattern.MatchString(runID)
+}
+
+// issueRunIDPattern is the shape of a run id that names a ticket, matching
+// what the ingest can actually write: a tracker key of one to a hundred
+// characters, which may carry underscores, and a positive issue number.
+//
+// Both of those bounds were once narrower (letters and digits only, sixteen
+// characters), and on a project keyed RHEMS_TEST the rebinding therefore
+// never happened: the tick found no waiting run, said "idle", and every
+// posted answer sat there for ever, as did the plan notice (live
+// 2026-09-17, reproduced from the instance's own ledger).
+var issueRunIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]{0,8}$`)
 
 // ClaimOwner is LocalStore.ClaimOwner for the DynamoDB store: the owner
 // identity the run row was written with at claim.
