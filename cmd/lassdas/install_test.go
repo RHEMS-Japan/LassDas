@@ -255,6 +255,17 @@ func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
 	if err := setupNote(context.Background(), engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1"}, &out); err != nil {
 		t.Fatal(err)
 	}
+	// A public image needs no login: --public clears what a previous note
+	// carried instead of keeping it.
+	if err := setupNote(context.Background(), engine, installOptions{image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/3", public: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if public, err := initwizard.ReadDistributionFile(filepath.Join(engine, "docs", "DISTRIBUTION.json")); err != nil || public.RegistryLogin != "" {
+		t.Fatalf("--public must clear the login: %+v %v", public, err)
+	}
+	if err := setupNote(context.Background(), engine, installOptions{registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
+		t.Fatal(err)
+	}
 	// Written elsewhere, it still starts from the checkout's note.
 	elsewhere := filepath.Join(t.TempDir(), "note.json")
 	if err := setupNote(context.Background(), engine, installOptions{out: elsewhere, image: next, engineSHA: strings.Repeat("e", 40), buildRecord: "https://example/build/2"}, &out); err != nil {
@@ -355,7 +366,7 @@ func TestTheRepositorysNoteAndReadmeLeadTheWay(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(readme)
-	for _, want := range []string{"URL だけを渡された開発 AI へ", "をセットアップして", "go build -o lassdas ./cmd/lassdas", "./lassdas setup install", "docs/DISTRIBUTION.json", "~/.lassdas/SETUP.md", "registry_login"} {
+	for _, want := range []string{"URL だけを渡された開発 AI へ", "をセットアップして", "go build -o lassdas ./cmd/lassdas", "./lassdas setup install", "docs/DISTRIBUTION.json", "~/.lassdas/SETUP.md", "registry_login", "ghcr.io"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("README lacks %q", want)
 		}

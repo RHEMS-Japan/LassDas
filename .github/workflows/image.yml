@@ -1,0 +1,73 @@
+name: image
+
+# Builds the body's runtime image from every commit on main, natively on
+# arm64 (the machines a local install runs it on), publishes it to the
+# public registry, and writes the distributor's note (docs/DISTRIBUTION.json)
+# back to main so a person handed only this repository's URL pulls the image
+# without any credential. The note's build record is this run.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - docs/DISTRIBUTION.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: image-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: go.mod
+      - name: Log in to the public registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build and push (arm64, no cache)
+        id: build
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')/runtime"
+          tag="$repo:${GITHUB_SHA}"
+          docker build --platform linux/arm64 --no-cache --pull \
+            --build-arg "ENGINE_SHA=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "$tag" -f deploy/pod/Dockerfile .
+          docker push "$tag"
+          digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$repo@sha256:" | head -n 1)"
+          [ -n "$digest" ] || { echo "no digest for $tag" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $digest"
+      - name: Write the distributor's note
+        run: |
+          set -euo pipefail
+          go run ./cmd/lassdas setup note \
+            --image "${{ steps.build.outputs.digest }}" \
+            --engine-sha "${GITHUB_SHA}" \
+            --build-record "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --public
+          cat docs/DISTRIBUTION.json
+      - name: Commit the note to main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- docs/DISTRIBUTION.json; then
+            echo "the note is unchanged"
+            exit 0
+          fi
+          git add docs/DISTRIBUTION.json
+          git commit -m "Distributor's note: image for ${GITHUB_SHA} [skip ci]"
+          git push origin HEAD:main
