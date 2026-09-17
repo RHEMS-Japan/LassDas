@@ -11,7 +11,7 @@
 1. この repo を作業用の場所へ取得する: `git clone https://github.com/RHEMS-Japan/LassDas.git /tmp/lassdas-src` (既にあれば `git -C /tmp/lassdas-src pull`)
 2. CLI を組み立て、準備を 1 回実行する: `cd /tmp/lassdas-src && go build -o lassdas ./cmd/lassdas && ./lassdas setup install` — 配布者の案内 (どのイメージを動かすか) は同じ repo の [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) から読まれる。引数は要らない
 3. 出力に示された `~/.lassdas/SETUP.md` を最初から最後まで読み、その指示に従う。以後の `lassdas …` は `~/.lassdas/bin/lassdas`
-4. 本体イメージのレジストリが非公開なら、案内の `registry_login` のコマンドを **利用者が** 実行する。AI は鍵を扱わない
+4. レジストリへのログインは、案内 (`~/.lassdas/distribution.json`) に `registry_login` があるときだけ要る。あるときは、そのコマンドを **利用者が** 実行する。AI は鍵を扱わない。main の image workflow が出す公開イメージ (ghcr.io) では不要
 
 前提は git・Go (`go.mod` の版)・Docker Desktop。納品先 repo への書き込みは `.lassdas/` だけで、この repo の中身を納品先に持ち込まない。
 
@@ -99,7 +99,7 @@ AWS 資格情報は通常の解決順 (環境変数 / プロファイル)。実�
 
 ## 導入 (新しいプロジェクトへ)
 
-導入は、利用者がすでに使っている開発 AI (Claude Code や Codex) に、この repo の URL を渡して頼む (冒頭の手順)。AI が [docs/SETUP.md](docs/SETUP.md) に従って repo を調べ、決めることを聞き、`.lassdas/` に合意と回答を書き、`lassdas setup` で本体を起動し、利用者が本人の鍵で試験依頼を 1 本流して完了になる。配布者はリリースのたびに `lassdas setup note …` で [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) を更新する。旧来の対話ウィザード `lassdas init` も残っている。シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で始める。ソース版には Git と Go (`go.mod` の版) も必要。
+導入は、利用者がすでに使っている開発 AI (Claude Code や Codex) に、この repo の URL を渡して頼む (冒頭の手順)。AI が [docs/SETUP.md](docs/SETUP.md) に従って repo を調べ、決めることを聞き、`.lassdas/` に合意と回答を書き、`lassdas setup` で本体を起動し、利用者が本人の鍵で試験依頼を 1 本流して完了になる。main の image workflow が公開イメージを作り、`lassdas setup note …` で [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) を更新する (main への push のたびに image・SHA・ビルド記録・ログインは書き換わる。手で直して残るのは本体 repo の名前だけ)。旧来の対話ウィザード `lassdas init` も残っている。シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で始める。ソース版には Git と Go (`go.mod` の版) も必要。
 
 ```sh
 # エンジンのソースでビルド

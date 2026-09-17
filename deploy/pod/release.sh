@@ -77,10 +77,19 @@ say "CI verdict for $engine_sha"
 # owner/name from either remote form (git@host:owner/name.git, https://host/owner/name)
 repo_slug="$(git remote get-url origin | sed -E 's#\.git$##; s#.*[:/]([^/]+/[^/]+)$#\1#')"
 [[ "$repo_slug" == */* ]] || { echo "could not read owner/name from the origin remote" >&2; exit 2; }
-ci_verdict="$(gh run list --repo "$repo_slug" --commit "$engine_sha" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
+# The image workflow commits the distributor's note to main with a token
+# that starts no CI run: a release taken from that commit is judged by the
+# commit it sits on, since the note changes no code. Only the ci workflow
+# is a verdict; the image workflow's own run is not.
+ci_commit="$engine_sha"
+while [[ "$(git diff-tree --no-commit-id --name-only -r "$ci_commit")" == "docs/DISTRIBUTION.json" ]]; do
+  ci_commit="$(git rev-parse "$ci_commit~1")"
+  echo "$engine_sha carries only the distributor's note above $ci_commit; judging that"
+done
+ci_verdict="$(gh run list --repo "$repo_slug" --workflow ci.yml --commit "$ci_commit" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
 echo "${ci_verdict:-no run found}"
 [[ "$ci_verdict" == "completed/success" ]] || {
-  echo "CI for $engine_sha is not green (${ci_verdict:-no run found}); push the commit, wait for a green run, then release" >&2
+  echo "CI for $ci_commit is not green (${ci_verdict:-no run found}); push the commit, wait for a green run, then release" >&2
   exit 2
 }
 
@@ -181,14 +190,10 @@ docker push "$tag" >/dev/null
 digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$image_repo@sha256:" | head -n 1)"
 [[ "$digest" == "$image_repo@sha256:"* ]] || { echo "could not read the pushed digest for $image_repo" >&2; exit 1; }
 say "pushed $digest"
-# The distributor's note (docs/DISTRIBUTION.json) is what a person handed
-# only the repository's URL reads (README); its history, written at every
-# release, is the record that ties the digest to the source sha. It is
-# written at the very end of the apply path, after the pod accepted the
-# image, so the tree stays clean through the checks and a dry run leaves
-# nothing behind (the clean-tree gate at the top would refuse the apply).
-note_record="https://github.com/$repo_slug/commits/main/docs/DISTRIBUTION.json"
-note_command="go run ./cmd/lassdas setup note --image $digest --engine-sha $engine_sha --build-record $note_record"
+# The distributor's note (docs/DISTRIBUTION.json) names the PUBLIC image the
+# image workflow builds from main and is written by that workflow; the
+# digest pushed here is the pod's private copy of the same source and stays
+# out of the note.
 
 # ---- 6. pins and toolchain, read from the image itself --------------------
 say "tool pins from the image"
@@ -230,8 +235,6 @@ PY
 diff <(echo "$current" | python3 -m json.tool --no-ensure-ascii) <(echo "$updated") || true
 
 if [[ "$apply" != "--apply" ]]; then
-  say "distributor's note (not written on a dry run; after the apply it is written for you)"
-  echo "  $note_command"
   say "dry run — nothing applied. To roll out:"
   echo "  $0 $image_repo --apply"
   exit 0
@@ -276,11 +279,6 @@ kc get pod -l "app=$statefulset" \
 echo "watch the attendant log for a pin failure before calling this done:"
 echo "  kubectl --context $KUBE_CONTEXT -n $KUBE_NAMESPACE logs statefulset/$statefulset --since=2m | grep -i 'sha256 pin' || echo 'no pin failure logged'"
 
-# ---- 10. the distributor's note, now that the pod accepted the image ------
+# ---- 10. the public image is the image workflow's -------------------------
 say "distributor's note"
-if $note_command; then
-  echo "commit docs/DISTRIBUTION.json (image $digest / engine-sha $engine_sha) and push it with this release"
-else
-  echo "the distributor's note could not be written; run by hand in the checkout:" >&2
-  echo "  $note_command" >&2
-fi
+echo "the public image and docs/DISTRIBUTION.json for $engine_sha are produced by .github/workflows/image.yml on main; check that run before telling anyone to install from this commit"

@@ -1,0 +1,112 @@
+name: image
+
+# Builds the body's runtime image from every commit on main, natively on
+# arm64 (the machines a local install runs it on), publishes it to the
+# public registry, and writes the distributor's note (docs/DISTRIBUTION.json)
+# back to main so a person handed only this repository's URL pulls the image
+# without any credential. The note's build record is this run.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - docs/DISTRIBUTION.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: image-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # main only: a dispatch on another branch must not push that branch to main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: go.mod
+      - name: Skip a commit that carries only the note
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")" = "docs/DISTRIBUTION.json" ]; then
+            echo "this commit carries only the distributor's note; nothing to build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Log in to the public registry
+        if: steps.gate.outputs.skip != 'true'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build and push (arm64, no cache)
+        id: build
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')/runtime"
+          tag="$repo:${GITHUB_SHA}"
+          docker build --platform linux/arm64 --no-cache --pull \
+            --build-arg "ENGINE_SHA=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "$tag" -f deploy/pod/Dockerfile .
+          docker push "$tag"
+          digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$repo@sha256:" | head -n 1)"
+          [ -n "$digest" ] || { echo "no digest for $tag" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $digest"
+      - name: Prove the image pulls without a credential
+        if: steps.gate.outputs.skip != 'true'
+        # The note will say no login is needed; that is checked here, not
+        # assumed. The first push creates the package private: until a
+        # person makes it public in the package settings, the note is not
+        # written and this run fails saying so.
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          if ! reason="$(docker manifest inspect "${{ steps.build.outputs.digest }}" 2>&1 >/dev/null)"; then
+            echo "::error::the image cannot be pulled anonymously (${reason}); if that says denied, make the package public once (organisation packages → lassdas/runtime → settings → visibility) and re-run this workflow. The note was not written."
+            exit 1
+          fi
+          echo "anonymous pull confirmed"
+      - name: Write the distributor's note
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          go run ./cmd/lassdas setup note \
+            --image "${{ steps.build.outputs.digest }}" \
+            --engine-sha "${GITHUB_SHA}" \
+            --build-record "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --public
+          cat docs/DISTRIBUTION.json
+      - name: Commit the note to main
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          [ "${GITHUB_REF}" = "refs/heads/main" ] || { echo "not main: ${GITHUB_REF}" >&2; exit 1; }
+          # A newer commit on main has its own run that writes the note
+          # from its own tree; this run's note would only be overwritten,
+          # and a rebase onto it would conflict on the same lines.
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "${GITHUB_SHA}" ]; then
+            echo "superseded: main moved to $(git rev-parse --short origin/main); its run writes the note"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- docs/DISTRIBUTION.json; then
+            echo "the note is unchanged"
+            exit 0
+          fi
+          git add docs/DISTRIBUTION.json
+          git commit -m "Distributor's note: image for ${GITHUB_SHA} [skip ci]"
+          git push origin HEAD:main

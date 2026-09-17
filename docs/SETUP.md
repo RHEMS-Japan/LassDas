@@ -77,7 +77,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 
 ## 6. 環境を整える
 
-0. 本体イメージが非公開レジストリにあるなら、利用者が自分の端末で先にログインする (案内 `~/.lassdas/distribution.json` の `registry_login` のコマンド。AI は実行しない。案内にパスワードは含めない決まりで、install が代表的な形を弾く)。
+0. 本体イメージは公開レジストリ (ghcr.io) にあり、通常はログイン不要。案内 `~/.lassdas/distribution.json` に `registry_login` があるときだけ、利用者が自分の端末で先にそのコマンドを実行する (AI は実行しない。案内にパスワードは含めない決まりで、install が代表的な形を弾く)。
 1. 利用者が実行: `lassdas setup secrets --project <name>` — 納品先 GitHub のトークン、Backlog の API キー、OpenRouter の API キー (役ごとに分ける設定ならその本数) を入れる。`~/.lassdas/<name>/` に 0600 で保存され、repo にも会話にも出ない。終わりに Backlog の鍵の持ち主 (名前と利用者 ID) が表示される。起票する本人がその人なら `creator-id` にその ID を書き、鍵を本人名義で使うことの承認 `requester-key-ok` を利用者にもらう。
 2. AI が実行: `lassdas setup apply --project <name>` — 回答から設定を組み立て、repo と枝の実在、編集範囲と検証コマンドのイメージ内での試走、課題管理の接続と受付カテゴリ・状態、各役のモデルの疎通 (少額の API 利用料がかかる)、本体の起動と起動時検査、を順に通す。止まったら、出力が示す不足 (回答・鍵・承認) を直して再実行する。済んだ段は飛ばして続きから再開する。ある段の回答を変えるときは `--redo <段>` (prepare / consumer / tracker / models / runtime)。
 3. 本体はローカルのコンテナで動く。板は `http://127.0.0.1:<board-port>` (認証なし)。
@@ -112,7 +112,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-repository` | 本体イメージの元ソース repo (owner/name) |
 | `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
-| `build-record` | イメージと SHA の対応の記録の URL。通常は本体 repo の `docs/DISTRIBUTION.json` の履歴 (配布者がリリースのたびに書く。`…/commits/main/docs/DISTRIBUTION.json`) |
+| `build-record` | イメージと SHA の対応の記録の URL。通常は、そのイメージを作って push した GitHub Actions の実行 (main の image workflow が `docs/DISTRIBUTION.json` を書く) |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 

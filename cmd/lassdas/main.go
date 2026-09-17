@@ -20,7 +20,7 @@ import (
 
 const help = `使用方法:
   lassdas setup install [--note PATH] [--image IMAGE@sha256:…] [--engine-sha SHA] [--build-record URL] [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--skills-dir DIR]
-  lassdas setup note --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD] [--repo-root PATH] [--out PATH]
+  lassdas setup note --image IMAGE@sha256:… --engine-sha SHA --build-record URL [--engine-repository OWNER/NAME] [--registry-login CMD | --public] [--repo-root PATH] [--out PATH]
   lassdas setup check [--repo-root PATH]
   lassdas setup secrets --project NAME [--repo-root PATH]
   lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
@@ -30,8 +30,8 @@ const help = `使用方法:
 setup は、開発 AI が導入指示 (~/.lassdas/SETUP.md) に従って書いた .lassdas/setup.json から
 導入を進めます。install は 1 台に 1 回、本体 repo の中で実行し、CLI・導入指示・
 配布者の案内 (既定は repo の docs/DISTRIBUTION.json)・開発 AI の skill を利用者の
-ホームに置きます。note は配布者がリリースのたびに docs/DISTRIBUTION.json を書き
-直すためのものです。check は回答の
+ホームに置きます。note は docs/DISTRIBUTION.json を書き直すもので、通常は main の
+image workflow が公開イメージを作ったあとに自動で実行します。check は回答の
 不足を示すだけで何も動かしません。secrets と smoke は利用者が実行します (鍵の
 入力と、本人名義の試験依頼)。apply は AI が実行し、本体の起動まで進めます。
 
@@ -104,6 +104,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if command == "setup note" {
 		flags.StringVar(&install.out, "out", "", "")
+		flags.BoolVar(&install.public, "public", false, "")
 	}
 	if err := flags.Parse(rest); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

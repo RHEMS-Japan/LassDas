@@ -22,6 +22,9 @@ var skillTemplate string
 // its skills.
 type installOptions struct {
 	engineRepository, image, engineSHA, buildRecord, registryLogin, skillsDir, note, out string
+	// public says the image needs no registry login: the note's login is
+	// cleared rather than kept from the previous note.
+	public bool
 }
 
 // noteFor is the distributor's note an install uses: the checkout's own
@@ -107,6 +110,12 @@ func setupNote(ctx context.Context, engineRoot string, options installOptions, o
 	}
 	if options.registryLogin != "" {
 		note.RegistryLogin = options.registryLogin
+	}
+	if options.public && options.registryLogin != "" {
+		return errors.New("--public と --registry-login は同時に指定できません (公開イメージにログインは要りません)")
+	}
+	if options.public {
+		note.RegistryLogin = ""
 	}
 	if err := initwizard.WriteDistributionFile(out, note); err != nil {
 		return fmt.Errorf("配布者の案内を書けません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
