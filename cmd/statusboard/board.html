@@ -396,7 +396,7 @@ function buildLivePane() {
   head.appendChild(el("span", "pin", ""));
   pane.appendChild(head);
   pane.appendChild(el("pre"));
-  pane.state = { timer: null, from: 0, step: null, pinned: false, stage: null };
+  pane.state = { timer: null, from: 0, step: null, header: null, pinned: false, stage: null };
   return pane;
 }
 
@@ -425,6 +425,7 @@ function liveDetach(pane) {
   pane.state.step = null;
   pane.state.stage = null;
   pane.state.from = 0;
+  pane.state.header = null;
   pane.querySelector("pre").textContent = "";
 }
 
@@ -447,7 +448,7 @@ function liveOpen(pane, issueKey, stage, stageName) {
   liveFollow = { issueKey: issueKey, stage: stage, stageName: stageName, pinned: pane.state.pinned };
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
-  pane.state = Object.assign(pane.state, { from: 0, step: null, stage: stage });
+  pane.state = Object.assign(pane.state, { from: 0, step: null, header: null, stage: stage });
   pane.classList.add("on");
   pane.querySelector(".lphead b").textContent = stageName;
   pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
@@ -457,14 +458,17 @@ function liveOpen(pane, issueKey, stage, stageName) {
 
 function liveTick(pane, issueKey, stage, first) {
   const body = pane.querySelector("pre");
-  const pick = pane.state.step
-    ? Promise.resolve(pane.state.step)
-    : fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
-        .then(r => r.ok ? r.json() : { steps: [] })
-        .then(index => {
-          const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
-          return match ? match.step : null;
-        });
+  // The newest writer of this stage, asked again every tick. A stage is
+  // several steps one after another, and following only the one that was
+  // newest when the pane opened left the reader watching a step that had
+  // finished while the stage carried on (live 2026-09-17).
+  const pick = fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
+    .then(r => r.ok ? r.json() : { steps: [] })
+    .then(index => {
+      const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
+      return match ? match.step : pane.state.step;
+    })
+    .catch(() => pane.state.step);
   pick.then(step => {
     if (pane.state.stage !== stage) return;
     if (!step) {
@@ -472,12 +476,23 @@ function liveTick(pane, issueKey, stage, first) {
       pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 3000);
       return;
     }
+    if (pane.state.step && pane.state.step !== step) {
+      // The stage moved on. The new step starts at its own beginning, not
+      // at an offset belonging to the previous one, and says its name so
+      // the reader knows the output changed hands.
+      pane.state.from = 0;
+      pane.state.header = step;
+    }
     pane.state.step = step;
     return fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live/" + encodeURIComponent(step) + "?from=" + pane.state.from, { headers: { Accept: "application/json" } })
       .then(r => r.ok ? r.json() : null)
       .then(chunk => {
         if (!chunk || pane.state.stage !== stage) return;
         if (first || pane.state.from === 0) body.textContent = "";
+        if (pane.state.header) {
+          body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
+          pane.state.header = null;
+        }
         if (chunk.text) {
           const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
           body.appendChild(document.createTextNode(chunk.text));

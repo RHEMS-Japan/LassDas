@@ -102,7 +102,10 @@
     if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
     if (view.running) {
       const live = el("div", "live");
-      live.appendChild(el("b", null, "いま動いています: " + view.running.step));
+      // The stage is what a requester recognises; the step's own name goes
+      // after it for anyone reading the records.
+      live.appendChild(el("b", null, "いま動いています: " + (view.running.stage || view.running.step)));
+      if (view.running.stage) live.appendChild(el("span", "since", view.running.step));
       const since = el("span", "since", elapsed(view.running.started_at));
       live.appendChild(since);
       head.appendChild(live);

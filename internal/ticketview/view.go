@@ -48,6 +48,10 @@ type View struct {
 type RunningStep struct {
 	Step      string    `json:"step"`
 	StartedAt time.Time `json:"started_at"`
+	// Stage is that step's place on the rail, named as a requester reads
+	// it. The step's own name is the engine's ("run-instruction",
+	// "agent-design-review"): correct, and no answer to "what is it doing".
+	Stage string `json:"stage,omitempty"`
 }
 
 // Event is one step on the timeline. Tone is ok | warn | bad | neutral.
@@ -882,6 +886,9 @@ func (v *View) readRunning(runDir string) {
 	if time.Since(record.StartedAt) > maxRunningStepAge {
 		return
 	}
+	// The file the step appends to is named for the step, so the stage is
+	// looked up the same way the board's live index looks it up.
+	record.Stage = StageName(LiveStage(liveLogName(record.Step)))
 	v.Running = &record
 }
 

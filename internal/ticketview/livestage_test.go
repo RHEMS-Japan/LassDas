@@ -14,19 +14,57 @@ import (
 // written at the call site.
 var stepCall = regexp.MustCompile(`p\.(?:worker|step|controller)\(ctx,\s*(.+)$`)
 
+// pinnedStages is what every step's stage is, written out a second time so
+// moving one in the table is a deliberate act with a failing test behind it.
+// The first version of this check only asked "does this step have a stage",
+// which left 30 of the entries free to move anywhere with the suite green
+// (review of #200).
+var pinnedStages = map[string]string{
+	"read-ticket": "intake", "read-contract": "intake", "build-draft": "intake",
+	"derive-contract": "intake", "list-candidates": "intake", "locate-target": "intake",
+	"baseline": "intake", "snapshot": "intake", "assess-readiness": "intake",
+	"check-readiness": "intake", "decide-readiness": "intake", "git-checkout": "intake",
+
+	"investigate": "investigate",
+
+	"agent-design-review": "design", "decide-design": "design", "design-impasse-question": "design",
+
+	"implement": "implement", "implement-instruction": "implement", "run-instruction": "implement",
+
+	"agent-review": "review", "review": "review", "seal-candidate": "review",
+
+	"decide": "checks", "apply": "checks", "run-validation": "checks",
+	"verify-applied": "checks", "verify-publish-gate": "checks", "impasse-question": "checks",
+
+	"create-feature-pr": "staging", "publish-feature": "staging", "compose-trail": "staging",
+	"merge-feature": "staging", "wait-feature": "staging", "await-staging": "staging",
+	"read-merged": "staging", "promotion-delta": "staging", "browsercheck-staging": "staging",
+
+	"await-merged-staging": "confirm",
+
+	"create-promotion-pr": "production", "merge-promotion": "production",
+	"await-production": "production", "browsercheck-production": "production",
+}
+
 // TestEveryRunnerStepHasAStage measures the stage table against the runner's
-// own call sites. The first table was written from remembered step names and
-// three of the engine's stages showed a requester nothing while their output
-// sat in the run directory. A table maintained by hand drifts the moment a
-// step is added; this fails the suite instead (live 2026-09-17).
+// own call sites, in both directions: every step the engine starts has a
+// stage, and it is the stage pinned above. A table maintained by hand drifts
+// the moment a step is added or moved; this fails the suite instead (live
+// 2026-09-17).
 func TestEveryRunnerStepHasAStage(t *testing.T) {
 	names, prefixes := runnerStepNames(t)
 	if len(names) < 30 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
-		if stage := LiveStage(runner.LiveLogName(name)); stage == "" {
-			t.Errorf("step %q belongs to no stage, so its live output is offered under no part of the rail", name)
+		file := runner.LiveLogName(name)
+		want, pinned := pinnedStages[file]
+		if !pinned {
+			t.Errorf("step %q (file %q) is in no pinned stage; add it to pinnedStages and to the table", name, file)
+			continue
+		}
+		if stage := LiveStage(file); stage != want {
+			t.Errorf("step %q is offered under %q, pinned as %q", name, stage, want)
 		}
 	}
 	for _, prefix := range prefixes {
@@ -38,30 +76,44 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	}
 }
 
-// TestLiveStageNamesAreWholeNames pins the shadowing the prefix table
-// allowed: the reception's own decision was filed under 審査 because it
-// begins with the review stage's "decide".
-func TestLiveStageNamesAreWholeNames(t *testing.T) {
-	for name, want := range map[string]string{
-		"decide-readiness":        "intake",
-		"decide-design":           "design",
-		"decide":                  "review",
-		"agent-design-review":     "design",
-		"agent-review":            "review",
-		"design-impasse-question": "design",
-		"impasse-question":        "intake",
-		"run-instruction":         "implement",
-		"run-validation":          "checks",
-		"git-checkout":            "intake",
-		"browsercheck-staging":    "staging",
-		"browsercheck-production": "production",
-	} {
-		if stage := LiveStage(name); stage != want {
-			t.Errorf("LiveStage(%q) = %q, want %q", name, stage, want)
+// TestPinnedStagesAndTheTableAgree reads the pins from the other side: an
+// entry moved in the table, or one the pins never knew about, fails here.
+func TestPinnedStagesAndTheTableAgree(t *testing.T) {
+	for step, want := range pinnedStages {
+		if stage := LiveStage(step); stage != want {
+			t.Errorf("LiveStage(%q) = %q, want %q", step, stage, want)
+		}
+	}
+	for step, stage := range liveStages {
+		if _, pinned := pinnedStages[step]; !pinned {
+			t.Errorf("the table files %q under %q, and nothing pins it", step, stage)
 		}
 	}
 	if stage := LiveStage("a-step-nobody-wrote"); stage != "" {
 		t.Errorf("an unknown step claimed stage %q", stage)
+	}
+}
+
+// Every rail stage has at least one step. A stage with none is a stage a
+// reader hovers and is told there is nothing, for ever — which is how 確認
+// behaved while the wait it shows ran under a step filed at STG.
+func TestEveryRailStageHasItsSteps(t *testing.T) {
+	counted := map[string]int{}
+	for _, stage := range liveStages {
+		counted[stage]++
+	}
+	for _, rule := range liveStagePrefixes {
+		counted[rule.stage]++
+	}
+	for _, stage := range []string{
+		"intake", "investigate", "design", "implement", "review", "checks", "staging", "confirm", "production",
+	} {
+		if counted[stage] == 0 {
+			t.Errorf("rail stage %q has no step at all", stage)
+		}
+		if StageName(stage) == "" {
+			t.Errorf("rail stage %q has no name a requester reads", stage)
+		}
 	}
 }
 
@@ -113,4 +165,17 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 		}
 	}
 	return names, prefixes
+}
+
+// The copy of the file-naming rule in this package has to agree with the
+// engine's, or a stage is looked up under a name no file ever has.
+func TestLiveLogNamesAgree(t *testing.T) {
+	for _, step := range []string{
+		"git checkout", "agent-design-review", "run-instruction", "browsercheck-production",
+		"", "...", strings.Repeat("x", 100), "a b/c:d", "decide", "実装",
+	} {
+		if mine, theirs := liveLogName(step), runner.LiveLogName(step); mine != theirs {
+			t.Errorf("%q: this package names the file %q, the engine names it %q", step, mine, theirs)
+		}
+	}
 }

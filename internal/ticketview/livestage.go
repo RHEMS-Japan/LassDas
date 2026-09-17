@@ -6,6 +6,15 @@ import "strings"
 // reader hovering one stage of the rail sees that stage's work and not
 // another's.
 //
+// One rule decides every entry: a step belongs to the stage of the card that
+// runs it, because that is the stage the rail lights up while the step is
+// working, and the lit stage is the one a reader hovers. Written from
+// remembered names instead, the table was wrong in both directions — the
+// design stage's own reviewer matched nothing while its output sat in the
+// run directory; the reception's decision matched the review stage's
+// "decide"; and the long wait a reader watches at 確認 was filed under STG,
+// a stage the rail already marks done (live 2026-09-17, review of #200).
+//
 // The argument is the live file's own name — runner.LiveLogName of the step,
 // which is the step's name with everything outside [A-Za-z0-9._-] replaced
 // ("git checkout" is the file "git-checkout"). Names are matched whole. The
@@ -29,10 +38,11 @@ func LiveStage(step string) string {
 	return ""
 }
 
-// liveStages is every step the runner names, by the stage a reader would
-// look for it under.
+// liveStages is every step the runner names, under the stage of the card
+// that runs it. The comment on each group names that card.
 var liveStages = map[string]string{
-	// 受付 — reading the ticket, deriving the contract, binding the source.
+	// 受付 — the reception (pretrip, readinessGate): reading the ticket,
+	// deriving the contract, binding the source, judging readiness.
 	"read-ticket":      "intake",
 	"read-contract":    "intake",
 	"build-draft":      "intake",
@@ -44,47 +54,57 @@ var liveStages = map[string]string{
 	"assess-readiness": "intake",
 	"check-readiness":  "intake",
 	"decide-readiness": "intake",
-	"impasse-question": "intake",
 
-	// 調査 — the investigating designer's measurements.
+	// 調査 — the investigate card.
 	"investigate": "investigate",
 
-	// 設計 — the plan, its judges, and the question a plan nobody passed asks.
+	// 設計 — the design review and decide cards, and the question a plan
+	// nobody passed puts to its requester.
 	"agent-design-review":     "design",
 	"decide-design":           "design",
 	"design-impasse-question": "design",
 
-	// 実装 — the instruction and the agent that carries it out.
+	// 実装 — the implement and apply cards: the instruction and the agent
+	// that carries it out.
 	"implement":             "implement",
 	"implement-instruction": "implement",
 	"run-instruction":       "implement",
-	"apply":                 "implement",
-	"seal-candidate":        "implement",
 
-	// 審査 — the reviewers and the verdict.
-	"agent-review": "review",
-	"review":       "review",
-	"decide":       "review",
+	// 審査 — the review cards. The seal runs on the first of them, which is
+	// why it is here and not with the implementation it records.
+	"agent-review":   "review",
+	"review":         "review",
+	"seal-candidate": "review",
 
-	// 検査 — the project's own checks against what was written.
-	"run-validation": "checks",
-	"verify-applied": "checks",
+	// 検査 — the validate card: it seals the round's verdict, applies the
+	// candidate into a sandbox, runs the project's checks, and asks the
+	// requester when the reviews never agreed.
+	"decide":              "checks",
+	"apply":               "checks",
+	"run-validation":      "checks",
+	"verify-applied":      "checks",
+	"verify-publish-gate": "checks",
+	"impasse-question":    "checks",
 
-	// STG — publishing the branch and waiting for the deployment.
-	"create-feature-pr":    "staging",
-	"publish-feature":      "staging",
-	"merge-feature":        "staging",
-	"wait-feature":         "staging",
-	"await-staging":        "staging",
-	"await-merged-staging": "staging",
-	"read-merged":          "staging",
-	"verify-publish-gate":  "staging",
-	"compose-trail":        "staging",
+	// STG — the publish card: the branch, its checks, the merge, and the
+	// wait for the staging deployment.
+	"create-feature-pr": "staging",
+	"publish-feature":   "staging",
+	"compose-trail":     "staging",
+	"merge-feature":     "staging",
+	"wait-feature":      "staging",
+	"await-staging":     "staging",
+	"read-merged":       "staging",
+	"promotion-delta":   "staging",
 
-	// 本番 — the promotion and its deployment.
+	// 確認 — the e2e card: the wait for a person to merge and for staging
+	// to carry the change. It is the one stage a reader watches for a long
+	// time, and its only step.
+	"await-merged-staging": "confirm",
+
+	// 本番 — the production delivery.
 	"create-promotion-pr": "production",
 	"merge-promotion":     "production",
-	"promotion-delta":     "production",
 	"await-production":    "production",
 }
 
@@ -96,4 +116,36 @@ var liveStagePrefixes = []struct{ prefix, stage string }{
 	{"browsercheck-production", "production"},
 	{"browsercheck-", "staging"},
 	{"git-", "intake"},
+}
+
+// StageName is the stage as a requester reads it on the rail. An unknown
+// stage has no name and the caller shows what it has.
+func StageName(stage string) string { return liveStageNames[stage] }
+
+var liveStageNames = map[string]string{
+	"intake": "受付", "investigate": "調査", "design": "設計", "implement": "実装",
+	"review": "審査", "checks": "検査", "staging": "STG", "confirm": "確認", "production": "本番",
+}
+
+// liveLogName is a step's name as its live file is named. It repeats
+// runner.LiveLogName rather than importing it: the runner is the engine and
+// this package is read by the board, which must not pull the engine in.
+// TestLiveLogNamesAgree measures the two against each other.
+func liveLogName(step string) string {
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, step)
+	name = strings.Trim(name, "-.")
+	if len(name) > 80 {
+		return name[:80]
+	}
+	if name == "" {
+		return "step"
+	}
+	return name
 }
