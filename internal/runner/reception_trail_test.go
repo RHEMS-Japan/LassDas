@@ -961,3 +961,19 @@ func TestReceptionNoteNamesTheIntakeAnswerThatCouldNotBeUsed(t *testing.T) {
 		t.Fatal("the intake failure fell through to the unnamed note")
 	}
 }
+
+// The seam between the worker's own phrase and the note a requester reads:
+// the derivation's "no target file chosen" must keep its place at the head
+// of the failure even now that the class travels with it, or the requester
+// is told to ask an operator instead of naming the file (review of #184).
+func TestDeriveNoteSurvivesTheAnswerUnusableClass(t *testing.T) {
+	stderr := "worker: contract derivation failed: " + worker.NoTargetFileChosen +
+		" (answer 3 of 3, request gen-1, began: {\"files\":[]}) (" + worker.AnswerUnusablePhrase + ")\n"
+	note := receptionNote(deriveStage, stderr)
+	if note != noFileChosenNote(deriveStage) {
+		t.Fatalf("the derivation's own note was lost:\n%s", note)
+	}
+	if strings.Contains(note, "決められた形になりませんでした") {
+		t.Fatalf("the class overruled the phrase:\n%s", note)
+	}
+}
