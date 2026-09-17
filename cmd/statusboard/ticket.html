@@ -106,7 +106,7 @@
     // board calls finished or waiting is not running whatever the record
     // says, and a pulsing "いま動いています" beside 「失敗で終了」 is the
     // page arguing with itself (review of #200).
-    const resting = ["done", "failed", "stopped", "question", "confirm"].includes(board.step);
+    const resting = ["done", "failed", "stopped", "question", "confirm", "attention"].includes(board.step);
     if (view.running && !resting) {
       const live = el("div", "live");
       // What the board says, read from the board's own row, so the two

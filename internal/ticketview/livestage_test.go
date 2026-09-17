@@ -63,7 +63,7 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	// smaller engine, it is a scan that stopped seeing call sites, or an
 	// engine that lost one - and a lost step is how a rail stage went empty
 	// (review of #200).
-	if len(names) < 44 {
+	if len(names) < 45 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
@@ -136,55 +136,62 @@ func TestEveryRailStageHasItsSteps(t *testing.T) {
 // how a stage goes missing.
 func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 	t.Helper()
-	entries, err := os.ReadDir("../runner")
-	if err != nil {
-		t.Fatalf("the runner's sources could not be read: %v", err)
+	helpers := forwardedStepNames(t)
+	for helper, literals := range helpers {
+		if len(literals) == 0 {
+			t.Errorf("%s is handed the step it starts and no caller names one", helper)
+		}
+		names = append(names, literals...)
 	}
-	forwarded, helpers := forwardedStepNames(t)
-	names = append(names, helpers...)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join("../runner", entry.Name()))
-		if err != nil {
-			t.Fatalf("%s could not be read: %v", entry.Name(), err)
-		}
-		source := string(body)
-		for _, at := range stepCall.FindAllStringIndex(source, -1) {
-			argument := strings.TrimLeft(source[at[1]:], " \t\n")
-			if !strings.HasPrefix(argument, `"`) {
-				// A name the enclosing function was handed. The wrappers
-				// forward "name"; a helper that is given the step to start
-				// is resolved from its own callers below, and anything
-				// else is a step this scan cannot see.
-				if field := strings.FieldsFunc(argument, func(r rune) bool {
-					return r == ',' || r == ' ' || r == '\n' || r == '\t'
-				}); len(field) > 0 && (field[0] == "name" || forwarded[field[0]]) {
+	for file, source := range runnerSources(t) {
+		for fn, body := range runnerFunctions(source) {
+			for _, at := range stepCall.FindAllStringIndex(body, -1) {
+				argument := strings.TrimLeft(body[at[1]:], " \t\n")
+				if !strings.HasPrefix(argument, `"`) {
+					// A name this function was handed. Excused only inside
+					// the function that was handed it, and only for the
+					// parameter it was handed: keyed on the name alone,
+					// any local variable called "step" hid a step from the
+					// scan entirely (review of #200).
+					field := strings.FieldsFunc(argument, func(r rune) bool {
+						return r == ',' || r == ' ' || r == '\n' || r == '\t'
+					})
+					if len(field) > 0 && field[0] == forwardedParam[fn] {
+						continue
+					}
+					head := argument
+					if len(head) > 40 {
+						head = head[:40]
+					}
+					t.Errorf("%s: %s starts a step with %q, which this scan cannot resolve to a name", file, fn, head)
 					continue
 				}
-				head := argument
-				if len(head) > 40 {
-					head = head[:40]
+				close := strings.Index(argument[1:], `"`)
+				if close < 0 {
+					t.Errorf("%s: a step name is not closed", file)
+					continue
 				}
-				t.Errorf("%s: a step is started with %q, which this scan cannot resolve to a name", entry.Name(), head)
-				continue
+				literal := argument[1 : close+1]
+				if strings.HasPrefix(strings.TrimLeft(argument[close+2:], " \t\n"), "+") {
+					prefixes = append(prefixes, literal)
+					continue
+				}
+				names = append(names, literal)
 			}
-			end := strings.Index(argument[1:], `"`)
-			if end < 0 {
-				t.Errorf("%s: a step name is not closed", entry.Name())
-				continue
-			}
-			literal := argument[1 : end+1]
-			if strings.HasPrefix(strings.TrimLeft(argument[end+2:], " \t\n"), "+") {
-				prefixes = append(prefixes, literal)
-				continue
-			}
-			names = append(names, literal)
 		}
 	}
 	return names, prefixes
 }
+
+// forwardedParam is the parameter each helper is handed its step in, filled
+// by forwardedStepNames.
+var forwardedParam = map[string]string{}
+
+// scannedWrappers are the three the scan matches at their own call sites, so
+// their callers' names are already collected once. Collecting them again as
+// forwarded names doubled every ordinary step and left the floor on how many
+// the scan expects unable to fire (review of #200).
+var scannedWrappers = map[string]bool{"worker": true, "step": true, "controller": true}
 
 // cardRailStage is where the attendant puts the rail while one chain card
 // runs (internal/attendant/status.go). Nine lines, and the only thing this
@@ -195,6 +202,12 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 // for it, which the board's rail does not draw at all, so a step reached
 // only from there has no lit stage to belong to. That gap is older than
 // this table and is named in it.
+// It is an approximation: status.go does not hold a per-card table, it
+// picks from the cards that are open. These nine hold while one card is
+// open and nothing is failing or waiting. They stop holding when a card
+// has failed (the rail says 実装 whatever the card was), when a card is
+// waiting for a person (the rail says attention), and while the implement
+// card is still open (it is chosen before review and validate).
 var cardRailStage = map[string]string{
 	"investigate":     "investigate",
 	"design-review-a": "design",
@@ -255,6 +268,18 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 			startedOutside[step] = true
 		}
 	}
+	// Which steps the reception starts, pinned: the entry points are named
+	// by literal, and reachableFrom answers about a name it does not know
+	// with a set of one rather than an error - so renaming one emptied the
+	// abstention in silence (review of #200).
+	var abstained []string
+	for step := range startedOutside {
+		abstained = append(abstained, step)
+	}
+	sort.Strings(abstained)
+	if strings.Join(abstained, " ") != strings.Join(receptionSteps, " ") {
+		t.Errorf("the reception starts %v; it started %v when this was written", abstained, receptionSteps)
+	}
 	if len(reached) < 15 {
 		t.Fatalf("only %d steps were reached from the cards; the walk is not working", len(reached))
 	}
@@ -298,6 +323,15 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 // derivedSteps is every step whose stage the walk settles. Adding to it is
 // coverage growing; removing from it is coverage going away, and either has
 // to be a deliberate edit here.
+// receptionSteps is what the reception starts. The walk leaves these to
+// the table, so the set has to be a deliberate edit rather than a rename
+// nobody noticed.
+var receptionSteps = []string{
+	"assess-readiness", "baseline", "build-draft", "check-readiness", "decide-readiness",
+	"derive-contract", "list-candidates", "locate-target",
+	"read-contract", "read-ticket", "snapshot",
+}
+
 var derivedSteps = []string{
 	"agent-design-review", "agent-review", "apply", "decide", "decide-design",
 	"impasse-question", "investigate", "run-instruction", "run-validation",
@@ -346,21 +380,9 @@ func stageConstantValues(t *testing.T) map[string]string {
 func runnerCallGraph(t *testing.T) (calls map[string][]string, steps map[string][]string) {
 	t.Helper()
 	calls, steps = map[string][]string{}, map[string][]string{}
-	entries, err := os.ReadDir("../runner")
-	if err != nil {
-		t.Fatal(err)
-	}
 	define := regexp.MustCompile(`(?m)^func (?:\(p \*Pipeline\) )?(\w+)`)
 	call := regexp.MustCompile(`p\.(\w+)\(`)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join("../runner", entry.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		source := string(body)
+	for _, source := range runnerSources(t) {
 		bounds := define.FindAllStringSubmatchIndex(source, -1)
 		for index, at := range bounds {
 			name := source[at[2]:at[3]]
@@ -400,49 +422,70 @@ func runnerCallGraph(t *testing.T) (calls map[string][]string, steps map[string]
 // helper shared by two phases could only start one step under one name,
 // and both phases' output landed in one file under one stage (review of
 // #200).
-func forwardedStepNames(t *testing.T) (map[string]bool, []string) {
+func forwardedStepNames(t *testing.T) map[string][]string {
 	t.Helper()
 	sources := runnerSources(t)
-	forwarded := map[string]bool{}
 	byHelper := map[string]string{}
 	define := regexp.MustCompile(`(?m)^func \(p \*Pipeline\) (\w+)\(ctx context\.Context, (\w+)[ ,]`)
 	for _, source := range sources {
 		for _, at := range define.FindAllStringSubmatchIndex(source, -1) {
 			fn, param := source[at[2]:at[3]], source[at[4]:at[5]]
+			if scannedWrappers[fn] {
+				continue
+			}
 			end := len(source)
 			if next := regexp.MustCompile(`(?m)^func `).FindStringIndex(source[at[1]:]); next != nil {
 				end = at[1] + next[0]
 			}
 			// Only when the helper actually starts a step with that name.
 			if regexp.MustCompile(`p\.(?:worker|step|controller)\(ctx,\s*` + param + `\b`).MatchString(source[at[1]:end]) {
-				forwarded[param] = true
 				byHelper[fn] = param
+				forwardedParam[fn] = param
 			}
 		}
 	}
-	var found []string
+	// The wrappers are handed "name" and are scanned at their own call
+	// sites, so the scan excuses that one word inside them without
+	// collecting anything.
+	for wrapper := range scannedWrappers {
+		forwardedParam[wrapper] = "name"
+	}
+	found := map[string][]string{}
 	for helper := range byHelper {
+		found[helper] = nil
 		call := regexp.MustCompile(`p\.` + helper + `\(ctx,\s*"([^"]+)"`)
 		for _, source := range sources {
 			for _, match := range call.FindAllStringSubmatch(source, -1) {
-				found = append(found, match[1])
+				found[helper] = append(found[helper], match[1])
 			}
 		}
-		if len(found) == 0 {
-			t.Errorf("%s is handed the step it starts and no caller names one", helper)
-		}
 	}
-	return forwarded, found
+	return found
+}
+
+// runnerFunctions splits one source into its function bodies by name.
+func runnerFunctions(source string) map[string]string {
+	define := regexp.MustCompile(`(?m)^func (?:\([^)]*\) )?(\w+)`)
+	bodies := map[string]string{}
+	bounds := define.FindAllStringSubmatchIndex(source, -1)
+	for index, at := range bounds {
+		end := len(source)
+		if index+1 < len(bounds) {
+			end = bounds[index+1][0]
+		}
+		bodies[source[at[2]:at[3]]] += source[at[1]:end]
+	}
+	return bodies
 }
 
 // runnerSources reads every non-test source of the runner.
-func runnerSources(t *testing.T) []string {
+func runnerSources(t *testing.T) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir("../runner")
 	if err != nil {
 		t.Fatalf("the runner's sources could not be read: %v", err)
 	}
-	var sources []string
+	sources := map[string]string{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
@@ -451,7 +494,7 @@ func runnerSources(t *testing.T) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sources = append(sources, string(body))
+		sources[entry.Name()] = string(body)
 	}
 	return sources
 }

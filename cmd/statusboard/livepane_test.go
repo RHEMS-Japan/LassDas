@@ -46,13 +46,33 @@ func TestLivePaneBehaviour(t *testing.T) {
 // outlived the card and the ticket page pulsed "いま動いています" beside a
 // finished run until the two-hour bound expired (review of #200).
 func TestEveryCardEntryPointClearsTheRunningStep(t *testing.T) {
-	for _, file := range []string{"chain_stage.go", "e2e.go", "deliver.go"} {
-		body, err := os.ReadFile(filepath.Join("..", "runner", file))
+	// Found rather than named: a fourth entry point added later would not
+	// be in a list of three, and would keep the record alive again.
+	entries, err := os.ReadDir(filepath.Join("..", "runner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join("..", "runner", entry.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(body), "ClearCurrentStep(workspace)") {
-			t.Errorf("cmd/runner/%s runs a card and never clears the running step", file)
+		// A file that builds a Pipeline and runs something on it is an
+		// entry point; main.go's one-process mode clears it already.
+		source := string(body)
+		if !strings.Contains(source, "&runner.Pipeline{") || !strings.Contains(source, "pipeline.Run") {
+			continue
 		}
+		checked++
+		if !strings.Contains(source, "ClearCurrentStep(workspace)") {
+			t.Errorf("cmd/runner/%s runs a card and never clears the running step", entry.Name())
+		}
+	}
+	if checked < 4 {
+		t.Errorf("only %d entry points were found; this check is looking in the wrong place", checked)
 	}
 }

@@ -541,13 +541,24 @@ function liveTick(pane, issueKey, stage, first) {
   // a row, so the pane has to notice the hand-over - but asking every tick
   // doubled the requests and made the newest writer flip back and forth
   // (review of #200).
+  //
+  // The hand-over is therefore noticed a tick late, and not at all while
+  // the step being followed writes something every single second and
+  // another step of the same stage runs beside it. Both at once is rare;
+  // a step that writes less often than the tick leaves a quiet tick, which
+  // is when the pane looks again.
   const pick = (pane.state.step && !pane.state.idle)
     ? Promise.resolve(pane.state.step)
     : fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
       .then(r => r.ok ? r.json() : unreachable)
       .then(index => {
         if (index === unreachable) return unreachable;
-        const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
+        // Ties broken by name, because two files written in the same
+        // millisecond otherwise came back in whichever order the sort
+        // happened to produce, and the pane announced a hand-over each
+        // time it changed its mind (review of #200).
+        const match = (index.steps || []).filter(s => s.stage === stage)
+          .sort((a, b) => b.updated_at_ms - a.updated_at_ms || a.step.localeCompare(b.step))[0];
         return match ? match.step : pane.state.step;
       })
       .catch(() => unreachable);
