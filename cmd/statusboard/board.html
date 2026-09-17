@@ -239,6 +239,14 @@
   }
 
   /* ---- finished lane ---- */
+  .livepane { margin-top: 10px; border: 1px solid var(--panel-edge); background: rgba(0,0,0,0.55); border-radius: 6px; display: none; }
+  .livepane.on { display: block; }
+  .livepane .lphead { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; border-bottom: 1px solid var(--faint); color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  .livepane .lphead b { color: var(--ink); text-transform: none; letter-spacing: 0; }
+  .livepane .lphead .pin { margin-left: auto; color: var(--muted); }
+  .livepane pre { margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); }
+  .node { cursor: default; }
+  .node.hasLive .nname { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; cursor: pointer; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip {
     display: inline-flex; align-items: center; gap: 8px;
@@ -339,10 +347,11 @@ function trackerURL(issueKey) {
   return trackerBase.replace(/\/$/, "") + "/view/" + encodeURIComponent(issueKey);
 }
 
-function buildTrack(container) {
+function buildTrack(container, issueKey, pane) {
   for (const [id, name] of STEPS) {
     const node = el("div", "node");
     node.dataset.step = id;
+    if (issueKey && pane) wireLive(node, issueKey, id, name, pane);
     const rail = el("div", "rail");
     rail.appendChild(el("div", "fill"));
     node.appendChild(rail);
@@ -373,6 +382,107 @@ function setTrack(container, stepID, round, stage) {
     laps.textContent = "×" + (showLaps ? round : 1);
     laps.classList.toggle("on", showLaps);
   });
+}
+
+/* ---- the live view: what a stage is producing, while it produces it ----
+   Hovering a stage of the rail opens its output; clicking pins it open so a
+   reader can scroll it. Only whole lines arrive, already masked by the
+   engine that wrote them. */
+function buildLivePane() {
+  const pane = el("div", "livepane");
+  const head = el("div", "lphead");
+  head.appendChild(el("span", null, "実況"));
+  head.appendChild(el("b", null, ""));
+  head.appendChild(el("span", "pin", ""));
+  pane.appendChild(head);
+  pane.appendChild(el("pre"));
+  pane.state = { timer: null, from: 0, step: null, pinned: false, stage: null };
+  return pane;
+}
+
+function liveStop(pane) {
+  if (pane.state.timer) clearTimeout(pane.state.timer);
+  pane.state.timer = null;
+}
+
+function liveClose(pane) {
+  liveStop(pane);
+  pane.classList.remove("on");
+  pane.state.step = null;
+  pane.state.stage = null;
+  pane.state.from = 0;
+  pane.querySelector("pre").textContent = "";
+}
+
+function liveOpen(pane, issueKey, stage, stageName) {
+  if (pane.state.stage === stage && pane.classList.contains("on")) return;
+  liveStop(pane);
+  pane.state = Object.assign(pane.state, { from: 0, step: null, stage: stage });
+  pane.classList.add("on");
+  pane.querySelector(".lphead b").textContent = stageName;
+  pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
+  pane.querySelector("pre").textContent = "読み込み中…";
+  liveTick(pane, issueKey, stage, true);
+}
+
+function liveTick(pane, issueKey, stage, first) {
+  const body = pane.querySelector("pre");
+  const pick = pane.state.step
+    ? Promise.resolve(pane.state.step)
+    : fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live", { headers: { Accept: "application/json" } })
+        .then(r => r.ok ? r.json() : { steps: [] })
+        .then(index => {
+          const match = (index.steps || []).filter(s => s.stage === stage).sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0];
+          return match ? match.step : null;
+        });
+  pick.then(step => {
+    if (pane.state.stage !== stage) return;
+    if (!step) {
+      if (first) body.textContent = "この工程の実況はまだありません。";
+      pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 3000);
+      return;
+    }
+    pane.state.step = step;
+    return fetch("/api/tickets/" + encodeURIComponent(issueKey) + "/live/" + encodeURIComponent(step) + "?from=" + pane.state.from, { headers: { Accept: "application/json" } })
+      .then(r => r.ok ? r.json() : null)
+      .then(chunk => {
+        if (!chunk || pane.state.stage !== stage) return;
+        if (first || pane.state.from === 0) body.textContent = "";
+        if (chunk.text) {
+          const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
+          body.appendChild(document.createTextNode(chunk.text));
+          if (atBottom) body.scrollTop = body.scrollHeight;
+        } else if (!body.textContent) {
+          body.textContent = "この工程の実況はまだありません。";
+        }
+        pane.state.from = chunk.next;
+        pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 1000);
+      });
+  }).catch(() => {
+    pane.state.timer = setTimeout(() => liveTick(pane, issueKey, stage, false), 4000);
+  });
+}
+
+function wireLive(node, issueKey, stage, stageName, pane) {
+  node.classList.add("hasLive");
+  node.tabIndex = 0;
+  const open = () => { if (!pane.state.pinned) liveOpen(pane, issueKey, stage, stageName); };
+  node.addEventListener("mouseenter", open);
+  node.addEventListener("focus", open);
+  node.addEventListener("mouseleave", () => { if (!pane.state.pinned) liveClose(pane); });
+  node.addEventListener("blur", () => { if (!pane.state.pinned) liveClose(pane); });
+  node.addEventListener("click", () => {
+    if (pane.state.pinned && pane.state.stage === stage) {
+      pane.state.pinned = false;
+      liveClose(pane);
+      return;
+    }
+    pane.state.pinned = false;
+    liveOpen(pane, issueKey, stage, stageName);
+    pane.state.pinned = true;
+    pane.querySelector(".lphead .pin").textContent = "固定中 (もう一度クリックで解除)";
+  });
+  node.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.click(); } });
 }
 
 function fmtElapsed(claimedAtMs) {
@@ -617,9 +727,11 @@ function buildCard(run) {
   card.appendChild(nowline);
 
   const track = el("div", "track");
-  buildTrack(track);
+  const pane = buildLivePane();
+  buildTrack(track, run.issue_key, pane);
   setTrack(track, run.step, run.round || 0, run.stage);
   card.appendChild(track);
+  card.appendChild(pane);
 
   if (run.next_action || run.can_resolve || run.can_go) card.appendChild(buildGuidance(run));
 
@@ -669,6 +781,10 @@ function renderBoard() {
   });
 
   const runsBox = document.getElementById("runs");
+  // Every card is rebuilt on each payload; a live pane still following a
+  // step would keep asking for it from a card nobody can see (review of
+  // #187).
+  for (const pane of runsBox.querySelectorAll(".livepane")) liveClose(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
     runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));

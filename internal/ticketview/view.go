@@ -25,18 +25,29 @@ import (
 
 // View is the ticket page's data.
 type View struct {
-	DeliveryID     string    `json:"delivery_id"`
-	IssueKey       string    `json:"issue_key,omitempty"`
-	Summary        string    `json:"summary,omitempty"`
-	Repository     string    `json:"repository,omitempty"`
-	Request        string    `json:"request,omitempty"`
-	PullRequestURL string    `json:"pr_url,omitempty"`
-	MergeSHA       string    `json:"merge_sha,omitempty"`
-	Timeline       []Event   `json:"timeline"`
-	Cost           Cost      `json:"cost"`
-	Failure        *Failure  `json:"failure,omitempty"`
-	Records        []string  `json:"records"`
-	BuiltAt        time.Time `json:"built_at"`
+	DeliveryID     string   `json:"delivery_id"`
+	IssueKey       string   `json:"issue_key,omitempty"`
+	Summary        string   `json:"summary,omitempty"`
+	Repository     string   `json:"repository,omitempty"`
+	Request        string   `json:"request,omitempty"`
+	PullRequestURL string   `json:"pr_url,omitempty"`
+	MergeSHA       string   `json:"merge_sha,omitempty"`
+	Timeline       []Event  `json:"timeline"`
+	Cost           Cost     `json:"cost"`
+	Failure        *Failure `json:"failure,omitempty"`
+	// Running is the step the runner started and has not finished. It is
+	// what tells a reader that a run is working rather than stuck: before
+	// it existed, a reception of a dozen steps showed one unchanging line
+	// for minutes, and an in-progress round read as a failed one.
+	Running *RunningStep `json:"running,omitempty"`
+	Records []string     `json:"records"`
+	BuiltAt time.Time    `json:"built_at"`
+}
+
+// RunningStep is the step the runner is executing right now.
+type RunningStep struct {
+	Step      string    `json:"step"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // Event is one step on the timeline. Tone is ok | warn | bad | neutral.
@@ -225,6 +236,7 @@ func Build(runDir string) (View, error) {
 		return View{}, errors.New("run directory not found")
 	}
 	view := View{DeliveryID: filepath.Base(runDir), BuiltAt: time.Now().UTC(), Timeline: []Event{}, Records: []string{}}
+	view.readRunning(runDir)
 	view.readTicket(runDir)
 	view.readIntake(runDir)
 	view.readReadiness(runDir)
@@ -527,7 +539,16 @@ func (v *View) readImplementation(dir string, n int) {
 	}
 	event := Event{At: at, Step: "implement", Tone: "ok", Title: fmt.Sprintf("実装 %d 巡目: 変更 %d ファイル", n, len(files)), Record: fmt.Sprintf("stage-%d-candidate", n)}
 	if !haveCandidate {
+		// The implementer's report lands before the change is sealed, and
+		// between the two the round looked failed in red while it was in
+		// fact running (live 2026-09-17: a reader almost told the requester
+		// the round had failed). A run that is still executing steps is
+		// told as in progress; only a run that has stopped can be said to
+		// have sealed nothing.
 		event.Title, event.Tone = fmt.Sprintf("実装 %d 巡目: 変更が封緘されなかった", n), "bad"
+		if v.Running != nil {
+			event.Title, event.Tone = fmt.Sprintf("実装 %d 巡目: 変更を封緘中", n), "neutral"
+		}
 		event.Record = fmt.Sprintf("stage-%d-%s", n, runRecord)
 	}
 	if runRecord == "applier-run" {
@@ -835,6 +856,33 @@ func (v *View) readEnding(runDir string) {
 		At: endAt, Step: "end", Tone: "bad",
 		Title: "失敗で終了: " + failure.Step, Why: why, Record: source,
 	})
+}
+
+// maxRunningStepAge is how long a started step may still be called running.
+// The implement stage's own bound is 90 minutes (internal/runtime chain), so
+// anything older than that plus a margin is a record nobody cleared.
+const maxRunningStepAge = 2 * time.Hour
+
+// readRunning reads the step the runner started last and has not replaced.
+// The record is removed when the run stops running steps, so its presence is
+// what "still working" means here.
+func (v *View) readRunning(runDir string) {
+	var record RunningStep
+	if !readJSON(filepath.Join(runDir, "current-step.json"), &record) {
+		return
+	}
+	record.Step = shown(record.Step)
+	if record.Step == "" || record.StartedAt.IsZero() {
+		return
+	}
+	// A runner that was killed leaves its record behind. Past the longest a
+	// step may take, "still running" would be a claim nobody is making: the
+	// page would pulse for ever and an unsealed round would read as in
+	// progress instead of dead (review of #187).
+	if time.Since(record.StartedAt) > maxRunningStepAge {
+		return
+	}
+	v.Running = &record
 }
 
 // modelFailureSummary says what the recorded numbers mean, in the

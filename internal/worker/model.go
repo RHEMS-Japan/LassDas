@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/probe"
 )
 
@@ -80,6 +81,18 @@ type ChatRequest struct {
 	Messages        []ChatMessage       `json:"messages"`
 	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *ChatResponseFormat `json:"response_format,omitempty"`
+	// Stream asks the endpoint to send the answer as it is written. The
+	// answer the caller receives is the same either way: the transport
+	// assembles the pieces back into one response. It is set only to feed
+	// the live view, never to change what a turn decides.
+	Stream        bool               `json:"stream,omitempty"`
+	StreamOptions *ChatStreamOptions `json:"stream_options,omitempty"`
+}
+
+// ChatStreamOptions asks for the usage block on a streamed answer: without
+// it the pieces carry no accounting, and a turn cannot tell what it spent.
+type ChatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // ChatUsage carries the token accounting returned by the endpoint. Cost is the
@@ -279,6 +292,13 @@ type ChatCompletionsAPI interface {
 // at the output allowance (converseTurn: once with more room, or with less reasoning when no answer began).
 type GatewayClient struct {
 	client *http.Client
+	// live receives the answer as it is written, for the board's live view.
+	// Nil when this process has no live file.
+	live *livelog.Sink
+	// streamOff is set when a streamed answer came back without the usage
+	// a turn needs: the endpoint does not support it, and every later call
+	// in this process asks in one piece instead.
+	streamOff bool
 }
 
 // gatewayRetryPauses is the wait before each retry of a "not now" answer;
@@ -345,7 +365,7 @@ func NewGatewayClient(client *http.Client) (*GatewayClient, error) {
 	if client == nil {
 		return nil, errors.New("HTTP client is required")
 	}
-	return &GatewayClient{client: client}, nil
+	return &GatewayClient{client: client, live: livelog.Open()}, nil
 }
 
 // SafeModelError marks an error that carries no URL and no credential -
@@ -414,6 +434,10 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 	if endpoint.APIKeyEnv == "" || apiKey == "" || strings.TrimSpace(apiKey) != apiKey || strings.ContainsAny(apiKey, "\r\n\x00") {
 		return nil, safeModelLiteral("model API key is unavailable")
 	}
+	streaming := g.live != nil && !g.streamOff && !request.Stream
+	if streaming {
+		request.Stream, request.StreamOptions = true, &ChatStreamOptions{IncludeUsage: true}
+	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, safeModelLiteral("model request could not be encoded")
@@ -424,9 +448,29 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 		// fixed assumption let a round trip slower than the assumption slip
 		// through and spend the whole allowance anyway (review of #125).
 		startedAttempt := time.Now()
-		body, status, retryAfter, err := g.post(ctx, endpoint.BaseURL, apiKey, encoded)
+		var body []byte
+		var status int
+		var retryAfter *time.Duration
+		var err error
+		if streaming {
+			body, status, retryAfter, err = g.postStreaming(ctx, endpoint.BaseURL, apiKey, encoded)
+		} else {
+			body, status, retryAfter, err = g.post(ctx, endpoint.BaseURL, apiKey, encoded)
+		}
 		lastAttempt := time.Since(startedAttempt)
 		if err != nil {
+			if errors.Is(err, errStreamUnsupported) {
+				// The endpoint does not stream. The question is asked again
+				// in one piece, and this process stops asking for streams.
+				// The asking starts over: this call may pay one more round
+				// of the gateway's waits, and the streamed attempt that
+				// came back unusable may already have been billed. It
+				// happens at most once per process.
+				g.streamOff = true
+				plain := request
+				plain.Stream, plain.StreamOptions = false, nil
+				return g.ChatCompletions(ctx, endpoint, plain)
+			}
 			// A gateway that answered a status gets the ladder below; one
 			// that could not be reached at all gets the same ladder here,
 			// because the moment that stopped it passes the same way.
@@ -462,6 +506,15 @@ func (g *GatewayClient) ChatCompletions(ctx context.Context, endpoint ModelEndpo
 			var response ChatResponse
 			if err := json.Unmarshal(body, &response); err != nil {
 				return nil, safeModelLiteral("model response is not valid JSON")
+			}
+			if streaming && response.Usage == nil {
+				// The endpoint streamed but kept its accounting to itself.
+				// A turn cannot work from that, so this process stops
+				// asking for streams and asks this one again in one piece.
+				g.streamOff = true
+				plain := request
+				plain.Stream, plain.StreamOptions = false, nil
+				return g.ChatCompletions(ctx, endpoint, plain)
 			}
 			return &response, nil
 		}

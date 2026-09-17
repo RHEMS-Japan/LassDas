@@ -560,3 +560,89 @@ func TestModelFailureSummaryShowsTheObjectionForRefusedAnswers(t *testing.T) {
 		t.Fatalf("a failure with no refused answers claimed them: %q", got)
 	}
 }
+
+// An unsealed implement round is a failure only when the run has stopped.
+// While the runner is still executing steps it is in progress: the report
+// lands before the seal, and red in that window read as a failed round.
+func TestUnsealedRoundIsInProgressWhileTheRunnerWorks(t *testing.T) {
+	dir := t.TempDir()
+	stage := filepath.Join(dir, "history", "stage-1")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, body string) {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(stage, "implementer-run.json"), `{"ran_at":"2026-09-17T07:25:00Z","duration_ms":85000,"changed_files":[]}`)
+
+	stopped, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := titleOfStep(stopped, "implement"); !strings.Contains(got, "封緘されなかった") || toneOfStep(stopped, "implement") != "bad" {
+		t.Fatalf("a stopped run must say the round sealed nothing: %q / %q", got, toneOfStep(stopped, "implement"))
+	}
+
+	// A step that started just now: the record is only believed while the
+	// step could still be running.
+	write(filepath.Join(dir, "current-step.json"), `{"step":"lassdas-review-a","started_at":"`+time.Now().Add(-30*time.Second).UTC().Format(time.RFC3339)+`"}`)
+	working, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if working.Running == nil || working.Running.Step != "lassdas-review-a" {
+		t.Fatalf("the running step was not read: %+v", working.Running)
+	}
+	if got := titleOfStep(working, "implement"); !strings.Contains(got, "封緘中") || toneOfStep(working, "implement") == "bad" {
+		t.Fatalf("a working run must not show the round as failed: %q / %q", got, toneOfStep(working, "implement"))
+	}
+}
+
+func titleOfStep(v View, step string) string {
+	for _, event := range v.Timeline {
+		if event.Step == step {
+			return event.Title
+		}
+	}
+	return ""
+}
+
+func toneOfStep(v View, step string) string {
+	for _, event := range v.Timeline {
+		if event.Step == step {
+			return event.Tone
+		}
+	}
+	return ""
+}
+
+// A runner that was killed leaves its current-step record behind. Past the
+// longest a step may take, the page must stop claiming work is happening -
+// otherwise a dead run reads as a working one, which is the confusion this
+// record exists to end (review of #187).
+func TestARecordLeftByAKilledRunnerIsNotRunning(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(dir, "current-step.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"step":"implement","started_at":"` + time.Now().Add(-5*time.Minute).UTC().Format(time.RFC3339) + `"}`)
+	fresh, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Running == nil {
+		t.Fatal("a step started five minutes ago is running")
+	}
+	write(`{"step":"implement","started_at":"` + time.Now().Add(-25*time.Hour).UTC().Format(time.RFC3339) + `"}`)
+	stale, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Running != nil {
+		t.Fatalf("a day-old record still claimed work: %+v", stale.Running)
+	}
+}

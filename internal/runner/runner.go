@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -119,11 +120,29 @@ func readWorkspaceFile(path string, limit int64) ([]byte, error) {
 // killed the job's process tree; the pod must do that itself.
 func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEnv ...string) (int, error) {
 	p.Logger.Info("step", "name", name, "argv0", argv[0])
+	p.recordCurrentStep(name)
+	// Every step is told where to append what it is producing, so a reader
+	// can watch the work instead of waiting for the record that lands when
+	// the step ends.
+	// The step's own child processes append to the same file, so what a
+	// step produced survives the container that produced it: until now the
+	// only copy of a failed step's output was the container's log, and a
+	// rebuilt container took the reason with it.
+	livePath := LiveLogPath(p.Workspace, name)
+	extraEnv = append(extraEnv, livelog.PathEnv+"="+livePath)
+	if err := os.Setenv(livelog.PathEnv, livePath); err != nil {
+		p.Logger.Error("live log path not set", "error", err.Error())
+	}
+	// It belongs to this step only: the clone and the terminal phase run
+	// outside any step and must not append to the last one's file.
+	defer func() { _ = os.Unsetenv(livelog.PathEnv) }()
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = p.Workspace
-	command.Stdout = os.Stdout
+	live := livelog.Open()
+	defer live.Close()
+	command.Stdout = live.Tee(os.Stdout)
 	stderrTail := &tailBuffer{limit: stepStderrTailBytes}
-	command.Stderr = io.MultiWriter(os.Stderr, stderrTail)
+	command.Stderr = live.Tee(io.MultiWriter(os.Stderr, stderrTail))
 	defer func() { p.lastStepStderr = stderrTail.String() }()
 	command.Env = append(os.Environ(), extraEnv...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

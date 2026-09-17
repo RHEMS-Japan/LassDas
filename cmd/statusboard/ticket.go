@@ -28,6 +28,11 @@ var ticketPage []byte
 
 // ticketKeyPattern is the engine's own issue key shape (worker config).
 var ticketKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]*$`)
+
+// liveStepPattern is the file-name shape the engine writes live output
+// under: one path segment of the characters runner.LiveLogName produces.
+var liveStepPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,80}$`)
+
 var recordNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,96}$`)
 
 // maxRecordRead bounds what one record request reads. A record larger
@@ -123,6 +128,10 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runDir := filepath.Join(s.runsRoot(), filepath.Base(row.DeliveryID))
+	if rest == "live" || strings.HasPrefix(rest, "live/") {
+		s.serveTicketLive(w, r, runDir, strings.TrimPrefix(strings.TrimPrefix(rest, "live"), "/"))
+		return
+	}
 	if rest != "" {
 		s.serveTicketRecord(w, r, runDir, rest)
 		return

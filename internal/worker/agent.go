@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/probe"
 	"bytes"
 	"context"
@@ -346,8 +347,13 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 	command.Dir = root
 	command.Env = environment
 	var transcript bytes.Buffer
-	command.Stdout = &transcript
-	command.Stderr = &transcript
+	// The transcript is the record; the live sink is the view of it as it
+	// arrives. A step whose output only appears when it ends looks stopped
+	// for as long as it runs (live 2026-09-17).
+	live := livelog.Open()
+	defer live.Close()
+	command.Stdout = live.Tee(&transcript)
+	command.Stderr = live.Tee(&transcript)
 	// A coding agent runs tools of its own, so stopping it means stopping
 	// everything it started. Its children are put in one process group and the
 	// whole group is signalled; without this a timed-out run keeps waiting for
