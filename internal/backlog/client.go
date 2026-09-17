@@ -255,10 +255,14 @@ func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marke
 // whether a comment is the automation's own.
 func (c *Client) SelfUserID(ctx context.Context) (int64, error) {
 	c.selfMu.Lock()
-	defer c.selfMu.Unlock()
-	if c.selfUserID > 0 {
-		return c.selfUserID, nil
+	known := c.selfUserID
+	c.selfMu.Unlock()
+	if known > 0 {
+		return known, nil
 	}
+	// Asked outside the lock: one caller's slow or hanging request must not
+	// hold every other caller for its whole timeout. Two callers may ask at
+	// once; both get the same answer and the second write is the same value.
 	var payload struct {
 		ID int64 `json:"id"`
 	}
@@ -268,8 +272,10 @@ func (c *Client) SelfUserID(ctx context.Context) (int64, error) {
 	if payload.ID <= 0 {
 		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
 	}
+	c.selfMu.Lock()
 	c.selfUserID = payload.ID
-	return c.selfUserID, nil
+	c.selfMu.Unlock()
+	return payload.ID, nil
 }
 
 // FindCommentWithMarkerPrefix answers the marker of the newest comment the
@@ -281,7 +287,13 @@ func (c *Client) SelfUserID(ctx context.Context) (int64, error) {
 // Author, not only shape, decides. The end-of-line anchor keeps a marker
 // quoted inside our own comment from counting, but a whole comment a person
 // writes can still end with a marker-shaped line, and treating that as the
-// automation's own report would silence the ticket for good.
+// automation's own report would silence the ticket for good: no queue, no
+// comment, nobody told.
+//
+// The cost is that a report posted under a different tracker account - a
+// deployment whose key belongs to another bot user - is not recognised, and
+// that ticket is worked again. That direction is the safe one: a second pull
+// request is visible and closable, a silenced ticket is neither.
 func (c *Client) FindCommentWithMarkerPrefix(ctx context.Context, issueID int64, prefix string) (string, bool, error) {
 	if issueID <= 0 || !validCommentMarkerPrefix(prefix) {
 		return "", false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
@@ -314,6 +326,18 @@ func validCommentMarkerPrefix(prefix string) bool {
 	}
 	for _, r := range prefix {
 		if r <= ' ' || r > '~' {
+			return false
+		}
+	}
+	// The opening alone would match every kind of marker for every run. A
+	// usable prefix names at least the kind and the run it belongs to, and
+	// every segment it names must be a real one.
+	segments := strings.Split(strings.TrimSuffix(strings.TrimPrefix(prefix, "["+hook.CommentMarkerPrefix+":"), ":"), ":")
+	if len(segments) < 2 {
+		return false
+	}
+	for _, segment := range segments {
+		if segment == "" {
 			return false
 		}
 	}

@@ -13,11 +13,8 @@ import (
 // a lost POST is repaired by searching for the marker, and duplicate postings
 // are detectable from the marker alone.
 
-const commentMarkerPrefix = "ticket-automation:v1"
-
-// CommentMarkerPrefix is what every marker this automation writes opens with,
-// for callers that must recognise one without building it.
-const CommentMarkerPrefix = commentMarkerPrefix
+// CommentMarkerPrefix is what every marker this automation writes opens with.
+const CommentMarkerPrefix = "ticket-automation:v1"
 
 // The kind class admits digits since the "e2e" kind joined; the end-of-body
 // anchor in ExtractCommentMarker stays the forgery defence either way.
@@ -27,7 +24,7 @@ var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z0-9-]
 // kind, run, and the kind-specific qualifiers (question revision, notification
 // number, digest prefix, ...).
 func CommentMarker(kind, runID string, qualifiers ...string) string {
-	parts := append([]string{commentMarkerPrefix, kind, runID}, qualifiers...)
+	parts := append([]string{CommentMarkerPrefix, kind, runID}, qualifiers...)
 	return "[" + strings.Join(parts, ":") + "]"
 }
 

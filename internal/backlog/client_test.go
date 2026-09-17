@@ -568,3 +568,18 @@ func TestFindCommentWithMarkerPrefixFailsWhenTheOwnerIsUnknown(t *testing.T) {
 		t.Fatalf("a failed owner read was not reported: found=%v err=%v", found, err)
 	}
 }
+
+// The prefix must name a kind and a run: the marker opening alone would match
+// every automated comment on the ticket.
+func TestValidCommentMarkerPrefixNeedsKindAndRun(t *testing.T) {
+	for _, bad := range []string{"[ticket-automation:v1:", "[ticket-automation:v1:terminal:", "[ticket-automation:v1::TICKET-5:"} {
+		if validCommentMarkerPrefix(bad) {
+			t.Errorf("accepted a prefix that names no run: %q", bad)
+		}
+	}
+	for _, good := range []string{"[ticket-automation:v1:terminal:TICKET-5:", "[ticket-automation:v1:terminal:TICKET-5:success:"} {
+		if !validCommentMarkerPrefix(good) {
+			t.Errorf("rejected a usable prefix: %q", good)
+		}
+	}
+}
