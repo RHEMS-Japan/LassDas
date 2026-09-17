@@ -253,7 +253,12 @@ func trackerBaseFromRuntimeConfig(path string) string {
 	// sensible size is not this configuration, and the board must not block
 	// on it - the read happens before the server starts listening (review
 	// of #192).
-	info, err := os.Lstat(path)
+	// Stat, not Lstat: a configuration mounted from a ConfigMap is a link
+	// to the data behind it, and refusing that would take the ticket link
+	// off every card in a deployment that mounts it that way. Following the
+	// link still reports a pipe or a directory, which is what this check is
+	// for (review of #192).
+	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
 		return ""
 	}

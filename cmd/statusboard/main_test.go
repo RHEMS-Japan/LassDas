@@ -263,11 +263,21 @@ func TestTrackerBaseRefusesWhatIsNotAPlainFile(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"tracker":{"origin":"https://example.backlog.jp"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A ConfigMap mounts its files as links to the data behind them, so a
+	// link to a plain file is the deployment shape, not an attack.
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if got := trackerBaseFromRuntimeConfig(link); got != "" {
-		t.Fatalf("a link yielded %q", got)
+	if got := trackerBaseFromRuntimeConfig(link); got != "https://example.backlog.jp" {
+		t.Fatalf("a mounted configuration yielded %q", got)
+	}
+	// A link to something that is not a plain file is still refused.
+	loop := filepath.Join(dir, "loop.json")
+	if err := os.Symlink(dir, loop); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := trackerBaseFromRuntimeConfig(loop); got != "" {
+		t.Fatalf("a link to a directory yielded %q", got)
 	}
 }

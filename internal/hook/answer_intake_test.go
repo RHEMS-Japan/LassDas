@@ -364,3 +364,35 @@ func TestAnswerIntakeRefusesABareWordThatCouldMeanAnything(t *testing.T) {
 		t.Fatalf("a malformed attempt was not answered: %+v", decision.Replies)
 	}
 }
+
+// A full-width keyboard writes the markers too. The copy-paste line and the
+// cancel line must read the same either way - the cancel line ends the run,
+// so it is held by a test rather than by a replacer nobody checks (review
+// of #192).
+func TestAnswerIntakeReadsFullWidthMarkers(t *testing.T) {
+	record := intakeTestRecord(questionTestSetJSON)
+	decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, "回答 Ｃ１ Ｑ１：ａ")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Adopted == nil || decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
+		t.Fatalf("a full-width answer line was not read: %+v", decision)
+	}
+	decision, err = EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, "中止Ｃ１")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Cancel == nil || decision.Cancel.CommentID != 101 {
+		t.Fatalf("a full-width cancel was not read: %+v", decision)
+	}
+	// Prose that merely contains those letters is still prose.
+	for _, body := range []string{"Ａ社でお願いします", "ＴＯＤＯ中止Ｃ１", "Ｑ＆Ａを見ました"} {
+		decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, body)))
+		if err != nil {
+			t.Fatalf("body %q: %v", body, err)
+		}
+		if decision.Adopted != nil || decision.Cancel != nil || len(decision.Replies) != 0 {
+			t.Fatalf("body %q was treated as an instruction: %+v", body, decision)
+		}
+	}
+}

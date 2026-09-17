@@ -284,11 +284,15 @@ func normalizeAnswerBody(body string) string {
 
 var fullWidthAnswerRunes = strings.NewReplacer(
 	"　", " ", "：", ":",
-	"ａ", "a", "ｂ", "b", "ｃ", "c", "ｄ", "d", "ｅ", "e", "ｆ", "f",
-	"Ａ", "A", "Ｂ", "B", "Ｃ", "C", "Ｄ", "D", "Ｅ", "E", "Ｆ", "F",
-	"０", "0", "１", "1", "２", "2", "３", "3", "４", "4", "５", "5",
-	"６", "6", "７", "7", "８", "8", "９", "9",
-	"Ｑ", "Q", "ｑ", "q", "Ｃ", "C", "ｃ", "c",
+	// The letters a choice id is written with (ids are a, b, c, d), the
+	// letters the markers use, and the digits of a revision or a question
+	// number. Rewriting them is what lets 「回答 Ｃ１ Ｑ１：ａ」 and
+	// 「中止Ｃ１」 be read at all.
+	"ａ", "a", "ｂ", "b", "ｃ", "c", "ｄ", "d",
+	"Ａ", "A", "Ｂ", "B", "Ｃ", "C", "Ｄ", "D",
+	"Ｑ", "Q", "ｑ", "q",
+	"０", "0", "１", "1", "２", "2", "３", "3", "４", "4",
+	"５", "5", "６", "6", "７", "7", "８", "8", "９", "9",
 )
 
 func firstContentLine(body string) string {
