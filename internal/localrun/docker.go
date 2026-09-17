@@ -1,6 +1,7 @@
 package localrun
 
 import (
+	"automation.internal/ticket-ingress/internal/imagepull"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,8 @@ func (m Manager) checkImage(ctx context.Context, p prepared) error {
 	}
 	out, err = inspect()
 	if err != nil {
-		if _, err := m.command(ctx, p.instance, "pull", "--platform", "linux/arm64", p.instance.Image); err != nil {
-			return errors.New("pinned runtime image is unavailable; acquire registry access outside init and retry")
+		if err := m.pull(ctx, p.instance); err != nil {
+			return err
 		}
 		out, err = inspect()
 		if err != nil {
@@ -150,3 +151,49 @@ for path in glob.glob('/proc/[0-9]*/cmdline'):
     except (FileNotFoundError, PermissionError): pass
 assert resident
 `
+
+// pull fetches the pinned image through the raw docker CLI so the registry's
+// answer can be read: pull output names the failure and never a credential.
+// A transfer cut by the network is retried once (docker resumes from the layers
+// it holds); any other failure is reported with its reason at once.
+func (m Manager) pull(ctx context.Context, i Instance) error {
+	docker := m.Docker
+	if docker == nil {
+		docker = dockerCLI{}
+	}
+	name := i.DockerContext
+	if name == "" {
+		name = "desktop-linux"
+	}
+	args := []string{"--context", name, "pull", "--platform", "linux/arm64", i.Image}
+	for attempt := 1; ; attempt++ {
+		out, err := docker.Run(ctx, args)
+		if err == nil {
+			return nil
+		}
+		class := imagepull.Explain(string(out))
+		if class == imagepull.Network && attempt == 1 && ctx.Err() == nil {
+			continue
+		}
+		return errors.New(pullFailure(class, string(out)))
+	}
+}
+
+func pullFailure(class imagepull.Class, detail string) string {
+	switch class {
+	case imagepull.Denied:
+		return "pinned runtime image pull was denied by the registry; follow the distributor's registry_login (if any) outside init, or ask the distributor to make the image public, then retry"
+	case imagepull.Missing:
+		return "pinned runtime image is not in the registry (digest mismatch); refresh the distributor's note from the engine repository's main and retry"
+	case imagepull.Network:
+		return "pinned runtime image pull was interrupted (network, not authentication); check the connection and retry, docker resumes from the layers it holds"
+	case imagepull.Daemon:
+		return "docker daemon is not reachable; start Docker Desktop and retry"
+	case imagepull.Disk:
+		return "no disk space left to extract the pinned runtime image; free space and retry"
+	}
+	if line := imagepull.LastLine(detail); line != "" {
+		return "pinned runtime image pull failed: " + line
+	}
+	return "pinned runtime image pull failed (docker printed no reason)"
+}

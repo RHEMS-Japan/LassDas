@@ -114,6 +114,20 @@ GitHub・トラッカー・モデルの鍵は、それぞれのサービスで�
 
 イメージの入手情報、必要な権限、起動・停止と再開は [ローカル導入手順](docs/LOCAL_INIT.md) を参照。CLI の自然文の依頼例は [チケットの書き方](docs/TICKET_AUTHORING.md#cli-アプリへの依頼) にある。
 
+## 配布者の手順 (本体を配る側)
+
+利用側は `docs/DISTRIBUTION.json` (配布者の案内) に書かれた digest 固定の image を取得するだけで、本体を build しない。案内は人が書かず、main への push が作る:
+
+1. main への push (docs/DISTRIBUTION.json だけの commit を除く) で `.github/workflows/image.yml` が linux/arm64 の image を build し、`ghcr.io/rhems-japan/lassdas/runtime:<commit SHA>` に push する。
+2. 同じ実行が docker からログアウトした状態で manifest を取り直し、匿名で取得できることを証明する。
+3. 証明できたら `docs/DISTRIBUTION.json` を新しい digest・SHA・実行 URL で書き換え、`[skip ci]` 付きで main に commit する。
+
+**初回だけ人の操作が要る。** GitHub Packages は最初の push でパッケージを非公開として作るので、初回の実行は 2. の匿名取得で失敗する。https://github.com/orgs/RHEMS-Japan/packages/container/lassdas%2Fruntime/settings で Visibility を Public にしてから、Actions の image workflow を main で再実行 (Run workflow) する。以後の push は人手なしで通る。
+
+workflow が失敗したときは案内は書き換わらず、利用側は前の image を使い続ける (`deploy/pod/release.sh` の CI 判定も同じ古い案内を読む)。失敗した段の名前 (build / push / 匿名取得の証明) がそのまま原因で、匿名取得の失敗はパッケージが非公開に戻っていないか確認する。
+
+image を非公開のまま配るときは、案内にログイン手順を載せる: `lassdas setup note --registry-login '<docker login のコマンド>'` (パスワードを含む形は受け付けない)。利用側の取得が registry に拒否されたとき、案内の `registry_login` があればその手順が表示される。
+
 ## 現在の状態
 
 | 項目 | 状態 |

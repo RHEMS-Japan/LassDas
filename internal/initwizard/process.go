@@ -1,6 +1,7 @@
 package initwizard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/imagepull"
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
@@ -41,6 +43,32 @@ func (ExecProcess) Run(ctx context.Context, name string, args []string, dir stri
 	return output, nil
 }
 
+// RunExplained is Run for the one command whose failure text is safe and
+// useful to show: `docker pull`. Docker prints the registry's answer (denied,
+// missing manifest, network trouble) on stderr and never a credential.
+func (ExecProcess) RunExplained(ctx context.Context, name string, args []string, dir string) ([]byte, string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	for _, key := range []string{"PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "LANG"} {
+		if value, ok := os.LookupEnv(key); ok {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, stderr.String(), fmt.Errorf("%s の実行に失敗しました", name)
+	}
+	return output, stderr.String(), nil
+}
+
+// Explainer is implemented by a Process that can hand back a command's
+// diagnostic text; the wizard uses it only for `docker pull`.
+type Explainer interface {
+	RunExplained(context.Context, string, []string, string) ([]byte, string, error)
+}
+
 func (w *Wizard) docker(ctx context.Context, s *State, args ...string) ([]byte, error) {
 	if s.DockerContext != "" {
 		args = append([]string{"--context", s.DockerContext}, args...)
@@ -50,6 +78,58 @@ func (w *Wizard) docker(ctx context.Context, s *State, args ...string) ([]byte, 
 
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 var pinPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// pull fetches the pinned image. Docker resumes from the layers it already
+// holds, so a transfer cut by the network is retried once before the user is
+// asked to; every other class of failure is reported at once with the reason,
+// because retrying an access denial or a missing digest cannot help.
+func (w *Wizard) pull(ctx context.Context, s *State) error {
+	args := []string{"pull", "--platform", "linux/arm64", s.Image}
+	if s.DockerContext != "" {
+		args = append([]string{"--context", s.DockerContext}, args...)
+	}
+	for attempt := 1; ; attempt++ {
+		start := time.Now()
+		var detail string
+		var err error
+		if explainer, ok := w.Process.(Explainer); ok {
+			_, detail, err = explainer.RunExplained(ctx, "docker", args, "")
+		} else {
+			_, err = w.Process.Run(ctx, "docker", args, "")
+		}
+		s.Metrics.DownloadSeconds += time.Since(start).Seconds()
+		if err == nil {
+			return nil
+		}
+		class := imagepull.Explain(detail)
+		if class == imagepull.Network && attempt == 1 && ctx.Err() == nil {
+			continue
+		}
+		return errors.New(pullFailure(class, detail))
+	}
+}
+
+// pullFailure words a pull failure for the person running setup. Authentication
+// is mentioned only when the registry actually refused access, so a public
+// image whose transfer merely broke is not sent looking for a login.
+func pullFailure(class imagepull.Class, detail string) string {
+	switch class {
+	case imagepull.Denied:
+		return "固定 image の取得を registry が拒否しました (denied)。配布者の案内 (~/.lassdas/distribution.json) に registry_login があればその手順で認証してから再実行してください。無ければ配布者に image の公開設定を確認してください"
+	case imagepull.Missing:
+		return "固定 image が registry に存在しません (digest が一致しない)。配布者の案内が本体 repo の main の docs/DISTRIBUTION.json と同じか確認し、古ければ install をやり直してください"
+	case imagepull.Network:
+		return "固定 image の取得が途中で切れました (ネットワーク)。認証の問題ではありません。接続を確認して再実行してください。取得済みの層は再利用されます"
+	case imagepull.Daemon:
+		return "Docker Desktop に接続できません。起動してから再実行してください"
+	case imagepull.Disk:
+		return "固定 image を展開する空き容量がありません。ディスクを空けてから再実行してください"
+	}
+	if line := imagepull.LastLine(detail); line != "" {
+		return "固定 image を取得できませんでした: " + line
+	}
+	return "固定 image を取得できませんでした (docker が理由を出力しませんでした)"
+}
 
 func (w *Wizard) imageCheck(ctx context.Context, s *State) error {
 	if !imagePattern.MatchString(s.Image) || !worker.ValidToolSHA(s.EngineSHA) || s.BuildRecord == "" {
@@ -70,11 +150,8 @@ func (w *Wizard) imageCheck(ctx context.Context, s *State) error {
 	if platform != "linux/aarch64" && platform != "linux/arm64" {
 		return errors.New("初版は Docker Desktop の linux/arm64 を対象とします")
 	}
-	start := time.Now()
-	_, err = w.docker(ctx, s, "pull", "--platform", "linux/arm64", s.Image)
-	s.Metrics.DownloadSeconds += time.Since(start).Seconds()
-	if err != nil {
-		return errors.New("固定 image を取得できません。非公開 image の認証は外で済ませてください")
+	if err := w.pull(ctx, s); err != nil {
+		return err
 	}
 	raw, err := w.docker(ctx, s, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", s.Image)
 	if err != nil {
