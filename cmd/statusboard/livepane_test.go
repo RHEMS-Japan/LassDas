@@ -36,7 +36,7 @@ func TestLivePaneBehaviour(t *testing.T) {
 	// empty print passed before this. A failure counts as having run, or
 	// one behaviour going wrong produced a second, untrue complaint that
 	// the harness had stopped (review of #200).
-	if ran < 21 {
+	if ran < 29 {
 		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", ran, output)
 	}
 }

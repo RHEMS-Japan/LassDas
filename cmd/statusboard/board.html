@@ -247,6 +247,11 @@
   .livepane pre { margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink); }
   .node { cursor: default; }
   .node.hasLive .nname { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; cursor: pointer; }
+  /* While a pane is pinned the other rails do not answer a hover, so they
+     stop offering to: an underline and a pointer cursor on something that
+     does nothing reads as broken (review of #200). */
+  body.livePinned .node.hasLive .nname { text-decoration: none; cursor: default; }
+  body.livePinned .livepane.on .node.hasLive .nname { text-decoration: underline dotted var(--muted); cursor: pointer; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip {
     display: inline-flex; align-items: center; gap: 8px;
@@ -463,6 +468,16 @@ function liveClose(pane) {
 // liveDetach stops a pane without forgetting what it was following, for the
 // rebuild: liveRestore opens the new card's pane on the same stage.
 function liveDetach(pane) {
+  // What the reader had. Every card is rebuilt on every payload, so
+  // without this a pinned pane went back to "読み込み中…" about once a
+  // minute and re-read its log from the beginning, losing the place the
+  // reader had scrolled to (review of #200).
+  if (liveFollow && liveFollow.deliveryID === deliveryIDOf(pane) && pane.classList.contains("on")) {
+    liveFollow.resume = {
+      text: pane.querySelector("pre").textContent,
+      step: pane.state.step, from: pane.state.from, offsets: pane.state.offsets,
+    };
+  }
   liveStop(pane);
   pane.classList.remove("on");
   pane.state.step = null;
@@ -476,6 +491,12 @@ function liveDetach(pane) {
 
 // liveRestore reopens the followed stage on the rebuilt card. A run that has
 // left the board takes its pane with it, and the follow ends there.
+// markPinned tells the page whether a pane is pinned, so the rails that
+// will not answer a hover stop offering to.
+function markPinned() {
+  document.body.classList.toggle("livePinned", !!(liveFollow && liveFollow.pinned));
+}
+
 function liveRestore(runsBox) {
   if (!liveFollow) return;
   const follow = liveFollow;
@@ -503,10 +524,12 @@ function liveRestore(runsBox) {
     return;
   }
   pane.state.pinned = follow.pinned;
-  liveOpen(pane, follow.issueKey, follow.stage, follow.stageName);
+  const resume = follow.resume;
+  follow.resume = null;
+  liveOpen(pane, follow.issueKey, follow.stage, follow.stageName, resume);
 }
 
-function liveOpen(pane, issueKey, stage, stageName) {
+function liveOpen(pane, issueKey, stage, stageName, resume) {
   // One pane at a time. Two open panes each poll, each say "固定中", and
   // the next refresh keeps whichever the follow names and drops the other
   // without the reader asking (review of #200).
@@ -525,6 +548,16 @@ function liveOpen(pane, issueKey, stage, stageName) {
   pane.classList.add("on");
   pane.querySelector(".lphead b").textContent = stageName;
   pane.querySelector(".lphead .pin").textContent = pane.state.pinned ? "固定中 (もう一度クリックで解除)" : "クリックで固定";
+  if (resume) {
+    // Carried across the rebuild: the same text, the same place in each
+    // step's file, and no "読み込み中…" in between.
+    pane.querySelector("pre").textContent = resume.text;
+    pane.state.step = resume.step;
+    pane.state.from = resume.from;
+    pane.state.offsets = resume.offsets || {};
+    liveTick(pane, issueKey, stage, false);
+    return;
+  }
   pane.querySelector("pre").textContent = "読み込み中…";
   liveTick(pane, issueKey, stage, true);
 }
@@ -605,6 +638,13 @@ function liveTick(pane, issueKey, stage, first) {
         // yet is the ordinary case, and clearing there emptied the pane
         // under the reader one tick after the hand-over (review of #200).
         const rewound = chunk.from === 0 && (pane.state.offsets[step] || 0) > 0;
+        if (chunk.from > pane.state.from) {
+          // The answer starts later than the reader had read to: the log
+          // grew past what one answer carries while nobody was looking.
+          // Two lines that were never next to each other must not be
+          // shown as if they were (review of #200).
+          body.appendChild(document.createTextNode("── 中略 (表示できる量を超えたため、途中を飛ばしました) ──\n"));
+        }
         if (first || rewound) body.textContent = "";
         if (pane.state.header) {
           body.appendChild(document.createTextNode("── " + pane.state.header + " ──\n"));
@@ -657,6 +697,7 @@ function wireLive(node, issueKey, stage, stageName, pane) {
       pane.state.pinned = false;
       liveFollow = null;
       liveClose(pane);
+      markPinned();
       return;
     }
     pane.state.pinned = false;
@@ -667,6 +708,7 @@ function wireLive(node, issueKey, stage, stageName, pane) {
       stage: stage, stageName: stageName, pinned: true,
     };
     pane.querySelector(".lphead .pin").textContent = "固定中 (もう一度クリックで解除)";
+    markPinned();
   });
   node.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.click(); } });
 }
