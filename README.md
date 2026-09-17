@@ -4,6 +4,17 @@
 
 `init` で必要な前提と実行環境を整え、依頼を受け取った AI が合意した手順で開発・確認を進め、検査を通った成果物を指定した納品先へ届けることを目指す。製品価値、対話による導入、LLM とゲートの役割、利用者の操作を含む **[全体方針](docs/PRODUCT_DIRECTION.md)** を設計判断の基準とする。方針と現在の実装・検証状況は区別する。
 
+## この repo の URL だけを渡された開発 AI へ
+
+「このプロジェクトで https://github.com/RHEMS-Japan/LassDas をセットアップして」と頼まれたら、いまいる repo (納品先) の外で、次を順に行う。
+
+1. この repo を作業用の場所へ取得する: `git clone https://github.com/RHEMS-Japan/LassDas.git /tmp/lassdas-src` (既にあれば `git -C /tmp/lassdas-src pull`)
+2. CLI を組み立て、準備を 1 回実行する: `cd /tmp/lassdas-src && go build -o lassdas ./cmd/lassdas && ./lassdas setup install` — 配布者の案内 (どのイメージを動かすか) は同じ repo の [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) から読まれる。引数は要らない
+3. 出力に示された `~/.lassdas/SETUP.md` を最初から最後まで読み、その指示に従う。以後の `lassdas …` は `~/.lassdas/bin/lassdas`
+4. 本体イメージのレジストリが非公開なら、案内の `registry_login` のコマンドを **利用者が** 実行する。AI は鍵を扱わない
+
+前提は git・Go (`go.mod` の版)・Docker Desktop。納品先 repo への書き込みは `.lassdas/` だけで、この repo の中身を納品先に持ち込まない。
+
 ## 理念
 
 **作業は AI がする。責任は人間が取る。** — *AI does the work; humans own the outcome.*
@@ -88,7 +99,7 @@ AWS 資格情報は通常の解決順 (環境変数 / プロファイル)。実�
 
 ## 導入 (新しいプロジェクトへ)
 
-導入は、利用者がすでに使っている開発 AI (Claude Code や Codex) に [docs/SETUP.md](docs/SETUP.md) を渡して頼む。AI が repo を調べ、決めることを聞き、`.lassdas/` に合意と回答を書き、`lassdas setup` で本体を起動し、利用者が本人の鍵で試験依頼を 1 本流して完了になる。旧来の対話ウィザード `lassdas init` も残っている。シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で始める。ソース版には Git と Go (`go.mod` の版) も必要。
+導入は、利用者がすでに使っている開発 AI (Claude Code や Codex) に、この repo の URL を渡して頼む (冒頭の手順)。AI が [docs/SETUP.md](docs/SETUP.md) に従って repo を調べ、決めることを聞き、`.lassdas/` に合意と回答を書き、`lassdas setup` で本体を起動し、利用者が本人の鍵で試験依頼を 1 本流して完了になる。配布者はリリースのたびに `lassdas setup note …` で [docs/DISTRIBUTION.json](docs/DISTRIBUTION.json) を更新する。旧来の対話ウィザード `lassdas init` も残っている。シンプルな CLI アプリは、Apple Silicon の Mac と Docker Desktop で始める。ソース版には Git と Go (`go.mod` の版) も必要。
 
 ```sh
 # エンジンのソースでビルド

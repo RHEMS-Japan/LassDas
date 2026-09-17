@@ -187,7 +187,7 @@ func RequiredAnswers() []Requirement {
 		{"engine-repository", "本体イメージの元ソース repo (owner/name)", fromDistribution},
 		{"image", "本体イメージ (registry/name@sha256:digest)", fromDistribution + "。タグ名から推定しない"},
 		{"engine-sha", "そのイメージに対応する本体ソースの 40 桁 SHA", fromDistribution},
-		{"build-record", "イメージと SHA の対応を確認できるビルド記録の URL", fromDistribution},
+		{"build-record", "イメージと SHA の対応の記録の URL (通常は配布者の案内ファイルの履歴)", fromDistribution},
 		{"tracker-origin", "課題管理 (Backlog) の接続先 URL", "利用者に確認"},
 		{"tracker-project", "Backlog の project キー", "利用者に確認"},
 		{"creator-id", "起票を許可する本人の Backlog 利用者 ID (数値)", "`lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認"},

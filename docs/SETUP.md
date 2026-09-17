@@ -15,7 +15,7 @@
 
 ## 1. 始める前に、機械で確かめる
 
-0. 本体の CLI と案内: 配布者 (または利用者) が 1 台につき 1 回、本体 repo の中で `lassdas setup install --image <registry/name@sha256:digest> --engine-sha <40 桁> --build-record <URL>` を実行してある。それが CLI を `~/.lassdas/bin/lassdas` に、この文書と本体 repo の docs/ にある文書 (参照先を含む) を `~/.lassdas/` に、配布者の案内 (本体イメージ・本体ソースの SHA・ビルド記録・本体 repo) を `~/.lassdas/distribution.json` に、開発 AI の skill を `~/.claude/skills/lassdas-setup/` に置く。以下の `lassdas …` はその CLI で呼ぶ。`setup.json` の `image` `engine-sha` `build-record` `engine-repository` は案内から自動で埋まるので書かなくてよい。install がまだなら、本体 repo を取得して `go build -o lassdas ./cmd/lassdas` で組み立て、案内は配布者からもらう。納品先 repo の中では CLI を実行するだけで、本体 repo の中身を納品先に持ち込まない。
+0. 本体の CLI と案内: 1 台につき 1 回、本体 repo の checkout の中で `go build -o lassdas ./cmd/lassdas && ./lassdas setup install` を実行する (引数なし。配布者の案内は同じ repo の `docs/DISTRIBUTION.json` から読まれる。別の案内を使うときだけ `--note PATH` か個別の引数)。それが CLI を `~/.lassdas/bin/lassdas` に、この文書と本体 repo の docs/ にある文書 (参照先を含む) を `~/.lassdas/` に、配布者の案内 (本体イメージ・本体ソースの SHA・ビルド記録・本体 repo) を `~/.lassdas/distribution.json` に、開発 AI の skill を `~/.claude/skills/lassdas-setup/` に置く。以下の `lassdas …` はその CLI で呼ぶ。`setup.json` の `image` `engine-sha` `build-record` `engine-repository` は案内から自動で埋まるので書かなくてよい。install がまだなら、本体 repo を取得して上のとおり組み立てて実行する。納品先 repo の中では CLI を実行するだけで、本体 repo の中身を納品先に持ち込まない。
 1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。
@@ -30,7 +30,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝と枝の運用 | README / CONTRIBUTING / AGENTS.md / CLAUDE.md、最近マージされた PR の宛先 (`git log --merges`、`gh pr list --state merged`) | `branch` |
 | 依存の入れ方、テストの動かし方、道具の版 | go.mod / package.json / Makefile / CI (`.github/workflows`) | `install` `verify` `toolchain` `verify-directory` |
 | 課題管理 | 利用者に確認 (Backlog の URL と project キー) | `tracker-origin` `tracker-project` |
-| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内)。無ければ install が未実行なので、配布者の案内をもらって install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
+| 本体イメージ | `~/.lassdas/distribution.json` (install が置いた配布者の案内。元は本体 repo の `docs/DISTRIBUTION.json`)。無ければ install が未実行なので、本体 repo を取得して 1.0 のとおり install する | `image` `engine-repository` `engine-sha` `build-record` (案内から自動) |
 
 文書と実態が食い違っていたら (README の PR 宛先と最近の PR の宛先が違う、など)、設定と履歴で経緯を調べる。判断できなければ、相違点と理由つきの推奨を利用者に確認する。名前から推測しない (B02)。
 
@@ -112,7 +112,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-repository` | 本体イメージの元ソース repo (owner/name) |
 | `image` | 本体イメージ (registry/name@sha256:digest)。タグ名から推定しない |
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
-| `build-record` | イメージと SHA の対応を確認できるビルド記録の URL |
+| `build-record` | イメージと SHA の対応の記録の URL。通常は本体 repo の `docs/DISTRIBUTION.json` の履歴 (配布者がリリースのたびに書く。`…/commits/main/docs/DISTRIBUTION.json`) |
 
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 

@@ -21,7 +21,107 @@ var skillTemplate string
 // installOptions is the distributor's note plus where the harness keeps
 // its skills.
 type installOptions struct {
-	engineRepository, image, engineSHA, buildRecord, registryLogin, skillsDir string
+	engineRepository, image, engineSHA, buildRecord, registryLogin, skillsDir, note, out string
+}
+
+// noteFor is the distributor's note an install uses: the checkout's own
+// docs/DISTRIBUTION.json (or --note PATH), with any flag given on the
+// command line overriding that field. A checkout without a note and no
+// flags is told where the note is expected.
+func noteFor(engineRoot string, options installOptions) (initwizard.Distribution, error) {
+	var note initwizard.Distribution
+	path := options.note
+	if path == "" {
+		path = filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
+	}
+	// Decoded, not judged: a flag may be the correction to one bad field,
+	// and the whole is validated once the flags are laid over it.
+	if read, err := initwizard.DecodeDistributionFile(path); err == nil {
+		note = read
+	} else if options.note != "" || (options.image == "" && options.engineSHA == "" && options.buildRecord == "") {
+		return initwizard.Distribution{}, err
+	} else if _, statErr := os.Stat(path); statErr == nil && (options.image == "" || options.engineSHA == "" || options.buildRecord == "" || options.engineRepository == "") {
+		// The file is there but unreadable, and the flags do not carry a
+		// whole note of their own: the message says why and the ways out.
+		return initwizard.Distribution{}, fmt.Errorf("%v。直すか消すか、--note PATH で別の案内を渡すか、--image / --engine-sha / --build-record / --engine-repository の 4 つを全部渡してください", err)
+	}
+	if options.engineRepository != "" {
+		note.EngineRepository = options.engineRepository
+	}
+	if options.image != "" {
+		note.Image = options.image
+	}
+	if options.engineSHA != "" {
+		note.EngineSHA = options.engineSHA
+	}
+	if options.buildRecord != "" {
+		note.BuildRecord = options.buildRecord
+	}
+	if options.registryLogin != "" {
+		note.RegistryLogin = options.registryLogin
+	}
+	return note, nil
+}
+
+// setupNote is the distributor's turn at a release: it writes the
+// repository's note from the release's image, sha and build record,
+// keeping what the previous note said where a flag says nothing (the
+// registry login, the body repository). It runs only in the body's own
+// repository: the note is never written into a delivery repository.
+func setupNote(ctx context.Context, engineRoot string, options installOptions, output io.Writer) error {
+	if err := bodyRepository(engineRoot); err != nil {
+		return err
+	}
+	repoNote := filepath.Join(engineRoot, filepath.FromSlash(initwizard.RepoDistributionFile))
+	out := options.out
+	if out == "" {
+		out = repoNote
+	}
+	// The starting point is always the checkout's note, so a release that
+	// restates only the image, sha and record keeps the login and the
+	// repository. A note that exists but cannot be read is not silently
+	// replaced: it is named, and the person decides.
+	var note initwizard.Distribution
+	if _, err := os.Stat(repoNote); err == nil {
+		decoded, err := initwizard.DecodeDistributionFile(repoNote)
+		if err != nil {
+			return fmt.Errorf("既存の案内を読めないので上書きしません: %v。直すか消してから再実行してください", err)
+		}
+		note = decoded
+	}
+	note.CLI, note.InstalledAt = "", time.Time{}
+	if options.engineRepository != "" {
+		note.EngineRepository = options.engineRepository
+	}
+	if note.EngineRepository == "" {
+		note.EngineRepository = originRepository(ctx, engineRoot)
+	}
+	if options.image != "" {
+		note.Image = options.image
+	}
+	if options.engineSHA != "" {
+		note.EngineSHA = options.engineSHA
+	}
+	if options.buildRecord != "" {
+		note.BuildRecord = options.buildRecord
+	}
+	if options.registryLogin != "" {
+		note.RegistryLogin = options.registryLogin
+	}
+	if err := initwizard.WriteDistributionFile(out, note); err != nil {
+		return fmt.Errorf("配布者の案内を書けません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
+	}
+	_, err := fmt.Fprintf(output, "配布者の案内を %s に書きました (image %s / engine-sha %s)。commit して push してください\n", out, note.Image, note.EngineSHA)
+	return err
+}
+
+// bodyRepository refuses any checkout that is not the body's own module.
+func bodyRepository(engineRoot string) error {
+	module, err := os.ReadFile(filepath.Join(engineRoot, "go.mod"))
+	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress\n") {
+		return errors.New("本体 repo の中で実行してください (go.mod が見つからないか、別の module です)")
+	}
+	return nil
 }
 
 // setupInstall is run once per machine, from a checkout of the body's
@@ -30,25 +130,25 @@ type installOptions struct {
 // person's development AI picks up when asked to set LassDas up - so
 // "LassDas をこのプロジェクトに導入して" is the whole request.
 func setupInstall(ctx context.Context, engineRoot, home string, options installOptions, output io.Writer) error {
-	module, err := os.ReadFile(filepath.Join(engineRoot, "go.mod"))
-	if err != nil || !strings.HasPrefix(string(module), "module automation.internal/ticket-ingress\n") {
-		return errors.New("本体 repo の中で実行してください (go.mod が見つからないか、別の module です)")
+	if err := bodyRepository(engineRoot); err != nil {
+		return err
 	}
-	if options.engineRepository == "" {
-		options.engineRepository = originRepository(ctx, engineRoot)
+	// The note is the checkout's own docs/DISTRIBUTION.json unless flags
+	// say otherwise. The source sha is the distributor's word, taken from
+	// the build record, never this checkout's HEAD: what runs is the image,
+	// and the checkout may be newer or older than what it was built from.
+	distribution, err := noteFor(engineRoot, options)
+	if err != nil {
+		return err
 	}
-	// The source sha is the distributor's word, taken from the build
-	// record, never this checkout's HEAD: what runs is the image, and the
-	// checkout may be newer or older than what it was built from.
-	if options.engineSHA == "" {
-		return errors.New("--engine-sha が必要です: そのイメージを作った本体ソースの 40 桁 SHA を、ビルド記録から写してください (手元の checkout の HEAD とは限りません)")
+	if distribution.EngineRepository == "" {
+		distribution.EngineRepository = originRepository(ctx, engineRoot)
 	}
 	base := filepath.Join(home, ".lassdas")
 	cli := filepath.Join(base, "bin", "lassdas")
-	distribution := initwizard.Distribution{EngineRepository: options.engineRepository, Image: options.image, EngineSHA: options.engineSHA,
-		BuildRecord: options.buildRecord, RegistryLogin: options.registryLogin, CLI: cli, InstalledAt: time.Now().UTC()}
+	distribution.CLI, distribution.InstalledAt = cli, time.Now().UTC()
 	if err := distribution.Validate(); err != nil {
-		return fmt.Errorf("配布者の案内が足りません: %v (--image / --engine-sha / --build-record / --engine-repository)", err)
+		return fmt.Errorf("配布者の案内が足りません: %v (repo の %s か、--image / --engine-sha / --build-record / --engine-repository)", err, initwizard.RepoDistributionFile)
 	}
 	previous, hadPrevious, _ := initwizard.LoadDistribution(home)
 	if hadPrevious && (previous.Image != distribution.Image || previous.EngineSHA != distribution.EngineSHA) {

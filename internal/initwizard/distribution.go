@@ -21,12 +21,65 @@ type Distribution struct {
 	EngineSHA        string    `json:"engine_sha"`
 	BuildRecord      string    `json:"build_record"`
 	RegistryLogin    string    `json:"registry_login,omitempty"`
-	CLI              string    `json:"cli"`
-	InstalledAt      time.Time `json:"installed_at"`
+	CLI              string    `json:"cli,omitempty"`
+	InstalledAt      time.Time `json:"installed_at,omitzero"`
 }
 
 // DistributionFile is where the note lives under the person's home.
 const DistributionFile = ".lassdas/distribution.json"
+
+// RepoDistributionFile is where the body's repository carries the current
+// note, so a person (or their AI) handed only the repository's URL finds
+// which image runs and where it came from. `lassdas setup note` writes it
+// at each release; `lassdas setup install` reads it by default.
+const RepoDistributionFile = "docs/DISTRIBUTION.json"
+
+// ReadDistributionFile reads a note wherever it is (the repository's, or
+// one given by path) and validates it; CLI and InstalledAt are set by
+// install, not here.
+func ReadDistributionFile(path string) (Distribution, error) {
+	d, err := DecodeDistributionFile(path)
+	if err != nil {
+		return Distribution{}, err
+	}
+	if err := d.Validate(); err != nil {
+		return Distribution{}, fmt.Errorf("配布者の案内 %s: %v", path, err)
+	}
+	return d, nil
+}
+
+// DecodeDistributionFile reads a note without validating it, so a caller
+// can overlay corrections before judging the whole.
+func DecodeDistributionFile(path string) (Distribution, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Distribution{}, fmt.Errorf("配布者の案内 %s を読めません: %v", path, err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var d Distribution
+	if err := decoder.Decode(&d); err != nil {
+		return Distribution{}, fmt.Errorf("配布者の案内 %s を読めません: %v", path, err)
+	}
+	return d, nil
+}
+
+// WriteDistributionFile writes a note for the repository (0644, no
+// install-time fields), validated first.
+func WriteDistributionFile(path string, d Distribution) error {
+	d.CLI, d.InstalledAt = "", time.Time{}
+	if err := d.Validate(); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(encoded, '\n'), 0o644)
+}
 
 // InstalledInstruction is where `setup install` puts the setup
 // instruction, beside the documents it links to.
