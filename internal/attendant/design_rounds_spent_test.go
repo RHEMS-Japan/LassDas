@@ -346,3 +346,87 @@ func TestARoundsSpentEndingDoesNotAskTheDesignQuestion(t *testing.T) {
 		t.Fatalf("comments posted = %d, want 1: %q", len(fixture.comments.posted), fixture.comments.posted)
 	}
 }
+
+// A delivery whose design was approved, whose change was written, and
+// whose reviewers then asked for a different design does not die when the
+// design rounds are spent: the change is written again under the design it
+// has, because that is the only work left and it is work that can finish.
+// Measured live: exactly that delivery ended with nothing delivered
+// (完遂率を最優先、発注者指示 2026-09-17).
+func TestAChangeIsWrittenAgainWhenTheDesignCannotBe(t *testing.T) {
+	fixture := newPendingFixture(t, "")
+	runDir := runDirectory(fixture.config, fixture.deliveryID)
+	for _, dir := range []string{"history/readiness", "history/stage-1", "history/design-3"} {
+		if err := os.MkdirAll(filepath.Join(runDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		"history/readiness/decision.json": `{"request_kind":"change","needs_design":true}`,
+		"history/stage-1/decision.json":   `{"outcome":"revise"}`,
+		// The change the round wrote, and both reviewers asking for a
+		// different design.
+		"history/stage-1/candidate.json": `{}`,
+		"history/stage-1/review-a.json":  `{"findings":[{"code":"design-wrong"}]}`,
+		"history/stage-1/review-b.json":  `{"findings":[{"code":"design-wrong"}]}`,
+		// The design the reviews approved, which the next attempt writes
+		// again from.
+		"history/design-1/investigation.json": `{}`,
+		"history/design-2/investigation.json": `{}`,
+		"history/design-3/investigation.json": `{}`,
+		"history/design-3/decision.json":      `{"outcome":"approved"}`,
+		"history/design-3/design.json":        `{}`,
+		"history/design-3/DESIGN.md":          "# 設計\n\nREADME.md のみを変更する。\n",
+		"ticket-draft.json":                   `{"repository":"example/consumer"}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(runDir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := fixture.config
+	config.Chain.Profiles = designTestProfiles()
+	if err := os.WriteFile(config.ConsumerConfigPath, []byte(
+		`{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"agents":{"applier":{"command":"true"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := backlog.NewClient(backlog.Config{SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com", Timeout: time.Second, MaxResponseBytes: 1 << 20},
+		roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("[]")), Header: http.Header{}}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.services.Backlog = quiet
+
+	var envelope hook.DispatchEnvelope
+	if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	card := func(id, stage, status string, round int) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, round)}
+	}
+	view := chainViewFor([]runtime.BoardTask{
+		card("t_i3", runtime.StageInvestigate, "done", 3), card("t_a3", runtime.StageDesignReviewA, "done", 3),
+		card("t_b3", runtime.StageDesignReviewB, "done", 3), card("t_d3", runtime.StageDesignDecide, "done", 3),
+		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "done", 1),
+		card("t_rb", runtime.StageReviewB, "done", 1), card("t_v", runtime.StageValidate, "blocked", 1),
+		card("t_p", runtime.StagePublish, "todo", 1),
+	}, fixture.deliveryID)
+
+	hermes, callLog := fakeBoard(t)
+	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, &recordingLogger{}); err != nil {
+		t.Fatalf("the delivery did not carry on: %v", err)
+	}
+	if len(fixture.comments.posted) != 0 {
+		t.Fatalf("the delivery ended instead of writing the change again: %q", fixture.comments.posted)
+	}
+	_, created := boardCalls(t, callLog)
+	if !containsID(created, fixture.deliveryID+":apply:r2") {
+		t.Errorf("no second implementation round was created: %v", created)
+	}
+}
