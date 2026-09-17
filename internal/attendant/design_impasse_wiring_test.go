@@ -74,9 +74,8 @@ func TestDesignNonconvergenceAsksInsteadOfEnding(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "question poster") {
 		t.Fatalf("the ask did not reach the poster: %v", err)
 	}
-	for _, posted := range fixture.comments.posted {
-		if strings.Contains(posted, "design_nonconverged") {
-			t.Fatalf("the run both asked and ended:\n%s", posted)
-		}
+	// The ask replaces the ending: nothing else is posted to the ticket.
+	if len(fixture.comments.posted) != 0 {
+		t.Fatalf("the run both asked and ended: %q", fixture.comments.posted)
 	}
 }
