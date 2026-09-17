@@ -513,8 +513,9 @@ func TestPreflightAsksAgainOnceAfterAMalformedResponse(t *testing.T) {
 	}
 }
 
-// A turn the provider ended at the output allowance is asked once more with
-// the allowance widened; a second cutoff, or one already at the ceiling,
+// A turn the provider ended at the output allowance is asked again with the
+// allowance widened, and a cutoff on that ask is given the rest of the
+// ceiling; a cutoff there, or one already at the ceiling to begin with,
 // travels named after the requests it took.
 func TestConverseTurnAsksAgainWithMoreRoomAfterACutOff(t *testing.T) {
 	config := validTestConfig()
@@ -565,6 +566,18 @@ func TestConverseTurnKeepsTheCutoffWhenTheWiderAskFailsOtherwise(t *testing.T) {
 	_, _, err := invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
 	if !errors.Is(err, errModelResponseTruncated) || len(api.requests) != 2 || !strings.Contains(err.Error(), "finish_reason=length") || !strings.Contains(err.Error(), "model invocation failed") {
 		t.Fatalf("cutoff then a transport failure: err = %v after %d requests, want the cutoff kept", err, len(api.requests))
+	}
+
+	// And it is the cutoff that led to the *last* re-ask. A turn widened
+	// twice that then fails names the allowance the second ask was cut off
+	// at; naming the first tells a reader the turn gave up with room it had
+	// already been given.
+	api = &loopScriptAPI{answers: []string{lengthMarker + `{}`, lengthMarker + `{}`}}
+	invoker, _ = NewModelInvoker(api)
+	_, _, err = invoker.converseTurn(context.Background(), ModelEndpoint{Model: "m", MaxOutputTokens: 4096}, messages, `{"type":"object"}`, 1<<16)
+	if len(api.requests) != 3 || !strings.Contains(err.Error(), "output allowance 8192 tokens") ||
+		strings.Contains(err.Error(), "4096 tokens") || !strings.Contains(err.Error(), CutoffWiderAskFailedPhrase) {
+		t.Fatalf("widened twice then a transport failure: err = %v after %d requests", err, len(api.requests))
 	}
 }
 

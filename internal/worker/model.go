@@ -956,7 +956,11 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // the cutoff travels at once. One more of any kind than its allowance, or
 // any other error, travels named. The counters are independent, so one turn
 // makes at most 9 calls (3 provider errors, 2 lowered, 2 cutoffs, 1
-// malformed, 1 final) with 42 s of pauses between them; each call has its own
+// malformed, 1 final). The second cutoff is what the ceiling costs: for
+// every role configured below half of it - which is every role the wizard
+// writes - a turn that keeps being cut off asks for 32,768 output tokens
+// it did not ask for before, and takes up to five minutes more, so the
+// worst case is 45 min 42 s rather than 40 min 42 s. The pauses total 42 s; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
 // round's wall (the context) is what ends a turn that keeps failing. A call
 // that spent its allowance (errModelAllowanceSpent) shares the provider's
