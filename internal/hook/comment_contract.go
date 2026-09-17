@@ -15,6 +15,10 @@ import (
 
 const commentMarkerPrefix = "ticket-automation:v1"
 
+// CommentMarkerPrefix is what every marker this automation writes opens with,
+// for callers that must recognise one without building it.
+const CommentMarkerPrefix = commentMarkerPrefix
+
 // The kind class admits digits since the "e2e" kind joined; the end-of-body
 // anchor in ExtractCommentMarker stays the forgery defence either way.
 var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z0-9-]{1,32}:[A-Za-z0-9_-]{1,128}(?::[A-Za-z0-9_.-]{1,64})*\]$`)
@@ -33,7 +37,8 @@ func CommentMarker(kind, runID string, qualifiers ...string) string {
 // this instance or on one that ran before it. The trailing colon keeps
 // "RUN-1:" from matching "RUN-10:".
 func TerminalMarkerPrefix(runID string) string {
-	return "[" + commentMarkerPrefix + ":terminal:" + runID + ":"
+	marker := CommentMarker("terminal", runID)
+	return marker[:len(marker)-1] + ":"
 }
 
 // TerminalCodeFromMarker returns the terminal code a terminal-report marker
@@ -43,8 +48,8 @@ func TerminalCodeFromMarker(marker string) string {
 		return ""
 	}
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(marker, "["), "]"), ":")
-	// prefix (2 parts) + kind + run + code + digest
-	if len(parts) < 6 || parts[2] != "terminal" {
+	// prefix (2 parts) + kind + run + code, with the report digest after it
+	if len(parts) < 5 || parts[2] != "terminal" {
 		return ""
 	}
 	return parts[4]

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -64,6 +65,11 @@ type Client struct {
 	apiKey           string
 	maxResponseBytes int64
 	http             *http.Client
+	// selfUserID is the tracker user the API key belongs to, read once and
+	// kept: the automation's own comments are told apart from everyone
+	// else's by author, and the key's owner cannot change under it.
+	selfMu     sync.Mutex
+	selfUserID int64
 }
 
 func NewClient(config Config, transport http.RoundTripper) (*Client, error) {
@@ -243,19 +249,55 @@ func (c *Client) FindCommentWithMarker(ctx context.Context, issueID int64, marke
 	return 0, false, nil
 }
 
-// FindCommentWithMarkerPrefix answers the marker of the newest comment, among
-// the issue's latest 100, whose final-line marker starts with prefix. The
-// prefix must itself be the opening of a marker and end with a separator, so
-// one run's prefix cannot match a longer run id.
+// SelfUserID is the tracker user the API key belongs to: the author of every
+// comment this automation has posted. Read once and kept for the process; a
+// failed read is reported, never guessed, because callers use it to decide
+// whether a comment is the automation's own.
+func (c *Client) SelfUserID(ctx context.Context) (int64, error) {
+	c.selfMu.Lock()
+	defer c.selfMu.Unlock()
+	if c.selfUserID > 0 {
+		return c.selfUserID, nil
+	}
+	var payload struct {
+		ID int64 `json:"id"`
+	}
+	if err := c.getJSON(ctx, "/api/v2/users/myself", &payload); err != nil {
+		return 0, err
+	}
+	if payload.ID <= 0 {
+		return 0, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_response")
+	}
+	c.selfUserID = payload.ID
+	return c.selfUserID, nil
+}
+
+// FindCommentWithMarkerPrefix answers the marker of the newest comment the
+// automation itself posted, among the issue's latest 100, whose final-line
+// marker starts with prefix. The prefix must itself be the opening of a
+// marker and end with a separator, so one run's prefix cannot match a longer
+// run id.
+//
+// Author, not only shape, decides. The end-of-line anchor keeps a marker
+// quoted inside our own comment from counting, but a whole comment a person
+// writes can still end with a marker-shaped line, and treating that as the
+// automation's own report would silence the ticket for good.
 func (c *Client) FindCommentWithMarkerPrefix(ctx context.Context, issueID int64, prefix string) (string, bool, error) {
 	if issueID <= 0 || !validCommentMarkerPrefix(prefix) {
 		return "", false, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
+	}
+	self, err := c.SelfUserID(ctx)
+	if err != nil {
+		return "", false, err
 	}
 	comments, err := c.latestComments(ctx, issueID)
 	if err != nil {
 		return "", false, err
 	}
 	for _, comment := range comments {
+		if comment.CreatedUser.ID != self {
+			continue
+		}
 		if marker := hook.ExtractCommentMarker(comment.Content); marker != "" && strings.HasPrefix(marker, prefix) {
 			return marker, true, nil
 		}
@@ -263,8 +305,11 @@ func (c *Client) FindCommentWithMarkerPrefix(ctx context.Context, issueID int64,
 	return "", false, nil
 }
 
+// validCommentMarkerPrefix accepts the opening of one kind of marker for one
+// run: the automation's own marker prefix, then printable ASCII without
+// whitespace, ending at a separator so a prefix cannot match a longer run id.
 func validCommentMarkerPrefix(prefix string) bool {
-	if len(prefix) < 8 || len(prefix) > 256 || prefix[0] != '[' || prefix[len(prefix)-1] != ':' {
+	if len(prefix) > 256 || !strings.HasPrefix(prefix, "["+hook.CommentMarkerPrefix+":") || prefix[len(prefix)-1] != ':' {
 		return false
 	}
 	for _, r := range prefix {

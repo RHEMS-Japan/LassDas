@@ -681,16 +681,31 @@ func TestProcessIgnoresTicketAlreadyReported(t *testing.T) {
 		}
 	}
 
-	store := &fakeStore{}
-	backlog := &fakeBacklog{activity: testActivity(), issue: testIssue(), reportErr: NewExternalFailure("backlog", FailureRetryable, "timeout")}
-	result := newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
-	if result.Decision != DecisionRetryRequested || result.Code != "report_lookup_failed" || len(store.requests) != 0 {
-		t.Fatalf("lookup failure: Process() = %s/%s queued=%d, want retry without queueing", result.Decision, result.Code, len(store.requests))
+	// Neither failure class may be conclusive: the sweep's cursor must not
+	// advance past a ticket whose report could not be read, or the ticket is
+	// skipped on every later scan with nothing posted to it.
+	for _, failure := range []struct {
+		err      error
+		decision Decision
+		code     string
+	}{
+		{NewExternalFailure("backlog", FailureRetryable, "timeout"), DecisionRetryRequested, "report_lookup_failed"},
+		{NewExternalFailure("backlog", FailureRejected, "authentication_failed"), DecisionDependencyFailed, "report_lookup_rejected"},
+	} {
+		store := &fakeStore{}
+		backlog := &fakeBacklog{activity: testActivity(), issue: testIssue(), reportErr: failure.err}
+		result := newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
+		if result.Decision != failure.decision || result.Code != failure.code || len(store.requests) != 0 {
+			t.Fatalf("lookup failure %v: Process() = %s/%s queued=%d, want %s/%s without queueing", failure.err, result.Decision, result.Code, len(store.requests), failure.decision, failure.code)
+		}
+		if ingestOutcomeConclusive(result.Decision) {
+			t.Fatalf("lookup failure %v was conclusive: the sweep would skip the ticket", failure.err)
+		}
 	}
 
-	store = &fakeStore{}
-	backlog = &fakeBacklog{activity: testActivity(), issue: testIssue()}
-	result = newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
+	store := &fakeStore{}
+	backlog := &fakeBacklog{activity: testActivity(), issue: testIssue()}
+	result := newTestService(t, backlog, store, &bytes.Buffer{}).Process(context.Background(), testHint())
 	if result.Decision != DecisionAccepted || result.Code != "queue_created" || len(backlog.reportPrefixes) != 1 {
 		t.Fatalf("unreported ticket: Process() = %s/%s asked=%d, want queue_created after one lookup", result.Decision, result.Code, len(backlog.reportPrefixes))
 	}
