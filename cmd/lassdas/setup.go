@@ -66,6 +66,16 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 			runner := initsmoke.Runner{UI: terminal, API: api, Observer: initsmoke.RuntimeObserver{Manager: manager, Process: process, API: api, Dir: dir}}
 			smoke = runner.Run
 		}
+		if command == "setup apply" && redo == "" {
+			stale, err := staleAgainstNote(dir, root, home)
+			if err != nil {
+				return err
+			}
+			if stale != "" {
+				_, _ = fmt.Fprintln(output, stale)
+				redo = "prepare"
+			}
+		}
 		wizard := initwizard.Wizard{UI: ui, API: api, Process: process, Runtime: runtimeAdapter{manager}, Smoke: smoke, RegistryLogin: noteRegistryLogin(home)}
 		_, err = wizard.Run(ctx, initwizard.Options{Project: project, Home: home, RepoRoot: root, Redo: redo})
 		return err
@@ -294,4 +304,43 @@ func noteRegistryLogin(home string) string {
 		return ""
 	}
 	return distribution.RegistryLogin
+}
+
+// staleAgainstNote reports, in the operator's words, that this project is
+// running an older body than the installed note names. A completed stage is
+// skipped on the next apply, so a new note used to change nothing: the
+// instance kept the image it was built with, apply said it had succeeded,
+// and a fix never reached the person who installed it (live 2026-09-17).
+// The answer is a line to print and a prepare to redo; an empty string
+// means the project already matches the note.
+func staleAgainstNote(dir, root, home string) (string, error) {
+	state, _, err := initwizard.Load(dir)
+	if err != nil {
+		return "", err
+	}
+	if state.Completed["prepare"] == "" || state.Image == "" {
+		// Nothing has been prepared yet; the run below does it from the
+		// note as it stands.
+		return "", nil
+	}
+	answers, err := loadAnswersWithDistribution(root, home)
+	if err != nil {
+		return "", err
+	}
+	image, _ := answers.Value("image")
+	engineSHA, _ := answers.Value("engine-sha")
+	if image == "" || (image == state.Image && (engineSHA == "" || engineSHA == state.EngineSHA)) {
+		return "", nil
+	}
+	return "配布者の案内が新しくなっています (この本体: " + shortDigest(state.Image) + " / 案内: " + shortDigest(image) + ")。入れ替えるため prepare からやり直します。", nil
+}
+
+// shortDigest names an image by the head of its digest, which is what a
+// person compares when they look at two of them.
+func shortDigest(image string) string {
+	_, digest, found := strings.Cut(image, "@sha256:")
+	if !found || len(digest) < 12 {
+		return image
+	}
+	return digest[:12]
 }

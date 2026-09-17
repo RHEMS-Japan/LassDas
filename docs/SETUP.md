@@ -17,6 +17,7 @@
 
 0. 本体の CLI と案内: 1 台につき 1 回、本体 repo の checkout の中で `go build -o lassdas ./cmd/lassdas && ./lassdas setup install` を実行する (引数なし。配布者の案内は同じ repo の `docs/DISTRIBUTION.json` から読まれる。別の案内を使うときだけ `--note PATH` か個別の引数)。それが CLI を `~/.lassdas/bin/lassdas` に、この文書と本体 repo の docs/ にある文書 (参照先を含む) を `~/.lassdas/` に、配布者の案内 (本体イメージ・本体ソースの SHA・ビルド記録・本体 repo) を `~/.lassdas/distribution.json` に、開発 AI の skill を `~/.claude/skills/lassdas-setup/` に置く。以下の `lassdas …` はその CLI で呼ぶ。`setup.json` の `image` `engine-sha` `build-record` `engine-repository` は案内から自動で埋まるので書かなくてよい。install がまだなら、本体 repo を取得して上のとおり組み立てて実行する。納品先 repo の中では CLI を実行するだけで、本体 repo の中身を納品先に持ち込まない。
    image の取得に失敗したときは、表示された理由で次が決まる: registry に拒否された (denied) なら案内の `registry_login` の手順を利用者に実行してもらう (無ければ配布者に image の公開設定を確認する)。ネットワークで途中で切れたなら認証の問題ではないので、接続を確認して同じコマンドを再実行する (取得済みの層は再利用される)。registry に存在しない (digest 不一致) なら案内が古いので install をやり直す。
+   本体を新しくするときは、本体 repo を取得し直して `./lassdas setup install` をやり直してから `lassdas setup apply` を実行する。apply は案内の image がこの本体のものと違えば「案内が新しくなっています」と述べて prepare からやり直し、コンテナを新しい image で入れ替える。何も言わずに古いままにはしない。
 1. 道具: `git`、`go` (本体の CLI をソースから組み立てる)、`docker` (Docker Desktop が起動していること)。`lassdas setup check` が無いもの・動いていないものを示す (G02)。
 2. 対象: `git remote -v`、いまの branch、`git status` の未保存の変更、fork や worktree かどうか。名前や現在のディレクトリだけで対象を決めない (A05)。
 3. すでに `.lassdas/` がある → `.lassdas/progress.md` を読み、7 段の続きから再開する (J01)。本体が動いている (`lassdas run status --project <name>`) → 「参加する (何も変えない)」「設定を変える」「旧設定を読んで引き継ぐ」を利用者に選んでもらう。動いている本体を止めない (A04 I07)。

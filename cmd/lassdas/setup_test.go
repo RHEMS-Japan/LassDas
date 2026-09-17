@@ -202,3 +202,74 @@ func TestSetupSecretsRefusesToFlipACompletedProjectsDesignChoice(t *testing.T) {
 		t.Fatalf("a completed design choice must not be flipped silently: %v", err)
 	}
 }
+
+// A note that names a newer body must reach the project. A completed stage
+// is skipped on the next apply, so a new note used to change nothing: the
+// instance kept its old image and apply said it had succeeded (live
+// 2026-09-17, a fix that never reached the person who installed it).
+func TestApplyNoticesANewerNote(t *testing.T) {
+	root := gitRepo(t)
+	home := t.TempDir()
+	dir, err := initwizard.ProjectDir(home, "sample")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const oldImage = "ghcr.io/example/runtime@sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const newImage = "ghcr.io/example/runtime@sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const oldSHA = "1111111111111111111111111111111111111111"
+	const newSHA = "2222222222222222222222222222222222222222"
+	state, secrets, err := initwizard.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Project, state.RepoRoot, state.Image, state.EngineSHA = "sample", root, oldImage, oldSHA
+	state.Completed["prepare"] = "done"
+	if err := initwizard.Save(dir, state, secrets); err != nil {
+		t.Fatal(err)
+	}
+	writeNote := func(image, engineSHA string) {
+		if err := os.MkdirAll(filepath.Join(home, ".lassdas"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		note := `{"engine_repository":"example/engine","image":"` + image + `","engine_sha":"` + engineSHA + `","build_record":"https://example.test/run/1"}`
+		if err := os.WriteFile(filepath.Join(home, ".lassdas", "distribution.json"), []byte(note), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".lassdas"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".lassdas", "setup.json"), []byte(`{"answers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeNote(oldImage, oldSHA)
+	line, err := staleAgainstNote(dir, root, home)
+	if err != nil || line != "" {
+		t.Fatalf("a matching note asked for a redo: %q (%v)", line, err)
+	}
+
+	writeNote(newImage, newSHA)
+	line, err = staleAgainstNote(dir, root, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, "案内が新しくなっています") || !strings.Contains(line, "aaaaaaaaaaaa") || !strings.Contains(line, "bbbbbbbbbbbb") {
+		t.Fatalf("the operator is not told which body is which: %q", line)
+	}
+
+	// A project that has prepared nothing yet is not stale; it is new.
+	fresh, err := initwizard.ProjectDir(home, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := staleAgainstNote(fresh, root, home); err != nil || line != "" {
+		t.Fatalf("a project with nothing prepared was called stale: %q (%v)", line, err)
+	}
+}
