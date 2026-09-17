@@ -116,6 +116,9 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
 | `build-record` | イメージと SHA の対応の記録の URL。通常は、そのイメージを作って push した GitHub Actions の実行 (main の image workflow が `docs/DISTRIBUTION.json` を書く) |
 
+
+実装・適用・レビューは、モデルの設定 (`models`) と実行基盤の役 (launch) の両方に現れる。実際に動くのは launch の方で、鍵は役ごとの `LASSDAS_<役>_KEY` を読む。費用の集計は両方の鍵を対象にするので、同じ鍵を全役で共用している設定では 1 行にまとまり、役ごとに鍵を分けている設定では行が分かれる。
+
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 
 - `review-a` と `review-b` は別のモデルで、別の提供会社。`implementer` と同じモデルにできるレビュー役は 1 つまで (`designer` も同じ)。

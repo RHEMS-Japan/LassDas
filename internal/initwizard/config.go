@@ -84,6 +84,10 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	}
 	endpoint := func(role string) worker.ModelEndpoint { return s.Models[role] }
 	implementer := endpoint("implementer")
+	// The implementer endpoint is not what implements here: the cards
+	// orchestration launches the implementing agent, which reads its own
+	// key. This endpoint drafts the target derivation, so it names that
+	// key - and the agent's key is read for spend through the launch.
 	implementer.APIKeyEnv = "LASSDAS_INTAKE_TARGET_KEY"
 	designer := endpoint("designer")
 	applier := agent("applier", 900)
