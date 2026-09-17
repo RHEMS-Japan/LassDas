@@ -405,7 +405,21 @@ function liveStop(pane) {
   pane.state.timer = null;
 }
 
+// liveFollow is the stage the reader is watching, kept outside the cards
+// because every card is rebuilt whenever the server sends a payload. Without
+// it the pane a reader was reading vanished on the next refresh — about once
+// a minute, and immediately on any event — which looks exactly like a stage
+// whose live output does not work (live 2026-09-17).
+let liveFollow = null; // {issueKey, stage, stageName, pinned}
+
 function liveClose(pane) {
+  liveFollow = null;
+  liveDetach(pane);
+}
+
+// liveDetach stops a pane without forgetting what it was following, for the
+// rebuild: liveRestore opens the new card's pane on the same stage.
+function liveDetach(pane) {
   liveStop(pane);
   pane.classList.remove("on");
   pane.state.step = null;
@@ -414,7 +428,23 @@ function liveClose(pane) {
   pane.querySelector("pre").textContent = "";
 }
 
+// liveRestore reopens the followed stage on the rebuilt card. A run that has
+// left the board takes its pane with it, and the follow ends there.
+function liveRestore(runsBox) {
+  if (!liveFollow) return;
+  const follow = liveFollow;
+  const card = runsBox.querySelector('.card[data-issue-key="' + CSS.escape(follow.issueKey) + '"]');
+  const pane = card && card.querySelector(".livepane");
+  if (!pane) {
+    liveFollow = null;
+    return;
+  }
+  pane.state.pinned = follow.pinned;
+  liveOpen(pane, follow.issueKey, follow.stage, follow.stageName);
+}
+
 function liveOpen(pane, issueKey, stage, stageName) {
+  liveFollow = { issueKey: issueKey, stage: stage, stageName: stageName, pinned: pane.state.pinned };
   if (pane.state.stage === stage && pane.classList.contains("on")) return;
   liveStop(pane);
   pane.state = Object.assign(pane.state, { from: 0, step: null, stage: stage });
@@ -480,6 +510,7 @@ function wireLive(node, issueKey, stage, stageName, pane) {
     pane.state.pinned = false;
     liveOpen(pane, issueKey, stage, stageName);
     pane.state.pinned = true;
+    liveFollow.pinned = true;
     pane.querySelector(".lphead .pin").textContent = "固定中 (もう一度クリックで解除)";
   });
   node.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); node.click(); } });
@@ -694,6 +725,7 @@ function buildResolveRow(run) {
 
 function buildCard(run) {
   const card = el("div", "card");
+  if (run.issue_key) card.dataset.issueKey = run.issue_key;
   card.dataset.delivery = run.delivery_id;
   const tone = TONE[run.step];
   if (tone) card.classList.add(tone);
@@ -784,13 +816,14 @@ function renderBoard() {
   // Every card is rebuilt on each payload; a live pane still following a
   // step would keep asking for it from a card nobody can see (review of
   // #187).
-  for (const pane of runsBox.querySelectorAll(".livepane")) liveClose(pane);
+  for (const pane of runsBox.querySelectorAll(".livepane")) liveDetach(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
     runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));
   } else {
     for (const run of active) runsBox.appendChild(buildCard(run));
   }
+  liveRestore(runsBox);
 
   const chips = document.getElementById("chips");
   chips.replaceChildren();
