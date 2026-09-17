@@ -23,6 +23,8 @@ concurrency:
 
 jobs:
   publish:
+    # main only: a dispatch on another branch must not push that branch to main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
@@ -50,6 +52,19 @@ jobs:
           [ -n "$digest" ] || { echo "no digest for $tag" >&2; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "pushed $digest"
+      - name: Prove the image pulls without a credential
+        # The note will say no login is needed; that is checked here, not
+        # assumed. The first push creates the package private: until a
+        # person makes it public in the package settings, the note is not
+        # written and this run fails saying so.
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          if ! docker manifest inspect "${{ steps.build.outputs.digest }}" >/dev/null 2>&1; then
+            echo "::error::the image cannot be pulled anonymously; make the package public once (organisation packages → lassdas/runtime → settings → visibility) and re-run this workflow. The note was not written."
+            exit 1
+          fi
+          echo "anonymous pull confirmed"
       - name: Write the distributor's note
         run: |
           set -euo pipefail
@@ -62,6 +77,7 @@ jobs:
       - name: Commit the note to main
         run: |
           set -euo pipefail
+          [ "${GITHUB_REF}" = "refs/heads/main" ] || { echo "not main: ${GITHUB_REF}" >&2; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --quiet -- docs/DISTRIBUTION.json; then

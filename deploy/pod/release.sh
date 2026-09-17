@@ -77,10 +77,19 @@ say "CI verdict for $engine_sha"
 # owner/name from either remote form (git@host:owner/name.git, https://host/owner/name)
 repo_slug="$(git remote get-url origin | sed -E 's#\.git$##; s#.*[:/]([^/]+/[^/]+)$#\1#')"
 [[ "$repo_slug" == */* ]] || { echo "could not read owner/name from the origin remote" >&2; exit 2; }
-ci_verdict="$(gh run list --repo "$repo_slug" --commit "$engine_sha" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
+# The image workflow commits the distributor's note to main with a token
+# that starts no CI run: a release taken from that commit is judged by the
+# commit it sits on, since the note changes no code. Only the ci workflow
+# is a verdict; the image workflow's own run is not.
+ci_commit="$engine_sha"
+if [[ "$(git diff-tree --no-commit-id --name-only -r "$engine_sha")" == "docs/DISTRIBUTION.json" ]]; then
+  ci_commit="$(git rev-parse "$engine_sha~1")"
+  echo "$engine_sha only carries the distributor's note; judging its parent $ci_commit"
+fi
+ci_verdict="$(gh run list --repo "$repo_slug" --workflow ci.yml --commit "$ci_commit" --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true)"
 echo "${ci_verdict:-no run found}"
 [[ "$ci_verdict" == "completed/success" ]] || {
-  echo "CI for $engine_sha is not green (${ci_verdict:-no run found}); push the commit, wait for a green run, then release" >&2
+  echo "CI for $ci_commit is not green (${ci_verdict:-no run found}); push the commit, wait for a green run, then release" >&2
   exit 2
 }
 
