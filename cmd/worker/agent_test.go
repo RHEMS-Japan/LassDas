@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -588,26 +589,68 @@ func TestImplementPromptCarriesTheDerivedTargetFiles(t *testing.T) {
 	}
 }
 
-func TestReadDerivedTargetsRefusesWhatItCannotTrust(t *testing.T) {
+func TestReadDerivedTargetsTakesOnlyThisRunsSealedTicket(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, body string) string {
+	config := cliTestConfig()
+	configSHA, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := config.Consumers[0]
+	draft := worker.TicketDraft{
+		SchemaVersion: 1, DeliveryID: "delivery_" + strings.Repeat("a", 32),
+		InputSHA256: strings.Repeat("b", 64), ConfigSHA256: configSHA, ToolSHA: strings.Repeat("c", 40),
+		IssueKey: "TICKET-501", RunID: "TICKET-501", Repository: consumer.Repository, Mode: consumer.Mode.ID,
+		Summary: "件名", Request: "本文",
+	}
+	ticket, err := draft.WithTargetFiles([]string{"client/src/label.ts"}, config)
+	if err != nil {
+		t.Fatalf("WithTargetFiles() error = %v", err)
+	}
+	write := func(name string, value any) string {
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return path
 	}
-	good, err := readDerivedTargets(write("good.json", `{"target_files":["README.md"]}`))
-	if err != nil || len(good) != 1 || good[0] != "README.md" {
-		t.Fatalf("targets = %v, err = %v", good, err)
+
+	targets, err := readDerivedTargets(write("good.json", ticket), draft, config)
+	if err != nil || len(targets) != 1 || targets[0] != "client/src/label.ts" {
+		t.Fatalf("targets = %v, err = %v", targets, err)
 	}
-	if targets, err := readDerivedTargets(""); err != nil || targets != nil {
+	if targets, err := readDerivedTargets("", draft, config); err != nil || targets != nil {
 		t.Fatalf("an unset path must yield no targets: %v %v", targets, err)
 	}
-	if _, err := readDerivedTargets(filepath.Join(dir, "absent.json")); err == nil {
-		t.Fatal("a named but missing derivation was accepted")
+	if _, err := readDerivedTargets(filepath.Join(dir, "absent.json"), draft, config); err == nil {
+		t.Fatal("a named but missing reception ticket was accepted")
 	}
-	if _, err := readDerivedTargets(write("bad.json", `{"target_files":["a\nb"]}`)); err == nil {
-		t.Fatal("a file name carrying a newline was accepted")
+
+	// A model agent can write in the run directory. A ticket that is not
+	// this run's, or whose files are not ones this consumer allows, is not
+	// what the reception sealed.
+	otherRun := ticket
+	otherRun.DeliveryID = "delivery_" + strings.Repeat("d", 32)
+	if _, err := readDerivedTargets(write("other-run.json", otherRun), draft, config); err == nil {
+		t.Fatal("another run's ticket was accepted")
+	}
+	forged := ticket
+	forged.TargetFiles = []string{"../../etc/passwd"}
+	if _, err := readDerivedTargets(write("escape.json", forged), draft, config); err == nil {
+		t.Fatal("a path outside the repository was accepted")
+	}
+	unsorted := ticket
+	unsorted.TargetFiles = []string{"client/src/a.ts", "client/src/a.ts"}
+	if _, err := readDerivedTargets(write("duplicate.json", unsorted), draft, config); err == nil {
+		t.Fatal("duplicated target files were accepted")
+	}
+	empty := ticket
+	empty.TargetFiles = []string{""}
+	if _, err := readDerivedTargets(write("empty.json", empty), draft, config); err == nil {
+		t.Fatal("an empty file name was accepted")
 	}
 }

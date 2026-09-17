@@ -21,7 +21,7 @@ func runImplementInstruction(args []string) error {
 	toolSHA := flags.String("tool-sha", "", "")
 	draftPath := flags.String("draft", "", "")
 	clarificationPath := flags.String("clarification", "", "")
-	derivationPath := flags.String("derivation", "", "")
+	derivationPath := flags.String("targets", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	outputPath := flags.String("out", "", "")
@@ -55,7 +55,7 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
-	targets, err := readDerivedTargets(*derivationPath)
+	targets, err := readDerivedTargets(*derivationPath, draft, config)
 	if err != nil {
 		return err
 	}

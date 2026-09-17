@@ -30,7 +30,7 @@ func runImplement(ctx context.Context, args []string) error {
 	knowledgeRoot := flags.String("knowledge-root", "", "")
 	stage := flags.Int("stage", 0, "")
 	clarificationPath := flags.String("clarification", "", "")
-	derivationPath := flags.String("derivation", "", "")
+	derivationPath := flags.String("targets", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	runOutPath := flags.String("run-out", "", "")
@@ -70,7 +70,7 @@ func runImplement(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	targets, err := readDerivedTargets(*derivationPath)
+	targets, err := readDerivedTargets(*derivationPath, draft, config)
 	if err != nil {
 		return err
 	}
@@ -591,12 +591,22 @@ func implementPrompt(
 			"依頼を果たすには他のファイルも変える必要がある、と判断した場合は、**変えずに** 何をなぜ変える必要があるかを報告して終了してください。その判断は依頼者に返します。前提を自分で直して先に進めないでください。",
 		)
 	}
-	sections = append(sections,
+	rules := []string{
 		"",
 		"## 守ること",
-		"- 変更してよいのは "+strings.Join(consumer.Mode.AllowedFilePrefixes, " / ")+" の下だけです。それ以外を変更した実行は破棄されます。",
-		"- 変更するファイルは最大 "+itoa(consumer.Mode.MaxFiles)+" 個までです。",
-		"- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。",
+		"- 変更してよいのは " + strings.Join(consumer.Mode.AllowedFilePrefixes, " / ") + " の下だけです。それ以外を変更した実行は破棄されます。",
+		"- 変更するファイルは最大 " + itoa(consumer.Mode.MaxFiles) + " 個までです。",
+	}
+	if len(targets) == 0 {
+		rules = append(rules, "- 新しいファイルを作ってもかまいません。置けるのは上の変更してよい場所の下だけで、ファイル数の上限にも数えます。既存ファイルの変更で足りる依頼では、新しいファイルを増やさないでください。")
+	} else {
+		// With the ticket's own files named above, "new files anywhere in
+		// the scope" would take the bound back four lines after giving it
+		// (review of #193).
+		rules = append(rules, "- 上に挙げたファイル以外は、新しく作るのも変更に当たります。作らないでください。")
+	}
+	sections = append(sections, rules...)
+	sections = append(sections,
 		"- 依頼に書かれていない改善・整理はしないでください。依頼を満たす最小の変更にしてください。",
 		"- 事実や操作手順を書く前に、根拠の実装・依存先・記録を読み、関係する条件分岐・対象範囲・副作用を記述と突き合わせてください。引用された行だけでなく、その主張が成立する条件と成立しない通常の経路も確認し、必要な条件や影響を説明から落とさないでください。",
 		"- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
@@ -673,23 +683,31 @@ func environmentSection(agent worker.AgentConfig) string {
 }
 
 // readDerivedTargets reads the files the reception decided this ticket
-// changes. An absent path means the caller has no derivation to hand (the
-// chat mode, and every older orchestration), and the instruction then says
+// changes, from the sealed reception ticket. Both receptions write it - the
+// one that derives the files from the request and the one that locates them
+// from the wording promise - and it is validated here against this run and
+// this consumer, because the file sits in a directory a model agent can
+// write to: without that, round one could rewrite what round two is told
+// the ticket changes (review of #193).
+//
+// An absent path means the caller has no reception ticket to hand (the chat
+// mode, and every older orchestration), and the instruction then says
 // nothing about target files rather than inventing a bound.
-func readDerivedTargets(path string) ([]string, error) {
+func readDerivedTargets(path string, draft worker.TicketDraft, config worker.Config) ([]string, error) {
 	if path == "" {
 		return nil, nil
 	}
-	var derivation struct {
-		TargetFiles []string `json:"target_files"`
+	var ticket worker.TicketRequest
+	if err := worker.ReadJSONFile(path, worker.MaxTicketJSONBytes, &ticket); err != nil {
+		return nil, errors.New("受付が判定した対象ファイルを読めませんでした")
 	}
-	if err := worker.ReadJSONFile(path, worker.MaxArtifactJSONBytes, &derivation); err != nil {
-		return nil, errors.New("derived contract could not be read")
+	if ticket.DeliveryID != draft.DeliveryID || ticket.InputSHA256 != draft.InputSHA256 ||
+		ticket.ConfigSHA256 != draft.ConfigSHA256 || ticket.ToolSHA != draft.ToolSHA ||
+		ticket.Repository != draft.Repository {
+		return nil, errors.New("受付が判定した対象ファイルはこの依頼のものではありません")
 	}
-	for _, file := range derivation.TargetFiles {
-		if file == "" || strings.ContainsAny(file, "\n\r") {
-			return nil, errors.New("derived contract names an invalid file")
-		}
+	if err := ticket.Validate(config); err != nil {
+		return nil, errors.New("受付が判定した対象ファイルが契約に合いません")
 	}
-	return derivation.TargetFiles, nil
+	return ticket.TargetFiles, nil
 }
