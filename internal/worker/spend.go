@@ -118,6 +118,14 @@ func SpendKeyEnvs(config Config) []string {
 			seen[endpoint.APIKeyEnv] = struct{}{}
 		}
 	}
+	// The seats that run as agents pay from their own keys, and those keys
+	// are named on the launch, not on an endpoint. Left out, the figures a
+	// requester reads covered the reception and the design and nothing
+	// else - and the implementing and reviewing seats are usually the
+	// larger half of a run (reported live 2026-09-17).
+	for env := range agentKeyEnvs(config) {
+		seen[env] = struct{}{}
+	}
 	envs := make([]string, 0, len(seen))
 	for env := range seen {
 		envs = append(envs, env)
@@ -128,6 +136,40 @@ func SpendKeyEnvs(config Config) []string {
 
 // RolesByKeyEnv names the roles each key pays for, so a report can say which
 // seats a figure covers instead of printing an environment variable.
+// agentKeyEnvs names every key an agent launch reads, by the seat it pays
+// for. An agent names its credential in SecretEnv: the variable the launch
+// reads, and the variable this process holds it in.
+func agentKeyEnvs(config Config) map[string]string {
+	envs := map[string]string{}
+	add := func(agent AgentConfig, role string) {
+		for _, source := range agent.SecretEnv {
+			if source != "" {
+				envs[source] = role
+			}
+		}
+	}
+	add(config.Agents.Implementer, "実装")
+	add(config.Agents.Reviewer, "レビュー")
+	if config.Agents.Applier != nil {
+		add(*config.Agents.Applier, "設計に沿った実装")
+	}
+	for _, reviewer := range config.Agents.ReviewerAgents {
+		name := reviewer.ReviewerID
+		if name == "" {
+			name = "review"
+		}
+		add(reviewer.Agent, "レビュー "+name)
+	}
+	for _, judge := range config.Agents.DesignReviewerAgents {
+		name := judge.ReviewerID
+		if name == "" {
+			name = "review"
+		}
+		add(judge.Agent, "設計レビュー "+name)
+	}
+	return envs
+}
+
 func RolesByKeyEnv(config Config) map[string][]string {
 	roles := map[string][]string{}
 	add := func(endpoint ModelEndpoint, role string) {
@@ -155,6 +197,9 @@ func RolesByKeyEnv(config Config) map[string][]string {
 			name = "review-" + string(rune('a'+index))
 		}
 		add(judge, "設計レビュー "+name)
+	}
+	for env, role := range agentKeyEnvs(config) {
+		roles[env] = append(roles[env], role)
 	}
 	for env, list := range roles {
 		roles[env] = dedupeStrings(list)

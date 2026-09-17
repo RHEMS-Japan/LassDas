@@ -322,3 +322,51 @@ func TestSpendListsTheDesignerAndTheDesignJudges(t *testing.T) {
 		t.Fatalf("roles = %v", roles)
 	}
 }
+
+// The seats that run as agents pay from their own keys, named on the launch
+// rather than on an endpoint. Left out, a run's figures covered the
+// reception and the design and nothing else, while the implementing and
+// reviewing seats are usually the larger half (reported live 2026-09-17).
+func TestSpendCoversTheSeatsThatRunAsAgents(t *testing.T) {
+	config := spendFixtureConfig()
+	envs := SpendKeyEnvs(config)
+	for _, want := range []string{"LASSDAS_IMPLEMENTER_KEY", "LASSDAS_APPLIER_KEY", "LASSDAS_REVIEW_A_KEY"} {
+		found := false
+		for _, env := range envs {
+			if env == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s is not read for spend: %v", want, envs)
+		}
+	}
+	roles := RolesByKeyEnv(config)
+	if len(roles["LASSDAS_IMPLEMENTER_KEY"]) == 0 || len(roles["LASSDAS_APPLIER_KEY"]) == 0 {
+		t.Fatalf("a figure would print an environment variable instead of a seat: %v", roles)
+	}
+}
+
+func spendFixtureConfig() Config {
+	endpoint := func(id, env string) ModelEndpoint {
+		return ModelEndpoint{ID: id, Vendor: "OpenAI", Model: "vendor/model", BaseURL: "https://gateway.example.com/api/v1", APIKeyEnv: env, MaxOutputTokens: 1024}
+	}
+	agent := func(role string) AgentConfig {
+		return AgentConfig{ID: role, Command: "sh", SecretEnv: map[string]string{"LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY": "LASSDAS_" + strings.ToUpper(strings.ReplaceAll(role, "-", "_")) + "_KEY"}, TimeoutSeconds: 600}
+	}
+	applier := agent("applier")
+	return Config{
+		SchemaVersion: ConfigSchemaVersion,
+		Models: ModelConfig{
+			Implementer: endpoint("implementer", "LASSDAS_INTAKE_TARGET_KEY"),
+			Reviewers:   []ModelEndpoint{endpoint("review-a", "LASSDAS_REVIEW_A_KEY")},
+			Readiness:   ReadinessModels{Assessor: endpoint("readiness-assessor", "LASSDAS_READINESS_ASSESSOR_KEY"), Checker: endpoint("readiness-checker", "LASSDAS_READINESS_CHECKER_KEY")},
+		},
+		Agents: AgentSet{
+			Implementer:    agent("implementer"),
+			Reviewer:       agent("reviewer-unused"),
+			Applier:        &applier,
+			ReviewerAgents: []ReviewerAgent{{ReviewerID: "review-a", Agent: agent("review-a")}},
+		},
+	}
+}
