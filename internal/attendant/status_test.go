@@ -461,10 +461,18 @@ func TestWaitingForAnAnswerSaysHowToWithdraw(t *testing.T) {
 	}
 	// Withdrawal belongs to the state that can act on it. A terminal run
 	// cannot be withdrawn, and saying so there would be a false promise.
-	for _, runState := range []string{"terminal", "queued", "claimed"} {
-		other := classifyRun(runtime.Config{}, state.RunOverview{State: runState}, nil)
+	for _, ending := range []state.RunOverview{
+		{State: "queued"},
+		{State: "claimed"},
+		{State: "terminal"},
+		{State: "terminal", TerminalCode: "success"},
+		{State: "terminal", TerminalCode: "cancelled"},
+		{State: "terminal", TerminalCode: "model_failed"},
+		{State: "terminal", TerminalCode: "clarification_expired"},
+	} {
+		other := classifyRun(runtime.Config{}, ending, nil)
 		if strings.Contains(other.ActionEffect, "中止") || strings.Contains(other.NextAction, "中止") {
-			t.Fatalf("state %q offers a withdrawal it cannot honour: %q / %q", runState, other.NextAction, other.ActionEffect)
+			t.Fatalf("state %q/%q offers a withdrawal it cannot honour: %q / %q", ending.State, ending.TerminalCode, other.NextAction, other.ActionEffect)
 		}
 	}
 }
