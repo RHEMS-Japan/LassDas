@@ -123,8 +123,8 @@ func TestInstallRefusesAnIncompleteNote(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(engine, "go.mod"), []byte("module automation.internal/ticket-ingress\n\ngo 1.25\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := setupInstall(context.Background(), engine, t.TempDir(), installOptions{image: digest, buildRecord: "u", engineRepository: "e/a", skillsDir: t.TempDir()}, &out); err == nil || !strings.Contains(err.Error(), "--engine-sha が必要") {
-		t.Fatalf("engine-sha must be given: %v", err)
+	if err := setupInstall(context.Background(), engine, t.TempDir(), installOptions{image: digest, buildRecord: "u", engineRepository: "e/a", skillsDir: t.TempDir()}, &out); err == nil || !strings.Contains(err.Error(), "engine-sha") {
+		t.Fatalf("engine-sha must be given when the checkout has no note: %v", err)
 	}
 }
 
@@ -223,5 +223,63 @@ func TestInstalledDocumentsLinkOnlyToEachOther(t *testing.T) {
 				t.Errorf("%s links to %s, which is not installed beside it", name, match[1])
 			}
 		}
+	}
+}
+
+// The checkout's own docs/DISTRIBUTION.json is the note an install uses
+// with no arguments; a flag overrides its field; a missing note with no
+// flags says where the note is expected. `setup note` writes that file.
+func TestInstallReadsTheRepositorysNoteAndFlagsOverrideIt(t *testing.T) {
+	engine := t.TempDir()
+	digest := "registry/engine@sha256:" + strings.Repeat("a", 64)
+	var out bytes.Buffer
+	if err := setupNote(engine, installOptions{engineRepository: "e/a", image: digest, engineSHA: strings.Repeat("b", 40), buildRecord: "https://example/build/1", registryLogin: "docker login --password-stdin registry"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "docs/DISTRIBUTION.json") {
+		t.Fatalf("note output: %q", out.String())
+	}
+	note, err := noteFor(engine, installOptions{})
+	if err != nil || note.Image != digest || note.EngineSHA != strings.Repeat("b", 40) || note.RegistryLogin != "docker login --password-stdin registry" {
+		t.Fatalf("note from the checkout: %+v %v", note, err)
+	}
+	other := "registry/engine@sha256:" + strings.Repeat("c", 64)
+	note, err = noteFor(engine, installOptions{image: other})
+	if err != nil || note.Image != other || note.EngineSHA != strings.Repeat("b", 40) {
+		t.Fatalf("a flag overrides one field: %+v %v", note, err)
+	}
+	if _, err := noteFor(t.TempDir(), installOptions{}); err == nil || !strings.Contains(err.Error(), "DISTRIBUTION.json") {
+		t.Fatalf("no note and no flags must name the file: %v", err)
+	}
+	if _, err := noteFor(t.TempDir(), installOptions{note: filepath.Join(t.TempDir(), "missing.json")}); err == nil {
+		t.Fatal("an explicit --note that cannot be read is an error")
+	}
+	if err := setupNote(engine, installOptions{engineRepository: "e/a", image: "registry/engine:latest", engineSHA: strings.Repeat("b", 40), buildRecord: "u"}, &out); err == nil {
+		t.Fatal("a tag is refused by setup note too")
+	}
+}
+
+// The note the repository ships is valid, and the README leads an AI
+// handed only the URL to it.
+func TestTheRepositorysNoteAndReadmeLeadTheWay(t *testing.T) {
+	note, err := initwizard.ReadDistributionFile("../../docs/DISTRIBUTION.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.EngineRepository == "" || !strings.Contains(note.Image, "@sha256:") {
+		t.Fatalf("note: %+v", note)
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(readme)
+	for _, want := range []string{"URL だけを渡された開発 AI へ", "をセットアップして", "go build -o lassdas ./cmd/lassdas", "./lassdas setup install", "docs/DISTRIBUTION.json", "~/.lassdas/SETUP.md", "registry_login"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("README lacks %q", want)
+		}
+	}
+	if strings.Index(text, "URL だけを渡された開発 AI へ") > strings.Index(text, "## 理念") {
+		t.Error("the entry for the AI must come before everything else")
 	}
 }
