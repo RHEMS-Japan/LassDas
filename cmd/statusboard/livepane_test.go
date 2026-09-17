@@ -114,6 +114,10 @@ func TestTheStylesheetAndTheScriptAgreeOnTheirClasses(t *testing.T) {
 // The board draws nine, and one the attendant placed was not among them,
 // so the whole rail went dark while a pull request was being published
 // (review of #200).
+var undrawnByDesign = map[string]string{
+	"reporting": "報告を書いている間だけ。札の本文が「報告を作成中」と言う",
+}
+
 func TestEveryPlacedStageIsDrawnOnTheRail(t *testing.T) {
 	status, err := os.ReadFile(filepath.Join("..", "..", "internal", "attendant", "status.go"))
 	if err != nil {
@@ -144,9 +148,12 @@ func TestEveryPlacedStageIsDrawnOnTheRail(t *testing.T) {
 		if resting[stage] || drawn[stage] {
 			continue
 		}
-		// One exception, named: the run has finished every stage and is
-		// writing its report, which the rail shows as all done.
-		if stage == "reporting" && strings.Contains(string(page), `stepID === "reporting"`) {
+		// One exception, named and argued: while a run writes its report
+		// it is no longer working, and the card's own line says so. The
+		// rail is dark for those seconds. Marking every stage done instead
+		// would have told a requester whose delivery failed in実装 that it
+		// had reached 本番 (review of #203).
+		if undrawnByDesign[stage] != "" {
 			continue
 		}
 		t.Errorf("the attendant places %q and the rail does not draw it, so the rail goes dark", stage)

@@ -184,7 +184,7 @@ func TestClassifyRunNamesEveryPipelinePosition(t *testing.T) {
 		// publishes the branch and waits for the deployment. It used to be
 		// placed on a stage the board's rail does not draw, which left the
 		// rail dark for the whole of it (review of #200).
-		"PR publication":    {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("validate", 1, "done"), chainCard("publish", 1, "running")}, wantStep: "staging"},
+		"PR publication":    {run: state.RunOverview{State: "claimed"}, tasks: []runtime.BoardTask{chainCard("validate", 1, "done"), chainCard("publish", 1, "running")}, wantStep: "checks"},
 		"cancelled":         {run: state.RunOverview{State: "terminal", TerminalCode: "cancelled"}, wantStep: "stopped"},
 		"failed terminal":   {run: state.RunOverview{State: "terminal", TerminalCode: "validation_failed"}, wantStep: "failed"},
 		"checks waiting":    {run: state.RunOverview{State: "terminal", TerminalCode: "success"}, tasks: []runtime.BoardTask{deliverTask("checks", "running")}, wantStep: "checks"},
