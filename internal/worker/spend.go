@@ -33,6 +33,11 @@ type KeySpend struct {
 	// AlsoKeyEnvs names further variables that resolved to this same key, so
 	// the report can list every role the one figure covers.
 	AlsoKeyEnvs []string `json:"also_key_envs,omitempty"`
+	// Approximate is set when the figure is the difference between two
+	// readings of the key's running total rather than a billing window.
+	// Anything else billed to the same key while this run worked is inside
+	// it, so the report says what kind of number it is showing.
+	Approximate bool `json:"approximate,omitempty"`
 }
 
 // SpendReader reads what one key was billed since a point in time.
@@ -105,6 +110,8 @@ type RunSpend struct {
 	Complete bool       `json:"complete"`
 	TotalUSD float64    `json:"total_usd"`
 	Keys     []KeySpend `json:"keys"`
+	// Approximate is set when any figure is a difference of running totals.
+	Approximate bool `json:"approximate,omitempty"`
 }
 
 // SpendKeyEnvs lists every distinct key the configured roles bill against, in a
@@ -279,6 +286,9 @@ func ReadRunSpend(ctx context.Context, reader SpendReader, config Config, since 
 			spend.Complete = false
 		}
 		key.AlsoKeyEnvs = append(key.AlsoKeyEnvs, group[1:]...)
+		if key.Approximate {
+			spend.Approximate = true
+		}
 		spend.Keys = append(spend.Keys, key)
 		spend.TotalUSD += key.SpendUSD
 	}
@@ -337,6 +347,12 @@ func ComposeSpendText(spend RunSpend, roles map[string][]string) string {
 			line += " ※ " + strconv.Itoa(key.Unpriced) + " 件は金額が確定せず未計上"
 		}
 		builder.WriteString(line + "\n")
+	}
+	if spend.Approximate {
+		// The difference cannot separate this ticket from anything else
+		// billed to the same key while it ran.
+		builder.WriteString("この金額は、依頼の開始時と終了時の利用額の差です。" +
+			"同じ鍵を使う別の依頼が同時に動いていた場合、その分も含まれます。\n")
 	}
 	builder.WriteString("為替は 1 ドル " + strconv.Itoa(SpendFXRateUSDJPY) + " 円の固定換算です。\n")
 	return builder.String()

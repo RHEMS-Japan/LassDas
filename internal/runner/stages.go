@@ -84,6 +84,10 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 	if err := p.Prepare(); err != nil {
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
+	// Each key's running total before this run spends anything. The report
+	// subtracts it; without it a provider with no per-window billing
+	// endpoint leaves the requester no cost at all.
+	p.recordSpendBaseline(ctx)
 	// ---- intake (workflow: read-ticket, read-contract) ----
 	if code, err := p.worker(ctx, "read-ticket", []string{
 		"read-ticket", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,

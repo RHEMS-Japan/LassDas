@@ -37,11 +37,42 @@ func (t *Terminal) loadRunSpendText(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	reader, err := worker.NewGatewaySpendReader(&http.Client{Timeout: spendReadTimeout})
+	return t.readSpendWith(ctx, config, &http.Client{Timeout: spendReadTimeout}, since)
+}
+
+// readSpendWith is the whole reading with the transport handed in: which
+// readings are asked for, in which order, and what is kept. Everything above
+// it is the configuration file and the real client.
+func (t *Terminal) readSpendWith(ctx context.Context, config worker.Config, client *http.Client, since time.Time) string {
+	reader, err := worker.NewGatewaySpendReader(client)
 	if err != nil {
 		return ""
 	}
-	return t.readAndRecordSpend(ctx, config, reader, since)
+	return t.readAndRecordSpend(ctx, config, t.withUsageDelta(reader, client), since)
+}
+
+// withUsageDelta adds the difference-of-running-totals reading behind the
+// per-window one, when this run recorded a baseline at its start. The
+// per-window figure is the better answer and is asked for first; the
+// difference is what a provider that has no such endpoint can still say.
+func (t *Terminal) withUsageDelta(reader worker.SpendReader, client *http.Client) worker.SpendReader {
+	baseline, found := loadSpendBaseline(t.workspace)
+	if !found {
+		return reader
+	}
+	usage, err := worker.NewGatewayUsageReader(client)
+	if err != nil {
+		return reader
+	}
+	delta, err := worker.NewUsageDeltaReader(usage, baseline)
+	if err != nil {
+		return reader
+	}
+	chained, err := worker.NewFallbackSpendReader(reader, delta)
+	if err != nil {
+		return reader
+	}
+	return chained
 }
 
 // readAndRecordSpend reads every configured key's figure since the run
@@ -70,6 +101,9 @@ type spendRecord struct {
 	TotalUSD float64          `json:"total_usd"`
 	Keys     []spendRecordKey `json:"keys"`
 	Text     string           `json:"text"`
+	// Approximate says the figures are differences of running totals, so a
+	// reader of the record knows what kind of number it holds.
+	Approximate bool `json:"approximate,omitempty"`
 }
 
 type spendRecordKey struct {
@@ -94,7 +128,8 @@ func (t *Terminal) recordSpend(spend worker.RunSpend, roles map[string][]string,
 	if len(spend.Keys) == 0 {
 		return
 	}
-	record := spendRecord{ReadAt: time.Now().UTC(), Since: since, Complete: spend.Complete, TotalUSD: spend.TotalUSD, Text: text}
+	record := spendRecord{ReadAt: time.Now().UTC(), Since: since, Complete: spend.Complete,
+		TotalUSD: spend.TotalUSD, Text: text, Approximate: spend.Approximate}
 	for _, key := range spend.Keys {
 		entry := spendRecordKey{KeyEnv: key.KeyEnv, KeyName: key.KeyName, SpendUSD: key.SpendUSD, Unpriced: key.Unpriced}
 		seen := map[string]bool{}
