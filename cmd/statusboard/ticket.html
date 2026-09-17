@@ -46,6 +46,11 @@
   .cost .total { border-top: 1px solid var(--panel-edge); padding-top: 4px; color: var(--white); font-weight: 600; }
   .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .empty { color: var(--muted); }
+    .live { margin-top: 10px; display: flex; gap: 10px; align-items: baseline; }
+    .live b::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--ok, #2f9e44); animation: pulse 1.6s ease-in-out infinite; }
+    .live .since { color: var(--muted); font-variant-numeric: tabular-nums; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+    @media (prefers-reduced-motion: reduce) { .live b::before { animation: none; } }
   pre.trail { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); margin: 6px 0 0; }
   .err { color: var(--red); }
 </style>
@@ -95,6 +100,20 @@
     if (view.repository) row("納品先", view.repository);
     head.appendChild(dl);
     if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
+    if (view.running) {
+      const live = el("div", "live");
+      live.appendChild(el("b", null, "いま動いています: " + view.running.step));
+      const since = el("span", "since", elapsed(view.running.started_at));
+      live.appendChild(since);
+      head.appendChild(live);
+    }
+  }
+  function elapsed(startedAt) {
+    const started = Date.parse(startedAt);
+    if (!started) return "";
+    const seconds = Math.max(0, Math.round((Date.now() - started) / 1000));
+    if (seconds < 90) return "経過 " + seconds + " 秒";
+    return "経過 " + Math.floor(seconds / 60) + " 分 " + (seconds % 60) + " 秒";
   }
   function renderTimeline(view) {
     const list = document.getElementById("timeline"); list.textContent = "";
@@ -107,7 +126,12 @@
       body.appendChild(title);
       if (ev.why) body.appendChild(el("p", "why", ev.why));
       if (ev.evidence && ev.evidence.length) {
-        const d = el("details"); d.appendChild(el("summary", null, "証拠 " + ev.evidence.length + " 件"));
+        const d = el("details");
+        // A round that came back for rework is opened: its findings are the
+        // reason it came back, and a reader who has to click to see them
+        // reads the page as saying nothing happened.
+        if (ev.tone === "bad" || ev.tone === "warn" || (ev.title || "").indexOf("やり直し") >= 0) d.open = true;
+        d.appendChild(el("summary", null, "証拠 " + ev.evidence.length + " 件"));
         const dl = el("dl", "ev");
         for (const e of ev.evidence) { dl.appendChild(el("dt", null, e.label)); dl.appendChild(el("dd", null, e.text)); }
         d.appendChild(dl); body.appendChild(d);
@@ -169,10 +193,45 @@
       for (const name of view.records) { const a = el("a", "rec", name); a.href = "/api/tickets/" + encodeURIComponent(key) + "/records/" + name; a.target = "_blank"; a.rel = "noopener"; records.appendChild(a); records.appendChild(el("br")); }
     } else { records.className = "empty"; records.textContent = "—"; }
   }
-  fetch("/api/tickets/" + encodeURIComponent(key), { headers: { Accept: "application/json" } })
-    .then(r => { if (!r.ok) throw new Error(r.status === 404 ? "この票は盤面にありません" : "読み込みに失敗しました (" + r.status + ")"); return r.json(); })
-    .then(data => { renderHead(data.board || {}, data.view || {}, data.tracker_base || ""); renderTimeline(data.view || {}); renderSide(data.view || {}); })
-    .catch(err => { document.getElementById("head").innerHTML = ""; document.getElementById("head").appendChild(el("div", "err", err.message)); document.getElementById("timeline").textContent = ""; });
+  // The page re-reads itself while the run is working, so a reader watching
+  // it sees the steps arrive instead of a still picture of the moment they
+  // opened it. Hidden tabs do not poll.
+  let lastBody = "";
+  let timer = null;
+  function load(first) {
+    return fetch("/api/tickets/" + encodeURIComponent(key), { headers: { Accept: "application/json" } })
+      .then(r => { if (!r.ok) throw new Error(r.status === 404 ? "この票は盤面にありません" : "読み込みに失敗しました (" + r.status + ")"); return r.text(); })
+      .then(body => {
+        const data = JSON.parse(body);
+        const view = data.view || {};
+        const stable = JSON.stringify([data.board, Object.assign({}, view, { built_at: null })]);
+        if (stable !== lastBody) {
+          lastBody = stable;
+          renderHead(data.board || {}, view, data.tracker_base || "");
+          renderTimeline(view);
+          renderSide(view);
+        } else if (view.running) {
+          const since = document.querySelector("#head .live .since");
+          if (since) since.textContent = elapsed(view.running.started_at);
+        }
+        schedule(view.running || (data.board && !["done", "failed", "stopped"].includes(data.board.step)));
+      })
+      .catch(err => {
+        if (first) {
+          document.getElementById("head").innerHTML = "";
+          document.getElementById("head").appendChild(el("div", "err", err.message));
+          document.getElementById("timeline").textContent = "";
+        }
+        schedule(true);
+      });
+  }
+  function schedule(active) {
+    if (timer) clearTimeout(timer);
+    if (!active) return;
+    timer = setTimeout(() => { if (!document.hidden) load(false); else schedule(true); }, 2000);
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(false); });
+  load(true);
 })();
 </script>
 </body>

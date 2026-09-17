@@ -140,6 +140,9 @@ func run() error {
 		Workspace: workspace, TargetToken: targetToken, Logger: logger,
 	}
 	outcome, runErr := pipeline.Run(ctx)
+	// Steps are done; whatever the outcome, no step is running any more, and
+	// a record left behind would keep telling readers one is.
+	runner.ClearCurrentStep(workspace)
 	if runErr != nil {
 		logger.Error("pipeline error", "error", runErr.Error())
 	}

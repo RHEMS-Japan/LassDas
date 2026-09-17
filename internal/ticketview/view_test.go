@@ -560,3 +560,58 @@ func TestModelFailureSummaryShowsTheObjectionForRefusedAnswers(t *testing.T) {
 		t.Fatalf("a failure with no refused answers claimed them: %q", got)
 	}
 }
+
+// An unsealed implement round is a failure only when the run has stopped.
+// While the runner is still executing steps it is in progress: the report
+// lands before the seal, and red in that window read as a failed round.
+func TestUnsealedRoundIsInProgressWhileTheRunnerWorks(t *testing.T) {
+	dir := t.TempDir()
+	stage := filepath.Join(dir, "history", "stage-1")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, body string) {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(stage, "implementer-run.json"), `{"ran_at":"2026-09-17T07:25:00Z","duration_ms":85000,"changed_files":[]}`)
+
+	stopped, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := titleOfStep(stopped, "implement"); !strings.Contains(got, "封緘されなかった") || toneOfStep(stopped, "implement") != "bad" {
+		t.Fatalf("a stopped run must say the round sealed nothing: %q / %q", got, toneOfStep(stopped, "implement"))
+	}
+
+	write(filepath.Join(dir, "current-step.json"), `{"step":"lassdas-review-a","started_at":"2026-09-17T07:26:30Z"}`)
+	working, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if working.Running == nil || working.Running.Step != "lassdas-review-a" {
+		t.Fatalf("the running step was not read: %+v", working.Running)
+	}
+	if got := titleOfStep(working, "implement"); !strings.Contains(got, "封緘中") || toneOfStep(working, "implement") == "bad" {
+		t.Fatalf("a working run must not show the round as failed: %q / %q", got, toneOfStep(working, "implement"))
+	}
+}
+
+func titleOfStep(v View, step string) string {
+	for _, event := range v.Timeline {
+		if event.Step == step {
+			return event.Title
+		}
+	}
+	return ""
+}
+
+func toneOfStep(v View, step string) string {
+	for _, event := range v.Timeline {
+		if event.Step == step {
+			return event.Tone
+		}
+	}
+	return ""
+}

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -119,6 +120,11 @@ func readWorkspaceFile(path string, limit int64) ([]byte, error) {
 // killed the job's process tree; the pod must do that itself.
 func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEnv ...string) (int, error) {
 	p.Logger.Info("step", "name", name, "argv0", argv[0])
+	p.recordCurrentStep(name)
+	// Every step is told where to append what it is producing, so a reader
+	// can watch the work instead of waiting for the record that lands when
+	// the step ends.
+	extraEnv = append(extraEnv, livelog.PathEnv+"="+LiveLogPath(p.Workspace, name))
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = p.Workspace
 	command.Stdout = os.Stdout
