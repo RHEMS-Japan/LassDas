@@ -654,3 +654,17 @@ func TestReadDerivedTargetsTakesOnlyThisRunsSealedTicket(t *testing.T) {
 		t.Fatal("an empty file name was accepted")
 	}
 }
+
+func TestFilesOutsideTargets(t *testing.T) {
+	targets := []string{"client/src/a.ts", "client/src/b.ts"}
+	if outside := filesOutsideTargets([]string{"client/src/a.ts"}, targets); outside != nil {
+		t.Fatalf("a change inside the ticket's files was called outside: %v", outside)
+	}
+	outside := filesOutsideTargets([]string{"client/src/a.ts", "main.go", "compress/extract.go"}, targets)
+	if len(outside) != 2 || outside[0] != "main.go" || outside[1] != "compress/extract.go" {
+		t.Fatalf("outside = %v", outside)
+	}
+	if outside := filesOutsideTargets([]string{"main.go"}, nil); outside != nil {
+		t.Fatalf("a run with no targets has nothing outside them: %v", outside)
+	}
+}
