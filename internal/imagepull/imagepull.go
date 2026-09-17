@@ -22,7 +22,8 @@ const (
 	// Network means the transfer was interrupted or never connected. Retrying
 	// resumes from the layers docker already holds.
 	Network
-	// Daemon means docker itself is not reachable (Docker Desktop not running).
+	// Daemon means docker itself is not reachable (Docker Desktop not running,
+	// or the chosen docker context does not exist).
 	Daemon
 	// Disk means the host ran out of space while extracting layers.
 	Disk
@@ -32,7 +33,7 @@ var rules = []struct {
 	class Class
 	hints []string
 }{
-	{Daemon, []string{"cannot connect to the docker daemon", "is the docker daemon running", "docker desktop is not running"}},
+	{Daemon, []string{"cannot connect to the docker daemon", "is the docker daemon running", "docker desktop is not running", "context not found"}},
 	{Disk, []string{"no space left on device"}},
 	{Denied, []string{"denied", "unauthorized", "authentication required", "no basic auth credentials", "forbidden"}},
 	{Missing, []string{"manifest unknown", "not found", "does not exist", "no matching manifest"}},
@@ -42,7 +43,9 @@ var rules = []struct {
 // Explain classifies docker's output. Rules are checked in a fixed order so
 // docker's "pull access denied for X, repository does not exist or may require
 // 'docker login'" reads as the denial it is, not as a missing image. Hints are
-// plain substrings; none may be short enough to occur inside an image name.
+// plain substrings, so an image name that happens to contain one ("denied-co")
+// would be misread; keep hints to whole words and avoid any that is a common
+// name fragment.
 func Explain(output string) Class {
 	lower := strings.ToLower(output)
 	for _, rule := range rules {

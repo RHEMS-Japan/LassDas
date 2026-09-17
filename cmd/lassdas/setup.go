@@ -286,7 +286,8 @@ func trackerOwner(ctx context.Context, api initwizard.API, origin, key string) (
 
 // noteRegistryLogin returns the login command the distributor put in the
 // installed note, if any, so a denied pull can show it. A missing or broken
-// note yields "" here; the answers loader has already reported those.
+// note yields "" here, and the denial message then says the command could not
+// be found rather than that none exists.
 func noteRegistryLogin(home string) string {
 	distribution, found, err := initwizard.LoadDistribution(home)
 	if err != nil || !found {

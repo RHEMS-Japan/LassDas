@@ -129,13 +129,13 @@ func pullFailure(class imagepull.Class, detail string, registryLogin string) str
 		if registryLogin != "" {
 			return "固定 image の取得を registry が拒否しました (denied)。配布者の案内のログイン手順を利用者に実行してもらってから再実行してください: " + registryLogin
 		}
-		return "固定 image の取得を registry が拒否しました (denied)。配布者の案内 (~/.lassdas/distribution.json) にログイン手順 (registry_login) が無いので、配布者に image の公開設定を確認してください"
+		return "固定 image の取得を registry が拒否しました (denied)。配布者の案内 (~/.lassdas/distribution.json) にログイン手順 (registry_login) が見つからないので、配布者に image の公開設定かログイン手順を確認してください"
 	case imagepull.Missing:
 		return "固定 image が registry に存在しないか、linux/arm64 用がありません。配布者の案内が本体 repo の main の docs/DISTRIBUTION.json と同じか確認し、古ければ install をやり直してください"
 	case imagepull.Network:
 		return "固定 image の取得が途中で切れました (ネットワーク)。認証の問題ではありません。接続を確認して再実行してください。取得済みの層は再利用されます"
 	case imagepull.Daemon:
-		return "Docker Desktop に接続できません。起動してから再実行してください"
+		return "Docker に接続できません (Docker Desktop が起動していないか、docker context が存在しない)。確認してから再実行してください"
 	case imagepull.Disk:
 		return "固定 image を展開する空き容量がありません。ディスクを空けてから再実行してください"
 	}

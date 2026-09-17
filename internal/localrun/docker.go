@@ -192,7 +192,7 @@ func pullFailure(class imagepull.Class, args []string) string {
 	case imagepull.Network:
 		return "pinned runtime image pull was interrupted (network, not authentication); check the connection and retry, docker resumes from the layers it holds"
 	case imagepull.Daemon:
-		return "docker daemon is not reachable; start Docker Desktop and retry"
+		return "docker is not reachable (Docker Desktop not running, or the docker context does not exist); check and retry"
 	case imagepull.Disk:
 		return "no disk space left to extract the pinned runtime image; free space and retry"
 	}

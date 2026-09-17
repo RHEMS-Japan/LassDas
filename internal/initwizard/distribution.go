@@ -175,12 +175,13 @@ func (a Answers) WithDistribution(d Distribution) Answers {
 // password inline: `--password X`, `--password=X`, `-p X` or `-pX`. Only
 // `--password-stdin` (fed by another command) is accepted.
 func loginCarriesPassword(login string) bool {
-	for _, token := range strings.Fields(login) {
-		lower := strings.ToLower(token)
-		if lower == "--password" || strings.HasPrefix(lower, "--password=") {
+	// Quotes are dropped first so a quoted "-p hunter2" is seen as two tokens.
+	unquoted := strings.ToLower(strings.NewReplacer("'", " ", "\"", " ").Replace(login))
+	for _, token := range strings.Fields(unquoted) {
+		if token == "--password" || strings.HasPrefix(token, "--password=") {
 			return true
 		}
-		if strings.HasPrefix(lower, "-p") && !strings.HasPrefix(lower, "--") {
+		if strings.HasPrefix(token, "-p") && !strings.HasPrefix(token, "--") {
 			return true
 		}
 	}

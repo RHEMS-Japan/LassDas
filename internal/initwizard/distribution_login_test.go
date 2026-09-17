@@ -10,6 +10,7 @@ func TestLoginCarriesPassword(t *testing.T) {
 		"docker login -u me -phunter2 ghcr.io",
 		"docker login -u me -P hunter2 ghcr.io",
 		"docker login --Password hunter2 ghcr.io",
+		"docker login -u me '-p hunter2' ghcr.io",
 	}
 	for _, login := range rejected {
 		if !loginCarriesPassword(login) {

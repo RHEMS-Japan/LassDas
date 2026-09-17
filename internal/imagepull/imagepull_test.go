@@ -24,6 +24,7 @@ func TestExplain(t *testing.T) {
 		{"unexpected EOF", Network},
 		{"context canceled", Network},
 		{"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", Daemon},
+		{"context \"desktop-linux\": context not found", Daemon},
 		{"failed to register layer: write /usr/lib/x: no space left on device", Disk},
 		{"something new", Unknown},
 		{"", Unknown},

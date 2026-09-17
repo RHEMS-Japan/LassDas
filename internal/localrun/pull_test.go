@@ -83,7 +83,7 @@ func TestPullFailureWording(t *testing.T) {
 		imagepull.Denied:  "denied by the registry",
 		imagepull.Missing: "not in the registry for linux/arm64",
 		imagepull.Network: "network, not authentication",
-		imagepull.Daemon:  "start Docker Desktop",
+		imagepull.Daemon:  "Docker Desktop not running",
 		imagepull.Disk:    "no disk space left",
 		imagepull.Unknown: "run `docker --context desktop-linux pull x` to read it",
 	}
