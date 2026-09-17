@@ -60,6 +60,5 @@ func LateWordContent(runID, word string) string {
 // report carries (kind, run and code, before the report digest), so a
 // terminal comment can be found without knowing the digest.
 func TerminalCommentMarkerPrefix(runID, code string) string {
-	marker := CommentMarker("terminal", runID, code)
-	return marker[:len(marker)-1] + ":"
+	return TerminalMarkerPrefix(runID) + code + ":"
 }

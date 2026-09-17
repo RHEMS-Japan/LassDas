@@ -13,7 +13,8 @@ import (
 // a lost POST is repaired by searching for the marker, and duplicate postings
 // are detectable from the marker alone.
 
-const commentMarkerPrefix = "ticket-automation:v1"
+// CommentMarkerPrefix is what every marker this automation writes opens with.
+const CommentMarkerPrefix = "ticket-automation:v1"
 
 // The kind class admits digits since the "e2e" kind joined; the end-of-body
 // anchor in ExtractCommentMarker stays the forgery defence either way.
@@ -23,8 +24,32 @@ var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z0-9-]
 // kind, run, and the kind-specific qualifiers (question revision, notification
 // number, digest prefix, ...).
 func CommentMarker(kind, runID string, qualifiers ...string) string {
-	parts := append([]string{commentMarkerPrefix, kind, runID}, qualifiers...)
+	parts := append([]string{CommentMarkerPrefix, kind, runID}, qualifiers...)
 	return "[" + strings.Join(parts, ":") + "]"
+}
+
+// TerminalMarkerPrefix is the start shared by every terminal-report marker of
+// one run, whatever code and digest the report carried: a ticket whose
+// comments end with such a marker has been reported on by an earlier run, on
+// this instance or on one that ran before it. The trailing colon keeps
+// "RUN-1:" from matching "RUN-10:".
+func TerminalMarkerPrefix(runID string) string {
+	marker := CommentMarker("terminal", runID)
+	return marker[:len(marker)-1] + ":"
+}
+
+// TerminalCodeFromMarker returns the terminal code a terminal-report marker
+// carries ("success", "model_failed", ...), or "" for any other marker.
+func TerminalCodeFromMarker(marker string) string {
+	if commentMarkerPattern.FindString(marker) != marker {
+		return ""
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(marker, "["), "]"), ":")
+	// prefix (2 parts) + kind + run + code, with the report digest after it
+	if len(parts) < 5 || parts[2] != "terminal" {
+		return ""
+	}
+	return parts[4]
 }
 
 // ExtractCommentMarker returns the machine marker of a comment, which is

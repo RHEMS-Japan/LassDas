@@ -491,3 +491,95 @@ func TestGetIssueParsesCategoryIDs(t *testing.T) {
 		t.Fatalf("category ids = %v", issue.CategoryIDs)
 	}
 }
+
+// The prefix lookup finds a terminal report whatever code and digest it
+// carried, still anchored to the final line, only among the automation's own
+// comments, and never lets one run's prefix match a longer run id.
+func TestFindCommentWithMarkerPrefixFindsAnyTerminalReport(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const marker = "[ticket-automation:v1:terminal:TICKET-50:success:" + digest + "]"
+	const longer = "[ticket-automation:v1:terminal:TICKET-505:model_failed:" + digest + "]"
+	const selfID = 4242
+	myself := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/v2/users/myself" {
+			myself++
+			return response(200, `{"id":4242,"name":"automation"}`), nil
+		}
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v2/issues/404/comments" {
+			t.Fatalf("unexpected request: method=%s path=%s", request.Method, request.URL.Path)
+		}
+		return response(200, `[`+
+			`{"id":813,"issueId":404,"createdUser":{"id":7},"content":"これで完了ということでお願いします\n`+marker+`"},`+
+			`{"id":812,"issueId":404,"createdUser":{"id":4242},"content":"> `+marker+`\n引用です"},`+
+			`{"id":811,"issueId":404,"createdUser":{"id":4242},"content":"別の依頼の報告\n`+longer+`"},`+
+			`{"id":810,"issueId":404,"createdUser":{"id":4242},"content":"自動処理が完了しました\n`+marker+`"},`+
+			`{"id":809,"issueId":404,"createdUser":{"id":4242},"content":"受付しました\n[ticket-automation:v1:ack:TICKET-50]"}]`), nil
+	})
+	client := testClient(t, transport, 0)
+	got, found, err := client.FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-50:")
+	if err != nil || !found || got != marker {
+		t.Fatalf("got=%q found=%v err=%v; want the terminal report of TICKET-50", got, found, err)
+	}
+	if got, found, err := client.FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-5:"); err != nil || found {
+		t.Fatalf("TICKET-5 has no report but got=%q found=%v err=%v", got, found, err)
+	}
+	if myself != 1 {
+		t.Fatalf("the automation asked who it is %d times, want once", myself)
+	}
+	if id, err := client.SelfUserID(context.Background()); err != nil || id != selfID {
+		t.Fatalf("SelfUserID() = %d, %v", id, err)
+	}
+	for _, bad := range []string{"", "[ticket-automation:v1:terminal:TICKET-50", "ticket-automation:v1:terminal:TICKET-50:", "[ticket automation:v1:terminal:T:", "[other:v1:terminal:T:"} {
+		if _, _, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, bad); err == nil {
+			t.Fatalf("an unshaped prefix was accepted: %q", bad)
+		}
+	}
+}
+
+// A comment somebody else wrote whose last line is marker-shaped is not a
+// report: counting it would ignore a fresh ticket for good, with no comment
+// posted and nobody told.
+func TestFindCommentWithMarkerPrefixIgnoresAMarkerSomebodyElseWrote(t *testing.T) {
+	const marker = "[ticket-automation:v1:terminal:TICKET-50:success:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" + "]"
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/v2/users/myself" {
+			return response(200, `{"id":4242}`), nil
+		}
+		return response(200, `[{"id":813,"issueId":404,"createdUser":{"id":7},"content":"前に出した分と同じでお願いします\n`+marker+`"}]`), nil
+	})
+	got, found, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-50:")
+	if err != nil || found {
+		t.Fatalf("a forged marker counted as a report: got=%q found=%v err=%v", got, found, err)
+	}
+}
+
+// Who the automation is cannot be guessed: a failed read is reported, so the
+// caller retries instead of reading "no report" and working the ticket again.
+func TestFindCommentWithMarkerPrefixFailsWhenTheOwnerIsUnknown(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/v2/users/myself" {
+			return response(500, `{"errors":[{"message":"boom"}]}`), nil
+		}
+		t.Fatalf("comments were read without knowing the owner: %s", request.URL.Path)
+		return nil, nil
+	})
+	if _, found, err := testClient(t, transport, 0).FindCommentWithMarkerPrefix(context.Background(), 404, "[ticket-automation:v1:terminal:TICKET-50:"); err == nil || found {
+		t.Fatalf("a failed owner read was not reported: found=%v err=%v", found, err)
+	}
+}
+
+// The prefix must name a kind and a run: the marker opening alone would match
+// every automated comment on the ticket.
+func TestValidCommentMarkerPrefixNeedsKindAndRun(t *testing.T) {
+	for _, bad := range []string{"[ticket-automation:v1:", "[ticket-automation:v1:terminal:", "[ticket-automation:v1::TICKET-5:"} {
+		if validCommentMarkerPrefix(bad) {
+			t.Errorf("accepted a prefix that names no run: %q", bad)
+		}
+	}
+	for _, good := range []string{"[ticket-automation:v1:terminal:TICKET-5:", "[ticket-automation:v1:terminal:TICKET-5:success:"} {
+		if !validCommentMarkerPrefix(good) {
+			t.Errorf("rejected a usable prefix: %q", good)
+		}
+	}
+}

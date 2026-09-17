@@ -197,6 +197,10 @@ func SealSnapshot(snapshot TicketSnapshot) (DispatchEnvelope, error) {
 type BacklogClient interface {
 	GetActivity(context.Context, int64) (CanonicalActivity, error)
 	GetIssue(context.Context, int64) (CanonicalIssue, error)
+	// FindCommentWithMarkerPrefix answers the marker of the newest automated
+	// comment on the issue whose marker starts with prefix, so intake can see
+	// a terminal report an earlier run left there.
+	FindCommentWithMarkerPrefix(context.Context, int64, string) (string, bool, error)
 }
 
 type QueueRequest struct {
