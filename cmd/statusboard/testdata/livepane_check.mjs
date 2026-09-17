@@ -623,7 +623,7 @@ startScenario();
   runTimers(); await settle();
   const shown = pane(a).querySelector("pre").textContent;
   check("and the incoming step's name is not written after that sentence",
-    shown.includes("まだありません── "), false);
+    shown.includes("まだありません") && shown.includes("── "), false);
 }
 
 if (checks < 47) {
