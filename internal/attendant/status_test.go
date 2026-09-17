@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
@@ -431,18 +432,73 @@ func TestBudgetHoldShowsAtIntakeAsAttention(t *testing.T) {
 
 // A requester who does not want to answer - because the question's premise
 // is wrong - had nothing to do but wait for a deadline days away. The board
-// says the other way out now (reported live 2026-09-17).
+// says the other way out now, naming the round the run is actually on: a
+// literal 「中止 C1」 is silently dropped on the second round (reported live
+// 2026-09-17, review of #197).
 func TestWaitingForAnAnswerSaysHowToWithdraw(t *testing.T) {
-	status := classifyRun(runtime.Config{}, state.RunOverview{State: "awaiting_answer"}, nil)
-	if status.Step != "question" {
-		t.Fatalf("step = %q", status.Step)
+	first := classifyRun(runtime.Config{}, state.RunOverview{State: "awaiting_answer", QuestionRecordJSON: questionRecordJSONForRevision(t, 1)}, nil)
+	if first.Step != "question" {
+		t.Fatalf("step = %q", first.Step)
 	}
-	for _, want := range []string{"中止 C1", "変更を加えずにこの依頼を終了"} {
-		if !strings.Contains(status.ActionEffect, want) {
-			t.Fatalf("the board does not say how to withdraw (%q): %q", want, status.ActionEffect)
+	for _, want := range []string{"依頼者が「中止 C1」", "変更を加えずにこの依頼を終了"} {
+		if !strings.Contains(first.ActionEffect, want) {
+			t.Fatalf("the board does not say how to withdraw (%q): %q", want, first.ActionEffect)
 		}
 	}
-	if !strings.Contains(status.NextAction, "選択肢の記号") {
-		t.Fatalf("the board does not offer the short answer: %q", status.NextAction)
+	second := classifyRun(runtime.Config{}, state.RunOverview{State: "awaiting_answer", QuestionRecordJSON: questionRecordJSONForRevision(t, 2)}, nil)
+	if !strings.Contains(second.ActionEffect, "依頼者が「中止 C2」") || strings.Contains(second.ActionEffect, "中止 C1") {
+		t.Fatalf("the second round was told to write the first round's comment: %q", second.ActionEffect)
 	}
+	// A run whose sealed question cannot be read names no round at all.
+	unknown := classifyRun(runtime.Config{}, state.RunOverview{State: "awaiting_answer"}, nil)
+	if !strings.Contains(unknown.ActionEffect, "見出しにある番号") || strings.Contains(unknown.ActionEffect, "中止 C") {
+		t.Fatalf("a run with no readable question named a round: %q", unknown.ActionEffect)
+	}
+	// The short answer is offered as the conditional it is: two questions in
+	// a set do not accept a bare choice.
+	if !strings.Contains(first.NextAction, "質問が 1 問だけのときは") {
+		t.Fatalf("the short answer is promised unconditionally: %q", first.NextAction)
+	}
+	// Withdrawal belongs to the state that can act on it. A terminal run
+	// cannot be withdrawn, and saying so there would be a false promise.
+	for _, runState := range []string{"terminal", "queued", "claimed"} {
+		other := classifyRun(runtime.Config{}, state.RunOverview{State: runState}, nil)
+		if strings.Contains(other.ActionEffect, "中止") || strings.Contains(other.NextAction, "中止") {
+			t.Fatalf("state %q offers a withdrawal it cannot honour: %q / %q", runState, other.NextAction, other.ActionEffect)
+		}
+	}
+}
+
+// questionRecordJSONForRevision is the sealed question a waiting run holds,
+// for the round the caller names.
+func questionRecordJSONForRevision(t *testing.T, revision int) string {
+	t.Helper()
+	record := hook.QuestionRecord{
+		Protocol: hook.QuestionProtocolVersion, DeliveryID: "delivery_" + strings.Repeat("a", 32),
+		InputSHA256: strings.Repeat("b", 64), RepositoryID: 12345, RepositorySHA256: hook.HashIdentity("example/automation-receiver"),
+		WorkflowRefSHA256: strings.Repeat("d", 64), WorkflowSHA: strings.Repeat("e", 40), WorkflowRunID: 7,
+		RunAttempt: 1, AutomationRunID: "TICKET-501",
+		RunURL: "https://github.com/example/automation-receiver/actions/runs/7/attempts/1",
+		// A second round is bound to the answers of the first.
+		ClarificationSHA256: clarificationDigestForRound(revision),
+		QuestionRevision:    revision, QuestionsJSON: questionSetJSONForBoard, QuestionsSHA256: hook.TerminalReportDigest([]byte(questionSetJSONForBoard)),
+		DecisionSHA256: strings.Repeat("f", 64), AnswerDeadlineAt: 1789700000000,
+		NotifyAt: [3]int64{1789600000000, 1789650000000, 1789690000000},
+	}
+	encoded, err := hook.MarshalQuestionRecord(record)
+	if err != nil {
+		t.Fatalf("MarshalQuestionRecord() error = %v", err)
+	}
+	return string(encoded)
+}
+
+const questionSetJSONForBoard = `[{"id":"Q1","dimension":"user_visible_behavior","question":"並び順は?","why_blocking":"表示が変わる","choices":[{"id":"a","label":"新着順","effect":"新しい順"},{"id":"b","label":"名前順","effect":"五十音順"}]}]`
+
+// clarificationDigestForRound is empty on the first round and a digest on
+// the rounds that follow it, which is what the record's shape requires.
+func clarificationDigestForRound(revision int) string {
+	if revision <= 1 {
+		return ""
+	}
+	return strings.Repeat("9", 64)
 }

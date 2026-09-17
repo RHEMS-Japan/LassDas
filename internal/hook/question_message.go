@@ -61,6 +61,13 @@ func formatQuestionInstant(unixMilli int64) string {
 }
 
 func questionRevisionTag(revision int) string {
+	return QuestionRevisionTag(revision)
+}
+
+// QuestionRevisionTag is the number a requester types after 回答 or 中止:
+// the round they are being asked about. A board that names a round the run
+// is not on sends the requester to a comment nobody reads.
+func QuestionRevisionTag(revision int) string {
 	return fmt.Sprintf("C%d", revision)
 }
 
