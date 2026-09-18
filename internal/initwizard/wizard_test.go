@@ -115,7 +115,7 @@ func TestGenerateUsesExistingValidatorsAndDistinctDirectProfileKeys(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if config.Consumers[0].EffectiveKind() != "cli" || config.Consumers[0].Delivery != worker.DeliverPullRequest || runtime.Orchestration != "cards" || config.Consumers[0].Design.Default != "on" || len(config.Consumers[0].Design.TriggerWords) != 0 || config.Agents.Applier == nil {
+		if config.Consumers[0].EffectiveKind() != "cli" || config.Consumers[0].Delivery != worker.DeliverPullRequest || runtime.Orchestration != "cards" || config.Consumers[0].Design.Default != "off" || len(config.Consumers[0].Design.TriggerWords) != 0 || config.Agents.Applier == nil {
 			t.Fatal("generated path does not pass design -> applier -> PR")
 		}
 		if config.Models.Implementer.APIKeyEnv != "LASSDAS_INTAKE_TARGET_KEY" || config.Agents.Implementer.SecretEnv["LASSDAS_IMPLEMENTER_KEY"] != "LASSDAS_IMPLEMENTER_KEY" {

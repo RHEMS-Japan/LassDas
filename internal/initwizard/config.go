@@ -44,8 +44,17 @@ func allRoles(s *State) []string {
 	return roles
 }
 
+// Consumer is the destination this installation delivers to.
+//
+// The design path is off. It is written here and nowhere else: apply
+// regenerates this file on every run, so the shipped example's own design
+// block never reaches an installed project and editing the installed file by
+// hand lasts until the next apply. Measured on one repository and one ticket
+// text, 2026-09-17: without the design path two deliveries finished, in 6.5
+// and 36 minutes; with it one took about two hours and one delivered nothing
+// in 76 minutes across six design rounds.
 func Consumer(s *State) worker.ConsumerConfig {
-	return worker.ConsumerConfig{Kind: "cli", Repository: s.Repository, RepositoryID: s.RepositoryID, Description: "CLI application", DeliveryBranch: s.Branch, IntegrationBranch: s.Branch, Delivery: worker.DeliverPullRequest, Design: &worker.DesignConfig{Default: "on"}, GitHub: worker.ConsumerGitHubContract{DefaultBranch: s.DefaultBranch}, Mode: s.Mode}
+	return worker.ConsumerConfig{Kind: "cli", Repository: s.Repository, RepositoryID: s.RepositoryID, Description: "CLI application", DeliveryBranch: s.Branch, IntegrationBranch: s.Branch, Delivery: worker.DeliverPullRequest, Design: &worker.DesignConfig{Default: "off"}, GitHub: worker.ConsumerGitHubContract{DefaultBranch: s.DefaultBranch}, Mode: s.Mode}
 }
 
 func agent(role string, timeout int) worker.AgentConfig {
