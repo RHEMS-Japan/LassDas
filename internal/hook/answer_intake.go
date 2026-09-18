@@ -36,10 +36,33 @@ type AnswerIntakeInput struct {
 	Question          QuestionRecord
 	QuestionCommentID int64
 	AnswererID        int64
-	GuidanceSent      bool
 	HandledCommentIDs map[int64]bool
 	Comments          []BacklogComment
+	// Readings is what a model made of each comment in scope, keyed by
+	// comment id. The engine does not read a comment itself: whether a
+	// person answered, which choice they picked, and whether they are
+	// calling the work off are all judgements, and five regular expressions
+	// over the first line made them badly enough that a requester who wrote
+	// anything but 「回答 C1 Q1:a」 had not answered at all.
+	Readings map[int64]AnswerReading
 }
+
+// AnswerReading is what a model made of one comment. It mirrors the worker
+// package's reading, which is where it is produced; this package may not
+// import that one.
+type AnswerReading struct {
+	Kind       string            `json:"kind"`
+	Answers    map[string]string `json:"answers"`
+	NotNeeded  []string          `json:"not_needed"`
+	Unanswered []string          `json:"unanswered"`
+	Reason     string            `json:"reason"`
+}
+
+const (
+	AnswerReadingAnswer    = "answer"
+	AnswerReadingCancel    = "cancel"
+	AnswerReadingUnrelated = "unrelated"
+)
 
 type AnswerReplyKind string
 
@@ -118,10 +141,6 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 	if input.QuestionCommentID <= 0 || input.AnswererID <= 0 {
 		return AnswerIntakeDecision{}, errors.New("answer intake binding is invalid")
 	}
-	questions, err := decodeIntakeQuestions(input.Question.QuestionsJSON)
-	if err != nil {
-		return AnswerIntakeDecision{}, err
-	}
 	comments := append([]BacklogComment{}, input.Comments...)
 	sort.Slice(comments, func(left, right int) bool { return comments[left].CommentID < comments[right].CommentID })
 	for index := 1; index < len(comments); index++ {
@@ -130,104 +149,66 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 		}
 	}
 
-	type evaluated struct {
-		comment BacklogComment
-		answers map[string]string
-		missing []string
-		invalid bool
-	}
 	var cancel *CancelDecision
-	var candidates []evaluated
+	var adopted *AdoptedAnswerDecision
 	for _, comment := range comments {
-		// Only new comments by the fixed answerer, posted after the question
-		// and before the sealed deadline, take part. Everything later belongs
-		// to the expiry transition.
+		// Which comments are in scope is routing, not reading: the answerer
+		// the question was addressed to, posted after the question and
+		// before the sealed deadline. Everything later belongs to the expiry
+		// transition.
 		if comment.UserID != input.AnswererID || comment.CommentID <= input.QuestionCommentID ||
 			comment.PostedAt <= 0 || comment.PostedAt >= input.Question.AnswerDeadlineAt {
 			continue
 		}
-		body := normalizeAnswerBody(comment.Body)
-		// A stop expressed on the first line is a cancel even when politeness
-		// follows on later lines; converting an expressed stop into a resume
-		// would be the worse failure. A 中止 line buried below an answer body
-		// stays a non-cancel.
-		if match := cancelPattern.FindStringSubmatch(firstContentLine(body)); match != nil {
-			if match[1] == revisionMarker(input.Question.QuestionRevision) && cancel == nil {
+		reading, read := input.Readings[comment.CommentID]
+		if !read {
+			continue
+		}
+		switch reading.Kind {
+		case AnswerReadingCancel:
+			// A stop always wins over an answer, and the earliest one is the
+			// evidence (README: 起票者による有効な中止コメントが同じ snapshot に
+			// 一つでもあれば、回答より中止を優先し、最小 comment ID の中止を
+			// 終端証拠にする).
+			if cancel == nil {
 				cancel = &CancelDecision{
 					CommentID:  comment.CommentID,
 					PostedAt:   comment.PostedAt,
 					BodySHA256: TerminalReportDigest([]byte(comment.Body)),
 				}
 			}
-			continue
+		case AnswerReadingAnswer:
+			if len(reading.Answers) == 0 {
+				continue
+			}
+			encoded, err := json.Marshal(reading.Answers)
+			if err != nil || len(encoded) > MaxAnswerSetBytes {
+				return AnswerIntakeDecision{}, errors.New("adopted answer set could not be encoded")
+			}
+			// Ascending, so the last answer the requester wrote is the one
+			// adopted. Whether it covers every question is not asked here:
+			// the answers go to the role that asked them, and a role that
+			// still cannot proceed asks again.
+			adopted = &AdoptedAnswerDecision{
+				CommentID:   comment.CommentID,
+				PostedAt:    comment.PostedAt,
+				BodySHA256:  TerminalReportDigest([]byte(comment.Body)),
+				AnswersJSON: string(encoded),
+			}
 		}
-		// A comment takes part only when it is addressed to the question:
-		// it opens with the answer marker, or - when one question is on the
-		// table - it is nothing but one of that question's choices. Every
-		// other comment on the ticket is a conversation between people and
-		// is left alone.
-		if !answerCandidatePattern.MatchString(strings.TrimSpace(body)) && !bareChoiceAnswer(questions, body) {
-			continue
-		}
-		answers, missing, ok := parseAnswerBody(body, input.Question.QuestionRevision, questions)
-		if len(comment.Body) > MaxAnswerBodyBytes {
-			ok = false
-		}
-		candidates = append(candidates, evaluated{comment: comment, answers: answers, missing: missing, invalid: !ok})
 	}
-	// The requester's explicit stop always wins over answers (README: 許可
-	// 起票者による有効な中止コメントが同じ snapshot に一つでもあれば、回答より
-	// 中止を優先し、最小 comment ID の中止を終端証拠にする).
 	if cancel != nil {
 		return AnswerIntakeDecision{Cancel: cancel}, nil
-	}
-	var adopted *AdoptedAnswerDecision
-	for _, candidate := range candidates {
-		if candidate.invalid || len(candidate.missing) > 0 {
-			continue
-		}
-		encoded, err := json.Marshal(candidate.answers)
-		if err != nil || len(encoded) > MaxAnswerSetBytes {
-			return AnswerIntakeDecision{}, errors.New("adopted answer set could not be encoded")
-		}
-		// Ascending validation ends with the highest complete valid comment
-		// adopted.
-		adopted = &AdoptedAnswerDecision{
-			CommentID:   candidate.comment.CommentID,
-			PostedAt:    candidate.comment.PostedAt,
-			BodySHA256:  TerminalReportDigest([]byte(candidate.comment.Body)),
-			AnswersJSON: string(encoded),
-		}
 	}
 	if adopted != nil {
 		return AnswerIntakeDecision{Adopted: adopted}, nil
 	}
-	decision := AnswerIntakeDecision{}
-	guidanceSent := input.GuidanceSent
-	// An already-handled invalid comment means the one-time guidance went out
-	// in an earlier snapshot; settle that before deciding on new replies.
-	for _, candidate := range candidates {
-		if candidate.invalid && input.HandledCommentIDs[candidate.comment.CommentID] {
-			guidanceSent = true
-		}
-	}
-	for _, candidate := range candidates {
-		if input.HandledCommentIDs[candidate.comment.CommentID] {
-			continue
-		}
-		if candidate.invalid {
-			if guidanceSent {
-				continue
-			}
-			guidanceSent = true
-			decision.Replies = append(decision.Replies, AnswerReply{CommentID: candidate.comment.CommentID, Kind: AnswerReplyGuidance})
-			continue
-		}
-		decision.Replies = append(decision.Replies, AnswerReply{
-			CommentID: candidate.comment.CommentID, Kind: AnswerReplyShortfall, MissingQuestionIDs: candidate.missing,
-		})
-	}
-	return decision, nil
+	// A comment that said nothing about the questions is left alone. The
+	// automation used to answer back - a guidance comment telling the person
+	// the format they should have used, and a shortfall comment listing what
+	// they had missed - and a live delivery stalled for hours because that
+	// courtesy could not be posted (2026-09-17).
+	return AnswerIntakeDecision{}, nil
 }
 
 // decodeIntakeQuestions extracts the question and choice identifiers from the

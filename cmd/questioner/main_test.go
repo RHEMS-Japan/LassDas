@@ -80,8 +80,14 @@ func TestQuestionerDecisionRoundTripsIntoASealedAnswerableRecord(t *testing.T) {
 		QuestionCommentID: 100,
 		AnswererID:        7,
 		Comments: []hook.BacklogComment{{
-			CommentID: 101, UserID: 7, Body: "回答 C1 Q1:a", PostedAt: record.NotifyAt[0],
+			CommentID: 101, UserID: 7, Body: "Q1 は a で", PostedAt: record.NotifyAt[0],
 		}},
+		// What the comment says is read by a model; the sealed record is
+		// what the reading is checked against, which is what this test is
+		// about.
+		Readings: map[int64]hook.AnswerReading{
+			101: {Kind: hook.AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}},
+		},
 	})
 	if err != nil || decision.Adopted == nil || decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
 		t.Fatalf("re-encoded questions are not answerable: %+v, err = %v", decision, err)

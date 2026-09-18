@@ -121,7 +121,7 @@ func TestSyncChainsProjectsADeliveredEndOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tick, err := hook.NewQuestionTickService(route, store, client, reportService, hookService, slogger)
+	tick, err := hook.NewQuestionTickService(route, store, client, reportService, hookService, readingStub{}, slogger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,4 +154,16 @@ func TestSyncChainsProjectsADeliveredEndOnce(t *testing.T) {
 	if len(board.phases) != 1 {
 		t.Fatalf("second tick projected again: %v", board.phases)
 	}
+}
+
+// readingStub answers with whatever a test set for a comment body. The tick
+// no longer reads a comment itself, so a test that drives it says what the
+// reading was.
+type readingStub struct{ byBody map[string]hook.AnswerReading }
+
+func (r readingStub) ReadAnswer(_ context.Context, _, body string) (hook.AnswerReading, error) {
+	if reading, ok := r.byBody[body]; ok {
+		return reading, nil
+	}
+	return hook.AnswerReading{Kind: hook.AnswerReadingUnrelated}, nil
 }

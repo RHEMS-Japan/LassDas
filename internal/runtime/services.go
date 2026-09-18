@@ -13,6 +13,7 @@ import (
 	"automation.internal/ticket-ingress/internal/backlog"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Services is the local wiring of everything the Lambda used to assemble:
@@ -111,7 +112,11 @@ func BuildServices(config Config, logger *slog.Logger) (*Services, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("question service: %w", err)
 	}
-	tickService, err := hook.NewQuestionTickService(route, store, backlogClient, reportService, hookService, logger)
+	answerReader, err := worker.NewAnswerReaderService(config.ConsumerConfigPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	tickService, err := hook.NewQuestionTickService(route, store, backlogClient, reportService, hookService, answerReader, logger)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("tick service: %w", err)

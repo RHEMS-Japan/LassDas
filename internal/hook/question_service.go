@@ -141,7 +141,9 @@ func (s *QuestionReportService) OverrideClock(now func() time.Time, token func()
 }
 
 func (s *QuestionReportService) failure(retry Decision, operation string, err error, deliveryID string) Result {
-	class, _ := FailureDetails(err)
+	class, reason := FailureDetails(err)
+	s.logger.Error("the report could not complete "+operation, "delivery_id", deliveryID,
+		"class", string(class), "reason", reason, "error", err.Error())
 	if class == FailureRejected {
 		return s.result(DecisionInvalid, operation+"_rejected", deliveryID)
 	}
@@ -215,6 +217,13 @@ type QuestionTickProcessor interface {
 	ProcessQuestionTick(context.Context, QuestionTickRequest) Result
 }
 
+// AnswerReader reads one comment a requester left against the questions that
+// were asked and says what it means. It is a model, because that is what the
+// question is: whether a person answered, and which choice they picked.
+type AnswerReader interface {
+	ReadAnswer(ctx context.Context, questionsJSON, body string) (AnswerReading, error)
+}
+
 // QuestionTickService is the 5-minute wake-up for a waiting question. One
 // tick does, in contract order: adopt a valid answer (resume) or an explicit
 // cancel (terminate), otherwise expire past the deadline, otherwise send owed
@@ -226,6 +235,7 @@ type QuestionTickService struct {
 	backlog  QuestionTickCommentClient
 	reporter TerminalReportProcessor
 	ingest   HookProcessor
+	answers  AnswerReader
 	logger   *slog.Logger
 	board    BoardProjector
 	now      func() time.Time
@@ -236,16 +246,16 @@ type QuestionTickService struct {
 // humans watch. Endings are projected by the terminal reporter, not here.
 func (s *QuestionTickService) UseBoard(board BoardProjector) { s.board = board }
 
-func NewQuestionTickService(config ReportRouteConfig, store QuestionTickStore, backlog QuestionTickCommentClient, reporter TerminalReportProcessor, ingest HookProcessor, logger *slog.Logger) (*QuestionTickService, error) {
+func NewQuestionTickService(config ReportRouteConfig, store QuestionTickStore, backlog QuestionTickCommentClient, reporter TerminalReportProcessor, ingest HookProcessor, answers AnswerReader, logger *slog.Logger) (*QuestionTickService, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if store == nil || backlog == nil || reporter == nil || ingest == nil || logger == nil {
+	if store == nil || backlog == nil || reporter == nil || ingest == nil || answers == nil || logger == nil {
 		return nil, errors.New("question tick dependencies must not be nil")
 	}
 	config.HMACKey = append([]byte(nil), config.HMACKey...)
 	return &QuestionTickService{
-		config: config, store: store, backlog: backlog, reporter: reporter, ingest: ingest, logger: logger,
+		config: config, store: store, backlog: backlog, reporter: reporter, ingest: ingest, answers: answers, logger: logger,
 		now: time.Now, token: randomLeaseToken,
 	}, nil
 }
@@ -308,30 +318,31 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if err != nil {
 		return s.failure("question_tick_comments", err, deliveryID)
 	}
-	guidanceSent, err := s.store.ReplyState(ctx, s.config, snapshot.Record, ReplyGuidance, 0)
-	if err != nil {
-		return s.failure("question_tick_reply_state", err, deliveryID)
-	}
-	handled := map[int64]bool{}
+	// Every comment in scope is read by a model, against the questions as
+	// they were sealed. A reading that cannot be taken leaves the comment
+	// out of this tick and is tried again on the next one: an answer is
+	// never discarded for being unreadable.
+	readings := make(map[int64]AnswerReading, len(comments))
 	for _, comment := range comments {
-		if comment.UserID != s.config.AllowedCreatorID || comment.CommentID <= snapshot.QuestionCommentID {
+		if comment.UserID != s.config.AllowedCreatorID || comment.CommentID <= snapshot.QuestionCommentID ||
+			comment.PostedAt <= 0 || comment.PostedAt >= snapshot.Record.AnswerDeadlineAt {
 			continue
 		}
-		replied, err := s.store.ReplyState(ctx, s.config, snapshot.Record, ReplyShortfall, comment.CommentID)
+		reading, err := s.answers.ReadAnswer(ctx, snapshot.Record.QuestionsJSON, comment.Body)
 		if err != nil {
-			return s.failure("question_tick_reply_state", err, deliveryID)
+			s.logger.Error("a comment could not be read", "delivery_id", deliveryID,
+				"comment_id", comment.CommentID, "error", err.Error())
+			continue
 		}
-		if replied {
-			handled[comment.CommentID] = true
-		}
+		readings[comment.CommentID] = reading
 	}
 	decision, err := EvaluateAnswerIntake(AnswerIntakeInput{
 		Question:          snapshot.Record,
 		QuestionCommentID: snapshot.QuestionCommentID,
 		AnswererID:        s.config.AllowedCreatorID,
-		GuidanceSent:      guidanceSent,
-		HandledCommentIDs: handled,
+		HandledCommentIDs: map[int64]bool{},
 		Comments:          comments,
+		Readings:          readings,
 	})
 	if err != nil {
 		return s.result(DecisionInvalid, "question_tick_intake_invalid", deliveryID)
@@ -346,16 +357,8 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if action.Kind == QuestionTickExpire {
 		return s.terminate(ctx, snapshot.Record, TerminalClarificationExpired, now, deliveryID, "question_tick_expired")
 	}
-	for _, reply := range decision.Replies {
-		if result, done := s.postReply(ctx, snapshot, reply, deliveryID); !done {
-			return result
-		}
-	}
 	if action.Kind == QuestionTickNotify {
 		return s.postNotify(ctx, snapshot, action.NotifyIndex, deliveryID)
-	}
-	if len(decision.Replies) > 0 {
-		return s.result(DecisionAccepted, "question_tick_replied", deliveryID)
 	}
 	if noticePending {
 		return noticeResult
@@ -494,67 +497,6 @@ func (s *QuestionTickService) resume(ctx context.Context, snapshot QuestionWaitS
 	}
 }
 
-func (s *QuestionTickService) postReply(ctx context.Context, snapshot QuestionWaitSnapshot, reply AnswerReply, deliveryID string) (Result, bool) {
-	var content string
-	var err error
-	kind := ReplyGuidance
-	if reply.Kind == AnswerReplyShortfall {
-		kind = ReplyShortfall
-		content, err = ShortfallCommentContent(snapshot.Record, reply.CommentID, reply.MissingQuestionIDs)
-	} else {
-		content = GuidanceCommentContent(snapshot.Record)
-	}
-	if err != nil {
-		return s.result(DecisionInvalid, "question_tick_reply_invalid", deliveryID), false
-	}
-	now := s.now().UTC()
-	leaseToken, err := s.token()
-	if err != nil {
-		return s.result(DecisionInternal, "question_tick_token_failed", deliveryID), false
-	}
-	binding, disposition, err := s.store.BeginReply(ctx, ReplyBeginRequest{
-		Record: snapshot.Record, RecordJSON: snapshot.RecordJSON, RecordSHA256: snapshot.RecordSHA256, Route: s.config,
-		Kind: kind, TriggerCommentID: reply.CommentID, ContentSHA256: TerminalReportDigest([]byte(content)),
-		StartedAt: now, LeaseUntil: now.Add(s.config.LeaseDuration), LeaseToken: leaseToken,
-	})
-	if err != nil {
-		return s.failure("question_tick_reply_begin", err, deliveryID), false
-	}
-	switch disposition {
-	case ReplyBeginComplete:
-		return Result{}, true
-	case ReplyBeginBusy:
-		return s.result(DecisionRetryRequested, "question_tick_reply_pending", deliveryID), false
-	case ReplyBeginConflict:
-		return s.result(DecisionInvalid, "question_tick_reply_conflict", deliveryID), false
-	case ReplyBeginAcquired:
-	default:
-		return s.result(DecisionInternal, "question_tick_reply_invalid", deliveryID), false
-	}
-	commentID, found, err := s.backlog.FindExactComment(ctx, binding.IssueID, content)
-	if err != nil {
-		return s.failure("question_tick_reply_lookup", err, deliveryID), false
-	}
-	if !found {
-		commentID, err = s.backlog.AddCommentNotifying(ctx, binding.IssueID, content, []int64{s.config.AllowedCreatorID})
-		if err != nil {
-			return s.failure("question_tick_reply_add", err, deliveryID), false
-		}
-	}
-	complete, err := s.store.CompleteReply(ctx, ReplyCompleteRequest{
-		Record: snapshot.Record, RecordJSON: snapshot.RecordJSON, RecordSHA256: snapshot.RecordSHA256, Route: s.config,
-		Kind: kind, TriggerCommentID: reply.CommentID, ContentSHA256: TerminalReportDigest([]byte(content)),
-		LeaseToken: leaseToken, CommentID: commentID, PostedAt: s.now().UTC(),
-	})
-	if err != nil {
-		return s.failure("question_tick_reply_complete", err, deliveryID), false
-	}
-	if complete == ReplyCompleted || complete == ReplyAlreadyComplete {
-		return Result{}, true
-	}
-	return s.result(DecisionInvalid, "question_tick_reply_conflict", deliveryID), false
-}
-
 func (s *QuestionTickService) postNotify(ctx context.Context, snapshot QuestionWaitSnapshot, index int, deliveryID string) Result {
 	content, err := NotifyCommentContent(snapshot.Record, index)
 	if err != nil {
@@ -612,8 +554,17 @@ func (s *QuestionTickService) OverrideClock(now func() time.Time, token func() (
 	s.now, s.token = now, token
 }
 
+// failure turns a store error into the tick's decision. The reason the store
+// gave is said out loud first: it used to be read and thrown away here, so a
+// stall showed only "<operation>_rejected" with nothing in it to act on, and
+// three separate live stalls on 2026-09-17 - a plan notice that could not be
+// posted, a ticket that could not be queued, and an answer whose reply could
+// not be written - each cost an operator a diagnosis they had no material
+// for. The one that stopped a delivery was the third.
 func (s *QuestionTickService) failure(operation string, err error, deliveryID string) Result {
-	class, _ := FailureDetails(err)
+	class, reason := FailureDetails(err)
+	s.logger.Error("the tick could not complete "+operation, "delivery_id", deliveryID,
+		"class", string(class), "reason", reason, "error", err.Error())
 	if class == FailureRejected {
 		return s.result(DecisionInvalid, operation+"_rejected", deliveryID)
 	}

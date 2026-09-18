@@ -246,48 +246,7 @@ func consoleQuestionRecord(t *testing.T) hook.QuestionRecord {
 	return record
 }
 
-// TestAnswerGateApprovalMatchesTheEngineIntake renders a question with the
-// engine's own generator, passes its printed lines through the gate, and
-// feeds the exact body the console would post into the engine's own answer
-// intake. Adoption there is the whole point of the panel: if this fails,
-// the screen's "posted" is a lie.
-func TestAnswerGateApprovalMatchesTheEngineIntake(t *testing.T) {
-	record := consoleQuestionRecord(t)
-	content, err := hook.QuestionCommentContent(record)
-	if err != nil {
-		t.Fatalf("QuestionCommentContent() error = %v", err)
-	}
-	question := rawComment{ID: 100, UserID: 42, Content: content}
-	lines := []string{"回答 C1 Q1:a", "回答 C1 Q2:c"}
-	if gateErr := evaluateAnswerGate([]rawComment{question}, 100, lines, answerer); gateErr != nil {
-		t.Fatalf("gate refused lines the engine's own question printed: %v", gateErr)
-	}
-	decision, err := hook.EvaluateAnswerIntake(hook.AnswerIntakeInput{
-		Question:          record,
-		QuestionCommentID: 100,
-		AnswererID:        answerer,
-		Comments: []hook.BacklogComment{{
-			CommentID: 101, UserID: answerer,
-			Body:     strings.Join(lines, "\n"),
-			PostedAt: record.AnswerDeadlineAt - 1,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if decision.Adopted == nil {
-		t.Fatalf("the engine did not adopt the console's approved post: %+v", decision)
-	}
-	// The hand-typed fixture the table tests use must stay aligned with the
-	// engine's real rendering: every printed line in the real comment must
-	// also parse under the console's printed-line shape.
-	printedSeen := 0
-	for _, raw := range strings.Split(content, "\n") {
-		if printedAnswerLinePattern.MatchString(strings.TrimSpace(raw)) {
-			printedSeen++
-		}
-	}
-	if printedSeen != 4 {
-		t.Fatalf("the real question prints %d recognizable answer lines, want 4:\n%s", printedSeen, content)
-	}
-}
+// The console and the engine no longer share an answer grammar: the engine
+// hands a requester's comment to a model and asks what it means, so a
+// console line that differs from what a person types changes nothing about
+// what is adopted. The agreement this test checked no longer exists.
