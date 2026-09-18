@@ -332,8 +332,9 @@ func startQueuedRun(
 	}
 	// Readiness passed. Post the implementation-plan notice — a notice, not
 	// a gate: a failed post is logged and the run continues.
-	if !services.Tick.PostPlanComment(ctx, envelope.DeliveryID, hook.PlanCommentContent(envelope.Snapshot.RunID, loadPlanFacts(runDir))) {
-		logger.Error("plan notice not posted; run continues", "run", run.RunID)
+	if posted, reason := services.Tick.PostPlanComment(ctx, envelope.DeliveryID,
+		hook.PlanCommentContent(envelope.Snapshot.RunID, loadPlanFacts(runDir))); !posted {
+		logger.Error("plan notice not posted; run continues", "run", run.RunID, "reason", reason)
 	}
 	// One opportunistic re-check before the first cards, for a stop request
 	// that arrived while the gate was running. Best-effort on purpose: a
