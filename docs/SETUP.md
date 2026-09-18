@@ -104,6 +104,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
+| `host` | この instance をどこで動かすか。自由記述 (例: `このマシン`、`社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`) | 利用者に確認。**選択肢は出さない** |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
 
@@ -116,6 +117,37 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `engine-sha` | そのイメージに対応する本体ソースの 40 桁 SHA |
 | `build-record` | イメージと SHA の対応の記録の URL。通常は、そのイメージを作って push した GitHub Actions の実行 (main の image workflow が `docs/DISTRIBUTION.json` を書く) |
 
+
+## どこで動かすか (`host`)
+
+**本体は置き場所を知りません。**`lassdas run spec` が「何を動かす必要があるか」だけを出すので、導入を進めている担当が、利用者の答えた場所に置く。
+
+```
+lassdas run spec --project NAME
+```
+
+出るもの (秘密の値は入らない):
+
+| 項目 | 意味 |
+|---|---|
+| `image` / `engine_sha` | 固定の digest と、その元になったソースの commit |
+| `user` / `platform` | `1000:1000` / `linux/arm64`。イメージ内のファイルの持ち主がこれ |
+| `board_port` | 盤面が出る、instance 内の port |
+| `env_file` / `env_keys` | 環境を置いたファイルと、そこにある名前。**値は出ない** |
+| `config_dir` / `config_files` / `config_mount_path` | 読み取り専用で置く 2 ファイルと、置き場所 |
+| `data_path` / `data_name` | 唯一の書き込み先。**再起動をまたいで残る必要がある** (台帳と走行の記録がここ) |
+
+置き方の例:
+
+- **このマシン / リモートの docker**: `lassdas run start` がそのまま使える。リモートは `docker context` を向けておく (linux/arm64 の daemon であれば製品は問わない)
+- **Kubernetes**: `env_file` から Secret、`config_dir` から ConfigMap、`data_path` に PVC、`board_port` に Service、あとは Deployment 1 つ。`user` と `platform` は必ず写す
+- **それ以外 (EC2 に直接、ECS、systemd など)**: 同じ 6 項目を、その仕組みのやり方で満たす
+
+**`data_path` を使い捨てにしない。**消えると、走行中の依頼と回答待ちの記録が失われる。
+
+**盤面は `board_port` を公開しないと見えない。**どこまで公開するかは利用者に確認する (このマシンなら `127.0.0.1` 固定、共有するなら到達できる場所へ)。
+
+`run status` / `run logs` / `run stop` は docker を前提にしている。**docker 以外に置いたら、状態の見方と止め方を `progress.md` に書いておく** — 次に触る人がそこから辿れるように。
 
 実装・適用・レビューは、モデルの設定 (`models`) と実行基盤の役 (launch) の両方に現れる。実際に動くのは launch の方で、鍵は役ごとの `LASSDAS_<役>_KEY` を読む。費用の集計は両方の鍵を対象にするので、同じ鍵を全役で共用している設定では 1 行にまとまり、役ごとに鍵を分けている設定では行が分かれる。
 
