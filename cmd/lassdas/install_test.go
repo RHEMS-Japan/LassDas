@@ -403,3 +403,34 @@ func TestTheRepositorysNoteAndReadmeLeadTheWay(t *testing.T) {
 		t.Error("the entry for the AI must come before everything else")
 	}
 }
+
+// The documents are installed as a set, so a new one is distributed the
+// moment it exists - but only reachable if something points at it. The
+// manual for the person who files tickets is reachable from the setup
+// instruction and from the skill; without that it is a file nobody opens.
+func TestTheRequestersManualIsReachable(t *testing.T) {
+	setup, err := os.ReadFile(filepath.Join("..", "..", "docs", "SETUP.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(setup), "OPERATING.md") {
+		t.Error("導入の指示から依頼者向けマニュアルに辿れません")
+	}
+	skill, err := os.ReadFile(filepath.Join("skills", "lassdas-setup", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(skill), "OPERATING.md") {
+		t.Error("導入スキルから依頼者向けマニュアルに辿れません")
+	}
+	manual, err := os.ReadFile(filepath.Join("..", "..", "docs", "OPERATING.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The three things a requester gets wrong, measured on live tickets.
+	for _, want := range []string{"カテゴリ", "起票者", "表示であって、入力ではない"} {
+		if !strings.Contains(string(manual), want) {
+			t.Errorf("マニュアルに %q がありません", want)
+		}
+	}
+}
