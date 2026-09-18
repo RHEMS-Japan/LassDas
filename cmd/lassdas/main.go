@@ -26,7 +26,7 @@ const help = `使用方法:
   lassdas setup apply --project NAME [--repo-root PATH] [--redo STAGE]
   lassdas setup smoke --project NAME [--repo-root PATH]
   lassdas init [--project NAME] [--repo-root PATH] [--redo STAGE]
-  lassdas run start|stop|status|logs --project NAME
+  lassdas run start|stop|status|logs|spec --project NAME
 setup は、開発 AI が導入指示 (~/.lassdas/SETUP.md) に従って書いた .lassdas/setup.json から
 導入を進めます。install は 1 台に 1 回、本体 repo の中で実行し、CLI・導入指示・
 配布者の案内 (既定は repo の docs/DISTRIBUTION.json)・開発 AI の skill を利用者の
@@ -83,7 +83,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		rest = rest[1:]
 	}
 	switch command {
-	case "init", "run start", "run stop", "run status", "run logs", "setup install", "setup note", "setup check", "setup secrets", "setup apply", "setup smoke":
+	case "init", "run start", "run stop", "run status", "run logs", "run spec", "setup install", "setup note", "setup check", "setup secrets", "setup apply", "setup smoke":
 	default:
 		return errors.New("コマンドが不明です。lassdas --help を参照してください")
 	}
@@ -195,6 +195,14 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		return json.NewEncoder(output).Encode(status)
+	case "run spec":
+		spec, err := localrun.Describe(i)
+		if err != nil {
+			return err
+		}
+		encoder := json.NewEncoder(output)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(spec)
 	case "run stop":
 		if err := manager.Stop(ctx, i); err != nil {
 			return err

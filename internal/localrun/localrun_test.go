@@ -390,3 +390,51 @@ func TestLogsRedactCredentialsAndRefuseUnreadableEnv(t *testing.T) {
 		t.Fatal("logs emitted without safe credential read")
 	}
 }
+
+// The spec says what has to run and nothing about where. An instance used to
+// be able to live in exactly one place - a docker daemon on the machine that
+// ran setup - so every delivery for a project stopped when that machine did.
+// Naming the hosts the engine supports would only move the limit to the next
+// host that is not on the list.
+func TestTheSpecSaysWhatRunsAndNotWhere(t *testing.T) {
+	i := fixture(t)
+
+	spec, err := Describe(i)
+	if err != nil {
+		t.Fatalf("Describe() error = %v", err)
+	}
+	if spec.Image != i.Image || spec.EngineSHA != i.EngineSHA {
+		t.Fatalf("spec = %+v: the pinned image and its source commit must travel", spec)
+	}
+	if spec.User != "1000:1000" || spec.Platform != "linux/arm64" || spec.BoardPort != 9200 {
+		t.Fatalf("spec = %+v: the process identity and port are part of what runs", spec)
+	}
+	if spec.ConfigMountPath != "/etc/lassdas/config" || spec.DataPath != "/data" {
+		t.Fatalf("spec = %+v: the paths the process reads and writes are part of what runs", spec)
+	}
+	if len(spec.EnvKeys) == 0 {
+		t.Fatal("the spec names no environment; an installation cannot check it has everything")
+	}
+
+	// Secret values never appear. The file that holds them is named so an
+	// installation reads it once and puts it where that host keeps secrets.
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"BACKLOG_API_KEY=", "sk-", "ghp_"} {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Fatalf("a secret value reached the spec: %s", encoded)
+		}
+	}
+	if spec.EnvFile == "" {
+		t.Fatal("the spec does not say where the environment is")
+	}
+
+	// Nothing in it names a host.
+	for _, host := range []string{"docker", "kubernetes", "kubectl", "ec2", "Docker Desktop"} {
+		if bytes.Contains(bytes.ToLower(encoded), bytes.ToLower([]byte(host))) {
+			t.Errorf("the spec names a host (%s): %s", host, encoded)
+		}
+	}
+}
