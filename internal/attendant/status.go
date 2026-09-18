@@ -441,6 +441,19 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 		status.place("checks", "納品後の工程を準備中", "")
 		return
 	}
+	// A delivery that stops at the pull request is not finished: a person
+	// has to merge it, and nothing reaches the repository until they do.
+	// Calling that "納品済み" moved the card out of 進行中 and collapsed it
+	// to two words, so a requester read "delivered" over an unmerged pull
+	// request and had no reason to look further (live 2026-09-18, measured
+	// against a pull request that was still open).
+	if run.TerminalCode == string(hook.TerminalSuccess) &&
+		deliverFileExists(runDir, "feature-pr.json") && !config.Chain.Deliver.Enabled() {
+		status.place("confirm", "マージ待ち", "取り込み用の Pull Request を人が確認してマージします")
+		status.NextAction = "チケットに記載された Pull Request を開いて内容を確認し、問題がなければマージしてください。"
+		status.ActionEffect = "マージするまで、依頼の変更はリポジトリに入りません。この画面から行える操作はありません。"
+		return
+	}
 	status.place("done", "納品済み", "")
 }
 

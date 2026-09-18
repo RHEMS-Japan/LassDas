@@ -1,6 +1,14 @@
 package attendant
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/state"
+)
 
 // A merge that deployed nothing waits for an operator, exactly as the other
 // staging outcomes an operator has to look at do. Left out of that set it
@@ -31,5 +39,44 @@ func TestADeployThatNeverStartedCannotOpenThePromotion(t *testing.T) {
 	}
 	if !promotableStagingVerdict("pass") {
 		t.Error("a passing staging report no longer opens the promotion")
+	}
+}
+
+// A delivery that stops at the pull request is not finished: a person has to
+// merge it, and nothing reaches the repository until they do. Calling it
+// "納品済み" moved the card out of the running list and collapsed it to two
+// words, so a requester read "delivered" over a pull request that was still
+// open and had no reason to look further (live 2026-09-18).
+func TestAPullRequestNobodyMergedIsNotDelivered(t *testing.T) {
+	config := runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}}
+	run := state.RunOverview{DeliveryID: "delivery_abc", TerminalCode: string(hook.TerminalSuccess)}
+	dir := runDirectory(config, run.DeliveryID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "feature-pr.json"), []byte(`{"binding":{"repository":"owner/name"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var status RunStatus
+	classifyAfterTerminal(&status, config, run, nil)
+	if status.Step == "done" {
+		t.Fatalf("an unmerged pull request was reported as finished: %q %q", status.Step, status.StepTitle)
+	}
+	if status.Step != "confirm" {
+		t.Fatalf("step = %q, want the stage a person acts on", status.Step)
+	}
+	if status.NextAction == "" {
+		t.Fatal("the requester is not told what to do next")
+	}
+
+	// With no pull request there is nothing for a person to merge.
+	if err := os.Remove(filepath.Join(dir, "feature-pr.json")); err != nil {
+		t.Fatal(err)
+	}
+	status = RunStatus{}
+	classifyAfterTerminal(&status, config, run, nil)
+	if status.Step != "done" {
+		t.Fatalf("step = %q, want done when no pull request was opened", status.Step)
 	}
 }
