@@ -1091,12 +1091,16 @@ func designVerdict(kind string, approachInTicket, proposerVeto, checkerVeto bool
 	if !approachInTicket {
 		return true, DesignReasonApproachMissing
 	}
-	if len(request.TargetFiles) > maxDesignSkipTargetFiles {
-		return true, DesignReasonTooManyFiles
-	}
-	if _, hit := ticketTriggerWord(request, consumer.EffectiveDesignTriggerWords()); hit {
-		return true, DesignReasonTriggerWord
-	}
+	// Two conditions used to stand here and no longer do. One counted the
+	// derived target files and designed anything over two; the other looked
+	// for any of forty-three words in the ticket - 遅い, slow, 本番で - and
+	// designed the change if it found one. Both decided, in code, a question
+	// the two readiness models are already asked and already answer, and the
+	// vocabulary overrode them in one direction only: a model that judged a
+	// change simple could not skip a design, but a word could force one. The
+	// vocabulary had been tuned against its own false hits for months
+	// (遅延読み込み, 重い順, in production builds) and a README ticket still
+	// went through a two-hour design path that a six-minute one finished.
 	if proposerVeto {
 		return true, DesignReasonProposer
 	}
@@ -1116,14 +1120,26 @@ func designStands(needsDesign bool, reason, kind string, approachInTicket bool, 
 	if kind != RequestKindChange && kind != RequestKindInvestigation {
 		return false
 	}
-	needs, mechanical := designVerdict(kind, approachInTicket, false, false, request, consumer)
-	if needs || mechanical != DesignReasonApproachInTicket {
-		return needsDesign == needs && reason == mechanical
+	// A sealed pair stands when the reason is one this engine knows and it
+	// agrees with itself. Re-deriving the rule here used to reject a record
+	// the moment the rule changed, which would have stranded every delivery
+	// sealed by the version before this one.
+	keeps, known := DesignReasonKeepsDesign(reason)
+	if !known || keeps != needsDesign {
+		return false
 	}
-	if !needsDesign {
-		return reason == DesignReasonApproachInTicket
+	if needsDesign && (reason == DesignReasonProposer || reason == DesignReasonChecker) {
+		return slices.Contains(vetoes, reason)
 	}
-	return slices.Contains(vetoes, reason)
+	// A record must agree with itself: a skip taken because the ticket says
+	// how the change is made has to be a record that says the ticket says so.
+	if reason == DesignReasonApproachInTicket && !approachInTicket {
+		return false
+	}
+	if reason == DesignReasonApproachMissing && approachInTicket {
+		return false
+	}
+	return true
 }
 
 // questionsSurvivingCheck is the one rescue on the final failed attempt: when
