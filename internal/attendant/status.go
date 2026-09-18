@@ -454,18 +454,18 @@ func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.R
 	// to two words, so a requester read "delivered" over an unmerged pull
 	// request and had no reason to look further (live 2026-09-18, measured
 	// against a pull request that was still open).
+	if merge, merged := readFeatureMerge(runDir); merged {
+		status.place("done", "マージ済み", "取り込み用の Pull Request はマージされ、依頼の変更がリポジトリに入りました")
+		if merge.MergeCommitSHA != "" {
+			status.Detail += " (" + merge.MergeCommitSHA[:min(7, len(merge.MergeCommitSHA))] + ")"
+		}
+		return
+	}
 	if run.TerminalCode == string(hook.TerminalSuccess) &&
 		deliverFileExists(runDir, "feature-pr.json") && !config.Chain.Deliver.Enabled() {
-		// The merge itself is not observed. The attendant speaks to GitHub
-		// only through the controller binary the runner invokes, and it has
-		// no verb that asks whether a pull request was merged, so this rests
-		// here whether the person merged an hour ago or has not looked yet.
-		// Saying "merge it" over and over at someone who already did is a
-		// worse lie than saying nothing, so the words say what is known and
-		// what is not.
-		status.place("confirm", "マージ待ち", "取り込み用の Pull Request を人が確認してマージします。マージ済みかどうかは、この画面からは分かりません")
-		status.NextAction = "チケットに記載された Pull Request を開いてください。まだマージされていなければ、内容を確認してマージします。"
-		status.ActionEffect = "マージするまで、依頼の変更はリポジトリに入りません。マージした後もこの表示は変わりません — 自動処理が Pull Request の状態を見ていないためです。"
+		status.place("confirm", "マージ待ち", "取り込み用の Pull Request を人が確認してマージします")
+		status.NextAction = "チケットに記載された Pull Request を開いて内容を確認し、問題がなければマージしてください。"
+		status.ActionEffect = "マージするまで、依頼の変更はリポジトリに入りません。マージすると、次の巡回でこの依頼は「マージ済み」になります。"
 		return
 	}
 	status.place("done", "納品済み", "")
