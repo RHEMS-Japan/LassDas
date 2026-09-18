@@ -348,6 +348,11 @@ func budgetFailureFixture(t *testing.T, fixture pendingFixture, stage string, ro
 	if stage == runtime.StageDesignReviewB || stage == runtime.StageReviewB {
 		index = 1
 	}
+	if index >= len(config.Models.Reviewers) {
+		// The configuration names no second judge, so the chain has no
+		// second review card and there is no failure of one to fixture.
+		t.Skipf("%s needs a second judge; the configuration names %d", stage, len(config.Models.Reviewers))
+	}
 	reviewer := config.Models.Reviewers[index].ID
 	agent := config.Agents.ReviewerAgentFor(reviewer)
 	if prefix == "design-" {

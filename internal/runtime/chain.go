@@ -73,15 +73,25 @@ type ChainPlan struct {
 	// anything ships. Two live deliveries died that way on 2026-09-17,
 	// deadlocked over a judgement call a single model settles in one pass.
 	// Zero means the caller did not say, and the chain keeps its original
-	// two cards.
+	// two cards. NoReviewers says none are configured, which is different
+	// from not saying: the chain then runs no review card and the machine
+	// checks in validate are what a change has to pass.
 	Reviewers int
 }
+
+// NoReviewers is ChainPlan.Reviewers for a configuration that names no
+// judge at all. It is not zero, because zero is what a caller that never
+// set the field has, and that must keep the original chain.
+const NoReviewers = -1
 
 // reviewCards is how many review cards a plan runs. Only two review
 // profiles exist, so a consumer with more judges than that still runs two
 // cards and gives each card more than one judge.
 func (p ChainPlan) reviewCards() int {
-	if p.Reviewers == 1 {
+	switch p.Reviewers {
+	case NoReviewers:
+		return 0
+	case 1:
 		return 1
 	}
 	return 2
@@ -146,7 +156,9 @@ func ChainStagesFor(chain ChainConfig, plan ChainPlan) []ChainStage {
 			investigateStage(chain),
 			// The design reviews carry the implementation reviews' wall:
 			// the same agents judge, only the subject differs.
-			{Name: StageDesignReviewA, Profile: chain.Profiles.DesignReviewA, MaxRuntimeSeconds: 70 * 60},
+		}
+		if plan.reviewCards() > 0 {
+			stages = append(stages, ChainStage{Name: StageDesignReviewA, Profile: chain.Profiles.DesignReviewA, MaxRuntimeSeconds: 70 * 60})
 		}
 		if plan.reviewCards() > 1 {
 			stages = append(stages, ChainStage{Name: StageDesignReviewB, Profile: chain.Profiles.DesignReviewB, MaxRuntimeSeconds: 70 * 60})
@@ -177,12 +189,14 @@ func investigateStage(chain ChainConfig) ChainStage {
 func implementChainStages(chain ChainConfig, reviewCards int) []ChainStage {
 	stages := []ChainStage{
 		{Name: StageImplement, Profile: chain.Profiles.Implementer, MaxRuntimeSeconds: 90 * 60},
-		// The card wall must outlast the reviewing agent's own budget
-		// (agents.reviewer_agents timeout, 60 minutes) plus sealing
-		// overhead, or the kanban SIGTERM kills a working review from
-		// outside: both live runs of two tickets died at exactly this
-		// wall while their reviewers were mid-judgment.
-		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60},
+	}
+	// A review card's wall must outlast the reviewing agent's own budget
+	// (agents.reviewer_agents timeout, 60 minutes) plus sealing overhead, or
+	// the kanban SIGTERM kills a working review from outside: both live runs
+	// of two tickets died at exactly this wall while their reviewers were
+	// mid-judgment.
+	if reviewCards > 0 {
+		stages = append(stages, ChainStage{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60})
 	}
 	if reviewCards > 1 {
 		stages = append(stages, ChainStage{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60})

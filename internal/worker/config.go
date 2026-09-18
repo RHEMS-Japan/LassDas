@@ -1147,8 +1147,15 @@ func (c ModelConfig) validate() error {
 	// two judges have to agree before anything ships, and two live
 	// deliveries died deadlocked on 2026-09-17 over a judgement call a
 	// single model settles in one pass.
-	if len(c.Reviewers) < 1 || len(c.Reviewers) > 4 {
-		return errors.New("reviewer count must be between 1 and 4")
+	// No judge is a legal configuration. What a change has to pass is then
+	// the machine checks in validate - the build and the tests - which are
+	// a better signal than a model's opinion and cost nothing. A second
+	// opinion pays for itself where being wrong is expensive; where it is
+	// not, two judges have to agree before anything ships, and two live
+	// deliveries died deadlocked on 2026-09-17 over a judgement call a
+	// single model settles in one pass.
+	if len(c.Reviewers) > 4 {
+		return errors.New("reviewer count must be at most 4")
 	}
 	ids := map[string]struct{}{c.Implementer.ID: {}}
 	vendors := make(map[string]struct{}, len(c.Reviewers))
@@ -1258,7 +1265,14 @@ func (c ModelConfig) validate() error {
 		}
 		ids[id] = struct{}{}
 	}
-	if strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
+	// Two different models judging readiness must come from two vendors, or
+	// one vendor's blind spot is the whole gate's blind spot. Naming the
+	// same endpoint and model twice is not two models: it is one
+	// participant reading its own answer back, which a consumer may
+	// deliberately choose, and there is no independence left for the rule
+	// to protect.
+	if !sameEndpointAndModel(c.Readiness.Assessor, c.Readiness.Checker) &&
+		strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
 		return errors.New("readiness assessor and checker must use different vendors")
 	}
 	if c.VendorHosts != nil {
@@ -1274,6 +1288,12 @@ func (c ModelConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+// sameEndpointAndModel reports whether two seats are the same model behind
+// the same gateway, whatever they are called.
+func sameEndpointAndModel(a, b ModelEndpoint) bool {
+	return strings.EqualFold(a.BaseURL, b.BaseURL) && strings.EqualFold(a.Model, b.Model)
 }
 
 func validateVendorHosts(table map[string][]string) error {

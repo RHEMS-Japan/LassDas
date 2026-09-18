@@ -64,17 +64,23 @@ func TestDesignConfigValidation(t *testing.T) {
 }
 
 // The shipped example configuration carries a design block, so the example a
-// consumer copies from already names a trigger vocabulary.
+// consumer copies from already names a trigger vocabulary - and it turns the
+// design path off. A design round costs an investigation, a review and a
+// decision before a line is written: the same README ticket took about two
+// hours through it and six and a half minutes without it (live 2026-09-17).
+// A consumer that wants it says so.
 func TestExampleConsumerConfigCarriesADesignPolicy(t *testing.T) {
 	config, err := LoadConfig(filepath.Join("..", "..", "config", "m1-consumer.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	consumer := config.Consumers[0]
-	if consumer.Design == nil || !consumer.DesignEnabled() || len(consumer.DesignTriggerWords()) == 0 || !consumer.ReviewsInvestigation() {
+	if consumer.Design == nil || consumer.DesignEnabled() || len(consumer.DesignTriggerWords()) == 0 || !consumer.ReviewsInvestigation() {
 		t.Fatalf("example design policy = %+v", consumer.Design)
 	}
-	// The second destination leaves it out and gets the safe reading.
+	// The second destination leaves it out and gets the safe reading: an
+	// absent block still means on, so no consumer loses a design round
+	// because this example changed.
 	if config.Consumers[1].Design != nil || !config.Consumers[1].DesignEnabled() {
 		t.Fatalf("second consumer design = %+v", config.Consumers[1].Design)
 	}

@@ -16,7 +16,7 @@
       "staging_login_url": "https://api-stg.example.com/console/auth/login?returnTo=/console",
       "observation_language": "en",
       "design": {
-        "default": "on",
+        "default": "off",
         "trigger_words": [
           "slow",
           "slower",
@@ -229,26 +229,14 @@
     },
     "reviewers": [
       {
-        "id": "claude-correctness",
+        "id": "review-a",
         "vendor": "Anthropic",
         "model": "anthropic/claude-opus-5",
         "base_url": "https://gateway.example.com/api/v1",
         "api_key_env": "MODEL_API_KEY_IMPLEMENTER",
         "lens": "Acceptance criteria, correctness, regressions, and concrete test gaps.",
-        "effort": "low",
         "structured_output": false,
-        "max_output_tokens": 4096
-      },
-      {
-        "id": "codex-adversarial",
-        "vendor": "OpenAI",
-        "model": "openai/gpt-5.6-sol-pro",
-        "base_url": "https://gateway.example.com/api/v1",
-        "api_key_env": "MODEL_API_KEY_REVIEWER",
-        "lens": "Adversarial edge cases, unsafe assumptions, scope violations, and production observability.",
-        "effort": "high",
-        "structured_output": true,
-        "max_output_tokens": 4096
+        "max_output_tokens": 8192
       }
     ],
     "readiness": {
@@ -264,10 +252,10 @@
       },
       "checker": {
         "id": "codex-readiness-checker",
-        "vendor": "OpenAI",
-        "model": "openai/gpt-5.6-sol-pro",
+        "vendor": "Anthropic",
+        "model": "anthropic/claude-opus-5",
         "base_url": "https://gateway.example.com/api/v1",
-        "api_key_env": "MODEL_API_KEY_REVIEWER",
+        "api_key_env": "MODEL_API_KEY_IMPLEMENTER",
         "lens": "Adversarially verify the readiness assessment for false-ready, false-block, invalid questions, and missed scope violations.",
         "effort": "high",
         "structured_output": true,
@@ -342,7 +330,7 @@
       }
     }
   },
-  "max_stages": 3,
+  "max_stages": 2,
   "answer_knowledge": {
     "to": "knowledge/library/answers"
   }

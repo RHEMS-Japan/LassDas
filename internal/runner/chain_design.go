@@ -70,6 +70,9 @@ func consumerReviewerCount(consumerConfigPath string) int {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return 0
 	}
+	if len(parsed.Models.Reviewers) == 0 {
+		return runtime.NoReviewers
+	}
 	return len(parsed.Models.Reviewers)
 }
 

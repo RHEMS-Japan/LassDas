@@ -493,8 +493,22 @@ func TestLoadM1ConsumerConfig(t *testing.T) {
 	if config.Consumers[0].Repository != "example/consumer" || config.Consumers[0].IntegrationBranch != "stg" || config.Consumers[0].ReleaseBranch != "prod" {
 		t.Fatalf("consumer = %+v", config.Consumers[0])
 	}
-	if len(config.Models.Reviewers) != 2 || config.Models.Reviewers[0].Vendor == config.Models.Reviewers[1].Vendor {
+	// The shipped configuration is one participant: the same model behind
+	// the same gateway does the work, judges readiness, and reads the
+	// change back. A ticket that needs two independent opinions is a
+	// configuration choice, not the default one.
+	if len(config.Models.Reviewers) != 1 || config.Models.Reviewers[0].Model != config.Models.Implementer.Model {
 		t.Fatalf("reviewers = %+v", config.Models.Reviewers)
+	}
+	if config.Models.Readiness.Assessor.Model != config.Models.Implementer.Model ||
+		config.Models.Readiness.Checker.Model != config.Models.Implementer.Model {
+		t.Fatalf("readiness = %+v", config.Models.Readiness)
+	}
+	if config.MaxStages != 2 {
+		t.Fatalf("max_stages = %d", config.MaxStages)
+	}
+	if design := config.Consumers[0].Design; design == nil || design.Default != "off" {
+		t.Fatalf("design = %+v", design)
 	}
 }
 
@@ -651,9 +665,11 @@ func TestOneReviewerIsALegalConfiguration(t *testing.T) {
 	if want := investigate.ReviewsRequired("design", len(config.Models.DesignJudges())); want != 1 {
 		t.Errorf("a design decision under one judge needs %d reviews", want)
 	}
-	// No judge at all is still refused: nothing would read the change.
+	// No judge at all is legal too: what a change has to pass is then the
+	// build and the tests in validate, which are a better signal than a
+	// model's opinion and cost nothing.
 	config.Models.Reviewers = nil
-	if err := config.Validate(); err == nil {
-		t.Fatal("a configuration with no judge at all was accepted")
+	if err := config.Validate(); err != nil {
+		t.Fatalf("no judge at all was refused: %v", err)
 	}
 }

@@ -289,6 +289,19 @@ func TestTheReviewCardsFollowTheConfiguredJudges(t *testing.T) {
 	if !same(four, two) {
 		t.Errorf("four judges: %v, want the same two cards as %v", four, two)
 	}
+	// No judge at all: the chain has no review card, and what a change has
+	// to pass is the build and the tests in validate.
+	none := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement, Reviewers: NoReviewers}))
+	if want := []string{StageImplement, StageValidate, StagePublish}; !same(none, want) {
+		t.Errorf("no judge: %v, want %v", none, want)
+	}
+	noneDesign := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeDesign, Reviewers: NoReviewers}))
+	// The design shape has no implement card: the applier writes the change
+	// the design already decided.
+	if want := []string{StageInvestigate, StageDesignDecide, StageApply, StageValidate, StagePublish}; !same(noneDesign, want) {
+		t.Errorf("no judge, design: %v, want %v", noneDesign, want)
+	}
+
 	// A caller that did not say keeps the original chain.
 	unset := names(ChainStagesFor(chain, ChainPlan{Shape: ShapeImplement}))
 	if !same(unset, two) {
