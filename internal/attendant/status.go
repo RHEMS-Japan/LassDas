@@ -28,6 +28,13 @@ type BoardSnapshot struct {
 	SchemaVersion int         `json:"schema_version"`
 	GeneratedAt   time.Time   `json:"generated_at"`
 	Runs          []RunStatus `json:"runs"`
+	// Stages are the rail this installation can actually reach, in order.
+	// The board used to draw a fixed nine, so a destination that stops at
+	// the pull request showed STG, 確認 and 本番 for every delivery and
+	// never lit them: a requester read three grey stages after the last one
+	// that moved and had no way to tell "not yet" from "never" (observed
+	// 2026-09-18).
+	Stages []BoardStage `json:"stages"`
 	// Notice is the one-line banner shown while intake is held (the same
 	// failure ended the last N deliveries); empty otherwise.
 	Notice string `json:"notice,omitempty"`
@@ -114,7 +121,7 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 		}
 		candidates = append(candidates, run)
 	}
-	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC()}
+	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
 	for _, run := range candidates {
 		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
 	}
@@ -595,6 +602,28 @@ func cardWithKey(tasks []runtime.BoardTask, key string) (cardView, bool) {
 		}
 	}
 	return cardView{}, false
+}
+
+// BoardStage is one stage of the rail: the id a run's Step names, and what
+// a reader is shown.
+type BoardStage struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// railStages is the rail this installation can reach. A destination that
+// stops at the pull request never reaches staging or production, and the
+// stage a person acts on is where it ends.
+func railStages(config runtime.Config) []BoardStage {
+	stages := []BoardStage{
+		{ID: "intake", Label: "受付"}, {ID: "investigate", Label: "調査"}, {ID: "design", Label: "設計"},
+		{ID: "implement", Label: "実装"}, {ID: "review", Label: "審査"}, {ID: "checks", Label: "検査"},
+	}
+	if config.Chain.Deliver.Enabled() {
+		return append(stages, BoardStage{ID: "staging", Label: "STG"},
+			BoardStage{ID: "confirm", Label: "確認"}, BoardStage{ID: "production", Label: "本番"})
+	}
+	return append(stages, BoardStage{ID: "confirm", Label: "マージ待ち"})
 }
 
 // WriteBoardStatus persists the snapshot atomically and appends one event

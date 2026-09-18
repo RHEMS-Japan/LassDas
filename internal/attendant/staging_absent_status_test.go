@@ -80,3 +80,40 @@ func TestAPullRequestNobodyMergedIsNotDelivered(t *testing.T) {
 		t.Fatalf("step = %q, want done when no pull request was opened", status.Step)
 	}
 }
+
+// The rail a reader sees is the one this installation can reach. It used to
+// be a fixed nine on the board, so a destination that stops at the pull
+// request drew STG, 確認 and 本番 for every delivery and never lit them: three
+// grey stages after the last one that moved, with no way to tell "not yet"
+// from "never" (observed 2026-09-18).
+func TestTheRailIsTheOneThisInstallationCanReach(t *testing.T) {
+	ids := func(stages []BoardStage) []string {
+		out := make([]string, 0, len(stages))
+		for _, stage := range stages {
+			out = append(out, stage.ID)
+		}
+		return out
+	}
+	same := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	stopsAtThePullRequest := ids(railStages(runtime.Config{}))
+	want := []string{"intake", "investigate", "design", "implement", "review", "checks", "confirm"}
+	if !same(stopsAtThePullRequest, want) {
+		t.Fatalf("rail = %v, want %v", stopsAtThePullRequest, want)
+	}
+	for _, stage := range railStages(runtime.Config{}) {
+		if stage.Label == "" {
+			t.Fatalf("stage %q has nothing to show a reader", stage.ID)
+		}
+	}
+}
