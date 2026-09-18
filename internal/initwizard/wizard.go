@@ -622,11 +622,34 @@ func (w *Wizard) trackerStage(ctx context.Context, s *State, secrets Secrets, sa
 const openRouterBaseURL = "https://openrouter.ai/api/v1"
 
 func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
-	if s.BaseURL != "" && s.BaseURL != openRouterBaseURL {
-		return errors.New("この init のモデル接続先は OpenRouter 固定です。保存済みの別接続先や鍵は変更しません。OpenRouter 用には新しい project を使ってください")
+	if s.BaseURL == "" {
+		// Asked once per project. The engine speaks OpenAI-compatible chat
+		// completions and nothing else, so a provider here is a name and a
+		// base URL - never an adapter. Changing it later is a new project:
+		// the stored keys belong to the provider that issued them.
+		options := make([]Option, 0, len(ModelProviders)+1)
+		for _, provider := range ModelProviders {
+			options = append(options, Option{Label: provider.Name, Detail: provider.Detail})
+		}
+		options = append(options, Option{Label: "その他 (OpenAI 互換の接続先を自分で入れる)", Detail: "chat completions が OpenAI 互換なら動く。費用の読み取りは接続先次第"})
+		picked, err := w.choose(s, "model-base-url", "モデルの接続先", options, 0)
+		if err != nil {
+			return err
+		}
+		if picked < len(ModelProviders) {
+			s.BaseURL = ModelProviders[picked].BaseURL
+		} else {
+			value, err := w.ask(s, "model-base-url-other", "接続先の URL (https://…/v1)", "", false)
+			if err != nil {
+				return err
+			}
+			s.BaseURL = strings.TrimRight(strings.TrimSpace(value), "/")
+		}
 	}
-	s.BaseURL = openRouterBaseURL
-	w.UI.Info("モデルの接続先は OpenRouter です。疎通確認にも API の利用料がかかります")
+	if err := CheckModelBaseURL(s.BaseURL); err != nil {
+		return err
+	}
+	w.UI.Info("モデルの接続先は " + ProviderName(s.BaseURL) + " です。疎通確認にも API の利用料がかかります")
 	if s.ModelKeyMode == "" {
 		s.ModelKeyMode = modelKeysShared
 		// Preserve keys from earlier versions or interrupted role-by-role
@@ -722,8 +745,8 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 
 func (w *Wizard) modelKeys(s *State, secrets Secrets, replace bool) error {
 	if s.ModelKeyMode == modelKeysShared {
-		w.UI.Info("OpenRouter のキー1本を全役で共用します。キー単位の利用上限と費用は全役の合算になります")
-		if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "OpenRouter API キー", replace); err != nil {
+		w.UI.Info(ProviderName(s.BaseURL) + " のキー 1 本を全役で共用します。キー単位の利用上限と費用は全役の合算になります")
+		if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", ProviderName(s.BaseURL)+" の API キー", replace); err != nil {
 			return err
 		}
 		for _, role := range allRoles(s) {
@@ -731,11 +754,11 @@ func (w *Wizard) modelKeys(s *State, secrets Secrets, replace bool) error {
 		}
 		return nil
 	}
-	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の OpenRouter API キー", replace); err != nil {
+	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の "+ProviderName(s.BaseURL)+" API キー", replace); err != nil {
 		return err
 	}
 	for _, role := range allRoles(s) {
-		if err := w.secret(s, secrets, keyName(role), role+" 専用の OpenRouter API キー", replace); err != nil {
+		if err := w.secret(s, secrets, keyName(role), role+" 専用の "+ProviderName(s.BaseURL)+" API キー", replace); err != nil {
 			return err
 		}
 	}

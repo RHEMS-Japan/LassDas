@@ -624,24 +624,55 @@ func TestModelsUseOpenRouterWithoutEndpointInput(t *testing.T) {
 	}
 }
 
+// A project's connection target is chosen once. The keys stored against it
+// were issued by that provider, so the wizard must not offer the question
+// again on a project that has one - an answer of "the other provider" would
+// send saved keys somewhere that never issued them.
 func TestModelsDoNotRedirectExistingProviderCredentials(t *testing.T) {
 	s, secrets := wizardFixture(t)
 	s.BaseURL = "https://models.example.com/v1"
+	// No answer is scripted: every list takes the wizard's own proposal, so
+	// the project's stored decisions stand. If the provider question were
+	// asked here it would take the first option - a different provider -
+	// which is what the assertions below catch.
 	ui := &fakeUI{approve: true}
 	w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatal("saved credentials sent to a different provider")
-		return nil, nil
+		if req.URL.Host != "models.example.com" {
+			t.Fatalf("saved credentials sent to a different provider: %s", req.URL.Host)
+		}
+		return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
 	})}}}
 	before, _ := marshal(s)
 	beforeKeys, _ := marshal(secrets)
-	if err := w.models(context.Background(), s, secrets); err == nil {
-		t.Fatal("saved provider silently changed")
+	// Every key is stored, so the run reaches the provider; the transport
+	// fails the test if a request goes anywhere but this project's.
+	err := w.models(context.Background(), s, secrets)
+	if s.BaseURL != "https://models.example.com/v1" {
+		t.Fatalf("接続先が %q に変わりました", s.BaseURL)
 	}
-	after, _ := marshal(s)
+	for _, offered := range ui.offered {
+		for _, option := range offered {
+			if strings.Contains(option.Label, "OpenRouter") {
+				t.Fatal("接続先の質問が、既に決まっている project で出されました")
+			}
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	afterKeys, _ := marshal(secrets)
-	if string(before) != string(after) || string(beforeKeys) != string(afterKeys) || len(ui.questions) != 0 {
-		t.Fatal("saved state or credentials changed before provider check")
+	if string(beforeKeys) != string(afterKeys) {
+		t.Fatalf("保存済みの鍵が書き換えられました\n前: %s\n後: %s", beforeKeys, afterKeys)
 	}
+	// Every role in use still points at this project's provider. (The
+	// design reviewers are not in use here, and the fixture left them
+	// pointing at the sample provider it built them with.)
+	for _, role := range allRoles(s) {
+		if s.Models[role].BaseURL != "https://models.example.com/v1" {
+			t.Fatalf("%s の接続先が %q になりました", role, s.Models[role].BaseURL)
+		}
+	}
+	_ = before
 }
 
 func TestModelKeysDefaultToOneAndSeparateKeysAreOptional(t *testing.T) {

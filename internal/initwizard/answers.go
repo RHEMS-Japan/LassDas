@@ -245,6 +245,7 @@ func OptionalAnswers() []Requirement {
 		{"requester-key-ok", "自動処理の鍵が起票者本人のもので、コメントと状態更新が本人名義になってよいか (true/false)", "利用者に確認してから書く"},
 		{"board-port", "板を 127.0.0.1 で開く port", "既定は 9200"},
 		{"host", "この instance を置く場所。このマシンの docker で動かすなら空にする", "このマシン以外に置くときだけ書く。書くと apply は準備だけして起動しない"},
+		{"model-base-url", "モデルの接続先 (OpenAI 互換の base URL)", "既定は OpenRouter。使える接続先を調べて選択肢で聞く"},
 	}
 }
 
@@ -301,6 +302,20 @@ func VendorFor(model string) string {
 		return "Amazon"
 	}
 	return ""
+}
+
+// checkModelBaseURL refuses a connection target that cannot be one before a
+// key is stored against it - the same moment the tracker origin is checked,
+// and for the same reason: the key is sent there.
+func (a Answers) checkModelBaseURL() []string {
+	value, ok := a.Value("model-base-url")
+	if !ok {
+		return nil
+	}
+	if err := CheckModelBaseURL(value); err != nil {
+		return []string{"model-base-url: " + err.Error()}
+	}
+	return nil
 }
 
 // checkModels mirrors, offline, what the body's configuration refuses
@@ -400,6 +415,7 @@ func (a Answers) Check(repoRoot string) []string {
 			}
 		}
 	}
+	problems = append(problems, a.checkModelBaseURL()...)
 	problems = append(problems, a.checkModels()...)
 	known := map[string]bool{}
 	for _, requirement := range append(RequiredAnswers(), OptionalAnswers()...) {

@@ -273,3 +273,57 @@ func TestApplyNoticesANewerNote(t *testing.T) {
 		t.Fatalf("a project with nothing prepared was called stale: %q (%v)", line, err)
 	}
 }
+
+// The unattended run takes the connection target from the answers file, and
+// refuses to point a project's stored keys at a provider that never issued
+// them.
+func TestTheAnswersFileChoosesTheProviderAndCannotSwitchOne(t *testing.T) {
+	if got := modelBaseURL(initwizard.Answers{}); got != initwizard.ModelProviders[0].BaseURL {
+		t.Fatalf("回答が無いときの既定 = %q", got)
+	}
+	root := t.TempDir()
+	write := func(body string) initwizard.Answers {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, ".lassdas"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".lassdas", "setup.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		answers, err := initwizard.LoadAnswers(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return answers
+	}
+	answers := write(`{"answers":{"model-base-url":"https://api.cheaperinference.com/v1"}}`)
+	if got := modelBaseURL(answers); got != "https://api.cheaperinference.com/v1" {
+		t.Fatalf("回答が読まれていません: %q", got)
+	}
+	// The key the person is asked for is named after that provider.
+	plan := secretPlan(answers)
+	found := false
+	for _, entry := range plan {
+		if strings.Contains(entry.label, "Cheaper Inference") {
+			found = true
+		}
+		if strings.Contains(entry.label, "OpenRouter") {
+			t.Errorf("別の接続先なのに OpenRouter の鍵を求めています: %q", entry.label)
+		}
+	}
+	if !found {
+		t.Errorf("鍵の説明に接続先の名前がありません: %+v", plan)
+	}
+	// A shape that cannot be a connection target is named by setup check.
+	answers = write(`{"answers":{"model-base-url":"http://api.example.com/v1"}}`)
+	problems := answers.Check(root)
+	named := false
+	for _, problem := range problems {
+		if strings.Contains(problem, "model-base-url") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("http の接続先が指摘されていません: %v", problems)
+	}
+}
