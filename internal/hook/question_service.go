@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -326,6 +327,14 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	for _, comment := range comments {
 		if comment.UserID != s.config.AllowedCreatorID || comment.CommentID <= snapshot.QuestionCommentID ||
 			comment.PostedAt <= 0 || comment.PostedAt >= snapshot.Record.AnswerDeadlineAt {
+			continue
+		}
+		if strings.TrimSpace(comment.Body) == "" {
+			// A comment with no text in it says nothing about the questions.
+			// Asking a model to read it fails, and a failed reading is kept
+			// for the next tick, so one empty comment on the ticket was
+			// retried every minute for as long as the question stayed open
+			// (live 2026-09-18).
 			continue
 		}
 		reading, err := s.answers.ReadAnswer(ctx, snapshot.Record.QuestionsJSON, comment.Body)
