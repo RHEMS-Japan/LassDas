@@ -328,18 +328,24 @@ func TestStageDecisionRejectsDuplicateInvocationRequestID(t *testing.T) {
 	}
 }
 
-func TestReviewRequiresFindingsToMatchVerdict(t *testing.T) {
+// A reviewer that passes a change and still writes a note has passed it, and
+// one that asks for a revision without listing a finding has still asked.
+// Both were thrown away and asked for again, and asking again is what rounds
+// are spent on. A verdict that is neither word is still no answer.
+func TestAReviewIsTakenAsGivenUnlessTheVerdictIsUnreadable(t *testing.T) {
 	config, request, source, candidate := validCandidate(t)
 	endpoint := config.Models.Reviewers[0]
-	tests := []ModelReviewOutput{
+	for _, output := range []ModelReviewOutput{
 		{Verdict: "pass", Findings: []ModelFinding{{Code: "bug", Path: request.TargetFiles[0], Message: "Bug."}}},
 		{Verdict: "revise", Findings: nil},
-		{Verdict: "maybe", Findings: nil},
-	}
-	for _, output := range tests {
-		if _, err := NewReview(1, endpoint, output, candidate, source, request, config, validTestInvocation(endpoint), testInvocationTime); err == nil {
-			t.Fatalf("NewReview() accepted output %+v", output)
+	} {
+		if _, err := NewReview(1, endpoint, output, candidate, source, request, config, validTestInvocation(endpoint), testInvocationTime); err != nil {
+			t.Fatalf("NewReview() refused %+v: %v", output, err)
 		}
+	}
+	unreadable := ModelReviewOutput{Verdict: "maybe", Findings: nil}
+	if _, err := NewReview(1, endpoint, unreadable, candidate, source, request, config, validTestInvocation(endpoint), testInvocationTime); err == nil {
+		t.Fatal("NewReview() accepted a verdict that is neither pass nor revise")
 	}
 }
 

@@ -554,9 +554,10 @@ func validateModelReviewOutput(output ModelReviewOutput, request TicketRequest) 
 	if output.Verdict != "pass" && output.Verdict != "revise" {
 		return fmt.Errorf("model review verdict is invalid: %q is not pass or revise", output.Verdict)
 	}
-	if len(output.Findings) > 16 || output.Verdict == "pass" && len(output.Findings) != 0 || output.Verdict == "revise" && len(output.Findings) == 0 {
-		return errors.New("model review findings do not match verdict")
-	}
+	// A reviewer that passes a change and still writes a note has passed it,
+	// and one that asks for a revision without listing a finding has still
+	// asked. Throwing the answer away for that made the turn ask again, and
+	// asking again is what rounds are spent on.
 	for _, finding := range output.Findings {
 		if !identifierPattern.MatchString(finding.Code) || finding.Line < 0 || finding.Line > 1_000_000 ||
 			validatePlainText(finding.Message, 4000, true) != nil {

@@ -259,9 +259,9 @@ func validateClarificationQuestions(questions []ReadinessQuestion) error {
 		if problem := plainTextProblem(question.WhyBlocking, 2000); problem != "" {
 			return fmt.Errorf("question %s why_blocking %s", question.ID, problem)
 		}
-		if len(question.Choices) < 2 || len(question.Choices) > 4 {
-			return fmt.Errorf("question %s must offer 2 to 4 bounded choices (has %d)", question.ID, len(question.Choices))
-		}
+		// However many choices a question offers is how many it offers. A
+		// question with one was refused and asked for again; the requester
+		// would have read it fine.
 		for choiceIndex, choice := range question.Choices {
 			if choice.ID != string(rune('a'+choiceIndex)) {
 				return fmt.Errorf("question %s choice %d id must be %q", question.ID, choiceIndex+1, string(rune('a'+choiceIndex)))

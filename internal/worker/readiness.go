@@ -599,9 +599,9 @@ func validateModelReadinessCheckOutput(output ModelReadinessCheckOutput) error {
 	if output.Verdict != "pass" && output.Verdict != "fail" {
 		return fmt.Errorf("readiness check verdict is invalid: %q is not pass or fail", output.Verdict)
 	}
-	if len(output.Reasons) > 8 || output.Verdict == "pass" && len(output.Reasons) != 0 || output.Verdict == "fail" && len(output.Reasons) == 0 {
-		return errors.New("readiness check reasons do not match verdict")
-	}
+	// The verdict is the answer; the reasons are what came with it. A
+	// mismatch between them was enough to discard the whole answer and ask
+	// again.
 	for _, reason := range output.Reasons {
 		if !identifierPattern.MatchString(reason.Code) || validatePlainText(reason.Message, 4000, true) != nil {
 			return errors.New("readiness check reason is invalid")

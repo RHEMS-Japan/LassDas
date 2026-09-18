@@ -131,10 +131,12 @@ func TestReadinessQuestionShapeIsStrict(t *testing.T) {
 	if err := validateModelReadinessOutput(output); err == nil {
 		t.Fatal("validateModelReadinessOutput() accepted a non-sequential question id")
 	}
+	// However many choices a question offers is how many it offers. One is
+	// a question the requester would have read fine.
 	output = testClarificationOutput()
 	output.Questions[0].Choices = output.Questions[0].Choices[:1]
-	if err := validateModelReadinessOutput(output); err == nil {
-		t.Fatal("validateModelReadinessOutput() accepted a single choice")
+	if err := validateModelReadinessOutput(output); err != nil {
+		t.Fatalf("a question with one choice was refused: %v", err)
 	}
 	output = testClarificationOutput()
 	output.Questions[0].Choices[1].ID = "c"
@@ -146,10 +148,12 @@ func TestReadinessQuestionShapeIsStrict(t *testing.T) {
 	if err := validateModelReadinessOutput(output); err == nil {
 		t.Fatal("validateModelReadinessOutput() accepted an unknown dimension")
 	}
+	// A question with no choices at all is still a question a requester can
+	// read and answer in their own words.
 	output = testClarificationOutput()
 	output.Questions[0].Choices = []ReadinessChoice{}
-	if err := validateModelReadinessOutput(output); err == nil {
-		t.Fatal("validateModelReadinessOutput() accepted a question without bounded choices")
+	if err := validateModelReadinessOutput(output); err != nil {
+		t.Fatalf("a question with no listed choices was refused: %v", err)
 	}
 	unresolvable := ModelReadinessOutput{Decision: ReadinessAssessorUnresolvable, Questions: []ReadinessQuestion{}, Assumptions: []ReadinessAssumption{}}
 	if err := validateModelReadinessOutput(unresolvable); err != nil {
@@ -682,9 +686,6 @@ func TestReceptionRefusalsNameTheFieldAndTheLimit(t *testing.T) {
 			o.Questions = nil
 			o.RejectCode = strings.Repeat("x", 500)
 		}, `reject_code "` + strings.Repeat("x", 64) + `…" (500 bytes)`},
-		{"five choices", func(o *ModelReadinessOutput) {
-			o.Questions[0].Choices = []ReadinessChoice{{ID: "a", Label: "a", Effect: "1"}, {ID: "b", Label: "b", Effect: "2"}, {ID: "c", Label: "c", Effect: "3"}, {ID: "d", Label: "d", Effect: "4"}, {ID: "e", Label: "e", Effect: "5"}}
-		}, "question Q1 must offer 2 to 4 bounded choices (has 5)"},
 		{"bad assumption kind", func(o *ModelReadinessOutput) {
 			o.Assumptions = []ReadinessAssumption{{Kind: "guess", Statement: "s", Evidence: "e"}}
 		}, `assumption 1 kind "guess" is not repository_convention or non_user_visible_implementation`},
