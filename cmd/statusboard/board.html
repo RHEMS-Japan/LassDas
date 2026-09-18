@@ -315,11 +315,28 @@
 /* All dynamic content is DOM-built with textContent — tracker-controlled
    strings (titles, details) must never reach innerHTML. */
 
-const STEPS = [
+// The rail this installation can actually reach, sent with every snapshot.
+// It used to be a fixed nine here, so a destination that stops at the pull
+// request drew STG, 確認 and 本番 for every delivery and never lit them: a
+// reader saw three grey stages after the last one that moved, with no way to
+// tell "not yet" from "never" (observed 2026-09-18). The list below is only
+// what an older snapshot with no stages in it falls back to.
+let STEPS = [
   ["intake", "受付"], ["investigate", "調査"], ["design", "設計"], ["implement", "実装"], ["review", "審査"], ["checks", "検査"],
   ["staging", "STG"], ["confirm", "確認"], ["production", "本番"],
 ];
-const STEP_INDEX = Object.fromEntries(STEPS.map(([id], i) => [id, i]));
+let STEP_INDEX = Object.fromEntries(STEPS.map(([id], i) => [id, i]));
+
+function adoptStages(stages) {
+  if (!Array.isArray(stages) || stages.length === 0) return;
+  const next = [];
+  for (const stage of stages) {
+    if (!stage || typeof stage.id !== "string" || typeof stage.label !== "string") return;
+    next.push([stage.id, stage.label]);
+  }
+  STEPS = next;
+  STEP_INDEX = Object.fromEntries(STEPS.map(([id], i) => [id, i]));
+}
 const RESTING = new Set(["done", "stopped", "failed"]);
 const ACTIONABLE = new Set(["confirm", "question"]);
 const TONE = { confirm: "tone-act", question: "tone-act", attention: "tone-warn", failed: "tone-bad", stopped: "", done: "" };
@@ -1149,6 +1166,7 @@ function applyPayload(payload, firstLoad) {
   }
   try { latestBoard = typeof payload.board === "string" ? JSON.parse(payload.board) : (payload.board || { runs: [] }); }
   catch (_) { latestBoard = { runs: [] }; }
+  adoptStages(latestBoard.stages);
   document.getElementById("footer").textContent = actionsEnabled
     ? "LASSDAS STATUS BOARD — 操作（Go・停止・確認済み）は依頼者のコメントとしてチケットに投稿します。質問への回答はチケットで行います。投稿後、自動処理が受け取るまで状態の更新をお待ちください。"
     : "LASSDAS STATUS BOARD — この画面は閲覧専用です。回答・承認・確認の記録はチケットのコメントで行ってください。";

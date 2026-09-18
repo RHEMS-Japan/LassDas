@@ -154,7 +154,7 @@ lassdas run spec --project NAME
 モデルの組み合わせには本体の規則がある。`lassdas setup check` が同じ規則で先に見る:
 
 - `review-a` と `review-b` は別のモデルで、別の提供会社。`implementer` と同じモデルにできるレビュー役は 1 つまで (`designer` も同じ)。
-- `readiness-assessor` と `readiness-checker` は別の提供会社。
+- `readiness-assessor` と `readiness-checker` は、**別のモデルを指名するなら**別の提供会社。同じモデルを 2 度指名してもよく、そのときは 1 人が自分の答えを読み返す形になるので、この規則は当たらない。
 - 提供会社はモデル名の接頭辞から本体が判定する (openai / anthropic / google / deepseek / x-ai / meta-llama / mistralai / qwen / moonshotai / z-ai / cohere / amazon)。それ以外の接頭辞は `<役>-vendor` に会社名を書く。
 - `separate-design` を true にしたら `design-review-a-model` `design-review-b-model` も必須で、同じ規則 (別モデル・別会社)。
 
