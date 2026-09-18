@@ -80,6 +80,15 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 	if strings.Contains(repairText, "{{HOME}}") {
 		t.Fatal("the home must be substituted")
 	}
+	migrate, err := os.ReadFile(filepath.Join(skills, "lassdas-migrate", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"name: lassdas-migrate", "run spec", "LASSDAS_BOARD_AUTH=basic", "data_name", "二重"} {
+		if !strings.Contains(string(migrate), want) {
+			t.Fatalf("migrate skill lacks %q", want)
+		}
+	}
 	loaded, found, err := initwizard.LoadDistribution(home)
 	if err != nil || !found || loaded.Image != note.Image || loaded.RegistryLogin != note.RegistryLogin {
 		t.Fatalf("note: %+v %v %v", loaded, found, err)
