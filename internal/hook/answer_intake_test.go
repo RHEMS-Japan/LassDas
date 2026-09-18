@@ -1,7 +1,6 @@
 package hook
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -14,385 +13,155 @@ func intakeTestRecord(questionsJSON string) QuestionRecord {
 	return record
 }
 
-func intakeTestInput(record QuestionRecord, comments ...BacklogComment) AnswerIntakeInput {
-	return AnswerIntakeInput{
-		Question:          record,
-		QuestionCommentID: 100,
-		AnswererID:        terminalTestConfig().AllowedCreatorID,
-		Comments:          comments,
-	}
-}
-
 func intakeComment(commentID int64, body string) BacklogComment {
 	return BacklogComment{CommentID: commentID, UserID: terminalTestConfig().AllowedCreatorID, Body: body, PostedAt: 3500}
 }
 
-func TestAnswerIntakeAdoptsTheCopyPasteLine(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	comment := intakeComment(101, "回答 C1 Q1:a")
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record, comment))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+// intakeInput pairs each comment with what the reading made of it, keyed the
+// way the tick keys them.
+func intakeInput(record QuestionRecord, pairs ...struct {
+	comment BacklogComment
+	reading AnswerReading
+}) AnswerIntakeInput {
+	input := AnswerIntakeInput{
+		Question:          record,
+		QuestionCommentID: 100,
+		AnswererID:        terminalTestConfig().AllowedCreatorID,
+		HandledCommentIDs: map[int64]bool{},
+		Readings:          map[int64]AnswerReading{},
 	}
-	if decision.Adopted == nil || decision.Cancel != nil || len(decision.Replies) != 0 {
-		t.Fatalf("decision = %+v, want adoption only", decision)
+	for _, pair := range pairs {
+		input.Comments = append(input.Comments, pair.comment)
+		input.Readings[pair.comment.CommentID] = pair.reading
 	}
-	if decision.Adopted.CommentID != 101 || decision.Adopted.PostedAt != 3500 {
-		t.Fatalf("adopted binding = %+v", decision.Adopted)
-	}
-	if decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
-		t.Fatalf("answers = %s", decision.Adopted.AnswersJSON)
-	}
-	if decision.Adopted.BodySHA256 != TerminalReportDigest([]byte(comment.Body)) {
-		t.Fatal("body digest is not bound to the raw comment body")
-	}
+	return input
 }
 
-func TestAnswerIntakeAcceptsBlockPasteAndTypedRescues(t *testing.T) {
+func read(comment BacklogComment, reading AnswerReading) struct {
+	comment BacklogComment
+	reading AnswerReading
+} {
+	return struct {
+		comment BacklogComment
+		reading AnswerReading
+	}{comment: comment, reading: reading}
+}
+
+// What a person wrote is not what decides: the reading is. A comment that no
+// pattern would have matched is an answer when the reading says it is.
+func TestAnAnswerIsWhateverTheReadingSaysIsOne(t *testing.T) {
 	record := intakeTestRecord(intakeTwoQuestionSet)
-	for _, run := range []struct {
-		name string
-		body string
-	}{
-		{name: "block form", body: "回答 C1\nQ1: a\nQ2: c"},
-		{name: "pasted per-choice lines", body: "回答 C1 Q1:a\n回答 C1 Q2:c"},
-		{name: "mixed paste then typed", body: "回答 C1 Q1:a\nQ2: c"},
-		{name: "full-width colon and space", body: "回答　C1\nQ1：a\nQ2：c"},
-		{name: "lowercase q and uppercase choice", body: "回答 C1\nq1: A\nq2: C"},
-		{name: "lines out of numeric order", body: "回答 C1\nQ2: c\nQ1: a"},
-		{name: "windows line endings", body: "回答 C1\r\nQ1: a\r\nQ2: c"},
-		{name: "missing space before the marker", body: "回答C1 Q1:a\n回答C1 Q2:c"},
-		{name: "lowercase revision marker", body: "回答 c1\nQ1: a\nQ2: c"},
-	} {
-		t.Run(run.name, func(t *testing.T) {
-			decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, run.body)))
-			if err != nil {
-				t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-			}
-			if decision.Adopted == nil {
-				t.Fatalf("decision = %+v, want adoption", decision)
-			}
-			if decision.Adopted.AnswersJSON != `{"Q1":"a","Q2":"c"}` {
-				t.Fatalf("answers = %s", decision.Adopted.AnswersJSON)
-			}
-		})
-	}
-}
-
-func TestAnswerIntakeIgnoresCommentsOutsideTheContract(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	answerer := terminalTestConfig().AllowedCreatorID
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record,
-		BacklogComment{CommentID: 101, UserID: answerer + 7, Body: "回答 C1 Q1:a", PostedAt: 3500},
-		BacklogComment{CommentID: 99, UserID: answerer, Body: "回答 C1 Q1:a", PostedAt: 3500},
-		BacklogComment{CommentID: 102, UserID: answerer, Body: "回答 C1 Q1:a", PostedAt: 4000},
-		BacklogComment{CommentID: 103, UserID: answerer, Body: "承知しました、確認します", PostedAt: 3500},
-		BacklogComment{CommentID: 104, UserID: answerer, Body: "中止 C2", PostedAt: 3500},
-	))
+	comment := intakeComment(101, "a でいきます。展開のことは書かないでください。")
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(comment, AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}, NotNeeded: []string{"Q2"}})))
 	if err != nil {
 		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if decision.Adopted != nil || decision.Cancel != nil || len(decision.Replies) != 0 {
-		t.Fatalf("decision = %+v, want empty", decision)
+	if decision.Adopted == nil || decision.Cancel != nil {
+		t.Fatalf("decision = %+v, want the answer adopted", decision)
+	}
+	if decision.Adopted.CommentID != 101 || decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
+		t.Fatalf("adopted = %+v", decision.Adopted)
 	}
 }
 
-func TestAnswerIntakeAdoptsTheHighestCompleteAnswer(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record,
-		intakeComment(101, "回答 C1 Q1:a"),
-		intakeComment(105, "回答 C1 Q1:b"),
-	))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if decision.Adopted == nil || decision.Adopted.CommentID != 105 || decision.Adopted.AnswersJSON != `{"Q1":"b"}` {
-		t.Fatalf("decision = %+v, want the later answer adopted", decision.Adopted)
-	}
-}
-
-func TestAnswerIntakePrefersTheEarliestCancelOverAnyAnswer(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	body := "中止 C1"
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record,
-		intakeComment(101, "回答 C1 Q1:a"),
-		intakeComment(102, body),
-		intakeComment(103, "中止　C1"),
-	))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if decision.Cancel == nil || decision.Adopted != nil || len(decision.Replies) != 0 {
-		t.Fatalf("decision = %+v, want cancel only", decision)
-	}
-	if decision.Cancel.CommentID != 102 || decision.Cancel.BodySHA256 != TerminalReportDigest([]byte(body)) {
-		t.Fatalf("cancel binding = %+v", decision.Cancel)
-	}
-}
-
-func TestAnswerIntakeReadsCancelFromTheFirstLineOnly(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	// A stop with trailing politeness is still a stop; converting an
-	// expressed stop into a resume would be the worse failure.
-	polite, err := EvaluateAnswerIntake(intakeTestInput(record,
-		intakeComment(101, "回答 C1 Q1:a"),
-		intakeComment(102, "中止 C1\nお手数ですがよろしくお願いします"),
-	))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if polite.Cancel == nil || polite.Cancel.CommentID != 102 || polite.Adopted != nil {
-		t.Fatalf("decision = %+v, want the polite cancel to win", polite)
-	}
-	if compact, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(103, "中止C1"))); err != nil || compact.Cancel == nil {
-		t.Fatalf("decision = %+v, err = %v, want the unspaced cancel accepted", compact, err)
-	}
-	// A 中止 line buried below an answer body is not a cancel; the comment is
-	// an uninterpretable answer and gets guidance.
-	buried, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(104, "回答 C1\nQ1: a\n中止 C1")))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if buried.Cancel != nil || buried.Adopted != nil ||
-		len(buried.Replies) != 1 || buried.Replies[0].Kind != AnswerReplyGuidance {
-		t.Fatalf("decision = %+v, want guidance only", buried)
-	}
-}
-
-func TestAnswerIntakeRepliesGuidanceOncePerRevision(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	for _, run := range []struct {
-		name string
-		body string
-	}{
-		{name: "unknown question", body: "回答 C1 Q9:a"},
-		{name: "unknown choice", body: "回答 C1 Q1:z"},
-		{name: "duplicate question", body: "回答 C1\nQ1: a\nQ1: b"},
-		{name: "extra prose", body: "回答 C1\nQ1: a\nよろしくお願いします"},
-		{name: "wrong revision header", body: "回答 C2\nQ1: a"},
-		// Blank padding keeps the grammar itself valid, so only the byte bound
-		// rejects this one.
-		{name: "oversize body", body: "回答 C1 Q1:a" + strings.Repeat("\n", MaxAnswerBodyBytes)},
-		// A near-miss marker must never be silently dropped: with no reaction
-		// at all the requester would wait for the next renotification.
-		{name: "near-miss marker with prose", body: "回答C1です。新着順でお願いします"},
-	} {
-		t.Run(run.name, func(t *testing.T) {
-			decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, run.body)))
-			if err != nil {
-				t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-			}
-			if decision.Adopted != nil || len(decision.Replies) != 1 || decision.Replies[0].Kind != AnswerReplyGuidance || decision.Replies[0].CommentID != 101 {
-				t.Fatalf("decision = %+v, want one guidance reply", decision)
-			}
-		})
-	}
-
-	// Two uninterpretable comments in one snapshot get a single guidance, and
-	// none is repeated once it was sent or the triggering comment was handled.
-	twoInvalid := intakeTestInput(record, intakeComment(101, "回答 C1 Q9:a"), intakeComment(102, "回答 C1 Q1:z"))
-	decision, err := EvaluateAnswerIntake(twoInvalid)
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if len(decision.Replies) != 1 || decision.Replies[0].CommentID != 101 {
-		t.Fatalf("decision = %+v, want a single guidance for the first comment", decision)
-	}
-	sent := twoInvalid
-	sent.GuidanceSent = true
-	if decision, err := EvaluateAnswerIntake(sent); err != nil || len(decision.Replies) != 0 {
-		t.Fatalf("decision = %+v, err = %v, want no reply after guidance was sent", decision, err)
-	}
-	handled := twoInvalid
-	handled.HandledCommentIDs = map[int64]bool{101: true}
-	if decision, err := EvaluateAnswerIntake(handled); err != nil || len(decision.Replies) != 0 {
-		t.Fatalf("decision = %+v, err = %v, want no second guidance after the first was handled", decision, err)
-	}
-}
-
-func TestAnswerIntakeReturnsShortfallPerIncompleteAnswer(t *testing.T) {
+// The delivery that stalled on 2026-09-17: a second question whose own words
+// made it conditional on the first was never going to be answered, and the
+// engine waited for it forever. Completeness is the asking role's judgement,
+// so an answer that leaves a question open is adopted all the same.
+func TestAnAnswerThatLeavesAQuestionOpenIsStillAdopted(t *testing.T) {
 	record := intakeTestRecord(intakeTwoQuestionSet)
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record,
-		intakeComment(101, "回答 C1"),
-		intakeComment(102, "回答 C1 Q2:c"),
+	comment := intakeComment(101, "Q1 は a で")
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(comment, AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}, Unanswered: []string{"Q2"}})))
+	if err != nil {
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+	}
+	if decision.Adopted == nil {
+		t.Fatalf("an answer with one question still open was not adopted: %+v", decision)
+	}
+}
+
+// A comment the reading calls unrelated is left alone. The automation used to
+// answer back with the format the person should have used; that courtesy
+// could fail, and when it did it stopped the delivery.
+func TestACommentAboutSomethingElseIsLeftAlone(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(intakeComment(101, "ありがとうございます、確認します"), AnswerReading{Kind: AnswerReadingUnrelated})))
+	if err != nil {
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+	}
+	if decision.Adopted != nil || decision.Cancel != nil {
+		t.Fatalf("decision = %+v, want nothing to happen", decision)
+	}
+}
+
+// A stop wins over an answer, and the earliest one is the evidence.
+func TestAStopWinsOverAnyAnswer(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(intakeComment(101, "やっぱりやめます"), AnswerReading{Kind: AnswerReadingCancel}),
+		read(intakeComment(102, "やっぱり a で"), AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}}),
 	))
 	if err != nil {
 		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if decision.Adopted != nil || len(decision.Replies) != 2 {
-		t.Fatalf("decision = %+v, want two shortfall replies", decision)
+	if decision.Cancel == nil || decision.Cancel.CommentID != 101 || decision.Adopted != nil {
+		t.Fatalf("decision = %+v, want the earliest stop", decision)
 	}
-	first, second := decision.Replies[0], decision.Replies[1]
-	if first.CommentID != 101 || first.Kind != AnswerReplyShortfall ||
-		len(first.MissingQuestionIDs) != 2 || first.MissingQuestionIDs[0] != "Q1" || first.MissingQuestionIDs[1] != "Q2" {
-		t.Fatalf("first reply = %+v", first)
-	}
-	if second.CommentID != 102 || second.Kind != AnswerReplyShortfall ||
-		len(second.MissingQuestionIDs) != 1 || second.MissingQuestionIDs[0] != "Q1" {
-		t.Fatalf("second reply = %+v", second)
-	}
+}
 
-	// A handled shortfall is not re-sent; a complete answer in the same
-	// snapshot supersedes every reply.
-	handled := intakeTestInput(record, intakeComment(101, "回答 C1"), intakeComment(102, "回答 C1 Q2:c"))
-	handled.HandledCommentIDs = map[int64]bool{101: true}
-	if decision, err := EvaluateAnswerIntake(handled); err != nil || len(decision.Replies) != 1 || decision.Replies[0].CommentID != 102 {
-		t.Fatalf("decision = %+v, err = %v, want only the unhandled shortfall", decision, err)
-	}
-	completed, err := EvaluateAnswerIntake(intakeTestInput(record,
-		intakeComment(101, "回答 C1"),
-		intakeComment(103, "回答 C1\nQ1: a\nQ2: c"),
+// The last answer the requester wrote is the one that counts.
+func TestTheLastAnswerWins(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(intakeComment(101, "a で"), AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}}),
+		read(intakeComment(102, "やっぱり b で"), AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "b"}}),
 	))
 	if err != nil {
 		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if completed.Adopted == nil || completed.Adopted.CommentID != 103 || len(completed.Replies) != 0 {
-		t.Fatalf("decision = %+v, want adoption without replies", completed)
+	if decision.Adopted == nil || decision.Adopted.CommentID != 102 || decision.Adopted.AnswersJSON != `{"Q1":"b"}` {
+		t.Fatalf("adopted = %+v, want the later answer", decision.Adopted)
 	}
 }
 
-func TestAnswerIntakeFailsClosedOnBrokenInput(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	if _, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, "回答 C1 Q1:a"), intakeComment(101, "回答 C1 Q1:b"))); err == nil {
-		t.Fatal("duplicate comment ids were accepted")
-	}
-	for _, run := range []struct {
-		name string
-		set  string
-	}{
-		{name: "single choice", set: `[{"id":"Q1","choices":[{"id":"a"}]}]`},
-		{name: "duplicate question ids", set: `[{"id":"Q1","choices":[{"id":"a"},{"id":"b"}]},{"id":"q1","choices":[{"id":"a"},{"id":"b"}]}]`},
-		{name: "duplicate choice ids", set: `[{"id":"Q1","choices":[{"id":"a"},{"id":"A"}]}]`},
-		{name: "missing question id", set: `[{"choices":[{"id":"a"},{"id":"b"}]}]`},
-	} {
-		t.Run(run.name, func(t *testing.T) {
-			if _, err := EvaluateAnswerIntake(intakeTestInput(intakeTestRecord(run.set), intakeComment(101, "回答 C1 Q1:a"))); err == nil {
-				t.Fatal("broken question set was accepted")
-			}
-		})
-	}
-	zeroBinding := intakeTestInput(record, intakeComment(101, "回答 C1 Q1:a"))
-	zeroBinding.QuestionCommentID = 0
-	if _, err := EvaluateAnswerIntake(zeroBinding); err == nil {
-		t.Fatal("missing question comment binding was accepted")
-	}
-}
-
-func TestAdoptedAnswersSealIntoAClarificationRound(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(601, "回答 C1 Q1:a")))
-	if err != nil || decision.Adopted == nil {
-		t.Fatalf("EvaluateAnswerIntake() = %+v, err = %v", decision, err)
-	}
-	question := questionTestRecord()
-	question.QuestionsJSON = record.QuestionsJSON
-	question.QuestionsSHA256 = record.QuestionsSHA256
-	encodedQuestion, err := MarshalQuestionRecord(question)
-	if err != nil {
-		t.Fatalf("MarshalQuestionRecord() error = %v", err)
-	}
-	clarification := clarificationTestRecord(t)
-	clarification.Rounds = []ClarificationRound{{
-		QuestionRecordJSON:   string(encodedQuestion),
-		QuestionRecordSHA256: TerminalReportDigest(encodedQuestion),
-		QuestionCommentID:    100,
-		AnswerCommentID:      decision.Adopted.CommentID,
-		AnswererID:           terminalTestConfig().AllowedCreatorID,
-		AnswerPostedAt:       decision.Adopted.PostedAt,
-		AnswerBodySHA256:     decision.Adopted.BodySHA256,
-		AnswersJSON:          decision.Adopted.AnswersJSON,
-		AnswersSHA256:        TerminalReportDigest([]byte(decision.Adopted.AnswersJSON)),
-	}}
-	if err := clarification.ValidateRoute(terminalTestConfig()); err != nil {
-		t.Fatalf("adopted answer does not seal into a clarification round: %v", err)
-	}
-}
-
-// One question, one line naming one of its choices: that is the answer. A
-// person facing a single question with two options wrote "a" and was
-// ignored while the run waited (live 2026-09-17).
-func TestAnswerIntakeAdoptsABareChoiceForASingleQuestion(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	for _, body := range []string{"a", "A", " a ", "a。", "(a)", "（ a ）", "ａ", "Ａ", "ａ。"} {
-		decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, body)))
-		if err != nil {
-			t.Fatalf("body %q: EvaluateAnswerIntake() error = %v", body, err)
-		}
-		if decision.Adopted == nil || len(decision.Replies) != 0 {
-			t.Fatalf("body %q: decision = %+v, want adoption", body, decision)
-		}
-		if decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
-			t.Fatalf("body %q: answers = %s", body, decision.Adopted.AnswersJSON)
-		}
-	}
-}
-
-// The short form is only for the case where it is unambiguous. With two
-// questions on the table a bare word says nothing, and a word that is not a
-// choice of the question asked is not an answer to it.
-func TestAnswerIntakeRefusesABareWordThatCouldMeanAnything(t *testing.T) {
-	two := intakeTestRecord(intakeTwoQuestionSet)
-	decision, err := EvaluateAnswerIntake(intakeTestInput(two, intakeComment(101, "a")))
+// A comment with no reading is one the model could not be asked about yet.
+// It is skipped, never treated as an answer and never discarded: the next
+// tick asks again.
+func TestACommentWithNoReadingIsSkippedNotDiscarded(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	input := intakeInput(record)
+	input.Comments = append(input.Comments, intakeComment(101, "a で"))
+	decision, err := EvaluateAnswerIntake(input)
 	if err != nil {
 		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if decision.Adopted != nil || len(decision.Replies) != 0 {
-		// Not only "not adopted": an unsolicited 「回答書式のご案内」 would
-		// spend the one guidance reply a revision gets, on a comment that
-		// was never an answer attempt (review of #192).
-		t.Fatalf("a bare choice was treated as an attempt on a two-question set: %+v", decision)
-	}
-	// Ordinary conversation on the ticket stays a conversation: it is
-	// neither adopted nor answered with a correction.
-	one := intakeTestRecord(questionTestSetJSON)
-	for _, body := range []string{"z", "ありがとう", "a b", "a\nb", "はい、a でお願いします"} {
-		decision, err := EvaluateAnswerIntake(intakeTestInput(one, intakeComment(101, body)))
-		if err != nil {
-			t.Fatalf("body %q: EvaluateAnswerIntake() error = %v", body, err)
-		}
-		if decision.Adopted != nil || len(decision.Replies) != 0 {
-			t.Fatalf("body %q was treated as an answer attempt: %+v", body, decision)
-		}
-	}
-	// An attempt that names the marker and gets the rest wrong is still
-	// answered, as before.
-	decision, err = EvaluateAnswerIntake(intakeTestInput(one, intakeComment(101, "回答 C1 Q1:z")))
-	if err != nil {
-		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
-	}
-	if len(decision.Replies) != 1 || decision.Replies[0].Kind != AnswerReplyGuidance {
-		t.Fatalf("a malformed attempt was not answered: %+v", decision.Replies)
+	if decision.Adopted != nil || decision.Cancel != nil {
+		t.Fatalf("decision = %+v, want the comment left for the next tick", decision)
 	}
 }
 
-// A full-width keyboard writes the markers too. The copy-paste line and the
-// cancel line must read the same either way - the cancel line ends the run,
-// so it is held by a test rather than by a replacer nobody checks (review
-// of #192).
-func TestAnswerIntakeReadsFullWidthMarkers(t *testing.T) {
-	record := intakeTestRecord(questionTestSetJSON)
-	decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, "回答 Ｃ１ Ｑ１：ａ")))
+// Which comments are in scope is still routing, not reading: another
+// person's comment, one posted before the question, and one posted after the
+// deadline all stay out, whatever a reading would have said.
+func TestOnlyTheAnswererInsideTheDeadlineTakesPart(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	answer := AnswerReading{Kind: AnswerReadingAnswer, Answers: map[string]string{"Q1": "a"}}
+
+	someoneElse := intakeComment(101, "a で")
+	someoneElse.UserID = terminalTestConfig().AllowedCreatorID + 1
+	before := intakeComment(99, "a で")
+	late := intakeComment(103, "a で")
+	late.PostedAt = record.AnswerDeadlineAt
+
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(someoneElse, answer), read(before, answer), read(late, answer)))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
 	}
-	if decision.Adopted == nil || decision.Adopted.AnswersJSON != `{"Q1":"a"}` {
-		t.Fatalf("a full-width answer line was not read: %+v", decision)
-	}
-	decision, err = EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, "中止Ｃ１")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decision.Cancel == nil || decision.Cancel.CommentID != 101 {
-		t.Fatalf("a full-width cancel was not read: %+v", decision)
-	}
-	// Prose that merely contains those letters is still prose.
-	for _, body := range []string{"Ａ社でお願いします", "ＴＯＤＯ中止Ｃ１", "Ｑ＆Ａを見ました"} {
-		decision, err := EvaluateAnswerIntake(intakeTestInput(record, intakeComment(101, body)))
-		if err != nil {
-			t.Fatalf("body %q: %v", body, err)
-		}
-		if decision.Adopted != nil || decision.Cancel != nil || len(decision.Replies) != 0 {
-			t.Fatalf("body %q was treated as an instruction: %+v", body, decision)
-		}
+	if decision.Adopted != nil || decision.Cancel != nil {
+		t.Fatalf("decision = %+v, want none of them to count", decision)
 	}
 }

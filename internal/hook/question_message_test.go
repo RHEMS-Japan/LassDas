@@ -47,48 +47,13 @@ func TestQuestionCommentCarriesACopyPasteLinePerChoice(t *testing.T) {
 	if err != nil || again != content {
 		t.Fatal("question comment content is not deterministic")
 	}
-	// The sealed answer grammar accepts the pasted lines verbatim.
-	decision, err := EvaluateAnswerIntake(AnswerIntakeInput{
-		Question:          record,
-		QuestionCommentID: 100,
-		AnswererID:        terminalTestConfig().AllowedCreatorID,
-		Comments: []BacklogComment{{
-			CommentID: 101, UserID: terminalTestConfig().AllowedCreatorID,
-			Body: "  回答 C1 Q1:a\n  回答 C1 Q2:c", PostedAt: record.AnswerDeadlineAt - 1,
-		}},
-	})
-	if err != nil || decision.Adopted == nil {
-		t.Fatalf("pasted lines were not adopted: %+v, err = %v", decision, err)
-	}
+	// The pasted line is an offer, not a grammar. What a requester writes is
+	// read by a model against these questions, so the line is there to save
+	// them typing and nothing depends on their using it.
 }
 
-func TestShortfallCommentListsOnlyTheMissingQuestions(t *testing.T) {
+func TestNotifyCommentsNameTheRevisionAndDeadline(t *testing.T) {
 	record := messageTestRecord()
-	content, err := ShortfallCommentContent(record, 12345, []string{"Q2"})
-	if err != nil {
-		t.Fatalf("ShortfallCommentContent() error = %v", err)
-	}
-	if !strings.Contains(content, "コメント #12345 への返信") || !strings.Contains(content, "Q2. 既存データは?") {
-		t.Fatalf("shortfall reply is incomplete:\n%s", content)
-	}
-	if strings.Contains(content, "Q1. 並び順は?") {
-		t.Fatalf("shortfall reply re-lists an answered question:\n%s", content)
-	}
-	if _, err := ShortfallCommentContent(record, 12345, []string{"Q9"}); err == nil {
-		t.Fatal("unknown missing question id was accepted")
-	}
-	if _, err := ShortfallCommentContent(record, 0, []string{"Q2"}); err == nil {
-		t.Fatal("missing trigger comment id was accepted")
-	}
-}
-
-func TestGuidanceAndNotifyCommentsNameTheRevisionAndDeadline(t *testing.T) {
-	record := messageTestRecord()
-	guidance := GuidanceCommentContent(record)
-	if !strings.Contains(guidance, "回答 C1") || !strings.Contains(guidance, "2026-08-14 17:00") ||
-		!strings.Contains(guidance, "一度だけ") {
-		t.Fatalf("guidance content is incomplete:\n%s", guidance)
-	}
 	notify, err := NotifyCommentContent(record, 2)
 	if err != nil {
 		t.Fatalf("NotifyCommentContent() error = %v", err)
@@ -147,12 +112,6 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 		t.Fatalf("ReceiptCommentContent() error = %v", err)
 	}
 	cases = append(cases, contractCase{"receipt", receipt, CommentMarker("answer-receipt", runID, "C1", "6002")})
-	cases = append(cases, contractCase{"guidance", GuidanceCommentContent(record), CommentMarker("answer-guidance", runID, "C1")})
-	shortfall, err := ShortfallCommentContent(record, 12345, []string{"Q2"})
-	if err != nil {
-		t.Fatalf("ShortfallCommentContent() error = %v", err)
-	}
-	cases = append(cases, contractCase{"shortfall", shortfall, CommentMarker("answer-shortfall", runID, "C1", "12345")})
 	for index := 1; index <= QuestionNotifyCount; index++ {
 		notify, err := NotifyCommentContent(record, index)
 		if err != nil {

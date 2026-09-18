@@ -90,6 +90,8 @@ func run(ctx context.Context, args []string) error {
 		return runDecideDesign(args[1:])
 	case "impasse-question":
 		return runImpasseQuestion(ctx, args[1:])
+	case "read-answer":
+		return runReadAnswer(ctx, args[1:])
 	case "design-impasse-question":
 		return runDesignImpasseQuestion(ctx, args[1:])
 	case "compose-trail":

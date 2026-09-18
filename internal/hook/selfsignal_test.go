@@ -15,10 +15,6 @@ func TestAutomationCommentsAreInertToIntake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shortfall, err := ShortfallCommentContent(record, 101, []string{"Q2"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	notify1, err := NotifyCommentContent(record, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -32,13 +28,11 @@ func TestAutomationCommentsAreInertToIntake(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := map[string]string{
-		"question":  question,
-		"guidance":  GuidanceCommentContent(record),
-		"shortfall": shortfall,
-		"notify1":   notify1,
-		"notify3":   notify3,
-		"ack":       AckCommentContent(TicketSnapshot{RunID: "TICKET-505"}),
-		"receipt":   receipt,
+		"question": question,
+		"notify1":  notify1,
+		"notify3":  notify3,
+		"ack":      AckCommentContent(TicketSnapshot{RunID: "TICKET-505"}),
+		"receipt":  receipt,
 	}
 	creator := terminalTestConfig().AllowedCreatorID
 	id := int64(200)

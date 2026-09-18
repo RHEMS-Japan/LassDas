@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,7 +108,7 @@ func newFlowHarness(t *testing.T, api *memoryDynamo) *flowHarness {
 		t.Fatalf("NewQuestionReportService() error = %v", err)
 	}
 	harness.ingest = &ingestStub{}
-	ticker, err := hook.NewQuestionTickService(route, store, harness.backlog, reporter, harness.ingest, logger)
+	ticker, err := hook.NewQuestionTickService(route, store, harness.backlog, reporter, harness.ingest, readingStub{}, logger)
 	if err != nil {
 		t.Fatalf("NewQuestionTickService() error = %v", err)
 	}
@@ -157,29 +158,18 @@ func TestQuestionFlowPostsAnswersAndResumesEndToEnd(t *testing.T) {
 		t.Fatalf("tick before answers = %+v", result)
 	}
 
-	// A malformed answer earns the one-time guidance; the next tick does not
-	// repeat it.
+	// A comment that says nothing the questions asked about is left alone.
+	// The automation used to reply with the format the person should have
+	// used, and that courtesy stopped a live delivery when it could not be
+	// posted (2026-09-17).
 	harness.clock = harness.clock.Add(time.Minute)
-	harness.backlog.post(harness.route.AllowedCreatorID, "回答 C1 Q1:z")
-	if result := harness.tick(t); result.Code != "question_tick_replied" {
-		t.Fatalf("tick with malformed answer = %+v", result)
-	}
-	guidanceCount := 0
-	for _, comment := range harness.backlog.comments {
-		if strings.Contains(comment.Body, "回答書式のご案内") {
-			guidanceCount++
-		}
-	}
-	if guidanceCount != 1 {
-		t.Fatalf("guidance comments = %d, want 1", guidanceCount)
-	}
+	harness.backlog.post(harness.route.AllowedCreatorID, "ありがとうございます、確認します")
+	before := len(harness.backlog.comments)
 	if result := harness.tick(t); result.Code != "question_tick_waiting" {
-		t.Fatalf("tick after guidance = %+v", result)
+		t.Fatalf("tick with an unrelated comment = %+v", result)
 	}
-	for _, comment := range harness.backlog.comments {
-		if strings.Count(comment.Body, "回答書式のご案内") > 1 {
-			t.Fatal("guidance was repeated")
-		}
+	if len(harness.backlog.comments) != before {
+		t.Fatalf("the automation answered back: %d comments, was %d", len(harness.backlog.comments), before)
 	}
 
 	// The pasted answer resumes the same run with the sealed clarification.
@@ -589,4 +579,25 @@ func TestAWaitingTicketIsNotPassedOverByWhatComesAfterIt(t *testing.T) {
 	if seen < 2 {
 		t.Fatalf("the waiting ticket was read %d time(s); the cursor was carried past it: %v", seen, harness.ingest.seen)
 	}
+}
+
+// readingStub stands in for the model that reads a requester's comment. It
+// is deliberately crude: these tests are about the flow around a reading,
+// not about the reading.
+type readingStub struct{}
+
+var stubAnswerPair = regexp.MustCompile(`[Qq]([0-9]+)[ 	]*:[ 	]*([A-Za-z0-9]+)`)
+
+func (readingStub) ReadAnswer(_ context.Context, _, body string) (hook.AnswerReading, error) {
+	if strings.Contains(body, "中止") {
+		return hook.AnswerReading{Kind: hook.AnswerReadingCancel}, nil
+	}
+	answers := map[string]string{}
+	for _, match := range stubAnswerPair.FindAllStringSubmatch(body, -1) {
+		answers["Q"+match[1]] = match[2]
+	}
+	if len(answers) == 0 {
+		return hook.AnswerReading{Kind: hook.AnswerReadingUnrelated}, nil
+	}
+	return hook.AnswerReading{Kind: hook.AnswerReadingAnswer, Answers: answers}, nil
 }

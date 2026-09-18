@@ -9,6 +9,7 @@ import (
 	"automation.internal/ticket-ingress/internal/backlog"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 	"github.com/aws/aws-lambda-go/lambda"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -65,7 +66,18 @@ func main() {
 		logger.Error("startup failed", "code", "question_report_service_invalid")
 		os.Exit(1)
 	}
-	tickService, err := hook.NewQuestionTickService(config.FunctionURL.Report, queueStore, backlogClient, reportService, service, logger)
+	// This deployment carries no consumer configuration of its own; the
+	// path is where the installer writes one.
+	consumerConfigPath := os.Getenv("CONSUMER_CONFIG_PATH")
+	if consumerConfigPath == "" {
+		consumerConfigPath = "/etc/lassdas/config/m1-consumer.json"
+	}
+	answerReader, err := worker.NewAnswerReaderService(consumerConfigPath, nil)
+	if err != nil {
+		logger.Error("startup failed", "code", "answer_reader_invalid")
+		os.Exit(1)
+	}
+	tickService, err := hook.NewQuestionTickService(config.FunctionURL.Report, queueStore, backlogClient, reportService, service, answerReader, logger)
 	if err != nil {
 		logger.Error("startup failed", "code", "question_tick_service_invalid")
 		os.Exit(1)
