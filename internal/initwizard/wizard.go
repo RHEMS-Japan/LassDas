@@ -20,8 +20,30 @@ import (
 
 type UI interface {
 	Ask(id, label, defaultValue string, secret bool) (string, error)
+	// Choose presents numbered options and returns the index of the one
+	// picked. A blank field asks a person to already know the answer's
+	// shape; a list asks them to recognise it. It carries an id and a
+	// proposal for the same reason Ask does: a run with nobody at the
+	// keyboard has to be able to answer it.
+	Choose(id, label string, options []Option, proposed int) (int, error)
 	Confirm(string) (bool, error)
 	Info(string)
+}
+
+// boolIndex is where a two-option list starts: the second option is the
+// one that turns the thing on.
+func boolIndex(on bool) int {
+	if on {
+		return 1
+	}
+	return 0
+}
+
+// Option is one thing a person can pick: what it is, and what picking it
+// means for them.
+type Option struct {
+	Label  string
+	Detail string
 }
 type TerminalUI struct{}
 
@@ -33,6 +55,26 @@ func (TerminalUI) Ask(_, label, value string, secret bool) (string, error) {
 	err := input.Run()
 	return strings.TrimSpace(value), needsTerminal(err)
 }
+func (TerminalUI) Choose(_, label string, options []Option, proposed int) (int, error) {
+	if len(options) == 0 {
+		return 0, errors.New("選べるものがありません")
+	}
+	choices := make([]huh.Option[int], 0, len(options))
+	for index, option := range options {
+		text := option.Label
+		if option.Detail != "" {
+			text += " — " + option.Detail
+		}
+		choices = append(choices, huh.NewOption(text, index))
+	}
+	picked := proposed
+	if picked < 0 || picked >= len(options) {
+		picked = 0
+	}
+	err := huh.NewSelect[int]().Title(label).Options(choices...).Value(&picked).Run()
+	return picked, needsTerminal(err)
+}
+
 func (TerminalUI) Confirm(label string) (bool, error) {
 	yes := false
 	err := huh.NewConfirm().Title(label).Affirmative("進める").Negative("中断").Value(&yes).Run()
@@ -135,6 +177,16 @@ func (w *Wizard) ask(s *State, id, label, defaultValue string, secret bool) (str
 	}
 	return value, err
 }
+
+// choose offers a list and counts the interaction the same way ask does.
+func (w *Wizard) choose(s *State, id, label string, options []Option, proposed int) (int, error) {
+	start := time.Now()
+	picked, err := w.UI.Choose(id, label, options, proposed)
+	s.Metrics.ActiveSeconds += time.Since(start).Seconds()
+	s.Metrics.Fields++
+	return picked, err
+}
+
 func (w *Wizard) confirm(s *State, label string) error {
 	start := time.Now()
 	yes, err := w.UI.Confirm(label)
@@ -587,30 +639,28 @@ func (w *Wizard) models(ctx context.Context, s *State, secrets Secrets) error {
 		return errors.New("モデルの鍵の設定は shared または separate です")
 	}
 	if s.Completed["models"] == "" {
-		value, err := w.ask(s, "separate-model-keys", "役ごとに別の OpenRouter API キーを使いますか (yes/no)", strconv.FormatBool(s.ModelKeyMode == modelKeysSeparate), false)
+		// Offered as a list rather than typed. "yes/no" makes a person work
+		// out which way round the question runs and what each way costs
+		// them; the options say it.
+		picked, err := w.choose(s, "separate-model-keys", "モデルの鍵をどう持つか", []Option{
+			{Label: "1 本を全役で共用する", Detail: "始めやすい。費用と利用上限は全役の合算になる"},
+			{Label: "役ごとに別の鍵にする", Detail: "役ごとに費用と上限を分けられる。鍵をその数だけ用意する"},
+		}, boolIndex(s.ModelKeyMode == modelKeysSeparate))
 		if err != nil {
 			return err
 		}
-		switch value {
-		case "yes", "true":
+		s.ModelKeyMode = modelKeysShared
+		if picked == 1 {
 			s.ModelKeyMode = modelKeysSeparate
-		case "no", "false":
-			s.ModelKeyMode = modelKeysShared
-		default:
-			return errors.New("yes または no を入力してください")
 		}
-		value, err = w.ask(s, "separate-design", "設計レビューを別の 2 モデルにしますか (yes/no)", strconv.FormatBool(s.SeparateDesignReviews), false)
+		picked, err = w.choose(s, "separate-design", "設計のレビューを誰がやるか", []Option{
+			{Label: "変更のレビュー役と同じ 2 モデル", Detail: "設定が 1 組で済む"},
+			{Label: "設計専用に別の 2 モデル", Detail: "設計と変更で別の目で見る。鍵とモデルを 2 つ増やす"},
+		}, boolIndex(s.SeparateDesignReviews))
 		if err != nil {
 			return err
 		}
-		switch value {
-		case "yes", "true":
-			s.SeparateDesignReviews = true
-		case "no", "false":
-			s.SeparateDesignReviews = false
-		default:
-			return errors.New("yes または no を入力してください")
-		}
+		s.SeparateDesignReviews = picked == 1
 		for _, role := range allRoles(s) {
 			endpoint := s.Models[role]
 			value, err := w.ask(s, role+"-model", role+" のモデル名", endpoint.Model, false)

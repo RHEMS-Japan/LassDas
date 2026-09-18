@@ -30,6 +30,9 @@ func (u *testUI) Ask(id, _, value string, secret bool) (string, error) {
 	}
 	return value, nil
 }
+func (*testUI) Choose(_, _ string, _ []initwizard.Option, proposed int) (int, error) {
+	return proposed, nil
+}
 func (*testUI) Confirm(string) (bool, error) { return true, nil }
 func (u *testUI) Info(value string)          { u.messages = append(u.messages, value) }
 
