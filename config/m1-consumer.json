@@ -16,7 +16,7 @@
       "staging_login_url": "https://api-stg.example.com/console/auth/login?returnTo=/console",
       "observation_language": "en",
       "design": {
-        "default": "on",
+        "default": "off",
         "trigger_words": [
           "slow",
           "slower",
