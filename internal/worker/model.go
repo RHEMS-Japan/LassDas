@@ -42,7 +42,11 @@ const (
 	// cutoff error carries about what converseTurn could do; the runner
 	// reads them from the worker's stderr to tell the requester the same.
 	CutoffAskedAgainPhrase = "asked again with the wider allowance and cut off again"
-	CutoffAtCeilingPhrase  = "the allowance is already at the ceiling"
+	// CutoffWiderAskFailedPhrase names a re-ask that was given more room
+	// and then failed for some other reason, so a reader can tell it from
+	// one that was cut off again.
+	CutoffWiderAskFailedPhrase = "asked again with the wider allowance: "
+	CutoffAtCeilingPhrase      = "the allowance is already at the ceiling"
 	// ReasoningExhaustedPhrase names a cutoff in which the whole allowance
 	// went to the model's reasoning and no answer was begun: more room is
 	// not the remedy, less reasoning is, and converseTurn asks again with
@@ -136,6 +140,17 @@ func lowerReasoningEffort(effort string) (string, bool) {
 		return "medium", true
 	case "medium":
 		return "low", true
+	case "":
+		// Unset is not "nothing to lower": it means the provider's own
+		// default, which on a reasoning model is high enough to spend a
+		// whole allowance on thought. A role that configures no effort is
+		// the common case, so leaving unset off the ladder made the remedy
+		// for an exhausted allowance unreachable exactly where it was most
+		// needed - live 2026-09-17, a reception's readiness check carried no
+		// effort, reasoned 8,192 tokens away, lowered nothing, and ended the
+		// delivery. Two steps remain below this one, the same as a
+		// configured "high".
+		return "medium", true
 	}
 	return "", false
 }
@@ -945,13 +960,18 @@ func sumInvocationUsage(total, usage InvocationUsage) InvocationUsage {
 // allowance — a live reception died on one such, 32,768 reasoning tokens
 // circling one thought (2026-09-15); and a response the provider cut off at
 // the output allowance (errModelResponseTruncated) once with the allowance
-// widened toward MaxConfiguredOutputTokens — a readiness answer long enough
+// widened toward MaxConfiguredOutputTokens, and once more with everything
+// left of that ceiling — a readiness answer long enough
 // to hit the allowance ended a live run as model_failed that the next
 // attempt passed (2026-09-05). At the ceiling there is no room to give, so
 // the cutoff travels at once. One more of any kind than its allowance, or
 // any other error, travels named. The counters are independent, so one turn
-// makes at most 8 calls (3 provider errors, 2 lowered, 1 cutoff, 1
-// malformed, 1 final) with 42 s of pauses between them; each call has its own
+// makes at most 9 calls (3 provider errors, 2 lowered, 2 cutoffs, 1
+// malformed, 1 final). The second cutoff is what the ceiling costs: for
+// every role configured below half of it - which is every role the wizard
+// writes - a turn that keeps being cut off asks for 32,768 output tokens
+// it did not ask for before, and takes up to five minutes more, so the
+// worst case is 45 min 42 s rather than 40 min 42 s. The pauses total 42 s; each call has its own
 // ModelInvocationTimeout and the turn has no deadline of its own — the
 // round's wall (the context) is what ends a turn that keeps failing. A call
 // that spent its allowance (errModelAllowanceSpent) shares the provider's
@@ -1045,16 +1065,25 @@ func (i *ModelInvoker) converseTurn(ctx context.Context, endpoint ModelEndpoint,
 			if lowered > 0 {
 				err = fmt.Errorf("%w; %s", err, EffortLoweredPhrase)
 			}
-			if widened {
-				return fail(fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase))
-			}
 			if endpoint.MaxOutputTokens >= MaxConfiguredOutputTokens {
+				if widened {
+					return fail(fmt.Errorf("%w; %s", err, CutoffAskedAgainPhrase))
+				}
 				return fail(fmt.Errorf("%w; %s of %d tokens", err, CutoffAtCeilingPhrase, MaxConfiguredOutputTokens))
 			}
 			cutoff = err
-			widened = true
 			lastRetry = "widened"
-			endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
+			if widened {
+				// The doubled ask was cut off as well, so the rest of the
+				// ceiling goes to the answer in one step rather than being
+				// left unused. A role configured at 4,096 reached 8,192 and
+				// gave up there with 32,768 available, and that ended a live
+				// reception (2026-09-17).
+				endpoint.MaxOutputTokens = MaxConfiguredOutputTokens
+			} else {
+				endpoint.MaxOutputTokens = widenedOutputAllowance(endpoint.MaxOutputTokens)
+			}
+			widened = true
 			continue
 		case errors.Is(err, errModelResponseMetadata) || errors.Is(err, errModelResponseContent) || errors.Is(err, errModelResponseRefused):
 			if malformed >= malformedTurnRetries {
@@ -1091,7 +1120,7 @@ func afterCutoff(cutoff error, lastRetry string, err error) error {
 	if lastRetry == "lowered" {
 		return fmt.Errorf("%w: %w", cutoff, err)
 	}
-	return fmt.Errorf("%w; asked again with the wider allowance: %w", cutoff, err)
+	return fmt.Errorf("%w; %s%w", cutoff, CutoffWiderAskFailedPhrase, err)
 }
 
 // effortLowerings bounds how many steps down the effort ladder one turn
