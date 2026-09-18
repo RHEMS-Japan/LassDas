@@ -104,3 +104,29 @@ PY
 	run(`test -r /data/secrets/leaky; if agentexec --check /data/secrets/leaky; then exit 1; else test "$?" = 3; fi`, "1000:1000")
 	run(`printf artificial-secret > /data/secrets/correctable; chmod 0644 /data/secrets/correctable; chmod go-rwx /data/secrets/correctable; agentexec --check /data/secrets/correctable`, "1000:1000")
 }
+
+// The image needs a linux/arm64 daemon. Which product provides it is not
+// this check's business: requiring the words "Docker Desktop" refused every
+// plain Linux host, so an instance could be hosted on a developer's laptop
+// and nowhere else - a docker context pointing at a server was accepted all
+// the way to here and then turned away.
+func TestAnyLinuxArm64DaemonWillDo(t *testing.T) {
+	for name, info := range map[string]string{
+		"a server":          "linux|aarch64|Docker Engine - Community",
+		"docker desktop":    "linux|arm64|Docker Desktop 4.34.2 (167172)",
+		"podman-compatible": "linux|arm64|Podman Engine",
+	} {
+		if err := daemonSuits(info); err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+		}
+	}
+	for name, info := range map[string]string{
+		"windows containers": "windows|arm64|Docker Desktop",
+		"the wrong chip":     "linux|x86_64|Docker Engine",
+		"nothing readable":   "",
+	} {
+		if err := daemonSuits(info); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}

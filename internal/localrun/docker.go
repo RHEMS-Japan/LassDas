@@ -14,15 +14,29 @@ func (p prepared) mounts() []string {
 		"--mount", "type=bind,src=" + filepath.Join(p.instance.Dir, "config") + ",dst=/etc/lassdas/config,readonly"}
 }
 
+// daemonSuits reads `docker info --format {{.OSType}}|{{.Architecture}}|{{.OperatingSystem}}`.
+// What the image needs is a linux/arm64 daemon. Which product provides it is
+// not this check's business: requiring the words "Docker Desktop" in the
+// daemon's description refused every plain Linux host, so an instance could
+// be hosted on a developer's laptop and nowhere else, and a docker context
+// pointing at a server was accepted all the way to here and then turned away.
+func daemonSuits(raw string) error {
+	info := strings.Split(strings.TrimSpace(raw), "|")
+	if len(info) != 3 || info[0] != "linux" || (info[1] != "aarch64" && info[1] != "arm64") {
+		return errors.New("the runtime needs a linux/arm64 docker daemon; this one reports " + strings.Join(info, "/"))
+	}
+	return nil
+}
+
 func (m Manager) checkImage(ctx context.Context, p prepared) error {
 	out, err := m.command(ctx, p.instance, "info", "--format", "{{.OSType}}|{{.Architecture}}|{{.OperatingSystem}}")
 	if err != nil {
 		return err
 	}
-	info := strings.Split(strings.TrimSpace(string(out)), "|")
-	if len(info) != 3 || info[0] != "linux" || (info[1] != "aarch64" && info[1] != "arm64") || !strings.Contains(info[2], "Docker Desktop") {
-		return errors.New("local runtime requires Docker Desktop with linux/arm64; no fallback is applied")
+	if err := daemonSuits(string(out)); err != nil {
+		return err
 	}
+
 	inspect := func() ([]byte, error) {
 		return m.command(ctx, p.instance, "image", "inspect", "--format", `{"OS":{{json .Os}},"Arch":{{json .Architecture}},"User":{{json .Config.User}},"Digests":{{json .RepoDigests}},"Entrypoint":{{json .Config.Entrypoint}}}`, p.instance.Image)
 	}
