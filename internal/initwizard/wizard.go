@@ -78,6 +78,49 @@ type Wizard struct {
 }
 type Options struct{ Project, Home, RepoRoot, Redo string }
 
+// errPlacedElsewhere ends apply where the instance is placed by hand: every
+// stage before it has run, and the one that tries a ticket cannot.
+var errPlacedElsewhere = errors.New("この instance は別の場所に置かれます。設定と鍵の準備は終わっています")
+
+// placedElsewhere reports the answer that says where this instance runs.
+//
+// apply used to start a container on the machine it ran on, whatever that
+// answer said. Someone who answered "Kubernetes" got a container on their
+// laptop - and on 2026-09-18 that put a second instance against a live
+// project, pointed at the same tickets as the one already running.
+//
+// The engine cannot place an instance on an arbitrary host, and naming the
+// hosts it knows would only move the limit to the next one. So when the
+// answer names a place, apply prepares everything and stops: what has to run
+// is in `lassdas run spec`, and whoever is installing puts it there.
+func placedElsewhere(s *State) (bool, string) {
+	if s == nil || s.RepoRoot == "" {
+		return false, ""
+	}
+	answers, err := LoadAnswers(s.RepoRoot)
+	if err != nil {
+		return false, ""
+	}
+	host, ok := answers.Value("host")
+	if !ok || strings.TrimSpace(host) == "" {
+		return false, ""
+	}
+	return true, strings.TrimSpace(host)
+}
+
+// elsewhereNotice says what is ready and what is left to do.
+func elsewhereNotice(ui UI, s *State, host string) error {
+	ui.Info("設定と鍵の準備ができました。本体は起動していません。\n" +
+		"動かす場所として次が記録されています:\n  " + host + "\n\n" +
+		"何を動かせばよいかは `lassdas run spec --project " + s.Project + "` が出します " +
+		"(image / 実行ユーザー / 板の port / 環境のファイル / 設定 / 残す必要のある書き込み先)。\n" +
+		"そこへ置いて、起動していること・板に到達できること・再起動しても書き込み先が残ることを確かめ、" +
+		"見方と止め方を .lassdas/progress.md に実際のコマンドで書いてください。\n\n" +
+		"このマシンの docker で動かすなら、回答の host を消してから apply をやり直すか、" +
+		"`lassdas run start --project " + s.Project + "` を実行してください。")
+	return nil
+}
+
 func (w *Wizard) ask(s *State, id, label, defaultValue string, secret bool) (string, error) {
 	start := time.Now()
 	value, err := w.UI.Ask(id, label, defaultValue, secret)
@@ -234,6 +277,15 @@ func (w *Wizard) Run(ctx context.Context, options Options) (*State, error) {
 		{"models", func() error { return w.models(ctx, s, secrets) }},
 		{"runtime", func() error { return w.start(ctx, s, secrets, dir) }},
 		{"smoke", func() error {
+			// Nothing is running here to try a ticket against: the instance
+			// is placed by whoever is installing, wherever they answered.
+			// Saying "本体は起動しました" after not starting it was the
+			// screen contradicting itself in consecutive lines.
+			if placed, host := placedElsewhere(s); placed {
+				w.UI.Info("試験依頼はまだ流せません。" + host + " に置いて動き出してから、" +
+					"`lassdas setup smoke --project " + s.Project + "` を実行してください。")
+				return errPlacedElsewhere
+			}
 			if w.Smoke == nil {
 				return errors.New("本体は起動済みですが、依頼から PR までの動作確認が未接続です。init は未完了です")
 			}
@@ -659,6 +711,9 @@ func (w *Wizard) start(ctx context.Context, s *State, secrets Secrets, dir strin
 		return err
 	}
 	if generatedUnchanged(dir, consumer, runtime, env) {
+		if placed, host := placedElsewhere(s); placed {
+			return elsewhereNotice(w.UI, s, host)
+		}
 		result, err := w.Runtime.Start(ctx, s, dir)
 		if err != nil {
 			return err
@@ -689,6 +744,9 @@ func (w *Wizard) start(ctx context.Context, s *State, secrets Secrets, dir strin
 	}
 	if err = w.checkRuntime(ctx, s, dir); err != nil {
 		return errors.New("image 内の本体設定検査に失敗しました。起動していません")
+	}
+	if placed, host := placedElsewhere(s); placed {
+		return elsewhereNotice(w.UI, s, host)
 	}
 	result, err := w.Runtime.Start(ctx, s, dir)
 	if err != nil {
