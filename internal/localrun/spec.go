@@ -51,6 +51,26 @@ type Spec struct {
 	// DataName is the volume name the docker host uses, offered as a
 	// default name for whatever the target host calls persistent storage.
 	DataName string `json:"data_name"`
+	// BeforeMoving is what has to change when this instance leaves the
+	// machine it was set up on. Each line is a thing that, carried over as
+	// it stands, makes the moved instance wrong quietly - it starts, it
+	// looks healthy, and it is not doing what it looks like it is doing.
+	BeforeMoving []string `json:"before_moving"`
+}
+
+// beforeMoving reads the instance's own environment for the settings that
+// only hold on the machine the wizard set up.
+func beforeMoving(env map[string]string) []string {
+	moving := []string{
+		"先にこのマシンの本体を止める。同じ課題管理の project を 2 つの本体が見ると、同じ依頼を二重に処理する",
+		"data_path の中身を移す (作り直さない)。台帳は SQLite の WAL なので、止めてから写す。動いたまま写すと壊れた台帳が届く",
+	}
+	if env["LASSDAS_BOARD_AUTH"] == "local" {
+		moving = append(moving,
+			"板の認証を変える。いまは local で、loopback の Host にしか答えない (Service や Ingress 越しは 403)。"+
+				"移した先では LASSDAS_BOARD_AUTH=basic と LASSDAS_BOARD_USER・LASSDAS_BOARD_PASS (16 文字以上) を入れる")
+	}
+	return moving
 }
 
 // Describe reads an instance and says what has to run, without saying where.
@@ -79,5 +99,6 @@ func Describe(i Instance) (Spec, error) {
 		ConfigMountPath: "/etc/lassdas/config",
 		DataPath:        "/data",
 		DataName:        name + "-data",
+		BeforeMoving:    beforeMoving(p.env),
 	}, nil
 }

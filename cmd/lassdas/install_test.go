@@ -64,6 +64,31 @@ func TestInstallFilesPlaceTheInstructionTheNoteAndTheSkill(t *testing.T) {
 	if strings.Contains(text, "{{HOME}}") {
 		t.Fatal("the home must be substituted")
 	}
+	// The second skill is the one that gets loaded when a setup has
+	// stopped, which is the moment the wrong move (rewriting the answers
+	// at random, deleting the ledger) is most tempting.
+	repair, err := os.ReadFile(filepath.Join(skills, "lassdas-repair", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairText := string(repair)
+	for _, want := range []string{"name: lassdas-repair", "init.json", "docker stop", "toolchain", "host"} {
+		if !strings.Contains(repairText, want) {
+			t.Fatalf("repair skill lacks %q", want)
+		}
+	}
+	if strings.Contains(repairText, "{{HOME}}") {
+		t.Fatal("the home must be substituted")
+	}
+	migrate, err := os.ReadFile(filepath.Join(skills, "lassdas-migrate", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"name: lassdas-migrate", "run spec", "LASSDAS_BOARD_AUTH=basic", "data_name", "二重"} {
+		if !strings.Contains(string(migrate), want) {
+			t.Fatalf("migrate skill lacks %q", want)
+		}
+	}
 	loaded, found, err := initwizard.LoadDistribution(home)
 	if err != nil || !found || loaded.Image != note.Image || loaded.RegistryLogin != note.RegistryLogin {
 		t.Fatalf("note: %+v %v %v", loaded, found, err)

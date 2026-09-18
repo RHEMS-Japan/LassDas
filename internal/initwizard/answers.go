@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -136,6 +137,20 @@ type AnswersUI struct {
 	Confirmed []string
 }
 
+// Choose takes the wizard's own proposal. The two questions offered as a
+// list are decided by the file before the wizard runs - apply reads them
+// and puts them in the state, and the wizard proposes that state back - so
+// answering with the proposal is answering with the file. Nobody is at the
+// keyboard to pick anything else.
+func (u *AnswersUI) Choose(id, label string, options []Option, proposed int) (int, error) {
+	u.Asked = append(u.Asked, id)
+	if proposed < 0 || proposed >= len(options) {
+		return 0, &MissingAnswer{ID: id, Label: label}
+	}
+	u.say(fmt.Sprintf("%s (%s) → %s", id, label, options[proposed].Label))
+	return proposed, nil
+}
+
 func (u *AnswersUI) Ask(id, label, fallback string, secret bool) (string, error) {
 	u.Asked = append(u.Asked, id)
 	if secret {
@@ -229,8 +244,26 @@ func OptionalAnswers() []Requirement {
 		{"tracker-create", "受付のカテゴリ・状態が無いとき、課題管理の project に作ってよいか (true/false)", "利用者に確認してから書く"},
 		{"requester-key-ok", "自動処理の鍵が起票者本人のもので、コメントと状態更新が本人名義になってよいか (true/false)", "利用者に確認してから書く"},
 		{"board-port", "板を 127.0.0.1 で開く port", "既定は 9200"},
-		{"host", "この instance をどこで動かすか (自由記述)", "利用者に確認。選択肢は出さない"},
+		{"host", "この instance を置く場所。このマシンの docker で動かすなら空にする", "このマシン以外に置くときだけ書く。書くと apply は準備だけして起動しない"},
 	}
+}
+
+// HostNotice says, while the answer can still be changed, which way the
+// answer file sends apply. A value in host is not a mistake - it is how an
+// instance goes somewhere else - but until 2026-09-18 its consequence only
+// appeared after a full apply had run, and the documented example value
+// ("このマシン") put people on the branch that refuses to start.
+func HostNotice(a Answers) string {
+	// Value answers not-ok for an empty or whitespace-only string, which is
+	// how "run it here" is written, and it is what placedElsewhere reads.
+	host, ok := a.Value("host")
+	if !ok {
+		return ""
+	}
+	return "動かす場所として " + strconv.Quote(host) + " が書かれています。" +
+		"apply は設定と鍵を用意するところまでで、本体は起動しません " +
+		"(置いて動かすのは人の手。何を置くかは `lassdas run spec` が出します)。\n" +
+		"  このマシンの docker で動かすなら、host を空にしてください。"
 }
 
 // VendorFor is the model provider the wizard proposes from a model's

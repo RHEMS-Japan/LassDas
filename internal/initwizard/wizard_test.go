@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -166,6 +167,26 @@ type fakeUI struct {
 	messages      []string
 	questions     []string
 	confirmations []string
+	offered       [][]Option
+	// picks answers each Choose in order; a run that asks more than this
+	// holds takes the first option, which is the recommended one.
+	picks []int
+}
+
+// chosen records what was offered, so a test can say a person was given a
+// list rather than a blank field.
+func (u *fakeUI) Choose(_, label string, options []Option, proposed int) (int, error) {
+	u.questions = append(u.questions, label)
+	u.offered = append(u.offered, options)
+	if len(options) == 0 {
+		return 0, nil
+	}
+	if len(u.picks) == 0 {
+		return proposed, nil
+	}
+	picked := u.picks[0]
+	u.picks = u.picks[1:]
+	return picked, nil
 }
 
 func (u *fakeUI) Ask(id, _, fallback string, _ bool) (string, error) {
@@ -629,9 +650,6 @@ func TestModelKeysDefaultToOneAndSeparateKeysAreOptional(t *testing.T) {
 			s, secrets := wizardFixture(t)
 			s.ModelKeyMode = ""
 			answers := map[string]string{}
-			if separate {
-				answers["separate-model-keys"] = "yes"
-			}
 			names := []string{"LASSDAS_INTAKE_TARGET_KEY"}
 			for _, role := range allRoles(s) {
 				names = append(names, keyName(role))
@@ -640,7 +658,16 @@ func TestModelKeysDefaultToOneAndSeparateKeysAreOptional(t *testing.T) {
 				answers[name] = secrets[name]
 				delete(secrets, name)
 			}
+			// The key-mode question is a list now: 0 shares one key, 1
+			// gives every seat its own. The design-review question that
+			// follows takes the same answer, and its 1 (separate design
+			// reviewers) is what this test already expected of it.
 			ui := &fakeUI{approve: true, answers: answers}
+			if separate {
+				// Separate keys, shared design reviewers: the two questions
+				// are answered apart.
+				ui.picks = []int{1, 0}
+			}
 			calls := 0
 			identities := map[string]bool{}
 			w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -702,6 +729,77 @@ func TestModelKeysDefaultToOneAndSeparateKeysAreOptional(t *testing.T) {
 			}
 			if _, _, _, err := Generate(loaded, saved); err == nil {
 				t.Fatal("key mode mismatch accepted")
+			}
+		})
+	}
+}
+
+// The questions with a fixed set of answers are offered as a list - the one
+// the wizard itself offers, not one a test made up. Asked as "yes/no" a
+// person has to work out which way round the question runs and what each way
+// costs them; the options say it.
+func TestFixedAnswersAreOfferedAsAList(t *testing.T) {
+	s, secrets := wizardFixture(t)
+	s.ModelKeyMode = ""
+	ui := &fakeUI{approve: true}
+	w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+	})}}}
+	if err := w.models(context.Background(), s, secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(ui.offered) != 2 {
+		t.Fatalf("一覧で聞かれた質問が %d 件", len(ui.offered))
+	}
+	for _, options := range ui.offered {
+		if len(options) < 2 {
+			t.Fatalf("選べるものが %d 件しかありません", len(options))
+		}
+		for _, option := range options {
+			if option.Label == "" {
+				t.Fatal("選択肢に名前がありません")
+			}
+			if option.Detail == "" {
+				t.Errorf("%q に、選ぶと何が起きるかが書かれていません", option.Label)
+			}
+		}
+	}
+}
+
+// `lassdas setup apply` runs with nobody at the keyboard: apply reads the
+// two decisions out of the answers file, puts them in the state, and the
+// wizard proposes that state back. Offering them as a list must not turn
+// that run into a stall.
+func TestTheUnattendedRunAnswersTheListsFromTheFile(t *testing.T) {
+	for _, separate := range []bool{false, true} {
+		t.Run(fmt.Sprint(separate), func(t *testing.T) {
+			s, secrets := wizardFixture(t)
+			// What apply does before the wizard starts.
+			s.ModelKeyMode, s.SeparateDesignReviews = modelKeysShared, false
+			if separate {
+				s.ModelKeyMode, s.SeparateDesignReviews = modelKeysSeparate, true
+			}
+			root := t.TempDir()
+			writeAnswers(t, root, `{"answers":{}}`)
+			answers, _ := LoadAnswers(root)
+			ui := &AnswersUI{Answers: answers, Project: "sample"}
+			w := Wizard{UI: ui, API: API{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return response(200, map[string]any{"id": "chatcmpl-fixture", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"status":"ready"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}), nil
+			})}}}
+			if err := w.models(context.Background(), s, secrets); err != nil {
+				t.Fatalf("無人実行が止まりました: %v", err)
+			}
+			wantMode := modelKeysShared
+			if separate {
+				wantMode = modelKeysSeparate
+			}
+			if s.ModelKeyMode != wantMode || s.SeparateDesignReviews != separate {
+				t.Fatalf("mode=%s separate design=%v", s.ModelKeyMode, s.SeparateDesignReviews)
+			}
+			for _, id := range []string{"separate-model-keys", "separate-design"} {
+				if !slices.Contains(ui.Asked, id) {
+					t.Errorf("%s が記録されていません: %v", id, ui.Asked)
+				}
 			}
 		})
 	}

@@ -56,6 +56,9 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 			if problems := answers.Check(root); len(problems) > 0 {
 				return errors.New("回答が足りません。`lassdas setup check` の指摘を直してください:\n" + strings.Join(problems, "\n"))
 			}
+			if notice := initwizard.HostNotice(answers); notice != "" {
+				_, _ = fmt.Fprintln(output, notice)
+			}
 			ui = &initwizard.AnswersUI{Answers: answers, Project: project, Out: func(line string) { _, _ = fmt.Fprintln(output, line) }}
 			smoke = func(context.Context, *initwizard.State, initwizard.Secrets, func() error) error {
 				return errSmokePending
@@ -150,6 +153,11 @@ func setupCheck(root, home string, output io.Writer) error {
 				problems = append(problems, fmt.Sprintf(".lassdas/%s がありません (~/%s の 5 段を参照)", name, initwizard.InstalledInstruction))
 			}
 		}
+	}
+	// Said here, where the answer can still be changed, and not only after
+	// a whole apply has run.
+	if notice := initwizard.HostNotice(answers); notice != "" {
+		_, _ = fmt.Fprintln(output, notice)
 	}
 	if len(problems) == 0 {
 		_, err := fmt.Fprintln(output, "不足なし。次は利用者が `lassdas setup secrets --project <name>` で鍵を入れ、AI が `lassdas setup apply --project <name>` を実行します")

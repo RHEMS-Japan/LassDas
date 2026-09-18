@@ -82,6 +82,45 @@ func (w *Wizard) docker(ctx context.Context, s *State, args ...string) ([]byte, 
 	return w.Process.Run(ctx, "docker", args, "")
 }
 
+// maxCheckReasonLines bounds what a failed in-image check is allowed to say
+// back. The worker prints the failing command and the tail of its output;
+// past this it is the repository's own build log.
+const maxCheckReasonLines = 12
+
+// dockerExplained is docker with the container's diagnostic text kept. The
+// in-image checks run as uid 1000 with no credential mounted and none of the
+// host's environment, so what they print is the person's own tool output -
+// the one thing that says why a check failed. Until 2026-09-18 it was thrown
+// away, and a stopped setup could only be answered by guessing: the person
+// on the other end changed the scope, emptied the install command and cut
+// the verification down to `go version`, none of which could have helped,
+// because the check stops on the tool versions before it runs any of them.
+func (w *Wizard) dockerExplained(ctx context.Context, s *State, args ...string) ([]byte, string, error) {
+	explainer, ok := w.Process.(Explainer)
+	if !ok {
+		out, err := w.docker(ctx, s, args...)
+		return out, "", err
+	}
+	if s.DockerContext != "" {
+		args = append([]string{"--context", s.DockerContext}, args...)
+	}
+	return explainer.RunExplained(ctx, "docker", args, "")
+}
+
+// checkFailure puts the container's own words under the headline. With
+// nothing to show it falls back to naming what the check looks at.
+func checkFailure(headline, detail, hint string) string {
+	reason := strings.TrimSpace(detail)
+	if reason == "" {
+		return headline + "。" + hint
+	}
+	lines := strings.Split(reason, "\n")
+	if len(lines) > maxCheckReasonLines {
+		lines = lines[len(lines)-maxCheckReasonLines:]
+	}
+	return headline + " — image の中はこう言っています:\n" + strings.Join(lines, "\n")
+}
+
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 var pinPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
@@ -270,9 +309,10 @@ func (w *Wizard) checkConsumer(ctx context.Context, s *State, secrets Secrets, d
 	if err = os.RemoveAll(authDir); err != nil {
 		return err
 	}
-	_, err = w.docker(ctx, s, "run", "--rm", "--user", "1000:1000", "--mount", "type=volume,src="+volume+",dst=/work", "--mount", "type=bind,src="+temp+",dst=/check,readonly", "--entrypoint", "/usr/local/bin/worker", s.Image, "check-consumer", "--consumer", "/check/consumer.json", "--repo-root", "/work/repo", "--base-sha", s.BaseSHA, "--out", "/work/check.json")
+	_, detail, err := w.dockerExplained(ctx, s, "run", "--rm", "--user", "1000:1000", "--mount", "type=volume,src="+volume+",dst=/work", "--mount", "type=bind,src="+temp+",dst=/check,readonly", "--entrypoint", "/usr/local/bin/worker", s.Image, "check-consumer", "--consumer", "/check/consumer.json", "--repo-root", "/work/repo", "--base-sha", s.BaseSHA, "--out", "/work/check.json")
 	if err != nil {
-		return errors.New("image 内の納品先検査に失敗しました。道具・検証コマンド・検証中の管理ファイル変更を確認してください")
+		return errors.New(checkFailure("image 内の納品先検査に失敗しました", detail,
+			"道具・検証コマンド・検証中の管理ファイル変更を確認してください"))
 	}
 	raw, err = w.docker(ctx, s, "run", "--rm", "--network", "none", "--user", "1000:1000", "--mount", "type=volume,src="+volume+",dst=/work,readonly", "--entrypoint", "/bin/cat", s.Image, "/work/check.json")
 	if err != nil {
@@ -288,8 +328,11 @@ func (w *Wizard) checkConsumer(ctx context.Context, s *State, secrets Secrets, d
 func (w *Wizard) checkRuntime(ctx context.Context, s *State, dir string) error {
 	// This invokes Load + BuildServices offline with disposable storage. The
 	// config validator needs a nonempty bot key, not the real runtime secrets.
-	_, err := w.docker(ctx, s, "run", "--rm", "--network", "none", "--env", "BACKLOG_API_KEY=init-offline-validation", "--tmpfs", "/data:uid=1000,gid=1000,mode=0700", "--mount", "type=bind,src="+filepath.Join(dir, "config")+",dst=/etc/lassdas/config,readonly", "--entrypoint", "/usr/local/bin/worker", s.Image, "check-runtime", "--config", "/etc/lassdas/config/runtime.json")
-	return err
+	_, detail, err := w.dockerExplained(ctx, s, "run", "--rm", "--network", "none", "--env", "BACKLOG_API_KEY=init-offline-validation", "--tmpfs", "/data:uid=1000,gid=1000,mode=0700", "--mount", "type=bind,src="+filepath.Join(dir, "config")+",dst=/etc/lassdas/config,readonly", "--entrypoint", "/usr/local/bin/worker", s.Image, "check-runtime", "--config", "/etc/lassdas/config/runtime.json")
+	if err != nil {
+		return errors.New(checkFailure("image 内の起動前検査に失敗しました", detail, "設定の内容を確認してください"))
+	}
+	return nil
 }
 
 func marshal(value any) ([]byte, error) {

@@ -25,6 +25,8 @@ kubectl config get-contexts → 到達できるクラスタと namespace
 
 見つかったものを並べて、「このマシンの docker (推奨: いちばん短く始められる)」「K8s の <context> / <namespace>」のように出す。**何も見つからなければ、そのことを言ってから自由記述で聞く。**
 
+**このマシンを選んだら、`host` には何も書かない (空にする)。**`host` に値があると、本体は「別の場所に置く」と読み、`apply` は設定と鍵を用意するところまでで止まり、起動しない。選択肢の見出しをそのまま `host` に書き写すと、このマシンを選んだのに起動しない状態になる。
+
 例 — モデル。**役ごとに 1 つずつ聞かない。**「実装役はどれにしますか」を 6 回やると、利用者は組み合わせの良し悪しを判断できないまま 6 回答えることになる。
 
 まず 1 つだけ聞く: **品質を優先するか、費用を抑えるか、その中間か。**
@@ -155,7 +157,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
-| `host` | この instance をどこで動かすか。自由記述 (例: `このマシン`、`社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`) | そのマシンで実際に使える置き場所を調べ、**選択肢にして出す** (下の「聞き方」) |
+| `host` | **このマシン以外**に置くときだけ書く。自由記述 (例: `社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`)。**このマシンの docker で動かすなら空にする** — 値があると `apply` は準備だけして起動しない | そのマシンで実際に使える置き場所を調べ、**選択肢にして出す** (上の「聞き方」)。このマシンを選んだら空のままにする |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
 

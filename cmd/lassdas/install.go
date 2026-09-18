@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +15,8 @@ import (
 	"automation.internal/ticket-ingress/internal/initwizard"
 )
 
-//go:embed skills/lassdas-setup/SKILL.md
-var skillTemplate string
+//go:embed skills
+var skillFiles embed.FS
 
 // installOptions is the distributor's note plus where the harness keeps
 // its skills.
@@ -222,11 +222,35 @@ func installFiles(home, engineRoot, skillsDir string, distribution initwizard.Di
 	if err := initwizard.WriteDistribution(home, distribution); err != nil {
 		return err
 	}
-	skillDir := filepath.Join(skillsDir, "lassdas-setup")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+	return installSkills(home, skillsDir)
+}
+
+// installSkills writes every skill shipped with the CLI. They are separate
+// skills because they are loaded at different moments: one when someone
+// asks to install LassDas, one when a setup has stopped or a file was
+// deleted, which is when the wrong move is most tempting.
+func installSkills(home, skillsDir string) error {
+	entries, err := skillFiles.ReadDir("skills")
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(strings.ReplaceAll(skillTemplate, "{{HOME}}", home)), 0o644)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		content, err := skillFiles.ReadFile("skills/" + entry.Name() + "/SKILL.md")
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(skillsDir, entry.Name())
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(strings.ReplaceAll(string(content), "{{HOME}}", home)), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // installedDocs lists the documents installed beside the instruction:
