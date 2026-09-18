@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -220,5 +221,51 @@ func TestLocalStoreSurvivesReopen(t *testing.T) {
 	}
 	if _, d, err := reopened.Pull(ctx, testPullRequest(t)); err != nil || d != hook.PullAcquired {
 		t.Fatalf("Pull() after reopen = %s, err = %v", d, err)
+	}
+}
+
+// A delivery waiting for a person to answer is not working, and holding the
+// project's single slot through that wait stopped every other ticket for as
+// long as the person took. Measured 2026-09-18: a ticket filed while a
+// question was open waited 5 hours 11 minutes and then ran in 6, and a later
+// pair deadlocked - the waiting ticket's intake never settled, so the scan
+// never reached the stop comment that would have freed it, and the ledger
+// had to be edited by hand.
+func TestAQuestionGivesTheProjectSlotBack(t *testing.T) {
+	ctx := context.Background()
+	store := newLocalForTest(t)
+	queue := testQueueRequest(t)
+	if _, err := store.Enqueue(ctx, queue); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Pull(ctx, testPullRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("a", 32)
+	if _, _, err := store.BeginQuestion(ctx, testQuestionBegin(t, queue.Envelope, testQueuedAt.Add(3*time.Second), token)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteQuestion(ctx, testQuestionComplete(t, queue.Envelope, token, 6001, testQueuedAt.Add(4*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+
+	pending := makeKey("pending", queue.Envelope.Snapshot.SpaceKey,
+		strconv.FormatInt(queue.Envelope.Snapshot.ProjectID, 10))
+	var rows int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM ledger WHERE pk = ?", pending).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatal("the project's slot is still held while a person is being waited on")
+	}
+
+	// The tick has no issue of its own, so the slot used to be how it found
+	// the waiting run. It still finds it.
+	wait, found, err := store.LoadQuestionWait(ctx, testTerminalRoute(t))
+	if err != nil || !found {
+		t.Fatalf("LoadQuestionWait() = found %v, err %v: the waiting run was lost with the slot", found, err)
+	}
+	if wait.QuestionCommentID != 6001 {
+		t.Fatalf("a different run was found: %+v", wait)
 	}
 }

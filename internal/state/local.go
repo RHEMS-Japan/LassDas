@@ -673,12 +673,55 @@ func (s *LocalStore) resolveRunRoute(ctx context.Context, route hook.ReportRoute
 		return route, localFailure(hook.FailureRetryable, "run_route_read_failed")
 	}
 	runID, ok := pendingRow.str("run_id")
-	if !ok || !reboundRunID(route, runID) {
+	if !ok {
+		// No delivery is running. One may still be waiting for an answer:
+		// it gave the slot back when it asked, and the tick has to find it
+		// to adopt the answer when it comes.
+		waiting, err := txn.awaitingRunID()
+		if err != nil || waiting == "" {
+			return route, err
+		}
+		runID = waiting
+	}
+	if !reboundRunID(route, runID) {
 		return route, nil
 	}
 	rebound := route
 	rebound.ExpectedRunID = runID
 	return rebound, nil
+}
+
+// awaitingRunID names the run that is waiting for an answer, or an empty
+// string when none is. A run gives the project's slot back when it asks its
+// question, so the slot can no longer point at it, and the tick carries no
+// issue of its own to look one up with.
+//
+// It reads inside the caller's transaction. Reaching outside it for a second
+// connection deadlocks on the open read.
+func (t *tx) awaitingRunID() (string, error) {
+	rows, err := t.tx.Query("SELECT attrs FROM ledger WHERE pk LIKE 'run#%'")
+	if err != nil {
+		return "", localFailure(hook.FailureRetryable, "run_route_read_failed")
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var encoded string
+		if err := rows.Scan(&encoded); err != nil {
+			return "", localFailure(hook.FailureRetryable, "run_route_read_failed")
+		}
+		row, err := decodeItem(encoded)
+		if err != nil || !row.strEquals("record_type", "run") {
+			continue
+		}
+		state, _ := row.str("state")
+		if state != stateAwaitingAnswer && state != stateQuestionPending {
+			continue
+		}
+		if runID, ok := row.str("run_id"); ok {
+			return runID, nil
+		}
+	}
+	return "", rows.Err()
 }
 
 // ClaimOwner returns the owner identity the run was claimed under — the
@@ -1013,6 +1056,19 @@ func (s *LocalStore) CompleteQuestion(ctx context.Context, request hook.Question
 	delete(binding.runRow, "question_lease_token")
 	delete(binding.runRow, "question_lease_until")
 	if err := txn.setItem(binding.runKey, binding.runRow); err != nil {
+		return "", localFailure(hook.FailureRetryable, "question_complete_write_failed")
+	}
+	// The project's single slot admits one delivery at a time. A delivery
+	// waiting for a person to answer is not working, and holding the slot
+	// through that wait stopped every other ticket in the project for as
+	// long as the person took: measured 2026-09-18, a ticket filed while a
+	// question was open waited 5 hours 11 minutes and then ran in 6, and a
+	// later pair deadlocked - the waiting ticket's intake never settled, so
+	// the scan never reached the stop comment that would have freed it, and
+	// the ledger had to be edited by hand. The slot is taken again when the
+	// answer arrives and the run goes back to queued.
+	if err := txn.deleteItem(makeKey("pending", binding.envelope.Snapshot.SpaceKey,
+		strconv.FormatInt(binding.envelope.Snapshot.ProjectID, 10))); err != nil {
 		return "", localFailure(hook.FailureRetryable, "question_complete_write_failed")
 	}
 	if err := txn.commit(); err != nil {
