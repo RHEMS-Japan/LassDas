@@ -72,3 +72,25 @@ func TestASilentFailureStillNamesWhatWasChecked(t *testing.T) {
 		t.Fatalf("%d 行: %q", strings.Count(text, "\n"), text)
 	}
 }
+
+// The link the fakes cannot prove: that a real child process's stderr is
+// what RunExplained hands back. The in-image checks are only readable
+// because of it.
+func TestARealProcessesStderrIsWhatComesBack(t *testing.T) {
+	out, detail, err := ExecProcess{}.RunExplained(context.Background(), "/bin/sh",
+		[]string{"-c", "echo 'worker: consumer check tool go: tool version is invalid' >&2; exit 1"}, "")
+	if err == nil {
+		t.Fatal("失敗が報告されませんでした")
+	}
+	if !strings.Contains(detail, "tool version is invalid") {
+		t.Fatalf("stderr が届いていません: %q", detail)
+	}
+	if len(out) != 0 {
+		t.Fatalf("出力: %q", out)
+	}
+	// The same text, through the message a person actually reads.
+	text := checkFailure("image 内の納品先検査に失敗しました", detail, "hint")
+	if !strings.Contains(text, "tool version is invalid") || strings.Contains(text, "hint") {
+		t.Fatalf("%q", text)
+	}
+}
