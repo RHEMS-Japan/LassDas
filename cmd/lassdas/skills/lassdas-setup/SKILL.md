@@ -13,3 +13,4 @@ description: LassDas をいまのプロジェクト (repo) に導入する。「
 4. 文書の「守ること」を守る: repo への書き込みは `.lassdas/` だけ、鍵の値を読まない・書かない・聞かない、できていないことを済んだと言わない、聞くのは決められないことだけ (一問一答・選択肢つき)。
 5. 利用者の出番は原則 2 回 (`lassdas setup secrets` と `lassdas setup smoke`)。非公開レジストリのログイン (`registry_login`) と、課題管理の管理者権限が要るときは、その分が足される。その番になったら、実行するコマンドと、そのとき聞かれること (鍵の種類、取得先) を伝えて待つ。
 6. 進捗は `.lassdas/progress.md` に残し、会話を閉じても別の AI が続きから再開できるようにする。
+7. **止まったら、設定を書き換えて再実行する前に `lassdas-repair` を読む。**理由を読まずに `setup.json` を変えて試すのを繰り返さない。台帳 (`{{HOME}}/.lassdas/<project>/init.json`)・鍵 (`runtime.env`)・回答 (`.lassdas/setup.json`) は消さない。
