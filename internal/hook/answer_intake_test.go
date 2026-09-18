@@ -165,3 +165,20 @@ func TestOnlyTheAnswererInsideTheDeadlineTakesPart(t *testing.T) {
 		t.Fatalf("decision = %+v, want none of them to count", decision)
 	}
 }
+
+// A comment with no text says nothing about the questions. Reading one fails,
+// and a failed reading is kept for the next tick, so a single empty comment
+// on the ticket was retried every minute for as long as the question stayed
+// open (live 2026-09-18).
+func TestAnEmptyCommentIsNotSomethingToRead(t *testing.T) {
+	record := intakeTestRecord(intakeTwoQuestionSet)
+	blank := intakeComment(101, "   \n\t ")
+	decision, err := EvaluateAnswerIntake(intakeInput(record,
+		read(blank, AnswerReading{Kind: AnswerReadingUnrelated})))
+	if err != nil {
+		t.Fatalf("EvaluateAnswerIntake() error = %v", err)
+	}
+	if decision.Adopted != nil || decision.Cancel != nil {
+		t.Fatalf("decision = %+v, want nothing", decision)
+	}
+}
