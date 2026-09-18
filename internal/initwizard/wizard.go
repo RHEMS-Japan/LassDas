@@ -31,12 +31,30 @@ func (TerminalUI) Ask(_, label, value string, secret bool) (string, error) {
 		input.EchoMode(huh.EchoModePassword)
 	}
 	err := input.Run()
-	return strings.TrimSpace(value), err
+	return strings.TrimSpace(value), needsTerminal(err)
 }
 func (TerminalUI) Confirm(label string) (bool, error) {
 	yes := false
 	err := huh.NewConfirm().Title(label).Affirmative("進める").Negative("中断").Value(&yes).Run()
-	return yes, err
+	return yes, needsTerminal(err)
+}
+
+// needsTerminal replaces the prompt library's own words for "there is no
+// terminal here" with words that say what to do about it.
+//
+// Asked through a wrapper that allocates no terminal - an editor's shell, a
+// CI step, an agent running a command on someone's behalf - the prompt
+// cannot open and the failure arrived as
+// "huh: could not open a new TTY: open /dev/tty: device not configured".
+// A person reading that has no idea the answer is "run it in a terminal
+// window" (live 2026-09-18, and the wrapper swallowed even that line, so
+// the command appeared to do nothing at all).
+func needsTerminal(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "TTY") {
+		return err
+	}
+	return errors.New("この操作は画面で 1 つずつ聞くので、端末が要ります。" +
+		"エディタや自動化からではなく、ターミナルの窓で直接実行してください")
 }
 func (TerminalUI) Info(value string) { fmt.Println(value) }
 

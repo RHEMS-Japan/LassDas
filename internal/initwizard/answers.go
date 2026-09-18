@@ -229,6 +229,7 @@ func OptionalAnswers() []Requirement {
 		{"tracker-create", "受付のカテゴリ・状態が無いとき、課題管理の project に作ってよいか (true/false)", "利用者に確認してから書く"},
 		{"requester-key-ok", "自動処理の鍵が起票者本人のもので、コメントと状態更新が本人名義になってよいか (true/false)", "利用者に確認してから書く"},
 		{"board-port", "板を 127.0.0.1 で開く port", "既定は 9200"},
+		{"host", "この instance をどこで動かすか (自由記述)", "利用者に確認。選択肢は出さない"},
 	}
 }
 
