@@ -105,45 +105,6 @@ func designDecision(t *testing.T, output ModelReadinessOutput, checkKind string,
 	return decision
 }
 
-// A destination that configured no trigger vocabulary is judged with the
-// framework's default one: a precisely stated change with none of those
-// words skips its design, and one carrying a default word (here 本番で) keeps
-// it. A configured vocabulary replaces the default, so the same default word
-// no longer triggers under it while its own words still do.
-func TestUnsetTriggerWordsUseTheDefaultVocabulary(t *testing.T) {
-	for name, design := range map[string]*DesignConfig{
-		"absent":     nil,
-		"empty list": {Default: DesignDefaultOn, TriggerWords: []string{}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			config, request, source := designFixture(t, design, designApproachBody)
-			decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-			if decision.NeedsDesign || decision.DesignReason != DesignReasonApproachInTicket {
-				t.Fatalf("decision = (%v, %q), want the design skipped under the default vocabulary", decision.NeedsDesign, decision.DesignReason)
-			}
-			if !decision.ApproachInTicket || decision.ApproachExcerpt != designApproachQuote || decision.RequestKind != RequestKindChange {
-				t.Fatalf("the other conditions were not recorded: %+v", decision)
-			}
-			config, request, source = designFixture(t, design, designApproachBody+" 本番で表示が崩れるので直したい。")
-			kept := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-			if !kept.NeedsDesign || kept.DesignReason != DesignReasonTriggerWord {
-				t.Fatalf("decision = (%v, %q), want the design kept for a default trigger word", kept.NeedsDesign, kept.DesignReason)
-			}
-		})
-	}
-	own := &DesignConfig{TriggerWords: designTriggerWords()}
-	config, request, source := designFixture(t, own, designApproachBody+" 本番で表示が崩れるので直したい。")
-	replaced := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-	if replaced.NeedsDesign || replaced.DesignReason != DesignReasonApproachInTicket {
-		t.Fatalf("decision = (%v, %q), want the configured vocabulary to replace the default", replaced.NeedsDesign, replaced.DesignReason)
-	}
-	config, request, source = designFixture(t, own, designApproachBody+" It is slow.")
-	ownHit := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config)
-	if !ownHit.NeedsDesign || ownHit.DesignReason != DesignReasonTriggerWord {
-		t.Fatalf("decision = (%v, %q), want the design kept for a configured trigger word", ownHit.NeedsDesign, ownHit.DesignReason)
-	}
-}
-
 // The default vocabulary must itself pass the validation a destination's own
 // list passes, and be what the rule and the prompts read when nothing is
 // configured.
@@ -347,26 +308,6 @@ func TestDesignDefaultOffSkipsDesignForChangeRequests(t *testing.T) {
 	}
 }
 
-// The remaining mechanical conditions, each on its own with the others held
-// satisfied: more than two derived target files, and a configured trigger
-// word in the ticket (matched without regard to case).
-func TestTargetFilesAndTriggerWordsKeepTheDesign(t *testing.T) {
-	words := &DesignConfig{TriggerWords: designTriggerWords()}
-	three := []string{"client/src/components/Example.tsx", "client/src/components/Other.tsx", "client/src/components/Third.tsx"}
-	config, request, source := designFixture(t, words, designApproachBody, three...)
-	if decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config); !decision.NeedsDesign || decision.DesignReason != DesignReasonTooManyFiles {
-		t.Fatalf("three files, decision = (%v, %q)", decision.NeedsDesign, decision.DesignReason)
-	}
-	config, request, source = designFixture(t, words, designApproachBody, three[:2]...)
-	if decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config); decision.NeedsDesign {
-		t.Fatalf("two files, decision = (%v, %q)", decision.NeedsDesign, decision.DesignReason)
-	}
-	config, request, source = designFixture(t, words, designApproachBody+" It renders wrongly In Production only.")
-	if decision := designDecision(t, skipOutput(), RequestKindChange, false, source, request, config); !decision.NeedsDesign || decision.DesignReason != DesignReasonTriggerWord {
-		t.Fatalf("trigger word, decision = (%v, %q)", decision.NeedsDesign, decision.DesignReason)
-	}
-}
-
 // The model path coerces, never objects: answers without the design fields,
 // or with an unknown kind, still seal - on the side that keeps the design.
 func TestAssessReadinessCoercesUnansweredDesignFields(t *testing.T) {
@@ -433,13 +374,13 @@ func TestReadinessDecisionSchemaVersionRejectsTheOldShape(t *testing.T) {
 		return edited
 	}
 	for name, mutate := range map[string]func(*ReadinessDecision){
-		"version 1":             func(d *ReadinessDecision) { d.SchemaVersion = 1 },
-		"unknown reason":        func(d *ReadinessDecision) { d.DesignReason = "because" },
-		"reason without design": func(d *ReadinessDecision) { d.DesignReason = DesignReasonTriggerWord },
-		"unknown kind":          func(d *ReadinessDecision) { d.RequestKind = "maybe" },
-		"quote edited":          func(d *ReadinessDecision) { d.ApproachExcerpt = "update the constant that holds the label" },
-		"quote dropped":         func(d *ReadinessDecision) { d.ApproachExcerpt = "" },
-		"skip without approach": func(d *ReadinessDecision) { d.ApproachInTicket, d.ApproachExcerpt = false, "" },
+		"version 1":                        func(d *ReadinessDecision) { d.SchemaVersion = 1 },
+		"unknown reason":                   func(d *ReadinessDecision) { d.DesignReason = "because" },
+		"reason disagrees with the design": func(d *ReadinessDecision) { d.DesignReason = DesignReasonApproachMissing },
+		"unknown kind":                     func(d *ReadinessDecision) { d.RequestKind = "maybe" },
+		"quote edited":                     func(d *ReadinessDecision) { d.ApproachExcerpt = "update the constant that holds the label" },
+		"quote dropped":                    func(d *ReadinessDecision) { d.ApproachExcerpt = "" },
+		"skip without approach":            func(d *ReadinessDecision) { d.ApproachInTicket, d.ApproachExcerpt = false, "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := reseal(mutate).ValidateBinding(source, request, config); err == nil {
@@ -592,5 +533,35 @@ func TestTriggerWordMatchingRules(t *testing.T) {
 		if got, hit := ticketTriggerWord(request, words); !hit || got != want {
 			t.Errorf("example vocabulary: %q matched %q (hit %v), want %q", body, got, hit, want)
 		}
+	}
+}
+
+// The design path is entered because a model said so, or because the ticket
+// does not say how the change is made. Two conditions used to stand in front
+// of that judgement and no longer do: a count of derived target files, and a
+// forty-three word vocabulary searched in the ticket. The vocabulary could
+// only force a design, never skip one, so a model that judged a change
+// simple was overruled by the word 遅い appearing anywhere in the text.
+func TestTheDesignPathIsEnteredByJudgementNotByVocabulary(t *testing.T) {
+	consumer := ConsumerConfig{Design: &DesignConfig{Default: "on"}}
+	request := TicketRequest{Summary: "README が遅い。本番で遅い。slow。", TargetFiles: []string{"a", "b", "c", "d"}}
+
+	needs, reason := designVerdict(RequestKindChange, true, false, false, request, consumer)
+	if needs {
+		t.Fatalf("a ticket full of trigger words and four files was designed anyway: %v %s", needs, reason)
+	}
+	if reason != DesignReasonApproachInTicket {
+		t.Fatalf("reason = %s", reason)
+	}
+	// Either model keeping the design still keeps it.
+	if needs, reason := designVerdict(RequestKindChange, true, true, false, request, consumer); !needs || reason != DesignReasonProposer {
+		t.Fatalf("the proposer's judgement was ignored: %v %s", needs, reason)
+	}
+	if needs, reason := designVerdict(RequestKindChange, true, false, true, request, consumer); !needs || reason != DesignReasonChecker {
+		t.Fatalf("the checker's judgement was ignored: %v %s", needs, reason)
+	}
+	// A ticket that never says how the change is made is still designed.
+	if needs, _ := designVerdict(RequestKindChange, false, false, false, request, consumer); !needs {
+		t.Fatal("a ticket with no approach in it skipped the design")
 	}
 }

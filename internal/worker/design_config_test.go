@@ -63,15 +63,18 @@ func TestDesignConfigValidation(t *testing.T) {
 	}
 }
 
-// The shipped example configuration carries a design block, so the example a
-// consumer copies from already names a trigger vocabulary.
+// The shipped example carries a design block and turns the design path off.
+// Measured 2026-09-17 on one repository, one ticket text: without the design
+// path, two deliveries finished, in 6.5 and 36 minutes. With it, one took
+// about two hours and one delivered nothing in 76 minutes across six design
+// rounds. A consumer that wants a design round says so.
 func TestExampleConsumerConfigCarriesADesignPolicy(t *testing.T) {
 	config, err := LoadConfig(filepath.Join("..", "..", "config", "m1-consumer.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	consumer := config.Consumers[0]
-	if consumer.Design == nil || !consumer.DesignEnabled() || len(consumer.DesignTriggerWords()) == 0 || !consumer.ReviewsInvestigation() {
+	if consumer.Design == nil || consumer.DesignEnabled() || len(consumer.DesignTriggerWords()) == 0 || !consumer.ReviewsInvestigation() {
 		t.Fatalf("example design policy = %+v", consumer.Design)
 	}
 	// The second destination leaves it out and gets the safe reading.
