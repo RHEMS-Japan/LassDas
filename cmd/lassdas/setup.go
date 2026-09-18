@@ -195,7 +195,18 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 	// The key mode is the file's decision, written down here so the
 	// wizard never infers "separate" from the presence of a stored key. A
 	// project set up the other way keeps its keys: changing the mode is
-	// the wizard's own path, never a silent overwrite.
+	// the wizard's own path, never a silent overwrite. The connection
+	// target is the file's decision for the same reason: changing it on an
+	// existing project would point stored keys at a provider that never
+	// issued them.
+	baseURL := modelBaseURL(answers)
+	if err := initwizard.CheckModelBaseURL(baseURL); err != nil {
+		return err
+	}
+	if state.BaseURL != "" && state.BaseURL != baseURL {
+		return fmt.Errorf("この project のモデル接続先は %s で作られています。変えるなら別の project 名を使ってください (保存済みの鍵はその接続先のものです)", state.BaseURL)
+	}
+	state.BaseURL = baseURL
 	mode, separateDesign := keyMode(answers)
 	if state.ModelKeyMode != "" && state.ModelKeyMode != mode {
 		return fmt.Errorf("この project の鍵の持ち方は %s で作られています。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.ModelKeyMode, project)
@@ -245,6 +256,16 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 
 type secretEntry struct{ name, label string }
 
+// modelBaseURL reads where the roles' models are reached, defaulting to the
+// first offered provider so an answers file written before this existed
+// keeps working.
+func modelBaseURL(answers initwizard.Answers) string {
+	if value, ok := answers.Value("model-base-url"); ok {
+		return value
+	}
+	return initwizard.ModelProviders[0].BaseURL
+}
+
 // keyMode reads the file's two choices that decide which keys exist.
 func keyMode(answers initwizard.Answers) (string, bool) {
 	mode := initwizard.ModelKeysShared
@@ -264,15 +285,15 @@ func secretPlan(answers initwizard.Answers) []secretEntry {
 	}
 	mode, separateDesign := keyMode(answers)
 	if mode == initwizard.ModelKeysShared {
-		return append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "OpenRouter API キー (既定では全役で共用)"})
+		return append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", initwizard.ProviderName(modelBaseURL(answers)) + " の API キー (既定では全役で共用)"})
 	}
-	names = append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の OpenRouter API キー"})
+	names = append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の " + initwizard.ProviderName(modelBaseURL(answers)) + " API キー"})
 	roles := initwizard.ModelRoles()
 	if separateDesign {
 		roles = append(roles, "design-review-a", "design-review-b")
 	}
 	for _, role := range roles {
-		names = append(names, secretEntry{initwizard.KeyName(role), role + " 専用の OpenRouter API キー"})
+		names = append(names, secretEntry{initwizard.KeyName(role), role + " 専用の " + initwizard.ProviderName(modelBaseURL(answers)) + " API キー"})
 	}
 	return names
 }

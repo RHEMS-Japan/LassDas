@@ -161,7 +161,8 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
 | `host` | **このマシン以外**に置くときだけ書く。自由記述 (例: `社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`)。**このマシンの docker で動かすなら空にする** — 値があると `apply` は準備だけして起動しない | そのマシンで実際に使える置き場所を調べ、**選択肢にして出す** (上の「聞き方」)。このマシンを選んだら空のままにする |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
-| `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
+| `model-base-url` | モデルの接続先 (OpenAI 互換の base URL)。省略すると OpenRouter | 使える接続先を**選択肢にして出す**。既定で名前が出るのは OpenRouter (`https://openrouter.ai/api/v1`) と Cheaper Inference (`https://api.cheaperinference.com/v1`)。他も OpenAI 互換なら URL を書けば動く。**project を作った後は変えられない** (保存した鍵はその接続先のもの) |
+| `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (接続先が使う名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
 
 配布者の案内 (`~/.lassdas/distribution.json`、`lassdas setup install` が置く) から自動で埋まるもの。書けば上書きできる:
 
@@ -221,6 +222,7 @@ lassdas run spec --project NAME
 - `review-a` と `review-b` は別のモデルで、別の提供会社。`implementer` と同じモデルにできるレビュー役は 1 つまで (`designer` も同じ)。
 - `readiness-assessor` と `readiness-checker` は、**別のモデルを指名するなら**別の提供会社。同じモデルを 2 度指名してもよく、そのときは 1 人が自分の答えを読み返す形になるので、この規則は当たらない。
 - 提供会社はモデル名の接頭辞から本体が判定する (openai / anthropic / google / deepseek / x-ai / meta-llama / mistralai / qwen / moonshotai / z-ai / cohere / amazon)。それ以外の接頭辞は `<役>-vendor` に会社名を書く。
+- **接頭辞を使わない接続先 (Cheaper Inference など、`gpt-…` `deepseek-…` のような名前) では、`<役>-vendor` が全役で必須。**判定材料が無いので、書かないと `setup check` が止める。どのモデルがどの会社のものかは接続先の一覧で確認する。
 - `separate-design` を true にしたら `design-review-a-model` `design-review-b-model` も必須で、同じ規則 (別モデル・別会社)。
 
 書かなければ本体の提案で進むもの (提案は apply の出力に「本体の提案」として残る):
