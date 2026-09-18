@@ -83,9 +83,6 @@ func answerReadingSchema() string {
 // over as they were sealed, so the reading is bound to what was actually
 // asked and not to a paraphrase of it.
 func (i *ModelInvoker) ReadAnswer(ctx context.Context, endpoint ModelEndpoint, questionsJSON, body string) (AnswerReading, InvocationUsage, error) {
-	if i == nil || i.api == nil || strings.TrimSpace(questionsJSON) == "" || strings.TrimSpace(body) == "" {
-		return AnswerReading{}, InvocationUsage{}, errors.New("answer reading input is invalid")
-	}
 	prompt, err := json.Marshal(struct {
 		Questions json.RawMessage `json:"questions"`
 		Comment   string          `json:"comment"`

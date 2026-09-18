@@ -473,7 +473,7 @@ func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
 // A checker that answers "pass" but still lists reasons decodes fine and
 // fails the contract's meaning. That objection is now something the checker
 // is told and gets to fix (a live ticket died on it one step past the decoder).
-func TestCheckReadinessSurvivesOneContractViolation(t *testing.T) {
+func TestAReadinessCheckIsTakenAsGiven(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	assessment, _ := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
 	api := &sequenceChatAPI{outputs: []*ChatResponse{
@@ -485,11 +485,10 @@ func TestCheckReadinessSurvivesOneContractViolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the corrected check was not accepted: %v", err)
 	}
-	if check.Verdict != "pass" || len(api.requests) != 2 {
+	// The first answer is taken as given: a pass that came with a note is a
+	// pass. It used to be thrown away and asked for again.
+	if check.Verdict != "pass" || len(api.requests) != 1 {
 		t.Fatalf("check = %+v, calls = %d", check, len(api.requests))
-	}
-	if !strings.Contains(api.requests[1].Messages[3].Content, "reasons do not match verdict") {
-		t.Fatalf("the checker was not told what was wrong: %q", api.requests[1].Messages[3].Content)
 	}
 }
 

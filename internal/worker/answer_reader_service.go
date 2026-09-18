@@ -36,9 +36,6 @@ func NewAnswerReaderService(configPath string, client ChatCompletionsAPI) (*Answ
 
 // ReadAnswer satisfies hook.AnswerReader.
 func (s *AnswerReaderService) ReadAnswer(ctx context.Context, questionsJSON, body string) (hook.AnswerReading, error) {
-	if s == nil {
-		return hook.AnswerReading{}, errors.New("answer reader is not configured")
-	}
 	config, err := LoadConfig(s.configPath)
 	if err != nil {
 		return hook.AnswerReading{}, err

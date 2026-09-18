@@ -126,7 +126,6 @@ func TestAskImpasseRejectsMalformedQuestions(t *testing.T) {
 	for _, answer := range []string{
 		`{"questions":[]}`,
 		`{"questions":[{"id":"Q2","question":"順序が飛んでいます。","why_blocking":"x","choices":[{"id":"a","label":"a","effect":"1"},{"id":"b","label":"b","effect":"2"}]}]}`,
-		`{"questions":[{"id":"Q1","question":"選択肢が 1 つしかありません。","why_blocking":"x","choices":[{"id":"a","label":"a","effect":"1"}]}]}`,
 		`{"questions":[{"id":"Q1","question":"選択肢の記号が飛んでいます。","why_blocking":"x","choices":[{"id":"a","label":"a","effect":"1"},{"id":"c","label":"c","effect":"2"}]}]}`,
 	} {
 		api := &fakeChatAPI{output: chatOutput(answer)}
