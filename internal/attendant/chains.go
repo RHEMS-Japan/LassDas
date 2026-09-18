@@ -120,6 +120,7 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 			if err := syncE2E(ctx, config, services, hermes, run, tasks, logger); err != nil {
 				logger.Error("e2e sync failed", "run", run.RunID, "error", err.Error())
 			}
+			recordFeatureMerge(ctx, config, run, runDirectory(config, run.DeliveryID), logger)
 			if err := syncDeliver(ctx, config, services, hermes, run, tasks, logger); err != nil {
 				logger.Error("deliver sync failed", "run", run.RunID, "error", err.Error())
 			}

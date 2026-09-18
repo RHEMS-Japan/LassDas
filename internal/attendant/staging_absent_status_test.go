@@ -117,3 +117,50 @@ func TestTheRailIsTheOneThisInstallationCanReach(t *testing.T) {
 		}
 	}
 }
+
+// Once the delivered pull request is merged, the delivery is finished. It
+// used to rest at マージ待ち for ever: the condition was a successful run, a
+// pull request on disk and no post-merge pipeline, none of which change when
+// someone merges, so the board told a requester to merge what they had
+// merged an hour before and the card never left the running list (live
+// 2026-09-18, five of them at once).
+func TestAMergedPullRequestFinishesTheDelivery(t *testing.T) {
+	config := runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}}
+	run := state.RunOverview{DeliveryID: "delivery_abc", TerminalCode: string(hook.TerminalSuccess)}
+	dir := runDirectory(config, run.DeliveryID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "feature-pr.json"), []byte(`{"binding":{"repository":"owner/name"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var waiting RunStatus
+	classifyAfterTerminal(&waiting, config, run, nil)
+	if waiting.Step != "confirm" {
+		t.Fatalf("before the merge: step = %q, want confirm", waiting.Step)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, featureMergeFile),
+		[]byte(`{"merged":true,"state":"closed","merge_commit_sha":"abcdef1234567890"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var merged RunStatus
+	classifyAfterTerminal(&merged, config, run, nil)
+	if merged.Step != "done" {
+		t.Fatalf("after the merge: step = %q %q, want done", merged.Step, merged.StepTitle)
+	}
+	if merged.StepTitle == "マージ待ち" {
+		t.Fatal("a merged delivery is still asking to be merged")
+	}
+
+	// A record that says it is not merged is not a merge.
+	if err := os.WriteFile(filepath.Join(dir, featureMergeFile), []byte(`{"merged":false,"state":"open"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var open RunStatus
+	classifyAfterTerminal(&open, config, run, nil)
+	if open.Step != "confirm" {
+		t.Fatalf("an open pull request was taken for merged: %q", open.Step)
+	}
+}
