@@ -4,6 +4,33 @@
 
 全体方針は [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md)、個々の判断は [INIT_DECISIONS.md](INIT_DECISIONS.md) (本文の A01 などはその項目番号)。この版で導入できる範囲は末尾の「この版でできること」を先に読む。
 
+## 聞き方 — 自由記述で投げない
+
+**利用者への質問は、調べた結果から作った選択肢で出す。**「どこで動かしますか」「どのモデルにしますか」と白紙で聞かない。何を答えればよいか分からないし、綴りを間違えれば後の工程で弾かれる。
+
+手順は毎回同じ:
+
+1. **そのマシンと repo を調べて、実際に選べるものを列挙する**
+2. **推奨を 1 つ決めて、理由を 1 行で添える**
+3. **選択肢として出す。**利用者は選ぶだけ。どれにも当てはまらなければ自由記述で答えてもらう
+
+選択肢はコードにも文書にも書いていない。**その場で調べて作る。**固定の一覧を持つと、一覧に無いものが選べなくなる。
+
+例 — `host` (どこで動かすか):
+
+```
+docker context ls        → このマシン / 登録済みのリモート docker
+kubectl config get-contexts → 到達できるクラスタと namespace
+```
+
+見つかったものを並べて、「このマシンの docker (推奨: いちばん短く始められる)」「K8s の <context> / <namespace>」のように出す。**何も見つからなければ、そのことを言ってから自由記述で聞く。**
+
+例 — モデル: 役ごとに 1 つずつ聞かない。**費用と品質の希望を先に聞き、6 役ぶんの組み合わせを 2〜3 案にして出す。**規則 (レビュー 2 役は別会社、受付 2 役も別会社) を満たした案だけを出す。
+
+例 — 課題管理: Backlog の接続先が分かるなら (既存の設定、`~/.lassdas` の別 project、環境変数)、それを第 1 候補にする。project キーは、その space で見えるものを列挙できるなら列挙する。
+
+**答えが 1 つしかないものは聞かない。** `git remote` から納品先が一意に決まるなら、確認だけして次へ進む。
+
 ## 0. 守ること
 
 - **repo への書き込みは `.lassdas/` だけ。** 既存の文書・コード・CI は調査のために読む。調査コマンドが lockfile や設定を生成する副作用も含めて守る。既存ファイルの変更が必要なら、理由と変更案を示して別の開発作業にする (B03 B04)。
@@ -104,7 +131,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `branch` | 取り込み枝 (PR の宛先。default branch とは限らない) | repo の規則と最近の PR の宛先から確かめる |
 | `tracker-origin` | Backlog の接続先 URL (`https://<space>.backlog.com`) | 利用者に確認 |
 | `tracker-project` | Backlog の project キー | 利用者に確認 |
-| `host` | この instance をどこで動かすか。自由記述 (例: `このマシン`、`社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`) | 利用者に確認。**選択肢は出さない** |
+| `host` | この instance をどこで動かすか。自由記述 (例: `このマシン`、`社内の EC2 (docker context: ops-tokyo)`、`K8s の rin-base / lassdas namespace`) | そのマシンで実際に使える置き場所を調べ、**選択肢にして出す** (下の「聞き方」) |
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (OpenRouter の名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
 
