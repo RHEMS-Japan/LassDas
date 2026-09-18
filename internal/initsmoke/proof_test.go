@@ -124,7 +124,7 @@ func proofFixture(t *testing.T) (map[string]json.RawMessage, worker.Config, Reco
 	if err != nil {
 		t.Fatal(err)
 	}
-	designDecision, err := investigate.DecideDesign(id, investigate.DesignSubject(design), designReviews, 1, config.DesignRounds())
+	designDecision, err := investigate.DecideDesign(id, investigate.DesignSubject(design), designReviews, 1, config.DesignRounds(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}

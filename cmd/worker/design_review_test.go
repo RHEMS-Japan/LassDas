@@ -457,7 +457,7 @@ func TestDecideDesignSealsTheRoundOutcome(t *testing.T) {
 		t.Fatalf("approved decision: %+v", decision)
 	}
 	reviews := []investigate.DesignReview{approved.readReview(t, "design-review-a"), approved.readReview(t, "design-review-b")}
-	if err := decision.Validate(approved.identity, investigate.DesignSubject(approved.design), reviews, approved.config.DesignRounds()); err != nil {
+	if err := decision.Validate(approved.identity, investigate.DesignSubject(approved.design), reviews, approved.config.DesignRounds(), 2); err != nil {
 		t.Fatalf("the sealed decision was rejected: %v", err)
 	}
 	// One review is not a decision; a round the subject is not in is refused; a

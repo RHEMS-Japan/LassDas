@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"os"
 	"path/filepath"
 	"strings"
@@ -630,5 +631,29 @@ func TestDesignJudgesRespectTheVendorHosts(t *testing.T) {
 	}
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "review-a") {
 		t.Fatalf("a judge outside its vendor's hosts was accepted: %v", err)
+	}
+}
+
+// One judge is a legal configuration. A second opinion on a change only
+// pays for itself where being wrong is expensive; where it is not, the two
+// judges have to agree before anything ships, and two live deliveries died
+// deadlocked on 2026-09-17 over a judgement call - whether to document a
+// flag the target repository accepts but never acts on - that a single
+// model settles in one pass. The two-vendor rule exists so that two judges
+// do not share one blind spot, and has nothing to say about one judge.
+func TestOneReviewerIsALegalConfiguration(t *testing.T) {
+	config := validTestConfig()
+	config.Models.Reviewers = config.Models.Reviewers[:1]
+	if err := config.Validate(); err != nil {
+		t.Fatalf("a single judge was refused: %v", err)
+	}
+	// A design decision on a one-judge configuration needs one review.
+	if want := investigate.ReviewsRequired("design", len(config.Models.DesignJudges())); want != 1 {
+		t.Errorf("a design decision under one judge needs %d reviews", want)
+	}
+	// No judge at all is still refused: nothing would read the change.
+	config.Models.Reviewers = nil
+	if err := config.Validate(); err == nil {
+		t.Fatal("a configuration with no judge at all was accepted")
 	}
 }

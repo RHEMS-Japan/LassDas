@@ -180,7 +180,7 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 	passB := sealedReview(t, subject, "review-b", passOutput(), testUsage("review-b"))
 	reviseB := sealedReview(t, subject, "review-b", reviseOutput(SectionFiles), testUsage("review-b"))
 
-	approved, err := DecideDesign(testIdentity, subject, []DesignReview{passB, passA}, 1, 3)
+	approved, err := DecideDesign(testIdentity, subject, []DesignReview{passB, passA}, 1, 3, 2)
 	if err != nil {
 		t.Fatalf("approved decision refused: %v", err)
 	}
@@ -188,24 +188,24 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 		approved.ReviewSHA256s[0] != passA.ReviewSHA256 || approved.ReviewSHA256s[1] != passB.ReviewSHA256 {
 		t.Fatalf("approved decision: %+v", approved)
 	}
-	if err := approved.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3); err != nil {
+	if err := approved.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3, 2); err != nil {
 		t.Fatalf("re-validation: %v", err)
 	}
 	// One veto sends the design back while rounds remain...
-	revise, err := DecideDesign(testIdentity, subject, []DesignReview{passA, reviseB}, 1, 3)
+	revise, err := DecideDesign(testIdentity, subject, []DesignReview{passA, reviseB}, 1, 3, 2)
 	if err != nil || revise.Outcome != OutcomeRevise {
 		t.Fatalf("revise decision: %+v %v", revise, err)
 	}
 	// ...and ends the delivery honestly at the last round.
-	last, err := DecideDesign(testIdentity, subject, []DesignReview{passA, reviseB}, 1, 1)
+	last, err := DecideDesign(testIdentity, subject, []DesignReview{passA, reviseB}, 1, 1, 2)
 	if err != nil || last.Outcome != OutcomeNonconverged {
 		t.Fatalf("last-round decision: %+v %v", last, err)
 	}
-	if err := last.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 1); err != nil {
+	if err := last.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 1, 2); err != nil {
 		t.Errorf("last-round re-validation: %v", err)
 	}
 	// The limit is part of the derivation: read under a longer limit the same decision no longer holds.
-	if err := last.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 3); err == nil {
+	if err := last.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 3, 2); err == nil {
 		t.Error("a nonconverged decision validated under a longer limit")
 	}
 
@@ -229,33 +229,33 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 		{"a review of another subject", []DesignReview{passA, reportPass}, 1, 3},
 	}
 	for _, tc := range refused {
-		if _, err := DecideDesign(testIdentity, subject, tc.reviews, tc.round, tc.max); err == nil {
+		if _, err := DecideDesign(testIdentity, subject, tc.reviews, tc.round, tc.max, 2); err == nil {
 			t.Errorf("%s: decision sealed", tc.name)
 		}
 	}
 
 	// An investigation report takes the evidence review alone.
-	decision, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportPass}, 1, 3)
+	decision, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportPass}, 1, 3, 2)
 	if err != nil || decision.Outcome != OutcomeApproved || len(decision.ReviewSHA256s) != 1 {
 		t.Fatalf("report decision: %+v %v", decision, err)
 	}
 	reportRevise := sealedReview(t, reportSubject, "review-a", reviseOutput(SectionUnknowns), testUsage("review-a"))
-	if nonconverged, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportRevise}, 1, 1); err != nil || nonconverged.Outcome != OutcomeNonconverged {
+	if nonconverged, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportRevise}, 1, 1, 2); err != nil || nonconverged.Outcome != OutcomeNonconverged {
 		t.Fatalf("report last-round decision: %+v %v", nonconverged, err)
 	}
-	if _, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportPass, reportPass}, 1, 3); err == nil {
+	if _, err := DecideDesign(testIdentity, reportSubject, []DesignReview{reportPass, reportPass}, 1, 3, 2); err == nil {
 		t.Error("two reviews of a report were accepted")
 	}
 
 	// Tampering with the outcome or the review set is caught.
 	tampered := revise
 	tampered.Outcome = OutcomeApproved
-	if err := tampered.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 3); err == nil || !strings.Contains(err.Error(), "outcome") {
+	if err := tampered.Validate(testIdentity, subject, []DesignReview{passA, reviseB}, 3, 2); err == nil || !strings.Contains(err.Error(), "outcome") {
 		t.Errorf("tampered outcome: %v", err)
 	}
 	swapped := approved
 	swapped.ReviewSHA256s = []string{passB.ReviewSHA256, passA.ReviewSHA256}
-	if err := swapped.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3); err == nil || !strings.Contains(err.Error(), "review set") {
+	if err := swapped.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3, 2); err == nil || !strings.Contains(err.Error(), "review set") {
 		t.Errorf("swapped review set: %v", err)
 	}
 	dir := t.TempDir()
@@ -263,7 +263,7 @@ func TestDecideDesignStopsAtTheRoundLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	read, err := ReadDesignDecision(filepath.Join(dir, "design-decision.json"))
-	if err != nil || read.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3) != nil {
+	if err != nil || read.Validate(testIdentity, subject, []DesignReview{passA, passB}, 3, 2) != nil {
 		t.Errorf("round trip: %v", err)
 	}
 }

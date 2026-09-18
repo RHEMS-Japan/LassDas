@@ -66,6 +66,25 @@ type ChainPlan struct {
 	// ReviewInvestigation adds the evidence review to an investigation-only
 	// delivery (consumer `design.review_investigation`, default on).
 	ReviewInvestigation bool
+	// Reviewers is how many judges the consumer configured
+	// (`models.reviewers`). One judge runs one review card instead of two:
+	// a second opinion on a change only pays for itself where being wrong
+	// is expensive, and where it does not, the two have to agree before
+	// anything ships. Two live deliveries died that way on 2026-09-17,
+	// deadlocked over a judgement call a single model settles in one pass.
+	// Zero means the caller did not say, and the chain keeps its original
+	// two cards.
+	Reviewers int
+}
+
+// reviewCards is how many review cards a plan runs. Only two review
+// profiles exist, so a consumer with more judges than that still runs two
+// cards and gives each card more than one judge.
+func (p ChainPlan) reviewCards() int {
+	if p.Reviewers == 1 {
+		return 1
+	}
+	return 2
 }
 
 // IsDesignStage reports whether a stage counts in design rounds.
@@ -111,7 +130,7 @@ func ChainStages(chain ChainConfig) []ChainStage {
 
 // ChainStagesFor is the chain for one plan, in order.
 func ChainStagesFor(chain ChainConfig, plan ChainPlan) []ChainStage {
-	tail := implementChainStages(chain)
+	tail := implementChainStages(chain, plan.reviewCards())
 	switch plan.Shape {
 	case ShapeInvestigation:
 		stages := []ChainStage{investigateStage(chain)}
@@ -128,15 +147,19 @@ func ChainStagesFor(chain ChainConfig, plan ChainPlan) []ChainStage {
 			// The design reviews carry the implementation reviews' wall:
 			// the same agents judge, only the subject differs.
 			{Name: StageDesignReviewA, Profile: chain.Profiles.DesignReviewA, MaxRuntimeSeconds: 70 * 60},
-			{Name: StageDesignReviewB, Profile: chain.Profiles.DesignReviewB, MaxRuntimeSeconds: 70 * 60},
+		}
+		if plan.reviewCards() > 1 {
+			stages = append(stages, ChainStage{Name: StageDesignReviewB, Profile: chain.Profiles.DesignReviewB, MaxRuntimeSeconds: 70 * 60})
+		}
+		stages = append(stages,
 			// design-decide is a kernel process like validate; five minutes
-			// outlasts reading two reviews and sealing a decision.
-			{Name: StageDesignDecide, Profile: chain.Profiles.DesignDecide, MaxRuntimeSeconds: 5 * 60},
+			// outlasts reading the reviews and sealing a decision.
+			ChainStage{Name: StageDesignDecide, Profile: chain.Profiles.DesignDecide, MaxRuntimeSeconds: 5 * 60},
 			// The applier copies a reviewed design: 40 turns at the measured
 			// 20 seconds each is 800 seconds; the wall leaves room for the
 			// seal that follows on the next card.
-			{Name: StageApply, Profile: chain.Profiles.Applier, MaxRuntimeSeconds: 20 * 60},
-		}
+			ChainStage{Name: StageApply, Profile: chain.Profiles.Applier, MaxRuntimeSeconds: 20 * 60},
+		)
 		return append(stages, tail[1:]...)
 	default:
 		return tail
@@ -151,8 +174,8 @@ func investigateStage(chain ChainConfig) ChainStage {
 	return ChainStage{Name: StageInvestigate, Profile: chain.Profiles.Investigate, MaxRuntimeSeconds: 40 * 60}
 }
 
-func implementChainStages(chain ChainConfig) []ChainStage {
-	return []ChainStage{
+func implementChainStages(chain ChainConfig, reviewCards int) []ChainStage {
+	stages := []ChainStage{
 		{Name: StageImplement, Profile: chain.Profiles.Implementer, MaxRuntimeSeconds: 90 * 60},
 		// The card wall must outlast the reviewing agent's own budget
 		// (agents.reviewer_agents timeout, 60 minutes) plus sealing
@@ -160,7 +183,16 @@ func implementChainStages(chain ChainConfig) []ChainStage {
 		// outside: both live runs of two tickets died at exactly this
 		// wall while their reviewers were mid-judgment.
 		{Name: StageReviewA, Profile: chain.Profiles.ReviewA, MaxRuntimeSeconds: 70 * 60},
-		{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60},
+	}
+	if reviewCards > 1 {
+		stages = append(stages, ChainStage{Name: StageReviewB, Profile: chain.Profiles.ReviewB, MaxRuntimeSeconds: 70 * 60})
+	}
+	return append(stages, validateAndPublishStages(chain)...)
+}
+
+// validateAndPublishStages close every implementing chain.
+func validateAndPublishStages(chain ChainConfig) []ChainStage {
+	return []ChainStage{
 		// The validate card runs the decision plus install and up to four
 		// verify commands, each with its own ten-minute ceiling
 		// (ValidationCommandTimeout) — a legal consumer configuration can

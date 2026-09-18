@@ -38,18 +38,39 @@ func ChainPlanFromDecision(runDir string, consumerConfigPath string) (runtime.Ch
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return runtime.ChainPlan{}, errors.New("readiness decision invalid")
 	}
+	reviewers := consumerReviewerCount(consumerConfigPath)
 	switch {
 	case parsed.RequestKind == "investigation":
 		review, err := consumerReviewsInvestigation(consumerConfigPath)
 		if err != nil {
 			return runtime.ChainPlan{}, err
 		}
-		return runtime.ChainPlan{Shape: runtime.ShapeInvestigation, ReviewInvestigation: review}, nil
+		return runtime.ChainPlan{Shape: runtime.ShapeInvestigation, ReviewInvestigation: review, Reviewers: reviewers}, nil
 	case parsed.NeedsDesign != nil && *parsed.NeedsDesign:
-		return runtime.ChainPlan{Shape: runtime.ShapeDesign}, nil
+		return runtime.ChainPlan{Shape: runtime.ShapeDesign, Reviewers: reviewers}, nil
 	default:
-		return runtime.ChainPlan{Shape: runtime.ShapeImplement}, nil
+		return runtime.ChainPlan{Shape: runtime.ShapeImplement, Reviewers: reviewers}, nil
 	}
+}
+
+// consumerReviewerCount reads how many judges are configured, which is how
+// many review cards the chain runs. A config that cannot be read for this
+// answers zero, and the chain keeps its original two cards rather than
+// shipping a change nobody judged.
+func consumerReviewerCount(consumerConfigPath string) int {
+	raw, err := os.ReadFile(consumerConfigPath)
+	if err != nil {
+		return 0
+	}
+	var parsed struct {
+		Models struct {
+			Reviewers []struct{} `json:"reviewers"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return 0
+	}
+	return len(parsed.Models.Reviewers)
 }
 
 // consumerReviewsInvestigation reads the destination switch leniently: an
