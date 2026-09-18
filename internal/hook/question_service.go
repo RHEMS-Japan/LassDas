@@ -281,6 +281,12 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	// ingested while the first was being implemented.
 	ingestResult := s.completeLostIngest(ctx)
 	if !notice.Exists {
+		// Said out loud: this return hands back whatever the intake scan
+		// made of the tick, and a reader cannot tell it from the one below.
+		// A live instance sat here for an hour with a question open and a
+		// stop comment unread, and the log said only that the scan was
+		// incomplete (2026-09-18).
+		s.logger.Info("no run is in flight for this project", "code", ingestResult.Code)
 		return ingestResult
 	}
 	// A notice that could not be posted must never hold back the answer
@@ -300,6 +306,8 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 		return s.failure("question_tick_load", err, "")
 	}
 	if !waiting {
+		s.logger.Info("the run in flight is not waiting for an answer",
+			"issue_id", notice.IssueID, "code", ingestResult.Code)
 		if noticePending {
 			return noticeResult
 		}
