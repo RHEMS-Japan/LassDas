@@ -698,20 +698,28 @@ func (s *QuestionTickService) postRunCommentRouted(ctx context.Context, route Re
 
 // PostPlanComment posts the run's implementation-plan notice exactly once
 // (the same lease/marker machinery as the acceptance notice). It is a
-// notice, not a gate: the return value only says whether the notice is now
-// known to be on the ticket, and the caller continues the run either way —
-// a missing plan notice must never block a delivery.
-func (s *QuestionTickService) PostPlanComment(ctx context.Context, deliveryID, content string) bool {
+// notice, not a gate: the caller continues the run either way — a missing
+// plan notice must never block a delivery.
+//
+// It returns why it could not post, because the caller's log line said only
+// that it had not. Live, that line appeared on every run, successful and
+// failed alike, and the reason was nowhere: the dispositions that are not
+// errors (a lease held elsewhere, a conflicting marker) return quietly, and
+// the one that is an error logs under a different message the reader has no
+// way to connect to this one.
+func (s *QuestionTickService) PostPlanComment(ctx context.Context, deliveryID, content string) (bool, string) {
 	posted, err := s.store.RunCommentState(ctx, s.config, RunCommentPlan, "")
 	if err != nil {
-		s.failure("question_tick_plan_state", err, deliveryID)
-		return false
+		return false, s.failure("question_tick_plan_state", err, deliveryID).Code
 	}
 	if posted {
-		return true
+		return true, ""
 	}
-	_, ok := s.postRunComment(ctx, RunCommentPlan, "", content, deliveryID)
-	return ok
+	result, ok := s.postRunComment(ctx, RunCommentPlan, "", content, deliveryID)
+	if ok {
+		return true, ""
+	}
+	return false, result.Code
 }
 
 // E2ECommentPosted reports whether the run's observation comment is already
