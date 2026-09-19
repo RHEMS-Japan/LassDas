@@ -443,6 +443,27 @@ func RetryableReviewFailure(outcome AgentOutcome) bool {
 // as repository-relative paths. A change outside the allowed prefixes is an
 // error rather than a filtered-out result: the agent was told where it may
 // write, and writing elsewhere is a failure of the run, not noise to discard.
+// ignoredWritablePrefix reports the declared writable prefix that an ignored
+// directory record swallows: the directory is that prefix, or it sits above
+// it, so nothing written under it can reach the delivery. It answers "" for
+// an ordinary byproduct directory (a dependency install or build output that
+// merely sits inside a writable prefix), which stays tolerated.
+func ignoredWritablePrefix(directory string, allowedPrefixes []string) string {
+	if !strings.HasSuffix(directory, "/") {
+		directory += "/"
+	}
+	for _, prefix := range allowedPrefixes {
+		if !strings.HasSuffix(prefix, "/") {
+			// A root file is named exactly; a directory record cannot be one.
+			continue
+		}
+		if prefix == directory || strings.HasPrefix(prefix, directory) {
+			return prefix
+		}
+	}
+	return ""
+}
+
 func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts []string) ([]string, error) {
 	return ChangedFilesUnderExcept(root, allowedPrefixes, ignoredByproducts, "")
 }
@@ -488,12 +509,26 @@ func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredBypro
 			//   appearing when the implementer ran the repo's own tests.
 			// - Hidden paths: a .DS_Store or an editor cache, never a
 			//   deliverable.
-			if len(allowedPrefixes) == 0 || strings.HasSuffix(entry, "/") {
+			if len(allowedPrefixes) == 0 {
 				continue
 			}
 			path := entry[3:]
+			if strings.HasSuffix(entry, "/") {
+				// A collapsed directory is a byproduct unless it is (or
+				// contains) a place the consumer declared writable. When it
+				// is, everything the agent wrote there collapsed into this
+				// one record, the candidate came out empty, and the run
+				// reported success having delivered nothing (#18).
+				if prefix := ignoredWritablePrefix(path, allowedPrefixes); prefix != "" {
+					return nil, errors.New("the repository ignores the writable scope " + prefix +
+						": everything written there would be left out of the delivery. Remove it from the repository's ignore rules, or point the scope somewhere the repository tracks")
+				}
+				continue
+			}
 			if !hasHiddenComponent(path) && allowedPath(path, allowedPrefixes) && !isDeclaredByproduct(path, ignoredByproducts) {
-				return nil, errors.New("the repository ignores a file inside the writable scope: " + path)
+				return nil, errors.New("the repository ignores a file inside the writable scope: " + path +
+					". If it is a byproduct of the toolchain, declare it in ignored_byproducts (" + filepath.Base(path) +
+					"); if it is part of what this ticket delivers, remove it from the repository's ignore rules")
 			}
 			continue
 		}
