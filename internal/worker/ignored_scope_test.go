@@ -79,5 +79,7 @@ func ignore(t *testing.T, root, rules string) {
 		t.Fatal(err)
 	}
 	agentGit(t, root, "add", "-f", ".gitignore")
-	agentGit(t, root, "commit", "-m", "ignore rules")
+	// The identity is given here for the same reason the fixture gives it:
+	// a runner with no git identity configured cannot commit at all.
+	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rules")
 }
