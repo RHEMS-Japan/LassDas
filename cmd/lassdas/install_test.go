@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -431,6 +432,78 @@ func TestTheRequestersManualIsReachable(t *testing.T) {
 	for _, want := range []string{"カテゴリ", "起票者", "表示であって、入力ではない"} {
 		if !strings.Contains(string(manual), want) {
 			t.Errorf("マニュアルに %q がありません", want)
+		}
+	}
+}
+
+// The migration skill hands someone a Kubernetes manifest to fill in. Every
+// value in it that the engine fixes (the uid it runs as, the platform, the
+// board port, the two mount paths) must match what `lassdas run spec` says,
+// or the person follows the skill and gets a Pod that cannot start or cannot
+// write. The two are checked against each other here so they cannot drift.
+func TestTheMigrationSkillMatchesTheSpecItFillsIn(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("skills", "lassdas-migrate", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := string(raw)
+	spec, err := localrun.Describe(localrun.Instance{
+		ID: "example", Dir: t.TempDir(), Image: "registry.example/runtime@sha256:" + strings.Repeat("a", 64),
+		EngineSHA: strings.Repeat("b", 40), BoardPort: 9200,
+	})
+	// Describe needs a prepared instance; when it cannot read one, the
+	// fixed values are still the contract this test is about.
+	user, platform, mount, data := "1000", "arm64", "/etc/lassdas/config", "/data"
+	port := "9200"
+	if err == nil {
+		user = strings.Split(spec.User, ":")[0]
+		platform = strings.TrimPrefix(spec.Platform, "linux/")
+		mount, data = spec.ConfigMountPath, spec.DataPath
+		port = strconv.Itoa(spec.BoardPort)
+	}
+	for _, want := range []string{
+		"runAsUser: " + user,
+		"fsGroup: " + user,
+		"kubernetes.io/arch: " + platform,
+		"containerPort: " + port,
+		"mountPath: " + mount,
+		"mountPath: " + data,
+	} {
+		if !strings.Contains(skill, want) {
+			t.Errorf("移設の手順に %q がありません (run spec の値と食い違います)", want)
+		}
+	}
+	// The three things that go wrong quietly, and the state triage that
+	// keeps the skill usable before anything has ever been started.
+	for _, want := range []string{"replicas: 1", "digest", "init.json"} {
+		if !strings.Contains(skill, want) {
+			t.Errorf("移設の手順に %q がありません", want)
+		}
+	}
+	// The board auth has to be switched where the environment is actually
+	// built, not only described elsewhere: carried over as "local", the Pod
+	// starts, looks healthy, and answers 403 to everyone (it only accepts a
+	// loopback Host). So the block that creates the secret is read on its
+	// own.
+	secretBlock := ""
+	for _, block := range strings.Split(skill, "```") {
+		if strings.Contains(block, "create secret generic") {
+			secretBlock = block
+		}
+	}
+	if secretBlock == "" {
+		t.Fatal("鍵を作る手順がありません")
+	}
+	if !strings.Contains(secretBlock, "LASSDAS_BOARD_AUTH=basic") {
+		t.Error("鍵を作る手順が、板の認証を basic にしていません")
+	}
+	if strings.Contains(secretBlock, "LASSDAS_BOARD_AUTH=local") {
+		t.Error("鍵を作る手順が、板の認証を local のまま持って行こうとしています")
+	}
+	// No credential value is written down for anyone to copy.
+	for _, forbidden := range []string{"sk-or-", "ghp_", "BACKLOG_API_KEY="} {
+		if strings.Contains(skill, forbidden) {
+			t.Errorf("手順に鍵の値らしきもの (%q) が含まれています", forbidden)
 		}
 	}
 }
