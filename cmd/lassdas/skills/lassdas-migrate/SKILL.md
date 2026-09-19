@@ -24,7 +24,7 @@ ls ~/.lassdas/<project>/
 
 真ん中の状態はよくある。`setup.json` の `host` に値を書いたまま `apply` すると、本体は「別の場所に置く」と読んで**準備だけで止まる**ので、一度も起動していない。その場合、移すべき台帳の中身は空で、実質は「K8s に新しく立てる」になる。
 
-## 1. まず現物を出す
+## 1. 現物と置き先を確かめる
 
 ```
 lassdas run spec --project <project>
@@ -33,6 +33,34 @@ lassdas run spec --project <project>
 これが正本。何を・どういう条件で置けばよいか (image / 実行ユーザー / platform / 板の port / 環境のファイル / 設定 / 消してはいけない書き込み先) が全部入っている。**推測で書かない。**出力の `before_moving` は、そのまま持って行くと静かに壊れるものの一覧。
 
 置き先ごとの対応 (Secret / ConfigMap / PVC / Service) は `~/.lassdas/SETUP.md` の「置き方の例」にある。
+
+### 1.1 置き先を調べてから、選択肢にして聞く
+
+**どのクラスタのどの namespace に置くかを、自分で決めない。勝手に決め打ちすると、別のクラスタや無関係な namespace に本体が立つ。**手元の kubectl が向いている先がその人の意図とは限らない。
+
+まず実在するものを調べる。
+
+```
+kubectl config get-contexts -o name
+kubectl --context <選んだ context> get namespace
+kubectl --context <選んだ context> get nodes -l kubernetes.io/arch=arm64
+kubectl --context <選んだ context> get storageclass
+```
+
+そのうえで、**出てきたものだけを選択肢にして**利用者に聞く。白紙で「どのクラスタですか」と聞かない — 何を答えればよいか分からないし、綴りを間違えれば後の工程で弾かれる。何も見つからなければ、そのことを言ってから自由記述で聞く。
+
+確認する 4 つ:
+
+| 聞くこと | 調べ方 | 見つからないとどうなるか |
+|---|---|---|
+| どの context | `kubectl config get-contexts` | 別のクラスタに立つ |
+| どの namespace | `get namespace` | `default` や無関係な場所に混ざる |
+| **arm64 の node があるか** | `get nodes -l kubernetes.io/arch=arm64` | **Pod が起動しない** (image は linux/arm64) |
+| どの storageClass | `get storageclass` | PVC が Pending のまま止まる |
+
+arm64 の node が 1 つも無ければ、**そのクラスタには置けない**。ここで止めて利用者に伝える。先へ進んでも Pod は Pending のまま動かない。
+
+**以後のコマンドで `--context` と `-n` を省略しない。**省略すると手元の current-context に向かう。この文書のコマンドはすべて両方を明示してある。
 
 ## 2. 先に止める (動いている場合だけ)
 
@@ -54,7 +82,7 @@ docker ps --filter name=lassdas-<project>
 | `image` | そのまま (digest 固定) | タグに置き換えない |
 | `user` (1000:1000) | `runAsUser` / `runAsGroup` | image のファイルがこの uid の持ち物 |
 | `platform` (linux/arm64) | arm64 の node | x86 の node に置くと起動しない |
-| `env_file` | Secret | **値を読まない・会話に出さない。**ファイルごと渡す (`kubectl create secret generic <name> --from-env-file=<env_file>`) |
+| `env_file` | Secret | **値を読まない・会話に出さない。**ファイルごと渡す (6.1 の手順で、ファイルごと渡す) |
 | `config_files` (2 つ) | ConfigMap → `config_mount_path` に read-only | 中身は置き場所が変わっても同じ |
 | `data_path` (`/data`) | PVC | **作り直さない。中身を移す** (次節) |
 | `board_port` | Service | 公開範囲は利用者に確認する |
@@ -81,8 +109,8 @@ docker ps --filter name=lassdas-<project>
 
 ```
 docker run --rm -v <data_name>:/from -v "$PWD":/out alpine tar -C /from -cf /out/lassdas-data.tar .
-kubectl -n <ns> cp lassdas-data.tar <一時 Pod>:/tmp/   # PVC を mount した Pod
-kubectl -n <ns> exec <一時 Pod> -- tar -C /data -xf /tmp/lassdas-data.tar
+kubectl --context <ctx> -n <ns> cp lassdas-data.tar <一時 Pod>:/tmp/   # PVC を mount した Pod
+kubectl --context <ctx> -n <ns> exec <一時 Pod> -- tar -C /data -xf /tmp/lassdas-data.tar
 ```
 
 展開後、`/data` 以下が uid 1000 の持ち物になっていることを確かめる。

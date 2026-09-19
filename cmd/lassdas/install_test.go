@@ -500,6 +500,37 @@ func TestTheMigrationSkillMatchesTheSpecItFillsIn(t *testing.T) {
 	if strings.Contains(secretBlock, "LASSDAS_BOARD_AUTH=local") {
 		t.Error("鍵を作る手順が、板の認証を local のまま持って行こうとしています")
 	}
+	// Where it lands is asked, not assumed. A migration that picks the
+	// machine's current context puts the engine on whatever cluster the
+	// person's kubectl happened to point at.
+	for _, want := range []string{"kubectl config get-contexts", "get storageclass", "kubernetes.io/arch=arm64", "選択肢",
+		// Without an arm64 node the Pod never starts, so the skill stops
+		// there instead of creating things that will sit Pending.
+		"そのクラスタには置けない"} {
+		if !strings.Contains(skill, want) {
+			t.Errorf("置き先を調べて聞く手順に %q がありません", want)
+		}
+	}
+	// Every kubectl command names the cluster and the namespace.
+	for _, line := range strings.Split(skill, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "kubectl ") || strings.HasPrefix(trimmed, "kubectl config ") {
+			continue
+		}
+		if !strings.Contains(trimmed, "--context") {
+			t.Errorf("クラスタを省略したコマンドがあります: %s", trimmed)
+			continue
+		}
+		// The discovery reads are cluster-wide and take no namespace; every
+		// other command works on objects that live in one.
+		clusterWide := strings.Contains(trimmed, "get namespace") ||
+			strings.Contains(trimmed, "get nodes") ||
+			strings.Contains(trimmed, "get storageclass")
+		if !clusterWide && !strings.Contains(trimmed, "-n ") {
+			t.Errorf("namespace を省略したコマンドがあります: %s", trimmed)
+		}
+	}
+
 	// No credential value is written down for anyone to copy.
 	for _, forbidden := range []string{"sk-or-", "ghp_", "BACKLOG_API_KEY="} {
 		if strings.Contains(skill, forbidden) {
