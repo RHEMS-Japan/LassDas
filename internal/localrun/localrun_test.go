@@ -431,10 +431,22 @@ func TestTheSpecSaysWhatRunsAndNotWhere(t *testing.T) {
 		t.Fatal("the spec does not say where the environment is")
 	}
 
-	// Nothing in it names a host.
+	// Nothing the spec says names a host. The generated identifiers are left
+	// out of the scan: they carry a hex digest, and hex spells "ec2" often
+	// enough to fail this test at random (CI, 2026-09-19).
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "name")
+	delete(fields, "data_name")
+	prose, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, host := range []string{"docker", "kubernetes", "kubectl", "ec2", "Docker Desktop"} {
-		if bytes.Contains(bytes.ToLower(encoded), bytes.ToLower([]byte(host))) {
-			t.Errorf("the spec names a host (%s): %s", host, encoded)
+		if bytes.Contains(bytes.ToLower(prose), bytes.ToLower([]byte(host))) {
+			t.Errorf("the spec names a host (%s): %s", host, prose)
 		}
 	}
 }

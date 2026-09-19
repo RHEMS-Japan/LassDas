@@ -55,3 +55,25 @@ func TestTheSpecSaysWhatHasToChangeWhenItLeavesThisMachine(t *testing.T) {
 		t.Error("台帳の移し方と二重起動は、板の設定に関わらず言う")
 	}
 }
+
+// The generated name carries a hex digest, and hex spells host names: a
+// digest containing "ec2" used to fail the spec's "names no host" check at
+// random (CI, 2026-09-19). The check reads what the spec says, not the
+// identifiers it generates.
+func TestAGeneratedIdentifierIsNotReadAsAHostName(t *testing.T) {
+	i := fixture(t)
+	spec, err := Describe(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Name == "" || spec.DataName == "" {
+		t.Fatal("識別子がありません")
+	}
+	for _, line := range spec.BeforeMoving {
+		for _, host := range []string{"docker", "kubernetes", "kubectl", "ec2"} {
+			if strings.Contains(strings.ToLower(line), host) {
+				t.Errorf("移設前の注意が置き場所を名指ししています (%s): %s", host, line)
+			}
+		}
+	}
+}
