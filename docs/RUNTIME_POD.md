@@ -30,6 +30,29 @@ keeps them on the same ledger, routes and identities.
 
 ## The ticket page
 
+The observer runs in both `runner` and `cards` mode: it writes an initial
+snapshot after reception and independently refreshes it every five seconds
+by default (`attendant --observe-interval`). The board streams file changes
+on a one-second watch. The running step is shown separately from the coarse
+pipeline stage, including steps within reception. A missing, invalid, or
+more-than-three-minute-old snapshot is displayed as unconfirmed progress,
+not an empty healthy board. Connection/receive time does not prove that the
+progress itself is fresh.
+
+Observation is separate from advancing stages. In `cards` mode,
+`--chain-interval` checks for stage transitions every ten seconds by
+default; `0` ties those checks to the reception tick. It never enables
+card-chain execution in `runner` mode. Disabling either fast loop does not
+disable the other. These are polling intervals, not upper bounds on stage
+latency: measure a stage's completion to the next stage's start separately
+from the age of the displayed snapshot.
+
+Cards-mode records keep the shared run-directory layout below. A single
+runner's existing workspace is resolved from Hermes' canonical card listing
+by delivery id; it is not moved or copied for viewing. The private snapshot
+carries that path for detail/live routing, and the status server removes it
+from board, SSE, and detail responses. Clients cannot select a workspace.
+
 The status board lists the runs; each row links to `/tickets/<issue key>`, one page per ticket built from the run directory's own records, in order, with the evidence under each step:
 
 - the reception: what the intake read, every assess/check attempt (a check that failed shows as a sent-back round with the checker's reasons; the last attempt carries the assumptions and questions the decision rests on), the sealed decision and its design line;

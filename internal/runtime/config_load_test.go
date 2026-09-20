@@ -241,10 +241,10 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 
 func TestListBoardTasksReadsEveryAssignee(t *testing.T) {
 	bin, callLog, tasksFile := stubHermes(t)
-	setTasks(t, tasksFile, []BoardTask{{ID: "t1", Status: "blocked", IdempotencyKey: "k1", BlockKind: "needs_input"}})
+	setTasks(t, tasksFile, []BoardTask{{ID: "t1", Status: "blocked", IdempotencyKey: "k1", BlockKind: "needs_input", WorkspacePath: "/example/workspace"}})
 	hermes := NewHermes(Config{HermesBin: bin, HermesBoard: "lassdas"})
 	tasks, err := hermes.ListBoardTasks(context.Background())
-	if err != nil || len(tasks) != 1 || tasks[0].BlockKind != "needs_input" {
+	if err != nil || len(tasks) != 1 || tasks[0].BlockKind != "needs_input" || tasks[0].WorkspacePath != "/example/workspace" {
 		t.Fatalf("ListBoardTasks() = %+v, %v", tasks, err)
 	}
 	records := calls(t, callLog)

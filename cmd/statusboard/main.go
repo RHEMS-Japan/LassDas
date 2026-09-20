@@ -479,6 +479,7 @@ type boardServer struct {
 }
 
 type streamPayload struct {
+	SnapshotState  string            `json:"snapshot_state"`
 	Board          json.RawMessage   `json:"board"`
 	Events         []json.RawMessage `json:"events"`
 	Actions        []json.RawMessage `json:"actions"`
@@ -489,6 +490,7 @@ type streamPayload struct {
 
 func (s *boardServer) payload() streamPayload {
 	payload := streamPayload{
+		SnapshotState:  "missing",
 		Board:          json.RawMessage(`{"schema_version":1,"runs":[]}`),
 		Events:         tailJSONL(filepath.Join(s.statusDir, "events.jsonl"), 80),
 		Actions:        tailJSONL(filepath.Join(s.statusDir, "actions.jsonl"), 50),
@@ -496,8 +498,15 @@ func (s *boardServer) payload() streamPayload {
 		ActionsEnabled: s.poster != nil,
 		SentAt:         time.Now().UTC(),
 	}
-	if raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json")); err == nil && json.Valid(raw) {
-		payload.Board = raw
+	if raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json")); err == nil {
+		payload.SnapshotState = "invalid"
+		if public, generatedAt, err := publicSnapshot(raw); err == nil {
+			payload.Board = public
+			payload.SnapshotState = "ready"
+			if age := payload.SentAt.Sub(generatedAt); age > snapshotMaxAge || age < -time.Minute {
+				payload.SnapshotState = "stale"
+			}
+		}
 	}
 	return payload
 }
@@ -759,8 +768,8 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	send()
 	last := stamp()
+	send()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	heartbeat := 0

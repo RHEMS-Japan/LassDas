@@ -14,6 +14,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/ticketview"
 )
 
 // The status board is a pure observation: every tick the attendant writes
@@ -42,11 +43,15 @@ type BoardSnapshot struct {
 
 // RunStatus is one delivery's position in the pipeline, in requester terms.
 type RunStatus struct {
-	DeliveryID string `json:"delivery_id"`
-	IssueID    int64  `json:"issue_id,omitempty"`
-	IssueKey   string `json:"issue_key,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	State      string `json:"state"`
+	// Private routing metadata from Hermes. The status server removes it
+	// from every public response; it never comes from a request URL.
+	WorkspacePath string                  `json:"workspace_path,omitempty"`
+	Running       *ticketview.RunningStep `json:"running,omitempty"`
+	DeliveryID    string                  `json:"delivery_id"`
+	IssueID       int64                   `json:"issue_id,omitempty"`
+	IssueKey      string                  `json:"issue_key,omitempty"`
+	Summary       string                  `json:"summary,omitempty"`
+	State         string                  `json:"state"`
 	// Step is one of the pipeline steps (intake, implement, review, checks,
 	// staging, confirm, production) or a resting state (question, done,
 	// stopped, failed).
@@ -164,6 +169,20 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		DeliveryID: run.DeliveryID, IssueID: run.IssueID, IssueKey: run.IssueKey, Summary: run.Summary,
 		State: run.State, ClaimedAt: run.ClaimedAt, Terminal: run.TerminalCode,
 	}
+	runDir := runDirectory(config, run.DeliveryID)
+	var runnerCard *runtime.BoardTask
+	if !config.OrchestrationCards() {
+		for i := range tasks {
+			if tasks[i].IdempotencyKey == run.DeliveryID {
+				runnerCard = &tasks[i]
+				if path := runnerCard.WorkspacePath; filepath.IsAbs(path) && filepath.Clean(path) != string(os.PathSeparator) {
+					status.WorkspacePath = filepath.Clean(path)
+					runDir = status.WorkspacePath
+				}
+				break
+			}
+		}
+	}
 	switch run.State {
 	case "queued":
 		// The pause outranks a budget or login hold left in the run
@@ -173,7 +192,7 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 			status.place("intake", "受付停止中", "運用者の指示で新しい依頼の開始を止めています（停止: "+since.In(hook.DisplayZone()).Format("2006-01-02 15:04")+"）。再開後に開始します")
 			break
 		}
-		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
+		if placeIntakeHold(&status, runDir) {
 			break
 		}
 		status.place("intake", "受付待ち", "")
@@ -191,12 +210,31 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		// comment nobody reads (review of #197).
 		status.ActionEffect = "回答を受け取ると、追加の調査・設計または実装へ進みます。回答まで作業は再開しません。" + withdrawSentence(run) + "取り下げると、変更を加えずにこの依頼を終了します。"
 	case "claimed":
-		if placeIntakeHold(&status, runDirectory(config, run.DeliveryID)) {
+		if placeIntakeHold(&status, runDir) {
 			break
 		}
 		classifyClaimed(&status, run, tasks)
+		if runnerCard != nil {
+			classifyRunnerCard(&status, runnerCard)
+		}
+		if status.Step != "attention" && (runnerCard == nil || runnerCard.Status == "running") {
+			status.Running = ticketview.ReadRunningStep(runDir)
+			if status.Running != nil {
+				// Cards already supply an authoritative coarse stage. Only
+				// the single runner needs its step to locate that stage.
+				if runnerCard != nil {
+					stage := ticketview.LiveStage(runner.LiveLogName(status.Running.Step))
+					for _, entry := range railStages(config) {
+						if entry.ID == stage {
+							status.place(stage, entry.Label+"中", "")
+							break
+						}
+					}
+				}
+			}
+		}
 	case "terminal":
-		classifyAfterTerminal(&status, config, run, tasks)
+		classifyAfterTerminalInDirectory(&status, config, run, tasks, runDir)
 	case "terminal_report_pending", "question_report_pending":
 		status.place("reporting", "報告を作成中", "チケットへの報告を準備しています")
 	default:
@@ -252,6 +290,21 @@ func placeIntakeHold(status *RunStatus, runDir string) bool {
 func (s *RunStatus) placeAt(step, stage, title, detail string) {
 	s.place(step, title, detail)
 	s.Stage = stage
+}
+
+func classifyRunnerCard(status *RunStatus, card *runtime.BoardTask) {
+	switch card.Status {
+	case "running":
+		status.place("intake", "実行中", "工程情報の更新を待っています")
+	case "blocked", "failed", "cancelled", "triage", "scheduled":
+		status.place("attention", "工程の停止を確認", "実行カードが停止しています。台帳の終了報告はまだ確認できません")
+		status.NextAction = "運用担当者が実行履歴とチケットの報告を確認してください。"
+		status.ActionEffect = "この表示だけでは終了理由や自動復旧の可否を確認できません。"
+	case "done", "archived":
+		status.place("reporting", "終了状態を確認中", "実行カードは終了しています。台帳の終了報告を待っています")
+	default:
+		status.place("intake", "実行待ち", "実行カードの開始を待っています")
+	}
 }
 
 func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.BoardTask) {
@@ -321,7 +374,10 @@ func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.B
 // endings (expired, stopped, dead cards) exist only as posted comments,
 // and without the seal the board would keep telling the previous story.
 func classifyAfterTerminal(status *RunStatus, config runtime.Config, run state.RunOverview, tasks []runtime.BoardTask) {
-	runDir := runDirectory(config, run.DeliveryID)
+	classifyAfterTerminalInDirectory(status, config, run, tasks, runDirectory(config, run.DeliveryID))
+}
+
+func classifyAfterTerminalInDirectory(status *RunStatus, config runtime.Config, run state.RunOverview, tasks []runtime.BoardTask, runDir string) {
 	readDeliveryEvidence(status, runDir)
 	if run.TerminalCode == string(hook.TerminalInvestigated) {
 		status.place("done", "調査報告を掲示して完了", "調査のみの依頼のため、コードの変更と Pull Request はありません")

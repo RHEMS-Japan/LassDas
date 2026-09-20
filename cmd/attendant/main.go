@@ -48,6 +48,12 @@ func statusDir() string {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return runContext(ctx)
+}
+
+func runContext(ctx context.Context) error {
 	flags := flag.NewFlagSet("attendant", flag.ContinueOnError)
 	configPath := flags.String("config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "runtime.json path")
 	interval := flags.Duration("interval", time.Minute, "tick interval")
@@ -73,9 +79,6 @@ func run() error {
 	}
 	defer func() { _ = services.Close() }()
 	hermes := runtime.NewHermes(config)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	// observe writes the status-board snapshot. Observation only; a failed
 	// snapshot must never disturb the tick that feeds it. The mutex
@@ -171,10 +174,10 @@ func run() error {
 			// A ticket read a moment ago starts here rather than waiting for
 			// the chain loop's next pass.
 			syncChains()
-			observe()
 		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())
 		}
+		observe()
 	}
 
 	if *once {
@@ -205,16 +208,14 @@ func run() error {
 	// it never touches the tracker unless the bell rang, so the extra rate
 	// costs nothing external. Only the main loop runs ticks; the observation
 	// loop signals a bell without waiting for the reception to finish.
-	snapshotInterval := *observeInterval
-	if !config.OrchestrationCards() {
-		snapshotInterval = 0
-	}
 	chainEvery := *chainInterval
 	if chainEvery <= 0 || !config.OrchestrationCards() {
 		// Tied to the tick, which is what it was before this loop existed.
 		chainEvery = 0
 	}
-	runLoops(ctx, *interval, snapshotInterval, chainEvery, tick, observe, syncChains, bellRang)
+	// Both orchestration modes publish progress; only cards advances stages
+	// here. Observation must not depend on whether that faster loop is on.
+	runLoops(ctx, *interval, *observeInterval, chainEvery, tick, observe, syncChains, bellRang)
 	logger.Info("attendant stopping")
 	return nil
 }

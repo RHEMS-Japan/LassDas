@@ -53,6 +53,9 @@ type BoardTask struct {
 	ID             string `json:"id"`
 	Status         string `json:"status"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// WorkspacePath comes from the canonical board, not a guessed directory.
+	// Single-runner cards keep their records here rather than in runs/<delivery>.
+	WorkspacePath string `json:"workspace_path"`
 	// BlockKind is the block's kind for blocked cards (needs_input,
 	// auto, …); empty otherwise.
 	BlockKind string `json:"block_kind"`
