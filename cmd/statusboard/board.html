@@ -351,6 +351,9 @@ const el = (tag, className, text) => {
 /* ---- state ---- */
 let lastPayloadAt = 0;       // ms, local receive time
 let lastServerSentAt = null; // ISO from server
+let snapshotState = "missing";
+let snapshotAgeAtReceive = null;
+let feedConnected = false;
 let trackerBase = "";
 let actionsEnabled = false;
 let sentActions = new Map(); // "action:issue" -> at
@@ -1026,6 +1029,9 @@ function buildCard(run) {
   const nowline = el("div", "nowline");
   nowline.appendChild(el("span", "now-title", run.step_title || ""));
   nowline.appendChild(el("span", "now-detail", run.detail || ""));
+  if (run.running && run.state === "claimed") {
+    nowline.appendChild(el("span", "now-detail running-step", "現在の工程: " + run.running.step));
+  }
   card.appendChild(nowline);
 
   const track = el("div", "track");
@@ -1089,7 +1095,9 @@ function renderBoard() {
   for (const pane of runsBox.querySelectorAll(".livepane")) liveDetach(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
-    runsBox.appendChild(el("div", "empty-state", "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));
+    runsBox.appendChild(el("div", "empty-state", snapshotProblem()
+      ? "進捗を確認できません — 依頼が0件であることを意味しません"
+      : "進行中の依頼はありません — チケットの起票で自動的にここに現れます"));
   } else {
     for (const run of active) runsBox.appendChild(buildCard(run));
   }
@@ -1117,6 +1125,10 @@ function renderBoard() {
   const needAttention = active.filter(run => ACTIONABLE.has(run.step) || run.step === "attention").length;
   const counts = document.getElementById("counts");
   counts.replaceChildren();
+  if (snapshotProblem()) {
+    counts.appendChild(document.createTextNode("最新件数は未確認 — 表示があれば最後に確認できた状態です"));
+    return;
+  }
   counts.appendChild(document.createTextNode("処理中 "));
   counts.appendChild(el("b", null, String(active.length)));
   counts.appendChild(document.createTextNode(" ／ 要対応 "));
@@ -1153,6 +1165,7 @@ function renderEvents(events, fresh) {
 
 /* ---- live feed ---- */
 function applyPayload(payload, firstLoad) {
+  if (!payload || typeof payload !== "object") throw new Error("invalid payload");
   lastPayloadAt = Date.now();
   lastServerSentAt = payload.sent_at || null;
   trackerBase = payload.tracker_base || "";
@@ -1164,8 +1177,19 @@ function applyPayload(payload, firstLoad) {
       if (action && action.action && action.issue_id) sentActions.set(actKey(action.action, action.issue_id, action.delivery_id), action.at);
     } catch (_) { /* skip torn line */ }
   }
-  try { latestBoard = typeof payload.board === "string" ? JSON.parse(payload.board) : (payload.board || { runs: [] }); }
-  catch (_) { latestBoard = { runs: [] }; }
+  let board;
+  try { board = typeof payload.board === "string" ? JSON.parse(payload.board) : payload.board; }
+  catch (_) { board = null; }
+  const generated = Date.parse(board && board.generated_at || "");
+  const sent = Date.parse(payload.sent_at || "");
+  snapshotState = payload.snapshot_state || (Number.isFinite(generated) ? "ready" : "missing");
+  snapshotAgeAtReceive = Number.isFinite(generated) && Number.isFinite(sent) ? (sent - generated) / 1000 : null;
+  if ((snapshotState === "ready" || snapshotState === "stale") && board && Array.isArray(board.runs)) {
+    latestBoard = board;
+  } else {
+    if (snapshotState === "ready" || snapshotState === "stale") snapshotState = "invalid";
+    // Retain the last valid board, but never pretend it is current.
+  }
   adoptStages(latestBoard.stages);
   document.getElementById("footer").textContent = actionsEnabled
     ? "LASSDAS STATUS BOARD — 操作（Go・停止・確認済み）は依頼者のコメントとしてチケットに投稿します。質問への回答はチケットで行います。投稿後、自動処理が受け取るまで状態の更新をお待ちください。"
@@ -1182,8 +1206,13 @@ let firstLoad = true;
 function connect() {
   source = new EventSource("/stream");
   source.addEventListener("board", message => {
-    setConnected(true);
-    try { applyPayload(JSON.parse(message.data), firstLoad); } catch (_) { /* keep last good state */ }
+    try {
+      applyPayload(JSON.parse(message.data), firstLoad);
+      setConnected(true);
+    } catch (_) {
+      snapshotState = "invalid";
+      setConnected(true);
+    }
     firstLoad = false;
   });
   source.onerror = () => {
@@ -1197,10 +1226,29 @@ function connect() {
 }
 
 function setConnected(connected) {
-  document.getElementById("conn-banner").classList.toggle("on", !connected);
+  feedConnected = connected;
+  refreshFeedStatus();
+}
+
+function snapshotProblem() {
+  if (snapshotState === "missing") return "進捗データがまだ作成されていないか、読み取れません。実行状態は未確認です";
+  if (snapshotState === "invalid") return "進捗データを読み取れません。表示があれば最後に確認できた状態です";
+  const age = snapshotAgeAtReceive === null ? null : snapshotAgeAtReceive + (Date.now() - lastPayloadAt) / 1000;
+  if (snapshotState === "stale" || age === null || age > 180 || age < -60) {
+    return "進捗データの更新が止まっています。表示は過去の状態で、現在の実行状態は未確認です";
+  }
+  return "";
+}
+
+function refreshFeedStatus() {
+  const problem = snapshotProblem();
+  if (problem) document.getElementById("counts").textContent = "最新件数は未確認 — 表示があれば最後に確認できた状態です";
+  const banner = document.getElementById("conn-banner");
+  banner.classList.toggle("on", !feedConnected || !!problem);
+  banner.textContent = feedConnected ? problem : "接続が切れています — 再接続を試みています。表示は最後に受信した状態のままです";
   const live = document.getElementById("live");
-  live.classList.toggle("dead", !connected);
-  document.getElementById("live-text").textContent = connected ? "ONLINE" : "再接続中…";
+  live.classList.toggle("dead", !feedConnected || !!problem);
+  document.getElementById("live-text").textContent = !feedConnected ? "再接続中…" : problem ? "進捗未確認" : "ONLINE";
 }
 
 /* per-second local refresh: elapsed counters + the honest freshness line */
@@ -1213,9 +1261,14 @@ setInterval(() => {
   if (!lastPayloadAt) { ago.textContent = "受信待ち…"; return; }
   const seconds = Math.floor((Date.now() - lastPayloadAt) / 1000);
   ago.textContent = "最終受信 " + (seconds < 60 ? seconds + " 秒前" : Math.floor(seconds / 60) + " 分前");
+  if (snapshotAgeAtReceive !== null) {
+    const age = Math.max(0, Math.floor(snapshotAgeAtReceive + seconds));
+    ago.textContent += " ／ 進捗更新 " + (age < 60 ? age + " 秒前" : Math.floor(age / 60) + " 分前");
+  }
   // The attendant writes every minute; silence far beyond that is stale
   // data even if the SSE pipe itself is alive.
-  if (seconds > 180) setConnected(false);
+  if (seconds > 180) feedConnected = false;
+  refreshFeedStatus();
 }, 1000);
 
 connect();

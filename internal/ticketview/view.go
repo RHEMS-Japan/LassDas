@@ -867,22 +867,28 @@ const maxRunningStepAge = 2 * time.Hour
 // The record is removed when the run stops running steps, so its presence is
 // what "still working" means here.
 func (v *View) readRunning(runDir string) {
+	v.Running = ReadRunningStep(runDir)
+}
+
+// ReadRunningStep is shared by the board and the detail page so they agree
+// about a step left behind by a killed runner.
+func ReadRunningStep(runDir string) *RunningStep {
 	var record RunningStep
 	if !readJSON(filepath.Join(runDir, "current-step.json"), &record) {
-		return
+		return nil
 	}
 	record.Step = shown(record.Step)
 	if record.Step == "" || record.StartedAt.IsZero() {
-		return
+		return nil
 	}
 	// A runner that was killed leaves its record behind. Past the longest a
 	// step may take, "still running" would be a claim nobody is making: the
 	// page would pulse for ever and an unsealed round would read as in
 	// progress instead of dead (review of #187).
 	if time.Since(record.StartedAt) > maxRunningStepAge {
-		return
+		return nil
 	}
-	v.Running = &record
+	return &record
 }
 
 // modelFailureSummary says what the recorded numbers mean, in the

@@ -48,6 +48,12 @@ func statusDir() string {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return runContext(ctx)
+}
+
+func runContext(ctx context.Context) error {
 	flags := flag.NewFlagSet("attendant", flag.ContinueOnError)
 	configPath := flags.String("config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "runtime.json path")
 	interval := flags.Duration("interval", time.Minute, "tick interval")
@@ -67,9 +73,6 @@ func run() error {
 	}
 	defer func() { _ = services.Close() }()
 	hermes := runtime.NewHermes(config)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	// observe writes the status-board snapshot. Observation only; a failed
 	// snapshot must never disturb the tick that feeds it. The mutex
@@ -146,10 +149,10 @@ func run() error {
 			if err := attendant.SyncChains(ctx, currentConfig(), services, hermes, logger); err != nil {
 				logger.Error("chain sync failed", "error", err.Error())
 			}
-			observe()
 		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
 			logger.Error("card sync failed", "error", err.Error())
 		}
+		observe()
 	}
 
 	if *once {
@@ -180,11 +183,7 @@ func run() error {
 	// it never touches the tracker unless the bell rang, so the extra rate
 	// costs nothing external. Only the main loop runs ticks; the observation
 	// loop signals a bell without waiting for the reception to finish.
-	snapshotInterval := *observeInterval
-	if !config.OrchestrationCards() {
-		snapshotInterval = 0
-	}
-	runLoops(ctx, *interval, snapshotInterval, tick, observe, bellRang)
+	runLoops(ctx, *interval, *observeInterval, tick, observe, bellRang)
 	logger.Info("attendant stopping")
 	return nil
 }
