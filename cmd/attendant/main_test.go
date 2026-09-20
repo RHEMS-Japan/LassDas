@@ -7,6 +7,43 @@ import (
 	"time"
 )
 
+func TestObservationAndChainPollingContinueDuringSlowReception(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ticks, snapshots, chains atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runLoops(ctx, time.Hour, 5*time.Millisecond, 5*time.Millisecond,
+			func() { ticks.Add(1); <-ctx.Done() },
+			func() { snapshots.Add(1) },
+			func() { chains.Add(1) },
+			func() bool { return false })
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("loops did not stop")
+		}
+	}()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	for snapshots.Load() < 5 || chains.Load() < 5 || ticks.Load() == 0 {
+		select {
+		case <-poll.C:
+		case <-timer.C:
+			t.Fatalf("slow reception blocked progress: snapshots=%d chains=%d", snapshots.Load(), chains.Load())
+		}
+	}
+	if ticks.Load() != 1 {
+		t.Fatalf("fast loops started extra reception: %d", ticks.Load())
+	}
+}
+
 func TestObservationContinuesDuringInitialAndBellDrivenReception(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -31,7 +68,7 @@ func TestObservationContinuesDuringInitialAndBellDrivenReception(t *testing.T) {
 	}
 	go func() {
 		defer close(done)
-		runLoops(ctx, time.Hour, 5*time.Millisecond, tick, func() {
+		runLoops(ctx, time.Hour, 5*time.Millisecond, 0, tick, func() {
 			select {
 			case observed <- int(calls.Load()):
 			default:
@@ -40,7 +77,7 @@ func TestObservationContinuesDuringInitialAndBellDrivenReception(t *testing.T) {
 			case observedBells <- bells:
 			default:
 			}
-		}, func() bool {
+		}, nil, func() bool {
 			if !bell.Swap(false) {
 				return false
 			}

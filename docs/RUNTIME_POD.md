@@ -39,6 +39,14 @@ more-than-three-minute-old snapshot is displayed as unconfirmed progress,
 not an empty healthy board. Connection/receive time does not prove that the
 progress itself is fresh.
 
+Observation is separate from advancing stages. In `cards` mode,
+`--chain-interval` checks for stage transitions every ten seconds by
+default; `0` ties those checks to the reception tick. It never enables
+card-chain execution in `runner` mode. Disabling either fast loop does not
+disable the other. These are polling intervals, not upper bounds on stage
+latency: measure a stage's completion to the next stage's start separately
+from the age of the displayed snapshot.
+
 Cards-mode records keep the shared run-directory layout below. A single
 runner's existing workspace is resolved from Hermes' canonical card listing
 by delivery id; it is not moved or copied for viewing. The private snapshot
