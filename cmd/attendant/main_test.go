@@ -31,7 +31,7 @@ func TestObservationContinuesDuringInitialAndBellDrivenReception(t *testing.T) {
 	}
 	go func() {
 		defer close(done)
-		runLoops(ctx, time.Hour, 5*time.Millisecond, tick, func() {
+		runLoops(ctx, time.Hour, 5*time.Millisecond, 0, tick, func() {
 			select {
 			case observed <- int(calls.Load()):
 			default:
@@ -40,7 +40,7 @@ func TestObservationContinuesDuringInitialAndBellDrivenReception(t *testing.T) {
 			case observedBells <- bells:
 			default:
 			}
-		}, func() bool {
+		}, nil, func() bool {
 			if !bell.Swap(false) {
 				return false
 			}
