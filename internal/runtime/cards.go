@@ -157,15 +157,27 @@ func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string)
 	if h.runsRoot != "" {
 		// Use the same configured tree the launcher lends and the volume
 		// persists. With no root configured, retain Hermes' scratch default.
-		if !filepath.IsAbs(h.runsRoot) || filepath.Base(deliveryID) != deliveryID || deliveryID == "." || deliveryID == ".." || deliveryID == "" {
+		if !filepath.IsAbs(h.runsRoot) || filepath.Clean(h.runsRoot) == string(filepath.Separator) || filepath.Base(deliveryID) != deliveryID || deliveryID == "." || deliveryID == ".." || deliveryID == "" {
 			return "", errors.New("runner workspace root or delivery id is invalid")
 		}
-		workspace := filepath.Join(h.runsRoot, deliveryID)
-		if err := os.MkdirAll(workspace, 0o700); err != nil {
-			return "", fmt.Errorf("prepare runner workspace: %w", err)
-		}
-		if info, err := os.Lstat(workspace); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("runner workspace must be a real directory")
+		root := filepath.Clean(h.runsRoot)
+		workspace := filepath.Join(root, deliveryID)
+		// Both ancestors of the lent clone must be traversable by the
+		// separate agent user. 0700 lets the engine prepare everything but
+		// makes the launcher's chdir fail after it switches users. Match
+		// the cards path: traversal only, not listing or writing; individual
+		// sealed records stay 0600. Chmod also repairs roots made by an
+		// earlier runner, since MkdirAll alone leaves their mode untouched.
+		for _, directory := range []string{root, workspace} {
+			if err := os.MkdirAll(directory, 0o711); err != nil {
+				return "", fmt.Errorf("prepare runner workspace: %w", err)
+			}
+			if info, err := os.Lstat(directory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return "", errors.New("runner workspace must be a real directory")
+			}
+			if err := os.Chmod(directory, 0o711); err != nil {
+				return "", fmt.Errorf("prepare runner workspace traversal: %w", err)
+			}
 		}
 		arguments = append(arguments, "--workspace", "dir:"+workspace)
 	}

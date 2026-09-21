@@ -59,6 +59,13 @@ jobs:
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             -t "$tag" -f deploy/pod/Dockerfile .
+          # Exercise the real capability-bearing launcher as the engine
+          # user, including the persistent runner workspace's ancestors.
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c ./internal/runtime -o "$RUNNER_TEMP/runtime-image.test"
+          docker run --rm --network none --platform linux/arm64 \
+            --mount "type=bind,src=$RUNNER_TEMP/runtime-image.test,dst=/tmp/runtime-image.test,readonly" \
+            -e RUNNER_IMAGE_TEST=1 --entrypoint /tmp/runtime-image.test "$tag" \
+            -test.run '^TestRunnerWorkspaceLaunchInImage$' -test.v
           docker push "$tag"
           digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^$repo@sha256:" | head -n 1)"
           [ -n "$digest" ] || { echo "no digest for $tag" >&2; exit 1; }
