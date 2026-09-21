@@ -172,15 +172,11 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 	runDir := runDirectory(config, run.DeliveryID)
 	var runnerCard *runtime.BoardTask
 	if !config.OrchestrationCards() {
-		for i := range tasks {
-			if tasks[i].IdempotencyKey == run.DeliveryID {
-				runnerCard = &tasks[i]
-				if path := runnerCard.WorkspacePath; filepath.IsAbs(path) && filepath.Clean(path) != string(os.PathSeparator) {
-					status.WorkspacePath = filepath.Clean(path)
-					runDir = status.WorkspacePath
-				}
-				break
-			}
+		var workspace string
+		workspace, runnerCard = runnerWorkspace(tasks, run.DeliveryID)
+		if workspace != "" {
+			status.WorkspacePath = workspace
+			runDir = workspace
 		}
 	}
 	switch run.State {
@@ -260,6 +256,20 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		}
 	}
 	return status
+}
+
+// Both merge observation and display must use the canonical task's
+// workspace, including runs created before persistent run directories.
+func runnerWorkspace(tasks []runtime.BoardTask, deliveryID string) (string, *runtime.BoardTask) {
+	for i := range tasks {
+		if tasks[i].IdempotencyKey == deliveryID {
+			if path := tasks[i].WorkspacePath; filepath.IsAbs(path) && filepath.Clean(path) != string(os.PathSeparator) {
+				return filepath.Clean(path), &tasks[i]
+			}
+			return "", &tasks[i]
+		}
+	}
+	return "", nil
 }
 
 func (s *RunStatus) place(step, title, detail string) {

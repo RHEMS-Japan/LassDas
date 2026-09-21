@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
 )
@@ -24,6 +25,42 @@ const featureMergeFile = "feature-merged.json"
 // mergeReadTimeout bounds one reading. The attendant wakes every minute; a
 // reading that cannot be had in this long is had on the next wake-up.
 const mergeReadTimeout = 30 * time.Second
+
+// SyncRunnerMerges observes the PRs left by finished runners. It neither
+// reopens runs nor starts cards/delivery stages. The ordinary reception
+// tick calls it; the fast, read-only display loop must not poll GitHub.
+func SyncRunnerMerges(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, logger Logger) error {
+	if config.OrchestrationCards() {
+		return nil // SyncChains already owns merge observation in this mode.
+	}
+	runs, err := services.Store.ScanRuns(ctx)
+	if err != nil {
+		return err
+	}
+	var tasks []runtime.BoardTask
+	loaded := false
+	for _, run := range runs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if run.State != "terminal" || run.TerminalCode != string(hook.TerminalSuccess) {
+			continue
+		}
+		if !loaded {
+			tasks, err = hermes.ListBoardTasks(ctx)
+			if err != nil {
+				return err
+			}
+			loaded = true
+		}
+		dir, _ := runnerWorkspace(tasks, run.DeliveryID)
+		if dir == "" {
+			dir = runDirectory(config, run.DeliveryID)
+		}
+		recordFeatureMerge(ctx, config, run, dir, logger)
+	}
+	return nil
+}
 
 type featureMerge struct {
 	Merged         bool      `json:"merged"`
