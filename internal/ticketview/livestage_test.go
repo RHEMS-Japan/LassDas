@@ -63,7 +63,10 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	// smaller engine, it is a scan that stopped seeing call sites, or an
 	// engine that lost one - and a lost step is how a rail stage went empty
 	// (review of #200).
-	if len(names) < 45 {
+	// Runner and cards now share agent-review's call site. That removes a
+	// duplicate, not a step; the bidirectional pinned-set check below still
+	// requires every distinct step.
+	if len(names) < 44 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {

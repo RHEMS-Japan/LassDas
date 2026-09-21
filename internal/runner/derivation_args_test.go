@@ -59,7 +59,7 @@ func TestImplementRoundPassesTheTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	config := runtime.Config{WorkerBin: script, ConsumerConfigPath: filepath.Join(workspace, "consumer.json")}
+	config := runtime.Config{WorkerBin: script, ConsumerConfigPath: writeRunnerConfig(t, runnerFixtureConfig(t, 2, 3, true))}
 	config.Identity.EngineSHA = strings.Repeat("ab", 20)
 	pipeline := &Pipeline{Config: config, Workspace: workspace, Logger: trailTestLogger{}}
 	if err := os.WriteFile(pipeline.path("readiness-ticket.json"), []byte(`{"target_files":["README.md"]}`), 0o600); err != nil {

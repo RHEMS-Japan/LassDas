@@ -80,10 +80,11 @@ const runTimers = () => { const due = [...pending]; pending.clear(); due.forEach
 // could pass or fail because of the order the blocks happen to be in
 // (review of #200).
 const startScenario = () => {
-  for (const pane of runsBox.querySelectorAll(".livepane")) live.liveDetach(pane);
+  for (const pane of bodyNode.querySelectorAll(".livepane")) live.liveDetach(pane);
   pending.clear();
   live.reset();
   runsBox.replaceChildren();
+  chipsBox.replaceChildren();
 };
 let answer = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ steps: [] }) });
 const fetchStub = url => answer(url);
@@ -174,6 +175,10 @@ const fire = (n, type) => (n.handlers[type] || []).forEach(h => h());
 // by, and rebuilt the way renderBoard rebuilds it.
 const runsBox = new Node("div", "runs");
 registry.runs = runsBox;
+const chipsBox = new Node("div", "chips");
+registry.chips = chipsBox;
+bodyNode.appendChild(runsBox);
+bodyNode.appendChild(chipsBox);
 const box = (...cards) => { runsBox.replaceChildren(...cards); return runsBox; };
 const setHeights = (...heights) => { runsBox.children.forEach((c, i) => (c.height = heights[i])); };
 const setRailTops = (...tops) => { runsBox.children.forEach((c, i) => (c.railTop = tops[i])); };
@@ -626,7 +631,56 @@ startScenario();
     shown.includes("まだありません") && shown.includes("── "), false);
 }
 
-if (checks < 47) {
+// Drive the page's actual renderBoard (not a hand-written approximation):
+// the original defect detached/restored only #runs and erased #chips later.
+const renderStart = script.indexOf("function renderBoard() {");
+const renderEnd = script.indexOf("\n}", renderStart) + 2;
+if (renderStart < 0 || renderEnd < renderStart) throw new Error("renderBoard missing");
+const expandedRuns = new Set();
+registry["notice-banner"] = new Node("div");
+registry.counts = new Node("div");
+const render = new Function("document", "el", "RESTING", "ACTIONABLE", "snapshotProblem", "buildCard", "buildChip", "liveDetach", "liveRestore", "expandedRuns", "CSS", "live",
+  "let latestBoard; " + script.slice(renderStart, renderEnd).replaceAll("liveFollow", "live.follow") +
+  "; return runs => { latestBoard = {runs}; renderBoard(); };")(
+  documentStub, el, new Set(["done", "failed"]), new Set(), () => false,
+  run => card(run.delivery_id, run.issue_key),
+  run => { const d = el("details", "finished-run"); d.open = expandedRuns.has(run.delivery_id); d.appendChild(card(run.delivery_id, run.issue_key)); return d; },
+  live.liveDetach, live.liveRestore, expandedRuns, {escape: s => s}, live);
+
+for (const initiallyFinished of [false, true]) {
+  startScenario();
+  expandedRuns.clear();
+  const run = {delivery_id: "finished-delivery", issue_key: "TICKET-9", step: initiallyFinished ? "failed" : "implement"};
+  answer = url => {
+    const from = Number(url.match(/from=(\d+)/)?.[1] || 0);
+    return Promise.resolve({ok: true, json: () => Promise.resolve(url.includes("?from=")
+      ? {from, next: 9, text: from === 0 ? "evidence\n" : ""}
+      : {steps: [{step: "read-contract", stage: "intake", updated_at_ms: 1}]})});
+  };
+  render([run]);
+  let c = bodyNode.querySelector('.card[data-delivery="finished-delivery"]');
+  node(c, "intake").click();
+  await settle();
+  const oldPane = pane(c);
+  const text = oldPane.querySelector("pre").textContent;
+  run.step = "failed";
+  for (let i = 0; i < 3; i++) { render([run]); await settle(); }
+  c = chipsBox.querySelector('.card[data-delivery="finished-delivery"]');
+  const label = initiallyFinished ? "finished card" : "active-to-finished card";
+  check(label + " retains its pin across actual board refreshes", pane(c).state.pinned, true);
+  check(label + " retains its rendered log", pane(c).querySelector("pre").textContent, text);
+  check(label + " retains visible output", pane(c).state.rendered, true);
+  check(label + " keeps the finished section open", c.closest(".finished-run").open, true);
+  check(label + " stops the removed pane", oldPane.state.stage, null);
+  check(label + " leaves just one polling timer", pending.size, 1);
+  const b = card("other", "TICKET-10");
+  runsBox.appendChild(b);
+  node(b, "intake").click(); await settle();
+  check(label + " closes when another section is pinned", pane(c).classList.contains("on"), false);
+  check(label + " no longer polls after changing cards", pane(c).state.timer, null);
+}
+
+if (checks < 63) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }

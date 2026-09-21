@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Run drives the whole ticket path and returns the outcome for the terminal
@@ -25,22 +25,27 @@ func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
 		return outcome, err
 	}
 	repoRoot, baseRoot, baseSHA := prep.repoRoot, prep.baseRoot, prep.baseSHA
+	config, err := worker.LoadConfig(p.Config.ConsumerConfigPath)
+	if err != nil {
+		return Outcome{Code: hook.TerminalInternalFailed}, err
+	}
+	reviewFiles := chainReviewFiles(configuredReviewerIDs(config))
 
-	// ---- model: readiness gate, then at most three finite stages ----
+	// ---- model: readiness gate, then the configured finite stages ----
 	outcome, err = p.modelStage(ctx, repoRoot, baseRoot, baseSHA)
 	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
 		return outcome, err
 	}
 
 	// ---- validation ----
-	if failed, err := p.validationStage(ctx, outcome.Stage, runnerReviewFiles()); err != nil {
+	if failed, err := p.validationStage(ctx, outcome.Stage, reviewFiles); err != nil {
 		return Outcome{Code: "internal_failed"}, err
 	} else if failed {
 		return Outcome{Code: hook.TerminalValidationFailed}, nil
 	}
 
 	// ---- delivery ----
-	return p.deliveryStage(ctx, outcome.Stage, runnerReviewFiles())
+	return p.deliveryStage(ctx, outcome.Stage, reviewFiles)
 }
 
 // ChainPrep is what the cards orchestration needs from a prepared run.
@@ -205,7 +210,15 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if err := p.writeAgentConfigs(); err != nil {
-		return pretripResult{}, Outcome{Code: "internal_failed"}, err
+		note := "実行エージェントの設定ファイルを用意できませんでした。運用担当者が設定と保存先の権限を確認します。"
+		var setup *agentSetupError
+		if errors.As(err, &setup) {
+			note = setup.note
+		}
+		if writeErr := p.writeReceptionTrail(note + "\n成果物の実装・納品は始めていません。同じ設定のまま再実行しても解消しません。\n"); writeErr != nil {
+			p.Logger.Error("agent setup failure trail not written", "error", writeErr.Error())
+		}
+		return pretripResult{}, Outcome{Code: hook.TerminalInternalFailed, Evidence: map[string]string{"failed_step": "実行エージェントの設定"}}, err
 	}
 
 	return pretripResult{repoRoot: repoRoot, baseRoot: baseRoot, baseSHA: baseSHA}, Outcome{}, nil
@@ -381,46 +394,37 @@ func (p *Pipeline) writeAgentConfigs() error {
 		return err
 	}
 
-	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
+	consumer, err := worker.LoadConfig(p.Config.ConsumerConfigPath)
 	if err != nil {
-		return err
+		return &agentSetupError{note: "モデル・レビュー担当を含む実行設定を読み取れないか、設定の検査に合格しなかったため停止しました。運用担当者が実行設定を確認します。", cause: err}
 	}
-	var consumer struct {
-		Models struct {
-			Reviewers []struct {
-				ID      string `json:"id"`
-				BaseURL string `json:"base_url"`
-				Model   string `json:"model"`
-				Effort  string `json:"effort"`
-			} `json:"reviewers"`
-		} `json:"models"`
-		Agents struct {
-			Reviewer struct {
-				SecretEnv map[string]string `json:"secret_env"`
-			} `json:"reviewer"`
-		} `json:"agents"`
+	codexCount := 0
+	for _, reviewer := range consumer.Models.Reviewers {
+		if filepath.Base(consumer.Agents.ReviewerAgentFor(reviewer.ID).Command) == "codex" && (len(consumer.Agents.ReviewerAgents) > 0 || reviewer.ID != "claude-correctness") {
+			codexCount++
+		}
 	}
-	if err := json.Unmarshal(raw, &consumer); err != nil {
-		return err
-	}
-	// The workflow's jq 'keys[0]' was deterministic; Go map iteration is
-	// not — sort so a two-entry secret_env cannot flip the provider file
-	// between runs.
-	keyNames := make([]string, 0, len(consumer.Agents.Reviewer.SecretEnv))
-	for name := range consumer.Agents.Reviewer.SecretEnv {
-		keyNames = append(keyNames, name)
-	}
-	sort.Strings(keyNames)
-	keyEnv := ""
-	if len(keyNames) > 0 {
-		keyEnv = keyNames[0]
+	if codexCount > 1 {
+		return &agentSetupError{note: "複数の Codex レビュー担当が同じ設定ファイルを使う構成には対応していないため停止しました。運用担当者が担当ごとの設定の分離を確認します。", cause: errors.New("multiple Codex reviewer launches would share one provider file")}
 	}
 	for _, reviewer := range consumer.Models.Reviewers {
-		if reviewer.ID != "codex-adversarial" {
+		agent := consumer.Agents.ReviewerAgentFor(reviewer.ID)
+		if filepath.Base(agent.Command) != "codex" || (len(consumer.Agents.ReviewerAgents) == 0 && reviewer.ID == "claude-correctness") {
 			continue
 		}
+		// Only a configured Codex CLI launch needs this provider file.
+		// Hermes profiles and direct model calls carry their own settings.
+		keyNames := make([]string, 0, len(agent.SecretEnv))
+		for name := range agent.SecretEnv {
+			keyNames = append(keyNames, name)
+		}
+		sort.Strings(keyNames)
+		keyEnv := ""
+		if len(keyNames) > 0 {
+			keyEnv = keyNames[0]
+		}
 		if reviewer.BaseURL == "" || reviewer.Model == "" || reviewer.Effort == "" || keyEnv == "" {
-			return fmt.Errorf("consumer config names codex-adversarial without base_url/model/effort/secret_env")
+			return &agentSetupError{note: "Codex レビュー担当の接続先・モデル・推論設定・鍵の参照先が揃っていないため停止しました。運用担当者がレビュー担当の設定を確認します。", cause: fmt.Errorf("Codex reviewer %s needs base_url/model/effort/secret_env", reviewer.ID)}
 		}
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -441,22 +445,33 @@ wire_api = "responses"
 `, reviewer.Model, reviewer.Effort, reviewer.BaseURL, keyEnv)
 		return os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(configTOML), 0o600)
 	}
-	// The runner mode hardwires this reviewer, so a configuration without
-	// it must fail before any model spend (the workflow's jq -er did). The
-	// cards mode derives every judge from configuration and has no provider
-	// file to write — but a previous run's stale one must not stay in force
-	// on the persistent pod $HOME, so it is removed instead of left behind.
-	if p.Config.OrchestrationCards() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		if err := os.Remove(filepath.Join(home, ".codex", "config.toml")); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
+	// No Codex launch in either mode: discard a previous run's stale file.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
 	}
-	return errors.New("consumer config defines no codex-adversarial reviewer")
+	if err := os.Remove(filepath.Join(home, ".codex", "config.toml")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// The private cause stays in the operator log. Only the explicit note is
+// passed to the ticket; filesystem paths and credential values never are.
+type agentSetupError struct {
+	note  string
+	cause error
+}
+
+func (e *agentSetupError) Error() string { return e.cause.Error() }
+func (e *agentSetupError) Unwrap() error { return e.cause }
+
+func configuredReviewerIDs(config worker.Config) []string {
+	ids := make([]string, 0, len(config.Models.Reviewers))
+	for _, reviewer := range config.Models.Reviewers {
+		ids = append(ids, reviewer.ID)
+	}
+	return ids
 }
 
 func (p *Pipeline) gitIn(ctx context.Context, dir string, arguments ...string) (int, error) {
@@ -492,8 +507,7 @@ func (p *Pipeline) clarificationArgs() []string {
 	return nil
 }
 
-// modelStage mirrors the workflow's single "Gate readiness, then run at
-// most three finite model stages" step.
+// modelStage gates readiness, then runs the configured finite model stages.
 func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
 	if outcome, err := p.readinessGate(ctx); err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
 		return outcome, err
@@ -602,9 +616,13 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 // implement/review/decide rounds. The cards orchestration replaces exactly
 // this function with the stage-card chain.
 func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
+	config, err := worker.LoadConfig(p.Config.ConsumerConfigPath)
+	if err != nil {
+		return Outcome{Code: hook.TerminalInternalFailed}, err
+	}
+	reviewers := configuredReviewerIDs(config)
 	historyDir := p.path("history")
-	// Implementation: at most three implement/review/decide stages.
-	for stage := 1; stage <= 3; stage++ {
+	for stage := 1; stage <= config.MaxStages; stage++ {
 		stageDir := fmt.Sprintf("%s/stage-%d", historyDir, stage)
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
 			return Outcome{Code: hook.TerminalInternalFailed}, err
@@ -617,10 +635,9 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 		}
 		if stage > 1 {
 			previous := fmt.Sprintf("%s/stage-%d", historyDir, stage-1)
-			implementArgs = append(implementArgs,
-				"--previous-findings", previous+"/claude-correctness.json",
-				"--previous-findings", previous+"/codex-adversarial.json",
-			)
+			for _, reviewer := range reviewers {
+				implementArgs = append(implementArgs, "--previous-findings", previous+"/"+reviewer+".json")
+			}
 		}
 		implementArgs = append(implementArgs, p.clarificationArgs()...)
 		implementArgs = append(implementArgs, p.targetArgs()...)
@@ -633,40 +650,36 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 		if code, err := p.worker(ctx, "implement", implementArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
-		reviewArgs := []string{
-			"review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-			"--candidate", stageDir + "/candidate.json",
+		for index, reviewer := range reviewers {
+			// Preserve the original workflow's direct-model review only for
+			// its legacy, unbound seat. Explicit agent bindings always win.
+			if reviewer != "claude-correctness" || len(config.Agents.ReviewerAgents) > 0 {
+				// A runner round is fresh, not a resumed card: a file left by
+				// another agent is never proof that this reviewer already ran.
+				if err := p.reviewSealed(ctx, reviewers, index, repoRoot, baseSHA, stage, false); err != nil {
+					return Outcome{Code: hook.TerminalModelFailed}, err
+				}
+				continue
+			}
+			reviewArgs := []string{
+				"review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+				"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
+				"--candidate", stageDir + "/candidate.json",
+			}
+			reviewArgs = append(reviewArgs, p.clarificationArgs()...)
+			reviewArgs = append(reviewArgs, "--reviewer", reviewer, "--out", stageDir+"/"+reviewer+".json")
+			if code, err := p.worker(ctx, "review", reviewArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+				return Outcome{Code: hook.TerminalModelFailed}, err
+			}
 		}
-		reviewArgs = append(reviewArgs, p.clarificationArgs()...)
-		reviewArgs = append(reviewArgs, "--reviewer", "claude-correctness", "--out", stageDir+"/claude-correctness.json")
-		claudeCode, err := p.worker(ctx, "review", reviewArgs, p.modelKeyEnv()...)
-		if err != nil {
-			return Outcome{Code: hook.TerminalModelFailed}, err
-		}
-		agentArgs := []string{
-			"agent-review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-			"--candidate", stageDir + "/candidate.json", "--repo-root", repoRoot, "--base-sha", baseSHA,
-			"--knowledge-root", p.Config.KnowledgeRoot,
-		}
-		agentArgs = append(agentArgs, p.clarificationArgs()...)
-		agentArgs = append(agentArgs, "--reviewer", "codex-adversarial",
-			"--run-out", stageDir+"/review-run.json", "--out", stageDir+"/codex-adversarial.json")
-		codexCode, err := p.worker(ctx, "agent-review", agentArgs, p.modelKeyEnv()...)
-		if err != nil {
-			return Outcome{Code: hook.TerminalModelFailed}, err
-		}
-		if claudeCode != 0 || codexCode != 0 {
-			return Outcome{Code: hook.TerminalModelFailed}, nil
-		}
-		if code, err := p.worker(ctx, "decide", []string{
+		reviewArgs := reviewFileArgs(stageDir, chainReviewFiles(reviewers))
+		decideArgs := append([]string{
 			"decide", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
 			"--candidate", stageDir + "/candidate.json",
-			"--review", stageDir + "/claude-correctness.json", "--review", stageDir + "/codex-adversarial.json",
-			"--out", stageDir + "/decision.json",
-		}); err != nil || code != 0 {
+		}, reviewArgs...)
+		decideArgs = append(decideArgs, "--out", stageDir+"/decision.json")
+		if code, err := p.worker(ctx, "decide", decideArgs); err != nil || code != 0 {
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
 		stageOutcome, err := p.readJSONField(relPath(p.Workspace, stageDir+"/decision.json"), "outcome")
@@ -677,19 +690,18 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 		case "converged":
 			return Outcome{Stage: stage}, nil
 		case "revise":
-			if stage == 3 {
+			if stage == config.MaxStages {
 				return Outcome{Code: hook.TerminalModelFailed}, nil
 			}
 		case "nonconverged":
-			if stage != 3 {
+			if stage != config.MaxStages {
 				return Outcome{Code: hook.TerminalModelFailed}, nil
 			}
-			questionArgs := []string{
+			questionArgs := append([]string{
 				"impasse-question", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 				"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
 				"--candidate", stageDir + "/candidate.json",
-				"--review", stageDir + "/claude-correctness.json", "--review", stageDir + "/codex-adversarial.json",
-			}
+			}, reviewArgs...)
 			questionArgs = append(questionArgs, p.clarificationArgs()...)
 			questionDecision := historyDir + "/question/decision.json"
 			if err := os.MkdirAll(historyDir+"/question", 0o755); err != nil {

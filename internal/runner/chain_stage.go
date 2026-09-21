@@ -27,10 +27,9 @@ import (
 // decide step, which makes "the first stage directory without a decision"
 // the current round for every stage that runs after implement.
 
-// chainReviewers reads the reviewer identities out of the consumer
-// configuration, so the stage artifacts are named by configuration rather
-// than by the two hardwired reviewer names the runner mode still carries
-// (issue #12; the cards mode starts config-derived).
+// chainReviewers reads the configured identities and enforces the cards
+// plan's two-reviewer shape. Runner mode uses the same artifact naming but
+// can run the full configured reviewer set without creating stage cards.
 func chainReviewers(consumerConfigPath string) ([]string, error) {
 	raw, err := os.ReadFile(consumerConfigPath)
 	if err != nil {
@@ -277,17 +276,26 @@ func (p *Pipeline) chainReview(ctx context.Context, reviewers []string, index in
 }
 
 func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, index int, repoRoot, baseSHA string, round int) error {
+	return p.reviewSealed(ctx, reviewers, index, repoRoot, baseSHA, round, true)
+}
+
+func (p *Pipeline) reviewSealed(ctx context.Context, reviewers []string, index int, repoRoot, baseSHA string, round int, resume bool) error {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), round)
 	reviewer := reviewers[index]
-	if _, err := os.Stat(fmt.Sprintf("%s/%s.json", stageDir, reviewer)); err == nil {
+	if _, err := os.Lstat(fmt.Sprintf("%s/%s.json", stageDir, reviewer)); err == nil {
+		if !resume {
+			return errors.New("review output already exists before its reviewer ran")
+		}
 		// A re-dispatched card finds its own sealed review: nothing left to
 		// do, and redoing it would double the judge's spend.
 		return nil
 	}
 	// A half-written attempt leaves the run record without the review; the
 	// exclusive-create outputs need their own leftovers gone first.
-	if err := os.Remove(fmt.Sprintf("%s/%s-run.json", stageDir, reviewer)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if resume {
+		if err := os.Remove(fmt.Sprintf("%s/%s-run.json", stageDir, reviewer)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	reviewArgs := []string{
 		"agent-review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
@@ -390,8 +398,8 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 	return nil
 }
 
-// chainReviewFiles are the configuration-derived review artifact names of
-// the cards mode: one per configured reviewer, named by its identity.
+// chainReviewFiles are the configuration-derived review artifact names
+// shared by both modes: one per configured reviewer, named by its identity.
 func chainReviewFiles(reviewers []string) []string {
 	names := make([]string, 0, len(reviewers))
 	for _, reviewer := range reviewers {

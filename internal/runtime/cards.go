@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,9 +18,10 @@ import (
 // transition and read (docs/RUNTIME_POD.md: no direct kanban.db access,
 // ever).
 type Hermes struct {
-	bin     string
-	board   string
-	profile string
+	bin      string
+	board    string
+	profile  string
+	runsRoot string
 }
 
 func NewHermes(config Config) *Hermes {
@@ -27,7 +29,7 @@ func NewHermes(config Config) *Hermes {
 	if bin == "" {
 		bin = "hermes"
 	}
-	return &Hermes{bin: bin, board: config.HermesBoard, profile: config.HermesProfile}
+	return &Hermes{bin: bin, board: config.HermesBoard, profile: config.HermesProfile, runsRoot: config.Chain.RunsRoot}
 }
 
 func (h *Hermes) run(ctx context.Context, arguments ...string) ([]byte, error) {
@@ -140,7 +142,7 @@ func (h *Hermes) CreateTask(ctx context.Context, spec CardSpec) (string, error) 
 
 // CreateCard creates (idempotently, by delivery id) the card for one run.
 func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string) (string, error) {
-	output, err := h.run(ctx, "create", title,
+	arguments := []string{"create", title,
 		"--body", body,
 		"--assignee", h.profile,
 		"--idempotency-key", deliveryID,
@@ -151,7 +153,23 @@ func (h *Hermes) CreateCard(ctx context.Context, deliveryID, title, body string)
 		// stage hanging silently for four (2026-08-19).
 		"--max-runtime", "21600",
 		"--json",
-	)
+	}
+	if h.runsRoot != "" {
+		// Use the same configured tree the launcher lends and the volume
+		// persists. With no root configured, retain Hermes' scratch default.
+		if !filepath.IsAbs(h.runsRoot) || filepath.Base(deliveryID) != deliveryID || deliveryID == "." || deliveryID == ".." || deliveryID == "" {
+			return "", errors.New("runner workspace root or delivery id is invalid")
+		}
+		workspace := filepath.Join(h.runsRoot, deliveryID)
+		if err := os.MkdirAll(workspace, 0o700); err != nil {
+			return "", fmt.Errorf("prepare runner workspace: %w", err)
+		}
+		if info, err := os.Lstat(workspace); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("runner workspace must be a real directory")
+		}
+		arguments = append(arguments, "--workspace", "dir:"+workspace)
+	}
+	output, err := h.run(ctx, arguments...)
 	if err != nil {
 		return "", err
 	}

@@ -99,9 +99,9 @@ func (c Config) OrchestrationCards() bool { return c.Orchestration == "cards" }
 // ChainConfig is the cards orchestration's shape: where run directories
 // live and which profile runs each stage.
 type ChainConfig struct {
-	// RunsRoot holds one directory per delivery; every card of a delivery's
-	// chain shares it as an explicit dir: workspace, which is what lets the
-	// implementer's edits be sealed and then judged by later cards.
+	// RunsRoot holds one persistent directory per delivery in either mode.
+	// Runner cards use it when configured; every card of a delivery's chain
+	// shares it as an explicit dir: workspace.
 	RunsRoot string `json:"runs_root,omitempty"`
 	// TargetTokenPath is the file the destination credential is read from
 	// by the stages that reach the destination (validate's sandbox clone,
