@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Run the cross-compiled test binary in the runtime image as the engine
@@ -38,7 +40,7 @@ func TestRunnerWorkspaceLaunchInImage(t *testing.T) {
 	root := filepath.Join(base, "runs")
 	delivery := filepath.Join(root, "delivery_test")
 	repo := filepath.Join(delivery, "target-repo")
-	home := filepath.Join(delivery, "agent-home")
+	home := filepath.Join(delivery, "manual-home")
 	for _, dir := range []string{repo, home} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -85,5 +87,26 @@ printf 'agent-launch-ok\n'
 	}
 	if data, err := os.ReadFile(filepath.Join(repo, "result.txt")); err != nil || string(data) != "own-workspace" {
 		t.Fatal("agent's output was not returned to the engine")
+	}
+	// Exercise the worker's complete lend/run/reclaim/cleanup path too:
+	// immutable tool caches must not accumulate after successful launches.
+	t.Setenv(worker.AgentLauncherEnv, "/usr/local/bin/agentexec")
+	t.Setenv("LASSDAS_STATE_DIR", base)
+	config := worker.AgentConfig{ID: "cache-fixture", Command: "sh", TimeoutSeconds: 60,
+		Args: []string{"-ec", `test "$(id -u)" = 2001; mkdir -p "$HOME/cache/module"; printf cache > "$HOME/cache/module/source.go"; chmod 555 "$HOME/cache/module"; printf 'cache-launch-ok\n'`}}
+	for i := 0; i < 2; i++ {
+		outcome, err := worker.RunReviewingAgentWithHomeFiles(context.Background(), config, repo, "fixture", nil, "")
+		if err != nil || outcome.ExitCode != 0 || strings.TrimSpace(outcome.Transcript) != "cache-launch-ok" {
+			t.Fatalf("worker launch: %+v, %v", outcome, err)
+		}
+		entries, err := os.ReadDir(filepath.Join(delivery, "agent-home"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.Name() != ".agent-lend.lock" {
+				t.Fatalf("worker left launch home behind: %s", entry.Name())
+			}
+		}
 	}
 }
