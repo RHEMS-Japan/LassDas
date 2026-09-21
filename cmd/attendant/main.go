@@ -174,8 +174,13 @@ func runContext(ctx context.Context) error {
 			// A ticket read a moment ago starts here rather than waiting for
 			// the chain loop's next pass.
 			syncChains()
-		} else if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
-			logger.Error("card sync failed", "error", err.Error())
+		} else {
+			if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
+				logger.Error("card sync failed", "error", err.Error())
+			}
+			if err := attendant.SyncRunnerMerges(ctx, currentConfig(), services, hermes, logger); err != nil {
+				logger.Error("runner merge observation failed", "error", err.Error())
+			}
 		}
 		observe()
 	}
