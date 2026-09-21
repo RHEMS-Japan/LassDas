@@ -433,9 +433,7 @@ function pointerIsOver(node) {
 
 // closeOtherPanes stops every pane but this one.
 function closeOtherPanes(keep) {
-  const runsBox = document.getElementById("runs");
-  if (!runsBox) return;
-  for (const pane of runsBox.querySelectorAll(".livepane")) {
+  for (const pane of document.body.querySelectorAll(".livepane")) {
     if (pane !== keep && pane.classList.contains("on")) {
       pane.state.pinned = false;
       liveDetach(pane);
@@ -539,9 +537,7 @@ function liveDetach(pane) {
 function markPinned() {
   const pinned = !!(liveFollow && liveFollow.pinned);
   document.body.classList.toggle("livePinned", pinned);
-  const runsBox = document.getElementById("runs");
-  if (!runsBox) return;
-  for (const card of runsBox.querySelectorAll(".card")) {
+  for (const card of document.body.querySelectorAll(".card")) {
     card.classList.toggle("pinnedHost", pinned && card.dataset.delivery === liveFollow.deliveryID);
   }
 }
@@ -1057,8 +1053,20 @@ function buildChip(run) {
   const details = el("details", "finished-run");
   details.open = expandedRuns.has(run.delivery_id);
   details.addEventListener("toggle", () => {
+    // A queued toggle from an already replaced card must not change the
+    // new card's expansion or follow state.
+    if (!details.isConnected) return;
     if (details.open) expandedRuns.add(run.delivery_id);
-    else expandedRuns.delete(run.delivery_id);
+    else {
+      expandedRuns.delete(run.delivery_id);
+      if (liveFollow && liveFollow.deliveryID === run.delivery_id) {
+        setFollow(null);
+        for (const pane of details.querySelectorAll(".livepane")) {
+          pane.state.pinned = false;
+          liveDetach(pane);
+        }
+      }
+    }
   });
   const chip = el("summary", "chip");
   chip.classList.add(run.step === "done" ? "ok" : run.step === "stopped" ? "stop" : "bad");
@@ -1092,7 +1100,7 @@ function renderBoard() {
   // Every card is rebuilt on each payload; a live pane still following a
   // step would keep asking for it from a card nobody can see (review of
   // #187).
-  for (const pane of runsBox.querySelectorAll(".livepane")) liveDetach(pane);
+  for (const pane of document.body.querySelectorAll(".livepane")) liveDetach(pane);
   runsBox.replaceChildren();
   if (active.length === 0) {
     runsBox.appendChild(el("div", "empty-state", snapshotProblem()
@@ -1101,8 +1109,6 @@ function renderBoard() {
   } else {
     for (const run of active) runsBox.appendChild(buildCard(run));
   }
-  liveRestore(runsBox);
-
   const chips = document.getElementById("chips");
   chips.replaceChildren();
   if (resting.length === 0) {
@@ -1110,6 +1116,16 @@ function renderBoard() {
   } else {
     for (const run of resting) chips.appendChild(buildChip(run));
   }
+  // Finished cards have the same live panes. Restore only after BOTH
+  // containers exist, including a followed card that just finished.
+  if (liveFollow && liveFollow.pinned) {
+    const card = chips.querySelector('.card[data-delivery="' + CSS.escape(liveFollow.deliveryID) + '"]');
+    if (card) {
+      card.closest(".finished-run").open = true;
+      expandedRuns.add(liveFollow.deliveryID);
+    }
+  }
+  liveRestore(document.body);
 
   if (focusDraft) {
     const revived = document.querySelector('textarea[data-draft-for="' + focusDraft + '"]');

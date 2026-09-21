@@ -11,13 +11,6 @@ import (
 	"automation.internal/ticket-ingress/internal/hook"
 )
 
-// runnerReviewFiles are the runner mode's fixed review artifact names,
-// frozen with that rail (issue #12 resolves in the cards mode, which
-// derives the names from configuration and passes them in).
-func runnerReviewFiles() []string {
-	return []string{"claude-correctness.json", "codex-adversarial.json"}
-}
-
 // reviewFileArgs renders --review flags for the named artifacts of a stage.
 func reviewFileArgs(stageDir string, names []string) []string {
 	arguments := make([]string, 0, 2*len(names))

@@ -200,6 +200,11 @@ Backlog 監視 60s
 
 ## 参照
 
+実装上の追補: runner を利用し続ける構成も扱うため、下記 v4 の凍結方針に対し、
+runner のレビュー担当・段数を設定連動へ修正した。既存の agent-review 呼び出しを
+共有し、前段の指摘も引き継ぐ。cards への自動切替は行わず、既存の unbound
+claude-correctness の直接呼び出しは互換性のため維持する。
+
 - docs/TARGET_SHAPE.md (最終形 — v4 で到達行数の確定を Phase 3 再設計へ送る訂正を同時実施)
 - [issue #9](https://github.com/RHEMS-Japan/LassDas/issues/9) 評価とクロスチェックの全記録
 - 欠陥台帳: [#10 trail](https://github.com/RHEMS-Japan/LassDas/issues/10) / [#11 レビュアー記憶](https://github.com/RHEMS-Japan/LassDas/issues/11) / [#12 設定連動](https://github.com/RHEMS-Japan/LassDas/issues/12) / [#13 レビュー容量根治](https://github.com/RHEMS-Japan/LassDas/issues/13) — #10 は Phase 0 実装で、**#11 は Phase 0 で注入機構 (agent-review の --previous-findings + 審判向け指示) を実装し、Phase 1 の関所起動配線で有効化** (M1 runner の agent-review 呼び出しには配線しない — 捨てる層への修理はしない)、**#12 は Phase 1 のカード生成を config 導出で作ることで解消** (runner 側の段数・レビュアー名直書きは修理せず凍結のまま Phase 3 で切除する — 捨てる層への修理はしない。v4 訂正)、#13 は Phase 3 削除で解消

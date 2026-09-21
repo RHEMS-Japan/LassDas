@@ -536,6 +536,20 @@ closed. The launcher lends and returns trees under the runs directory
 alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint from the runtime
 configuration's `chain.runs_root`).
 
+This root is also used by single-runner cards when configured: the canonical
+Hermes card receives `--workspace dir:<runs_root>/<delivery_id>`. It must be
+on persistent storage in a pod deployment; leaving the runner on Hermes'
+scratch default puts its workspace outside the launcher's permitted tree
+and loses its records on replacement. Configurations without a runs root
+retain the legacy scratch default. Existing cards keep their recorded paths;
+setting a root does not move or re-run historical cards.
+
+Runner mode takes reviewer identities and the stage limit from the consumer
+configuration, carrying those same review files into decision, validation
+and publication. Explicit `reviewer_agents` bindings select each launch.
+The original unbound `claude-correctness` seat keeps its direct-model call
+for compatibility; no configured reviewer is renamed or substituted.
+
 Stopping an agent: a signal from the engine's user does not reach the
 agent user's processes, so the worker stops a run by sending the launcher
 `SIGTERM`; the launcher holds `cap_kill` for this, kills the agent's own
