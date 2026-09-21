@@ -108,9 +108,17 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 	if err != nil {
 		return
 	}
-	token, err := readTargetToken(config)
-	if err != nil {
-		return
+	// Match entrypoint.sh: runner retains the existing environment token,
+	// while cards seals it into an operator-only file before dispatch.
+	token := ""
+	if !config.OrchestrationCards() {
+		token = os.Getenv("TARGET_GITHUB_TOKEN")
+	}
+	if token == "" {
+		token, err = readTargetToken(config)
+		if err != nil {
+			return
+		}
 	}
 	out := filepath.Join(runDir, featureMergeFile+".reading")
 	_ = os.Remove(out)

@@ -49,7 +49,17 @@ func TestResidentObservesHumanMerge(t *testing.T) {
 				write(ticket, `{}`, 0600)
 				write(filepath.Join(dir, "feature-pr.json"), `{"payload":{"pull_request":{"Number":29}}}`, 0600)
 				chain := config["chain"].(map[string]any)
-				write(chain["target_token_path"].(string), "test-token", 0600)
+				if mode == "runner" && !legacy {
+					// The runner entrypoint retains this environment variable;
+					// only cards writes and unsets it into the sealed token file.
+					t.Setenv("TARGET_GITHUB_TOKEN", "test-token")
+				} else {
+					t.Setenv("TARGET_GITHUB_TOKEN", "")
+					if mode == "cards" {
+						t.Setenv("TARGET_GITHUB_TOKEN", "must-not-use-environment-in-cards")
+					}
+					write(chain["target_token_path"].(string), "test-token", 0600)
+				}
 				controller := filepath.Join(root, "controller")
 				config["controller_bin"] = controller
 				response := filepath.Join(root, "merge-response")
