@@ -60,7 +60,12 @@ func TestSnapshotAvailabilityAndPrivateRouting(t *testing.T) {
 
 func TestStreamPublishesReplacedSnapshotWithoutReload(t *testing.T) {
 	s := &boardServer{statusDir: t.TempDir()}
-	writeSnapshot(t, s.statusDir, "intake", time.Now())
+	at := time.Now()
+	writeSnapshot(t, s.statusDir, "intake", at)
+	before, err := os.Stat(filepath.Join(s.statusDir, "board.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(s.serveStream))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -87,6 +92,15 @@ func TestStreamPublishesReplacedSnapshotWithoutReload(t *testing.T) {
 		t.Fatalf("no event: %v", scanner.Err())
 	}
 	read("intake")
-	writeSnapshot(t, s.statusDir, "review", time.Now())
+	writeSnapshot(t, s.statusDir, "review", at)
+	// Atomic replacement can keep both size and timestamp (including on
+	// fast CI filesystems). File identity must still trigger publication.
+	if err := os.Chtimes(filepath.Join(s.statusDir, "board.json"), before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(filepath.Join(s.statusDir, "board.json"))
+	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || os.SameFile(before, after) {
+		t.Fatal("test did not replace the file with matching metadata")
+	}
 	read("review")
 }

@@ -748,16 +748,25 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	watched := []string{filepath.Join(s.statusDir, "board.json"), filepath.Join(s.statusDir, "actions.jsonl")}
-	stamp := func() string {
-		var parts []string
+	last := make(map[string]os.FileInfo, len(watched))
+	changed := func() bool {
+		dirty := false
 		for _, path := range watched {
-			if info, err := os.Stat(path); err == nil {
-				parts = append(parts, fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()))
-			} else {
-				parts = append(parts, "-")
+			info, err := os.Stat(path)
+			if err != nil {
+				info = nil
 			}
+			before := last[path]
+			if info == nil {
+				dirty = dirty || before != nil
+			} else if before == nil || !os.SameFile(before, info) || before.Size() != info.Size() || !before.ModTime().Equal(info.ModTime()) {
+				// Snapshots are replaced atomically. Equal timestamps and
+				// lengths do not make two different files the same snapshot.
+				dirty = true
+			}
+			last[path] = info
 		}
-		return strings.Join(parts, "|")
+		return dirty
 	}
 	send := func() {
 		encoded, err := json.Marshal(s.payload())
@@ -768,7 +777,7 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	last := stamp()
+	changed()
 	send()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -778,8 +787,7 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			if current := stamp(); current != last {
-				last = current
+			if changed() {
 				send()
 				heartbeat = 0
 				continue

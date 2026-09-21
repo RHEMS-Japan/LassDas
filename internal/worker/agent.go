@@ -338,7 +338,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 			// run record holds the transcript, and nothing of a launch is
 			// left for the next one to read.
 			reclaimWorkspace(launcher, agentHome)
-			if err := os.RemoveAll(agentHome); err != nil {
+			if err := removeAgentHome(agentHome); err != nil {
 				fmt.Fprintf(os.Stderr, "worker: launch home not removed: %v\n", err)
 			}
 		}()
@@ -616,6 +616,35 @@ const AgentLauncherEnv = "LASSDAS_AGENT_LAUNCHER"
 const AgentTreeRootEnv = "LASSDAS_AGENT_TREE_ROOT"
 
 func agentLauncher() string { return os.Getenv(AgentLauncherEnv) }
+
+// removeAgentHome cleans only the per-launch home after its ownership has
+// returned. Build tools can leave read-only directories (Go's module cache,
+// for example), whose children the engine cannot unlink with RemoveAll
+// alone. Keep the home private and never follow links into another tree.
+func removeAgentHome(home string) error {
+	info, err := os.Lstat(home)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("launch home is not a real directory")
+	}
+	if err := filepath.WalkDir(home, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return os.RemoveAll(home)
+}
 
 // reclaimWorkspace asks the launcher to return a workspace to this user.
 // The launcher does it itself when the agent exits; this covers an agent
