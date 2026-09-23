@@ -26,6 +26,52 @@ func validTicketEnvelope(t *testing.T, description string) hook.DispatchEnvelope
 	return envelope
 }
 
+// TestReadRawTicketAcceptsAShortTicketKey pins the worker to the reception's
+// definition of a run id. The reception admits the shortest legal ticket key
+// (AB-1); a second copy of the rule in this package still demanded eight
+// characters and refused the same ticket as an invalid identity (measured
+// live: the requester saw internal_failed fifteen seconds after acceptance).
+func TestReadRawTicketAcceptsAShortTicketKey(t *testing.T) {
+	snapshot := hook.TicketSnapshot{
+		SchemaVersion: hook.SnapshotSchemaVersion,
+		SpaceKey:      "example", ActivityID: 1, ActivityType: 1, ProjectID: 909057, ProjectKey: "AB",
+		IssueID: 2, IssueKey: "AB-1", IssueKeyID: 1, CreatorID: 9903853,
+		RunID: "AB-1", CreatedAt: time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC),
+		Target:    hook.DeliveryTarget{RepositoryID: 101, WorkflowRefSHA256: strings.Repeat("a", 64)},
+		Untrusted: hook.UntrustedTicketData{Summary: "Change one visible label", Description: realTicketDescription()},
+	}
+	envelope, err := hook.SealSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := validTestConfig()
+	toolSHA := strings.Repeat("c", 40)
+	raw, err := ReadRawTicket(envelope, config, toolSHA)
+	if err != nil {
+		t.Fatalf("a short ticket key must be accepted by the worker too, got error = %v", err)
+	}
+	if raw.RunID != "AB-1" || raw.IssueKey != "AB-1" {
+		t.Fatalf("raw = %+v", raw)
+	}
+	if err := raw.Validate(config); err != nil {
+		t.Fatalf("sealed raw ticket must revalidate: %v", err)
+	}
+	// The contract read from the ticket carries the same key, through the
+	// other copy of the rule.
+	request := TicketRequest{
+		SchemaVersion: 1, DeliveryID: raw.DeliveryID, InputSHA256: raw.InputSHA256,
+		ConfigSHA256: raw.ConfigSHA256, ToolSHA: toolSHA,
+		IssueKey: "AB-1", RunID: "AB-1",
+		Repository: config.Consumers[0].Repository, Mode: config.Consumers[0].Mode.ID,
+		Summary:     "Change one visible label",
+		TargetFiles: []string{"client/src/components/Example.tsx"},
+		Request:     "Change the label on the settings page.",
+	}
+	if err := request.Validate(config); err != nil {
+		t.Fatalf("a short ticket key must pass the request validation too: %v", err)
+	}
+}
+
 func validTicketDescription() string {
 	return strings.Join([]string{
 		"Automation-Run-ID: run_20260802_alpha",

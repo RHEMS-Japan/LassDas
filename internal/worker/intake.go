@@ -104,7 +104,7 @@ func (r RawTicket) Validate(config Config) error {
 	}
 	if r.SchemaVersion != ArtifactSchemaVersion || !deliveryPattern.MatchString(r.DeliveryID) ||
 		!sha256Pattern.MatchString(r.InputSHA256) || r.ConfigSHA256 != configSHA || !ValidToolSHA(r.ToolSHA) ||
-		!issueKeyPattern.MatchString(r.IssueKey) || !runIDPattern.MatchString(r.RunID) ||
+		!issueKeyPattern.MatchString(r.IssueKey) || !hook.ValidRunID(r.RunID) ||
 		!sha256Pattern.MatchString(r.RawSHA256) {
 		return errors.New("raw ticket identity is invalid")
 	}
