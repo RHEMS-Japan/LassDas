@@ -229,6 +229,32 @@ func TestProcessAcceptsAnyBodyBecauseTheTicketNamesTheRun(t *testing.T) {
 	}
 }
 
+// TestProcessAcceptsAShortTicketKey pins the run id's minimum length to what
+// a ticket key can be. A project with a two-letter key names its first tickets
+// AB-1 … AB-9, seven characters or fewer, and the former minimum of eight
+// ignored every one of them without a word to the requester (measured live).
+func TestProcessAcceptsAShortTicketKey(t *testing.T) {
+	config := testConfig()
+	config.ProjectKey = "AB"
+	activity, issue := testActivity(), testIssue()
+	activity.ProjectKey, activity.IssueKeyID = "AB", 1
+	issue.IssueKey, issue.KeyID = "AB-1", 1
+	hint := WebhookHint{ActivityID: activity.ID, ActivityType: activity.Type, ProjectID: activity.ProjectID, ProjectKey: activity.ProjectKey, CreatorID: activity.CreatorID, IssueID: activity.IssueID, IssueKeyID: activity.IssueKeyID}
+	store := &fakeStore{}
+	service, err := NewService(config, &fakeBacklog{activity: activity, issue: issue}, store, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	service.now = func() time.Time { return testTime }
+	result := service.Process(context.Background(), hint)
+	if result.Decision != DecisionAccepted || result.Code != "queue_created" || len(store.requests) != 1 {
+		t.Fatalf("a short ticket key must be accepted: result=%+v enqueued=%d", result, len(store.requests))
+	}
+	if got := store.requests[0].Envelope.Snapshot.RunID; got != "AB-1" {
+		t.Fatalf("run id = %q, want the ticket key", got)
+	}
+}
+
 func TestProcessDefaultDenyBeforeQueue(t *testing.T) {
 	tests := []struct {
 		name     string

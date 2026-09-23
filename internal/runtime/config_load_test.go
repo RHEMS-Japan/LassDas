@@ -168,7 +168,7 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 		"wrong activity type":   func(m map[string]any) { m["tracker"].(map[string]any)["allowed_activity_type"] = 2 },
 		"bad repository":        func(m map[string]any) { m["identity"].(map[string]any)["repository"] = "no-slash" },
 		"short engine sha":      func(m map[string]any) { m["identity"].(map[string]any)["engine_sha"] = "abc" },
-		"bad automation id":     func(m map[string]any) { m["automation_run_id"] = "run" },
+		"bad automation id":     func(m map[string]any) { m["automation_run_id"] = "run id" },
 		"no destinations":       func(m map[string]any) { m["report_destinations"] = []any{} },
 		"bad binary pin":        func(m map[string]any) { m["worker_sha256"] = "zz" },
 		"cards without chain":   func(m map[string]any) { m["orchestration"] = "cards" },
