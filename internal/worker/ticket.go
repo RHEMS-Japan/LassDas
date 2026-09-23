@@ -236,7 +236,7 @@ func (r TicketRequest) Validate(config Config) error {
 	}
 	if r.SchemaVersion != 1 || !deliveryPattern.MatchString(r.DeliveryID) || !sha256Pattern.MatchString(r.InputSHA256) ||
 		r.ConfigSHA256 != configSHA || !ValidToolSHA(r.ToolSHA) ||
-		!issueKeyPattern.MatchString(r.IssueKey) || !runIDPattern.MatchString(r.RunID) || r.Mode != consumer.Mode.ID {
+		!issueKeyPattern.MatchString(r.IssueKey) || !hook.ValidRunID(r.RunID) || r.Mode != consumer.Mode.ID {
 		return errors.New("ticket identity is invalid")
 	}
 	if err := validatePlainText(r.Summary, maxTicketSummaryBytes, false); err != nil {

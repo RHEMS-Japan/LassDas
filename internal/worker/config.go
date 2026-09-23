@@ -26,7 +26,9 @@ var (
 	sha256Pattern           = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	commitPattern           = regexp.MustCompile(`^[a-f0-9]{40}$`)
 	deliveryPattern         = regexp.MustCompile(`^delivery_[a-f0-9]{32}$`)
-	runIDPattern            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`)
+	// The run id's shape is the reception's to define (hook.ValidRunID); a
+	// second copy here drifted once — the reception admitted a short ticket
+	// key that this package then refused as an invalid ticket identity.
 	issueKeyPattern         = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,99}-[1-9][0-9]*$`)
 	relativePathPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$`)
 	verificationPathPattern = regexp.MustCompile(`^/(?:[A-Za-z0-9._~-]+/)*[A-Za-z0-9._~-]*$`)
