@@ -67,7 +67,7 @@ func TestPullRequestRejectsEveryIdentityBoundary(t *testing.T) {
 		"sha":                       func(v *PullRequest) { v.WorkflowSHA = strings.Repeat("g", 40) },
 		"workflow run":              func(v *PullRequest) { v.WorkflowRunID = 0 },
 		"attempt":                   func(v *PullRequest) { v.RunAttempt = 0 },
-		"automation run":            func(v *PullRequest) { v.AutomationRunID = "bad" },
+		"automation run":            func(v *PullRequest) { v.AutomationRunID = "bad run" },
 		"time":                      func(v *PullRequest) { v.IssuedAt = time.Time{} },
 	}
 	for name, mutate := range tests {

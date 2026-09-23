@@ -13,7 +13,12 @@ const SnapshotSchemaVersion = 2
 
 var (
 	componentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
-	runIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`)
+	// The run id is the ticket key (PROJECT-N), whose shortest legal form is
+	// three characters. The former minimum of eight was a leftover of the
+	// fixed run_YYYYMMDD_... value the key replaced: a project with a short
+	// key had every ticket below its tenth ignored, silently, with nothing
+	// posted to the requester (measured live on the first such project).
+	runIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$`)
 	digestPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	deliveryPattern  = regexp.MustCompile(`^delivery_[a-f0-9]{32}$`)
 	safeCodePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
