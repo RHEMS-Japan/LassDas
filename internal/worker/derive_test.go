@@ -73,6 +73,42 @@ func TestCandidateListingOffersOnlyTheWritableScope(t *testing.T) {
 	}
 }
 
+// TestCandidateListingAcceptsARepositoryTheSizeOfALiveOne pins the bound to
+// what a real writable scope produced: the first repository offered whole
+// had 4,742 files and died at the former limit of 2,000 before any model
+// ran. The bound still exists; one file past it is still refused.
+func TestCandidateListingAcceptsARepositoryTheSizeOfALiveOne(t *testing.T) {
+	config := validTestConfig()
+	consumer := config.Consumers[0]
+	tree := func(count int) string {
+		t.Helper()
+		root := t.TempDir()
+		dir := filepath.Join(root, "client", "src", "generated")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < count; index++ {
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("file-%05d.ts", index)), []byte("export {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	listing, err := ReadCandidateListing(tree(4742), strings.Repeat("a", 40), consumer, config)
+	if err != nil {
+		t.Fatalf("a repository of 4,742 files must be listed: %v", err)
+	}
+	if len(listing.Paths) != 4742 {
+		t.Fatalf("paths = %d, want 4742", len(listing.Paths))
+	}
+	if err := listing.Validate(consumer, config); err != nil {
+		t.Fatalf("listing does not validate: %v", err)
+	}
+	if _, err := ReadCandidateListing(tree(maxCandidatePaths+1), strings.Repeat("a", 40), consumer, config); err == nil {
+		t.Fatal("a listing one past the bound was accepted")
+	}
+}
+
 // scriptedDeriveAPI returns one canned model answer and captures the prompt.
 func newDeriveInvoker(t *testing.T, response string) (*ModelInvoker, *scriptedChatAPI) {
 	t.Helper()
