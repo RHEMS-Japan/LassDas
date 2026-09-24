@@ -635,7 +635,13 @@ func validateFeatureSpec(spec FeatureSpec, contract Contract) ([]string, error) 
 	if err := validateText(spec.CommitMessage, 512, "invalid_commit_message"); err != nil {
 		return nil, err
 	}
-	if len(spec.Files) == 0 || len(spec.Files) > 32 || len(spec.AllowedPathPrefixes) == 0 || len(spec.AllowedPathPrefixes) > 16 {
+	// The prefixes are the consumer's writable scope, copied as configured.
+	// The configuration side deliberately leaves that list uncapped (a
+	// repository names as many top-level directories as it has); a cap of
+	// 16 here contradicted it and refused a delivery whose implementation,
+	// both reviews and validation had all passed — the first consumer to
+	// offer its whole tree named 29. Only an empty list is a defect.
+	if len(spec.Files) == 0 || len(spec.Files) > 32 || len(spec.AllowedPathPrefixes) == 0 {
 		return nil, invariant("invalid_feature_file_set")
 	}
 	for _, prefix := range spec.AllowedPathPrefixes {
