@@ -14,8 +14,15 @@ import (
 )
 
 const (
-	maxCandidatePaths        = 2000
-	maxCandidateListingBytes = 256 * 1024
+	// The listing is what the reception's assessor reads to name the files
+	// a ticket changes, so its bound is a prompt-size and cost question, not
+	// a correctness one. The first repository with a full-tree writable
+	// scope had 4,742 files (about 200 KB of paths) and died here at 2,000
+	// before any model ran. The durable answer for large repositories —
+	// narrowing the offer by the names the ticket itself carries — is
+	// separate work; this bound just stops refusing them.
+	maxCandidatePaths        = 8000
+	maxCandidateListingBytes = 1024 * 1024
 	maxDeriveResponseBytes   = 16 * 1024
 	derivePromptVersion      = 2
 )
