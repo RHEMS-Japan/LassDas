@@ -84,6 +84,19 @@ dispatches the runner. The contract the code relies on:
   `HERMES_KANBAN_WORKSPACE`, `HERMES_KANBAN_RUN_ID` set; the workspace
   persists across re-dispatches of the same card (the runner clears it in
   `Prepare`).
+- Before claiming, the runner reads its dispatched card through the canonical
+  CLI, matches its delivery id to the ledger, and verifies the dispatched
+  workspace against the card's actual workspace. It supplies that run id to
+  `Pull`; it never takes whichever ticket occupies the project's pending slot.
+  The card remains authoritative for existing workspaces, including scratch
+  cards created before a persistent runs root was configured.
+- A missing/non-running card, unreadable binding, mismatched workspace, or
+  workspace envelope belonging to another delivery stops the runner **before**
+  it claims a ticket, clears any records, starts a stage, or posts a result.
+  An invalid existing envelope also stops it without deleting evidence. This
+  prevents new cross-ticket processing; it does not repair previously mixed
+  histories or rewrite existing ledger/card state. Those require separately
+  authorized recovery after the evidence has been preserved.
 - Exit code 0 → the supervisor completes the card; **the complete
   translation is a no-op when the card is not `running`** — that is what
   lets the runner block its own card (`awaiting-answer:<delivery>`) and
