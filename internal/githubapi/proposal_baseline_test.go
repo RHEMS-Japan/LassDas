@@ -104,6 +104,31 @@ func TestPublishFeatureRejectsAMalformedReleaseTree(t *testing.T) {
 	}
 }
 
+// TestFeatureScopeMayNameTheWholeTree pins the publish side to the
+// configuration's rule: the writable scope is uncapped there, so it is here.
+// The first consumer to offer its whole tree named 29 prefixes, and its
+// delivery — implemented, reviewed twice and validated — died at publish on
+// a cap of 16 the configuration never mentioned.
+func TestFeatureScopeMayNameTheWholeTree(t *testing.T) {
+	controller, transport := newTestController(t, nil, true)
+	prefixes := []string{"AGENTS.md", "CODE_OF_CONDUCT.md", "DEVELOPMENT.md", "LICENSE", "Makefile", "README.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "flake.lock", "flake.nix", "pulse.yaml"}
+	for _, dir := range []string{"cli", "cmd", "community", "core", "deploy", "docs", "examples", "framework", "helm-charts", "nix", "npx", "plugins", "recipes", "scripts", "terraform", "tests", "transports", "ui"} {
+		prefixes = append(prefixes, dir+"/")
+	}
+	if len(prefixes) != 29 {
+		t.Fatalf("the live scope had 29 entries, this fixture has %d", len(prefixes))
+	}
+	spec := FeatureSpec{Branch: "automation/sample", CommitMessage: "sample", AllowedPathPrefixes: prefixes, Files: []FileUpdate{{Path: "DEVELOPMENT.md", Content: []byte("# dev\n"), ExpectedBlobSHA: shaA}}}
+	if _, err := validateFeatureSpec(spec, controller.contract); err != nil {
+		t.Fatalf("a scope of %d prefixes must be publishable: %v", len(prefixes), err)
+	}
+	spec.AllowedPathPrefixes = nil
+	if _, err := validateFeatureSpec(spec, controller.contract); err == nil {
+		t.Fatal("an empty scope was accepted")
+	}
+	transport.done()
+}
+
 func TestFeatureRootFileScopeIsExact(t *testing.T) {
 	controller, transport := newTestController(t, nil, true)
 	spec := FeatureSpec{Branch: "automation/sample", CommitMessage: "sample", AllowedPathPrefixes: []string{"main.go", "cmd/"}, Files: []FileUpdate{{Path: "main.go", Content: []byte("package main\n"), ExpectedBlobSHA: shaA}}}
