@@ -416,6 +416,15 @@ func TestTheProceedThresholdIsHeldToItsRange(t *testing.T) {
 	if named.Threshold() != DefaultReceptionProceedThreshold {
 		t.Errorf("a destination that named no threshold takes %v, want the default %v", named.Threshold(), DefaultReceptionProceedThreshold)
 	}
+	// The default is a measured number, written out here rather than named,
+	// so moving it is moving it deliberately. Every request the reception
+	// really asked about was judged between 0.64 and 0.81 over 35 cases, so
+	// anything at or under 0.81 settles a question the reception was right
+	// to ask; 0.85 is the lowest that overrules none of them and this keeps
+	// a margin above it (docs/SETUP.md).
+	if DefaultReceptionProceedThreshold != 0.90 {
+		t.Errorf("the measured default moved to %v without the measurement moving", DefaultReceptionProceedThreshold)
+	}
 	if err := named.validate(); err != nil {
 		t.Errorf("a destination that named no threshold was refused: %v", err)
 	}

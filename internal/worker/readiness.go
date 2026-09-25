@@ -111,10 +111,22 @@ const (
 
 	// DefaultReceptionProceedThreshold is how sure the reception's decision
 	// model has to be, by default, before the reception settles questions it
-	// had written instead of putting them to the requester. See docs/SETUP.md
-	// for the measurement it was read off, and MinReceptionProceedThreshold
-	// for the range a destination may move it inside.
-	DefaultReceptionProceedThreshold = 1.0
+	// had written instead of putting them to the requester.
+	//
+	// It is read off a measurement rather than chosen: 35 requests from two
+	// destinations' finished runs, judged under these criteria, with what
+	// the reception itself did as the answer. Every request it really asked
+	// about came back between 0.64 and 0.81, so 0.85 is the lowest number
+	// that overrules none of them and 0.90 keeps a margin over the highest.
+	// docs/SETUP.md carries the table and how to take it again.
+	//
+	// The number is a floor on certainty, not a quota. At this one, none of
+	// the requests that measurement covers would have been settled: it buys
+	// nothing on a corpus already judged correctly, and exists for requests
+	// the judge is surer about than it was about any request the reception
+	// was right to ask. MinReceptionProceedThreshold is the range a
+	// destination may move it inside once it has measured its own history.
+	DefaultReceptionProceedThreshold = 0.90
 
 	// maxApproachExcerptBytes bounds the quoted approach. The quote is
 	// evidence, not the ticket over again.
