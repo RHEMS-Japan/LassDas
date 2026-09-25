@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/probe"
 	"bytes"
@@ -259,7 +260,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		// A launch that died with the pod left the tree to the agent user;
 		// it comes back before it is lent again.
 		reclaimWorkspace(launcher, root)
-		agentHome, err = prepareAgentHome(config, root)
+		agentHome, err = prepareAgentHome(config, root, launcher)
 		if err != nil {
 			return AgentOutcome{}, "", err
 		}
@@ -304,8 +305,19 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		}
 		prompt = strings.ReplaceAll(prompt, homeToken, agentHome)
 	}
-	environment, err := agentEnvironment(config, agentHome)
+	// lentHome is the home this launch made and lends to another user; it
+	// is "" where the agent runs as this process's own user, which is what
+	// decides whether a credential handed over as a file name needs a copy
+	// the agent can open.
+	lentHome := ""
+	if launcher != "" {
+		lentHome = agentHome
+	}
+	environment, err := agentEnvironment(config, agentHome, lentHome)
 	if err != nil {
+		if launcher != "" {
+			_ = os.RemoveAll(agentHome)
+		}
 		return AgentOutcome{}, "", err
 	}
 	if launcher != "" {
@@ -768,11 +780,46 @@ var agentHomeSeeds = []string{".codex/config.toml"}
 // running at once never share one. The launcher lends the directory to
 // the agent user; the worker takes it back when the run ends, so the
 // engine can read what was left and the next dispatch can clear it.
-func prepareAgentHome(config AgentConfig, root string) (string, error) {
+// sweepStaleAgentHomes removes the launch homes of launches that did not
+// end. A card runs one launch at a time and the chain runs one card at a
+// time on a run directory, so anything already under the parent belongs to
+// a launch that is over.
+//
+// Best effort throughout: a home that will not go is a full volume or a
+// launcher that cannot reach it, and neither is a reason to refuse to start
+// this launch. What it must not do is leave one readable and say nothing,
+// which is why the failure is printed.
+func sweepStaleAgentHomes(launcher, base string) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		stale := filepath.Join(base, entry.Name())
+		// The agent user owns what it was lent; the launcher is what can
+		// give it back, exactly as at the end of a launch that finished.
+		reclaimWorkspace(launcher, stale)
+		if err := removeAgentHome(stale); err != nil {
+			fmt.Fprintf(os.Stderr, "worker: a launch home from an earlier card was not removed: %v\n", err)
+		}
+	}
+}
+
+func prepareAgentHome(config AgentConfig, root, launcher string) (string, error) {
 	base := filepath.Join(filepath.Dir(root), "agent-home")
 	if err := os.MkdirAll(base, 0o711); err != nil {
 		return "", errors.New("agent home could not be prepared")
 	}
+	// The homes of launches that did not end. Every launch makes a fresh
+	// directory of its own, so a stale one is never reused — but it is
+	// still lent to the agent user, and a credential a launch placed there
+	// for the AI to read would stay readable to the next card's AI, which
+	// the list of stages says must not have it. The deferred cleanup cannot
+	// cover a pod replaced mid-card; this is what does.
+	sweepStaleAgentHomes(launcher, base)
 	home, err := os.MkdirTemp(base, config.ID+"-")
 	if err != nil {
 		return "", errors.New("agent home could not be prepared")
@@ -845,7 +892,7 @@ func copyHomeSeed(engineHome, agentHome, relative string) error {
 	return nil
 }
 
-func agentEnvironment(config AgentConfig, home string) ([]string, error) {
+func agentEnvironment(config AgentConfig, home, lentHome string) ([]string, error) {
 	environment := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + home,
@@ -861,11 +908,92 @@ func agentEnvironment(config AgentConfig, home string) ([]string, error) {
 		}
 		environment = append(environment, name+"="+value)
 	}
+	// What this card was handed. The environment an agent runs in is built
+	// here from nothing, so a credential in this process's own environment
+	// would otherwise stop at the process that read it — and the agent is
+	// the one thing in a card that has to reach a service to write a change
+	// against it. SecretEnv is not the way in: it is the launch's own fixed
+	// binding of a model key, four names at most, and a credential is the
+	// destination's, named per card and possibly multi-line.
+	for _, name := range cardsecret.Names() {
+		value := os.Getenv(name)
+		if value == "" {
+			// The card's entry refuses an unreadable credential before any
+			// step runs, so an empty one here is a variable the launch
+			// itself dropped; the agent runs without it rather than not at
+			// all, and the service it cannot reach is what says so.
+			continue
+		}
+		if cardsecret.HandedAsPath(name) && lentHome != "" {
+			// The configured file is closed to the agent user — the boot
+			// refuses to start otherwise — so handing the agent that name
+			// would hand it a file it is guaranteed not to be able to open.
+			// A copy it can open is placed in the home this launch made,
+			// which is outside the working copy (so it can never be
+			// committed) and is taken back and removed when the launch
+			// ends, whether the card finished, failed or was interrupted.
+			copied, err := lendCredentialFile(lentHome, name, value)
+			if err != nil {
+				return nil, err
+			}
+			value = copied
+		}
+		environment = append(environment, name+"="+value)
+	}
 	sort.Strings(environment)
 	return environment, nil
 }
 
+// credentialLendDir is where a launch keeps the copies it lends. Under the
+// launch's own home, so the one cleanup that already exists removes them.
+const credentialLendDir = "credentials"
+
+// lendCredentialFile places a copy of a configured credential file where
+// the agent user can read it, and answers with the copy's path.
+//
+// Read-only, and named for the variable rather than for the configured
+// file: what the agent is told is a variable and a file to read, and the
+// configured path is the operator's business. The copy never goes in the
+// working copy — a secret in there would be sealed into the candidate and
+// published with it.
+func lendCredentialFile(lentHome, variable, configuredPath string) (string, error) {
+	if !credentialVariablePattern.MatchString(variable) {
+		return "", errors.New("credential variable name is invalid")
+	}
+	// The same bounded, regular-file read the card's entry point and the
+	// seal use. Two processes open the same file separately, and a read
+	// under looser rules here would accept a file the others refuse.
+	contents, err := cardsecret.ReadCredentialFile(configuredPath)
+	if err != nil {
+		return "", errors.New("the credential in " + variable + " is " + err.Error() + ", so it cannot be lent to the launch")
+	}
+	directory := filepath.Join(lentHome, credentialLendDir)
+	// Traversable, not listable: the agent opens the file it was told
+	// about and cannot enumerate the others.
+	if err := os.MkdirAll(directory, 0o711); err != nil {
+		return "", errors.New("credential could not be placed for the launch")
+	}
+	copied := filepath.Join(directory, variable)
+	if err := os.WriteFile(copied, contents, 0o444); err != nil {
+		return "", errors.New("credential could not be placed for the launch")
+	}
+	return copied, nil
+}
+
+// credentialVariablePattern is the shape the runtime configuration already
+// held the name to; it is checked again here because the name becomes a
+// file name.
+var credentialVariablePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+
+// boundedTranscript is the agent's own output as the run keeps it. The
+// card's credentials go first and the bound is applied after, so the count
+// is of what will be written rather than of text that still holds a secret.
+//
+// Replaced rather than refused: the transcript is the agent's account of
+// what it did, and for a run that stopped it is the whole of what the
+// ticket gets. A sentence with [secret] in it still says what happened.
 func boundedTranscript(value string) string {
+	value = cardsecret.Redact(value)
 	if len(value) <= MaxAgentTranscriptBytes {
 		return value
 	}

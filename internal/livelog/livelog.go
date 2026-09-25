@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/probe"
 )
 
@@ -135,7 +136,11 @@ func (s *Sink) append(chunk string) {
 	if s.cut {
 		return
 	}
-	masked, _, refusal := probe.MaskSecrets(chunk, nil)
+	// The card's own credentials are named as forbidden literals, not only
+	// the shapes a secret usually has: a connection string or a key file
+	// this destination handed over has no shape the general masker knows,
+	// and a step that prints one would publish it on the board.
+	masked, _, refusal := probe.MaskSecrets(chunk, cardsecret.Literals())
 	if refusal != "" {
 		masked = "[秘密の形 (" + refusal + ") を含む行は表示しません]\n"
 	}

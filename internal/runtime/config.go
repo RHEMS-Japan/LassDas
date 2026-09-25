@@ -137,6 +137,11 @@ type ChainConfig struct {
 	// it is waiting on. Sharing only: nothing waits for a reply, and the
 	// run does not stop. Omitted means 3.
 	RetryNoticeAttempts int `json:"retry_notice_attempts,omitempty"`
+	// Credentials are the secrets the operator provisioned for this
+	// destination and the cards that receive them (see credentials.go).
+	// Omitted, and empty, means the engine runs with nothing but the
+	// destination token and the model keys, exactly as it always has.
+	Credentials []Credential `json:"credentials,omitempty"`
 	// IntakePausedSince, when set (RFC 3339), stops the attendant from
 	// starting queued deliveries: the operator's explicit pause (J03). Runs
 	// already claimed continue to their end; a queued ticket is told once
@@ -435,6 +440,17 @@ func (c Config) ValidateDestinations() error {
 		if consumer.EffectiveKind() == "cli" && (c.Chain.E2EProfile != "" || c.Chain.E2EEnabledAfter != "" || c.Chain.E2EMaxRuntimeSeconds != 0 || c.Chain.Deliver != (DeliverConfig{})) {
 			return errors.New("runtime config: cli consumers cannot configure observation or delivery continuation")
 		}
+		// The destination says which credential reaches its provider and
+		// the runtime says where that credential's file is; the two are
+		// loaded from separate files, so this is where a name that points
+		// at nothing can be caught. Left unchecked it would come back as a
+		// card that ran with nothing in its environment and an agent
+		// reporting that it cannot sign in.
+		if infrastructure := consumer.Infrastructure; infrastructure != nil && infrastructure.Credential != "" {
+			if _, known := c.Chain.CredentialNamed(infrastructure.Credential); !known {
+				return errors.New("runtime config: a destination's infrastructure names the credential " + infrastructure.Credential + ", which chain.credentials does not provision")
+			}
+		}
 	}
 	return nil
 }
@@ -539,6 +555,9 @@ func (c Config) validateOrchestration() error {
 	}
 	if c.Chain.RetryBackoffBase() > c.Chain.RetryBackoffMax() {
 		return errors.New("runtime config: chain.retry_backoff_base_seconds must not exceed chain.retry_backoff_max_seconds")
+	}
+	if err := validateCredentials(c.Chain.Credentials); err != nil {
+		return err
 	}
 	if c.Chain.E2EProfile != "" {
 		if _, taken := seen[c.Chain.E2EProfile]; taken {

@@ -288,6 +288,22 @@ func (w *Wizard) Run(ctx context.Context, options Options) (*State, error) {
 	}
 	s.Project = options.Project
 	s.RepoRoot = options.RepoRoot
+	// What this project hands the engine beyond the repository. Read from
+	// the file rather than asked: a setup that hands over nothing must not
+	// be shown a question about a cloud account it does not have, and one
+	// that does has already written the answers down. A missing file is the
+	// interactive path, which has none of these.
+	if answers, err := LoadAnswers(options.RepoRoot); err == nil {
+		means, err := MeansFromAnswers(answers)
+		if err != nil {
+			return s, fmt.Errorf("%s: %w", AnswersFile, err)
+		}
+		if len(means.Credentials) > 0 || means.Infrastructure != nil {
+			s.Means = &means
+		} else {
+			s.Means = nil
+		}
+	}
 	s.Metrics.ExternalKeyAcquisition = "利用者が init の外で取得。所要時間は未計測"
 	if s.AutomationRunID == "" {
 		s.AutomationRunID, err = newRunID()

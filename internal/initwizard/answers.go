@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,8 +247,19 @@ func OptionalAnswers() []Requirement {
 		{"board-port", "板を 127.0.0.1 で開く port", "既定は 9200"},
 		{"host", "この instance を置く場所。このマシンの docker で動かすなら空にする", "このマシン以外に置くときだけ書く。書くと apply は準備だけして起動しない"},
 		{"model-base-url", "モデルの接続先 (OpenAI 互換の base URL)", "既定は OpenRouter。使える接続先を調べて選択肢で聞く"},
+		{"infrastructure-provider", "本体が資源を作ってよい提供元 (例 aws)", "repo の外に資源を作らせないなら書かない"},
+		{"infrastructure-region", "その提供元のどの地域に作るか", "provider を書いたときだけ"},
+		{"infrastructure-credential", "その提供元に届く鍵の名前 (credential-<名前>-path の <名前>)", "provider を書いたときだけ"},
+		{"infrastructure-resources", "作ってよい資源の種類 (JSON 配列。例 [\"sqs\", \"s3\"])", "挙げた種類だけを作る"},
+		{"infrastructure-naming-prefix", "本体が付ける名前の接頭辞", "後から見分けるための印"},
 	}
 }
+
+// meansAnswer matches the answers that hand the engine a secret. They are
+// keyed by a name the project chooses, so they cannot be listed one by one
+// the way the fixed questions are — but the check still has to tell one
+// from a misspelling of a question the engine does ask.
+var meansAnswer = regexp.MustCompile(`^credential-[a-z0-9][a-z0-9-]*-(path|env|stages|mode)$`)
 
 // HostNotice says, while the answer can still be changed, which way the
 // answer file sends apply. A value in host is not a mistake - it is how an
@@ -417,6 +429,12 @@ func (a Answers) Check(repoRoot string) []string {
 	}
 	problems = append(problems, a.checkModelBaseURL()...)
 	problems = append(problems, a.checkModels()...)
+	// What the engine is handed beyond the repository, held to the same
+	// rules the body's own load applies, so a mistyped line is named while
+	// the file can still be edited.
+	if _, err := MeansFromAnswers(a); err != nil {
+		problems = append(problems, err.Error())
+	}
 	known := map[string]bool{}
 	for _, requirement := range append(RequiredAnswers(), OptionalAnswers()...) {
 		known[requirement.ID] = true
@@ -426,7 +444,7 @@ func (a Answers) Check(repoRoot string) []string {
 	}
 	var unknown []string
 	for id := range a.Answers {
-		if !known[id] {
+		if !known[id] && !meansAnswer.MatchString(id) {
 			unknown = append(unknown, id)
 		}
 	}

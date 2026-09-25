@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"automation.internal/ticket-ingress/internal/cardsecret"
 )
 
 const (
@@ -363,6 +365,22 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 			if strings.Contains(folded, strings.ToLower(forbidden)) {
 				return errors.New("candidate contains forbidden text")
 			}
+		}
+		// The logs a handed credential could leave through are masked, and
+		// the round's own diff is the way out that is left: a change
+		// carrying the value goes into the pull request and stays there.
+		//
+		// The refusal names the variable and never the value — a refusal
+		// travels into the round's record and onto the ticket, so saying
+		// the value would publish it in the act of complaining about it.
+		//
+		// Every credential the deployment provisions, not only the ones
+		// this card was handed: the sealing worker reads them all for the
+		// comparison (cmd/worker/credential_scan.go). Which cards receive a
+		// value is a different question, answered by the list of stages,
+		// and neither answer moves the other.
+		if variable := cardsecret.VariableIn(file.Content); variable != "" {
+			return errors.New("candidate contains the value of " + variable)
 		}
 		total += len(file.Content)
 	}

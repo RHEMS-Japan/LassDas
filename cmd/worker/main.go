@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/worker"
 	"automation.internal/ticket-ingress/internal/worker/investigate"
@@ -21,6 +22,17 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Which of the inherited variables are the card's credentials. Every
+	// verb this binary runs writes text somebody reads — a live log, a
+	// transcript, a record — and the name list is the one thing a started
+	// process cannot work out from its own environment.
+	if err := cardsecret.FromEnvironment(); err != nil {
+		// Before any verb runs: this process captures what an AI prints
+		// and writes the records a person reads, and it cannot do either
+		// safely without knowing what it must keep out of them.
+		_, _ = fmt.Fprintln(os.Stderr, "worker:", err)
+		os.Exit(1)
+	}
 	if err := run(ctx, os.Args[1:]); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "worker:", err)
 		os.Exit(commandExitCode(err))
@@ -947,10 +959,14 @@ func runComposeTrail(args []string) error {
 	trailClarificationPath := flags.String("clarification", "", "")
 	trailDesignPath := flags.String("design", "", "")
 	blockedStep := flags.String("blocked-step", "", "")
+	resourcesPath := flags.String("resources", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *historyDir, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("compose-trail arguments are invalid")
 	}
+	// What the run brought into existence outside the repository. Absent on
+	// every run that created nothing, which is most of them.
+	created := worker.LoadCreatedResources(*resourcesPath)
 	designSummary := ""
 	if *trailDesignPath != "" {
 		design, err := investigate.ReadDesign(*trailDesignPath)
@@ -975,7 +991,7 @@ func runComposeTrail(args []string) error {
 			fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "trail could not be composed", err)
 			return errors.New("trail could not be composed")
 		}
-		trail := worker.ComposeUnsealedTrail(round, *blockedStep)
+		trail := worker.ComposeUnsealedTrailWithResources(round, *blockedStep, created)
 		if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
 			return errors.New("trail could not be written")
 		}
@@ -993,7 +1009,7 @@ func runComposeTrail(args []string) error {
 			validationPassed = true
 		}
 	}
-	trail := worker.ComposeTrailWithDesign(stages, clarification, validationPassed, designSummary)
+	trail := worker.ComposeTrailWithResources(stages, clarification, validationPassed, designSummary, created)
 	if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
 		return errors.New("trail could not be written")
 	}

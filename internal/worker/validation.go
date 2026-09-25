@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/cardsecret"
 )
 
 const ValidationCommandTimeout = 10 * time.Minute
@@ -148,6 +150,18 @@ func createValidationEnvironment(host []string) ([]string, func(), error) {
 		"LC_ALL=C",
 		"CI=true",
 		"NO_COLOR=1",
+	}
+	// The credentials this card was handed, where it was handed any. The
+	// environment is otherwise built from nothing on purpose — a hermetic
+	// sandbox is what makes the verification mean something — and a
+	// destination whose tests need a database would have them fail here for
+	// a reason the output cannot explain. Only the validate card carries
+	// them: a process that was not handed one has nothing to add, which is
+	// every other caller of this.
+	for _, name := range cardsecret.Names() {
+		if value, present := os.LookupEnv(name); present && value != "" {
+			environment = append(environment, name+"="+value)
+		}
 	}
 	return environment, cleanup, nil
 }

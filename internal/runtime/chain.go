@@ -135,6 +135,22 @@ func knownStage(stage string) bool {
 	return slices.Contains(AllStages(), stage)
 }
 
+// DispatchedStages is every card the engine dispatches for one delivery:
+// the chain's rounds and the delivery continuation's three phases. The
+// delivery cards are absent from AllStages because that list builds a
+// round and they belong to none, so this is the list for anything that
+// must name every card — a credential's stages above all, where a name
+// reaching no card would hand its secret to nothing and say nothing
+// about it.
+func DispatchedStages() []string {
+	return append(AllStages(), DeliverStageChecks, DeliverStageIntegrate, DeliverStagePromote)
+}
+
+// DispatchedStage reports whether a name is one of them.
+func DispatchedStage(stage string) bool {
+	return slices.Contains(DispatchedStages(), stage)
+}
+
 // ChainStage is one step of the chain: which profile runs it and how long
 // it may take. The runtimes are the operating premise from the migration
 // design (implement 90 minutes, reviews and validation 30, publish 15);

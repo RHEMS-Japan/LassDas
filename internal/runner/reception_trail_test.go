@@ -193,7 +193,9 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 }
 
 // The stderr tail keeps the end of a long stream, where the worker's
-// refusal line is.
+// refusal line is. A stream with no line break in the kept window keeps it
+// all the same, headed by a line saying it begins part-way through: the end
+// is the only reason the tail exists.
 func TestTailBufferKeepsTheEnd(t *testing.T) {
 	tail := &tailBuffer{limit: 16}
 	for _, chunk := range []string{"0123456789", "abcdefghij", "KLMNOPQRSTUV"} {
@@ -201,8 +203,36 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if tail.String() != "ghijKLMNOPQRSTUV" {
+	if tail.String() != partialLineNotice+"ghijKLMNOPQRSTUV" {
 		t.Fatalf("tail = %q", tail.String())
+	}
+}
+
+// A step that printed one line longer than the buffer, ending with a line
+// break, has exactly one boundary in the window and it is at the very end.
+// Cutting there left nothing at all, so the reason the card failed
+// disappeared from the record — the one thing the tail is for.
+func TestTailBufferNeverEmptiesItself(t *testing.T) {
+	tail := &tailBuffer{limit: 16}
+	if _, err := tail.Write([]byte(strings.Repeat("x", 40) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if tail.String() == "" || tail.String() == partialLineNotice {
+		t.Fatalf("the tail emptied itself: %q", tail.String())
+	}
+	if !strings.HasSuffix(tail.String(), "xxx\n") {
+		t.Fatalf("the end was not kept: %q", tail.String())
+	}
+	// And a stream with a usable boundary is cut on it, with no notice.
+	clean := &tailBuffer{limit: 16}
+	if _, err := clean.Write([]byte("first line\nsecond\nthird\n")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(clean.String(), "途中から") {
+		t.Fatalf("a tail cut on a boundary claims it is partial: %q", clean.String())
+	}
+	if clean.String() != "second\nthird\n" {
+		t.Fatalf("tail = %q", clean.String())
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/probe"
 )
@@ -915,7 +916,7 @@ func answerHead(answer string) string {
 	// no longer recognisable, and half of a key is still half of a key. The
 	// head travels into the run's failure record and the job log, both of
 	// which outlive the turn.
-	masked, _, refusal := probe.MaskSecrets(answer, nil)
+	masked, _, refusal := probe.MaskSecrets(answer, cardsecret.Literals())
 	if refusal != "" {
 		return "[秘密の形 (" + refusal + ") を含むため答えの冒頭は伏せます]"
 	}

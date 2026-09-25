@@ -11,6 +11,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -45,7 +47,14 @@ type Pipeline struct {
 	// same-UID /proc exposure of the runner's own exec image is recorded in
 	// docs/RUNTIME_POD.md as the Phase-3 UID-separation gate).
 	TargetToken string
-	Logger      interface {
+	// StageCredentials are the operator-provisioned secrets this card was
+	// named in, already read, as NAME=value assignments. Every step this
+	// card runs gets them, the launched agent included: a card is named in
+	// a credential precisely so that what runs inside it can reach the
+	// service. No other card sees them, because no other card's entry read
+	// the files. Empty for a card no credential names.
+	StageCredentials []string
+	Logger           interface {
 		Info(string, ...any)
 		Error(string, ...any)
 	}
@@ -128,6 +137,13 @@ func readWorkspaceFile(path string, limit int64) ([]byte, error) {
 // killed the job's process tree; the pod must do that itself.
 func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEnv ...string) (int, error) {
 	p.Logger.Info("step", "name", name, "argv0", argv[0])
+	// One source of truth for what this card carries. The assignments are
+	// what the child process gets and the same values are what must never
+	// appear in a log or a record; registering them here, rather than
+	// leaving the caller to do both, is what keeps the two from drifting
+	// apart. Registration is idempotent, so every step after the first
+	// registers nothing.
+	p.registerCredentials()
 	p.recordCurrentStep(name)
 	// Every step is told where to append what it is producing, so a reader
 	// can watch the work instead of waiting for the record that lands when
@@ -151,8 +167,13 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	command.Stdout = live.Tee(os.Stdout)
 	stderrTail := &tailBuffer{limit: stepStderrTailBytes}
 	command.Stderr = live.Tee(io.MultiWriter(os.Stderr, stderrTail))
-	defer func() { p.lastStepStderr = stderrTail.String() }()
-	command.Env = append(os.Environ(), extraEnv...)
+	// Redacted on the way in, at the one place a child's output becomes
+	// something this process keeps. From here the tail travels into the
+	// round's failure record, into the next round's instruction, and onto
+	// the ticket; a credential echoed by a failing command would ride all
+	// three, and each of them outlives the card.
+	defer func() { p.lastStepStderr = p.redactCredentials(stderrTail.String()) }()
+	command.Env = append(append(os.Environ(), p.StageCredentials...), extraEnv...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {
@@ -194,17 +215,86 @@ const stepStderrTailBytes = 2 * worker.MaxFailureDetailLineBytes
 type tailBuffer struct {
 	limit int
 	data  []byte
+	// partial is set while the kept text begins in the middle of a line.
+	partial bool
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.data = append(b.data, p...)
-	if len(b.data) > b.limit {
-		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
+	if len(b.data) <= b.limit {
+		return len(p), nil
 	}
+	cut := len(b.data) - b.limit
+	// Cut on a line boundary. A value that straddles the cut would
+	// otherwise survive as its own last few characters, which no
+	// whole-value replacement finds: one byte off the front of a token is
+	// still the token. Dropping the part-line loses nothing a reader could
+	// have used, because it begins in the middle of a sentence.
+	//
+	// Unless the boundary is the end of everything kept. A step that
+	// printed one line longer than this buffer has exactly one break in the
+	// window, at the very end, and cutting there leaves nothing at all —
+	// the reason the card failed disappears from the record, which is the
+	// one thing the tail exists to carry. The byte cut stands in that case
+	// and the text says its first line starts part-way through; a value
+	// beginning mid-line is taken out by the redaction, which looks at
+	// every line's start.
+	boundary := bytes.IndexByte(b.data[cut:], '\n')
+	if b.partial = boundary < 0 || cut+boundary+1 >= len(b.data); !b.partial {
+		cut += boundary + 1
+	}
+	b.data = append([]byte(nil), b.data[cut:]...)
 	return len(p), nil
 }
 
-func (b *tailBuffer) String() string { return string(b.data) }
+func (b *tailBuffer) String() string {
+	if b.partial {
+		return partialLineNotice + string(b.data)
+	}
+	return string(b.data)
+}
+
+// partialLineNotice heads a tail whose first line begins part-way through,
+// so a reader does not take the first words for the start of a sentence.
+const partialLineNotice = "[この行は途中から始まります]\n"
+
+// registerCredentials makes this card's credential values known to
+// everything in this process that writes text a person may read: the live
+// log's masker, the records this pipeline keeps, and the agent transcript
+// captured in another package again.
+func (p *Pipeline) registerCredentials() {
+	if len(p.StageCredentials) == 0 {
+		return
+	}
+	entries := make([]cardsecret.Entry, 0, len(p.StageCredentials))
+	for _, assignment := range p.StageCredentials {
+		name, value, found := strings.Cut(assignment, "=")
+		if !found {
+			continue
+		}
+		entry := cardsecret.Entry{Name: name}
+		// A variable holding a file's name is not a secret, and registering
+		// it as one would take every build line that mentions the file out
+		// of the live log. The card's entry point registered what is in the
+		// file when it read it; this is the backstop for a value handed
+		// over directly.
+		if cardsecret.HandedAsPath(name) {
+			entry.Path = true
+		} else {
+			entry.Secret = value
+		}
+		entries = append(entries, entry)
+	}
+	cardsecret.Register(entries)
+}
+
+// redactCredentials removes this card's credentials from text the engine is
+// about to keep. The card registered them when it read the files, whole and
+// line by line: a credentials file reaches a log one line at a time, and a
+// record holding one of those lines has published it.
+func (p *Pipeline) redactCredentials(text string) string {
+	return cardsecret.Redact(text)
+}
 
 func (p *Pipeline) worker(ctx context.Context, name string, arguments []string, extraEnv ...string) (int, error) {
 	argv := append([]string{p.Config.WorkerBin}, arguments...)

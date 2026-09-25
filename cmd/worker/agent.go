@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
@@ -72,8 +73,10 @@ func runImplement(ctx context.Context, args []string) error {
 	// No refused validation, no ruling and no returned round here: this verb
 	// builds the prompt and launches the agent in one process, which is the
 	// path the chain does not take. The chain renders the instruction on its
-	// own card, and that is where all three are read.
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, nil, nil, nil, *repoRoot)
+	// own card, and that is where all three are read. The credentials are
+	// the other way round: one process builds and launches, so the ones it
+	// would name are the ones it is carrying.
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, nil, nil, nil, *repoRoot, cardsecret.Names())
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -586,6 +589,7 @@ func implementPrompt(
 	ruling *worker.Ruling,
 	returned *worker.ReturnedWork,
 	repoRoot string,
+	credentialEnv []string,
 ) (string, error) {
 	sections := []string{
 		"あなたはこのリポジトリで、依頼された変更を実装します。",
@@ -710,9 +714,14 @@ func implementPrompt(
 		"- 1 回の実行で変更できるのは、最大 "+itoa(consumer.Mode.MaxFiles)+" ファイル・"+itoa(consumer.Mode.MaxChangedLines)+" 行・"+itoa(consumer.Mode.MaxChangedBytes)+" バイトまでです。1 ファイルの大きさは "+itoa(consumer.Mode.MaxFileBytes)+" バイトまでです。新しく作ったファイルも同じように数えます。超えた実行は破棄されます。",
 		"- 依頼に書かれていない改善・整理はしないでください。依頼を満たす最小の変更にしてください。",
 		"- 事実や操作手順を書く前に、根拠の実装・依存先・記録を読み、関係する条件分岐・対象範囲・副作用を記述と突き合わせてください。引用された行だけでなく、その主張が成立する条件と成立しない通常の経路も確認し、必要な条件や影響を説明から落とさないでください。",
-		"- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
+		automationBoundary(consumer),
 		"- テストやビルドで生まれた一時ファイル (別のパッケージ管理ツールの lockfile、ログ、キャッシュ等) は、終了する前に削除して作業ディレクトリを綺麗に戻してください。",
 		"- 変更が終わったら、何をどう変えたかを数行で述べて終了してください。コミットはしないでください。",
+	)
+	if section := infrastructureSection(consumer, credentialEnv); section != "" {
+		sections = append(sections, "", section)
+	}
+	sections = append(sections,
 		"",
 		environmentSection(agent),
 	)
@@ -726,7 +735,7 @@ func implementPrompt(
 		// objections already filled the budget would otherwise render
 		// nothing at all — every tick failing on the same overflow, with
 		// no report and no round.
-		return implementPrompt(draft, consumer, agent, clarification, nil, validationFailure, ruling, returned, repoRoot)
+		return implementPrompt(draft, consumer, agent, clarification, nil, validationFailure, ruling, returned, repoRoot, credentialEnv)
 	}
 	if len(prompt) > worker.MaxAgentPromptBytes {
 		return "", errors.New("instruction is too large")
@@ -776,6 +785,70 @@ func placeAgentKnowledge(agent worker.AgentConfig, knowledgeRoot, workspace stri
 //
 // This describes the framework, not any destination, so it stays here rather
 // than in configuration.
+// automationBoundary is the line about what an implementer does not touch.
+// A destination that handed the engine an account and named the kinds it
+// may create has said the opposite about that account, and an instruction
+// that carried both sentences would be asking for the change and refusing
+// it in the same breath. Release steps and permission settings stay out of
+// reach either way: what opens is the infrastructure the next section names
+// and the credential it names with it.
+func automationBoundary(consumer worker.ConsumerConfig) string {
+	if consumer.Infrastructure == nil {
+		return "- 自動化・リリース手順・資格情報・権限設定には触れないでください。"
+	}
+	return "- 自動化・リリース手順・権限設定には触れないでください。資格情報は、下の「使ってよい基盤」に挙げた環境変数を読んで使うだけにしてください (値を出力・記録・コミットしない)。"
+}
+
+// infrastructureSection tells the agent what it may bring into existence
+// outside the repository, and how to say what it made.
+//
+// Without it the destination's standing permission is a setting nobody
+// acts on: the agent has the credential in its environment and no statement
+// that it may use it, no statement of which kinds are allowed, and no way
+// to tell the engine what it created — so a queue it makes to finish the
+// request is invisible from the moment the card ends.
+//
+// Empty for a destination that declared no infrastructure, which is every
+// destination that delivers only a change to a repository.
+func infrastructureSection(consumer worker.ConsumerConfig, credentialEnv []string) string {
+	infrastructure := consumer.Infrastructure
+	if infrastructure == nil {
+		return ""
+	}
+	lines := []string{
+		"## 使ってよい基盤",
+		"依頼を果たすのに必要なら、この節に挙げた範囲で repo の外の資源を使ってよく、作ってもかまいません。挙げていないことはしないでください。",
+		"- 提供元: " + infrastructure.Provider,
+	}
+	if infrastructure.Region != "" {
+		lines = append(lines, "- 地域: "+infrastructure.Region)
+	}
+	if len(credentialEnv) > 0 {
+		lines = append(lines, "- 資格情報: 環境変数 "+strings.Join(credentialEnv, " / ")+" に入っています。値を出力・記録・コミットしないでください。")
+	} else {
+		lines = append(lines, "- 資格情報はこの実行には渡されていません。届かない操作は行わず、何が必要だったかを最後の報告に書いてください。")
+	}
+	if len(infrastructure.Resources) > 0 {
+		lines = append(lines, "- 作ってよい種類: "+strings.Join(infrastructure.Resources, " / ")+"。これ以外の種類は作らないでください。")
+	} else {
+		lines = append(lines, "- 新しく作ってよい種類はありません。既にあるものを使うだけにしてください。")
+	}
+	if infrastructure.NamingPrefix != "" {
+		lines = append(lines, "- 名前は "+infrastructure.NamingPrefix+" で始めてください。後から見分けるための印です。")
+	}
+	lines = append(lines,
+		"",
+		"### 作ったものは必ず申告する",
+		"作った資源は自動では消えません。申告しなかったものは誰にも見えないまま課金が続きます。",
+		"- 作業コピーの直下 (`"+worker.AgentResourcesFile+"`) に、作った資源 1 つにつき 1 行の JSON を書いてください。",
+		`- 形式: {"kind": "種類", "identifier": "見つけるための名前や ID", "provider": "提供元"}`,
+		"- `kind` は上の「作ってよい種類」の語をそのまま使ってください。挙げていない語は、作られていても「許可されていない」として記録され、成果としては報告されません。",
+		"- どの工程で・いつ作ったかは本体が記録します。書かなくてかまいません。",
+		"- このファイルは本体が回収して消すので、変更したファイルとしては数えません。何も作らなかったら、作らないでください。",
+	)
+	return strings.Join(lines, "\n")
+}
+
 func environmentSection(agent worker.AgentConfig) string {
 	lines := []string{
 		"## この実行環境について",

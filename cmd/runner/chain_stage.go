@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 )
@@ -54,12 +55,91 @@ func runChainStage(ctx context.Context, arguments []string) error {
 		}
 		pipeline.TargetToken = token
 	}
+	// The means this card was handed. Read here, per card, for the same
+	// reason the destination token is: a value in the dispatcher's own
+	// environment would reach every card, and the point of naming stages is
+	// that it reaches those and no others.
+	credentials, err := stageCredentials(config, *stage)
+	if err != nil {
+		pipeline.SealStageFailure(*stage, err)
+		return err
+	}
+	pipeline.StageCredentials = credentials
 	// Whatever this card was running is no longer running when it returns.
 	// Where this was missing, the record outlived every card and the
 	// ticket page kept a pulsing "いま動いています" beside a run that had
 	// finished, for two hours (review of #200).
 	defer runner.ClearCurrentStep(workspace)
 	return pipeline.RunChainStage(ctx, *stage)
+}
+
+// stageCredentials reads the files this card was named in and returns them
+// as environment assignments. A file the operator declared and did not
+// provision fails the card rather than running it without: a delivery that
+// was told it may reach a service, and silently could not, spends a whole
+// round finding out in the worst possible way.
+//
+// The contents are registered as this process's secrets whichever way the
+// variable is handed over. A credential given as a path exports a file name
+// that is not itself secret, but the tool that reads the file prints what is
+// in it when it fails, and that output travels into records and onto a
+// screen.
+func stageCredentials(config runtime.Config, stage string) ([]string, error) {
+	var assignments, variables, paths []string
+	var entries []cardsecret.Entry
+	for _, credential := range config.Chain.CredentialsFor(stage) {
+		contents, err := credentialValue(credential)
+		if err != nil {
+			return nil, err
+		}
+		exported := contents
+		if credential.HandsOverPath() {
+			exported = credential.Path
+		}
+		for _, variable := range credential.Env {
+			assignments = append(assignments, variable+"="+exported)
+			variables = append(variables, variable)
+			if credential.HandsOverPath() {
+				paths = append(paths, variable)
+			}
+			entries = append(entries, cardsecret.Entry{
+				Name: variable, Secret: contents, Path: credential.HandsOverPath(),
+			})
+		}
+	}
+	if len(variables) == 0 {
+		return nil, nil
+	}
+	cardsecret.Register(entries)
+	// The names travel to every process this card starts, so a worker — and
+	// the agent it launches — knows which of the variables it inherited are
+	// secret and which name a file. The values travel as the variables
+	// themselves.
+	assignments = append(assignments, cardsecret.NamesEnv+"="+strings.Join(variables, ":"))
+	if len(paths) > 0 {
+		assignments = append(assignments, cardsecret.PathNamesEnv+"="+strings.Join(paths, ":"))
+	}
+	return assignments, nil
+}
+
+// credentialValue reads one provisioned file. The name is in the error and
+// the content never is — a refusal travels into the round's record and onto
+// the ticket.
+func credentialValue(credential runtime.Credential) (string, error) {
+	raw, err := cardsecret.ReadCredentialFile(credential.Path)
+	if err != nil {
+		return "", errors.New("credential " + credential.Name + " is " + err.Error())
+	}
+	// Trailing whitespace only: a credentials file has its own interior
+	// newlines, and a token written by an editor has one at the end.
+	value := strings.TrimRight(string(raw), " \t\r\n")
+	if value == "" {
+		return "", errors.New("credential " + credential.Name + " is empty")
+	}
+	if strings.ContainsRune(value, 0) {
+		return "", errors.New("credential " + credential.Name + " holds a null byte, which cannot be an environment value")
+	}
+	return value, nil
 }
 
 func destinationToken(config runtime.Config) (string, error) {

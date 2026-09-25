@@ -15,6 +15,14 @@ import (
 	"automation.internal/ticket-ingress/internal/runtime"
 )
 
+// EngineGuardedFiles are the files this local runtime provisions for the
+// engine itself and the boot must find closed to the agent user. A
+// project's own credentials are added to them from the configuration.
+var EngineGuardedFiles = []string{
+	"/data/secrets/target-token", "/data/secrets/board-pass",
+	"/data/secrets/board-tracker-key", "/data/route.key",
+}
+
 var instanceID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
 var imageRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$`)
 var sourceSHA = regexp.MustCompile(`^[a-f0-9]{40}$`)
@@ -115,7 +123,12 @@ func prepare(i Instance) (prepared, error) {
 	wantEnv := map[string]string{
 		"LASSDAS_RUNTIME_CONFIG": "/etc/lassdas/config/runtime.json", "LASSDAS_STATE_DIR": "/data",
 		"HERMES_KANBAN_DB": "/data/kanban.db", "LASSDAS_AGENT_TREE_ROOT": "/data/runs", "HERMES_KANBAN_BOARD": config.HermesBoard,
-		"LASSDAS_GUARDED_FILES": "/data/secrets/target-token:/data/secrets/board-pass:/data/secrets/board-tracker-key:/data/route.key",
+		// Derived from the configuration rather than fixed: a project that
+		// hands the engine a credential adds that file to the list the boot
+		// checks, and an environment naming fewer files than the
+		// configuration declares would start an instance whose agents can
+		// read a secret their card was never named in.
+		"LASSDAS_GUARDED_FILES": config.Chain.GuardedFiles(EngineGuardedFiles...),
 	}
 	for key, value := range wantEnv {
 		if env[key] != value {

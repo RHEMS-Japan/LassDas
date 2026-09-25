@@ -514,7 +514,7 @@ func TestAgentEnvironmentNeverCarriesTheSessionJar(t *testing.T) {
 	t.Setenv("LASSDAS_E2E_SESSION_STATE_FILE", "/data/e2e-session/session.json")
 	t.Setenv("TARGET_GITHUB_TOKEN", "should-not-leak")
 	t.Setenv("FIXTURE_AGENT_CREDENTIAL", "credential")
-	environment, err := agentEnvironment(fixtureAgentConfig("author", "fixture-agent"), "/data/agent-home")
+	environment, err := agentEnvironment(fixtureAgentConfig("author", "fixture-agent"), "/data/agent-home", "")
 	if err != nil {
 		t.Fatal(err)
 	}

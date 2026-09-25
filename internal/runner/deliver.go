@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/visiblecheck"
 )
 
@@ -123,6 +124,10 @@ const maxDeliverReportBytes = 1 << 20
 // RunDeliver advances the delivery to the requested milestone, resuming
 // past every step whose artifact already exists.
 func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
+	// A delivery card reaches the destination's environments with whatever
+	// credential it was named in, so it is a card that can bring something
+	// into existence; what it made is collected the way a chain card's is.
+	defer func() { _ = p.RecordCreatedResources(DeliverStageOf(until), p.path("target-repo")) }()
 	if until != DeliverUntilChecks && until != DeliverUntilStaging && until != DeliverUntilProduction {
 		return errors.New("deliver milestone is invalid")
 	}
@@ -159,6 +164,23 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 		return nil
 	}
 	return p.deliverStaging(ctx, stageDir, reviews)
+}
+
+// DeliverStageOf is the card name behind one milestone. The kanban
+// dispatches three cards by name and each asks for its own milestone, so
+// this is the one place the two vocabularies meet: the card's entry point
+// reads the credentials configured against the name, the verb seals its
+// failure record under it, and the tick reads that record by it.
+func DeliverStageOf(until string) string {
+	switch until {
+	case DeliverUntilChecks:
+		return runtime.DeliverStageChecks
+	case DeliverUntilStaging:
+		return runtime.DeliverStageIntegrate
+	case DeliverUntilProduction:
+		return runtime.DeliverStagePromote
+	}
+	return ""
 }
 
 // deliverChecks waits for the feature CI. A red gate is a sealed result

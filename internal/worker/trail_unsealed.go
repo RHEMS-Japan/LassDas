@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/cardsecret"
 )
 
 // A round that produced no candidate has no sealed chain to render, so the
@@ -88,17 +90,34 @@ func LoadUnsealedRound(historyDir string, config Config) (UnsealedRound, error) 
 // same cap as the sealed trail bounds the result, because the same comment
 // and pull request body carry it.
 func ComposeUnsealedTrail(round UnsealedRound, blocked string) string {
+	return ComposeUnsealedTrailWithResources(round, blocked, nil)
+}
+
+// ComposeUnsealedTrailWithResources is the same for a run that created
+// something outside the repository before it stopped. It is a separate
+// entry because the sentence about having changed nothing is only true
+// when nothing was created: a card that provisioned a queue and then died
+// has left the queue behind, and a record claiming otherwise is the one
+// thing a report of a failed run must not do.
+func ComposeUnsealedTrailWithResources(round UnsealedRound, blocked string, created CreatedTrailInput) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "### 実装の経過 (%d 周目で停止)\n", round.Round)
+	untouched := "対象リポジトリと本番環境は変更していません。"
+	if len(created) > 0 {
+		untouched = "対象リポジトリは変更していませんが、下記の資源は作られたまま残っています。"
+	}
 	if round.ReturnedWork {
-		builder.WriteString("- 実装役は、変更を加えずに理由を報告して終了しました。対象リポジトリと本番環境は変更していません。\n")
+		// The sentence is the one the engine's own answer left: the round
+		// is not handed back. What it claims about the environments is the
+		// part that changes when something was created.
+		builder.WriteString("- 実装役は、変更を加えずに理由を報告して終了しました。" + untouched + "\n")
 		if round.EngineAnswers > 0 {
 			fmt.Fprintf(&builder,
 				"- この報告は依頼者に返していません。本体が %d 回、足りない点の扱いを決めて同じ周をやり直させています。決めた内容は前提として記録にあります。\n",
 				round.EngineAnswers)
 		}
 	} else {
-		builder.WriteString("- 変更を確定できなかったため、この周の記録は残っていません。対象リポジトリと本番環境は変更していません。\n")
+		builder.WriteString("- 変更を確定できなかったため、この周の記録は残っていません。" + untouched + "\n")
 	}
 	if round.EmptyAttempts > 0 {
 		fmt.Fprintf(&builder, "- 変更がないまま終わった試行が、この前に %d 回ありました。\n", round.EmptyAttempts)
@@ -106,6 +125,11 @@ func ComposeUnsealedTrail(round UnsealedRound, blocked string) string {
 	if step := strings.TrimSpace(blocked); step != "" {
 		builder.WriteString("- 止まった段階: " + trailClip(step, 120) + "\n")
 	}
-	builder.WriteString("\n### 実装役の報告\n" + round.Report + "\n")
+	builder.WriteString(composeCreatedResources(created))
+	// The report is the agent's own words, and it is redacted where it is
+	// captured, so this finds nothing in a record this build wrote. It is
+	// here for one that an older build wrote and this run is reporting on:
+	// the ticket comment is the least private place the engine writes.
+	builder.WriteString("\n### 実装役の報告\n" + cardsecret.Redact(round.Report) + "\n")
 	return trailTruncate(builder.String())
 }

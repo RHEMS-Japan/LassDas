@@ -667,7 +667,10 @@ through the `fsGroup`), because its default 0644 is readable by every
 user. The entrypoint checks all of them on every boot with `agentexec
 --check`, after tightening to 0600 any of them the engine's user owns
 (the kubeconfig on the state volume, for one); an operator lists further
-files in `LASSDAS_GUARDED_FILES` (colon-separated). A file the agent user
+files in `LASSDAS_GUARDED_FILES` (colon-separated), which every file named
+in `chain.credentials` joins — a credential reaches the cards its `stages`
+name through their environment, and this is what keeps a card it does not
+name from simply opening the file. A file the agent user
 can read refuses the boot, as does a launcher without its capabilities (a
 container with `allowPrivilegeEscalation: false` drops file capabilities
 at exec): a pod that does not start is the fail-closed answer, and the

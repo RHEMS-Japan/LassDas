@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/localrun"
 	runtimeconfig "automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
 )
@@ -54,7 +55,11 @@ func allRoles(s *State) []string {
 // and 36 minutes; with it one took about two hours and one delivered nothing
 // in 76 minutes across six design rounds.
 func Consumer(s *State) worker.ConsumerConfig {
-	return worker.ConsumerConfig{Kind: "cli", Repository: s.Repository, RepositoryID: s.RepositoryID, Description: "CLI application", DeliveryBranch: s.Branch, IntegrationBranch: s.Branch, Delivery: worker.DeliverPullRequest, Design: &worker.DesignConfig{Default: "off"}, GitHub: worker.ConsumerGitHubContract{DefaultBranch: s.DefaultBranch}, Mode: s.Mode}
+	consumer := worker.ConsumerConfig{Kind: "cli", Repository: s.Repository, RepositoryID: s.RepositoryID, Description: "CLI application", DeliveryBranch: s.Branch, IntegrationBranch: s.Branch, Delivery: worker.DeliverPullRequest, Design: &worker.DesignConfig{Default: "off"}, GitHub: worker.ConsumerGitHubContract{DefaultBranch: s.DefaultBranch}, Mode: s.Mode}
+	if s.Means != nil {
+		consumer.Infrastructure = s.Means.Infrastructure
+	}
+	return consumer
 }
 
 func agent(role string, timeout int) worker.AgentConfig {
@@ -125,7 +130,10 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	}
 	board := "local-" + s.Project
 	runtime := runtimeconfig.Config{LedgerPath: "/data/ledger.db", ConsumerConfigPath: "/etc/lassdas/config/m1-consumer.json", KnowledgeRoot: "/data/instance", Tracker: s.Tracker, Identity: runtimeconfig.IdentityConfig{RepositoryID: s.EngineRepositoryID, Repository: s.EngineRepository, WorkflowRef: s.EngineRepository + "/local-runtime@" + s.EngineSHA, EngineSHA: s.EngineSHA}, AutomationRunID: s.AutomationRunID, ReportDestinations: []hook.ReportDestination{{Kind: "cli", Repository: s.Repository, Delivery: "pull_request"}}, WorkerBin: "/usr/local/bin/worker", ControllerBin: "/usr/local/bin/controller", WorkerSHA256: s.Pins["worker"], ControllerSHA256: s.Pins["controller"], HermesBin: "/usr/local/bin/hermes", HermesBoard: board, Orchestration: "cards", Chain: runtimeconfig.ChainConfig{RunsRoot: "/data/runs", TargetTokenPath: "/data/secrets/target-token", Profiles: runtimeconfig.ChainProfiles{Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b", Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate", DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b", DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier"}}}
-	for k, v := range map[string]string{"LASSDAS_RUNTIME_CONFIG": "/etc/lassdas/config/runtime.json", "LASSDAS_STATE_DIR": "/data", "HERMES_KANBAN_DB": "/data/kanban.db", "LASSDAS_AGENT_TREE_ROOT": "/data/runs", "HERMES_KANBAN_BOARD": board, "LASSDAS_GATEWAY_BASE_URL": s.BaseURL, "LASSDAS_GUARDED_FILES": "/data/secrets/target-token:/data/secrets/board-pass:/data/secrets/board-tracker-key:/data/route.key"} {
+	if s.Means != nil {
+		runtime.Chain.Credentials = s.Means.Credentials
+	}
+	for k, v := range map[string]string{"LASSDAS_RUNTIME_CONFIG": "/etc/lassdas/config/runtime.json", "LASSDAS_STATE_DIR": "/data", "HERMES_KANBAN_DB": "/data/kanban.db", "LASSDAS_AGENT_TREE_ROOT": "/data/runs", "HERMES_KANBAN_BOARD": board, "LASSDAS_GATEWAY_BASE_URL": s.BaseURL, "LASSDAS_GUARDED_FILES": runtime.Chain.GuardedFiles(localrun.EngineGuardedFiles...)} {
 		env[k] = v
 	}
 	if env["TARGET_GITHUB_TOKEN"] == "" || env["BACKLOG_API_KEY"] == "" {

@@ -128,6 +128,16 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 		"--repo-root", p.path("target-repo"),
 		"--draft", p.path("ticket-draft.json"),
 	}
+	// The variables the implement card will carry. The destination's
+	// configuration says which provider the engine may reach; only the
+	// runtime's says under which names, and an agent told it may create
+	// something without being told what its credential is called would go
+	// looking through its own environment.
+	for _, credential := range p.Config.Chain.CredentialsFor(runtime.StageImplement) {
+		for _, variable := range credential.Env {
+			args = append(args, "--credential-env", variable)
+		}
+	}
 	if round > 1 {
 		previous := fmt.Sprintf("%s/stage-%d", p.path("history"), round-1)
 		for _, reviewer := range reviewers {
@@ -196,6 +206,16 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 // full volume and a missing binary lives in the record or nowhere.
 func (p *Pipeline) RunChainStage(ctx context.Context, stage string) error {
 	err := p.runChainStage(ctx, stage)
+	// Whatever this card made outside the repository, before the error is
+	// returned and before any later card seals this working copy. Every
+	// card, not only the two that launch a writing agent: a review agent,
+	// the destination's own verification commands and a delivery step all
+	// run with the credentials their card was named in, and a resource left
+	// out of the record is one nobody knows to remove. A card that made
+	// nothing collects nothing, which is nearly all of them.
+	if collected := p.RecordCreatedResources(stage, p.path("target-repo")); collected != nil && err == nil {
+		err = collected
+	}
 	if err != nil {
 		p.SealStageFailure(stage, err)
 	}
