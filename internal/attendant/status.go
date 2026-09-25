@@ -117,26 +117,37 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
-	// Which finished runs a person has already cleared away. It decides
-	// what may be left out below, so it is read once per snapshot.
+	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
+	snapshot.Runs = boardRows(config, statusDir, runs, tasks)
+	snapshot.Notice = intakeNotice(config)
+	return snapshot, nil
+}
+
+// boardRows turns the ledger's runs into the rows the board shows: which
+// ones are worth reading, what each of them says, and which of them the
+// snapshot may leave out.
+//
+// The board's own record of what a person has cleared away is read HERE
+// rather than by the caller, so that everything the record decides can be
+// exercised without a ledger or a card wall behind it. Read outside, the
+// wiring was the one part with no test: the record could stop being read
+// at all and every test still passed, while the snapshot quietly grew
+// without bound — the same silent failure this change exists to end.
+func boardRows(config runtime.Config, statusDir string, runs []state.RunOverview, tasks []runtime.BoardTask) []RunStatus {
 	cleared := boardack.Read(statusDir)
 	// Trim BEFORE classifying: classification does per-run file I/O, and
 	// the ledger only grows. Only runs a person has already CLEARED AWAY
 	// may be left out: the board promises a finished card stays until
 	// somebody presses it, and a cap that dropped the oldest would break
 	// that promise exactly when the board is furthest behind — the cards
-	// nobody had got to would be the ones to vanish. Cleared runs beyond
-	// twice the display limit (newest first) cannot appear on the board:
-	// they are capped at the limit below. Non-terminal runs always
-	// classify.
+	// nobody had got to would be the ones to vanish. Non-terminal runs
+	// always classify.
 	sort.SliceStable(runs, func(a, b int) bool { return runs[a].ClaimedAt > runs[b].ClaimedAt })
-	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
+	var rows []RunStatus
 	for _, run := range worthClassifying(runs, cleared) {
-		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
+		rows = append(rows, classifyRun(config, run, tasks))
 	}
-	snapshot.Runs = trimClearedRows(snapshot.Runs, cleared)
-	snapshot.Notice = intakeNotice(config)
-	return snapshot, nil
+	return trimClearedRows(rows, cleared)
 }
 
 // worthClassifying drops the runs that cannot appear on the board, before

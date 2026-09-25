@@ -287,3 +287,78 @@ func TestARunningRowCarriesNoZeroTimes(t *testing.T) {
 		t.Fatalf("a finished row lost its time: %s", encoded)
 	}
 }
+
+// The board's record of what a person cleared away is read where the rows
+// are built, and every decision it makes is exercised here without a ledger
+// or a card wall behind it. Read outside this function, the wiring was the
+// one part with no test at all: the read could disappear and every test
+// still passed, while the snapshot grew without bound.
+func TestTheRowsHonourTheRecordOfWhatWasClearedAway(t *testing.T) {
+	config := runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}}
+	statusDir := t.TempDir()
+	// More cleared runs than the reading cap, so both filters have to look
+	// at the record to arrive at the right number.
+	const clearedCount = 2*terminalSnapshotLimit + 5
+	const waitingCount = 5
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	record := map[string]boardack.Entry{}
+	runs := []state.RunOverview{}
+	terminal := func(id string, claimed int64) state.RunOverview {
+		return state.RunOverview{
+			DeliveryID: id, State: "terminal",
+			TerminalCode: string(hook.TerminalSuccess), ClaimedAt: claimed,
+		}
+	}
+	for i := range clearedCount {
+		id := fmt.Sprintf("cleared_%03d", i)
+		record[id] = boardack.Entry{At: start.Add(time.Duration(i) * time.Minute), User: "someone"}
+		runs = append(runs, terminal(id, int64(i)))
+	}
+	for i := range waitingCount {
+		runs = append(runs, terminal(fmt.Sprintf("waiting_%03d", i), int64(clearedCount+i)))
+	}
+	if err := boardack.Write(statusDir, record); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := boardRows(config, statusDir, slices.Clone(runs), nil)
+
+	shown := map[string]bool{}
+	clearedShown := 0
+	for _, row := range rows {
+		if !ticketview.IsFinished(row.Step) {
+			t.Fatalf("%s is not a finished row: %q", row.DeliveryID, row.Step)
+		}
+		shown[row.DeliveryID] = true
+		if strings.HasPrefix(row.DeliveryID, "cleared_") {
+			clearedShown++
+		}
+	}
+	// The record was read: without it nothing would have been capped.
+	if clearedShown != terminalSnapshotLimit {
+		t.Fatalf("%d cleared rows shown, want %d — the record of what was cleared away was not honoured", clearedShown, terminalSnapshotLimit)
+	}
+	// And what it says about the other cards is that they stay.
+	for i := range waitingCount {
+		if id := fmt.Sprintf("waiting_%03d", i); !shown[id] {
+			t.Fatalf("%s was dropped although nobody cleared it away", id)
+		}
+	}
+	// Oldest cleared first: the newest cleared card is kept, the oldest is not.
+	if !shown[fmt.Sprintf("cleared_%03d", clearedCount-1)] {
+		t.Fatal("the most recently cleared card went")
+	}
+	if shown["cleared_000"] {
+		t.Fatal("the longest-cleared card was kept over a newer one")
+	}
+	if len(rows) != terminalSnapshotLimit+waitingCount {
+		t.Fatalf("%d rows, want %d", len(rows), terminalSnapshotLimit+waitingCount)
+	}
+
+	// With no record at all, nothing has been cleared away and every card
+	// is on the board, however many there are.
+	none := boardRows(config, t.TempDir(), slices.Clone(runs), nil)
+	if len(none) != len(runs) {
+		t.Fatalf("%d rows without a record, want all %d", len(none), len(runs))
+	}
+}
