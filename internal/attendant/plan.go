@@ -67,6 +67,7 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	for attempt := readinessAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []struct {
+				Kind      string `json:"kind"`
 				Statement string `json:"statement"`
 			} `json:"assumptions"`
 		}
@@ -75,14 +76,32 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 			continue
 		}
 		for _, assumption := range assessment.Assumptions {
-			if statement := strings.TrimSpace(assumption.Statement); statement != "" {
-				facts.Assumptions = append(facts.Assumptions, statement)
+			statement := strings.TrimSpace(assumption.Statement)
+			if statement == "" {
+				continue
 			}
+			// A point the reception decided instead of asking about is the
+			// one the requester may want back. It is told apart by the kind
+			// the assessment sealed it under, and an assessment sealed
+			// before that kind existed carries none, which reads as the
+			// ordinary assumption it was.
+			if assumption.Kind == assumptionDecidedKind {
+				facts.Decided = append(facts.Decided, statement)
+				continue
+			}
+			facts.Assumptions = append(facts.Assumptions, statement)
 		}
 		break
 	}
 	return facts
 }
+
+// assumptionDecidedKind is internal/worker's AssumptionDefensibleDefault.
+// The string is repeated rather than imported, the way the design reasons
+// already are: this package cannot import the worker, which imports the
+// package this one writes for. A worker test pins the kind's spelling to
+// this copy, so renaming it there fails there.
+const assumptionDecidedKind = "defensible_default"
 
 func readPlanArtifact(path string, out any) error {
 	info, err := os.Lstat(path)

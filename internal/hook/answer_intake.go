@@ -213,7 +213,9 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 
 // decodeIntakeQuestions extracts the question and choice identifiers from the
 // sealed questions array. Unknown fields are readiness-owned and ignored here;
-// the identifiers themselves must be present, unique and non-empty.
+// the identifiers themselves must be present, unique and non-empty. The set
+// is as long as the reception's one round of questions, up to the protocol
+// ceiling — the grammar numbers questions, it does not count them.
 func decodeIntakeQuestions(encoded string) ([]answerQuestion, error) {
 	var raw []struct {
 		ID      string `json:"id"`

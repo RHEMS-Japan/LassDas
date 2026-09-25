@@ -180,3 +180,83 @@ func TestPlanCommentContentStaysWithinTheTrackerLimit(t *testing.T) {
 		t.Fatalf("capped plan comment violates the contract: %v", err)
 	}
 }
+
+// A reception that asks as little as it can decides the rest, and what it
+// decided is the part of the plan notice a requester is most likely to want
+// back. The decisions are told apart from the conventions by the kind the
+// assessment sealed them under, and they get their own heading with the one
+// action that changes them.
+func TestTheReceptionsOwnDecisionsReachThePlanNotice(t *testing.T) {
+	runDir := t.TempDir()
+	path := filepath.Join(runDir, "history", "readiness", "assessment-1.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sealed := `{"assumptions":[` +
+		`{"kind":"repository_convention","statement":"命名は既存のファイルに合わせる"},` +
+		`{"kind":"defensible_default","statement":"並び順は指定が無いため新着順にする"},` +
+		`{"kind":"non_user_visible_implementation","statement":"取得はいまの関数を使う"},` +
+		`{"kind":"defensible_default","statement":"空のときは件数 0 と出す"}]}`
+	if err := os.WriteFile(path, []byte(sealed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	facts := loadPlanFacts(runDir)
+	if len(facts.Decided) != 2 || facts.Decided[0] != "並び順は指定が無いため新着順にする" {
+		t.Fatalf("Decided = %v, want the two points the reception settled itself", facts.Decided)
+	}
+	if len(facts.Assumptions) != 2 || facts.Assumptions[0] != "命名は既存のファイルに合わせる" {
+		t.Fatalf("Assumptions = %v, want the two it took from the repository", facts.Assumptions)
+	}
+	facts.Request = "一覧に絞り込みを足す"
+	content := hook.PlanCommentContent("run-42", facts)
+	for _, want := range []string{
+		"確認せずにこちらで決めた点（違う場合は停止してください）",
+		"- 並び順は指定が無いため新着順にする",
+		"- 空のときは件数 0 と出す",
+		"前提とした解釈（曖昧だった点はこう進めます）",
+		"- 命名は既存のファイルに合わせる",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the plan notice lacks %q:\n%s", want, content)
+		}
+	}
+	if strings.Index(content, "確認せずにこちらで決めた点") > strings.Index(content, "前提とした解釈") {
+		t.Fatal("the decisions are printed after the conventions; the requester reads them first")
+	}
+	// An assessment sealed before the kind existed keeps reading as what it
+	// was: an assumption, not a decision taken instead of asking.
+	old := `{"assumptions":[{"statement":"古い前提"}]}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if facts := loadPlanFacts(runDir); len(facts.Decided) != 0 || len(facts.Assumptions) != 1 {
+		t.Fatalf("an older assessment produced %d decisions and %d assumptions", len(facts.Decided), len(facts.Assumptions))
+	}
+}
+
+// However long the record of what was decided grows, the notice still says
+// how to stop the run. That instruction is the only move a requester has
+// left once the reception has asked its one round, so the lists are what
+// gives way when the body runs out of room, never the instruction.
+func TestTheStopInstructionSurvivesALongRecord(t *testing.T) {
+	facts := hook.PlanFacts{
+		Request:   strings.Repeat("依", 600),
+		Rationale: strings.Repeat("方", 600),
+	}
+	for index := 0; index < 12; index++ {
+		facts.Decided = append(facts.Decided, strings.Repeat("決", 200))
+		facts.Assumptions = append(facts.Assumptions, strings.Repeat("前", 200))
+	}
+	content := hook.PlanCommentContent("run-42", facts)
+	if len(content) > 16*1024 {
+		t.Fatalf("the notice is %d bytes, over the tracker's limit", len(content))
+	}
+	for _, want := range []string{"「停止」とだけ書いたコメント", "確認せずにこちらで決めた点", "…（長いため以下略）"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the notice lacks %q at %d bytes", want, len(content))
+		}
+	}
+	if err := hook.ValidateCommentContract(content, hook.CommentMarker("plan", "run-42")); err != nil {
+		t.Fatalf("the notice broke its contract: %v", err)
+	}
+}

@@ -32,9 +32,16 @@ func AckCommentContent(snapshot TicketSnapshot) string {
 // readiness gate decided to proceed on. Every field is optional — the notice
 // renders whatever the run directory could provide.
 type PlanFacts struct {
-	Request     string
-	Rationale   string
+	Request   string
+	Rationale string
+	// Assumptions are the points the reception settled from the repository
+	// or because nobody sees them. Decided are the points it would have put
+	// to the requester and answered itself: with the reception asking once
+	// and nothing after it asking at all, these are the requester's only
+	// sight of a decision that was theirs to make, so the notice gives them
+	// their own heading rather than mixing them into the conventions.
 	Assumptions []string
+	Decided     []string
 	// NeedsDesign and DesignReason are the reception's sealed design
 	// decision (readiness decision.json: needs_design, design_reason). An
 	// empty reason means the run's decision did not say - a decision sealed
@@ -98,6 +105,12 @@ const (
 	// planTextMaxRunes keeps each prose part to a requester-sized paragraph;
 	// the full text stays in the sealed run directory, not the ticket.
 	planTextMaxRunes = 600
+	// Twelve per list, and the reception now fills two of them: what it
+	// settled from the repository, and what it decided instead of asking.
+	// The cut is per list so a long set of conventions cannot push the
+	// decisions out, and what is left over is counted rather than dropped
+	// silently. Raising it further would cost the stop instructions below,
+	// which the body cap trims first.
 	planListMaxItems = 12
 	planItemMaxRunes = 200
 	// planBodyMaxBytes keeps the body clear of the tracker's comment-size
@@ -118,27 +131,28 @@ const (
 const planStopSentence = "\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前に停止指示を確認し、読み取れた場合は以後の処理を止めます。実行中の工程は完了まで進む場合があり、停止指示が確認されるまでに行われた取り込みや反映は自動では取り消しません。停止の結果はこのチケットの通知をご確認ください。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n"
 
 func PlanCommentContent(runID string, facts PlanFacts) string {
-	var builder strings.Builder
-	builder.WriteString(planHeadline(facts))
+	var head strings.Builder
+	head.WriteString(planHeadline(facts))
 	if request := truncatePlanText(facts.Request); request != "" {
-		builder.WriteString("\n依頼の解釈: " + request + "\n")
+		head.WriteString("\n依頼の解釈: " + request + "\n")
 	}
 	if rationale := truncatePlanText(facts.Rationale); rationale != "" {
-		builder.WriteString("\n方針: " + rationale + "\n")
+		head.WriteString("\n方針: " + rationale + "\n")
 	}
 	if reason := strings.TrimSpace(facts.DesignReason); reason != "" {
-		builder.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
+		head.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
 	}
 	// Which files the change touches is not known here: it is decided by
 	// making the change. Naming a guess under "触る予定の範囲" told the
 	// requester a scope nothing holds the implementer to.
-	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
+	var lists strings.Builder
+	writePlanList(&lists, "確認せずにこちらで決めた点（違う場合は停止してください）", facts.Decided)
+	writePlanList(&lists, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
+	stop := planStopSentence
 	if facts.RequestKind == "investigation" {
-		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、停止が読み取られた時点で調査報告の掲示と計り直し（次の巡）は行わず、停止として終了します。\n")
-	} else {
-		builder.WriteString(planStopSentence)
+		stop = "\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、停止が読み取られた時点で調査報告の掲示と計り直し（次の巡）は行わず、停止として終了します。\n"
 	}
-	return capPlanBody(builder.String()) + CommentFacts{
+	return capPlanBody(head.String(), lists.String(), stop) + CommentFacts{
 		State:      "実装方針を掲示・自動処理中",
 		NextActor:  "自動処理（方針を変えたい場合のみ依頼者）",
 		Operation:  "方針が違う場合のみ「停止」とコメント",
@@ -161,17 +175,25 @@ func truncatePlanRunes(text string, limit int) string {
 	return string(runes[:limit]) + "…（以下略）"
 }
 
-// capPlanBody bounds the whole body below the tracker's comment limit. The
-// cut lands on a rune boundary so the notice stays valid UTF-8.
-func capPlanBody(body string) string {
-	if len(body) <= planBodyMaxBytes {
-		return body
+// capPlanBody bounds the whole body below the tracker's comment limit by
+// shortening the part that can be shortened. How to stop the run is the one
+// thing this notice must always carry — with the reception asking once and
+// nothing after it asking at all, a requester who disagrees with what was
+// decided has no other move — so the lists give way and the instructions
+// stay. The cut lands on a rune boundary so the notice stays valid UTF-8.
+func capPlanBody(head, lists, stop string) string {
+	if len(head)+len(lists)+len(stop) <= planBodyMaxBytes {
+		return head + lists + stop
 	}
-	runes := []rune(body)
-	for len(runes) > 0 && len(string(runes)) > planBodyMaxBytes {
-		runes = runes[:len(runes)*planBodyMaxBytes/len(string(runes))]
+	room := planBodyMaxBytes - len(head) - len(stop)
+	if room < 0 {
+		room = 0
 	}
-	return string(runes) + "\n…（長いため以下略）\n"
+	runes := []rune(lists)
+	for len(runes) > 0 && len(string(runes)) > room {
+		runes = runes[:len(runes)*room/len(string(runes))]
+	}
+	return head + string(runes) + "\n…（長いため以下略）\n" + stop
 }
 
 func writePlanList(builder *strings.Builder, heading string, items []string) {

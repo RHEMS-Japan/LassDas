@@ -11,17 +11,27 @@ import (
 
 const (
 	QuestionProtocolVersion = "clarification-question-v1"
-	// MaxClarificationQuestions bounds one round to the agreed contract
-	// (README「質問、回答、再通知、再開」: 1 round 最大 3 件).
-	MaxClarificationQuestions = 3
-	// MaxClarificationRounds bounds question revisions across the whole run
-	// (README: 最大 2 round。round 2 は具体化のみ).
+	// MaxClarificationQuestions is the protocol ceiling on one question set,
+	// not the number a destination asks. The reception puts every open point
+	// to the requester in a single comment, so a set is as long as the ticket
+	// left open; how long that may be is a destination setting, decided where
+	// the questions are produced. What stays here is only what the sealed
+	// store and the answer grammar can check without that setting: the
+	// highest id the ids can reach (Q19).
+	MaxClarificationQuestions = 19
+	// MaxClarificationRounds bounds how many rounds one sealed record may
+	// carry. It is a record bound, deliberately not the asking policy: the
+	// reception asks once (its own setting says how often), while a record
+	// already sealed with two rounds must keep validating, or the ticket
+	// waiting on it strands at the next read.
 	MaxClarificationRounds = 2
 	// QuestionNotifyCount is the fixed number of scheduled renotifications
 	// (README: 翌平日、3 平日目、5 平日目の 10:00 に最大 3 回).
 	QuestionNotifyCount = 3
-	// MaxQuestionSetBytes bounds the canonical questions array. Three
-	// questions with four choices each stay far below this.
+	// MaxQuestionSetBytes bounds the canonical questions array. It is also
+	// what the comment carrying the set has to fit into, so the reception
+	// holds a set to the rendered size (RenderedQuestionCommentBytes) rather
+	// than to this array alone.
 	MaxQuestionSetBytes = 16 * 1024
 	// MaxQuestionRecordBytes bounds the sealed record envelope around the
 	// questions array.
@@ -122,7 +132,7 @@ func (r QuestionRecord) ValidateRoute(config ReportRouteConfig) error {
 }
 
 // questionSetCountValid enforces only the structural bound the sealed store
-// can check without the readiness schema: a JSON array of 1..3 objects.
+// can check without the readiness schema: a JSON array of 1..19 objects.
 // Semantic validation (dimensions, 2..4 choices per question) is owned by the
 // readiness artifact contract that produced the set.
 func questionSetCountValid(encoded string) bool {
