@@ -611,6 +611,12 @@ type InfrastructureConfig struct {
 	// what it made can be told apart afterwards from what was already
 	// there.
 	NamingPrefix string `json:"naming_prefix,omitempty"`
+	// DeployWorkflows is the one means that is a policy rather than a name
+	// in Resources, because what it permits is a file whose contents decide
+	// what runs on this destination's own machines. A pointer, and absent
+	// for every destination configured before it existed, so no digest
+	// bound to such a configuration moves.
+	DeployWorkflows *DeployWorkflowPolicy `json:"deploy_workflows,omitempty"`
 }
 
 var (
@@ -651,6 +657,9 @@ func (i InfrastructureConfig) validate() error {
 	}
 	if i.NamingPrefix != "" && !infrastructurePrefixPattern.MatchString(i.NamingPrefix) {
 		return errors.New("consumer infrastructure naming prefix is invalid")
+	}
+	if i.DeployWorkflows != nil {
+		return i.DeployWorkflows.validate()
 	}
 	return nil
 }

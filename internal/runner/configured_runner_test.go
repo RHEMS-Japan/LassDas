@@ -153,7 +153,7 @@ func TestSetupFailureReachesRequesterAndBoard(t *testing.T) {
 	c := runnerFixtureConfig(t, 2, 1, false)
 	c.Models.Reviewers[1].Effort = "" // Valid endpoint, insufficient for the legacy CLI provider file.
 	p, log := configuredRunner(t, c, "converged")
-	_, outcome, err := p.PrepareChainRun(context.Background())
+	_, outcome, err := p.PrepareChainRun(context.Background(), nil)
 	if err == nil || outcome.Code != hook.TerminalInternalFailed || outcome.Evidence["failed_step"] == "" {
 		t.Fatalf("PrepareChainRun = %+v, %v", outcome, err)
 	}

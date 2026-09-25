@@ -331,7 +331,25 @@ func startQueuedRun(
 		Config: config, Services: services, Envelope: envelope,
 		Workspace: runDir, TargetToken: token, Logger: logger,
 	}
-	_, outcome, runErr := pipeline.PrepareChainRun(ctx)
+	// What the destination's release path is missing, worked out once,
+	// before the reception and before the first round.
+	//
+	// Before the reception because the reception is the only place anything
+	// asks the requester anything: a means this engine was not handed is a
+	// permission only they can settle, and one not raised in that single
+	// set of questions is never raised at all. After the first half of the
+	// preparation because this reads the destination's own checked-out
+	// tree, which that half is what puts on the volume — a workflow the
+	// settings name and the repository has is a path that works, and
+	// nothing can tell the two apart without looking.
+	//
+	// The round that implements the request builds the part of the path
+	// that lives in this repository and it goes out in the same pull
+	// request; the parts this engine was not handed the means to apply are
+	// named in the report afterwards. A destination whose path is complete,
+	// and one that stops at the proposal, get no plan and no extra work
+	// (depth_gap.go).
+	_, outcome, runErr := pipeline.PrepareChainRun(ctx, prepareReleasePath(config, run, runDir, logger))
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	if outcome.QuestionDecisionPath != "" {
 		// The gate takes minutes, and a stop written while it ran is a stop.
@@ -377,22 +395,6 @@ func startQueuedRun(
 			repository = ""
 		}
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
-	}
-	// What the destination's release path is missing, worked out once,
-	// before the first round. The round that implements the request builds
-	// the part of it that lives in this repository and it goes out in the
-	// same pull request; the parts this engine was not handed the means to
-	// apply are named in the report afterwards. A destination whose path is
-	// complete, and one that stops at the proposal, get no plan and no
-	// extra work (depth_gap.go).
-	if releasePath, gapErr := detectReleasePathGap(config, run, runDir); gapErr != nil {
-		logger.Error("the destination's release path could not be read; the delivery carries the request alone",
-			"run", run.RunID, "error", gapErr.Error())
-	} else if !releasePath.Empty() {
-		sealReleasePathPlan(runDir, releasePath, logger)
-		logger.Info("the destination asks for a depth it has no path for; this round builds what it can",
-			"run", run.RunID, "configured", releasePath.Configured,
-			"builds", len(releasePath.Buildable()), "unapplied", len(releasePath.Unapplied()))
 	}
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
@@ -493,13 +495,14 @@ func engineChangedUnderRun(config runtime.Config, runDir string) (string, bool) 
 // fixed by starting the delivery again, and this is that fix for the other
 // half of the binding.
 //
-// A delivery past its pull request is exempt, and that is the whole reason
-// the engine may write a destination's settings at all: from the publish
-// card on, the delivery cards re-verify the sealed records under the digest
-// recorded in the pull request itself (internal/runner/deliver.go's
-// recorded configuration digest), so a configuration that moved afterwards
-// cannot make them unreadable. Restarting one of those would throw away a
-// finished implementation over a setting that no longer constrains it.
+// A delivery past its pull request is exempt, so that an operator editing
+// the configuration in the middle of one does not throw away a finished
+// implementation. From the publish card on, the delivery cards re-verify
+// the sealed records under the digest recorded in the pull request itself
+// (internal/runner/deliver.go's recorded configuration digest), so a
+// setting that moved afterwards cannot make them unreadable and no longer
+// constrains what was already built. Nothing in this engine writes a
+// destination's settings, so every move this notices is a person's.
 func settingsChangedUnderRun(config runtime.Config, runDir string) bool {
 	sealed, err := readField(runDir, "ticket-draft.json", "config_sha256")
 	if err != nil || sealed == "" {

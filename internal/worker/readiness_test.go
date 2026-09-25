@@ -107,7 +107,7 @@ func TestAssessReadinessSealsAssessment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assessment, usage, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	assessment, usage, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,15 +125,15 @@ func TestAssessReadinessSealsAssessment(t *testing.T) {
 func TestAssessReadinessRejectsInconsistentDecision(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[{"id":"Q1","dimension":"user_visible_behavior","question":"Which one?","why_blocking":"Changes result.","choices":[]}],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("AssessReadiness() accepted ready with questions")
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"clarification_required","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("AssessReadiness() accepted clarification without questions")
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"reject","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("AssessReadiness() accepted reject without a reject code")
 	}
 }
@@ -180,14 +180,14 @@ func TestAssessReadinessRetryRequiresFailedPrior(t *testing.T) {
 	api := &fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[],"assumptions":[],"reject_code":""}`)}
 	invoker, _ := NewModelInvoker(api)
 
-	if _, _, err := invoker.AssessReadiness(context.Background(), 2, nil, nil, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 2, nil, nil, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("AssessReadiness() accepted a retry without the failed prior attempt")
 	}
 	passedAssessment, passedCheck := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
-	if _, _, err := invoker.AssessReadiness(context.Background(), 2, &passedAssessment, &passedCheck, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 2, &passedAssessment, &passedCheck, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("AssessReadiness() accepted a retry after a passing check")
 	}
-	retried, _, err := invoker.AssessReadiness(context.Background(), 2, &assessment, &failedCheck, nil, nil, source, request, config)
+	retried, _, err := invoker.AssessReadiness(context.Background(), 2, &assessment, &failedCheck, nil, nil, source, request, config, nil)
 	if err != nil || retried.Attempt != 2 {
 		t.Fatalf("retry = %+v, error = %v", retried, err)
 	}
@@ -198,7 +198,7 @@ func TestCheckReadinessBindsAssessment(t *testing.T) {
 	assessment, _ := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
 	api := &fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[]}`)}
 	invoker, _ := NewModelInvoker(api)
-	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestCheckReadinessBindsAssessment(t *testing.T) {
 	invoker, _ = NewModelInvoker(counting)
 	tampered := assessment
 	tampered.Decision = ReadinessOutcomeClarification
-	if _, _, err := invoker.CheckReadiness(context.Background(), tampered, nil, nil, source, request, config); err == nil {
+	if _, _, err := invoker.CheckReadiness(context.Background(), tampered, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("CheckReadiness() accepted a tampered assessment")
 	}
 	if len(counting.requests) != 0 {
@@ -506,7 +506,7 @@ func TestCheckReadinessDropsAHallucinatedQuestionID(t *testing.T) {
 	}
 	api := &fakeChatAPI{output: chatOutput(`{"verdict":"fail","reasons":[{"code":"false-block","message":"Blames a question that does not exist.","question_id":"Q3"}]}`)}
 	invoker, _ := NewModelInvoker(api)
-	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil)
 	if err != nil {
 		t.Fatalf("a hallucinated question id killed the check: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestCheckerPromptCodesAreInItsSchema(t *testing.T) {
 func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	config.Probes = []probe.Spec{{ID: "http.timing", Kind: probe.KindHTTP}, {ID: "k8s.workloads", Kind: probe.KindExec}}
-	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
 	// to ask or assume as before.
 	bare := config
 	bare.Probes = nil
-	if prompt, err := readinessPrompt(source, request, bare, nil, nil, nil, nil); err != nil || strings.Contains(prompt, `"catalogue"`) {
+	if prompt, err := readinessPrompt(source, request, bare, nil, nil, nil, nil, nil); err != nil || strings.Contains(prompt, `"catalogue"`) {
 		t.Errorf("a destination without probes was handed a catalogue (%v)", err)
 	}
 	off := config
@@ -636,11 +636,11 @@ func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
 	for index := range off.Consumers {
 		off.Consumers[index].Design = &DesignConfig{Default: DesignDefaultOff}
 	}
-	if prompt, err := readinessPrompt(source, request, off, nil, nil, nil, nil); err != nil || strings.Contains(prompt, `"catalogue"`) {
+	if prompt, err := readinessPrompt(source, request, off, nil, nil, nil, nil, nil); err != nil || strings.Contains(prompt, `"catalogue"`) {
 		t.Errorf("a destination with the design stage off was handed a catalogue (%v)", err)
 	}
 	assessment := ReadinessAssessment{Decision: ReadinessOutcomeReady, RequestKind: "change"}
-	check, err := readinessCheckPrompt(assessment, source, request, config, nil, nil)
+	check, err := readinessCheckPrompt(assessment, source, request, config, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,7 +789,7 @@ func TestTheReceptionContractDoesNotClaimSourceFilesItNeverGot(t *testing.T) {
 	if len(source.Files) != 0 {
 		t.Fatalf("source files = %+v, want none", source.Files)
 	}
-	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

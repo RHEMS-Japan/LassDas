@@ -105,7 +105,9 @@ func runImplement(ctx context.Context, args []string) error {
 		return errors.New("the implementing agent did not finish: " + runErr.Error())
 	}
 
-	return sealObservedChain(outcome.ChangedFiles, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, "")
+	// No workflow files: this verb reads no release path plan (see
+	// runImplement above), so it seals nothing outside the declared scope.
+	return sealObservedChain(outcome.ChangedFiles, nil, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, "", "", 0)
 }
 
 // runAgentReview hands the finished change to the reviewing agent, in the same
@@ -270,7 +272,7 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return errors.New("ticket repository is not a configured consumer")
 	}
-	if err := worker.ConfirmTreeMatchesCandidate(*repoRoot, candidate, consumer); err != nil {
+	if err := worker.ConfirmTreeMatchesCandidate(*repoRoot, candidate, consumer, request.WorkflowAllowance()); err != nil {
 		return err
 	}
 	headAfter, err := worker.RepositoryHead(*repoRoot)

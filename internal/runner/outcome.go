@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -146,6 +147,7 @@ const (
 	recordReturned  = "実装役に返された仕事への答え"
 	recordSeatMove  = "担当の入れ替え"
 	recordResources = "作った資源"
+	recordPath      = "リリース経路の記録"
 )
 
 // composeOutcome writes the two sections the report leads with, out of the
@@ -173,6 +175,12 @@ func composeOutcomeText(runDir string, code hook.TerminalCode, evidence map[stri
 			builder.WriteString("\n")
 		}
 		builder.WriteString(where)
+	}
+	if unapplied := outcomeUnapplied(runDir, notes); unapplied != "" {
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(unapplied)
 	}
 	if happened := outcomeWhatHappened(runDir, code, evidence, notes); happened != "" {
 		if builder.Len() > 0 {
@@ -1053,4 +1061,37 @@ func readLadderAttempts(runDir, stage string, round int, notes *outcomeNotes) (l
 		return ladderAttempts{}, false
 	}
 	return record, true
+}
+
+// outcomeUnapplied names the parts of the destination's release path this
+// delivery did not apply.
+//
+// By their configuration keys and nothing else. These are the parts the
+// engine was not handed the means for — a credential it does not hold, a
+// permission the destination's own policy refuses, its own execution
+// settings — and the previous shape of this was a line on the ticket
+// telling a person to go and write them. That line is what the release
+// path work exists to remove, so what is left is a statement of fact in the
+// report: here is what this delivery did not touch. Nobody is asked for
+// anything.
+func outcomeUnapplied(runDir string, notes *outcomeNotes) string {
+	plan, err := worker.ReadReleasePathFile(ReleasePathPlanFile(runDir))
+	if err != nil {
+		// A plan that is not there is the ordinary case: most destinations
+		// have a complete release path or stop at the proposal. One that is
+		// there and will not read is named with the other unreadable
+		// records rather than passed over, because an absent section reads
+		// as "nothing was left undone".
+		if _, statErr := os.Stat(ReleasePathPlanFile(runDir)); statErr == nil {
+			notes.failed(recordPath, err)
+		}
+		return ""
+	}
+	names := plan.UnappliedNames()
+	if len(names) == 0 {
+		return ""
+	}
+	return "## この実行で本体が適用していない設定\n" +
+		"次の設定は、本体に渡されている手段では書けないため、この実行では触っていません: " +
+		strings.Join(names, "、") + "\n"
 }

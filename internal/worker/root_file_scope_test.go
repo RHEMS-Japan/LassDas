@@ -59,11 +59,11 @@ func TestRootFileScopeSurvivesTicketCandidateAndAgentChecks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("Updated label\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ChangedFilesUnder(root, config.Consumers[0].Mode.AllowedFilePrefixes, nil)
+	changed, err := ChangedFilesUnder(root, config.Consumers[0].Mode.AllowedFilePrefixes, nil, WorkflowAllowance{})
 	if err != nil || !reflect.DeepEqual(changed, []string{"main.go"}) {
 		t.Fatalf("changed = %v, error = %v", changed, err)
 	}
-	if _, err := ReadObservedChanges(root, t.TempDir(), changed, config.Consumers[0]); err != nil {
+	if _, err := ReadObservedChanges(root, t.TempDir(), changed, config.Consumers[0], WorkflowAllowance{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"main.go.bak", "main.go/child", "other/main.go", ".github/workflows/ci.yml"} {
@@ -74,14 +74,14 @@ func TestRootFileScopeSurvivesTicketCandidateAndAgentChecks(t *testing.T) {
 		if allowedPath(name, config.Consumers[0].Mode.AllowedFilePrefixes) {
 			t.Errorf("scope accepted %q", name)
 		}
-		if _, err := ReadObservedChanges(root, t.TempDir(), []string{name}, config.Consumers[0]); err == nil {
+		if _, err := ReadObservedChanges(root, t.TempDir(), []string{name}, config.Consumers[0], WorkflowAllowance{}); err == nil {
 			t.Errorf("agent accepted %q", name)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "main.go.bak"), []byte("extra"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ChangedFilesUnder(root, config.Consumers[0].Mode.AllowedFilePrefixes, nil); err == nil {
+	if _, err := ChangedFilesUnder(root, config.Consumers[0].Mode.AllowedFilePrefixes, nil, WorkflowAllowance{}); err == nil {
 		t.Fatal("agent change checker accepted neighboring root file")
 	}
 	if err := os.Remove(filepath.Join(root, "main.go")); err != nil {
@@ -90,7 +90,7 @@ func TestRootFileScopeSurvivesTicketCandidateAndAgentChecks(t *testing.T) {
 	if err := os.Symlink("main.go.bak", filepath.Join(root, "main.go")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadObservedChanges(root, t.TempDir(), []string{"main.go"}, config.Consumers[0]); err == nil {
+	if _, err := ReadObservedChanges(root, t.TempDir(), []string{"main.go"}, config.Consumers[0], WorkflowAllowance{}); err == nil {
 		t.Fatal("agent change reader accepted root symlink")
 	}
 }

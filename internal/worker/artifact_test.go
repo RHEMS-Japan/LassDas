@@ -611,23 +611,23 @@ func TestASnapshotRecordsATargetThatDoesNotExistYet(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A file this run creates: absent from the base, inside the tree.
-	created, err := newFileTarget(root, "docs/NEW.md")
+	created, err := newFileTarget(root, "docs/NEW.md", WorkflowAllowance{})
 	if err != nil || !created {
 		t.Fatalf("an absent target: created=%v err=%v", created, err)
 	}
 	// One that exists is not a file to create.
-	if created, err := newFileTarget(root, "docs/README.md"); err == nil || created {
+	if created, err := newFileTarget(root, "docs/README.md", WorkflowAllowance{}); err == nil || created {
 		t.Fatalf("an existing target: created=%v err=%v", created, err)
 	}
 	// A component in the way, or a symbolic link, is still a refusal.
 	if err := os.WriteFile(filepath.Join(root, "docs", "blocker"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if created, err := newFileTarget(root, "docs/blocker/NEW.md"); err == nil || created {
+	if created, err := newFileTarget(root, "docs/blocker/NEW.md", WorkflowAllowance{}); err == nil || created {
 		t.Fatalf("a file in the path: created=%v err=%v", created, err)
 	}
 	if err := os.Symlink(filepath.Join(root, "docs"), filepath.Join(root, "link")); err == nil {
-		if created, err := newFileTarget(root, "link/NEW.md"); err == nil || created {
+		if created, err := newFileTarget(root, "link/NEW.md", WorkflowAllowance{}); err == nil || created {
 			t.Fatalf("a symbolic link in the path: created=%v err=%v", created, err)
 		}
 	}
@@ -659,7 +659,7 @@ func TestASnapshotRecordsATargetThatDoesNotExistYet(t *testing.T) {
 
 	// And a hidden or escaping path is refused whatever the tree looks like.
 	for _, refused := range []string{"docs/.hidden.md", "../escape.md", "/etc/passwd"} {
-		if created, err := newFileTarget(root, refused); err == nil || created {
+		if created, err := newFileTarget(root, refused, WorkflowAllowance{}); err == nil || created {
 			t.Errorf("%q: created=%v err=%v", refused, created, err)
 		}
 	}

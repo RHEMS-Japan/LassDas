@@ -96,3 +96,14 @@ func ReleasePathPlanSealed(runDir string) bool {
 	_, err := worker.ReadReleasePathFile(ReleasePathPlanFile(runDir))
 	return err == nil
 }
+
+// releasePathArgs hands the sealed plan to a card that has something to say
+// about it. Empty for the deliveries that have no plan, which is most of
+// them; the command refuses a path it cannot read, so an unreadable record
+// is never passed as if it were one.
+func (p *Pipeline) releasePathArgs() []string {
+	if !ReleasePathPlanSealed(p.Workspace) {
+		return nil
+	}
+	return []string{"--release-path", ReleasePathPlanFile(p.Workspace)}
+}

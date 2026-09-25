@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -52,6 +53,11 @@ const (
 // needs rather than the whole typed structure, so a plan can still be made
 // for a destination whose configuration this engine cannot fully parse.
 type consumerReleaseSettings struct {
+	// The two branches a deploy workflow may filter on. They are the
+	// destination's own, already written down and already validated, so
+	// the workflow policy does not name them a second time.
+	IntegrationBranch   string   `json:"integration_branch"`
+	ReleaseBranch       string   `json:"release_branch"`
 	StagingOrigin       string   `json:"staging_origin"`
 	ProductionOrigin    string   `json:"production_origin"`
 	StagingWorkflow     string   `json:"staging_workflow"`
@@ -74,6 +80,26 @@ type consumerReleaseSettings struct {
 	Mode struct {
 		AllowedFilePrefixes []string `json:"allowed_file_prefixes"`
 	} `json:"mode"`
+	// Infrastructure carries the one means this file acts on: the content
+	// policy for deploy workflows. Read leniently like everything else
+	// here, and typed strictly once it is read, because what it permits is
+	// the only hole in the engine's path vocabulary.
+	Infrastructure struct {
+		DeployWorkflows *worker.DeployWorkflowPolicy `json:"deploy_workflows"`
+	} `json:"infrastructure"`
+}
+
+// workflowPolicy is the destination's handed means for authoring deploy
+// workflows, or nil when it was not handed or does not hold together. A
+// policy that would be refused when the configuration loads is treated as
+// absent here: this read is the lenient one, and a lenient read must not be
+// the way a refused policy takes effect.
+func (s consumerReleaseSettings) workflowPolicy() *worker.DeployWorkflowPolicy {
+	policy := s.Infrastructure.DeployWorkflows
+	if policy == nil || worker.ValidateDeployWorkflowPolicy(*policy) != nil {
+		return nil
+	}
+	return policy
 }
 
 // errDestinationGone is the destination not being in the configuration at
@@ -129,8 +155,17 @@ func (s consumerReleaseSettings) productionWorkflowPath() string {
 // reach of the whole engine and no setting changes that, while a path the
 // destination simply did not declare writable is that destination's own
 // choice and one line of configuration away.
-func workflowMeans(name string, scope []string) string {
+func workflowMeans(name string, scope []string, policy *worker.DeployWorkflowPolicy) string {
+	if policy.Allows(name) {
+		// Handed. The destination wrote down what such a file may contain,
+		// and this is one of the names it wrote down, so the round builds
+		// it and the content gate holds what comes back to that policy.
+		return ""
+	}
 	if hiddenDirectory(name) {
+		if policy != nil {
+			return "この納品先が本体に書かせる workflow (infrastructure.deploy_workflows.paths) にこの名前がありません。"
+		}
 		return "先頭がドットのディレクトリの中は本体が書けません。"
 	}
 	if !withinWritableScope(name, scope) {
@@ -198,6 +233,13 @@ func detectReleasePathGap(config runtime.Config, run state.RunOverview, runDir s
 	plan.Items = append(plan.Items, missingWorkflowItems(settings, tree, production)...)
 	plan.Items = append(plan.Items, missingObservationItems(settings, production)...)
 	plan.Items = append(plan.Items, missingCardItems(config, run)...)
+	// Reported by name whether or not the means was handed, because the
+	// engine cannot make this setting true either way. It says which files
+	// the deployment's own commit modifies, with which message and by whom,
+	// and the promotion holds the real commit to it exactly; nothing asks
+	// any round to make such a commit. A workflow the engine authored does
+	// not change that on its own — the digest-commit step has to be built
+	// and asked for first (deliver_depth.go names what that change needs).
 	if production && settings.GitHub.StagingDigestCommit == nil {
 		plan.Items = append(plan.Items, worker.ReleasePathItem{
 			Name: "github_contract.staging_digest_commit", Kind: worker.ReleasePathDigestCommit,
@@ -224,19 +266,48 @@ func detectReleasePathGap(config runtime.Config, run state.RunOverview, runDir s
 	if len(plan.Items) > worker.MaxReleasePathItems {
 		plan.Items = plan.Items[:worker.MaxReleasePathItems]
 	}
+	// The files the round is allowed to create outside the writable scope.
+	// Named here, in the record the round is rendered from, because this is
+	// the only list the path gates admit: a file the policy permits and
+	// this plan does not name is refused exactly like any other dotted
+	// path.
+	plan.WorkflowFiles = plannedWorkflowFiles(plan, settings)
 	plan.Instruction = releasePathInstruction(plan, settings)
 	return plan, nil
+}
+
+// plannedWorkflowFiles are the workflow files this plan says the round will
+// create: the ones the destination's policy names, that the repository does
+// not have, in the order they were found.
+func plannedWorkflowFiles(plan worker.ReleasePathPlan, settings consumerReleaseSettings) []string {
+	policy := settings.workflowPolicy()
+	if policy == nil {
+		return nil
+	}
+	files := make([]string, 0, len(plan.Items))
+	for _, item := range plan.Items {
+		if item.Kind == worker.ReleasePathWorkflow && item.Buildable() && policy.Allows(item.Name) &&
+			!slices.Contains(files, item.Name) {
+			files = append(files, item.Name)
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	return files
 }
 
 // missingWorkflowItems names the deploy workflows the settings expect and
 // the repository does not have.
 //
-// Never buildable, and not because of this destination. A path whose first
-// directory begins with a dot is not addressable by anything in the engine
-// — the candidate refuses one outright rather than skipping it — so the
-// workflow file is the one part of the path that is always out of reach,
-// whatever a destination declares writable.
+// Buildable only where the destination handed the means. A path whose
+// first directory begins with a dot is not addressable by anything in the
+// engine — the candidate refuses one outright rather than skipping it — so
+// a workflow file is out of reach whatever a destination declares writable.
+// The one way in is a content policy: a destination that wrote down what
+// such a file may contain, and named this file in it, gets it built.
 func missingWorkflowItems(settings consumerReleaseSettings, tree string, production bool) []worker.ReleasePathItem {
+	policy := settings.workflowPolicy()
 	var items []worker.ReleasePathItem
 	add := func(name, environment string) {
 		if name == "" {
@@ -253,7 +324,7 @@ func missingWorkflowItems(settings consumerReleaseSettings, tree string, product
 		items = append(items, worker.ReleasePathItem{
 			Name: name, Kind: worker.ReleasePathWorkflow,
 			Detail: environment + " へ反映する workflow がリポジトリにありません。",
-			Means:  workflowMeans(name, settings.Scope),
+			Means:  workflowMeans(name, settings.Scope, policy),
 		})
 	}
 	add(settings.stagingWorkflowPath(), "staging")
@@ -333,12 +404,21 @@ func buildableReleasePathItems(settings consumerReleaseSettings, production bool
 	if !production {
 		where = "staging"
 	}
+	deployment := where + " へ反映するために、リポジトリの中で動く部分 (適用するマニフェスト、起動スクリプト、設定の差し替え) を" +
+		"変更してよい場所の下に用意してください。これを呼び出す workflow ファイル自体は本体が書けないので、" +
+		"どう呼び出すかを、変更してよい場所の下の文書に 1 か所だけ書き残してください。"
+	if settings.workflowPolicy() != nil {
+		// The means is handed, so the part that used to be left as a note
+		// in a document is the work itself. The one sentence changes with
+		// it: an instruction that asked for a workflow and told the writer
+		// it could not write one would be answered by doing neither.
+		deployment = where + " へ反映するために、リポジトリの中で動く部分 (適用するマニフェスト、起動スクリプト、設定の差し替え) を" +
+			"変更してよい場所の下に用意し、それを呼び出す workflow ファイルを下の一覧の名前で作ってください。"
+	}
 	return []worker.ReleasePathItem{
 		{
 			Name: releasePathBuildDeployment, Kind: worker.ReleasePathWorkflow,
-			Detail: where + " へ反映するために、リポジトリの中で動く部分 (適用するマニフェスト、起動スクリプト、設定の差し替え) を" +
-				"変更してよい場所の下に用意してください。これを呼び出す workflow ファイル自体は本体が書けないので、" +
-				"どう呼び出すかを、変更してよい場所の下の文書に 1 か所だけ書き残してください。",
+			Detail: deployment,
 		},
 		{
 			Name: releasePathBuildObservation, Kind: worker.ReleasePathObservation,
@@ -372,10 +452,98 @@ func releasePathInstruction(plan worker.ReleasePathPlan, settings consumerReleas
 			"- 置ける場所は "+strings.Join(settings.Scope, " / ")+" の下だけです。"+
 				"ここに置けないものは作らず、最後の報告に「置けなかったもの」として 1 行で書いてください。")
 	}
+	lines = append(lines, workflowInstructionLines(plan, settings)...)
 	lines = append(lines,
 		"- 資格情報・権限設定・利用上限には触れないでください。経路のうちそれらが要る部分は、本体が別に記録します。",
 		"- 経路を作ったことで依頼そのものが変わることはありません。依頼を満たす変更を先に済ませてください。")
 	return worker.BoundedReleasePathInstruction(strings.Join(lines, "\n"))
+}
+
+// workflowInstructionLines are what the round is told about the workflow
+// files it may create, and what they may contain.
+//
+// The policy is quoted rather than summarised. It is checked again, to the
+// letter, before the change is sealed, so a round that is told less than
+// the rule it will be held to is a round that gets refused for a reason it
+// was never given — and the objection that comes back names the rule, which
+// only helps somebody who was told the rule existed.
+func workflowInstructionLines(plan worker.ReleasePathPlan, settings consumerReleaseSettings) []string {
+	policy := settings.workflowPolicy()
+	if policy == nil || len(plan.WorkflowFiles) == 0 {
+		return nil
+	}
+	branches := make([]string, 0, 2)
+	for _, branch := range []string{settings.ReleaseBranch, settings.IntegrationBranch} {
+		if branch != "" && !slices.Contains(branches, branch) {
+			branches = append(branches, branch)
+		}
+	}
+	lines := []string{
+		"- 作ってよい workflow ファイルは次の名前だけです: " + strings.Join(plan.WorkflowFiles, " / ") +
+			"。この名前以外の場所に .github の下のファイルを作ると、その実行は丸ごと破棄されます。",
+		"- workflow の中身は次の範囲に収めてください。範囲を外れたものは封じる前に機械的に拒否され、次の巡でやり直しになります。",
+		"  - on: に書いてよいイベント: " + strings.Join(policy.Triggers, " / ") +
+			"。push と pull_request は branches でブランチを絞った場合だけ使えます" + branchesPhrase(branches) + "。",
+		"  - permissions: は job ごとにも全体にも必ず書いてください。書かなかった場合は拒否されます。書いてよい上限は " +
+			permissionsPhrase(policy) + " です。",
+		"  - ${{ }} の中で secrets に触れてよいのは " + secretsPhrase(policy) +
+			" だけです。toJSON(secrets) のように secrets 全体を渡す書き方は使えません。",
+		"  - uses: に書いてよいのは " + actionsPhrase(policy) + " だけです (この形のまま、コミット id も含めて一致すること)。",
+		"  - runs-on: に書いてよいのは " + strings.Join(policy.Runners, " / ") + " だけです。",
+		"  - run: の中で環境変数の一覧を出力しないでください (env / printenv / set / export -p)。",
+		"  - run: は bash か sh で書いてください。defaults の shell 指定は使えません。",
+		"  - 依頼した人が書いた文字列 (github.event.* / github.head_ref) を run: の中に直接展開しないでください。" +
+			"env: で環境変数に渡してから読んでください。",
+		"  - if: の条件にも同じ secrets の決まりが掛かります。",
+	}
+	return lines
+}
+
+// branchesPhrase names the branches a push or pull_request filter may hold,
+// or says nothing when the destination named none — in which case no branch
+// filter can pass and the trigger is unusable, which the gate says at the
+// time rather than this predicting it.
+func branchesPhrase(branches []string) string {
+	if len(branches) == 0 {
+		return ""
+	}
+	return " (絞ってよいのは " + strings.Join(branches, " / ") + " だけです)"
+}
+
+// permissionsPhrase writes the ceiling out scope by scope, in a fixed order
+// so two renderings of one policy read the same.
+func permissionsPhrase(policy *worker.DeployWorkflowPolicy) string {
+	scopes := make([]string, 0, len(policy.Permissions))
+	for scope := range policy.Permissions {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	if len(scopes) == 0 {
+		return "permissions: {} (何も与えない)"
+	}
+	phrases := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		phrases = append(phrases, scope+": "+policy.Permissions[scope])
+	}
+	return strings.Join(phrases, " / ")
+}
+
+func secretsPhrase(policy *worker.DeployWorkflowPolicy) string {
+	if len(policy.Secrets) == 0 {
+		return "なし (secrets には一切触れない)"
+	}
+	names := make([]string, 0, len(policy.Secrets))
+	for _, name := range policy.Secrets {
+		names = append(names, "secrets."+name)
+	}
+	return strings.Join(names, " / ")
+}
+
+func actionsPhrase(policy *worker.DeployWorkflowPolicy) string {
+	if len(policy.Actions) == 0 {
+		return "なし (uses: を使わず run: だけで書く)"
+	}
+	return strings.Join(policy.Actions, " / ")
 }
 
 // releasePathUnapplied is the names of the parts the engine did not apply,
@@ -386,11 +554,7 @@ func releasePathInstruction(plan worker.ReleasePathPlan, settings consumerReleas
 // something is the shape this whole file exists to remove. The outcome
 // section reads this.
 func releasePathUnapplied(plan worker.ReleasePathPlan) []string {
-	names := make([]string, 0, len(plan.Items))
-	for _, item := range plan.Unapplied() {
-		names = append(names, item.Name)
-	}
-	return names
+	return plan.UnappliedNames()
 }
 
 // handedMeans is what this instance was given to work with beyond the
@@ -501,4 +665,31 @@ func withinWritableScope(name string, scope []string) bool {
 		}
 	}
 	return false
+}
+
+// prepareReleasePath is what the reception is given before it asks.
+//
+// It reads the destination's settings and its checked-out tree and seals
+// what the release path is missing, and it is handed to the preparation
+// rather than run beside it because the order is the whole point: the
+// reception is the only place anything asks the requester anything, so a
+// means this engine was not handed has to be known before it runs. Run
+// afterwards — where this lived until the ordering was measured — the plan
+// was sealed 58 lines after the questions had already gone out, and the
+// single question about a missing means could never be asked at all.
+func prepareReleasePath(config runtime.Config, run state.RunOverview, runDir string, logger Logger) func() error {
+	return func() error {
+		plan, err := detectReleasePathGap(config, run, runDir)
+		if err != nil {
+			return err
+		}
+		if plan.Empty() {
+			return nil
+		}
+		sealReleasePathPlan(runDir, plan, logger)
+		logger.Info("the destination asks for a depth it has no path for; this round builds what it can",
+			"run", run.RunID, "configured", plan.Configured,
+			"builds", len(plan.Buildable()), "unapplied", len(plan.Unapplied()))
+		return nil
+	}
 }

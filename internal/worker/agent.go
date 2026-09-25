@@ -171,7 +171,10 @@ func RunAgentUnlessHaltedWithHomeFiles(ctx context.Context, config AgentConfig, 
 			return outcome, false, errors.New("the agent left " + haltFile + " as something other than a regular file")
 		}
 	}
-	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts)
+	// No allowance: this is the one-process verb, which builds its own
+	// prompt and never reads a release path plan, so nothing it produces
+	// may reach outside the declared scope.
+	changed, err := ChangedFilesUnder(root, allowedPrefixes, ignoredByproducts, WorkflowAllowance{})
 	if err != nil {
 		return outcome, false, err
 	}
@@ -476,14 +479,19 @@ func ignoredWritablePrefix(directory string, allowedPrefixes []string) string {
 	return ""
 }
 
-func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts []string) ([]string, error) {
-	return ChangedFilesUnderExcept(root, allowedPrefixes, ignoredByproducts, "")
+func ChangedFilesUnder(root string, allowedPrefixes []string, ignoredByproducts []string, allowance WorkflowAllowance) ([]string, error) {
+	return ChangedFilesUnderExcept(root, allowedPrefixes, ignoredByproducts, "", allowance)
 }
 
 // ChangedFilesUnderExcept is ChangedFilesUnder with one file at the root of
 // the working copy left out of the scan: the applier's halt file, which its
 // caller reads and removes itself. Empty except scans everything.
-func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredByproducts []string, except string) ([]string, error) {
+//
+// The allowance is the sealed plan's: the deploy workflow files this run was
+// told to build. It is the zero value for every run that was told to build
+// none, which is every run that is not repairing a destination's release
+// path, and then nothing about this scan has changed.
+func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredByproducts []string, except string, allowance WorkflowAllowance) ([]string, error) {
 	output, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "-z")
 	if err != nil {
 		return nil, errors.New("changed files could not be read")
@@ -494,10 +502,13 @@ func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredBypro
 		if except != "" && path == except {
 			return nil
 		}
-		if !validRelativePath(path) || hasHiddenComponent(path) {
+		// Gate three of five. A plan-named workflow file passes; its
+		// dotted siblings do not, and neither does the same file in a run
+		// that carries no plan.
+		if !allowance.Admits(path) && (!validRelativePath(path) || hasHiddenComponent(path)) {
 			return errors.New("agent changed a path that is not addressable")
 		}
-		if len(allowedPrefixes) > 0 && !allowedPath(path, allowedPrefixes) {
+		if len(allowedPrefixes) > 0 && !allowedPathWithin(path, allowedPrefixes, allowance) {
 			return errors.New("agent changed a file outside the writable scope")
 		}
 		changed = append(changed, path)
@@ -535,9 +546,25 @@ func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredBypro
 					return nil, errors.New("the repository ignores the writable scope " + prefix +
 						": everything written there would be left out of the delivery. Remove it from the repository's ignore rules, or point the scope somewhere the repository tracks")
 				}
+				// A collapsed directory holding a workflow file this round
+				// was told to build swallows a deliverable just as surely.
+				// It is the shape the dotted floor used to make impossible,
+				// so it was never checked for: one ignore rule on .github/
+				// and the release path the round built would be missing
+				// from the delivery with nothing said.
+				if file := ignoredAllowedWorkflow(path, allowance); file != "" {
+					return nil, errors.New("the repository ignores " + file +
+						", which this round was told to build: it would be left out of the delivery. Remove it from the repository's ignore rules")
+				}
 				continue
 			}
-			if !hasHiddenComponent(path) && allowedPath(path, allowedPrefixes) && !isDeclaredByproduct(path, ignoredByproducts) {
+			// Gate four of five. A workflow file the plan named is a
+			// deliverable, so a repository that ignores it has to say so
+			// here rather than let it vanish from the candidate — which is
+			// the whole failure this guard exists for, and the one shape of
+			// it a dotted path used to walk straight past.
+			if (allowance.Admits(path) || !hasHiddenComponent(path)) &&
+				allowedPathWithin(path, allowedPrefixes, allowance) && !isDeclaredByproduct(path, ignoredByproducts) {
 				return nil, errors.New("the repository ignores a file inside the writable scope: " + path +
 					". If it is a byproduct of the toolchain, declare it in ignored_byproducts (" + filepath.Base(path) +
 					"); if it is part of what this ticket delivers, remove it from the repository's ignore rules")
@@ -563,6 +590,21 @@ func ChangedFilesUnderExcept(root string, allowedPrefixes []string, ignoredBypro
 	}
 	sort.Strings(changed)
 	return changed, nil
+}
+
+// ignoredAllowedWorkflow names the workflow file this round was told to
+// build that an ignored directory record swallows, or "" for a directory
+// that holds none of them.
+func ignoredAllowedWorkflow(directory string, allowance WorkflowAllowance) string {
+	if !strings.HasSuffix(directory, "/") {
+		directory += "/"
+	}
+	for _, file := range allowance.Files() {
+		if strings.HasPrefix(file, directory) {
+			return file
+		}
+	}
+	return ""
 }
 
 // isDeclaredByproduct reports whether the path's base name is one the

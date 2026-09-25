@@ -37,6 +37,12 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 	}
 	defer cleanup()
 
+	// The workflow files this delivery was allowed to build, from the
+	// contract the candidate is bound to. Applying is how the change
+	// reaches the branch that is pushed, so this is the last place the
+	// allowance is needed and the contract is the only thing that carries
+	// it this far.
+	allowance := request.WorkflowAllowance()
 	// Validate the complete set first. A stale or unsafe file must fail before
 	// any target is changed. A created file's claim is absence: the path must
 	// not exist yet, and its parent directory is prepared here so the
@@ -46,7 +52,7 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 			return errors.New("apply source no longer matches the snapshot")
 		}
 		if source.Files[index].Created {
-			final, err := createdFileWithin(root, file.Path)
+			final, err := createdFileWithin(root, file.Path, allowance)
 			if err != nil {
 				return err
 			}
@@ -58,7 +64,7 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 			})
 			continue
 		}
-		filename, info, current, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes)
+		filename, info, current, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes, allowance)
 		if err != nil || digestBytes(current) != source.Files[index].SHA256 {
 			return errors.New("apply source no longer matches the snapshot")
 		}
@@ -88,12 +94,12 @@ func ApplyCandidate(repoRoot string, candidate Candidate, source SourceSnapshot,
 			// Re-walked, not just re-stat'd: a symlink swapped into an
 			// ancestor during preparation must fail exactly like one that
 			// was there from the start.
-			if _, err := createdFileWithin(root, candidate.Files[index].Path); err != nil {
+			if _, err := createdFileWithin(root, candidate.Files[index].Path, allowance); err != nil {
 				return errors.New("apply source changed during preparation")
 			}
 			continue
 		}
-		_, _, current, err := currentBoundFile(root, candidate.Files[index].Path, consumer.Mode.MaxFileBytes)
+		_, _, current, err := currentBoundFile(root, candidate.Files[index].Path, consumer.Mode.MaxFileBytes, allowance)
 		if err != nil || digestBytes(current) != source.Files[index].SHA256 {
 			return errors.New("apply source changed during preparation")
 		}
@@ -121,8 +127,9 @@ func VerifyApplied(repoRoot string, candidate Candidate, source SourceSnapshot, 
 	if err != nil {
 		return errors.New("apply artifact bindings are invalid")
 	}
+	allowance := request.WorkflowAllowance()
 	for _, file := range candidate.Files {
-		_, _, current, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes)
+		_, _, current, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes, allowance)
 		if err != nil || string(current) != file.Content {
 			return errors.New("applied candidate does not match")
 		}
@@ -153,8 +160,8 @@ func validatedApplyRoot(repoRoot string, candidate Candidate, source SourceSnaps
 	return root, nil
 }
 
-func currentBoundFile(root, relative string, limit int) (string, os.FileInfo, []byte, error) {
-	filename, err := regularFileWithin(root, relative)
+func currentBoundFile(root, relative string, limit int, allowance WorkflowAllowance) (string, os.FileInfo, []byte, error) {
+	filename, err := regularFileWithinAllowing(root, relative, allowance)
 	if err != nil {
 		return "", nil, nil, errors.New("bound file is invalid")
 	}

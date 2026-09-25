@@ -33,7 +33,14 @@ type TicketRequest struct {
 	// TargetFiles is what the change touched, sealed after the fact. It is
 	// empty on a reception contract, which is made before anything is
 	// changed, and it is never a list the implementer is held to.
-	TargetFiles      []string `json:"target_files"`
+	TargetFiles []string `json:"target_files"`
+	// ReleaseWorkflows are the deploy workflow files the sealed release
+	// path plan said this delivery would build, carried here so that every
+	// later reader of the contract — the reviews, the apply, the publish
+	// gate — admits the same set this round was allowed to write and not
+	// one path more. Absent for every delivery that builds none, so a
+	// contract sealed before this existed keeps its exact bytes.
+	ReleaseWorkflows []string `json:"release_workflows,omitempty"`
 	VerificationPath string   `json:"verification_path"`
 	ExpectedText     string   `json:"expected_text"`
 	AbsentText       string   `json:"absent_text"`
@@ -214,13 +221,24 @@ func ParseTicketDraft(envelope hook.DispatchEnvelope, config Config, toolSHA str
 // WithTargetFiles completes a draft once the target files are known, applying
 // exactly the same validation a fully written ticket receives.
 func (d TicketDraft) WithTargetFiles(targetFiles []string, config Config) (TicketRequest, error) {
+	return d.WithTargetFilesBuilding(targetFiles, nil, config)
+}
+
+// WithTargetFilesBuilding is WithTargetFiles for a round that was also
+// building this destination's release path: the workflow files the sealed
+// plan named travel into the contract, which is what lets the target set
+// hold a path the writable scope does not reach.
+func (d TicketDraft) WithTargetFilesBuilding(targetFiles, releaseWorkflows []string, config Config) (TicketRequest, error) {
 	files := append([]string(nil), targetFiles...)
 	sort.Strings(files)
+	workflows := append([]string(nil), releaseWorkflows...)
+	sort.Strings(workflows)
 	request := TicketRequest{
 		SchemaVersion: d.SchemaVersion, DeliveryID: d.DeliveryID, InputSHA256: d.InputSHA256,
 		ConfigSHA256: d.ConfigSHA256, ToolSHA: d.ToolSHA,
 		IssueKey: d.IssueKey, RunID: d.RunID, Repository: d.Repository, Mode: d.Mode, Summary: d.Summary,
-		TargetFiles: files, VerificationPath: d.VerificationPath, ExpectedText: d.ExpectedText,
+		TargetFiles: files, ReleaseWorkflows: workflows,
+		VerificationPath: d.VerificationPath, ExpectedText: d.ExpectedText,
 		AbsentText: d.AbsentText, Request: d.Request,
 	}
 	if err := request.Validate(config); err != nil {
@@ -257,9 +275,20 @@ func (r TicketRequest) Validate(config Config) error {
 	if len(r.TargetFiles) > consumer.Mode.MaxFiles || !sort.StringsAreSorted(r.TargetFiles) {
 		return errors.New("ticket target files are invalid")
 	}
+	// The workflow files this delivery was allowed to build. Checked before
+	// the target files, and checked against the destination's own handed
+	// policy rather than against itself: the contract says what the plan
+	// named, and the configuration says what an operator permitted, and a
+	// path needs both. A contract that had been edited to name a file
+	// nobody handed the means for therefore widens nothing.
+	allowance, err := r.validatedWorkflowAllowance(consumer)
+	if err != nil {
+		return err
+	}
 	seen := make(map[string]struct{}, len(r.TargetFiles))
 	for _, filename := range r.TargetFiles {
-		if !validRelativePath(filename) || !allowedPath(filename, consumer.Mode.AllowedFilePrefixes) {
+		if !validRelativePathWithin(filename, allowance) ||
+			!allowedPathWithin(filename, consumer.Mode.AllowedFilePrefixes, allowance) {
 			return errors.New("ticket target file is invalid")
 		}
 		if _, exists := seen[filename]; exists {
@@ -375,4 +404,45 @@ func hasDisallowedControls(value string, allowNewlines bool) bool {
 		}
 	}
 	return false
+}
+
+// validatedWorkflowAllowance is the contract's own workflow allowance,
+// refused unless the destination handed the means for every file in it.
+//
+// Two facts have to agree before a dotted path is addressable at all: an
+// operator wrote a content policy naming the file, and this delivery's
+// sealed plan said it was going to build it. The contract carries the
+// second; the configuration in hand is the first. Checking them here means
+// every reader of a contract — the seal, the reviews, the apply, the
+// publish gate, the controller — gets the same answer without carrying the
+// plan itself.
+func (r TicketRequest) validatedWorkflowAllowance(consumer ConsumerConfig) (WorkflowAllowance, error) {
+	if len(r.ReleaseWorkflows) == 0 {
+		return WorkflowAllowance{}, nil
+	}
+	policy := consumer.DeployWorkflows()
+	if policy == nil {
+		return WorkflowAllowance{}, errors.New("ticket names workflow files this destination handed no means for")
+	}
+	if len(r.ReleaseWorkflows) > MaxDeployWorkflowPaths || !sort.StringsAreSorted(r.ReleaseWorkflows) {
+		return WorkflowAllowance{}, errors.New("ticket release workflows are invalid")
+	}
+	seen := make(map[string]struct{}, len(r.ReleaseWorkflows))
+	for _, name := range r.ReleaseWorkflows {
+		if !policy.Allows(name) {
+			return WorkflowAllowance{}, errors.New("ticket names a workflow file the destination's policy does not allow")
+		}
+		if _, exists := seen[name]; exists {
+			return WorkflowAllowance{}, errors.New("ticket release workflows contain duplicates")
+		}
+		seen[name] = struct{}{}
+	}
+	allowance := NewWorkflowAllowance(r.ReleaseWorkflows)
+	if len(allowance.Files()) != len(r.ReleaseWorkflows) {
+		// A name the policy allowed and this refuses is a name that is not
+		// a plain workflow file. The policy's own load check refuses those,
+		// so reaching here means one of the two was edited under the run.
+		return WorkflowAllowance{}, errors.New("ticket release workflows are invalid")
+	}
+	return allowance, nil
 }

@@ -175,7 +175,7 @@ func TestNeedsDesignFallsToSafeSide(t *testing.T) {
 		t.Fatal(err)
 	}
 	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[]}`)})
-	silentCheck, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	silentCheck, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil)
 	if err != nil {
 		t.Fatalf("an unanswered needs_design killed the check: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestAssessReadinessCoercesUnansweredDesignFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			api := &fakeChatAPI{output: chatOutput(answer)}
 			invoker, _ := NewModelInvoker(api)
-			assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+			assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil)
 			if err != nil {
 				t.Fatalf("the answer was objected to: %v", err)
 			}
@@ -335,13 +335,13 @@ func TestAssessReadinessCoercesUnansweredDesignFields(t *testing.T) {
 	// proposer's sealed design half.
 	api := &fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[],"assumptions":[],"reject_code":"","request_kind":"change","approach_in_ticket":true,"approach_excerpt":"` + designApproachQuote + `","needs_design":false}`)}
 	invoker, _ := NewModelInvoker(api)
-	assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil)
 	if err != nil || assessment.NeedsDesign || !assessment.ApproachInTicket {
 		t.Fatalf("assessment = %+v, error = %v", assessment, err)
 	}
 	checker := &fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[],"request_kind":"change","needs_design":false}`)}
 	invoker, _ = NewModelInvoker(checker)
-	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil)
 	if err != nil || check.NeedsDesign {
 		t.Fatalf("check = %+v, error = %v", check, err)
 	}

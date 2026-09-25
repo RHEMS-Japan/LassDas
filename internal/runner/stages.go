@@ -29,10 +29,25 @@ type ChainPrep struct {
 // binding, the readiness gate — stopping where the implement stage would
 // start. A non-empty outcome code
 // (or a question decision path) means the run must not reach a chain.
-func (p *Pipeline) PrepareChainRun(ctx context.Context) (ChainPrep, Outcome, error) {
+//
+// beforeReception runs between the two halves, and the seam is there for
+// one reason: the reception is the only place this engine asks the
+// requester anything, so everything a question could be about has to be
+// known before it runs — while the destination's own repository is not on
+// the volume until the first half has cloned it. A caller with nothing to
+// do there passes nil. Its error is not the run's: what it prepares makes
+// the reception better informed, and a reception that runs without it asks
+// what it always asked.
+func (p *Pipeline) PrepareChainRun(ctx context.Context, beforeReception func() error) (ChainPrep, Outcome, error) {
 	prep, outcome, err := p.pretrip(ctx)
 	if err != nil || outcome.Code != "" {
 		return ChainPrep{}, outcome, err
+	}
+	if beforeReception != nil {
+		if err := beforeReception(); err != nil {
+			p.Logger.Error("the reception was prepared incompletely; it asks what it can",
+				"error", err.Error())
+		}
 	}
 	outcome, err = p.readinessGate(ctx)
 	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
@@ -479,6 +494,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 			)
 		}
 		assessArgs = append(assessArgs, p.clarificationArgs()...)
+		assessArgs = append(assessArgs, p.releasePathArgs()...)
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の判定")
@@ -490,6 +506,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 			"--knowledge-root", p.Config.KnowledgeRoot, "--assessment", assessment,
 		}
 		checkArgs = append(checkArgs, p.clarificationArgs()...)
+		checkArgs = append(checkArgs, p.releasePathArgs()...)
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の確認")

@@ -294,7 +294,10 @@ reporting success.
 // not the design's author's to answer.
 func sealAppliersHalt(repoRoot, objectionOut string, consumer worker.ConsumerConfig, draft worker.TicketDraft, baseSHA string, stage int, design *investigate.Design) error {
 	halt := filepath.Join(repoRoot, objectionFileName)
-	changed, scanErr := worker.ChangedFilesUnderExcept(repoRoot, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, objectionFileName)
+	// No allowance: an objecting applier is required to have left the tree
+	// untouched, so anything at all outside the declared scope — a workflow
+	// file included — is the failure this scan is looking for.
+	changed, scanErr := worker.ChangedFilesUnderExcept(repoRoot, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, objectionFileName, worker.WorkflowAllowance{})
 	if scanErr != nil || len(changed) > 0 {
 		_ = os.Remove(halt)
 		if scanErr != nil {

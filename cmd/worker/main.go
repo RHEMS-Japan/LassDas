@@ -709,6 +709,7 @@ func runAssessReadiness(ctx context.Context, args []string) error {
 	previousCheckPath := flags.String("previous-check", "", "")
 	clarificationPath := flags.String("clarification", "", "")
 	knowledgeRoot := flags.String("knowledge-root", "", "")
+	releasePathPath := flags.String("release-path", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) || *attempt < 1 || *attempt > worker.MaxReadinessAttempts ||
@@ -749,7 +750,15 @@ func runAssessReadiness(ctx context.Context, args []string) error {
 	if droppedAnswers > 0 {
 		fmt.Fprintf(os.Stderr, "worker: preserved answers over budget: %d oldest records not carried\n", droppedAnswers)
 	}
-	assessment, _, err := invoker.AssessReadiness(ctx, *attempt, previous, previousCheck, clarification, answers, source, request, config)
+	// What this destination's release path is missing, so the reception can
+	// put a means the engine was not handed to the requester — once, with
+	// everything else it asks. Nothing after the reception asks anybody
+	// anything, so a means not raised here is never raised.
+	releasePath, err := readReleasePath(*releasePathPath)
+	if err != nil {
+		return err
+	}
+	assessment, _, err := invoker.AssessReadiness(ctx, *attempt, previous, previousCheck, clarification, answers, source, request, config, releasePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness assessment failed", err)
 		return errors.New("readiness assessment failed")
@@ -769,6 +778,7 @@ func runCheckReadiness(ctx context.Context, args []string) error {
 	assessmentPath := flags.String("assessment", "", "")
 	clarificationPath := flags.String("clarification", "", "")
 	knowledgeRoot := flags.String("knowledge-root", "", "")
+	releasePathPath := flags.String("release-path", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *assessmentPath, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("check-readiness arguments are invalid")
@@ -797,7 +807,14 @@ func runCheckReadiness(ctx context.Context, args []string) error {
 	if droppedAnswers > 0 {
 		fmt.Fprintf(os.Stderr, "worker: preserved answers over budget: %d oldest records not carried\n", droppedAnswers)
 	}
-	check, _, err := invoker.CheckReadiness(ctx, assessment, clarification, answers, source, request, config)
+	// The checker sees the same missing means the assessor did, so a
+	// question about one reads to it as a question the rules asked for
+	// rather than one nothing in the prompt accounts for.
+	releasePath, err := readReleasePath(*releasePathPath)
+	if err != nil {
+		return err
+	}
+	check, _, err := invoker.CheckReadiness(ctx, assessment, clarification, answers, source, request, config, releasePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness check failed", err)
 		return errors.New("readiness check failed")
