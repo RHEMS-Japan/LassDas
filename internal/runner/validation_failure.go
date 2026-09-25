@@ -78,3 +78,21 @@ func ReadValidationFailure(runDir string, round int) (worker.ValidationFailure, 
 	}
 	return record, true
 }
+
+// ReleasePathPlanFile is where the tick that found a destination's release
+// path incomplete leaves what it found: at the root of the delivery rather
+// than under a round, because what a destination is missing belongs to the
+// destination and every round of the delivery is told the same thing.
+func ReleasePathPlanFile(runDir string) string {
+	return filepath.Join(runDir, worker.ReleasePathFile)
+}
+
+// ReleasePathPlanSealed reports whether the plan is there and reads back
+// whole. Asked before the path is handed to the command that renders an
+// instruction, because that command refuses a path it cannot read rather
+// than rendering an instruction that has lost what the round was for — and
+// most deliveries have no plan at all, which is not a failure.
+func ReleasePathPlanSealed(runDir string) bool {
+	_, err := worker.ReadReleasePathFile(ReleasePathPlanFile(runDir))
+	return err == nil
+}

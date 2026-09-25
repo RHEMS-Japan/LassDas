@@ -138,7 +138,7 @@ func TestAFullValidationOutputStillFitsTheInstruction(t *testing.T) {
 		t.Fatalf("the fixture's output is %d bytes, not a full one", len(failure.Output))
 	}
 	prompt, err := implementPrompt(draft, consumer, worker.AgentConfig{ID: "implementer", Command: "agent"},
-		nil, findings, &failure, nil, nil, "/work/repo", nil)
+		nil, findings, &failure, nil, nil, nil, "/work/repo", nil)
 	if err != nil {
 		t.Fatalf("a full instruction did not render: %v", err)
 	}

@@ -252,6 +252,14 @@ func OptionalAnswers() []Requirement {
 		{"infrastructure-credential", "その提供元に届く鍵の名前 (credential-<名前>-path の <名前>)", "provider を書いたときだけ"},
 		{"infrastructure-resources", "作ってよい資源の種類 (JSON 配列。例 [\"sqs\", \"s3\"])", "挙げた種類だけを作る"},
 		{"infrastructure-naming-prefix", "本体が付ける名前の接頭辞", "後から見分けるための印"},
+		{"delivery-depth", "変更をどこまで自動で届けるか (pull_request / integration / production)", "既定は pull_request。staging や本番まで届けるなら、下の 7 つも書く"},
+		{"deliver-checks-profile", "CI の完了を待つカードの担当名", "delivery-depth が pull_request 以外のときだけ。3 つの担当名は揃えて書く"},
+		{"deliver-integrate-profile", "staging へ反映して確かめるカードの担当名", "同上"},
+		{"deliver-promote-profile", "本番へ反映するカードの担当名", "同上"},
+		{"deliver-enabled-after", "この時刻より後に受け付けた依頼だけを届ける (RFC3339)", "過去の依頼へ遡らないための区切り"},
+		{"staging-login-url", "staging の画面にサインインする入口", "サインインが要らない画面なら空。本番の入口とは別にする"},
+		{"production-login-url", "本番の画面にサインインする入口", "同上"},
+		{"observation-language", "確認の browser が画面に求める言語 (ja など)", "空なら browser の既定"},
 	}
 }
 

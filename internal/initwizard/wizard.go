@@ -585,7 +585,140 @@ func (w *Wizard) consumer(ctx context.Context, s *State, secrets Secrets, dir st
 			return err
 		}
 	}
+	if err := w.deliveryDepth(s); err != nil {
+		return err
+	}
 	return w.checkConsumer(ctx, s, secrets, dir)
+}
+
+// deliveryDepth asks how far a change travels without a person, and — when
+// the answer is further than the proposal — for the things that carry it.
+//
+// Asked explicitly rather than assumed, because everything past the
+// proposal needs something to deploy the change and somewhere to look at it
+// afterwards, and a destination that has neither would otherwise discover
+// that on its first delivery. An answer that is left blank is not a reason
+// to quietly deliver less: the engine builds what it can of the path and
+// reports the rest by name, so a blank here is a decision to let it.
+func (w *Wizard) deliveryDepth(s *State) error {
+	if s.Completed["consumer"] != "" && s.Delivery != "" {
+		return nil
+	}
+	depths := []string{
+		string(worker.DeliverPullRequest), string(worker.DeliverIntegration), string(worker.DeliverProduction),
+	}
+	picked, err := w.choose(s, "delivery-depth", "変更をどこまで自動で届けますか", []Option{
+		{Label: "Pull Request まで", Detail: "取り込みは人が行う"},
+		{Label: "staging まで", Detail: "取り込んで staging に反映し、画面を確かめる"},
+		{Label: "本番まで", Detail: "staging で確かめたうえで本番まで反映し、本番の画面を確かめる"},
+	}, deliveryDepthIndex(s.Delivery))
+	if err != nil {
+		return err
+	}
+	s.Delivery = depths[picked]
+	if s.Delivery == string(worker.DeliverPullRequest) {
+		return nil
+	}
+	if Consumer(s).EffectiveKind() == "cli" {
+		// This version installs command-line destinations, which have no
+		// environment to reach. The answer is kept rather than overwritten:
+		// it is read again the day this project has a screen, and losing it
+		// here would mean asking for it twice.
+		w.UI.Info("この版が作れる納品先はコマンドラインのもので、届け先の画面がありません。" +
+			"回答は残しますが、この版では Pull Request までで止まります")
+	}
+	for _, field := range []struct {
+		id, label string
+		value     *string
+	}{
+		{"deliver-checks-profile", "CI の完了を待つカードの担当名", &s.Deliver.ChecksProfile},
+		{"deliver-integrate-profile", "staging へ反映して確かめるカードの担当名", &s.Deliver.IntegrateProfile},
+		{"deliver-promote-profile", "本番へ反映するカードの担当名", &s.Deliver.PromoteProfile},
+		{"deliver-enabled-after", "この時刻より後に受け付けた依頼だけを届ける (RFC3339)", &s.Deliver.EnabledAfter},
+		{"staging-login-url", "staging の画面にサインインする入口 (不要なら空)", &s.StagingLoginURL},
+		{"production-login-url", "本番の画面にサインインする入口 (不要なら空)", &s.ProductionLoginURL},
+		{"observation-language", "確認の browser が画面に求める言語 (ja など)", &s.ObservationLanguage},
+	} {
+		answer, err := w.optional(s, field.id, field.label, *field.value)
+		if err != nil {
+			return err
+		}
+		*field.value = answer
+	}
+	if s.Deliver.EnabledAfter != "" {
+		if _, err := s.Deliver.EnabledAfterTime(); err != nil {
+			return errors.New("届ける依頼の開始時刻は 2026-09-25T00:00:00Z の形で入れてください")
+		}
+	}
+	if s.StagingLoginURL != "" && s.StagingLoginURL == s.ProductionLoginURL {
+		// One entry for both signs the production observer in to staging,
+		// and every production report then ends unjudged.
+		return errors.New("staging と本番のサインイン入口は別にしてください")
+	}
+	return nil
+}
+
+// optional asks a question whose blank answer is an answer.
+//
+// A file-driven run refuses a question it has no answer for and no proposal
+// to fall back on, which is right for everything the engine cannot invent.
+// These seven are different: a destination with no sign-in entry and no
+// language preference is an ordinary destination, and the engine builds or
+// names whatever the blanks leave open. Refusing them would mean a file
+// that answered only the depth could not finish a setup at all.
+func (w *Wizard) optional(s *State, id, label, current string) (string, error) {
+	answer, err := w.ask(s, id, label, current, false)
+	var missing *MissingAnswer
+	if errors.As(err, &missing) {
+		return "", nil
+	}
+	return answer, err
+}
+
+// SeedDeliveryDepth puts the file's depth answer into the state before the
+// interview runs.
+//
+// The depth is offered as a list, and a list answers with the wizard's own
+// proposal: nobody is at the keyboard to pick anything else. So the answer
+// has to be in the state for the wizard to propose it back, which is how
+// the two key questions already travel from the file to the interview. A
+// depth the engine does not know is refused here, where the file is read,
+// rather than falling through to the proposal and quietly delivering
+// something the file did not ask for.
+func SeedDeliveryDepth(s *State, answers Answers) error {
+	depth, ok := answers.Value("delivery-depth")
+	if !ok {
+		return nil
+	}
+	if err := CheckDeliveryDepth(depth); err != nil {
+		return err
+	}
+	s.Delivery = depth
+	return nil
+}
+
+// CheckDeliveryDepth refuses a depth the engine does not know, where the
+// answer file is read rather than where the list is offered: a typo in a
+// written answer would otherwise fall through to the proposal and deliver
+// something the file did not ask for, silently.
+func CheckDeliveryDepth(depth string) error {
+	switch worker.Delivery(depth) {
+	case worker.DeliverPullRequest, worker.DeliverIntegration, worker.DeliverProduction:
+		return nil
+	}
+	return errors.New("delivery-depth は pull_request / integration / production のいずれかです: " + depth)
+}
+
+// deliveryDepthIndex is where the list opens: on the answer already given,
+// and otherwise on the proposal, which is what this version installs.
+func deliveryDepthIndex(delivery string) int {
+	switch delivery {
+	case string(worker.DeliverIntegration):
+		return 1
+	case string(worker.DeliverProduction):
+		return 2
+	}
+	return 0
 }
 
 func (w *Wizard) trackerStage(ctx context.Context, s *State, secrets Secrets, save func() error) error {

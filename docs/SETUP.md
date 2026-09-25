@@ -115,6 +115,7 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | PR の宛先の枝。マージは誰がするか | `branch`。マージの担当は `agreement.md` (E02 E03 E05) |
 | 検証は何を・どこで・いつ・何をもって合格とするか | `verify` と `agreement.md` (F01 F02 F07) |
 | 自動で進める範囲と、依頼 1 件の完了地点 | `agreement.md` (E08 I04) |
+| 変更をどこまで自動で届けるか (Pull Request まで / staging まで / 本番まで) | `delivery-depth`。staging より先を選んだら下の「届ける深さ」の項目も聞く |
 | 役ごとのモデル (品質と費用の希望を聞き、推奨を出す) | `<役>-model` (H01) |
 | 費用・時間・修正回数の上限 | `agreement.md` (H04。この版では本体の既定値で動く) |
 | 外部モデルに送ってはいけない path | `agreement.md` (H07。この版では本体は機械で縛らない。その旨を伝える) |
@@ -171,6 +172,36 @@ repo を読んで、次を埋める。分かったことは根拠 (ファイル�
 | `creator-id` | 起票を許可する本人の Backlog 利用者 ID (数値) | `lassdas setup secrets` が鍵の持ち主の ID を表示する。別の人が起票するならその人の ID を利用者に確認 |
 | `model-base-url` | モデルの接続先 (OpenAI 互換の base URL)。省略すると OpenRouter | 使える接続先を**選択肢にして出す**。既定で名前が出るのは OpenRouter (`https://openrouter.ai/api/v1`) と Cheaper Inference (`https://api.cheaperinference.com/v1`)。他も OpenAI 互換なら URL を書けば動く。**project を作った後は変えられない** (保存した鍵はその接続先のもの) |
 | `implementer-model` `review-a-model` `review-b-model` `readiness-assessor-model` `readiness-checker-model` `designer-model` `applier-model` | 各役のモデル名 (接続先が使う名前、例 `anthropic/claude-sonnet-4`) | 品質と費用の希望を聞いて推奨を出し、利用者が確定 |
+
+### 届ける深さ (`delivery-depth`)
+
+**変更をどこまで人手を挟まずに届けるかを、必ず聞く。**答えは 3 つ。
+
+| 答え | 起きること |
+|---|---|
+| `pull_request` | 取り込み用の Pull Request を作って終わり。取り込みは人が行う |
+| `integration` | 取り込んで staging に反映し、画面を開いて確かめる |
+| `production` | staging で確かめたうえで本番まで反映し、本番の画面を確かめる |
+
+`integration` か `production` を選んだら、続けて次を聞く。**空のまま進めてよい。**空いた分は、本体が経路を作れるところまで作って、作れなかったものを名前で報告する。
+
+| 項目 | 意味 |
+|---|---|
+| `deliver-checks-profile` `deliver-integrate-profile` `deliver-promote-profile` | 納品を運ぶ 3 枚のカードの担当名。これが無いと、変更は Pull Request までで止まる |
+| `deliver-enabled-after` | この時刻 (RFC3339) より後に受け付けた依頼だけを届ける。過去の依頼へ遡って反映しないための区切り |
+| `staging-login-url` `production-login-url` | 画面にサインインが要るときの入口。**2 つは別にする** — 同じにすると本番を見る側が staging にサインインし、本番の報告が毎回未判定で終わる。サインインの要らない画面なら空 |
+| `observation-language` | 確認の browser が画面に求める言語 (`ja` など) |
+
+### 経路が無い納品先で何が起きるか
+
+`production` を選んだのに、そこへ届く経路 (反映する workflow、反映された内容を記録するコミットの方針、画面から確かめる入口、staging と本番の場所) がまだ無いことがある。**そのとき本体は、人に設定を頼みません。**
+
+- **経路を作ることを依頼の一部として扱う。**依頼の本文に書いていなくても同じ
+- **リポジトリの中で動く部分** — 反映に使うマニフェストや起動スクリプト、反映された内容を画面から確かめる入口 — を、**変更してよい場所の下に作り、依頼の変更と同じ Pull Request に入れる**
+- **本体が作れないものは、名前で報告する。**頼み文は書かない。作れないのは 2 種類:
+  - **先頭がドットのディレクトリの中** (`.github/workflows/` など)。本体はこの場所をそもそも指せない
+  - **本体自身の実行権限にあたる設定** (`chain.deliver.*`) と、**納品先の環境そのものの値** (`production_origin`、サインインの入口など)。観測していない値を設定に書くことはしない
+- **本番へ反映する前に、経路そのものを確かめる。**反映する workflow がリポジトリにあるか、staging のデプロイが実際に動いたか、画面を確かめた記録があるか。揃っていなければ本番へは進めず、staging までで止めて理由を 1 行で報告する
 
 配布者の案内 (`~/.lassdas/distribution.json`、`lassdas setup install` が置く) から自動で埋まるもの。書けば上書きできる:
 
@@ -308,7 +339,7 @@ lassdas run spec --project NAME
 ## この版でできること・できないこと
 
 - できる: 納品先が GitHub の repo、課題管理が Backlog、モデルの接続先が OpenRouter、本体は手元の Docker (Apple Silicon / linux-arm64 のイメージ)、納品は PR まで。CLI アプリや文書・スクリプトの repo に向く。
-- できない (未対応): デプロイと画面での確認まで含む納品 (Web アプリ)、GitHub Issues からの受付、サーバやコンテナ基盤で共有する本体の起動、`.lassdas/agreement.md` の合意を本体が機械で守ること (上限・送ってはいけない path・マージの担当)。これらは `agreement.md` に「本体は未対応」と書き、未検証の範囲として扱う。
+- できない (未対応): デプロイと画面での確認まで含む納品 (Web アプリ)。`delivery-depth` に staging や本番を選んでも、この版のウィザードが作る納品先はコマンドラインのもので、届け先の画面がない。**答えは `.lassdas/setup.json` と導入の記録に残るだけで、この版ではどの設定にも入らず、納品は Pull Request までで止まる。**画面のある納品先を作れるようになった時点で、同じ答えがそのまま使われる。GitHub Issues からの受付、サーバやコンテナ基盤で共有する本体の起動、`.lassdas/agreement.md` の合意を本体が機械で守ること (上限・送ってはいけない path・マージの担当)。これらは `agreement.md` に「本体は未対応」と書き、未検証の範囲として扱う。
 - 共有する本体 (Pod) の運用は [RUNTIME_POD.md](RUNTIME_POD.md)。
 
 ## 記録するもの

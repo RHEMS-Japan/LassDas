@@ -312,6 +312,9 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 		return fmt.Errorf("この project の設計レビューの構成 (separate-design=%v) は確定済みです。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.SeparateDesignReviews, project)
 	}
 	state.ModelKeyMode, state.SeparateDesignReviews = mode, separateDesign
+	if err := initwizard.SeedDeliveryDepth(state, answers); err != nil {
+		return err
+	}
 	names := secretPlan(answers)
 	terminal := initwizard.TerminalUI{}
 	for _, entry := range names {

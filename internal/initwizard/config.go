@@ -106,7 +106,28 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 	implementer.APIKeyEnv = "LASSDAS_INTAKE_TARGET_KEY"
 	designer := endpoint("designer")
 	applier := agent("applier", 900)
-	config := worker.Config{SchemaVersion: worker.ConfigSchemaVersion, Consumers: []worker.ConsumerConfig{Consumer(s)}, MaxStages: 3, Models: worker.ModelConfig{Implementer: implementer, Reviewers: []worker.ModelEndpoint{endpoint("review-a"), endpoint("review-b")}, Readiness: worker.ReadinessModels{Assessor: endpoint("readiness-assessor"), Checker: endpoint("readiness-checker")}, Designer: &designer}, Agents: worker.AgentSet{Implementer: agent("implementer", 3600), Reviewer: agent("reviewer-unused", 3600), Applier: &applier}}
+	consumer := Consumer(s)
+	// What the depth question answered reaches the configuration only where
+	// there is somewhere for it to reach.
+	//
+	// This version installs command-line destinations, and the loader
+	// refuses one that carries a delivery continuation or an observation at
+	// all (internal/runtime/config.go's report destination check, and the
+	// destination's own validateCLI). Writing the answers here would
+	// produce an instance that does not start — which is a worse answer
+	// than a shallower delivery, and a silent one. They stay in the journal
+	// instead, and the interview says so while it is asking.
+	carriesDelivery := consumer.EffectiveKind() != "cli"
+	deliver := runtimeconfig.DeliverConfig{}
+	if carriesDelivery {
+		deliver = s.Deliver
+		consumer.StagingLoginURL, consumer.ProductionLoginURL = s.StagingLoginURL, s.ProductionLoginURL
+		consumer.ObservationLanguage = s.ObservationLanguage
+		if s.Delivery != "" {
+			consumer.Delivery = worker.Delivery(s.Delivery)
+		}
+	}
+	config := worker.Config{SchemaVersion: worker.ConfigSchemaVersion, Consumers: []worker.ConsumerConfig{consumer}, MaxStages: 3, Models: worker.ModelConfig{Implementer: implementer, Reviewers: []worker.ModelEndpoint{endpoint("review-a"), endpoint("review-b")}, Readiness: worker.ReadinessModels{Assessor: endpoint("readiness-assessor"), Checker: endpoint("readiness-checker")}, Designer: &designer}, Agents: worker.AgentSet{Implementer: agent("implementer", 3600), Reviewer: agent("reviewer-unused", 3600), Applier: &applier}}
 	for _, suffix := range []string{"a", "b"} {
 		role := "review-" + suffix
 		config.Agents.ReviewerAgents = append(config.Agents.ReviewerAgents, worker.ReviewerAgent{ReviewerID: role, Agent: agent(role, 3600)})
@@ -129,7 +150,7 @@ func Generate(s *State, secrets Secrets) (worker.Config, runtimeconfig.Config, S
 		return config, runtimeconfig.Config{}, nil, err
 	}
 	board := "local-" + s.Project
-	runtime := runtimeconfig.Config{LedgerPath: "/data/ledger.db", ConsumerConfigPath: "/etc/lassdas/config/m1-consumer.json", KnowledgeRoot: "/data/instance", Tracker: s.Tracker, Identity: runtimeconfig.IdentityConfig{RepositoryID: s.EngineRepositoryID, Repository: s.EngineRepository, WorkflowRef: s.EngineRepository + "/local-runtime@" + s.EngineSHA, EngineSHA: s.EngineSHA}, AutomationRunID: s.AutomationRunID, ReportDestinations: []hook.ReportDestination{{Kind: "cli", Repository: s.Repository, Delivery: "pull_request"}}, WorkerBin: "/usr/local/bin/worker", ControllerBin: "/usr/local/bin/controller", WorkerSHA256: s.Pins["worker"], ControllerSHA256: s.Pins["controller"], HermesBin: "/usr/local/bin/hermes", HermesBoard: board, Orchestration: "cards", Chain: runtimeconfig.ChainConfig{RunsRoot: "/data/runs", TargetTokenPath: "/data/secrets/target-token", Profiles: runtimeconfig.ChainProfiles{Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b", Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate", DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b", DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier"}}}
+	runtime := runtimeconfig.Config{LedgerPath: "/data/ledger.db", ConsumerConfigPath: "/etc/lassdas/config/m1-consumer.json", KnowledgeRoot: "/data/instance", Tracker: s.Tracker, Identity: runtimeconfig.IdentityConfig{RepositoryID: s.EngineRepositoryID, Repository: s.EngineRepository, WorkflowRef: s.EngineRepository + "/local-runtime@" + s.EngineSHA, EngineSHA: s.EngineSHA}, AutomationRunID: s.AutomationRunID, ReportDestinations: []hook.ReportDestination{{Kind: "cli", Repository: s.Repository, Delivery: "pull_request"}}, WorkerBin: "/usr/local/bin/worker", ControllerBin: "/usr/local/bin/controller", WorkerSHA256: s.Pins["worker"], ControllerSHA256: s.Pins["controller"], HermesBin: "/usr/local/bin/hermes", HermesBoard: board, Orchestration: "cards", Chain: runtimeconfig.ChainConfig{RunsRoot: "/data/runs", TargetTokenPath: "/data/secrets/target-token", Deliver: deliver, Profiles: runtimeconfig.ChainProfiles{Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b", Validate: "lassdas-validate", Publish: "lassdas-publish", Investigate: "lassdas-investigate", DesignReviewA: "lassdas-design-review-a", DesignReviewB: "lassdas-design-review-b", DesignDecide: "lassdas-design-decide", Applier: "lassdas-applier"}}}
 	if s.Means != nil {
 		runtime.Chain.Credentials = s.Means.Credentials
 	}

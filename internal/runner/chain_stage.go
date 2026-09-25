@@ -181,6 +181,14 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 	if returned.Latest() != nil {
 		args = append(args, "--returned", ReturnRecordFile(p.Workspace, round))
 	}
+	// The destination's release path, when this engine found it missing.
+	// The plan is the delivery's, not the round's: what the destination
+	// needs does not change between rounds, and every round that renders
+	// an instruction carries it so a round repeated over an objection does
+	// not quietly drop half of what it was for.
+	if plan := ReleasePathPlanFile(p.Workspace); ReleasePathPlanSealed(p.Workspace) {
+		args = append(args, "--release-path", plan)
+	}
 	args = append(args, p.clarificationArgs()...)
 	// The implementer's seat has one launch, so the ladder's remedy for an
 	// implementer that will not answer is the instruction rather than the

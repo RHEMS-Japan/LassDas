@@ -26,7 +26,7 @@ func TestTheInstructionCarriesTheInfrastructureTheAgentMayUse(t *testing.T) {
 		Provider: "aws", Region: "ap-northeast-1", Credential: "cloud",
 		Resources: []string{"sqs", "s3"}, NamingPrefix: "lassdas-",
 	}
-	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, "/work/repo", []string{"AWS_SHARED_CREDENTIALS_FILE"})
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, nil, "/work/repo", []string{"AWS_SHARED_CREDENTIALS_FILE"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestTheInstructionCarriesTheInfrastructureTheAgentMayUse(t *testing.T) {
 // A destination that declared none keeps the instruction it always had.
 func TestAnInstructionWithoutInfrastructureIsUnchanged(t *testing.T) {
 	draft, consumer, agent := infrastructureDraft()
-	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, "/work/repo", nil)
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, nil, "/work/repo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestAnInstructionWithoutInfrastructureIsUnchanged(t *testing.T) {
 func TestTheInstructionIsHonestAboutWhatIsMissing(t *testing.T) {
 	draft, consumer, agent := infrastructureDraft()
 	consumer.Infrastructure = &worker.InfrastructureConfig{Provider: "aws"}
-	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, "/work/repo", nil)
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, nil, "/work/repo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
