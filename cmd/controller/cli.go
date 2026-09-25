@@ -143,6 +143,27 @@ func loadCommandConfig(configPath, outputPath string) (worker.Config, error) {
 	return config, nil
 }
 
+// finishedRunConfig holds the configuration to the digest the caller read out
+// of the finished run's own records, so that reading that run does not depend
+// on the destination's configuration having stayed put since it ran. An empty
+// digest leaves the configuration live, which is what every verb that runs
+// while the delivery is still in flight gets.
+//
+// The pin is applied before anything else touches the configuration: the
+// ticket, the sealed gate artifacts and the baseline all reach their
+// validators through this value.
+func finishedRunConfig(config worker.Config, recorded string) (worker.Config, error) {
+	if recorded == "" {
+		return config, nil
+	}
+	pinned, err := config.ForFinishedRun(recorded)
+	if err != nil {
+		return worker.Config{}, fail("config_sha256_invalid")
+	}
+	loadedConfig = pinned
+	return pinned, nil
+}
+
 // prepareRuntime builds the GitHub controller for the destination the ticket
 // names. The repository must be a configured consumer and carry a reviewed
 // fixed contract; there is no discovery.

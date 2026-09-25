@@ -125,7 +125,11 @@ func newBaselineArtifact(config worker.Config, consumer worker.ConsumerConfig, b
 }
 
 func (a baselineArtifact) validate(config worker.Config) error {
-	configSHA, err := config.SHA256()
+	// The baseline is read again by the verbs that carry a finished run to
+	// production, so it is held to the run's recorded digest for the same
+	// reason the ticket is. newBaselineArtifact still seals with the live
+	// configuration's own digest: it only ever runs inside a live run.
+	configSHA, err := config.RunConfigSHA256()
 	if err != nil || a.SchemaVersion != controllerArtifactSchemaVersion || a.Kind != kindBaseline ||
 		a.ConfigSHA256 != configSHA || !validSHA256(a.ArtifactSHA256) {
 		return errors.New("baseline artifact is invalid")

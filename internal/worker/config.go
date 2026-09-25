@@ -61,6 +61,14 @@ type Config struct {
 	// DefaultDesignMaxRounds; omitempty keeps existing configurations'
 	// digests unchanged.
 	DesignMaxRounds int `json:"design_max_rounds,omitempty"`
+
+	// finishedRunSHA256 pins the digest this configuration's sealed records
+	// are held to. It is unexported so that SHA256, which marshals the
+	// exported fields, still reports the configuration's own digest, and so
+	// that nothing sealed while the pin is held can inherit it. Empty — the
+	// zero value — is the live configuration, which is what every path that
+	// loads a configuration from disk gets. See ForFinishedRun.
+	finishedRunSHA256 string
 }
 
 // DefaultDesignMaxRounds is the design review round limit a configuration
@@ -845,6 +853,40 @@ func (c Config) SHA256() (string, error) {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// ForFinishedRun holds this configuration to the digest a run recorded while
+// it was running, and returns it; the receiver is untouched.
+//
+// While a run is in flight the two are deliberately the same: if the
+// destination's configuration moves underneath a run, the rules it was
+// admitted under are no longer the rules, and finishing it under a mixture
+// of both is worse than refusing it. Once the run has ended there is nothing
+// left to admit — its pull request is already published — and holding its
+// sealed records to today's digest only makes them unreadable. Reading a
+// finished run that way is how a delivery whose pull request had been merged
+// sat on the board asking for the merge for more than ten hours, while a run
+// started after the change was noticed within seconds (live 2026-09-24).
+func (c Config) ForFinishedRun(recorded string) (Config, error) {
+	if !sha256Pattern.MatchString(recorded) {
+		return Config{}, errors.New("recorded configuration digest is invalid")
+	}
+	c.finishedRunSHA256 = recorded
+	return c, nil
+}
+
+// RunConfigSHA256 is the digest a run's sealed records must carry: the live
+// configuration's own, unless this configuration was held to a finished run's
+// recorded one. The configuration itself is checked either way, so a pinned
+// one is no easier to pass than a live one.
+func (c Config) RunConfigSHA256() (string, error) {
+	if c.finishedRunSHA256 == "" {
+		return c.SHA256()
+	}
+	if err := c.Validate(); err != nil {
+		return "", errors.New("worker configuration is invalid")
+	}
+	return c.finishedRunSHA256, nil
 }
 
 func (c Config) Validate() error {

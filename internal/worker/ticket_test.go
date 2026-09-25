@@ -113,6 +113,62 @@ func TestParseTicketBindsConfigAndToolRevision(t *testing.T) {
 	}
 }
 
+// A run that has already ended is read against the digest IT recorded. The
+// binding above is what a run in flight needs — the rules it was admitted
+// under must not move underneath it — but after the delivery is published
+// there is nothing left to admit, and holding the run's sealed records to
+// today's digest only makes them unreadable. A merged pull request went
+// unseen for more than ten hours that way (live 2026-09-24).
+func TestFinishedRunIsValidatedAgainstTheDigestItRecorded(t *testing.T) {
+	config := validTestConfig()
+	request, err := ParseTicket(validTicketEnvelope(t, validTicketDescription()), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := config
+	changed.Consumers[0].Mode.MaxChangedBytes--
+	if err := request.Validate(changed); err == nil {
+		t.Fatal("a ticket must not validate against a configuration it was not sealed under")
+	}
+
+	finished, err := changed.ForFinishedRun(request.ConfigSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.Validate(finished); err != nil {
+		t.Fatalf("a finished run's ticket was refused by its own digest: %v", err)
+	}
+
+	// The pin says which digest the run's records carry; it does not change
+	// what this configuration is. Anything sealed from here on still has to
+	// carry the live digest.
+	live, err := changed.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := finished.SHA256()
+	if err != nil || pinned != live {
+		t.Fatalf("pinned digest = %q, live = %q, error = %v", pinned, live, err)
+	}
+	recorded, err := finished.RunConfigSHA256()
+	if err != nil || recorded != request.ConfigSHA256 {
+		t.Fatalf("recorded digest = %q, want %q, error = %v", recorded, request.ConfigSHA256, err)
+	}
+
+	// A third digest is still a refusal: the pin names one run, it does not
+	// switch the comparison off.
+	other, err := changed.ForFinishedRun(strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.Validate(other); err == nil {
+		t.Fatal("a ticket validated against a digest no run recorded")
+	}
+	if _, err := changed.ForFinishedRun("not-a-digest"); err == nil {
+		t.Fatal("a malformed recorded digest was accepted")
+	}
+}
+
 func TestParseTicketSortsTargetFiles(t *testing.T) {
 	description := strings.Replace(validTicketDescription(),
 		"Target-File: client/src/components/Example.tsx",

@@ -18,11 +18,12 @@ import (
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
-// extractPublishOption removes one optional name/value pair from a pairwise
+// extractOption removes one optional name/value pair from a pairwise
 // argument list. The publish command grew host-side-only options after the
-// shared parser froze its required/repeated contract; stripping them first
-// keeps every other verb's argument contract byte-identical.
-func extractPublishOption(args []string, name string) ([]string, string) {
+// shared parser froze its required/repeated contract, and the verbs that
+// read a finished run later grew --config-sha256 the same way; stripping
+// them first keeps every other verb's argument contract byte-identical.
+func extractOption(args []string, name string) ([]string, string) {
 	for index := 0; index+1 < len(args); index += 2 {
 		if args[index] == name {
 			trimmed := append(append(make([]string, 0, len(args)-2), args[:index]...), args[index+2:]...)
@@ -33,6 +34,15 @@ func extractPublishOption(args []string, name string) ([]string, string) {
 }
 
 var publishSourceBasePattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
+
+// finishedRunOption names the digest a run recorded while it was running.
+// Every verb that reads a run AFTER it has ended accepts it, and holds the
+// run's sealed records to that digest instead of to the live configuration's;
+// the verbs that run while the delivery is still in flight do not accept it
+// at all, so a run in flight still stops when the configuration moves under
+// it. Optional: without it a verb behaves exactly as it did before, which is
+// what a hand-run invocation gets.
+const finishedRunOption = "--config-sha256"
 
 // writePublishFailure leaves a machine-readable failure reason for the
 // runner, which retries exactly one class of refusal (the integration base
@@ -99,8 +109,8 @@ func runBaseline(ctx context.Context, args []string, getenv func(string) string,
 }
 
 func runPublishFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
-	args, sourceBase := extractPublishOption(args, "--source-base")
-	args, failureOut := extractPublishOption(args, "--failure-out")
+	args, sourceBase := extractOption(args, "--source-base")
+	args, failureOut := extractOption(args, "--failure-out")
 	if sourceBase != "" && !publishSourceBasePattern.MatchString(sourceBase) {
 		return fail("arguments_invalid")
 	}
@@ -249,11 +259,16 @@ func runCreateFeaturePR(ctx context.Context, args []string, getenv func(string) 
 }
 
 func runWaitFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--out"})
 	if err != nil {
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -297,11 +312,16 @@ func runWaitFeature(ctx context.Context, args []string, getenv func(string) stri
 // pull_request delivery never builds the release-proof chain, and the E2E
 // observation this gates is a courtesy report, not a promotion input.
 func runAwaitMergedStaging(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--out"})
 	if err != nil {
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -356,11 +376,16 @@ func mergedStagingWait() githubapi.WaitOptions {
 // delivery uses it AFTER a merge verb failed, to report honestly whether
 // the merge itself landed — the merge verbs can fail after the merge did.
 func runReadMerged(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--number", "--out"})
 	if err != nil {
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -390,11 +415,16 @@ func runReadMerged(ctx context.Context, args []string, getenv func(string) strin
 // The requester sees this list in the staging report before writing Go —
 // the rail moves the whole branch, and Go approves the whole list.
 func runPromotionDelta(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--out"})
 	if err != nil {
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -417,11 +447,16 @@ func runPromotionDelta(ctx context.Context, args []string, getenv func(string) s
 }
 
 func runMergeFeature(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature-pr", "--checks", "--out"})
 	if err != nil {
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -470,6 +505,7 @@ func runMergeFeature(ctx context.Context, args []string, getenv func(string) str
 }
 
 func runAwaitStaging(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--feature-merge", "--out",
 	}, "--review")
@@ -477,6 +513,10 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -534,6 +574,7 @@ func runAwaitStaging(ctx context.Context, args []string, getenv func(string) str
 }
 
 func runCreatePromotionPR(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--staging", "--visible", "--screenshot", "--out",
 	}, "--review")
@@ -541,6 +582,10 @@ func runCreatePromotionPR(ctx context.Context, args []string, getenv func(string
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -616,6 +661,7 @@ func promotionFollowsVisibleEvidence(pull githubapi.PullRequest, visible visible
 }
 
 func runMergePromotion(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--promotion", "--reflection-out", "--out",
 	}, "--review")
@@ -628,6 +674,10 @@ func runMergePromotion(ctx context.Context, args []string, getenv func(string) s
 		return fail("production_reflection_path_invalid")
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}
@@ -718,6 +768,7 @@ func writeProductionReflectionArtifact(
 }
 
 func runAwaitProduction(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	args, recordedConfigSHA := extractOption(args, finishedRunOption)
 	arguments, err := parseCommandArguments(args, []string{
 		"--config", "--ticket", "--source", "--candidate", "--decision", "--validation", "--baseline", "--promotion-merge", "--out",
 	}, "--review")
@@ -725,6 +776,10 @@ func runAwaitProduction(ctx context.Context, args []string, getenv func(string) 
 		return err
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
+	if err != nil {
+		return err
+	}
+	config, err = finishedRunConfig(config, recordedConfigSHA)
 	if err != nil {
 		return err
 	}

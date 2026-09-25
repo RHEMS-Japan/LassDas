@@ -13,16 +13,16 @@ import (
 	"automation.internal/ticket-ingress/internal/githubapi"
 )
 
-func TestExtractPublishOptionRemovesOnePairAndKeepsTheRest(t *testing.T) {
+func TestExtractOptionRemovesOnePairAndKeepsTheRest(t *testing.T) {
 	args := []string{"--config", "c.json", "--source-base", strings.Repeat("a", 40), "--out", "o.json"}
-	trimmed, value := extractPublishOption(args, "--source-base")
+	trimmed, value := extractOption(args, "--source-base")
 	if value != strings.Repeat("a", 40) {
 		t.Fatalf("value = %q", value)
 	}
 	if !slices.Equal(trimmed, []string{"--config", "c.json", "--out", "o.json"}) {
 		t.Fatalf("trimmed = %v", trimmed)
 	}
-	same, missing := extractPublishOption(trimmed, "--failure-out")
+	same, missing := extractOption(trimmed, "--failure-out")
 	if missing != "" || !slices.Equal(same, trimmed) {
 		t.Fatalf("absent option changed the arguments: %v %q", same, missing)
 	}

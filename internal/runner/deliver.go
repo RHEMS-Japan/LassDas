@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -551,13 +552,36 @@ func (p *Pipeline) probeMerged(ctx context.Context, step, stageDir, artifact str
 }
 
 // deliverCommon renders the arguments every controller verb shares.
+//
+// The delivery continuation runs after the run itself has ended, so it names
+// the configuration digest the run recorded: the destination's configuration
+// may have been changed in between, and holding a finished run's sealed
+// records to today's digest makes them unreadable rather than unsafe.
 func (p *Pipeline) deliverCommon(stageDir string, extra ...string) []string {
 	arguments := []string{
 		"--config", p.Config.ConsumerConfigPath,
 		"--ticket", p.path(stageDir + "/ticket.json"),
 	}
+	if recorded := p.recordedConfigSHA256(); recorded != "" {
+		arguments = append(arguments, "--config-sha256", recorded)
+	}
 	return append(arguments, extra...)
 }
+
+// recordedConfigSHA256 is the configuration digest this run was sealed
+// under, read back from the delivered pull request artifact — the same
+// artifact that names the pull request these verbs act on. Empty when it
+// cannot be read, which leaves the verb bound to the live configuration
+// exactly as it was before.
+func (p *Pipeline) recordedConfigSHA256() string {
+	recorded, err := p.readJSONField("feature-pr.json", "binding", "config_sha256")
+	if err != nil || !recordedConfigPattern.MatchString(recorded) {
+		return ""
+	}
+	return recorded
+}
+
+var recordedConfigPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // deliverGate adds the full publication-gate artifact set the promotion
 // verbs re-verify, on top of the common arguments.

@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -25,6 +27,31 @@ const featureMergeFile = "feature-merged.json"
 // mergeReadTimeout bounds one reading. The attendant wakes every minute; a
 // reading that cannot be had in this long is had on the next wake-up.
 const mergeReadTimeout = 30 * time.Second
+
+// mergeUnreadableFile records that this run's own records could not be read,
+// so the reason is said once and not once a minute for as long as the run is
+// kept.
+const mergeUnreadableFile = "feature-merged.unreadable.json"
+
+// mergeReadStderrBytes bounds what is kept of the reader's stderr. Only the
+// last line matters — the reader prints its detail first and its fixed code
+// last — and the detail may name an endpoint, never a credential.
+const mergeReadStderrBytes = 4096
+
+// mergeRecordFailures are the reader's refusals that mean this run's own
+// sealed records could not be read at all: nothing about them will be
+// different on the next wake-up, and an operator has to look. Every other
+// refusal — the destination unreachable, the token rejected, the reading
+// itself failing — is transient and stays quiet, because a pull request that
+// is simply not merged yet looks the same from here.
+var mergeRecordFailures = map[string]bool{
+	"ticket_artifact_invalid": true,
+	"config_invalid":          true,
+	"config_sha256_invalid":   true,
+	"arguments_invalid":       true,
+	"output_path_invalid":     true,
+	"command_invalid":         true,
+}
 
 // SyncRunnerMerges observes the PRs left by finished runners. It neither
 // reopens runs nor starts cards/delivery stages. The ordinary reception
@@ -100,7 +127,7 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 	if _, known := readFeatureMerge(runDir); known {
 		return
 	}
-	number, err := featurePullNumber(runDir)
+	number, recordedConfigSHA, err := featureDelivery(runDir)
 	if err != nil {
 		return
 	}
@@ -124,13 +151,25 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 	_ = os.Remove(out)
 	runCtx, cancel := context.WithTimeout(ctx, mergeReadTimeout)
 	defer cancel()
+	// The run is over, so its records are held to the digest IT recorded and
+	// not to the destination's configuration as it stands now. Without this
+	// the reader refuses the ticket of every run that finished before the
+	// last configuration change, and the refusal is indistinguishable here
+	// from "not merged yet" — which is how merges went unseen for as long as
+	// the run was kept (live 2026-09-24).
 	command := exec.CommandContext(runCtx, config.ControllerBin, "read-merged",
 		"--config", config.ConsumerConfigPath, "--ticket", ticket,
+		"--config-sha256", recordedConfigSHA,
 		"--number", strconv.FormatInt(number, 10), "--out", out)
 	command.Env = append(os.Environ(), "TARGET_GITHUB_TOKEN="+token)
+	stderr := &tailWriter{limit: mergeReadStderrBytes}
+	command.Stderr = stderr
 	if err := command.Run(); err != nil {
-		// Nothing to say every minute: the pull request is simply not known
-		// to be merged yet, which is also what "not merged" looks like.
+		// A pull request that is simply not merged yet reads successfully and
+		// says so, so a refusal here is never that. Most refusals are still
+		// worth no words every minute — the destination may be unreachable —
+		// but one whose own records cannot be read will not heal on its own.
+		noteUnreadableRun(runDir, run, endingCode(stderr.String()), logger)
 		return
 	}
 	raw, err := os.ReadFile(out)
@@ -159,13 +198,20 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 	logger.Info("the delivered pull request was merged", "run", run.RunID, "merge_commit", reading.MergeCommitSHA)
 }
 
-// featurePullNumber reads the delivered pull request's number.
-func featurePullNumber(runDir string) (int64, error) {
+// featureDelivery reads what the delivered pull request artifact says about
+// itself: the number to ask about, and the configuration digest the run was
+// sealed under. Both come from the same artifact on purpose — the reader
+// then has to be handed a ticket that belongs to the very delivery whose
+// pull request is being asked about.
+func featureDelivery(runDir string) (int64, string, error) {
 	raw, err := os.ReadFile(filepath.Join(runDir, "feature-pr.json"))
 	if err != nil || len(raw) > 1<<20 {
-		return 0, errors.New("no delivered pull request")
+		return 0, "", errors.New("no delivered pull request")
 	}
 	var record struct {
+		Binding struct {
+			ConfigSHA256 string `json:"config_sha256"`
+		} `json:"binding"`
 		Payload struct {
 			PullRequest struct {
 				Number int64 `json:"Number"`
@@ -173,9 +219,72 @@ func featurePullNumber(runDir string) (int64, error) {
 		} `json:"payload"`
 	}
 	if json.Unmarshal(raw, &record) != nil || record.Payload.PullRequest.Number <= 0 {
-		return 0, errors.New("the delivered pull request has no number")
+		return 0, "", errors.New("the delivered pull request has no number")
 	}
-	return record.Payload.PullRequest.Number, nil
+	if !recordedDigestPattern.MatchString(record.Binding.ConfigSHA256) {
+		return 0, "", errors.New("the delivered pull request records no configuration digest")
+	}
+	return record.Payload.PullRequest.Number, record.Binding.ConfigSHA256, nil
+}
+
+var recordedDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// tailWriter keeps the last limit bytes written to it.
+type tailWriter struct {
+	limit int
+	data  []byte
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	w.data = append(w.data, p...)
+	if len(w.data) > w.limit {
+		w.data = append([]byte(nil), w.data[len(w.data)-w.limit:]...)
+	}
+	return len(p), nil
+}
+
+func (w *tailWriter) String() string { return string(w.data) }
+
+// endingCode is the fixed failure code the reader ended with. It prints its
+// detail first and its code last, so the LAST bare "controller: <code>" line
+// is the ending; a code named inside an earlier wrapped error is a detail.
+func endingCode(stderr string) string {
+	ending := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		after, found := strings.CutPrefix(strings.TrimSpace(line), "controller: ")
+		if found && !strings.Contains(after, ":") {
+			ending = after
+		}
+	}
+	return ending
+}
+
+// noteUnreadableRun says once, per run and per reason, that a finished run's
+// own records could not be read. Saying it every minute would bury it; never
+// saying it is how this went unnoticed for half a day.
+func noteUnreadableRun(runDir string, run state.RunOverview, code string, logger Logger) {
+	if !mergeRecordFailures[code] {
+		return
+	}
+	marker := filepath.Join(runDir, mergeUnreadableFile)
+	var noted struct {
+		Code    string    `json:"code"`
+		NotedAt time.Time `json:"noted_at"`
+	}
+	if raw, err := os.ReadFile(marker); err == nil && len(raw) <= 1<<16 &&
+		json.Unmarshal(raw, &noted) == nil && noted.Code == code {
+		return
+	}
+	noted.Code, noted.NotedAt = code, time.Now().UTC()
+	encoded, err := json.Marshal(noted)
+	if err != nil {
+		return
+	}
+	// Best effort: an unwritable marker must not cost the operator the one
+	// line that says what is wrong, even if it then repeats.
+	_ = os.WriteFile(marker, encoded, 0o600)
+	logger.Error("a finished run's records could not be read, so its merge cannot be observed",
+		"run", run.RunID, "reason", code)
 }
 
 // newestStageTicket names the ticket artifact of the highest implementation
