@@ -1001,6 +1001,19 @@ type ModelConfig struct {
 	// the delivery carrying itself rather than stopping. Moving the seat is
 	// work for whoever gives the ruling a card of its own.
 	Arbiter *ModelEndpoint `json:"arbiter,omitempty"`
+	// ReceptionJudge, when present, is a decision model the reception may
+	// put its own questions to: it answers with an option and a number
+	// instead of prose, so the reception can weigh a second reading of a
+	// request without a second prose seat. It is not a seat - it generates
+	// nothing, reviews nothing, and its id never appears in a record of a
+	// round - so it carries none of a seat's fields and takes part in none
+	// of the different-vendor rules.
+	//
+	// Absent, and the reception behaves exactly as it did before this
+	// existed. The field is omitted when empty, so a destination that says
+	// nothing about it encodes - and therefore digests - as it always did,
+	// and no delivery in flight is invalidated by the role being added.
+	ReceptionJudge *ReceptionJudgeConfig `json:"reception_judge,omitempty"`
 	// VendorHosts, when present, pins every declared vendor name to the hosts
 	// its endpoints may be reached through. The different-vendor rules below
 	// otherwise trust the vendor string as written: a config could call two
@@ -1019,6 +1032,66 @@ type ModelConfig struct {
 type ReadinessModels struct {
 	Assessor ModelEndpoint `json:"assessor"`
 	Checker  ModelEndpoint `json:"checker"`
+}
+
+// ReceptionJudgeConfig is where the reception's decision model is reached.
+// It is deliberately not a ModelEndpoint: a decision model has no prose
+// output, so an output allowance means nothing to it, and it has no lens,
+// no effort and no candidates because nothing about it is a seat that could
+// fail over to another.
+//
+// BaseURL is its own. The decisions service is not the chat-completions
+// address the seats post to, so a role that inherited a gateway's base URL
+// would reach a completions handler on every call and fail in a way that
+// reads as the model being down. Left empty it is the service's published
+// address; an operator who reaches it through something else names that.
+type ReceptionJudgeConfig struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	BaseURL   string `json:"base_url,omitempty"`
+	APIKeyEnv string `json:"api_key_env"`
+}
+
+// DecisionsBaseURL is the decisions service's published address, used when
+// the role names none. It is stated here as well as in the client package so
+// that a configuration can be validated without the client being built.
+const DecisionsBaseURL = "https://openrouter.ai/api/alpha"
+
+// Address is where this role is reached, filling in the default.
+func (r ReceptionJudgeConfig) Address() string {
+	if r.BaseURL == "" {
+		return DecisionsBaseURL
+	}
+	return r.BaseURL
+}
+
+// validate holds the role to what a call needs: somewhere to post, a model
+// to name, and a variable the key arrives in. The address is held to the
+// same spelling rule the seats' addresses are, so one malformed URL is
+// refused the same way wherever it appears.
+func (r ReceptionJudgeConfig) validate() error {
+	for _, value := range []string{r.Provider, r.Model} {
+		if value == "" || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") || len(value) > 128 {
+			return errors.New("reception judge provider and model are invalid")
+		}
+	}
+	if err := validateModelBaseURL(r.Address()); err != nil {
+		return err
+	}
+	if !apiKeyEnvPattern.MatchString(r.APIKeyEnv) {
+		return errors.New("reception judge api key environment name is invalid")
+	}
+	return nil
+}
+
+// ReceptionJudgeRole reports the configured reception judge, and false when
+// no role is configured. Callers branch on the boolean: without a role the
+// reception asks nobody anything extra and runs exactly as before.
+func (m ModelConfig) ReceptionJudgeRole() (ReceptionJudgeConfig, bool) {
+	if m.ReceptionJudge == nil {
+		return ReceptionJudgeConfig{}, false
+	}
+	return *m.ReceptionJudge, true
 }
 
 // ModelEndpoint names one OpenAI-compatible chat completions endpoint. The
@@ -1625,6 +1698,15 @@ func (c ModelConfig) validate() error {
 	}
 	if strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
 		return errors.New("readiness assessor and checker must use different vendors")
+	}
+	// The reception judge is checked but takes no part in the rules above:
+	// it holds no id, so it cannot collide with a seat's, and it answers no
+	// prose, so the different-vendor rules that keep one vendor from being
+	// every judge have nothing to say about it.
+	if c.ReceptionJudge != nil {
+		if err := c.ReceptionJudge.validate(); err != nil {
+			return fmt.Errorf("reception judge: %w", err)
+		}
 	}
 	if c.VendorHosts != nil {
 		if err := validateVendorHosts(c.VendorHosts); err != nil {
