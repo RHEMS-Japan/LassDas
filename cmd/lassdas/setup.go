@@ -312,6 +312,17 @@ func setupSecrets(ctx context.Context, project, root, home string, output io.Wri
 		return fmt.Errorf("この project の設計レビューの構成 (separate-design=%v) は確定済みです。変えるなら `lassdas init --project %s --redo models` を利用者が対話で実行するか、別の project 名を使ってください", state.SeparateDesignReviews, project)
 	}
 	state.ModelKeyMode, state.SeparateDesignReviews = mode, separateDesign
+	// The depth is offered as a list, and a list answers with the wizard's
+	// own proposal: nobody is at the keyboard to pick anything else. So the
+	// file's answer is put into the state here, before the wizard runs, and
+	// the wizard proposes it back — the same way the two key questions
+	// above already travel from the file to the interview.
+	if depth, ok := answers.Value("delivery-depth"); ok {
+		if err := initwizard.CheckDeliveryDepth(depth); err != nil {
+			return err
+		}
+		state.Delivery = depth
+	}
 	names := secretPlan(answers)
 	terminal := initwizard.TerminalUI{}
 	for _, entry := range names {

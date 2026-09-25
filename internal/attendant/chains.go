@@ -378,6 +378,22 @@ func startQueuedRun(
 		}
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
+	// What the destination's release path is missing, worked out once,
+	// before the first round. The round that implements the request builds
+	// the part of it that lives in this repository and it goes out in the
+	// same pull request; the parts this engine was not handed the means to
+	// apply are named in the report afterwards. A destination whose path is
+	// complete, and one that stops at the proposal, get no plan and no
+	// extra work (depth_gap.go).
+	if releasePath, gapErr := detectReleasePathGap(config, run, runDir); gapErr != nil {
+		logger.Error("the destination's release path could not be read; the delivery carries the request alone",
+			"run", run.RunID, "error", gapErr.Error())
+	} else if !releasePath.Empty() {
+		sealReleasePathPlan(runDir, releasePath, logger)
+		logger.Info("the destination asks for a depth it has no path for; this round builds what it can",
+			"run", run.RunID, "configured", releasePath.Configured,
+			"builds", len(releasePath.Buildable()), "unapplied", len(releasePath.Unapplied()))
+	}
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
 		// Fail closed: a request the decision routed to the investigating
@@ -466,6 +482,43 @@ func engineChangedUnderRun(config runtime.Config, runDir string) (string, bool) 
 	return sha, sha != config.Identity.EngineSHA
 }
 
+// settingsChangedUnderRun answers whether the destination configuration
+// changed under this delivery.
+//
+// Every stage refuses a record sealed under a different configuration, the
+// same way it refuses one sealed by a different engine — and until now
+// nothing noticed. A configuration edited while a delivery was in flight
+// left that delivery failing its cards on "not bound to this run", every
+// minute, for ever; the engine's own version had the same shape and was
+// fixed by starting the delivery again, and this is that fix for the other
+// half of the binding.
+//
+// A delivery past its pull request is exempt, and that is the whole reason
+// the engine may write a destination's settings at all: from the publish
+// card on, the delivery cards re-verify the sealed records under the digest
+// recorded in the pull request itself (internal/runner/deliver.go's
+// recorded configuration digest), so a configuration that moved afterwards
+// cannot make them unreadable. Restarting one of those would throw away a
+// finished implementation over a setting that no longer constrains it.
+func settingsChangedUnderRun(config runtime.Config, runDir string) bool {
+	sealed, err := readField(runDir, "ticket-draft.json", "config_sha256")
+	if err != nil || sealed == "" {
+		return false
+	}
+	if deliverFileExists(runDir, "feature-pr.json") {
+		return false
+	}
+	live, err := worker.LoadConfig(config.ConsumerConfigPath)
+	if err != nil {
+		// Unreadable is not changed. A configuration this engine cannot
+		// parse stops every card on its own terms, and restarting the
+		// delivery would only reach the same refusal one round earlier.
+		return false
+	}
+	digest, err := live.SHA256()
+	return err == nil && digest != "" && digest != sealed
+}
+
 func advanceClaimedRun(
 	ctx context.Context,
 	config runtime.Config,
@@ -495,6 +548,16 @@ func advanceClaimedRun(
 	if wrote, changed := engineChangedUnderRun(config, runDir); changed {
 		logger.Info("the engine changed under this delivery; starting it again",
 			"run", run.RunID, "wrote", wrote, "running", config.Identity.EngineSHA)
+		for _, task := range view.all {
+			if err := hermes.Archive(ctx, task.ID); err != nil {
+				return err
+			}
+		}
+		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
+	}
+	if settingsChangedUnderRun(config, runDir) {
+		logger.Info("the destination configuration changed under this delivery; starting it again",
+			"run", run.RunID)
 		for _, task := range view.all {
 			if err := hermes.Archive(ctx, task.ID); err != nil {
 				return err

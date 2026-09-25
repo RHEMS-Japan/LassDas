@@ -418,6 +418,13 @@ func deliveryOutcome(runDir, repository string, depth depthPlan, evidence map[st
 
 	if reached == depth.Configured {
 		shortfall = ""
+	} else if hold := releasePathHold(runDir); hold != "" && depth.reachesProduction() &&
+		reached == string(worker.DeliverIntegration) {
+		// The path to production was checked before the promotion and did
+		// not check out (deliver.go). That is a more exact answer than the
+		// depth record's own line, which was written before the delivery
+		// ran and only knows what the settings said then.
+		shortfall = hold
 	} else if shortfall == "" && depth.reachesProduction() && reached == string(worker.DeliverIntegration) {
 		// The Go wait ended without a promotion: the operator asked for a
 		// look before production moved and no look arrived in time.

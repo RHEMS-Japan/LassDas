@@ -25,6 +25,7 @@ func runImplementInstruction(args []string) error {
 	validationFailurePath := flags.String("validation-failure", "", "")
 	rulingPath := flags.String("ruling", "", "")
 	returnedPath := flags.String("returned", "", "")
+	releasePathPath := flags.String("release-path", "", "")
 	rebuild := flags.String("rebuild-prompt", "", "")
 	var credentialEnv stringList
 	flags.Var(&credentialEnv, "credential-env", "")
@@ -71,6 +72,10 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
+	releasePath, err := readReleasePath(*releasePathPath)
+	if err != nil {
+		return err
+	}
 	if *rebuild != "" {
 		// The ladder has been here before and the implementer answered
 		// nothing. The request and the boundaries stay; what the earlier
@@ -79,7 +84,7 @@ func runImplementInstruction(args []string) error {
 		// stays: it is the reason this round exists, not commentary on it.
 		findings = nil
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, returned, *repoRoot, credentialEnv)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, returned, releasePath, *repoRoot, credentialEnv)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -130,4 +135,24 @@ func readReturnedRound(path string) (*worker.ReturnedWork, error) {
 		return nil, errors.New("this round's returned-work record holds no answer")
 	}
 	return latest, nil
+}
+
+// readReleasePath loads what this destination's release path is missing, or
+// nil when the flag was not given — the ordinary case, because most
+// destinations either stop at the proposal or already have a path.
+//
+// A path that was given and cannot be read is a failure rather than an
+// absence, for the same reason the previous round's validation failure is:
+// the round is being rendered to build what is in that file, and rendering
+// without it would produce a plausible instruction that quietly does half
+// the job.
+func readReleasePath(path string) (*worker.ReleasePathPlan, error) {
+	if path == "" {
+		return nil, nil
+	}
+	plan, err := worker.ReadReleasePathFile(path)
+	if err != nil {
+		return nil, errors.New("the release path plan could not be read")
+	}
+	return &plan, nil
 }

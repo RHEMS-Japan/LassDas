@@ -132,7 +132,7 @@ func TestAnOversizeInstructionShedsTheEarlierObjections(t *testing.T) {
 	// want of room and not by accident.
 	small := draft
 	small.Request = "本文"
-	roomy, err := implementPrompt(small, consumer, agent, nil, findings, nil, nil, &answer, "/work/repo", nil)
+	roomy, err := implementPrompt(small, consumer, agent, nil, findings, nil, nil, &answer, nil, "/work/repo", nil)
 	if err != nil {
 		t.Fatalf("an instruction with room for everything did not render: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestAnOversizeInstructionShedsTheEarlierObjections(t *testing.T) {
 		t.Fatal("the objections were dropped from an instruction with room for them")
 	}
 
-	prompt, err := implementPrompt(draft, consumer, agent, nil, findings, nil, nil, &answer, "/work/repo", nil)
+	prompt, err := implementPrompt(draft, consumer, agent, nil, findings, nil, nil, &answer, nil, "/work/repo", nil)
 	if err != nil {
 		t.Fatalf("an oversize instruction rendered nothing at all: %v", err)
 	}

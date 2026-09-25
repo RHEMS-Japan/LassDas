@@ -216,6 +216,25 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 		}
 		return deliverStopped, nil
 	}
+	// The path to production is checked before anything is promoted. Where
+	// the engine built that path itself, this is the first time anything
+	// asks whether what it built actually works, and the answer is already
+	// on the volume: staging's own deployment ran under it, and staging's
+	// screen was opened and judged through it. What is checked here is
+	// production's half — the settings that name where production is and
+	// what deploys it, and the workflow file itself.
+	//
+	// Failing this is not a failure of the delivery. The change is merged,
+	// deployed and seen on staging; the promotion is what does not happen,
+	// and the report says which part of the path was not there rather than
+	// letting a promote card wait three hours for a deployment that was
+	// never going to start.
+	if reason, built := verifyBuiltPath(config, runDir); !built {
+		holdReleasePath(runDir, reason, logger)
+		logger.Info("the path to production is not complete; the delivery stops at staging",
+			"run", run.RunID, "reason", reason)
+		return deliverReached, nil
+	}
 	if config.Chain.Deliver.GoGateRequired() {
 		if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
 			content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
@@ -249,6 +268,52 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 		logger.Info("deliver promote card created", "run", run.RunID, "go_gate", config.Chain.Deliver.GoGate)
 	}
 	return deliverWorking, err
+}
+
+// verifyBuiltPath says whether this destination can actually be promoted
+// to, and why not when it cannot.
+//
+// Read from the settings and from the destination's own checked-out tree,
+// never from what the engine believes it built. A tree that is not there to
+// read is not an answer either way, so the file check is skipped and the
+// settings are judged alone: refusing a promotion because a working copy
+// was swept would stop a delivery that is perfectly healthy.
+func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
+	repository, err := readField(runDir, "ticket-draft.json", "repository")
+	if err != nil {
+		return "", true
+	}
+	settings, err := readConsumerReleaseSettings(config.ConsumerConfigPath, repository)
+	if err != nil {
+		return "", true
+	}
+	workflow := settings.productionWorkflowPath()
+	switch {
+	case settings.ProductionOrigin == "":
+		return "本番が応答する場所 (production_origin) が設定にないため、本番反映は行わず staging までで止めています。", false
+	case workflow == "":
+		return "本番へ反映する workflow が設定にないため、本番反映は行わず staging までで止めています。", false
+	}
+	tree := filepath.Join(runDir, "target-repo")
+	if _, err := os.Stat(tree); err != nil {
+		return "", true
+	}
+	if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(workflow))); err != nil {
+		return "本番へ反映する " + workflow + " がリポジトリに無いため、本番反映は行わず staging までで止めています。", false
+	}
+	// Staging is the proof that the path works at all: a deployment ran
+	// under it, and where the ticket promised something visible, a screen
+	// was opened through it and judged. A pass without either is a pass
+	// nothing verified, and promoting on it would carry an unverified path
+	// into production.
+	if !deliverFileExists(runDir, runner.DeliverStagingProofFile) {
+		return "staging へのデプロイが実際に動いた記録が無いため、本番反映は行わず staging までで止めています。", false
+	}
+	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
+	if err == nil && report.ScreenChecked && !deliverFileExists(runDir, runner.DeliverStagingVisibleFile) {
+		return "staging の画面を確かめた記録が無いため、本番反映は行わず staging までで止めています。", false
+	}
+	return "", true
 }
 
 // commentIDWithMarker finds the NEWEST comment carrying exactly the given

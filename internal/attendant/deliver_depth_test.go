@@ -77,9 +77,10 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 	t.Helper()
 	root := t.TempDir()
 	consumerConfig := filepath.Join(root, "consumer.json")
-	body := fmt.Sprintf(`{"max_stages":3,"consumers":[{"repository":%q,"delivery":%q}]}`, depthRepository, delivery)
+	body := fmt.Sprintf(`{"max_stages":3,"consumers":[{"repository":%q,"delivery":%q%s}]}`,
+		depthRepository, delivery, depthReleaseSettings)
 	if delivery == "" {
-		body = fmt.Sprintf(`{"max_stages":3,"consumers":[{"repository":%q}]}`, depthRepository)
+		body = fmt.Sprintf(`{"max_stages":3,"consumers":[{"repository":%q%s}]}`, depthRepository, depthReleaseSettings)
 	}
 	if err := os.WriteFile(consumerConfig, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -290,7 +291,10 @@ func (h *depthHarness) write(name, content string) {
 	}
 }
 
-// sealPhase writes the record a delivery card would have sealed.
+// sealPhase writes the records a delivery card would have sealed: the
+// phase's own summary, and — for a staging phase that passed — the deploy
+// proof and the screen the observation opened, which a real card seals
+// before it writes its summary. The promotion reads all three.
 func (h *depthHarness) sealPhase(file string, report runner.DeliverReport) {
 	h.t.Helper()
 	report.SchemaVersion = 1
@@ -299,7 +303,26 @@ func (h *depthHarness) sealPhase(file string, report runner.DeliverReport) {
 	}
 	encoded, _ := json.Marshal(report)
 	h.write(file, string(encoded))
+	if file != runner.DeliverStagingReportFile || report.Verdict != "pass" {
+		return
+	}
+	h.write(runner.DeliverStagingProofFile, fmt.Sprintf(`{"merge":{"sha":%q}}`, depthMergeSHA))
+	if report.ScreenChecked {
+		h.write(runner.DeliverStagingVisibleFile, `{"verdict":"pass"}`)
+	}
 }
+
+// depthReleaseSettings is the release configuration every web destination
+// carries before its configuration will load at all: where the two
+// environments answer and what deploys to them. The harness writes them so
+// that a test about something else is not also a test about a destination
+// with no release path.
+const depthReleaseSettings = `,"staging_origin":"` + depthStagingHost +
+	`","production_origin":"` + depthProdHost +
+	`","staging_workflow":"deploy-staging.yml","production_workflow":"deploy-production.yml"` +
+	`,"observation_language":"ja"` +
+	`,"github_contract":{"staging_workflow":{"path":".github/workflows/deploy-staging.yml"},` +
+	`"production_workflows":[{"path":".github/workflows/deploy-production.yml"}]}`
 
 func (h *depthHarness) calls() string {
 	raw, err := os.ReadFile(h.callsFile)

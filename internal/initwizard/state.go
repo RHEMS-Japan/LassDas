@@ -47,10 +47,19 @@ type State struct {
 	BaseURL               string                          `json:"base_url"`
 	ModelKeyMode          string                          `json:"model_key_mode,omitempty"`
 	SeparateDesignReviews bool                            `json:"separate_design_reviews"`
-	BoardPort             int                             `json:"board_port"`
-	AutomationRunID       string                          `json:"automation_run_id"`
-	Completed             map[string]string               `json:"completed"`
-	Checks                map[string]json.RawMessage      `json:"checks"`
+	// Delivery is how far this destination is carried without a person:
+	// the proposal, staging, or production. Everything past the proposal
+	// needs cards to carry it and screens to be judged on, which is what
+	// Deliver and the three observation fields below answer.
+	Delivery            string                      `json:"delivery,omitempty"`
+	Deliver             runtimeconfig.DeliverConfig `json:"deliver,omitempty"`
+	StagingLoginURL     string                      `json:"staging_login_url,omitempty"`
+	ProductionLoginURL  string                      `json:"production_login_url,omitempty"`
+	ObservationLanguage string                      `json:"observation_language,omitempty"`
+	BoardPort           int                         `json:"board_port"`
+	AutomationRunID     string                      `json:"automation_run_id"`
+	Completed           map[string]string           `json:"completed"`
+	Checks              map[string]json.RawMessage  `json:"checks"`
 	// Means is what this project hands its engine beyond the repository
 	// (see means.go). A pointer so a project that hands over nothing — the
 	// ordinary one — keeps the journal it always had.
