@@ -332,7 +332,7 @@ func rebuildDeliverCard(ctx context.Context, climb ladderClimb, verdict string, 
 // is whatever the refusal was about, and nothing before it.
 func deliverRetryDrops(stage, verdict string) []string {
 	if stage == deliverStagePromote {
-		drops := []string{runner.DeliverProductionReportFile}
+		drops := []string{runner.DeliverProductionReportFile, deliverFailureRecord(stage)}
 		switch verdict {
 		case "observe_failed", "observe_blocked":
 			return append(drops, runner.DeliverProductionVisibleFile, runner.DeliverProductionShotFile)
@@ -343,7 +343,7 @@ func deliverRetryDrops(stage, verdict string) []string {
 		}
 		return drops
 	}
-	drops := []string{runner.DeliverStagingReportFile}
+	drops := []string{runner.DeliverStagingReportFile, deliverFailureRecord(stage)}
 	if stage == deliverStageChecks {
 		// The gate's own record is written only when it goes green, so
 		// there is nothing of it to drop; what goes is the record that says
@@ -357,6 +357,19 @@ func deliverRetryDrops(stage, verdict string) []string {
 		return append(drops, runner.DeliverStagingProofFile, runner.DeliverStagingPlainProofFile)
 	}
 	return drops
+}
+
+// deliverFailureRecord is where a delivery card's account of its own
+// failure lives, relative to the run directory.
+//
+// It goes with every other record a second attempt must not inherit. A
+// delivery card has one round however many attempts it takes, so the
+// account of the attempt before it sits at the same path — and left there,
+// a card that filled the volume once and then met a red gate would be
+// climbed as a volume that filled, and swept instead of waited on. The
+// account is the attempt's, not the phase's.
+func deliverFailureRecord(stage string) string {
+	return runner.StageFailureFile("", stage, deliverLadderRound)
 }
 
 // commitSHAPattern is what a commit the report may cite looks like. A merge

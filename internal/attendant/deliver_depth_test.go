@@ -862,3 +862,99 @@ func TestARedGateIsClimbedAgainstTheCardThatWaited(t *testing.T) {
 		t.Fatalf("the merge card was charged for the gate: %+v", record)
 	}
 }
+
+// A stop that reached staging can be sent again.
+//
+// The report the store sealed carries where the delivery got to and that
+// depth's evidence, and the digest it is identified by is built from them.
+// A re-submission that rebuilt the report without them — which is what
+// every other ending needs — reproduces a different digest, and the
+// delivery then sits in "the report is pending" with the tick refusing to
+// touch it and its cards parked, until a person goes and looks. That is the
+// exact silence this path exists to end.
+func TestAStopThatReachedStagingCanBeSentAgain(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	*h.comments = append(*h.comments, ticketComment(954, depthRequester, "停止"))
+	h.tick() // the stop ends the delivery
+
+	sealed := h.runRow()
+	if sealed.TerminalCode != string(hook.TerminalCancelled) || sealed.TerminalReportSHA256 == "" {
+		t.Fatalf("run = %s / %s, digest %q", sealed.State, sealed.TerminalCode, sealed.TerminalReportSHA256)
+	}
+
+	// The rebuild has to find the repository the sealed report named, which
+	// it can only do by reproducing the digest.
+	var envelope hook.DispatchEnvelope
+	if err := json.Unmarshal([]byte(sealed.EnvelopeJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	terminal := runner.NewTerminal(h.config, h.services, envelope, chainOwnerRunID(h.deliveryID), h.runDir, h.logger)
+	code := hook.TerminalCancelled
+	evidenceFor := func(repository string) map[string]string {
+		return stoppedDeliveryEvidence(h.runDir, repository, code)
+	}
+	repository, err := pendingRepository(context.Background(), terminal, h.runDir, sealed, code, evidenceFor)
+	if err != nil {
+		t.Fatalf("the sealed stop could not be rebuilt: %v", err)
+	}
+	if repository != depthRepository {
+		t.Fatalf("the rebuild named %q", repository)
+	}
+
+	// And the whole path: a row that says the report is still pending is
+	// driven to its end rather than handed to an operator.
+	pending := sealed
+	pending.State = "terminal_report_pending"
+	before := len(h.logger.lines)
+	if err := resubmitPendingTerminal(context.Background(), h.config, h.services, h.hermes, pending,
+		chainViewFor(nil, h.deliveryID), h.logger); err != nil {
+		t.Fatalf("resubmitPendingTerminal: %v", err)
+	}
+	log := strings.Join(h.logger.lines[before:], "\n")
+	if strings.Contains(log, "needs an operator") {
+		t.Fatalf("the pending stop was handed to an operator: %q", log)
+	}
+	if !strings.Contains(log, "pending terminal report completed") {
+		t.Fatalf("the pending stop was not completed: %q", log)
+	}
+}
+
+// A second attempt at a delivery phase does not inherit the first one's
+// account of what went wrong.
+//
+// A delivery card counts in one round however many attempts it takes, so
+// the account of the attempt before it sits at the same path. Left there, a
+// card that filled the volume once and then met a red gate would be climbed
+// as a volume that filled — swept, when what it needed was to wait.
+func TestASecondAttemptDoesNotInheritTheFirstOnesFailure(t *testing.T) {
+	for _, stage := range []string{deliverStageChecks, deliverStageIntegrate, deliverStagePromote} {
+		drops := strings.Join(deliverRetryDrops(stage, "deploy_failed"), " ")
+		if !strings.Contains(drops, stage+"-failure.json") {
+			t.Errorf("%s keeps its previous attempt's failure record: %s", stage, drops)
+		}
+	}
+
+	h := newDepthHarness(t, "production", true, "")
+	h.config.Chain.RetryBackoffBaseSeconds = 1
+	if err := runner.SealStageFailureRecord(h.runDir, runner.StageFailure{
+		Stage: deliverStageIntegrate, Round: deliverLadderRound,
+		Class: runner.FailureClassDisk, Error: "no space left on device",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.write(runner.DeliverMergeFile, `{"payload":{"merge":{"MergeSHA":"`+depthMergeSHA+`"}}}`)
+	h.sealPhase(runner.DeliverStagingReportFile, runner.DeliverReport{Phase: "staging", Verdict: "deploy_failed"})
+	h.tick() // the volume's record is read: swept
+	time.Sleep(1100 * time.Millisecond)
+	h.tick() // the hands run out, the wait ends, the card is rebuilt
+
+	if _, ok := runner.ReadStageFailure(h.runDir, deliverStageIntegrate, deliverLadderRound); ok {
+		t.Fatal("the first attempt's account of the failure survived the rebuild")
+	}
+}

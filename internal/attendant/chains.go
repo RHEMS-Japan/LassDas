@@ -669,12 +669,22 @@ func resubmitPendingTerminal(
 		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	repository, err := pendingRepository(ctx, terminal, runDir, run, code)
+	// What a rebuilt report carries can depend on the repository it names:
+	// a stop that reached staging cites a commit in that repository, and
+	// all of it is sealed into the digest this re-submission has to
+	// reproduce. Each candidate below is rebuilt with its own.
+	evidenceFor := func(repository string) map[string]string {
+		if code == hook.TerminalCancelled {
+			return stoppedDeliveryEvidence(runDir, repository, code)
+		}
+		return evidence
+	}
+	repository, err := pendingRepository(ctx, terminal, runDir, run, code, evidenceFor)
 	if err != nil {
 		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
 		return nil
 	}
-	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidenceFor(repository)}, repository); err != nil {
 		return err
 	}
 	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
@@ -691,7 +701,7 @@ func resubmitPendingTerminal(
 // conflict on every tick — the same silence this path exists to end. Both
 // candidates are rebuilt and the one that reproduces the row's digest is
 // sent; neither matching is left to a person.
-func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode) (string, error) {
+func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode, evidenceFor func(string) map[string]string) (string, error) {
 	if run.TerminalReportSHA256 == "" {
 		return "", errors.New("the pending report carries no digest")
 	}
@@ -700,7 +710,7 @@ func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir st
 		candidates = []string{drafted, ""}
 	}
 	for _, candidate := range candidates {
-		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code}, candidate)
+		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code, Evidence: evidenceFor(candidate)}, candidate)
 		if err != nil {
 			if candidate != "" {
 				// The draft's value could not be shaped into a report, so
