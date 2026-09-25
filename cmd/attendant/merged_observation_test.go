@@ -14,6 +14,11 @@ import (
 
 // Exercise the real mode selection, not just classification with a merge
 // record pre-placed by the test. Only the external CLIs are fixtures.
+// The configuration digest the delivery recorded while it was running. The
+// reader is held to this one rather than to the destination's configuration
+// as it stands now, which may well have changed since.
+const observedRunDigest = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+
 func TestResidentObservesHumanMerge(t *testing.T) {
 	for _, mode := range []string{"runner", "cards"} {
 		for _, legacy := range []bool{false, true} {
@@ -47,7 +52,12 @@ func TestResidentObservesHumanMerge(t *testing.T) {
 					t.Fatal(err)
 				}
 				write(ticket, `{}`, 0600)
-				write(filepath.Join(dir, "feature-pr.json"), `{"payload":{"pull_request":{"Number":29}}}`, 0600)
+				// The published pull request artifact carries the digest the
+				// run recorded; the reader is told it, so a run sealed
+				// before the destination's configuration was last changed
+				// is still readable (live 2026-09-24).
+				write(filepath.Join(dir, "feature-pr.json"),
+					`{"binding":{"config_sha256":"`+observedRunDigest+`"},"payload":{"pull_request":{"Number":29}}}`, 0600)
 				chain := config["chain"].(map[string]any)
 				if mode == "runner" && !legacy {
 					// The runner entrypoint retains this environment variable;
@@ -68,11 +78,13 @@ func TestResidentObservesHumanMerge(t *testing.T) {
 				t.Setenv("MERGE_TEST_CALLS", calls)
 				t.Setenv("MERGE_TEST_TICKET", ticket)
 				t.Setenv("MERGE_TEST_CONFIG", config["consumer_config_path"].(string))
+				t.Setenv("MERGE_TEST_DIGEST", observedRunDigest)
 				write(controller, `#!/bin/sh
-[ "$#" = 9 ] && [ "$1" = read-merged ] && [ "$2" = --config ] && [ "$3" = "$MERGE_TEST_CONFIG" ] && [ "$4" = --ticket ] && [ "$5" = "$MERGE_TEST_TICKET" ] && [ "$6" = --number ] && [ "$7" = 29 ] && [ "$8" = --out ] && [ "$TARGET_GITHUB_TOKEN" = test-token ] || exit 94
+[ "$#" = 11 ] && [ "$1" = read-merged ] && [ "$2" = --config ] && [ "$3" = "$MERGE_TEST_CONFIG" ] && [ "$4" = --ticket ] && [ "$5" = "$MERGE_TEST_TICKET" ] && [ "$6" = --config-sha256 ] && [ "$7" = "$MERGE_TEST_DIGEST" ] && [ "$8" = --number ] && [ "$9" = 29 ] && [ "${10}" = --out ] && [ "$TARGET_GITHUB_TOKEN" = test-token ] || exit 94
 printf 'read\n' >> "$MERGE_TEST_CALLS"
 [ -f "$MERGE_TEST_RESPONSE" ] || exit 1
-cp "$MERGE_TEST_RESPONSE" "$9"
+shift 10
+cp "$MERGE_TEST_RESPONSE" "$1"
 `, 0700)
 				// A terminal runner task must not be re-created or mutated.
 				if mode == "runner" {

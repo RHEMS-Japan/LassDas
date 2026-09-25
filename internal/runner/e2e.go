@@ -71,12 +71,20 @@ func (p *Pipeline) RunE2ECheck(ctx context.Context) error {
 	}
 	roundTicket := p.path(fmt.Sprintf("history/stage-%d/ticket.json", round))
 	if !p.exists(E2EMergedStagingFile) {
-		code, err := p.controller(ctx, "await-merged-staging", []string{
+		// The run has already ended, so the wait is bound to the digest the
+		// run recorded rather than to the destination's configuration as it
+		// stands now; see deliverCommon.
+		arguments := []string{
 			"await-merged-staging", "--config", p.Config.ConsumerConfigPath,
 			"--ticket", roundTicket,
+		}
+		if recorded := p.recordedConfigSHA256(); recorded != "" {
+			arguments = append(arguments, "--config-sha256", recorded)
+		}
+		arguments = append(arguments,
 			"--feature-pr", p.path("feature-pr.json"),
-			"--out", p.path(E2EMergedStagingFile),
-		})
+			"--out", p.path(E2EMergedStagingFile))
+		code, err := p.controller(ctx, "await-merged-staging", arguments)
 		if err != nil || code != 0 {
 			// The merge landing and no deployment being created is a
 			// different fact from either not completing, and this is the

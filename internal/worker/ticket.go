@@ -226,7 +226,12 @@ func (d TicketDraft) WithTargetFiles(targetFiles []string, config Config) (Ticke
 }
 
 func (r TicketRequest) Validate(config Config) error {
-	configSHA, err := config.SHA256()
+	// The digest a run in flight is held to is the live configuration's own;
+	// a finished run's is the one it recorded. Config.ForFinishedRun is what
+	// tells the two apart, and every artifact sealed after this one chains
+	// its own digest to this ticket's, so this is the only place the live
+	// configuration enters the comparison.
+	configSHA, err := config.RunConfigSHA256()
 	if err != nil {
 		return errors.New("worker configuration is invalid")
 	}
