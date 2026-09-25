@@ -830,6 +830,27 @@ func handleChainFailure(
 	// "chain terminalized" line, which is written after the report is
 	// accepted rather than before it (review of #201).
 	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName, "action", action.String())
+	// A round whose agent handed the work back, before anything else looks
+	// at it. The engine decides what the report asked about and starts the
+	// same round again; what comes back here is only the cases where it did
+	// not — the requester asked the delivery to stop, or the engine will not
+	// answer this return again and it is now an ordinary model failure for
+	// the ladder below to climb.
+	if action == actionAnswerReturn {
+		verdict, answerErr := answerReturnedWork(ctx, config, services, hermes, envelope, run, view, stageName, logger)
+		if answerErr != nil {
+			return answerErr
+		}
+		action = actionReport
+		switch verdict {
+		case returnRelaunched:
+			return nil
+		case returnStopped:
+			code = hook.TerminalCancelled
+		default:
+			code = hook.TerminalModelFailed
+		}
+	}
 	// Three of the endings this could choose were never decisions about the
 	// request: something broke, and the delivery was over. The ladder takes
 	// those instead — it reads what the card said went wrong, changes
@@ -861,17 +882,6 @@ func handleChainFailure(
 		}
 	}
 	switch action {
-	case actionAnswerReturn:
-		verdict, answerErr := answerReturnedWork(ctx, config, services, hermes, envelope, run, view, logger)
-		if answerErr != nil {
-			return answerErr
-		}
-		switch verdict {
-		case returnRelaunched:
-			return nil
-		case returnStopped:
-			code = hook.TerminalCancelled
-		}
 	case actionRegenerate:
 		limit, limitErr := consumerRoundLimit(config.ConsumerConfigPath)
 		if limitErr != nil {
@@ -1075,20 +1085,26 @@ func classifyChainFailure(stageName string, decision func() (string, error), ret
 	switch stageName {
 	case runtime.StagePublish:
 		return actionReport, hook.TerminalReleaseFailed
-	case runtime.StageImplement:
-		// The implementer is told to change nothing and say why when it
-		// cannot carry the request out. What it wrote is an answer, not a
-		// breakdown — and it is not an ending either. The engine decides
+	case runtime.StageImplement, runtime.StageApply:
+		// The implementing agent is told to change nothing and say why when
+		// it cannot carry the request out. What it wrote is an answer, not
+		// a breakdown — and it is not an ending either. The engine decides
 		// what the report asked about, records what it decided, and starts
 		// the same round again; nothing is handed to the requester.
 		//
-		// The code is what a failure of that answering would be reported
-		// as, and it names the machinery rather than the agent: on this
-		// path the agent answered, and the only way the delivery stops here
-		// is the engine failing to act on it. A card that blocked for any
+		// Both cards, because both run an implementing agent on the same
+		// instruction file and both can leave the working copy untouched. A
+		// designed request's applier has one more way to stop — an
+		// objection against the design, which halts and goes back to the
+		// designer — and that leaves a record of its own, well before this.
+		//
+		// The code is what the caller reports if the answering is declined,
+		// and it is the ladder's: a round handed back more times than the
+		// engine answers is the seat's model refusing the work, which is
+		// the thing the ladder exists for. A card that blocked for any
 		// other reason left no such record and takes the arm below.
 		if returned() {
-			return actionAnswerReturn, hook.TerminalInternalFailed
+			return actionAnswerReturn, hook.TerminalModelFailed
 		}
 		return actionReport, hook.TerminalModelFailed
 	case runtime.StageValidate:

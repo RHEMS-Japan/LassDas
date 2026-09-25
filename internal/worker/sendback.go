@@ -35,6 +35,18 @@ import (
 // own record beside it.
 var implementingRunRecords = []string{"implementer-run.json", "applier-run.json", "implement-run.json"}
 
+// EmptyAttemptRecordPath is where the launch that reported work and changed
+// nothing is kept: beside the run record, under a name nothing else writes.
+//
+// Named here rather than where it is written because two processes want it.
+// The verb writes it, and the card that starts the same round again has to
+// clear it first: the record is exclusive-create, so a leftover would make
+// every later attempt's account of itself vanish silently.
+func EmptyAttemptRecordPath(runOut string) string {
+	extension := filepath.Ext(runOut)
+	return strings.TrimSuffix(runOut, extension) + "-empty-attempt" + extension
+}
+
 // IsSendBack reports whether an implementing run returned the work instead
 // of doing it: it finished, it changed nothing, and it said something. The
 // working tree is what decides "changed nothing" — the same measurement the
@@ -152,10 +164,24 @@ const (
 	// own budget; what is kept here is what the next attempt is shown of
 	// its own previous answer, and that rides inside a bounded prompt.
 	maxReturnedReportBytes = 8 * 1024
-	// maxReturnAttempts bounds how many returns one round records. Nothing
-	// stops at this — the round is answered and started again regardless —
-	// but the record is read whole, so it cannot grow without end.
+	// maxReturnAttempts bounds how many returns one round records. It is a
+	// bound on the file, not on the delivery; what bounds the answering is
+	// maxAnsweredReturns below.
 	maxReturnAttempts = 64
+	// maxAnsweredReturns is how many times the engine answers one round
+	// itself before it stops calling the return an answerable one.
+	//
+	// The engine's answer does not vary: it is the same three rules every
+	// time. An implementer that has been given them once and comes back
+	// anyway is not going to be moved by being given them a second time,
+	// and a third is paying for a whole agent launch to find that out. Past
+	// this the return is read as what it has become — the seat's model
+	// declining the work after being told there is nowhere to hand it back
+	// — and the remedy is the ladder's: a shorter instruction, a different
+	// occupant, a wait. Three because the first answer is the one worth
+	// making, and two more cover a report that names something genuinely
+	// new each time.
+	maxAnsweredReturns = 3
 	// maxReturnSupplies and maxReturnSupplyBytes bound the lines quoted out
 	// of a report as what has to be supplied. They are the agent's own
 	// words about what it was missing, not the engine's summary of them.
@@ -167,13 +193,20 @@ const (
 // what the engine decided in its place, and what the same round is being
 // told to do now.
 type ReturnedWork struct {
-	Attempt      int                 `json:"attempt"`
+	Attempt  int  `json:"attempt"`
+	Repeated bool `json:"repeated"`
+	// Answered is whether the engine answered this return itself. False
+	// means the round was not started again over it: the return repeated
+	// one already answered, or the round had used up the answers the engine
+	// makes, and what happens to it instead is the ladder's business. The
+	// assumption and the instruction are empty for such a return — nothing
+	// was decided and nothing was said to anyone.
+	Answered     bool                `json:"answered"`
 	ReportSHA256 string              `json:"report_sha256"`
 	Report       string              `json:"report"`
-	Repeated     bool                `json:"repeated"`
 	Supply       []string            `json:"supply,omitempty"`
-	Assumption   ReadinessAssumption `json:"assumption"`
-	Instruction  string              `json:"instruction"`
+	Assumption   ReadinessAssumption `json:"assumption,omitempty"`
+	Instruction  string              `json:"instruction,omitempty"`
 	AnsweredAt   time.Time           `json:"answered_at"`
 }
 
@@ -194,30 +227,41 @@ func (r *ReturnedRound) Latest() *ReturnedWork {
 }
 
 // Assumptions is what the engine decided across this round's returns, in
-// the order it decided them, for the record the requester reads.
+// the order it decided them, for the record the requester reads. A return
+// the engine did not answer decided nothing and contributes nothing.
 func (r *ReturnedRound) Assumptions() []ReadinessAssumption {
 	if r == nil {
 		return nil
 	}
 	assumptions := make([]ReadinessAssumption, 0, len(r.Returns))
 	for _, returned := range r.Returns {
-		assumptions = append(assumptions, returned.Assumption)
+		if returned.Answered {
+			assumptions = append(assumptions, returned.Assumption)
+		}
 	}
 	return assumptions
 }
 
-// AnswerReturn decides what a returned round is told, and returns the
-// record of that decision.
+// AnswerReturn reads one return and decides what becomes of it: an answer
+// the engine makes itself, or a return it will not answer, which its caller
+// hands to the ladder.
 //
-// The engine writes this itself rather than asking a model. The decision
-// does not vary: the work is never handed back, missing information takes
-// the most defensible reading, and a key becomes a stand-in. A model would
-// be paid to restate a rule that is already written down, once per return,
-// inside the attendant's own loop — and a returned round has neither a
-// sealed candidate nor a sealed review, which is what the arbiter seat
-// reads. The arbiter rules on rounds that produced something and disagreed
-// about it; this is a round that produced nothing, and the answer to it is
-// policy rather than judgement.
+// The engine writes the answer itself rather than asking a model. The
+// decision does not vary: the work is never handed back, missing
+// information takes the most defensible reading, and a key becomes a
+// stand-in. A model would be paid to restate a rule that is already written
+// down, once per return, inside the attendant's own loop — and a returned
+// round has neither a sealed candidate nor a sealed review, which is what
+// the arbiter seat reads. The arbiter rules on rounds that produced
+// something and disagreed about it; this is a round that produced nothing,
+// and the answer to it is policy rather than judgement.
+//
+// Two returns are not answered. One that repeats a report already answered,
+// at any attempt, because the answer has plainly not moved the implementer
+// and repeating it would only cost another launch. And one past
+// maxAnsweredReturns, because by then the same is true however the wording
+// varied. Both are the seat's model declining the work, and the ladder is
+// what this engine does about a model that will not answer.
 func AnswerReturn(report string, previous *ReturnedRound, answeredAt time.Time) ReturnedWork {
 	report = boundedReport(ReportText(report))
 	digest := sha256.Sum256([]byte(report))
@@ -230,13 +274,17 @@ func AnswerReturn(report string, previous *ReturnedRound, answeredAt time.Time) 
 	}
 	if last := previous.Latest(); last != nil {
 		returned.Attempt = last.Attempt + 1
-		// The same words again. Not a new position to answer — the same one
-		// — so the record says so and the instruction stops restating the
-		// rule and starts naming what the round must produce.
+		// The same words again, compared against the newest return rather
+		// than against any of them: what matters is whether the answer this
+		// round is running under changed anything, and that is the one
+		// before this.
 		returned.Repeated = last.ReportSHA256 == returned.ReportSHA256
 	}
-	returned.Assumption = returnAssumption(returned)
-	returned.Instruction = returnInstruction(returned)
+	returned.Answered = !returned.Repeated && returned.Attempt <= maxAnsweredReturns
+	if returned.Answered {
+		returned.Assumption = returnAssumption(returned)
+		returned.Instruction = returnInstruction(returned)
+	}
 	return returned
 }
 
@@ -352,9 +400,14 @@ func returnInstruction(returned ReturnedWork) string {
 	if len(returned.Supply) > 0 {
 		lines = append(lines, "- 前の実行が不足として挙げたもの: "+strings.Join(returned.Supply, " / "))
 	}
-	if returned.Repeated {
-		lines = append(lines,
-			"- 前の実行でも同じ報告を返しました。同じ報告をもう一度返しても巡は進みません。上の条件を満たす変更を必ず作業コピーに残してください。")
+	// Where the round stands, for a round that has come back before. The
+	// count is the honest thing to say: this is the last of the answers the
+	// engine makes, or the one before it, and after them the round is
+	// handled as a model that will not do the work.
+	if returned.Attempt > 1 {
+		lines = append(lines, fmt.Sprintf(
+			"- この巡が戻ってきたのは %d 回目です。本体が指示を出し直すのは %d 回までで、それを過ぎた分と、同じ報告の繰り返しは、実装役が作業を引き受けなかったものとして扱います。",
+			returned.Attempt, maxAnsweredReturns))
 	}
 	return strings.Join(lines, "\n")
 }

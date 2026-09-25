@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,11 +79,11 @@ func TestAReportThatAsksForAKeyGetsAStandInAndTheSupplyIsRecorded(t *testing.T) 
 	}
 }
 
-// The same report twice is the round saying nothing new. It is recorded as
-// exactly that — same digest, marked as a repeat — so a later reader can
-// see a round coming back rather than a relaunch nobody counted, and the
-// instruction stops restating the rule and names what must be produced.
-func TestTheSameReportTwiceIsRecordedAsARepeat(t *testing.T) {
+// The same report twice is the round saying nothing new, and the engine's
+// answer has plainly not moved it. That return is not answered again: it is
+// recorded as a repeat, carries no assumption and no instruction, and its
+// caller hands the round to the ladder.
+func TestARepeatedReportIsNotAnsweredAgain(t *testing.T) {
 	const report = "この依頼は、いまのままでは実現できません。"
 	record := &ReturnedRound{}
 	first := AnswerReturn(report, record, answeredAt())
@@ -89,30 +91,57 @@ func TestTheSameReportTwiceIsRecordedAsARepeat(t *testing.T) {
 	second := AnswerReturn(report, record, answeredAt().Add(time.Minute))
 	record.Append(1, second)
 
-	if second.Attempt != 2 || !second.Repeated {
-		t.Fatalf("second answer attempt = %d, repeated = %v", second.Attempt, second.Repeated)
+	if !first.Answered || first.Attempt != 1 || first.Repeated {
+		t.Fatalf("first answer = %+v", first)
+	}
+	if second.Attempt != 2 || !second.Repeated || second.Answered {
+		t.Fatalf("second answer attempt = %d, repeated = %v, answered = %v",
+			second.Attempt, second.Repeated, second.Answered)
 	}
 	if second.ReportSHA256 != first.ReportSHA256 {
 		t.Fatalf("the same report carries two digests: %q / %q", first.ReportSHA256, second.ReportSHA256)
 	}
-	if strings.Contains(first.Instruction, "同じ報告をもう一度返しても") {
-		t.Fatalf("the first answer already called the round a repeat:\n%s", first.Instruction)
+	if second.Instruction != "" || second.Assumption.Kind != "" {
+		t.Fatalf("a return nobody answered decided something: %+v", second)
 	}
-	if !strings.Contains(second.Instruction, "同じ報告をもう一度返しても") {
-		t.Fatalf("the repeat is not said in the instruction:\n%s", second.Instruction)
-	}
-	if len(record.Returns) != 2 {
-		t.Fatalf("the round's record holds %d returns, want both", len(record.Returns))
-	}
-	if kinds := record.Assumptions(); len(kinds) != 2 {
-		t.Fatalf("the round's assumptions = %d, want one per return", len(kinds))
+	if kinds := record.Assumptions(); len(kinds) != 1 {
+		t.Fatalf("the round's assumptions = %d, want only the one that was answered", len(kinds))
 	}
 
-	// A different report is a different position, and answering it is not a
-	// repeat however many times the round has been handed back.
+	// A different report is a different position, and it is answered — the
+	// bound is on answers that changed nothing, not on rounds.
 	third := AnswerReturn(report+"\n別の理由も見つかりました。", record, answeredAt().Add(2*time.Minute))
-	if third.Attempt != 3 || third.Repeated {
-		t.Fatalf("third answer attempt = %d, repeated = %v", third.Attempt, third.Repeated)
+	if third.Attempt != 3 || third.Repeated || !third.Answered {
+		t.Fatalf("third answer = %+v", third)
+	}
+	if !strings.Contains(third.Instruction, "この巡が戻ってきたのは 3 回目です") {
+		t.Fatalf("a later answer does not say where the round stands:\n%s", third.Instruction)
+	}
+}
+
+// The bound on the answering. The engine's answer is the same three rules
+// every time, so a round that has heard them three times and come back with
+// something new a fourth is not being persuaded; past that the return is a
+// model declining the work and the ladder is what this engine does about
+// one.
+func TestTheEngineStopsAnsweringOneRoundAfterThreeAnswers(t *testing.T) {
+	record := &ReturnedRound{}
+	for attempt := 1; attempt <= maxAnsweredReturns; attempt++ {
+		answer := AnswerReturn(fmt.Sprintf("理由 %d を見つけました。", attempt), record, answeredAt())
+		if !answer.Answered || answer.Attempt != attempt {
+			t.Fatalf("attempt %d = %+v, want it answered", attempt, answer)
+		}
+		record.Append(1, answer)
+	}
+	beyond := AnswerReturn("さらに別の理由です。", record, answeredAt())
+	if beyond.Attempt != maxAnsweredReturns+1 || beyond.Repeated || beyond.Answered {
+		t.Fatalf("the return past the bound = %+v, want it left to the ladder", beyond)
+	}
+	if beyond.Instruction != "" {
+		t.Fatalf("a return past the bound was still told something:\n%s", beyond.Instruction)
+	}
+	if kinds := record.Assumptions(); len(kinds) != maxAnsweredReturns {
+		t.Fatalf("assumptions = %d, want one per answer the engine made", len(kinds))
 	}
 }
 
@@ -166,5 +195,54 @@ func TestAnUnreadableReturnRecordIsNotAnAbsence(t *testing.T) {
 	}
 	if _, err := ReadReturnedRoundFile(missing); err == nil {
 		t.Fatal("an unreadable record read as a round nobody handed back")
+	}
+}
+
+// A delivery that stopped at a return boundary leaves a record saying what
+// happened to the round. It used to say the work had been returned, which
+// stopped being true: the engine answers such a round and starts it again,
+// and a record that does not say so reads as though nobody had done
+// anything about it.
+func TestTheRecordSaysTheEngineAnsweredTheReturn(t *testing.T) {
+	history := t.TempDir()
+	const report = "外部の決済サービスの API キーが渡されていません。"
+	writeRoundRun(t, history, 1, "implementer-run.json", returnedRun(report))
+	record := &ReturnedRound{}
+	record.Append(1, AnswerReturn(report, record, answeredAt()))
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(history, "stage-1", ReturnRecordFileName), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	round, err := LoadUnsealedRound(history, Config{})
+	if err != nil {
+		t.Fatalf("LoadUnsealedRound: %v", err)
+	}
+	if round.EngineAnswers != 1 {
+		t.Fatalf("the round's answers = %d, want the one the engine made", round.EngineAnswers)
+	}
+	trail := ComposeUnsealedTrail(round, "変更の確定")
+	if !strings.Contains(trail, "この報告は依頼者に返していません") {
+		t.Fatalf("the record still reads as work handed back:\n%s", trail)
+	}
+	if !strings.Contains(trail, "本体が 1 回") {
+		t.Fatalf("the record does not say how often the engine decided:\n%s", trail)
+	}
+
+	// A round nobody answered says nothing of the sort.
+	plain := t.TempDir()
+	writeRoundRun(t, plain, 1, "implementer-run.json", returnedRun(report))
+	untouched, err := LoadUnsealedRound(plain, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.EngineAnswers != 0 {
+		t.Fatalf("a round nobody answered counted %d answers", untouched.EngineAnswers)
+	}
+	if strings.Contains(ComposeUnsealedTrail(untouched, ""), "この報告は依頼者に返していません") {
+		t.Fatal("a round nobody answered claimed the engine had")
 	}
 }

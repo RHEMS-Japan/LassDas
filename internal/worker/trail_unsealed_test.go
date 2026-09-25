@@ -34,7 +34,7 @@ func TestTheTrailOfARoundThatSealedNothingCarriesTheImplementersReport(t *testin
 	trail := ComposeUnsealedTrail(round, "変更の確定")
 	for _, expected := range []string{
 		"実装の経過 (1 周目で停止)",
-		"変更を加えずに理由を報告して作業を返しました",
+		"変更を加えずに理由を報告して終了しました",
 		"変更がないまま終わった試行が、この前に 1 回",
 		"止まった段階: 変更の確定",
 		"実装役の報告",

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,17 +31,47 @@ type returnedSetup struct {
 	runDir   string
 	hermes   *runtime.Hermes
 	board    string
+	tracker  *returnTracker
 	logger   *recordingLogger
 }
 
-// stopTracker answers with whatever comments the ticket is standing at.
-func stopTracker(t *testing.T, body string) *backlog.Client {
+// returningConsumer is a destination with the three seats an
+// implementation round runs, which is what the ladder reads to decide what
+// it may change about a card that keeps failing.
+const returningConsumer = `{"max_stages":3,"models":{"implementer":{"id":"implementer"},` +
+	`"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`
+
+// returnTracker answers a listing with whatever comments the ticket is
+// standing at, and keeps what was posted to it. The ladder's one notice
+// goes through this rather than through the terminal report's own comments.
+type returnTracker struct {
+	listing string
+	posted  []string
+}
+
+func (r *returnTracker) client(t *testing.T) *backlog.Client {
 	t.Helper()
 	client, err := backlog.NewClient(backlog.Config{
 		SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com",
 		Timeout: time.Second, MaxResponseBytes: 1 << 20,
-	}, roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	}, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, status := r.listing, http.StatusOK
+		if request.Method == http.MethodPost {
+			raw, _ := io.ReadAll(request.Body)
+			values, _ := url.ParseQuery(string(raw))
+			content := values.Get("content")
+			r.posted = append(r.posted, content)
+			// Answered the way the tracker answers, so the caller accepts
+			// it: a rejected answer would leave the notice unrecorded and
+			// posted again on the next tick, which is the very thing the
+			// record exists to prevent.
+			encoded, _ := json.Marshal(map[string]any{
+				"id": int64(9000 + len(r.posted)), "issueId": int64(4242), "content": content,
+				"created": "2026-09-25T00:00:00Z", "createdUser": map[string]any{"id": int64(7)},
+			})
+			body, status = string(encoded), http.StatusCreated
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -54,11 +85,19 @@ func newReturnedSetup(t *testing.T, report string) *returnedSetup {
 	fixture.writeRunDir(t, "example/consumer")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
 	writeReturnedRound(t, runDir, report)
+	// The shape the reception decided, which is what says which cards this
+	// delivery has and therefore which instruction its round is rendered
+	// from.
+	writeChainShape(t, runDir, false)
 
 	config := fixture.config
 	config.Chain.Profiles = designTestProfiles()
 	config.Tracker.AllowedCreatorID = 7
-	if err := os.WriteFile(config.ConsumerConfigPath, []byte(plainConsumer), 0o600); err != nil {
+	// An implementer seat, because the ladder's remedy for an implementing
+	// card is the seat's: the instruction rebuilt shorter. Without one the
+	// ladder has no hand to play and every return would go straight to the
+	// wait, which is not the delivery this measures.
+	if err := os.WriteFile(config.ConsumerConfigPath, []byte(returningConsumer), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A stand-in worker that records what verb it was asked for and writes
@@ -78,7 +117,8 @@ exit 0
 `), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fixture.services.Backlog = quietTracker(t)
+	tracker := &returnTracker{listing: "[]"}
+	fixture.services.Backlog = tracker.client(t)
 
 	var envelope hook.DispatchEnvelope
 	if err := json.Unmarshal([]byte(fixture.run.EnvelopeJSON), &envelope); err != nil {
@@ -96,7 +136,39 @@ exit 0
 	}, fixture.deliveryID)
 	hermes, board := fakeBoard(t)
 	return &returnedSetup{fixture: fixture, config: config, envelope: envelope, view: view,
-		runDir: runDir, hermes: hermes, board: board, logger: &recordingLogger{}}
+		runDir: runDir, hermes: hermes, board: board, tracker: tracker, logger: &recordingLogger{}}
+}
+
+// writeChainShape leaves the reception's decision about which cards this
+// delivery has.
+func writeChainShape(t *testing.T, runDir string, designed bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(runDir, "history", "readiness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shape := `{"request_kind":"change","needs_design":false}`
+	if designed {
+		shape = `{"request_kind":"change","needs_design":true}`
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "history", "readiness", "decision.json"), []byte(shape), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// returnAgain replaces the round's run record with another report, the way
+// the card that ran again would have left it.
+func (s *returnedSetup) returnAgain(t *testing.T, report string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(s.runDir, "history", "stage-1", "implementer-run.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeReturnedRound(t, s.runDir, report)
+}
+
+// boardCreations counts the cards the board was asked to make.
+func (s *returnedSetup) boardCreations(t *testing.T) int {
+	t.Helper()
+	return strings.Count(s.boardCalls(t), "|create|")
 }
 
 func (s *returnedSetup) tick(t *testing.T) error {
@@ -220,41 +292,217 @@ func TestAReturnAskingForAKeyRecordsTheStandInAndTheSupply(t *testing.T) {
 	}
 }
 
-// A round that comes back saying exactly the same thing is a round that is
-// not moving. It is still answered and still started again — the delivery
-// does not stop — but the repetition is left on disk where it can be seen
-// and said in the instruction, rather than being a loop nobody counted.
-func TestAReturnRepeatedIdenticallyLeavesTheMaterialToSeeIt(t *testing.T) {
+// A round that comes back saying exactly the same thing is a round the
+// engine's answer did not move, so it is not answered a second time: the
+// record says it repeated, the round's failure is sealed as the model
+// declining the work, and the ladder takes it from there. Nothing about
+// that reaches the requester.
+func TestARepeatedReturnGoesToTheLadderAtOnce(t *testing.T) {
 	const report = "この依頼は、いまのままでは実現できません。"
 	setup := newReturnedSetup(t, report)
-	for tick := 1; tick <= 2; tick++ {
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	built := setup.boardCreations(t)
+	if built == 0 {
+		t.Fatal("the first return did not start the round again")
+	}
+	setup.returnAgain(t, report)
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+
+	record, err := runner.ReadReturns(setup.runDir, 1)
+	if err != nil || record == nil || len(record.Returns) != 2 {
+		t.Fatalf("the round's record = %+v %v", record, err)
+	}
+	first, second := record.Returns[0], record.Returns[1]
+	if !first.Answered || first.Repeated {
+		t.Fatalf("the first return = %+v", first)
+	}
+	if !second.Repeated || second.Answered {
+		t.Fatalf("the second return = %+v, want it left to the ladder", second)
+	}
+	if len(record.Assumptions()) != 1 {
+		t.Fatalf("assumptions = %d, want only the answer the engine made", len(record.Assumptions()))
+	}
+	// Sealed as what it is, so the ladder that reads sealed failures finds
+	// one it has remedies for rather than one it can only wait out.
+	failure, sealed := runner.ReadStageFailure(setup.runDir, runtime.StageImplement, 1)
+	if !sealed || failure.Class != runner.FailureClassModel || failure.Interrupted {
+		t.Fatalf("the round's failure = %+v (sealed %v)", failure, sealed)
+	}
+	if len(setup.fixture.comments.posted) != 0 || len(setup.fixture.store.digests) != 0 {
+		t.Fatalf("the delivery ended over a repeat: %q %v",
+			setup.fixture.comments.posted, setup.fixture.store.digests)
+	}
+	said := strings.Join(setup.logger.lines, "\n")
+	if !strings.Contains(said, "handled as a model that will not do the work") {
+		t.Fatalf("nothing said what the repeat became:\n%s", said)
+	}
+}
+
+// Two returns that name different things are both answered, because each is
+// a position the engine has not decided about yet. The third, repeating the
+// second, is not.
+func TestReturnsThatNameSomethingNewAreAnsweredAndARepeatIsNot(t *testing.T) {
+	setup := newReturnedSetup(t, "並び順が依頼に書かれていません。")
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	const second = "表示件数も依頼に書かれていません。"
+	setup.returnAgain(t, second)
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	record, err := runner.ReadReturns(setup.runDir, 1)
+	if err != nil || len(record.Assumptions()) != 2 {
+		t.Fatalf("assumptions after two different returns = %+v %v", record, err)
+	}
+	if _, sealed := runner.ReadStageFailure(setup.runDir, runtime.StageImplement, 1); sealed {
+		t.Fatal("a return that named something new was refused")
+	}
+
+	setup.returnAgain(t, second)
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("third tick: %v", err)
+	}
+	record, err = runner.ReadReturns(setup.runDir, 1)
+	if err != nil || len(record.Returns) != 3 || len(record.Assumptions()) != 2 {
+		t.Fatalf("the round's record after the repeat = %+v %v", record, err)
+	}
+	if _, sealed := runner.ReadStageFailure(setup.runDir, runtime.StageImplement, 1); !sealed {
+		t.Fatal("the repeat did not reach the ladder")
+	}
+}
+
+// The probe that found this change unbounded: an implementer that answers
+// every relaunch the same way was started again two hundred times, with
+// nothing on the ticket and no way out but the requester writing 「停止」 —
+// the very thing this change exists to remove. It reaches the ladder
+// instead, which waits, says so once, and stops launching an agent every
+// tick.
+func TestAnImplementerThatKeepsReturningReachesTheLadderAndWaits(t *testing.T) {
+	const report = "この依頼は、いまのままでは実現できません。"
+	setup := newReturnedSetup(t, report)
+	setup.config.Chain.RetryNoticeAttempts = 1
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	for tick := 1; tick <= 8; tick++ {
 		if err := setup.tick(t); err != nil {
 			t.Fatalf("tick %d: %v", tick, err)
 		}
+		setup.returnAgain(t, report)
 	}
-	record, err := runner.ReadReturns(setup.runDir, 1)
-	if err != nil || record == nil {
-		t.Fatalf("nothing was recorded beside the round: %+v %v", record, err)
+	// The ladder is keeping the count, on the volume, where a replaced pod
+	// picks it up again.
+	retry := filepath.Join(setup.runDir, "retry", "implement-r1.json")
+	if _, err := os.Stat(retry); err != nil {
+		t.Fatalf("the delivery never reached the ladder: %v", err)
 	}
-	if len(record.Returns) != 2 {
-		t.Fatalf("the round's record holds %d returns, want both", len(record.Returns))
+	// It stops launching an agent every tick. One relaunch for the answer
+	// the engine made, one dispatch for the ladder's single hand on an
+	// implementing seat (the instruction rebuilt shorter), and then the
+	// wait, which this test's backoff makes an hour long.
+	if built := setup.boardCreations(t); built > 2*len(runtime.ChainStagesFor(setup.config.Chain, runtime.ChainPlan{Shape: runtime.ShapeImplement})) {
+		t.Fatalf("cards built across eight ticks = %d, want the delivery waiting rather than launching", built)
 	}
-	first, second := record.Returns[0], record.Returns[1]
-	if first.ReportSHA256 != second.ReportSHA256 {
-		t.Fatalf("the same report left two digests: %q / %q", first.ReportSHA256, second.ReportSHA256)
+	// Said once, for sharing. Nothing waits for a reply.
+	notices := 0
+	for _, posted := range setup.tracker.posted {
+		if strings.Contains(posted, setup.fixture.run.RunID) {
+			notices++
+		}
 	}
-	if first.Repeated {
-		t.Fatal("the first return was recorded as a repeat")
-	}
-	if !second.Repeated {
-		t.Fatal("the round came back saying the same thing and nothing recorded it")
-	}
-	if !strings.Contains(second.Instruction, "同じ報告をもう一度返しても") {
-		t.Fatalf("the repeat was not said to the round:\n%s", second.Instruction)
+	if notices != 1 {
+		t.Fatalf("ladder notices posted = %d across eight ticks: %q", notices, setup.tracker.posted)
 	}
 	if len(setup.fixture.comments.posted) != 0 || len(setup.fixture.store.digests) != 0 {
-		t.Fatalf("the delivery stopped over a repeat: %q %v",
-			setup.fixture.comments.posted, setup.fixture.store.digests)
+		t.Fatalf("the delivery ended: %q %v", setup.fixture.comments.posted, setup.fixture.store.digests)
+	}
+}
+
+// And when an operator did put a limit on the attempts, the delivery ends
+// on the ladder's own code. Reported as an internal failure it would tell
+// the requester the machinery broke, when what happened is that the
+// implementing model would not do the work.
+func TestAnOperatorsLimitEndsAReturningDeliveryOnTheLaddersCode(t *testing.T) {
+	const report = "この依頼は、いまのままでは実現できません。"
+	setup := newReturnedSetup(t, report)
+	setup.config.Chain.RetryMaxAttempts = 1
+	report2, err := hook.NewTerminalReportService(setup.fixture.services.Route, &sendBackFakeStore{},
+		setup.fixture.comments, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup.fixture.services.Report = report2
+	for tick := 1; tick <= 4; tick++ {
+		if err := setup.tick(t); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		setup.returnAgain(t, report)
+	}
+	if len(setup.fixture.comments.posted) != 1 {
+		t.Fatalf("terminal comments = %q, want the one ending", setup.fixture.comments.posted)
+	}
+	posted := setup.fixture.comments.posted[0]
+	if strings.Contains(posted, string(hook.TerminalInternalFailed)) {
+		t.Fatalf("a model that would not work was reported as the machinery breaking:\n%s", posted)
+	}
+	if !strings.Contains(posted, string(hook.TerminalModelFailed)) {
+		t.Fatalf("the delivery did not end on the ladder's code:\n%s", posted)
+	}
+}
+
+// A render that fails must leave the board exactly as it was. Archived
+// first, a failed render would take every card of the delivery with it and
+// leave nothing to drive the run.
+func TestAFailedRenderLeavesTheBoardAlone(t *testing.T) {
+	setup := newReturnedSetup(t, "この依頼は、いまのままでは実現できません。")
+	if err := os.WriteFile(setup.config.WorkerBin, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.tick(t); err == nil {
+		t.Fatal("a failed render was treated as a relaunch")
+	}
+	board, err := os.ReadFile(setup.board)
+	if err == nil && (strings.Contains(string(board), "|archive|") || strings.Contains(string(board), "|create|")) {
+		t.Fatalf("the board was changed for a render that failed:\n%s", board)
+	}
+}
+
+// A designed request's applier can hand the work back exactly as an
+// implementer can, and the round it is started again in has to be the
+// delivery's own shape: rebuilt as an ordinary chain it would lose the
+// design cards and apply a design the request no longer has.
+func TestADesignedRoundThatIsHandedBackKeepsItsShape(t *testing.T) {
+	setup := newDesignedReturnedSetup(t, "設計のこの部分は、いまのままでは適用できません。")
+	run := state.RunOverview{DeliveryID: setup.fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if err := handleChainFailure(context.Background(), setup.config, setup.fixture.services, setup.hermes,
+		setup.envelope, run, setup.view, runtime.StageApply, setup.logger); err != nil {
+		t.Fatalf("the returned apply round was not answered: %v", err)
+	}
+	record, err := runner.ReadReturns(setup.runDir, 1)
+	if err != nil || record.Latest() == nil || !record.Latest().Answered {
+		t.Fatalf("the applier's return was not answered: %+v %v", record, err)
+	}
+	board := setup.boardCalls(t)
+	if !strings.Contains(board, "apply r1") {
+		t.Fatalf("the applier's card was not built back:\n%s", board)
+	}
+	if strings.Contains(board, "implement r1") {
+		t.Fatalf("a designed delivery was rebuilt as an ordinary chain:\n%s", board)
+	}
+	// And the instruction it will read is the applier's, carrying what the
+	// engine decided.
+	instruction, err := os.ReadFile(filepath.Join(setup.runDir, "INSTRUCTION.md"))
+	if err != nil {
+		t.Fatalf("no instruction was rendered: %v", err)
+	}
+	if !strings.Contains(string(instruction), "この巡は一度戻ってきています") {
+		t.Fatalf("the applier's instruction lost the engine's answer:\n%s", instruction)
+	}
+	if !strings.Contains(string(instruction), "設計のこの部分") {
+		t.Fatalf("the applier's instruction lost its own previous report:\n%s", instruction)
 	}
 }
 
@@ -263,8 +511,7 @@ func TestAReturnRepeatedIdenticallyLeavesTheMaterialToSeeIt(t *testing.T) {
 // heard. What the engine had decided by then is still written down.
 func TestAStopIsHonouredBeforeAReturnedRoundStartsAgain(t *testing.T) {
 	setup := newReturnedSetup(t, "この依頼は、いまのままでは実現できません。")
-	setup.fixture.services.Backlog = stopTracker(t,
-		`[{"id":1,"issueId":4242,"content":"停止","created":"2026-09-25T00:00:00Z","createdUser":{"id":7}}]`)
+	setup.tracker.listing = `[{"id":1,"issueId":4242,"content":"停止","created":"2026-09-25T00:00:00Z","createdUser":{"id":7}}]`
 	// A ledger with no report already begun on the row: the shared fixture
 	// pins a model failure's digest, and this delivery ends as a stop.
 	report, err := hook.NewTerminalReportService(setup.fixture.services.Route, &sendBackFakeStore{},
@@ -284,6 +531,13 @@ func TestAStopIsHonouredBeforeAReturnedRoundStartsAgain(t *testing.T) {
 	}
 	if board := setup.boardCalls(t); strings.Contains(board, "|create|") {
 		t.Fatalf("a card was built after the requester asked to stop:\n%s", board)
+	}
+	// Read before the round is rendered, not only before the cards are
+	// built. The ladder's dispatcher reads 「停止」 too, so without this the
+	// engine would still pay to render an instruction for a delivery the
+	// requester has already stopped.
+	if strings.Contains(setup.workerCalls(t), "implement-instruction ") {
+		t.Fatalf("the round was rendered after the requester asked to stop:\n%s", setup.workerCalls(t))
 	}
 	// What was decided before the stop was read still belongs to the record.
 	record, readErr := runner.ReadReturns(setup.runDir, 1)
@@ -323,4 +577,67 @@ func TestNoClassificationProducesImplementationReturned(t *testing.T) {
 	if action != actionAnswerReturn {
 		t.Fatalf("a returned round is classified as %v", action)
 	}
+}
+
+// newDesignedReturnedSetup is the same delivery as a designed request: the
+// design was approved, and the applier that was to copy it into the working
+// copy changed nothing and said why.
+func newDesignedReturnedSetup(t *testing.T, report string) *returnedSetup {
+	t.Helper()
+	setup := newReturnedSetup(t, report)
+	writeChainShape(t, setup.runDir, true)
+	if err := os.WriteFile(setup.config.ConsumerConfigPath,
+		[]byte(`{"max_stages":3,"agents":{"applier":{"command":"launch"}},"models":{"implementer":{"id":"implementer"},`+
+			`"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The report is the applier's on a designed delivery, under the name
+	// that card writes.
+	if err := os.Remove(filepath.Join(setup.runDir, "history", "stage-1", "implementer-run.json")); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := worker.SealAgentRun(worker.AgentRun{
+		SchemaVersion: worker.ArtifactSchemaVersion, Stage: 1, AgentID: "applier",
+		Transcript: report, RanAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSONFileExclusive(
+		filepath.Join(setup.runDir, "history", "stage-1", "applier-run.json"), sealed, worker.MaxArtifactJSONBytes); err != nil {
+		t.Fatal(err)
+	}
+	// The approved design the round is applying.
+	designDir := filepath.Join(setup.runDir, "history", "design-1")
+	if err := os.MkdirAll(designDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"investigation.json": `{"measurements":[]}`,
+		"decision.json":      `{"outcome":"approved"}`,
+		"design.json":        `{"files":[]}`,
+		"DESIGN.md":          "# 設計\n\nラベルを差し替える。\n",
+	} {
+		if err := os.WriteFile(filepath.Join(designDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	design := func(id, stage string) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: "done", IdempotencyKey: runtime.ChainCardKey(setup.fixture.deliveryID, stage, 1)}
+	}
+	card := func(id, stage, status string) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey(setup.fixture.deliveryID, stage, 1)}
+	}
+	setup.view = chainViewFor([]runtime.BoardTask{
+		design("t_inv", runtime.StageInvestigate),
+		design("t_dra", runtime.StageDesignReviewA),
+		design("t_drb", runtime.StageDesignReviewB),
+		design("t_dd", runtime.StageDesignDecide),
+		card("t_apply", runtime.StageApply, "blocked"),
+		card("t_ra", runtime.StageReviewA, "todo"),
+		card("t_rb", runtime.StageReviewB, "todo"),
+		card("t_v", runtime.StageValidate, "todo"),
+		card("t_p", runtime.StagePublish, "todo"),
+	}, setup.fixture.deliveryID)
+	return setup
 }

@@ -100,3 +100,59 @@ func TestAnUnreadableAnswerStopsTheRenderRatherThanLosingIt(t *testing.T) {
 		t.Fatal("an unreadable answer rendered an instruction anyway")
 	}
 }
+
+// The return's own section can be several kilobytes, and a delivery whose
+// earlier objections already filled the budget would push the whole
+// instruction past what an agent may be sent. Rendering nothing is the
+// worst answer available: every tick would fail on the same overflow, no
+// round would run and nothing would reach the ticket. The objections go
+// instead — the same part a rebuilt instruction drops — and the request,
+// the boundaries and the engine's answer stay.
+func TestAnOversizeInstructionShedsTheEarlierObjections(t *testing.T) {
+	draft := worker.TicketDraft{
+		IssueKey: "TEST-1", Summary: "件名", Repository: "example/target",
+		// Just under the budget on its own; the objections are what push it over.
+		Request: strings.Repeat("本文。", 5500),
+	}
+	consumer := worker.ConsumerConfig{Repository: "example/target", Mode: worker.ModeConfig{
+		AllowedFilePrefixes: []string{"README.md"},
+		MaxFiles:            5, MaxChangedLines: 400, MaxChangedBytes: 32768, MaxFileBytes: 65536,
+	}}
+	findings := make([]worker.ModelFinding, 0, 16)
+	for index := 0; index < 16; index++ {
+		findings = append(findings, worker.ModelFinding{
+			Code: "stale-caller", Path: "README.md", Message: strings.Repeat("指摘の本文。", 200),
+		})
+	}
+	answer := worker.AnswerReturn("鍵が渡されていません。", nil, time.Now().UTC())
+	agent := worker.AgentConfig{ID: "implementer", Command: "agent"}
+
+	// The control: the same objections on a request that leaves room for
+	// them are carried, so what the oversize case drops was dropped for
+	// want of room and not by accident.
+	small := draft
+	small.Request = "本文"
+	roomy, err := implementPrompt(small, consumer, agent, nil, findings, nil, nil, &answer, "/work/repo")
+	if err != nil {
+		t.Fatalf("an instruction with room for everything did not render: %v", err)
+	}
+	if !strings.Contains(roomy, "### 前回の指摘") {
+		t.Fatal("the objections were dropped from an instruction with room for them")
+	}
+
+	prompt, err := implementPrompt(draft, consumer, agent, nil, findings, nil, nil, &answer, "/work/repo")
+	if err != nil {
+		t.Fatalf("an oversize instruction rendered nothing at all: %v", err)
+	}
+	if len(prompt) > worker.MaxAgentPromptBytes {
+		t.Fatalf("the rendered instruction is %d bytes, past what an agent may be sent", len(prompt))
+	}
+	if strings.Contains(prompt, "### 前回の指摘") {
+		t.Fatal("the objections were kept and something else was dropped")
+	}
+	for _, want := range []string{"この巡は一度戻ってきています", "変更してよいのは README.md の下だけです"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("the instruction lost %q", want)
+		}
+	}
+}

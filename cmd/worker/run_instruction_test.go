@@ -302,7 +302,7 @@ func TestAnAgentThatChangedNothingIsAskedAgainWithTheTreeInFrontOfIt(t *testing.
 	// What the first attempt claimed is kept beside the final record, so
 	// the fabricated report can be read, not only counted.
 	var first worker.AgentRun
-	if err := worker.ReadJSONFile(emptyAttemptRecordPath(record), worker.MaxArtifactJSONBytes, &first); err != nil {
+	if err := worker.ReadJSONFile(worker.EmptyAttemptRecordPath(record), worker.MaxArtifactJSONBytes, &first); err != nil {
 		t.Fatalf("the attempt that changed nothing was not kept: %v", err)
 	}
 	if len(first.ChangedFiles) != 0 || !strings.Contains(first.Transcript, "the design is applied") {
@@ -335,7 +335,12 @@ func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
 	args := []string{"run-instruction", "--role", "applier", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
 		"--draft", fixture.draftPath, "--instruction", long, "--repo-root", fixture.repoRoot,
 		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", record}
-	if err := run(context.Background(), args); err != nil {
+	// The stand-in applier changes nothing, which now stops the card: the
+	// engine answers such a round rather than sending an empty working copy
+	// to the review. What is measured here is the retry, which happens
+	// before that.
+	if err := run(context.Background(), args); err == nil ||
+		!strings.Contains(err.Error(), "the round is answered and run again") {
 		t.Fatalf("run-instruction with a full instruction: %v", err)
 	}
 	if attempts, _ := os.ReadFile(marker); len(attempts) != 1 {
@@ -368,9 +373,12 @@ func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	slowRecord := filepath.Join(t.TempDir(), "slow-run.json")
+	// The stand-in changes nothing, which stops the card so the engine can
+	// answer the round; the retry this measures happens before that.
 	if err := run(context.Background(), []string{"run-instruction", "--role", "applier", "--config", slow.configPath, "--tool-sha", cliToolSHA,
 		"--draft", slow.draftPath, "--instruction", instruction, "--repo-root", slow.repoRoot,
-		"--base-sha", slow.baseSHA, "--stage", "1", "--out", slowRecord}); err != nil {
+		"--base-sha", slow.baseSHA, "--stage", "1", "--out", slowRecord}); err == nil ||
+		!strings.Contains(err.Error(), "the round is answered and run again") {
 		t.Fatalf("run-instruction after a slow attempt: %v", err)
 	}
 	if attempts, _ := os.ReadFile(slowMarker); len(attempts) != 1 {
@@ -382,7 +390,7 @@ func TestTheRetryIsSkippedWithoutRoomOrTime(t *testing.T) {
 	}
 
 	// A skipped retry writes no separate record: nothing was answered.
-	if _, err := os.Stat(emptyAttemptRecordPath(slowRecord)); err == nil {
+	if _, err := os.Stat(worker.EmptyAttemptRecordPath(slowRecord)); err == nil {
 		t.Error("a skipped retry left an empty-attempt record")
 	}
 	// The record is written even when the retry is skipped after the first

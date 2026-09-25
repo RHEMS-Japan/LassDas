@@ -95,3 +95,57 @@ func TestEachAnswerIsAddedToTheRoundsRecord(t *testing.T) {
 		t.Fatalf("the newest answer = %+v, want the second and a repeat", record.Latest())
 	}
 }
+
+// A round started again must not silently lose the account of what its
+// earlier launches did. The record of a launch that reported work and
+// changed nothing is exclusive-create, so a leftover makes every later
+// attempt's account vanish without a word — and that account is evidence
+// about the very failure a round which keeps being handed back is made of.
+func TestASecondEmptyAttemptIsRecorded(t *testing.T) {
+	pipeline, _ := returnedPipeline(t)
+	if err := os.WriteFile(pipeline.path("INSTRUCTION.md"), []byte("Change the label.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageDir := pipeline.path("history/stage-1")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(stageDir, "implementer-run.json")
+	empty := worker.EmptyAttemptRecordPath(record)
+	for _, leftover := range []string{record, empty} {
+		if err := os.WriteFile(leftover, []byte(`{"schema_version":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pipeline.chainRunInstruction(context.Background(), "implementer", pipeline.path("target-repo"), strings.Repeat("a", 40)); err != nil {
+		t.Fatalf("chainRunInstruction: %v", err)
+	}
+	for _, leftover := range []string{record, empty} {
+		if _, err := os.Stat(leftover); err == nil {
+			t.Fatalf("the earlier attempt's record is still there: %s", leftover)
+		}
+	}
+}
+
+// A record that was written and will not read stops the render. Skipped, the
+// round would be started again under the instruction it has already
+// answered, and the command that reads the file refuses it for exactly that
+// reason — so the failure belongs here, where the caller can try again,
+// rather than in a plausible instruction that has lost the point of the
+// round.
+func TestAnUnreadableAnswerStopsTheRoundBeingRendered(t *testing.T) {
+	pipeline, record := returnedPipeline(t)
+	path := ReturnRecordFile(pipeline.Workspace, 1)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.RenderImplementInstruction(context.Background(), 1); err == nil {
+		t.Fatal("the round was rendered without an answer it was supposed to carry")
+	}
+	if _, err := os.Stat(record); err == nil {
+		t.Fatal("a verb was run for a render that should not have started")
+	}
+}

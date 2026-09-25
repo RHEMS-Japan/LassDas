@@ -63,11 +63,15 @@ func RecordReturn(runDir string, round int, returned worker.ReturnedWork) error 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// Written through a fresh file rather than over the old one: a link
-	// left at the path must not carry the write somewhere else, and a
-	// half-written record would read as a round of another shape.
+	// Removed first because a link left at the path must not carry the
+	// write somewhere else, then written whole through a temporary file and
+	// renamed into place. A process that stops between a truncate and a
+	// write would otherwise leave a record that will not read, and a
+	// returned round read as a round nobody had handed back starts its
+	// attempts again at one — which is the count that decides whether this
+	// engine is still answering or the ladder has it.
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return os.WriteFile(path, encoded, 0o600)
+	return writeRecordAtomically(path, encoded)
 }
