@@ -104,7 +104,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	now := time.Now().UTC()
-	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
+	hermes := runtime.NewHermes(config)
+	envelope, disposition, err := hermes.PullTask(ctx, services.Store, taskID, workspace, hook.PullClaimRequest{
 		SpaceKey:            config.Tracker.SpaceKey,
 		ProjectID:           config.Tracker.ProjectID,
 		ProjectKey:          config.Tracker.ProjectKey,
@@ -152,7 +153,6 @@ func run() error {
 		if err := terminal.AskQuestion(ctx, outcome.QuestionDecisionPath); err != nil {
 			return fmt.Errorf("question could not be posted: %w", err)
 		}
-		hermes := runtime.NewHermes(config)
 		if err := hermes.Block(ctx, taskID, "awaiting-answer:"+envelope.DeliveryID); err != nil {
 			// The question is sealed but the card is still running. Exiting
 			// 0 here would COMPLETE the card — a completed card is never
