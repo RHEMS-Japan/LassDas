@@ -149,13 +149,74 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 		// report field the chain assembles.
 		ReachedDelivery:   evidence["reached_delivery"],
 		DeliveryShortfall: evidence["delivery_shortfall"],
-		TrailText:         trail,
 	}
 	if withSpend {
 		report.SpendText = t.loadRunSpendText(ctx)
+		// What the delivery made possible, and what was decided along the
+		// way without asking. Neither is part of the sealed record, so a
+		// digest-only build skips both reads: a pending report resubmitted
+		// every tick would otherwise walk the whole run directory each time
+		// to compute something the digest does not contain.
+		report.OutcomeText, report.AssumptionsText = composeOutcome(t.workspace, code, evidence)
 	}
+	fitReportText(&report, trail)
 	return report, nil
 }
+
+// fitReportText decides how much of this report's prose the envelope can
+// carry, and drops what it cannot in the order the parts are worth least to
+// the person reading.
+//
+// The envelope is the one bound in this chain that cannot be given way: a
+// report too large to marshal is a delivery that ends saying nothing at all.
+// So the account of how the work went gives way first, then what was decided
+// on the requester's behalf, and the outcome last of all — which is the part
+// they came for and the part that stays.
+//
+// The room is found by measuring rather than by arithmetic. What a string
+// costs in the envelope is not its length: the encoder escapes, and a record
+// full of quotes and angle brackets costs several times what counting its
+// bytes would suggest.
+func fitReportText(report *hook.TerminalReportRequest, trail string) {
+	// The shape check wants a timestamp, as every attempt carries one; the
+	// real one is stamped per attempt and is the same length as this.
+	probe := *report
+	probe.IssuedAt = time.Now().UTC()
+	// The composer measures the envelope itself. Marshalling only gates the
+	// report's shape; the size is refused where the request is decoded, which
+	// is far enough downstream that a report too large would be discovered by
+	// not arriving.
+	fits := func() bool {
+		encoded, err := hook.MarshalTerminalReportRequest(probe)
+		return err == nil && len(encoded) <= hook.MaxTerminalReportRequestBytes
+	}
+	room := hook.MaxTerminalTrailBytes
+	for attempt := 0; attempt < terminalTrailFitAttempts; attempt++ {
+		probe.TrailText = hook.ShortenTrailForComment(trail, room)
+		if fits() {
+			report.TrailText = probe.TrailText
+			return
+		}
+		room /= 2
+	}
+	probe.TrailText = ""
+	report.TrailText = ""
+	if fits() {
+		return
+	}
+	probe.AssumptionsText = ""
+	report.AssumptionsText = ""
+	if fits() {
+		return
+	}
+	probe.OutcomeText = ""
+	report.OutcomeText = ""
+}
+
+// terminalTrailFitAttempts halves the record's budget this many times before
+// giving up on carrying any of it. Eight halvings take the eight-kilobyte
+// budget below a single byte, so the loop cannot end with room to spare.
+const terminalTrailFitAttempts = 8
 
 // owner is the identity this run's reports are bound to: the one the run
 // was claimed under, read from the ledger's run row. The engine that ends a

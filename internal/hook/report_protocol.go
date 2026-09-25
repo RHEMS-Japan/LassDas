@@ -335,9 +335,49 @@ type TerminalReportRequest struct {
 	// DeliveryShortfall says, in one requester-facing line, what a deeper
 	// delivery would have needed. Set only alongside a ReachedDelivery
 	// shallower than the destination asked for.
-	DeliveryShortfall string    `json:"delivery_shortfall,omitempty"`
-	IssuedAt          time.Time `json:"issued_at"`
+	DeliveryShortfall string `json:"delivery_shortfall,omitempty"`
+	// OutcomeText is what the delivery made possible and where that can be
+	// seen, written for the person who filed the ticket. It leads the
+	// closing comment because that is what they came for: a record of which
+	// rounds ran and which reviewer objected to what is the work's account
+	// of itself, not its result, and a comment that opens with the account
+	// makes the reader hunt for the result.
+	//
+	// It is composed where the run's own records are — the engine that
+	// carries the delivery — and travels as text rather than as fields,
+	// because what is worth saying differs with how far the delivery got
+	// and with how it ended, and a report that ended in a failure has as
+	// much to say here as one that succeeded.
+	//
+	// Empty is what every report written before this carries, and the
+	// comment then reads exactly as it did.
+	OutcomeText string `json:"outcome_text,omitempty"`
+	// AssumptionsText is everything the engine settled without asking:
+	// points the reception decided instead of putting to the requester,
+	// rulings on rounds that stopped agreeing, roles moved to another
+	// provider, stand-ins put where a key was wanted, and resources brought
+	// into existence outside the repository.
+	//
+	// It is separate from the outcome because it gives way separately. The
+	// outcome, where to see it, the cost and the footer are what a comment
+	// must always carry; this is what a requester reads when they want to
+	// know why it came out the way it did, and a comment with no room for
+	// everything drops this before it drops those.
+	AssumptionsText string    `json:"assumptions_text,omitempty"`
+	IssuedAt        time.Time `json:"issued_at"`
 }
+
+// MaxOutcomeTextBytes and MaxAssumptionsTextBytes bound the two composed
+// sections. Both ride inside the report envelope beside the run record, and
+// the envelope is the one bound that cannot be given way: a report too large
+// to marshal is a delivery that says nothing at all. So these are held small
+// enough that the record still has room after them, and the composer counts
+// its own items rather than letting a run with sixty assumptions crowd out
+// the sentence saying what was delivered.
+const (
+	MaxOutcomeTextBytes     = 4 * 1024
+	MaxAssumptionsTextBytes = 4 * 1024
+)
 
 // MaxDeliveryShortfallBytes bounds the shortfall line, on the same footing
 // as every other requester-facing string the report carries: one bounded
@@ -479,6 +519,15 @@ func (r TerminalReportRequest) ValidateShape() error {
 		strings.ContainsAny(r.DeliveryShortfall, "\x00\r\n") ||
 		(r.DeliveryShortfall != "" && r.ReachedDelivery == "") {
 		return errors.New("terminal report delivery shortfall is invalid")
+	}
+	// The two composed sections are prose over several lines, so they are
+	// held to the record's discipline rather than the one-line fields':
+	// bounded, valid UTF-8, no carriage returns and no NULs.
+	if err := ValidateTrailTextWithin(r.OutcomeText, MaxOutcomeTextBytes); err != nil {
+		return errors.New("terminal report outcome text is invalid")
+	}
+	if err := ValidateTrailTextWithin(r.AssumptionsText, MaxAssumptionsTextBytes); err != nil {
+		return errors.New("terminal report assumptions text is invalid")
 	}
 	if (r.CommitSHA == "") != (r.CommitURL == "") || (r.CommitSHA != "" && !commitPattern.MatchString(r.CommitSHA)) {
 		return errors.New("terminal report commit binding is invalid")

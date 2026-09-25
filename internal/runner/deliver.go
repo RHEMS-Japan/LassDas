@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -85,6 +86,39 @@ type DeliverReport struct {
 	ScreenChecked bool      `json:"screen_checked,omitempty"`
 	ObservedAt    time.Time `json:"observed_at"`
 }
+
+// ReadDeliverReport reads back one phase's sealed report from a finished
+// run's directory.
+//
+// It is here rather than at the reader because this file owns the record's
+// shape, and because the closing report now reads it for a reason the
+// attendant never did: to say what the observation actually saw. "Delivered
+// and verified" is a claim about a screen, and the person who filed the
+// ticket is owed the screen, not the claim.
+//
+// A record that is missing, oversized or malformed reads as no observation
+// at all. That is the honest answer for every one of those, and it keeps a
+// bad file out of the one place a delivery gets to describe itself. The
+// error is returned beside the absence so a caller can tell a phase that
+// never ran from one whose record will not read, and say which it was.
+func ReadDeliverReport(runDir, name string) (DeliverReport, bool, error) {
+	var report DeliverReport
+	raw, err := readWorkspaceFile(filepath.Join(runDir, name), maxDeliverReportBytes)
+	if err != nil {
+		return DeliverReport{}, false, err
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return DeliverReport{}, false, err
+	}
+	if report.Verdict == "" {
+		return DeliverReport{}, false, errors.New("the delivery phase record names no verdict")
+	}
+	return report, true, nil
+}
+
+// maxDeliverReportBytes bounds that read. The record is a verdict, a URL and
+// a sentence or two; anything larger is not one of ours.
+const maxDeliverReportBytes = 1 << 20
 
 // RunDeliver advances the delivery to the requested milestone, resuming
 // past every step whose artifact already exists.

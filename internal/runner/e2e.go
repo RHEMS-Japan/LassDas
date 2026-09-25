@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +51,32 @@ type E2EResult struct {
 	Screenshot    bool      `json:"screenshot"`
 	ObservedAt    time.Time `json:"observed_at"`
 }
+
+// ReadE2EResult reads back the sealed observation verdict from a finished
+// run's directory, for the closing report: this card is what looked at the
+// deployed page, and what it saw is the answer to "where can I see it".
+//
+// A verdict that is missing, oversized or malformed reads as no observation.
+// The error travels beside the absence so a caller can tell a card that
+// never ran from one whose verdict will not read, and say which it was.
+func ReadE2EResult(runDir string) (E2EResult, bool, error) {
+	raw, err := readWorkspaceFile(filepath.Join(runDir, E2EResultFile), maxE2EResultBytes)
+	if err != nil {
+		return E2EResult{}, false, err
+	}
+	var result E2EResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return E2EResult{}, false, err
+	}
+	if result.Verdict == "" {
+		return E2EResult{}, false, errors.New("the observation record names no verdict")
+	}
+	return result, true, nil
+}
+
+// maxE2EResultBytes bounds that read, on the same footing as every other
+// sealed record the report composes from.
+const maxE2EResultBytes = 1 << 20
 
 // RunE2ECheck drives the whole observation. Verdicts — including "the pull
 // request was closed unmerged" and "the session is not configured" — are

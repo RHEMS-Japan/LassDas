@@ -333,51 +333,85 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		facts.Operation = "いまは利用者の操作は不要です。自動処理の結果をお待ちください"
 		facts.NextEvent = "staging の確認結果、または処理を進められない理由と必要な操作を、このチケットでお知らせします"
 	}
-	lines := []string{
-		heading,
-		message,
-		"実行履歴: " + report.RunURL,
+	// The order is the requester's. What they can now do and where to look
+	// at it come first; what was decided on their behalf comes next,
+	// because with nothing asking them anything after the reception it is
+	// their only sight of those decisions; then the cost. The pull request
+	// and the record of how the work went follow, because they answer a
+	// different question -- how it was built -- and a comment that opens
+	// with the account of the building makes the reader hunt for the result.
+	head := heading + "\n" + message
+	if outcome := strings.TrimSpace(report.OutcomeText); outcome != "" {
+		head += "\n\n" + outcome
 	}
+	// What a deeper delivery would have needed, on the ticket rather than in
+	// a log. A destination asked for production and the change stopped at
+	// its pull request: the requester is owed the reason on the same comment
+	// that tells them where it stopped, which is why it sits with the
+	// outcome rather than down with the links.
+	if report.DeliveryShortfall != "" {
+		head += "\n\nここまでで止まった理由: " + report.DeliveryShortfall
+	}
+	lines := []string{"実行履歴: " + report.RunURL}
 	if report.PullRequestURL != "" {
 		lines = append(lines, "Pull Request: "+report.PullRequestURL)
 	}
 	if report.CommitURL != "" {
 		lines = append(lines, "反映commit: "+report.CommitSHA+" "+report.CommitURL)
 	}
-	if report.StagingEvidenceURL != "" {
-		lines = append(lines, "staging確認先: "+report.StagingEvidenceURL)
-	}
-	if report.ProductionEvidenceURL != "" {
-		lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
-	}
-	// What a deeper delivery would have needed, on the ticket rather than in
-	// a log. A destination asked for production and the change stopped at
-	// its pull request: the requester is owed the reason on the same comment
-	// that tells them where it stopped.
-	if report.DeliveryShortfall != "" {
-		lines = append(lines, "ここまでで止まった理由: "+report.DeliveryShortfall)
+	// A report that composed its own outcome named the places to look
+	// inside it, beside what was actually seen there. One from an engine
+	// that composed none keeps them here, so an older report still says
+	// where its delivery landed.
+	if report.OutcomeText == "" {
+		if report.StagingEvidenceURL != "" {
+			lines = append(lines, "staging確認先: "+report.StagingEvidenceURL)
+		}
+		if report.ProductionEvidenceURL != "" {
+			lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
+		}
 	}
 	footer := facts.render()
-	head := strings.Join(lines, "\n")
-	tail := ""
+	links := "\n\n" + strings.Join(lines, "\n")
+	cost := ""
 	if report.SpendText != "" {
-		tail = "\n\n## この依頼にかかった費用\n" + report.SpendText
+		cost = "\n\n## この依頼にかかった費用\n" + report.SpendText
 	}
+	// Two parts of this comment can be long, and they give way in the order
+	// they are worth least to the person reading: the run record first, then
+	// what was decided. Never the outcome, never the places to look, never
+	// the cost line the requester is owed, and never the footer, whose final
+	// line is the marker the exactly-once machinery anchors on. Whatever
+	// gives way says so and says where the whole of it is, so nothing is
+	// dropped without the ticket admitting it.
+	fixed := len(head) + len(cost) + len(links) + len(footer)
+	assumptions := ""
+	if decided := strings.TrimSpace(report.AssumptionsText); decided != "" {
+		switch {
+		case fixed+len("\n\n")+len(decided) <= MaxTrackerCommentBytes:
+			assumptions = "\n\n" + decided
+		case fixed+len("\n\n")+len(assumptionsElsewhere(report)) <= MaxTrackerCommentBytes:
+			assumptions = "\n\n" + assumptionsElsewhere(report)
+		}
+	}
+	body := head + assumptions + cost + links
 	if report.TrailText == "" {
-		return head + tail + footer
+		return fitCommentWithin(body, footer)
 	}
-	// The run record is the only part of this comment that can be long, so
-	// it is the part that gives way when the tracker's comment limit binds --
-	// never the footer, whose final line is the marker the exactly-once
-	// machinery anchors on, and never the cost line the requester is owed.
-	// The record is shortened with a sentence saying where the whole of it
-	// is, so nothing is dropped without the ticket saying so.
-	room := MaxTrackerCommentBytes - len(head) - len(terminalTrailHeading) - len(tail) - len(footer)
+	room := MaxTrackerCommentBytes - len(body) - len(terminalTrailHeading) - len(footer)
 	trail := ShortenTrailForComment(report.TrailText, room)
 	if trail == "" {
-		return head + "\n\n" + terminalTrailElsewhere + tail + footer
+		// The sentence saying where the record is costs bytes of its own,
+		// and the room left may have none: appending it unmeasured pushed
+		// the comment past the tracker's limit, which loses the whole
+		// comment rather than the record it was standing in for.
+		elsewhere := "\n\n" + terminalTrailElsewhere
+		if len(body)+len(elsewhere)+len(footer) > MaxTrackerCommentBytes {
+			return fitCommentWithin(body, footer)
+		}
+		return fitCommentWithin(body+elsewhere, footer)
 	}
-	return head + terminalTrailHeading + trail + tail + footer
+	return fitCommentWithin(body+terminalTrailHeading+trail, footer)
 }
 
 const (
@@ -386,7 +420,58 @@ const (
 	// comment leaves it no room at all, so the ticket still says the record
 	// exists and where to read it.
 	terminalTrailElsewhere = "この実行の記録はこのコメントに収まらないため、上の実行履歴をご確認ください。"
+	// commentBodyCutNote ends a comment held back from the tracker's limit.
+	commentBodyCutNote = "\n…（このコメントに収まらないため、ここまでを掲示しています）\n"
 )
+
+// assumptionsElsewhere stands in for what the engine decided on its own when
+// the comment has no room for the list, and it has to name a place that
+// really holds the rest.
+//
+// The pull request description does: it is written after the last round that
+// can decide anything and it carries the whole list. The run record does
+// not — it is an account of the rounds, with no decisions section in it — so
+// with no pull request the honest answer is the run's own records, which an
+// operator can read. Sending a requester to a page that does not hold what
+// they were sent for is worse than telling them it is not here.
+func assumptionsElsewhere(report TerminalReportRequest) string {
+	if report.PullRequestURL != "" {
+		return "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
+			"Pull Request の説明に全文を載せています: " + report.PullRequestURL
+	}
+	return "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
+		"運用担当者が保管しているこの実行の記録に残してあります。"
+}
+
+// fitCommentWithin holds the whole comment to the tracker's limit without
+// losing the footer, whose final line is the marker the exactly-once
+// machinery anchors on.
+//
+// Both halves of that matter. A comment over the limit is refused by the
+// client before it leaves this process, so the requester sees no report at
+// all; a comment that posted without its marker is one the next attempt
+// cannot recognise, so it gets posted again. The parts above gave way in
+// order and this is the last guard, for the case where even what never
+// gives way does not fit.
+func fitCommentWithin(body, footer string) string {
+	if len(body)+len(footer) <= MaxTrackerCommentBytes {
+		return body + footer
+	}
+	room := MaxTrackerCommentBytes - len(footer) - len(commentBodyCutNote)
+	if room <= 0 {
+		return footer
+	}
+	clipped := body[:room]
+	// Back off to a rune boundary, then off the rune that boundary begins,
+	// so the comment never ends on half a character.
+	for len(clipped) > 0 && !utf8.RuneStart(clipped[len(clipped)-1]) {
+		clipped = clipped[:len(clipped)-1]
+	}
+	if len(clipped) > 0 && clipped[len(clipped)-1] >= utf8.RuneSelf {
+		clipped = clipped[:len(clipped)-1]
+	}
+	return clipped + commentBodyCutNote + footer
+}
 
 // terminalCommentFacts maps every finite terminal code onto the seven-item
 // comment contract: who acts next, what production verifiably looks like, and

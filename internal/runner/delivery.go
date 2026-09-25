@@ -166,6 +166,28 @@ func (p *Pipeline) EnsureTrail(ctx context.Context) error {
 	return nil
 }
 
+// writeDeliveryPreamble leaves the pull request's opening section beside the
+// run record, and answers where it is. An empty answer means there was
+// nothing to say — no request could be read back and nothing was decided —
+// and the description then opens with the record, exactly as it did before.
+//
+// A failure to write is not a failure to deliver: the description is worth
+// less than the change it describes, so the caller carries on without it.
+func (p *Pipeline) writeDeliveryPreamble() (string, error) {
+	preamble := composeDeliveryPreamble(p.Workspace)
+	if preamble == "" {
+		return "", nil
+	}
+	path := p.path("m1-outcome.txt")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(preamble), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // AttemptedImplementation reports whether this run sealed at least the start
 // of one implementation round — the condition under which a failure report
 // has a history worth rendering. Prepare must have run: without its
@@ -201,9 +223,17 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []s
 	if outcome, err := p.publishWithBaseAdvance(ctx, stage, reviewFiles, stageDir, common); err != nil || outcome.Code != "" {
 		return outcome, err
 	}
-	if err := p.runController(ctx, "create-feature-pr", append([]string{"create-feature-pr"}, append(common,
+	pullRequestArgs := append(common,
 		"--feature", p.path("feature.json"), "--trail", trailPath,
-		"--out", p.path("feature-pr.json"))...)); err != nil {
+		"--out", p.path("feature-pr.json"))
+	// What the change is for and what was decided without asking, at the top
+	// of the description. The file is composed from this run's own sealed
+	// records and written immediately before it is read, so whatever an
+	// agent may have left on the path is overwritten rather than trusted.
+	if outcomePath, err := p.writeDeliveryPreamble(); err == nil && outcomePath != "" {
+		pullRequestArgs = append(pullRequestArgs, "--outcome", outcomePath)
+	}
+	if err := p.runController(ctx, "create-feature-pr", append([]string{"create-feature-pr"}, pullRequestArgs...)); err != nil {
 		return Outcome{Code: hook.TerminalReleaseFailed}, err
 	}
 	if url, err := p.readJSONField("feature-pr.json", "payload", "pull_request", "HTMLURL"); err == nil && url != "" {
