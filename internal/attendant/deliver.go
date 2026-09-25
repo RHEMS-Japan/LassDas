@@ -335,9 +335,9 @@ func verifyBuiltPath(config runtime.Config, runDir string, staging runner.Delive
 		// before anything looks at a deployment, and that merge's base is
 		// the release branch — so a missing workflow surfaces only after
 		// the change is already released, and backing that out is somebody's
-		// afternoon. Refusing costs the delivery a staging landing it has
-		// already made, says which part could not be checked, and can be
-		// promoted again the moment the copy is back.
+		// afternoon. Refusing keeps the staging landing the delivery has
+		// already made and says which part could not be checked; the run
+		// then ends, and the work is raised again to reach production.
 		return "本番へ反映する " + workflow + " を確かめられなかった (この依頼の作業コピーが残っていない) ため、" +
 			"本番反映は行わず staging までで止めています。", false
 	}
