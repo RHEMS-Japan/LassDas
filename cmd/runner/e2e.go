@@ -26,9 +26,6 @@ func runE2ECheck(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return err
 	}
-	if !config.OrchestrationCards() {
-		return errors.New("e2e-check requires the cards orchestration")
-	}
 	workspace := os.Getenv("HERMES_KANBAN_WORKSPACE")
 	if workspace == "" {
 		return errors.New("HERMES_KANBAN_WORKSPACE is required (dispatched by the Hermes kanban only)")

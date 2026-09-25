@@ -27,9 +27,9 @@ import (
 // decide step, which makes "the first stage directory without a decision"
 // the current round for every stage that runs after implement.
 
-// chainReviewers reads the configured identities and enforces the cards
-// plan's two-reviewer shape. Runner mode uses the same artifact naming but
-// can run the full configured reviewer set without creating stage cards.
+// chainReviewers reads the configured identities and enforces the chain
+// plan's two-reviewer shape: only two review profiles exist, so a consumer
+// with more judges than that still runs two cards.
 func chainReviewers(consumerConfigPath string) ([]string, error) {
 	raw, err := os.ReadFile(consumerConfigPath)
 	if err != nil {
@@ -95,7 +95,7 @@ func (p *Pipeline) latestCandidateRound() int {
 // RenderImplementInstruction writes the implement card's instruction for
 // one round into the run directory (INSTRUCTION.md). The kernel authors the
 // prompt even though the kanban launches the agent; earlier rounds'
-// objections ride in exactly as the runner mode feeds its own implementer.
+// objections ride in with it.
 func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) error {
 	reviewers, err := chainReviewers(p.Config.ConsumerConfigPath)
 	if err != nil {
@@ -275,26 +275,17 @@ func (p *Pipeline) chainReview(ctx context.Context, reviewers []string, index in
 }
 
 func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, index int, repoRoot, baseSHA string, round int) error {
-	return p.reviewSealed(ctx, reviewers, index, repoRoot, baseSHA, round, true)
-}
-
-func (p *Pipeline) reviewSealed(ctx context.Context, reviewers []string, index int, repoRoot, baseSHA string, round int, resume bool) error {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), round)
 	reviewer := reviewers[index]
 	if _, err := os.Lstat(fmt.Sprintf("%s/%s.json", stageDir, reviewer)); err == nil {
-		if !resume {
-			return errors.New("review output already exists before its reviewer ran")
-		}
 		// A re-dispatched card finds its own sealed review: nothing left to
 		// do, and redoing it would double the judge's spend.
 		return nil
 	}
 	// A half-written attempt leaves the run record without the review; the
 	// exclusive-create outputs need their own leftovers gone first.
-	if resume {
-		if err := os.Remove(fmt.Sprintf("%s/%s-run.json", stageDir, reviewer)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	if err := os.Remove(fmt.Sprintf("%s/%s-run.json", stageDir, reviewer)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	reviewArgs := []string{
 		"agent-review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
@@ -417,8 +408,8 @@ type ChainOutcome struct {
 	Evidence map[string]string `json:"evidence"`
 }
 
-// chainPublish delivers the adopted round exactly as the runner mode would
-// and persists the outcome for the attendant, which owns the report.
+// chainPublish delivers the adopted round and persists the outcome for the
+// attendant, which owns the report.
 func (p *Pipeline) chainPublish(ctx context.Context, reviewers []string) error {
 	round := p.latestCandidateRound()
 	if round < 1 {

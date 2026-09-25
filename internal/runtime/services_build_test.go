@@ -58,19 +58,14 @@ func TestOwnerAndTargetDeriveFromTheFixedIdentity(t *testing.T) {
 	}
 }
 
-func TestBlockAndCompleteGoThroughTheCanonicalCLI(t *testing.T) {
+func TestArchiveGoesThroughTheCanonicalCLI(t *testing.T) {
 	bin, callLog, _ := stubHermes(t)
 	hermes := NewHermes(Config{HermesBin: bin, HermesBoard: "lassdas"})
-	if err := hermes.Block(context.Background(), "t1", "awaiting-answer:delivery_x"); err != nil {
-		t.Fatalf("Block() error = %v", err)
-	}
-	if err := hermes.Complete(context.Background(), "t1"); err != nil {
-		t.Fatalf("Complete() error = %v", err)
+	if err := hermes.Archive(context.Background(), "t1"); err != nil {
+		t.Fatalf("Archive() error = %v", err)
 	}
 	records := calls(t, callLog)
-	if len(records) != 2 ||
-		!strings.HasPrefix(records[0], "kanban|block|t1|awaiting-answer:delivery_x|--kind|needs_input") ||
-		!strings.HasPrefix(records[1], "kanban|complete|t1") {
+	if len(records) != 1 || !strings.HasPrefix(records[0], "kanban|archive|t1") {
 		t.Fatalf("canonical transitions = %v", records)
 	}
 }

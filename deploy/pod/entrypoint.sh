@@ -49,19 +49,9 @@ E2E_SESSION_DIR="$(dirname "$LASSDAS_E2E_SESSION_STATE_FILE")"
 mkdir -p "$E2E_SESSION_DIR" 2>/dev/null || echo "note: $E2E_SESSION_DIR could not be created; the renewed jar will not be kept" >&2
 chmod 700 "$E2E_SESSION_DIR" 2>/dev/null || true
 
-# Profile with the direct-command worker (idempotent write; host-side
-# configuration is the only thing that decides what executes).
-PROFILE_HOME="$HOME/.hermes/profiles/lassdas-runner"
-mkdir -p "$PROFILE_HOME"
-cat > "$PROFILE_HOME/config.yaml" <<'YAML'
-worker:
-  command:
-    - /usr/local/bin/runner
-YAML
-
-# The cards orchestration's stage profiles: one per chain stage, each a
-# fixed host-side command — the task-creation surface can never choose what
-# executes. Written unconditionally (idempotent; unused in runner mode).
+# The stage profiles: one per chain stage, each a fixed host-side command —
+# the task-creation surface can never choose what executes. Written
+# unconditionally (idempotent).
 # The review profiles double as the judges' own agent identity: the same
 # profile the card dispatches under is what `hermes --profile <name> -z`
 # runs the review with, so each judge carries its own provider block and
@@ -267,18 +257,15 @@ agent:
   max_turns: ${LASSDAS_APPLIER_MAX_TURNS:-40}
 YAML
 
-# Cards orchestration: the destination credential moves from the process
-# environment into an operator-file before any resident starts, because the
-# dispatcher spawns every stage — the untrusted implementer included — from
-# this environment. Runner mode keeps the environment path unchanged.
-if grep -q '"orchestration"[[:space:]]*:[[:space:]]*"cards"' "$LASSDAS_RUNTIME_CONFIG"; then
-  mkdir -p "$STATE/runs" "$STATE/secrets"
-  if [ -n "${TARGET_GITHUB_TOKEN:-}" ]; then
-    umask 077
-    printf '%s' "$TARGET_GITHUB_TOKEN" > "$STATE/secrets/target-token"
-    umask 022
-    unset TARGET_GITHUB_TOKEN
-  fi
+# The destination credential moves from the process environment into an
+# operator-file before any resident starts, because the dispatcher spawns
+# every stage — the untrusted implementer included — from this environment.
+mkdir -p "$STATE/runs" "$STATE/secrets"
+if [ -n "${TARGET_GITHUB_TOKEN:-}" ]; then
+  umask 077
+  printf '%s' "$TARGET_GITHUB_TOKEN" > "$STATE/secrets/target-token"
+  umask 022
+  unset TARGET_GITHUB_TOKEN
 fi
 
 # The board's credentials leave the process environment for the same
@@ -329,8 +316,10 @@ liveness() { touch "$STATE/heartbeat"; }
 # starts.
 export LASSDAS_AGENT_LAUNCHER="${LASSDAS_AGENT_LAUNCHER:-/usr/local/bin/agentexec}"
 # The launcher lends and returns trees under the runs directory alone —
-# the one the runtime configuration names (chain.runs_root), so a runs
-# directory placed elsewhere is not refused at every launch.
+# the one the runtime configuration names (chain.runs_root, which every
+# configuration has), so a runs directory placed elsewhere is not refused
+# at every launch. The fallback covers a config this shell cannot read;
+# the residents refuse such a config outright a moment later.
 RUNS_ROOT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("chain", {}).get("runs_root", ""))' "$LASSDAS_RUNTIME_CONFIG" 2>/dev/null || true)"
 export LASSDAS_AGENT_TREE_ROOT="${LASSDAS_AGENT_TREE_ROOT:-${RUNS_ROOT:-$STATE/runs}}"
 # Boot check, fail-closed. First the launcher itself: without its file

@@ -2,6 +2,8 @@
 
 対象: docs/TARGET_SHAPE.md (確定済みの最終形) への移行。本書はその実施設計 — 何を・どの順で・どこまでやったら完了か。
 
+> **現況 (2026-09-25)**: 依頼は工程カードの連鎖でのみ実行する。設定 `orchestration` は `"cards"` だけを受け付け、旧方式 (1 枚のカードが 1 件を最後まで実行する経路) とその設定・プロファイルは削除済み。**本書に残る「旧方式へ戻す」ロールバック手順は、もう実行できない。** 以下は移行時の記録として読むこと。
+
 **スコープ (v4・発注者決定 2026-08-24)**: 本書の実行範囲は **Phase 0〜2**。Phase 3 (切除) は受入合格後に別文書で再設計してから実施する。根拠: 3 巡の独立評価で Phase 0〜2 の設計中核 (審判の所有・カード連鎖・失敗の扱い) は生き残り、落ち続けた指摘は全て切除の帳簿 (行数算術・昇格レールの去就) だった。切除は受入の実測を入力にやり直す方が正確で、実装を止めてまで先に確定させる価値がない。
 
 ## 変更履歴
@@ -80,7 +82,7 @@ Backlog 監視 60s
 - **トークンの流路**: cards モードでは entrypoint が起動前にトークンをファイル (`chain.target_token_path`、0600) へ移して環境から消す。読むのは attendant (clone) と検証・納品工程のみ。同一 UID のファイル露出は既知の残余 (UID 分離は Phase 3 関門、docs/RUNTIME_POD.md)
 - **claim の身元**: attendant の claim/報告は deliveryID から決定的に導出した固定 id — プロセス再起動をまたいでも台帳の owner 突合が成立する
 - **工程時間の訂正**: 検証カードは 60 分 (v3 の 30 分は誤り — 検証コマンドは各 10 分上限×最大 5 本が合法なため、設計値でなく上限からの導出に変更)
-- **P2 前フライト (pod 上で最初の cards 実行前に確認)**: ①fork native worker がカード本文を初期プロンプトとして実装役に渡す実効確認 ②implementer プロファイルの providers 設定 (gateway 接続・virtual key) の実効確認 ③旧バイナリ×新 runtime.json は起動不能 (DisallowUnknownFields) — ロールバックは常に「orchestration を "runner" に戻す」で行い、バイナリだけ戻さない
+- **P2 前フライト (pod 上で最初の cards 実行前に確認)**: ①fork native worker がカード本文を初期プロンプトとして実装役に渡す実効確認 ②implementer プロファイルの providers 設定 (gateway 接続・virtual key) の実効確認 ③旧バイナリ×新 runtime.json は起動不能 (DisallowUnknownFields) — 当時のロールバックは設定の切り替えで行い、バイナリだけ戻さない方針だった (現在は切り替え先が無い)
 
 ### seal-candidate の仕様 (v3 追記)
 
@@ -101,7 +103,7 @@ Backlog 監視 60s
 - プロファイル 5 個 (implementer / review-a / review-b / validate / publish) の config.yaml 定義 + 実装役手順書 (作業規約・終了規約)
 - カード生成の改修: 実体は **`internal/runtime`** (実測 30.3%・cards.go) — 「親 + 工程連鎖」型へ。**改修と同時にテスト新設し 70% 以上** (v2 の「attendant ≥70%」は対象誤り — cmd/attendant は 96 行の配線のみ)
 - 失敗検知→終端化・差し戻し再生成・質問橋の attendant/runtime 実装。**#10 の呼び出し規則もここへ移設する**: 「実装を 1 巡でも開始した失敗終端は compose-trail を試み、生成失敗は固定 fallback 行で報告を止めない」(Phase 0 で runner 側に実装済みのポリシーと同一。合成本体は kernel verb のまま)
-- **新旧切替とロールバック**: runtime config `orchestration: "runner" | "cards"`。M1 runner 経路は Phase 3 まで削除しない。**ロールバック発動 = cards 方式の進行不能 2 回連続**。**切り分けの判定 (v3)**: 工程カードに stage 成果物 (candidate/review artifact) が 1 つも残らず止まった = 設計欠陥 (ロールバック対象) / 成果物が残り revise・nonconverged 系で終わった = 実装品質 (分離条件の管轄)。判定は成果物の有無という機械条件で行い、発動時に発注者へ報告
+- **新旧切替とロールバック (当時)**: runtime config で新旧を選び、旧経路は Phase 3 まで残す方針だった。**ロールバック発動 = cards 方式の進行不能 2 回連続**。**切り分けの判定 (v3)**: 工程カードに stage 成果物 (candidate/review artifact) が 1 つも残らず止まった = 設計欠陥 (ロールバック対象) / 成果物が残り revise・nonconverged 系で終わった = 実装品質 (分離条件の管轄)。判定は成果物の有無という機械条件で行い、発動時に発注者へ報告。**現在この切り替えは存在しない**
 
 **Phase 2 — 受入 (最終形の上で初納品)**
 - 同一の実チケット (組織別モデルホワイトリスト、裁定 4 件焼き込み済み) を cards 方式で投入
@@ -134,8 +136,8 @@ Backlog 監視 60s
 | cmd/setup | 1,926 | 残す (製品ツール) | 導入ウィザード |
 | cmd/console | 1,050 | 残す (製品ツール) | 運用画面 |
 | internal/state (dynamodb.go 除く) | 3,378 | 残す (当面) | ファイル状態系は現用 (local.go は attendant 経路)。DynamoStore メソッド残余の整理は後続 |
-| internal/runner | 1,272 | 捨てる | 自前進行配線 (テスト 0%) |
-| **cmd/runner** | 157 | **捨てる (v3 追加)** | 現 direct-command worker 実体 — cards 方式で不要化 |
+| internal/runner | 1,272 | 一部だけ捨てた (2026-09-25 訂正) | 自前進行配線 (1 件を最後まで駆動する部分) は削除。工程カードが使う段の実装は残した |
+| **cmd/runner** | 157 | **残した (2026-09-25 訂正)** | 工程カード 1 枚を実行する direct-command worker 実体 |
 | cmd/{reporter,questioner,app,lambda,ticker,receiver} + internal/receiver | 2,151 | 捨てる | 旧 GitHub Actions レール |
 | cmd/browsercheck | 279 | 捨てる | 旧レール専用 (visiblecheck とは分離) |
 | internal/state/dynamodb.go | 1,141 | 捨てる | 旧レール専用ストア |
@@ -169,7 +171,7 @@ Backlog 監視 60s
 ## 中止・分離・ロールバック条件 (事前確定)
 
 - **実装役の分離**: 実装品質起因の受入失敗 (成果物あり・revise/nonconverged 系) が連続 2 回 → 実装役のみ claude CLI に分離
-- **進行方式のロールバック**: 設計欠陥起因の進行不能 (工程カードに stage 成果物が残らない停止) が 2 回連続 → config `orchestration: "runner"` へ戻し設計に差し戻す。切り分けは成果物の有無という機械条件・発動時に発注者へ報告
+- **進行方式のロールバック (当時)**: 設計欠陥起因の進行不能 (工程カードに stage 成果物が残らない停止) が 2 回連続 → 設定を旧方式へ戻し設計に差し戻す。切り分けは成果物の有無という機械条件・発動時に発注者へ報告。**現在は戻す先が無く、同じ事象は設計への差し戻しだけで扱う**
 - **移行自体の中止**: Phase 0 で「関所所有のレビュー起動が Hermes プロファイルでは成立しない」型の行き止まりが 3 営業日以内に解けない場合 → 発注者へ報告
 - Phase 3 は受入合格後に別文書で再設計してから着手する (本書の Phase 3 記載のまま実行しない — v4)
 
@@ -200,10 +202,9 @@ Backlog 監視 60s
 
 ## 参照
 
-実装上の追補: runner を利用し続ける構成も扱うため、下記 v4 の凍結方針に対し、
-runner のレビュー担当・段数を設定連動へ修正した。既存の agent-review 呼び出しを
-共有し、前段の指摘も引き継ぐ。cards への自動切替は行わず、既存の unbound
-claude-correctness の直接呼び出しは互換性のため維持する。
+実装上の追補 (当時): 旧方式を使い続ける構成も扱うため、下記 v4 の凍結方針に対し、
+旧方式のレビュー担当・段数を設定連動へ修正した。その経路は削除済みで、
+残っているのは工程カードが共有する agent-review 呼び出しだけ。
 
 - docs/TARGET_SHAPE.md (最終形 — v4 で到達行数の確定を Phase 3 再設計へ送る訂正を同時実施)
 - [issue #9](https://github.com/RHEMS-Japan/LassDas/issues/9) 評価とクロスチェックの全記録

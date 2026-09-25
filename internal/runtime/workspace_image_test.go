@@ -12,6 +12,11 @@ import (
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
+// runDirectoryMode is the mode the attendant's preparation leaves on a
+// delivery's run directory and on the root above it: traversal for the
+// agent user, never listing or writing.
+const runDirectoryMode = 0o711
+
 // Run the cross-compiled test binary in the runtime image as the engine
 // user, without a network or credentials, with RUNNER_IMAGE_TEST=1. This
 // exercises the installed launcher's actual capabilities and UID switch;
@@ -41,8 +46,20 @@ func TestRunnerWorkspaceLaunchInImage(t *testing.T) {
 	delivery := filepath.Join(root, "delivery_test")
 	repo := filepath.Join(delivery, "target-repo")
 	home := filepath.Join(delivery, "manual-home")
+	// The attendant prepares a delivery's directory, and the root above it,
+	// exactly this way before any card is dispatched.
+	if err := os.MkdirAll(delivery, runDirectoryMode); err != nil {
+		t.Fatal(err)
+	}
 	for _, dir := range []string{repo, home} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A closed ancestor is what the launch must refuse to work through: it
+	// can prepare everything and still fail after it switches users.
+	for _, dir := range []string{root, delivery} {
+		if err := os.Chmod(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -77,10 +94,10 @@ printf 'agent-launch-ok\n'
 		t.Fatalf("closed ancestor did not reproduce launch failure: %s, %v", output, err)
 	}
 	reclaimHome()
-	bin, _, _ := stubHermes(t)
-	h := NewHermes(Config{HermesBin: bin, Chain: ChainConfig{RunsRoot: root}})
-	if _, err := h.CreateCard(context.Background(), "delivery_test", "ticket", "body"); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{root, delivery} {
+		if err := os.Chmod(dir, runDirectoryMode); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if output, err := launch(); err != nil || strings.TrimSpace(string(output)) != "agent-launch-ok" {
 		t.Fatalf("prepared workspace cannot launch safely: %s, %v", output, err)

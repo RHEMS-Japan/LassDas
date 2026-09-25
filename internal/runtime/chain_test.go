@@ -216,30 +216,23 @@ func TestOrchestrationValidation(t *testing.T) {
 	if err := base.validateOrchestration(); err != nil {
 		t.Fatalf("validateOrchestration() error = %v", err)
 	}
-	if !base.OrchestrationCards() {
-		t.Fatal("cards orchestration did not report itself")
-	}
 	withoutRoot := chainTestConfig()
 	withoutRoot.RunsRoot = ""
 	withoutToken := chainTestConfig()
 	withoutToken.TargetTokenPath = ""
 	cases := map[string]Config{
-		"unknown mode":         {Orchestration: "swarm"},
-		"missing profile":      {Orchestration: "cards", Chain: ChainConfig{RunsRoot: "/r", TargetTokenPath: "/t", Profiles: ChainProfiles{Implementer: "a", ReviewA: "b", ReviewB: "c", Validate: "d"}}},
-		"duplicate names":      {Orchestration: "cards", Chain: ChainConfig{RunsRoot: "/r", TargetTokenPath: "/t", Profiles: ChainProfiles{Implementer: "a", ReviewA: "a", ReviewB: "c", Validate: "d", Publish: "e"}}},
-		"missing runs dir":     {Orchestration: "cards", Chain: withoutRoot},
-		"missing token path":   {Orchestration: "cards", Chain: withoutToken},
-		"runner profile reuse": {Orchestration: "cards", HermesProfile: "lassdas-implementer", Chain: chainTestConfig()},
+		"unknown mode":        {Orchestration: "swarm"},
+		"the retired mode":    {Orchestration: "runner", Chain: chainTestConfig()},
+		"nothing selected":    {Chain: chainTestConfig()},
+		"the retired profile": {Orchestration: "cards", HermesProfile: "an-assignee-profile", Chain: chainTestConfig()},
+		"missing profile":     {Orchestration: "cards", Chain: ChainConfig{RunsRoot: "/r", TargetTokenPath: "/t", Profiles: ChainProfiles{Implementer: "a", ReviewA: "b", ReviewB: "c", Validate: "d"}}},
+		"duplicate names":     {Orchestration: "cards", Chain: ChainConfig{RunsRoot: "/r", TargetTokenPath: "/t", Profiles: ChainProfiles{Implementer: "a", ReviewA: "a", ReviewB: "c", Validate: "d", Publish: "e"}}},
+		"missing runs dir":    {Orchestration: "cards", Chain: withoutRoot},
+		"missing token path":  {Orchestration: "cards", Chain: withoutToken},
 	}
 	for name, config := range cases {
 		if err := config.validateOrchestration(); err == nil {
 			t.Errorf("validateOrchestration() accepted %s", name)
-		}
-	}
-	for _, mode := range []string{"", "runner"} {
-		config := Config{Orchestration: mode}
-		if err := config.validateOrchestration(); err != nil {
-			t.Errorf("validateOrchestration() rejected mode %q: %v", mode, err)
 		}
 	}
 }

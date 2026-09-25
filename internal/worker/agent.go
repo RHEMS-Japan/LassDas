@@ -608,7 +608,7 @@ func validatedWorkspace(workspace string) (string, error) {
 //
 // AgentLauncherEnv names the launcher that runs agents as the agent user
 // (docs/RUNTIME_POD.md, "Agents under their own user"). Unset, agents run
-// as this process does, at its home — the runner mode outside the pod.
+// as this process does, at its home — a workstation, never the pod.
 const AgentLauncherEnv = "LASSDAS_AGENT_LAUNCHER"
 
 // AgentTreeRootEnv names the directory under which the launcher lends and

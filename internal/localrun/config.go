@@ -95,7 +95,7 @@ func prepare(i Instance) (prepared, error) {
 	// pinned image; host inspection checks only the local launch contract.
 	if config.Identity.EngineSHA != i.EngineSHA || config.LedgerPath != "/data/ledger.db" || config.ConsumerConfigPath != "/etc/lassdas/config/m1-consumer.json" ||
 		config.KnowledgeRoot != "/data/instance" || config.Chain.RunsRoot != "/data/runs" || config.Chain.TargetTokenPath != "/data/secrets/target-token" ||
-		config.Orchestration != "cards" || config.HermesBoard == "" || config.HermesProfile != "lassdas-runner" || config.HermesBin != "/usr/local/bin/hermes" ||
+		config.Orchestration != "cards" || config.HermesBoard == "" || config.HermesBin != "/usr/local/bin/hermes" ||
 		config.WorkerBin != "/usr/local/bin/worker" || config.ControllerBin != "/usr/local/bin/controller" || config.BrowserCheckBin != "" ||
 		config.WorkerSHA256 == "" || config.ControllerSHA256 == "" || config.Chain.E2EProfile != "" || config.Chain.Deliver != (runtime.DeliverConfig{}) {
 		return prepared{}, errors.New("runtime.json does not match the saved image source or the local cards runtime paths and PR-only contract")

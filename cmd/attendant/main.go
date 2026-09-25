@@ -5,15 +5,13 @@
 //     pulling new tracker activity into the ledger, adopting answers,
 //     posting renotifications and shortfall replies, expiring deadlines,
 //     recovering half-posted questions, and projecting the board; and
-//  2. aligns Hermes cards with ledger states — creating the card for a
-//     newly queued run (idempotent by delivery id), unblocking it when an
-//     adopted answer returned the run to the queue, re-blocking it if a
-//     waiting run's card somehow runs free, and retiring bookkeeping for
-//     finished runs.
+//  2. advances every delivery's chain of stage cards — preparing a newly
+//     queued run, creating the round's missing cards, reading what a
+//     finished stage sealed, and owning the report the ticket receives.
 //
 // It replaces the Lambda entirely: no webhook endpoint exists in this
 // constitution — the attendant reads the tracker, the tracker never calls
-// in. It holds no state beyond the ledger and a local delivery→card map.
+// in. It holds no state beyond the ledger and the run directories.
 package main
 
 import (
@@ -98,9 +96,6 @@ func runContext(ctx context.Context) error {
 		return current
 	}
 	refreshPause := func() {
-		if !config.OrchestrationCards() {
-			return
-		}
 		value, err := runtime.ReadIntakePause(*configPath)
 		pauseMu.Lock()
 		defer pauseMu.Unlock()
@@ -140,9 +135,6 @@ func runContext(ctx context.Context) error {
 	// read, and the faster loop below - so one pass never overlaps another.
 	var chainMu sync.Mutex
 	syncChains := func() {
-		if !config.OrchestrationCards() {
-			return
-		}
 		chainMu.Lock()
 		defer chainMu.Unlock()
 		defer func() {
@@ -168,25 +160,14 @@ func runContext(ctx context.Context) error {
 			Protocol: hook.QuestionTickProtocol, AutomationRunID: config.AutomationRunID, IssuedAt: time.Now().UTC(),
 		})
 		logger.Info("tick", "decision", result.Decision, "code", result.Code)
-		if config.OrchestrationCards() {
-			// The cards orchestration: the attendant claims, prepares,
-			// aligns chains and owns every report; no runner process exists.
-			// A ticket read a moment ago starts here rather than waiting for
-			// the chain loop's next pass.
-			syncChains()
-		} else {
-			if err := runtime.SyncCards(ctx, services, hermes, logger); err != nil {
-				logger.Error("card sync failed", "error", err.Error())
-			}
-			if err := attendant.SyncRunnerMerges(ctx, currentConfig(), services, hermes, logger); err != nil {
-				logger.Error("runner merge observation failed", "error", err.Error())
-			}
-		}
-		// Both orchestrations leave the same thing behind, so the sweep sits
-		// outside the branch: a run sealed by the question tick above — an
-		// expired question, a stop asked for while it waited — keeps its
-		// copies of the destination whatever mode created them.
-		if err := attendant.SweepFinishedRunClones(ctx, currentConfig(), services, hermes, logger); err != nil {
+		// The attendant claims, prepares, aligns chains and owns every
+		// report. A ticket read a moment ago starts here rather than waiting
+		// for the chain loop's next pass.
+		syncChains()
+		// A run sealed by the question tick above — an expired question, a
+		// stop asked for while it waited — keeps its copies of the
+		// destination until the sweep takes them.
+		if err := attendant.SweepFinishedRunClones(ctx, currentConfig(), services, logger); err != nil {
 			logger.Error("finished run clone sweep failed", "error", err.Error())
 		}
 		observe()
@@ -221,12 +202,11 @@ func runContext(ctx context.Context) error {
 	// costs nothing external. Only the main loop runs ticks; the observation
 	// loop signals a bell without waiting for the reception to finish.
 	chainEvery := *chainInterval
-	if chainEvery <= 0 || !config.OrchestrationCards() {
+	if chainEvery <= 0 {
 		// Tied to the tick, which is what it was before this loop existed.
 		chainEvery = 0
 	}
-	// Both orchestration modes publish progress; only cards advances stages
-	// here. Observation must not depend on whether that faster loop is on.
+	// Observation must not depend on whether the faster stage loop is on.
 	runLoops(ctx, *interval, *observeInterval, chainEvery, tick, observe, syncChains, bellRang)
 	logger.Info("attendant stopping")
 	return nil

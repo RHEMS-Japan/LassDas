@@ -8,8 +8,10 @@ import (
 
 const snapshotMaxAge = 3 * time.Minute
 
-// Routing belongs to the private snapshot, never to the browser. Keeping
-// it on the existing row avoids a second delivery/workspace registry.
+// Routing belongs to the private snapshot, never to the browser. Nothing
+// writes a routing field onto a row any more, but board.json outlives the
+// process that wrote it: a file left by an older engine must not reach a
+// reader either.
 func publicBoardRow(raw json.RawMessage) (json.RawMessage, error) {
 	var row map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &row); err != nil || row == nil {

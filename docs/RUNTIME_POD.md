@@ -30,7 +30,7 @@ keeps them on the same ledger, routes and identities.
 
 ## The ticket page
 
-The observer runs in both `runner` and `cards` mode: it writes an initial
+The observer writes an initial
 snapshot after reception and independently refreshes it every five seconds
 by default (`attendant --observe-interval`). The board streams file changes
 on a one-second watch. The running step is shown separately from the coarse
@@ -39,19 +39,18 @@ more-than-three-minute-old snapshot is displayed as unconfirmed progress,
 not an empty healthy board. Connection/receive time does not prove that the
 progress itself is fresh.
 
-Observation is separate from advancing stages. In `cards` mode,
-`--chain-interval` checks for stage transitions every ten seconds by
-default; `0` ties those checks to the reception tick. It never enables
-card-chain execution in `runner` mode. Disabling either fast loop does not
+Observation is separate from advancing stages. `--chain-interval` checks
+for stage transitions every ten seconds by default; `0` ties those checks
+to the reception tick. Disabling either fast loop does not
 disable the other. These are polling intervals, not upper bounds on stage
 latency: measure a stage's completion to the next stage's start separately
 from the age of the displayed snapshot.
 
-Cards-mode records keep the shared run-directory layout below. A single
-runner's existing workspace is resolved from Hermes' canonical card listing
-by delivery id; it is not moved or copied for viewing. The private snapshot
-carries that path for detail/live routing, and the status server removes it
-from board, SSE, and detail responses. Clients cannot select a workspace.
+Records keep the shared run-directory layout below, and the ticket page
+reads a delivery's own directory under `chain.runs_root`. No board row and
+no request names a directory: the delivery id is the only thing that comes
+from outside, and it is reduced to a single path element. Clients cannot
+select a workspace.
 
 The status board lists the runs; each row links to `/tickets/<issue key>`, one page per ticket built from the run directory's own records, in order, with the evidence under each step:
 
@@ -78,61 +77,51 @@ transactions without the write lock.
 ## The supervisor contract (fork worker.command)
 
 The Hermes fork's profile-level `worker.command` support is what
-dispatches the runner. The contract the code relies on:
+dispatches a stage card. The contract the code relies on:
 
-- The dispatcher spawns the supervisor with `HERMES_KANBAN_TASK`,
-  `HERMES_KANBAN_WORKSPACE`, `HERMES_KANBAN_RUN_ID` set; the workspace
-  persists across re-dispatches of the same card (the runner clears it in
-  `Prepare`).
-- Before claiming, the runner reads its dispatched card through the canonical
-  CLI, matches its delivery id to the ledger, and verifies the dispatched
-  workspace against the card's actual workspace. It supplies that run id to
-  `Pull`; it never takes whichever ticket occupies the project's pending slot.
-  The card remains authoritative for existing workspaces, including scratch
-  cards created before a persistent runs root was configured.
-- A missing/non-running card, unreadable binding, mismatched workspace, or
-  workspace envelope belonging to another delivery stops the runner **before**
-  it claims a ticket, clears any records, starts a stage, or posts a result.
-  An invalid existing envelope also stops it without deleting evidence. This
-  prevents new cross-ticket processing; it does not repair previously mixed
-  histories or rewrite existing ledger/card state. Those require separately
-  authorized recovery after the evidence has been preserved.
-- Exit code 0 → the supervisor completes the card; **the complete
-  translation is a no-op when the card is not `running`** — that is what
-  lets the runner block its own card (`awaiting-answer:<delivery>`) and
-  then exit 0 with the block keeping its word.
-- Non-zero exit → the supervisor blocks the card with the failure reason.
+- The dispatcher spawns the supervisor with `HERMES_KANBAN_WORKSPACE`
+  set: the delivery's own run directory, which every card of its chain
+  shares and which persists across re-dispatches of the same card. A
+  re-dispatched card removes its own half-written outputs before running
+  again, and never trusts a file another agent left as proof that it
+  already ran.
+- Exit code 0 → the supervisor completes the card, and the attendant
+  reads what the stage sealed on its next pass.
+- Non-zero exit → the supervisor blocks the card with the failure reason,
+  and that blocked card is the visible record of the failure.
 - The card is the liveness signal: a card stays `running` exactly while a
   worker process lives; the supervisor's translation happens within
   seconds of exit.
 
 ### Card ↔ run states
 
-The delivery→card mapping is derived from the kanban itself on every
-sync pass (`list --json --archived`, matching on the idempotency key) —
-there is no attendant-side mapping file. A cached map that could be lost
-or trail reality made "no card known" indistinguishable from "no card
-exists", which is exactly the evidence the claim recovery needs. This
-also makes concurrent attendants safe-if-pointless: every ledger
-transition is CAS-guarded and every card verb idempotent.
+The delivery→cards mapping is derived from the kanban itself on every
+sync pass (`list --json --archived`, matching on the idempotency key
+`<delivery>:<stage>:r<N>` or `:d<N>`) — there is no attendant-side
+mapping file. A cached map that could be lost or trail reality made "no
+card known" indistinguishable from "no card exists", which is exactly the
+evidence the claim recovery needs. This also makes concurrent attendants
+safe-if-pointless: every ledger transition is CAS-guarded and every card
+verb idempotent.
 
-| Ledger state | Card | Owner of the transition |
+| Ledger state | Cards | Owner of the transition |
 | --- | --- | --- |
-| queued | created (idempotency key = delivery id) or unblocked (`--resolve`) | attendant |
-| claimed | running | dispatcher/supervisor |
-| question pending → awaiting answer | blocked (`needs_input`, by the runner; attendant re-blocks escapes) | runner |
-| queued again (answer adopted) | unblocked | attendant |
-| terminal via runner report | completed (rc 0) / blocked (rc ≠ 0) | supervisor |
-| terminal via attendant (expiry, cancel) | completed by `SyncCards` | attendant |
+| queued | any stale card archived, the run prepared, the round's chain created | attendant |
+| claimed | the round's next card runs; a finished one is `done` | dispatcher/supervisor |
+| claimed, round to redo | the round's remaining cards archived, the next round's chain created | attendant |
+| question sealed → awaiting answer | the whole chain archived; the question is posted to the ticket | attendant |
+| queued again (answer adopted) | a fresh round's chain | attendant |
+| terminal | the chain is left as it stands; the failure's blocked card remains | supervisor / attendant |
 
 ### Crash recovery
 
 A run whose worker died holds `claimed` (or `terminal_report_pending`
-without sealed question evidence — a runner that died between the two
-phases of its own report). The attendant recovers it: card not
-`running`/`review`, claim older than the grace (10 min) →
-`RecoverLostClaim` returns it to `queued` bound to the observed dead
-claim's timestamp, so a live re-claim can never be stomped. Neither store
+without sealed question evidence — a stage that died between the two
+phases of its own report). The attendant recovers it: with the run's
+records unusable — the sealed envelope unreadable, or the engine changed
+under the delivery — it archives the chain and calls `RecoverLostClaim`,
+which returns the run to `queued` bound to the observed dead claim's
+timestamp, so a live re-claim can never be stomped. Neither store
 expires claims on its own — under the workflow constitution a dead claim
 required operator surgery (measured live 2026-08-19); this transition is
 the structural replacement. `terminal_report_pending` **with** sealed
@@ -158,13 +147,11 @@ a person releases the card, exactly as with `scheduled`.
 - `scheduled` (operator time-wait) and `triage` (the kanban's forced
   human decision) are human lanes; the attendant never automates through
   either — the run waits with the card.
-- A runner-reported failure leaves the supervisor's `blocked` card as the
-  visible record of that failure. The attendant retires cards only for
-  its OWN terminations (`clarification_expired`, `cancelled`) — Complete
-  first, Archive as the fallback for states Complete refuses.
-- A `done` card under a queued run cannot be re-dispatched and still
-  holds the delivery's idempotency key (only archiving releases it), so
-  it is archived and a fresh card created.
+- A stage that exited non-zero leaves the supervisor's `blocked` card as
+  the visible record of that failure.
+- A card that cannot be re-dispatched still holds its idempotency key
+  (only archiving releases it), so the attendant archives it and creates
+  the round's chain afresh.
 
 ## Identity and run references
 
@@ -267,7 +254,7 @@ fabricated workflow link.
   `failure-streak-resolution.json` recorded in that run's directory).
   In-flight runs are not touched; the held ticket is read at most every
   two minutes.
-- **Intake pause** (cards orchestration only): `chain.intake_paused_since`
+- **Intake pause**: `chain.intake_paused_since`
   (an RFC 3339 time) is the operator's explicit pause. The attendant and the
   console re-read it from the mounted config before every tick, so editing
   the ConfigMap is enough — no restart, which would interrupt the running
@@ -277,7 +264,7 @@ fabricated workflow link.
   (marker `intake-paused` with the pause instant) and the board shows
   受付停止中 with the instant in Asia/Tokyo — and claimed deliveries continue
   to their end. Removing the value resumes intake; the queued runs then start
-  in order. The runner orchestration refuses the value at load.
+  in order.
 - **A configuration change no longer stops a published delivery**: the
   merge observation and the delivery continuation hold a finished run's
   sealed records to the configuration digest that run recorded, not to the
@@ -302,8 +289,10 @@ fabricated workflow link.
   most once an hour for 14 days.
 - **Credentials**: the destination token reaches only the clone (via a
   one-shot GIT_ASKPASS) and the controller (explicit env), never the
-  model-stage children — the runner strips it from its own environment
-  first. The agents run as a separate user (below), so the runner's exec
+  model-stage children — the entrypoint moves it out of the process
+  environment into an operator-only file before any resident starts, and
+  only the stages that reach the destination read it back.
+  The agents run as a separate user (below), so the runner's exec
   image and the state volume's owner-only files are closed to them; what
   remains readable to an agent is the workspace it was lent and the
   world-readable parts of the image.
@@ -313,7 +302,7 @@ fabricated workflow link.
   never stored), and a read-only base copy no agent is pointed at bounds
   what a change started from.
 
-- **Adopted answers are preserved by the runner, not by a job of the
+- **Adopted answers are preserved by the engine, not by a job of the
   instance repository.** The workflow rendered a resumed run's adopted
   answers (`worker preserve-answers`) and committed the record to the
   instance repository's knowledge tree. The pod's knowledge tree is the
@@ -528,7 +517,7 @@ by design; the run record holds the transcript. At boot the entrypoint
 takes back whatever a pod that died mid-run left to the agent user under
 the runs directory.
 
-In the cards orchestration every card that runs an agent is a direct
+Every card that runs an agent is a direct
 command: the implement and apply cards run `runner chain-stage --stage
 implement|apply`, and the runner hands the rendered instruction to `worker
 run-instruction`, which starts the agent as above (the consumer's
@@ -564,19 +553,11 @@ closed. The launcher lends and returns trees under the runs directory
 alone (`LASSDAS_AGENT_TREE_ROOT`, set by the entrypoint from the runtime
 configuration's `chain.runs_root`).
 
-This root is also used by single-runner cards when configured: the canonical
-Hermes card receives `--workspace dir:<runs_root>/<delivery_id>`. It must be
-on persistent storage in a pod deployment; leaving the runner on Hermes'
-scratch default puts its workspace outside the launcher's permitted tree
-and loses its records on replacement. Configurations without a runs root
-retain the legacy scratch default. Existing cards keep their recorded paths;
-setting a root does not move or re-run historical cards.
-
-Runner mode takes reviewer identities and the stage limit from the consumer
-configuration, carrying those same review files into decision, validation
-and publication. Explicit `reviewer_agents` bindings select each launch.
-The original unbound `claude-correctness` seat keeps its direct-model call
-for compatibility; no configured reviewer is renamed or substituted.
+`chain.runs_root` is required, and must be on persistent storage in a pod
+deployment: a card left on Hermes' scratch default would put its workspace
+outside the launcher's permitted tree and lose its records on replacement.
+Every card of a delivery's chain receives `--workspace
+dir:<runs_root>/<delivery_id>`.
 
 Stopping an agent: a signal from the engine's user does not reach the
 agent user's processes, so the worker stops a run by sending the launcher
@@ -734,7 +715,7 @@ means adding a row here and the test it names.
 | A run claimed under one engine revision is ended by the next: the terminal report is refused as `terminal_report_conflict` for ever when the owner comes from the running engine | `internal/state` `TestClaimOwnerIsTheIdentityTheRunWasClaimedUnder`; `Terminal.owner` reads the claim owner from the run row | live, 2026-09-05 (an investigation-only run claimed under 55ed29c, reported under 896efa8) |
 | A run that ends `model_failed` — 12 of the 33 runs the board holds, the most common outcome — naming no step, so the requester cannot tell a stop before anything was written from one after the change was made and reviewed, and the operator's only copy of the cause is a container log the next release erases | `internal/attendant` `TestAModelFailureTellsTheRequesterWhichStepFailed`, `TestAModelFailureOnTheImplementationSideAlsoNamesItsStep`, `TestEveryStepOfTheWorkHasARequesterFacingName`, `TestTheSentenceEveryStepProducesIsTrueOfThatStep`, `TestTheSealAndTheReviewAreNotToldAsTheSameStep`, `TestAReportPostedOnTheSecondAttemptStillNamesTheStep`, `TestAMalformedRecordCostsTheSentenceNotTheComment`, `TestThePublishCardNeverEndsARunAsAModelFailure`; `internal/runner` `TestEveryReceptionExitNamesItsOwnStep`, `TestAReceptionRecordThatCannotBeReadIsNotToldAsTheAIFailing`; `internal/hook` `TestTheModelFailureSentenceNamesTheStepWhenItHasOne`, `TestAStepNameThatIsNotOneBoundedLineIsRefused` | live, 2026-09-09 (a run ended `model_failed` at 16:02; the pod was replaced before the cause was read, and it is not recoverable) |
 | A toolchain missing from the image (`go`, `node`) | not a test: `release.sh` runs them inside the built image | first live run |
-| A delivery whose pull request was merged never noticed, because the merge observation was held to the configuration as it stands now and refused the ticket of every run sealed before the last change to it — a refusal indistinguishable from "not merged yet" | `internal/worker` `TestFinishedRunIsValidatedAgainstTheDigestItRecorded`; `cmd/controller` `TestReadMergedReadsAFinishedRunAfterTheConfigurationChanged`, `TestTheDeliveryContinuationReadsAFinishedRunAfterTheConfigurationChanged`, `TestInFlightVerbsDoNotAcceptARecordedDigest`; `internal/attendant` `TestAFinishedRunsMergeIsRecordedAfterTheConfigurationChanged`, `TestSyncRunnerMergesRecordsAMergeOfARunSealedUnderAnotherConfiguration`, `TestAFinishedRunWhoseRecordsCannotBeReadIsSaidOnce`, `TestAPublishedDeliveryWithAnUnreadableRecordIsSaidOnce`, `TestATransientRefusalIsNotSaid`, `TestAFinishedRunThatPublishedNothingIsNotSaid`; `internal/runner` `TestPostTerminalVerbsNameTheDigestTheRunRecorded`; `cmd/attendant` `TestResidentObservesHumanMerge` | live, 2026-09-24 (the board asked for a merge made ten hours earlier; a run sealed under the current configuration was recorded within four seconds) |
+| A delivery whose pull request was merged never noticed, because the merge observation was held to the configuration as it stands now and refused the ticket of every run sealed before the last change to it — a refusal indistinguishable from "not merged yet" | `internal/worker` `TestFinishedRunIsValidatedAgainstTheDigestItRecorded`; `cmd/controller` `TestReadMergedReadsAFinishedRunAfterTheConfigurationChanged`, `TestTheDeliveryContinuationReadsAFinishedRunAfterTheConfigurationChanged`, `TestInFlightVerbsDoNotAcceptARecordedDigest`; `internal/attendant` `TestAFinishedRunsMergeIsRecordedAfterTheConfigurationChanged`, `TestAFinishedRunWhoseRecordsCannotBeReadIsSaidOnce`, `TestAPublishedDeliveryWithAnUnreadableRecordIsSaidOnce`, `TestATransientRefusalIsNotSaid`, `TestAFinishedRunThatPublishedNothingIsNotSaid`; `internal/runner` `TestPostTerminalVerbsNameTheDigestTheRunRecorded`; `cmd/attendant` `TestResidentObservesHumanMerge` | live, 2026-09-24 (the board asked for a merge made ten hours earlier; a run sealed under the current configuration was recorded within four seconds) |
 | A run whose failure could be read only in the pod — a reviewer that returned no verdict, a key whose allowance ran out, a design decision, the price of the calls — with the board showing one line and the ticket a paragraph; the ticket page now shows the whole run from its own records, masked the way probe outputs are, by the key the board lists and never by a path | `internal/ticketview` `TestBuildAssemblesTheRunInOrderWithCostsAndMaskedSecrets`, `TestBuildShowsEveryReadinessAttempt`, `TestBuildReadsDesignRoundsAndApplierRuns`, `TestBuildMasksBeforeTakingATail`, `TestRecordPathServesOnlyKnownNames`, `TestShownRefusesWholeSecretsAndBoundsLength`; `cmd/statusboard` `TestTicketAPIResolvesTheKeyThroughTheBoardOnly`, `TestTicketAPIPicksTheNewestRunOfAKey`, `TestTicketRecordsAreAllowListedAndMasked`, `TestTicketRecordsAreMaskedBeforeAnyCut`, `TestTicketRoutesSitBehindTheAccessGate`, `TestBoardHTMLLinksEachCardToItsTicketPage` | live, 2026-09-15 (two failed deliveries whose causes were found only through the pod's records and the gateway's database) |
 | A reception that reasoned itself to the wall ending as model_failed with nothing but the step name in the run directory — the cause (finish reason, 32,768 reasoning tokens, no answer) found only in the gateway's own logs; the turn now writes what it knew on one stderr line, the runner keeps it as `model-failure-detail.json` beside the failed step, and the ticket page says what the numbers mean | `internal/worker` `TestATurnThatGivesUpLeavesItsDetailOnOneLine`, `TestAGatewayStatusReachesTheDetailAsANumber`, `TestASuccessfulTurnLeavesNoDetailLine`, `TestParseFailureDetailLineIsStrict`; `internal/runner` `TestAReceptionModelFailureKeepsTheWorkersDetailBesideTheRun`, `TestAReceptionFailureWithoutDetailLeavesNoRecord`; `internal/ticketview` `TestBuildReadsTheBilledSpendAndTheModelFailureDetail`, `TestModelFailureSummaryNamesEachCase` | live, 2026-09-15 (a readiness assessment that spent its whole allowance reasoning) |
 | A run's cost read from the gateway for the terminal comment and then lost — the board and the ticket page could sum only the prices a few records carry, a fraction of the bill; the reading is now kept as `spend.json` on every report, per key with its roles, and the page shows it first | `internal/runner` `TestTheSpendReadingIsKeptBesideTheRun`; `internal/ticketview` `TestBuildReadsTheBilledSpendAndTheModelFailureDetail` | live, 2026-09-15 (a ticket billed $2.79 whose page said $0.05) |

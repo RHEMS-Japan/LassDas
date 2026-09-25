@@ -33,9 +33,9 @@ var pinnedStages = map[string]string{
 
 	"agent-design-review": "design", "decide-design": "design", "design-impasse-question": "design",
 
-	"implement": "implement", "implement-instruction": "implement", "run-instruction": "implement",
+	"implement-instruction": "implement", "run-instruction": "implement",
 
-	"agent-review": "review", "review": "review", "seal-candidate": "review",
+	"agent-review": "review", "seal-candidate": "review",
 
 	"decide": "checks", "apply": "checks", "run-validation": "checks",
 	"verify-applied": "checks", "verify-publish-gate": "checks", "impasse-question": "checks",
@@ -63,10 +63,7 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	// smaller engine, it is a scan that stopped seeing call sites, or an
 	// engine that lost one - and a lost step is how a rail stage went empty
 	// (review of #200).
-	// Runner and cards now share agent-review's call site. That removes a
-	// duplicate, not a step; the bidirectional pinned-set check below still
-	// requires every distinct step.
-	if len(names) < 43 {
+	if len(names) < 39 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
@@ -276,10 +273,9 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 	}
 	// The reception is not a card, and its work is most of what a reader
 	// watches under 受付, so a step it starts is the table's call. Only the
-	// reception: the one-process mode runs the same stages without cards,
-	// and letting that abstain took the review steps out of the derivation
-	// entirely - agent-review could be moved anywhere and stay green
-	// (review of #200).
+	// reception: letting any other entry abstain took the review steps out
+	// of the derivation entirely - agent-review could be moved anywhere and
+	// stay green (review of #200).
 	reception := map[string]bool{}
 	for _, entry := range []string{"pretrip", "readinessGate"} {
 		for _, fn := range reachableFrom(entry, calls) {

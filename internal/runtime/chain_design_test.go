@@ -140,7 +140,7 @@ func TestEnsureChainForDesignShapeKeysDesignAndImplementRoundsApart(t *testing.T
 }
 
 func TestDesignProfilesAreSetTogether(t *testing.T) {
-	config := Config{Orchestration: "cards", HermesProfile: "lassdas-runner", Chain: chainTestConfig()}
+	config := Config{Orchestration: "cards", Chain: chainTestConfig()}
 	if err := config.validateOrchestration(); err != nil {
 		t.Fatalf("original five profiles refused: %v", err)
 	}

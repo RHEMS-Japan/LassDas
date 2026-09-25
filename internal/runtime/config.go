@@ -70,9 +70,12 @@ type Config struct {
 	HermesBin string `json:"hermes_bin"`
 	// HermesBoard is the kanban board slug the cards live on.
 	HermesBoard string `json:"hermes_board"`
-	// HermesProfile is the assignee profile whose worker.command runs the
-	// stage runner.
-	HermesProfile string `json:"hermes_profile"`
+	// HermesProfile named the assignee profile of the single card that ran
+	// a whole delivery. That card is gone, and so is the profile. The field
+	// is still decoded for one reason only: a configuration that still
+	// carries it is refused with a sentence that says what to delete,
+	// instead of the decoder's unknown-field message.
+	HermesProfile string `json:"hermes_profile,omitempty"`
 
 	// WorkerSHA256/ControllerSHA256 optionally pin the stage binaries. The
 	// workflow measured its tools before every use (checkout SHA + binary
@@ -83,26 +86,21 @@ type Config struct {
 	BrowserCheckSHA256 string `json:"browsercheck_sha256,omitempty"`
 	ControllerSHA256   string `json:"controller_sha256,omitempty"`
 
-	// Orchestration selects how a queued run executes: "runner" (the
-	// default, and the rollback target) keeps the single-card pipeline;
-	// "cards" builds the per-stage card chain (docs/M2_MIGRATION.md). The
-	// M1 runner path is not deleted until Phase 3 precisely so this flip
-	// stays possible.
-	Orchestration string `json:"orchestration,omitempty"`
-	// Chain configures the cards orchestration; required when it is on.
-	Chain ChainConfig `json:"chain,omitempty"`
+	// Orchestration must be "cards": a queued run executes as a chain of
+	// per-stage cards. It is the only way a run executes, and the field
+	// stays so that the older value is refused by name rather than
+	// reinterpreted.
+	Orchestration string `json:"orchestration"`
+	// Chain configures the card chain. Required.
+	Chain ChainConfig `json:"chain"`
 }
 
-// OrchestrationCards reports whether queued runs execute as card chains.
-func (c Config) OrchestrationCards() bool { return c.Orchestration == "cards" }
-
-// ChainConfig is the cards orchestration's shape: where run directories
-// live and which profile runs each stage.
+// ChainConfig is the chain's shape: where run directories live and which
+// profile runs each stage.
 type ChainConfig struct {
-	// RunsRoot holds one persistent directory per delivery in either mode.
-	// Runner cards use it when configured; every card of a delivery's chain
-	// shares it as an explicit dir: workspace.
-	RunsRoot string `json:"runs_root,omitempty"`
+	// RunsRoot holds one persistent directory per delivery: every card of
+	// a delivery's chain shares it as an explicit dir: workspace. Required.
+	RunsRoot string `json:"runs_root"`
 	// TargetTokenPath is the file the destination credential is read from
 	// by the stages that reach the destination (validate's sandbox clone,
 	// publish). A file rather than the environment: the kanban dispatcher
@@ -110,7 +108,7 @@ type ChainConfig struct {
 	// own environment, and a token there would ride into the implementing
 	// agent. Same-UID file exposure remains, recorded with the pod's other
 	// UID-separation gates (docs/RUNTIME_POD.md).
-	TargetTokenPath string `json:"target_token_path,omitempty"`
+	TargetTokenPath string `json:"target_token_path"`
 	// Profiles names the five stage profiles. Their worker.command (or, for
 	// the implementer, the native agent) is host-side Hermes configuration.
 	Profiles ChainProfiles `json:"profiles,omitempty"`
@@ -144,8 +142,8 @@ type ChainConfig struct {
 	Deliver DeliverConfig `json:"deliver,omitempty"`
 }
 
-// E2EEnabledAfterTime parses the observation cut-off. The cards
-// orchestration validates it at load time whenever the debug role is on.
+// E2EEnabledAfterTime parses the observation cut-off, validated at load
+// time whenever the debug role is on.
 func (c ChainConfig) E2EEnabledAfterTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, c.E2EEnabledAfter)
 }
@@ -349,11 +347,6 @@ func Load(path string) (Config, error) {
 		if _, err := time.Parse(time.RFC3339, config.Chain.IntakePausedSince); err != nil {
 			return Config{}, errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
 		}
-		if !config.OrchestrationCards() {
-			// Only the cards attendant holds queued runs; the runner
-			// orchestration would accept the value and start everything.
-			return Config{}, errors.New("runtime config: chain.intake_paused_since needs orchestration \"cards\"")
-		}
 	}
 	i := config.Identity
 	if i.RepositoryID <= 0 || !ownerNamePattern.MatchString(i.Repository) ||
@@ -411,79 +404,87 @@ func (c Config) ValidateDestinations() error {
 	return nil
 }
 
-// validateOrchestration checks the execution-mode selection: the runner mode
-// carries no extra requirements, the cards mode refuses to load half-shaped
-// (a missing profile would send a stage to a nonexistent assignee and the
-// chain would sit in dispatch forever).
+// OrchestrationRefusal is what an operator is told when the configuration
+// does not select the card chain. The older single-card mode is gone, and a
+// configuration that still asks for it — or says nothing, which used to mean
+// it — is refused rather than quietly read as the chain: the two ran a
+// delivery differently, and a pod that started the wrong one would leave the
+// board and the tracker describing a shape nobody configured.
+const OrchestrationRefusal = `runtime config: orchestration は "cards" だけを受け付けます（"runner" は廃止しました）。設定の orchestration を "cards" にしてください`
+
+// hermesProfileRefusal names the setting the single-card mode took with it.
+// Without this the decoder refuses the whole file for an unknown field, and
+// the operator has to guess which line to delete.
+const hermesProfileRefusal = `runtime config: hermes_profile は廃止しました。設定から hermes_profile の行を削除してください`
+
+// validateOrchestration checks the chain configuration: it refuses to load
+// half-shaped (a missing profile would send a stage to a nonexistent
+// assignee and the chain would sit in dispatch forever).
 func (c Config) validateOrchestration() error {
-	switch c.Orchestration {
-	case "", "runner":
-		return nil
-	case "cards":
-		p := c.Chain.Profiles
-		names := []string{p.Implementer, p.ReviewA, p.ReviewB, p.Validate, p.Publish}
-		seen := make(map[string]struct{}, len(names))
-		for _, name := range names {
-			if name == "" {
-				return errors.New("runtime config: cards orchestration needs all five chain profiles")
-			}
+	if c.Orchestration != "cards" {
+		return errors.New(OrchestrationRefusal)
+	}
+	if c.HermesProfile != "" {
+		return errors.New(hermesProfileRefusal)
+	}
+	p := c.Chain.Profiles
+	names := []string{p.Implementer, p.ReviewA, p.ReviewB, p.Validate, p.Publish}
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			return errors.New("runtime config: chain needs all five stage profiles")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return errors.New("runtime config: chain profiles must be distinct")
+		}
+		seen[name] = struct{}{}
+	}
+	if p.designPartiallyConfigured() {
+		return errors.New("runtime config: chain design profiles (investigate, design_review_a, design_review_b, design_decide, applier) are set together or not at all")
+	}
+	if p.DesignEnabled() {
+		for _, name := range []string{p.Investigate, p.DesignReviewA, p.DesignReviewB, p.DesignDecide, p.Applier} {
 			if _, duplicate := seen[name]; duplicate {
-				return errors.New("runtime config: chain profiles must be distinct")
-			}
-			if name == c.HermesProfile {
-				return errors.New("runtime config: chain profiles must not reuse the runner profile")
+				return errors.New("runtime config: chain design profiles must not reuse another profile")
 			}
 			seen[name] = struct{}{}
 		}
-		if p.designPartiallyConfigured() {
-			return errors.New("runtime config: chain design profiles (investigate, design_review_a, design_review_b, design_decide, applier) are set together or not at all")
-		}
-		if p.DesignEnabled() {
-			for _, name := range []string{p.Investigate, p.DesignReviewA, p.DesignReviewB, p.DesignDecide, p.Applier} {
-				if _, duplicate := seen[name]; duplicate || name == c.HermesProfile {
-					return errors.New("runtime config: chain design profiles must not reuse another profile")
-				}
-				seen[name] = struct{}{}
-			}
-		}
-		if c.Chain.RunsRoot == "" {
-			return errors.New("runtime config: cards orchestration needs chain.runs_root")
-		}
-		if c.Chain.TargetTokenPath == "" {
-			return errors.New("runtime config: cards orchestration needs chain.target_token_path")
-		}
-		if c.Chain.E2EProfile != "" {
-			if _, taken := seen[c.Chain.E2EProfile]; taken || c.Chain.E2EProfile == c.HermesProfile {
-				return errors.New("runtime config: chain.e2e_profile must not reuse another profile")
-			}
-			if _, err := c.Chain.E2EEnabledAfterTime(); err != nil {
-				return errors.New("runtime config: chain.e2e_profile needs chain.e2e_enabled_after as an RFC3339 instant (observations never reach back before it)")
-			}
-		}
-		if c.Chain.Deliver.partiallyConfigured() {
-			return errors.New("runtime config: chain.deliver needs checks_profile, integrate_profile and promote_profile together")
-		}
-		if c.Chain.Deliver.Enabled() {
-			if c.Chain.E2EProfile != "" {
-				return errors.New("runtime config: chain.deliver replaces chain.e2e_profile — configure one, not both")
-			}
-			for _, profile := range []string{c.Chain.Deliver.ChecksProfile, c.Chain.Deliver.IntegrateProfile, c.Chain.Deliver.PromoteProfile} {
-				if _, taken := seen[profile]; taken || profile == c.HermesProfile {
-					return errors.New("runtime config: chain.deliver profiles must not reuse another profile")
-				}
-				seen[profile] = struct{}{}
-			}
-			if _, err := c.Chain.Deliver.EnabledAfterTime(); err != nil {
-				return errors.New("runtime config: chain.deliver needs enabled_after as an RFC3339 instant (deliveries never reach back before it)")
-			}
-			if c.BrowserCheckBin == "" {
-				return errors.New("runtime config: chain.deliver needs browsercheck_bin (the sealed observation binary)")
-			}
-		}
-		return nil
-	default:
-		return errors.New("runtime config: orchestration must be \"runner\" or \"cards\"")
 	}
+	if c.Chain.RunsRoot == "" {
+		return errors.New("runtime config: chain.runs_root is required")
+	}
+	if c.Chain.TargetTokenPath == "" {
+		return errors.New("runtime config: chain.target_token_path is required")
+	}
+	if c.Chain.E2EProfile != "" {
+		if _, taken := seen[c.Chain.E2EProfile]; taken {
+			return errors.New("runtime config: chain.e2e_profile must not reuse another profile")
+		}
+		if _, err := c.Chain.E2EEnabledAfterTime(); err != nil {
+			return errors.New("runtime config: chain.e2e_profile needs chain.e2e_enabled_after as an RFC3339 instant (observations never reach back before it)")
+		}
+	}
+	if c.Chain.Deliver.partiallyConfigured() {
+		return errors.New("runtime config: chain.deliver needs checks_profile, integrate_profile and promote_profile together")
+	}
+	if c.Chain.Deliver.Enabled() {
+		if c.Chain.E2EProfile != "" {
+			return errors.New("runtime config: chain.deliver replaces chain.e2e_profile — configure one, not both")
+		}
+		for _, profile := range []string{c.Chain.Deliver.ChecksProfile, c.Chain.Deliver.IntegrateProfile, c.Chain.Deliver.PromoteProfile} {
+			if _, taken := seen[profile]; taken {
+				return errors.New("runtime config: chain.deliver profiles must not reuse another profile")
+			}
+			seen[profile] = struct{}{}
+		}
+		if _, err := c.Chain.Deliver.EnabledAfterTime(); err != nil {
+			return errors.New("runtime config: chain.deliver needs enabled_after as an RFC3339 instant (deliveries never reach back before it)")
+		}
+		if c.BrowserCheckBin == "" {
+			return errors.New("runtime config: chain.deliver needs browsercheck_bin (the sealed observation binary)")
+		}
+	}
+	return nil
 }
 
 // BoardStatuses are the tracker's own status ids for the four phases the

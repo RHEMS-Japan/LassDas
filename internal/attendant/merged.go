@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
 )
@@ -58,42 +57,6 @@ var mergeRecordFailures = map[string]bool{
 	"arguments_invalid":       true,
 	"output_path_invalid":     true,
 	"command_invalid":         true,
-}
-
-// SyncRunnerMerges observes the PRs left by finished runners. It neither
-// reopens runs nor starts cards/delivery stages. The ordinary reception
-// tick calls it; the fast, read-only display loop must not poll GitHub.
-func SyncRunnerMerges(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, logger Logger) error {
-	if config.OrchestrationCards() {
-		return nil // SyncChains already owns merge observation in this mode.
-	}
-	runs, err := services.Store.ScanRuns(ctx)
-	if err != nil {
-		return err
-	}
-	var tasks []runtime.BoardTask
-	loaded := false
-	for _, run := range runs {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if run.State != "terminal" || run.TerminalCode != string(hook.TerminalSuccess) {
-			continue
-		}
-		if !loaded {
-			tasks, err = hermes.ListBoardTasks(ctx)
-			if err != nil {
-				return err
-			}
-			loaded = true
-		}
-		dir, _ := runnerWorkspace(tasks, run.DeliveryID)
-		if dir == "" {
-			dir = runDirectory(config, run.DeliveryID)
-		}
-		recordFeatureMerge(ctx, config, run, dir, logger)
-	}
-	return nil
 }
 
 type featureMerge struct {
@@ -154,17 +117,12 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 		noteUnreadableRun(runDir, run, mergeDeliveryRecordCode, logger)
 		return
 	}
-	// Match entrypoint.sh: runner retains the existing environment token,
-	// while cards seals it into an operator-only file before dispatch.
-	token := ""
-	if !config.OrchestrationCards() {
-		token = os.Getenv("TARGET_GITHUB_TOKEN")
-	}
-	if token == "" {
-		token, err = readTargetToken(config)
-		if err != nil {
-			return
-		}
+	// Match entrypoint.sh: the destination credential is sealed into an
+	// operator-only file before any stage is dispatched, never left in the
+	// environment an agent could inherit.
+	token, err := readTargetToken(config)
+	if err != nil {
+		return
 	}
 	out := filepath.Join(runDir, featureMergeFile+".reading")
 	_ = os.Remove(out)

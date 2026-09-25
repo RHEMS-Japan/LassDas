@@ -24,8 +24,8 @@
 |---|---|
 | Go バイナリ | attendant、runner、worker、controller、browsercheck、statusboard、agentexec、計 7 |
 | tool-pins.txt | worker、controller、browsercheck の SHA-256、3 本分 |
-| boot が書く profile | runner 1、validate/publish/investigate/design-decide 4、e2e 1、配送 3、実装 1、レビュー 2、設計レビュー 2、写し 1、計 15 |
-| 本設計のカード用 profile | 実装系 5 + 設計系 5、計 10。runner は別枠。観測・配送用は使用しない |
+| boot が書く profile | validate/publish/investigate/design-decide 4、e2e 1、配送 3、実装 1、レビュー 2、設計レビュー 2、写し 1、計 14 |
+| 本設計のカード用 profile | 実装系 5 + 設計系 5、計 10。観測・配送用は使用しない |
 | モデルの鍵 | 既定は共通の1本。任意で §7 の役別8本、設計レビューも別に指定する場合は10本 |
 
 予算監視は接続先とキー変数名が同じ役をまとめる (`internal/attendant/budget.go` の roleProbes)。別の変数名へ同じ値を設定しただけで監視が1回になるとは扱わない。共通キーではキー単位の費用と利用上限が全役の合算になる。役別に異なるキーを設定することと、費用内訳が正しく分かれることは別の検査であり、後者は §10 で測る。私的な個別の運用記録を公開設計の実測根拠にしない。
@@ -46,7 +46,7 @@ lassdas init
 lassdas run start / stop / status / logs
 ```
 
-本体は `orchestration: cards` を明示する。現行の省略時・見本の runner 方式とは異なり、既存の設計工程を備える cards を選ぶ。別の進行機構は作らない。init が内部で run start 相当を呼ぶため、立ち上げに別コマンドの実行を要求しない。
+本体は `orchestration: cards` を明示する。これが唯一の受理値で、省略や他の値は起動時に断る。別の進行機構は作らない。init が内部で run start 相当を呼ぶため、立ち上げに別コマンドの実行を要求しない。
 
 ### 1.1 init 自体の入手と前提
 
@@ -154,13 +154,13 @@ statusboard はコンテナ内 :9200。init は `LASSDAS_BOARD_AUTH=local` を�
 | report_destinations | 段 1 の repo、kind=cli、delivery=pull_request。§4 の実装が前提 |
 | worker_bin / controller_bin / browsercheck_bin | /usr/local/bin/worker、/usr/local/bin/controller、browsercheck は空 |
 | worker_sha256 / controller_sha256 | image の /etc/lassdas/tool-pins.txt から取得し実バイナリと照合。3 本目も存在検査するが観測を有効にしない |
-| hermes_bin / hermes_board / hermes_profile | /usr/local/bin/hermes、project ごとの内部名、lassdas-runner |
+| hermes_bin / hermes_board | /usr/local/bin/hermes、project ごとの内部名 |
 | orchestration / chain | cards、runs_root=/data/runs、target_token_path=/data/secrets/target-token、failure_streak_limit=3、profile 10 本を entrypoint と一致させる |
 | chain.profiles の実装系 5 本 | implementer、review_a、review_b、validate、publish → lassdas-implementer、lassdas-review-a、lassdas-review-b、lassdas-validate、lassdas-publish |
 | chain.profiles の設計系 5 本 | investigate、design_review_a、design_review_b、design_decide、applier → lassdas-investigate、lassdas-design-review-a、lassdas-design-review-b、lassdas-design-decide、lassdas-applier |
 | 観測・配送 | chain.e2e_profile と chain.deliver は空。consumer と矛盾する組合せは起動前に拒否 |
 
-`internal/runtime/config.go` の Load と BuildServices の双方を通す。見本のコピーだけでは空の report_destinations と runner 既定が残る。常用 tracker bot の鍵は runtime services が読む既存 env へ設定する (変数名の正本は `internal/runtime/services.go`)。
+`internal/runtime/config.go` の Load と BuildServices の双方を通す。見本のコピーだけでは report_destinations が空のまま残る。常用 tracker bot の鍵は runtime services が読む既存 env へ設定する (変数名の正本は `internal/runtime/services.go`)。
 
 LASSDAS_RUNTIME_CONFIG=/etc/lassdas/config/runtime.json、LASSDAS_STATE_DIR=/data、HERMES_KANBAN_DB=/data/kanban.db、LASSDAS_AGENT_TREE_ROOT=/data/runs を揃える。**HERMES_KANBAN_BOARD は runtime.hermes_board と同じ値を必ず生成する。** runtime はその設定名の板へカードを作るが、entrypoint の dispatch は env 未指定で別の既定名を使うためである。C は boot・受付・dispatch が同じ板を使うことを検査する。TARGET_GITHUB_TOKEN は entrypoint が target-token へ移す。
 

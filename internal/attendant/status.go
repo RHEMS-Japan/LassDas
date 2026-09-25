@@ -43,15 +43,12 @@ type BoardSnapshot struct {
 
 // RunStatus is one delivery's position in the pipeline, in requester terms.
 type RunStatus struct {
-	// Private routing metadata from Hermes. The status server removes it
-	// from every public response; it never comes from a request URL.
-	WorkspacePath string                  `json:"workspace_path,omitempty"`
-	Running       *ticketview.RunningStep `json:"running,omitempty"`
-	DeliveryID    string                  `json:"delivery_id"`
-	IssueID       int64                   `json:"issue_id,omitempty"`
-	IssueKey      string                  `json:"issue_key,omitempty"`
-	Summary       string                  `json:"summary,omitempty"`
-	State         string                  `json:"state"`
+	Running    *ticketview.RunningStep `json:"running,omitempty"`
+	DeliveryID string                  `json:"delivery_id"`
+	IssueID    int64                   `json:"issue_id,omitempty"`
+	IssueKey   string                  `json:"issue_key,omitempty"`
+	Summary    string                  `json:"summary,omitempty"`
+	State      string                  `json:"state"`
 	// Step is one of the pipeline steps (intake, implement, review, checks,
 	// staging, confirm, production) or a resting state (question, done,
 	// stopped, failed).
@@ -170,15 +167,6 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		State: run.State, ClaimedAt: run.ClaimedAt, Terminal: run.TerminalCode,
 	}
 	runDir := runDirectory(config, run.DeliveryID)
-	var runnerCard *runtime.BoardTask
-	if !config.OrchestrationCards() {
-		var workspace string
-		workspace, runnerCard = runnerWorkspace(tasks, run.DeliveryID)
-		if workspace != "" {
-			status.WorkspacePath = workspace
-			runDir = workspace
-		}
-	}
 	switch run.State {
 	case "queued":
 		// The pause outranks a budget or login hold left in the run
@@ -210,24 +198,10 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 			break
 		}
 		classifyClaimed(&status, run, tasks)
-		if runnerCard != nil {
-			classifyRunnerCard(&status, runnerCard)
-		}
-		if status.Step != "attention" && (runnerCard == nil || runnerCard.Status == "running") {
+		if status.Step != "attention" {
+			// The cards already supply an authoritative coarse stage; the
+			// running step only adds which step of it is under way.
 			status.Running = ticketview.ReadRunningStep(runDir)
-			if status.Running != nil {
-				// Cards already supply an authoritative coarse stage. Only
-				// the single runner needs its step to locate that stage.
-				if runnerCard != nil {
-					stage := ticketview.LiveStage(runner.LiveLogName(status.Running.Step))
-					for _, entry := range railStages(config) {
-						if entry.ID == stage {
-							status.place(stage, entry.Label+"中", "")
-							break
-						}
-					}
-				}
-			}
 		}
 	case "terminal":
 		classifyAfterTerminalInDirectory(&status, config, run, tasks, runDir)
@@ -258,20 +232,6 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 	return status
 }
 
-// Both merge observation and display must use the canonical task's
-// workspace, including runs created before persistent run directories.
-func runnerWorkspace(tasks []runtime.BoardTask, deliveryID string) (string, *runtime.BoardTask) {
-	for i := range tasks {
-		if tasks[i].IdempotencyKey == deliveryID {
-			if path := tasks[i].WorkspacePath; filepath.IsAbs(path) && filepath.Clean(path) != string(os.PathSeparator) {
-				return filepath.Clean(path), &tasks[i]
-			}
-			return "", &tasks[i]
-		}
-	}
-	return "", nil
-}
-
 func (s *RunStatus) place(step, title, detail string) {
 	s.Step, s.StepTitle, s.Detail = step, title, detail
 }
@@ -300,21 +260,6 @@ func placeIntakeHold(status *RunStatus, runDir string) bool {
 func (s *RunStatus) placeAt(step, stage, title, detail string) {
 	s.place(step, title, detail)
 	s.Stage = stage
-}
-
-func classifyRunnerCard(status *RunStatus, card *runtime.BoardTask) {
-	switch card.Status {
-	case "running":
-		status.place("intake", "実行中", "工程情報の更新を待っています")
-	case "blocked", "failed", "cancelled", "triage", "scheduled":
-		status.place("attention", "工程の停止を確認", "実行カードが停止しています。台帳の終了報告はまだ確認できません")
-		status.NextAction = "運用担当者が実行履歴とチケットの報告を確認してください。"
-		status.ActionEffect = "この表示だけでは終了理由や自動復旧の可否を確認できません。"
-	case "done", "archived":
-		status.place("reporting", "終了状態を確認中", "実行カードは終了しています。台帳の終了報告を待っています")
-	default:
-		status.place("intake", "実行待ち", "実行カードの開始を待っています")
-	}
 }
 
 func classifyClaimed(status *RunStatus, run state.RunOverview, tasks []runtime.BoardTask) {

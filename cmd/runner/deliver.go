@@ -28,9 +28,6 @@ func runDeliver(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return err
 	}
-	if !config.OrchestrationCards() {
-		return errors.New("deliver requires the cards orchestration")
-	}
 	workspace := os.Getenv("HERMES_KANBAN_WORKSPACE")
 	if workspace == "" {
 		return errors.New("HERMES_KANBAN_WORKSPACE is required (dispatched by the Hermes kanban only)")

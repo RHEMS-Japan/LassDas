@@ -218,9 +218,8 @@ func ChainCardKey(deliveryID, stage string, round int) string {
 }
 
 // ParseChainCardKey splits a chain card key back into its parts. The second
-// return is false for keys of other shapes (the runner mode's plain
-// delivery-id cards above all). The round returned is the design round for
-// design stages and the implementation round otherwise.
+// return is false for keys of other shapes. The round returned is the
+// design round for design stages and the implementation round otherwise.
 func ParseChainCardKey(key string) (deliveryID, stage string, round int, ok bool) {
 	last := strings.LastIndex(key, ":")
 	if last <= 0 || last+2 > len(key) {

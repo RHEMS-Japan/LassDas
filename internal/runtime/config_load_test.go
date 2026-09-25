@@ -16,7 +16,9 @@ import (
 // can break exactly one thing.
 func validRuntimeConfigMap() map[string]any {
 	return map[string]any{
-		"ledger_path": "/data/ledger.db",
+		"orchestration": "cards",
+		"chain":         cardsChainMap(),
+		"ledger_path":   "/data/ledger.db",
 		"tracker": map[string]any{
 			"origin": "https://example.backlog.com", "space_key": "example",
 			"project_id": 100, "project_key": "TKT",
@@ -41,7 +43,6 @@ func validRuntimeConfigMap() map[string]any {
 		"browsercheck_bin":     "",
 		"hermes_bin":           "/usr/local/bin/hermes",
 		"hermes_board":         "lassdas",
-		"hermes_profile":       "lassdas-runner",
 	}
 }
 
@@ -79,8 +80,8 @@ func TestLoadAcceptsACompleteConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if config.OrchestrationCards() {
-		t.Fatal("a config without orchestration reported cards mode")
+	if config.Chain.RunsRoot != "/data/runs" {
+		t.Fatalf("chain.runs_root = %q", config.Chain.RunsRoot)
 	}
 }
 
@@ -95,16 +96,47 @@ func cardsChainMap() map[string]any {
 	}
 }
 
-func TestLoadAcceptsTheCardsOrchestration(t *testing.T) {
-	raw := validRuntimeConfigMap()
-	raw["orchestration"] = "cards"
-	raw["chain"] = cardsChainMap()
-	config, err := Load(writeRuntimeConfig(t, raw))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+// A pod that still asks for the retired single-card mode — or says nothing,
+// which used to mean it — must be told what to change rather than started
+// on a shape nobody configured. The same goes for the setting that mode
+// took with it: the operator is told which line to delete, instead of the
+// decoder's unknown-field message.
+func TestLoadRefusesEverythingButTheCardChain(t *testing.T) {
+	for _, orchestration := range []any{"runner", "", "swarm", nil} {
+		raw := validRuntimeConfigMap()
+		if orchestration == nil {
+			delete(raw, "orchestration")
+		} else {
+			raw["orchestration"] = orchestration
+		}
+		_, err := Load(writeRuntimeConfig(t, raw))
+		if err == nil || err.Error() != OrchestrationRefusal {
+			t.Fatalf("orchestration %v: Load() error = %v, want %s", orchestration, err, OrchestrationRefusal)
+		}
 	}
-	if !config.OrchestrationCards() {
-		t.Fatal("the cards orchestration did not report itself")
+	raw := validRuntimeConfigMap()
+	raw["hermes_profile"] = "an-assignee-profile"
+	_, err := Load(writeRuntimeConfig(t, raw))
+	if err == nil || !strings.Contains(err.Error(), "hermes_profile") || !strings.Contains(err.Error(), "削除") {
+		t.Fatalf("hermes_profile: Load() error = %v", err)
+	}
+}
+
+// The chain has nowhere to work without a run directory root, and a card
+// created with Hermes' scratch default loses its records on replacement.
+func TestLoadRequiresTheRunsRoot(t *testing.T) {
+	raw := validRuntimeConfigMap()
+	chain := cardsChainMap()
+	delete(chain, "runs_root")
+	raw["chain"] = chain
+	_, err := Load(writeRuntimeConfig(t, raw))
+	if err == nil || !strings.Contains(err.Error(), "chain.runs_root") {
+		t.Fatalf("Load() error = %v, want chain.runs_root required", err)
+	}
+	chain["runs_root"] = ""
+	raw["chain"] = chain
+	if _, err := Load(writeRuntimeConfig(t, raw)); err == nil {
+		t.Fatal("Load() accepted an empty chain.runs_root")
 	}
 }
 
@@ -171,9 +203,19 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 		"bad automation id":     func(m map[string]any) { m["automation_run_id"] = "run id" },
 		"no destinations":       func(m map[string]any) { m["report_destinations"] = []any{} },
 		"bad binary pin":        func(m map[string]any) { m["worker_sha256"] = "zz" },
-		"cards without chain":   func(m map[string]any) { m["orchestration"] = "cards" },
+		"no chain at all":       func(m map[string]any) { delete(m, "chain") },
 		"unknown field":         func(m map[string]any) { m["surprise"] = true },
 		"unknown orchestration": func(m map[string]any) { m["orchestration"] = "swarm" },
+		"no target token path": func(m map[string]any) {
+			chain := cardsChainMap()
+			delete(chain, "target_token_path")
+			m["chain"] = chain
+		},
+		"a stage profile missing": func(m map[string]any) {
+			chain := cardsChainMap()
+			delete(chain["profiles"].(map[string]any), "publish")
+			m["chain"] = chain
+		},
 		"e2e profile without cut-off": func(m map[string]any) {
 			m["orchestration"] = "cards"
 			chain := cardsChainMap()
@@ -241,10 +283,10 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 
 func TestListBoardTasksReadsEveryAssignee(t *testing.T) {
 	bin, callLog, tasksFile := stubHermes(t)
-	setTasks(t, tasksFile, []BoardTask{{ID: "t1", Status: "blocked", IdempotencyKey: "k1", BlockKind: "needs_input", WorkspacePath: "/example/workspace"}})
+	setTasks(t, tasksFile, []BoardTask{{ID: "t1", Status: "blocked", IdempotencyKey: "k1", BlockKind: "needs_input"}})
 	hermes := NewHermes(Config{HermesBin: bin, HermesBoard: "lassdas"})
 	tasks, err := hermes.ListBoardTasks(context.Background())
-	if err != nil || len(tasks) != 1 || tasks[0].BlockKind != "needs_input" || tasks[0].WorkspacePath != "/example/workspace" {
+	if err != nil || len(tasks) != 1 || tasks[0].BlockKind != "needs_input" {
 		t.Fatalf("ListBoardTasks() = %+v, %v", tasks, err)
 	}
 	records := calls(t, callLog)
@@ -315,7 +357,7 @@ func TestCLIConfigAndBootBindConsumerToReportDestination(t *testing.T) {
 	for _, field := range []string{"e2e_profile", "e2e_enabled_after", "e2e_max_runtime_seconds", "deliver"} {
 		t.Run(field, func(t *testing.T) {
 			raw := cliRuntimeConfigMap(t)
-			chain := map[string]any{}
+			chain := cardsChainMap()
 			switch field {
 			case "e2e_profile":
 				chain[field] = "observer"

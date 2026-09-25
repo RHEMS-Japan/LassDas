@@ -34,9 +34,7 @@ var sweepRecords = map[string]string{
 type sweepReception struct {
 	config     runtime.Config
 	services   *runtime.Services
-	hermes     *runtime.Hermes
 	logger     *recordingLogger
-	tasksFile  string
 	ids        []string                         // the runs in the order they were seeded
 	dirs       map[string]string                // run id -> the delivery's directory under the runs root
 	deliveries map[string]string                // run id -> delivery id
@@ -47,11 +45,11 @@ type sweepReception struct {
 // The ledger state is written straight into the row: the sweep reads
 // nothing else of a run, and reaching awaiting_answer or an ending through
 // the protocols would stage a question that has no bearing on the clones.
-func newSweepReception(t *testing.T, orchestration string, states ...string) *sweepReception {
+func newSweepReception(t *testing.T, states ...string) *sweepReception {
 	t.Helper()
 	root := t.TempDir()
 	config := runtime.Config{
-		Orchestration: orchestration,
+		Orchestration: "cards",
 		Tracker:       runtime.TrackerConfig{SpaceKey: "example", ProjectID: 42, ProjectKey: "TICKET", AllowedCreatorID: 7, AllowedActivityType: 1},
 		Identity:      runtime.IdentityConfig{RepositoryID: 1, Repository: "o/r", WorkflowRef: "o/r/wf@main", EngineSHA: strings.Repeat("a", 40)},
 		Chain:         runtime.ChainConfig{RunsRoot: filepath.Join(root, "runs")},
@@ -62,17 +60,8 @@ func newSweepReception(t *testing.T, orchestration string, states ...string) *sw
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	tasksFile := filepath.Join(root, "tasks.json")
-	if err := os.WriteFile(tasksFile, []byte("[]"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(root, "hermes")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncase \"$2\" in list) cat "+tasksFile+" ;; *) : ;; esac\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	reception := &sweepReception{
-		config: config, services: &runtime.Services{Store: store}, hermes: runtime.NewHermes(runtime.Config{HermesBin: bin}),
-		logger: &recordingLogger{}, tasksFile: tasksFile,
+		config: config, services: &runtime.Services{Store: store}, logger: &recordingLogger{},
 		dirs: map[string]string{}, deliveries: map[string]string{}, envelopes: map[string]hook.DispatchEnvelope{},
 	}
 	for index, runState := range states {
@@ -93,7 +82,7 @@ func newSweepReception(t *testing.T, orchestration string, states ...string) *sw
 // tick runs the sweep the way the attendant's tick runs it.
 func (r *sweepReception) tick(t *testing.T) {
 	t.Helper()
-	if err := SweepFinishedRunClones(context.Background(), r.config, r.services, r.hermes, r.logger); err != nil {
+	if err := SweepFinishedRunClones(context.Background(), r.config, r.services, r.logger); err != nil {
 		t.Fatalf("the sweep failed the tick: %v", err)
 	}
 }
@@ -112,18 +101,6 @@ func (r *sweepReception) stage(t *testing.T, id, directory string) {
 		}
 	}
 	stageEnvelope(t, directory, r.envelopes[id])
-}
-
-// board is what the kanban answers from now on.
-func (r *sweepReception) board(t *testing.T, tasks []runtime.BoardTask) {
-	t.Helper()
-	encoded, err := json.Marshal(tasks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(r.tasksFile, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func (r *sweepReception) complaints() []string {
@@ -265,7 +242,7 @@ func recordsLeft(t *testing.T, directory string) []string {
 // them, and everything the finished run is read back for stays where it
 // is, ledger row included.
 func TestATickClearsTheClonesOfARunSealedWithoutADirectory(t *testing.T) {
-	reception := newSweepReception(t, "cards", finishedRunState)
+	reception := newSweepReception(t, finishedRunState)
 	directory := reception.dirs["TICKET-500"]
 	reception.stage(t, "TICKET-500", directory)
 	stageClones(t, directory)
@@ -301,7 +278,7 @@ func TestATickLeavesTheClonesOfARunThatHasNotEnded(t *testing.T) {
 	// project, and four of these five still hold that slot.
 	for _, runState := range []string{"queued", "claimed", "question_report_pending", "awaiting_answer", "terminal_report_pending"} {
 		t.Run(runState, func(t *testing.T) {
-			reception := newSweepReception(t, "cards", runState)
+			reception := newSweepReception(t, runState)
 			directory := reception.dirs["TICKET-500"]
 			reception.stage(t, "TICKET-500", directory)
 			stageClones(t, directory)
@@ -331,7 +308,7 @@ func TestACloneThatRefusedIsSweptAgainOnTheNextTick(t *testing.T) {
 		// permissions to be refused by.
 		t.Skip("the unremovable clone cannot be staged as root")
 	}
-	reception := newSweepReception(t, "cards", finishedRunState)
+	reception := newSweepReception(t, finishedRunState)
 	directory := reception.dirs["TICKET-500"]
 	reception.stage(t, "TICKET-500", directory)
 	// Two of the three are there and neither can be removed: an unwritable
@@ -374,7 +351,7 @@ func TestACloneThatRefusedIsSweptAgainOnTheNextTick(t *testing.T) {
 // Almost every finished run the reception looks at on a tick was cleared
 // long ago, so looking must cost three stats and nothing else.
 func TestARunWithNoClonesCostsTheTickNoRemoval(t *testing.T) {
-	reception := newSweepReception(t, "cards", finishedRunState)
+	reception := newSweepReception(t, finishedRunState)
 	directory := reception.dirs["TICKET-500"]
 	reception.stage(t, "TICKET-500", directory)
 	swept := 0
@@ -398,41 +375,10 @@ func TestARunWithNoClonesCostsTheTickNoRemoval(t *testing.T) {
 	}
 }
 
-// In the runner orchestration the run works in the directory its card
-// names, which is not the delivery's directory under the runs root; a run
-// whose card is gone is looked for under the root instead, the way the
-// merge observation looks for it.
-func TestTheRunnerOrchestrationSweepsTheDirectoryTheCardNames(t *testing.T) {
-	reception := newSweepReception(t, "runner", finishedRunState, finishedRunState)
-	carded := filepath.Join(t.TempDir(), "workspace")
-	reception.stage(t, "TICKET-500", carded)
-	stageClones(t, carded)
-	reception.board(t, []runtime.BoardTask{{
-		ID: "task-1", Status: "done", IdempotencyKey: reception.deliveries["TICKET-500"], WorkspacePath: carded,
-	}})
-	uncarded := reception.dirs["TICKET-501"]
-	reception.stage(t, "TICKET-501", uncarded)
-	stageClones(t, uncarded)
-
-	reception.tick(t)
-
-	for _, directory := range []string{carded, uncarded} {
-		if left := clonesLeft(t, directory); len(left) != 0 {
-			t.Fatalf("%s kept its clones: %v", directory, left)
-		}
-		if kept := recordsLeft(t, directory); len(kept) != len(sweepRecords) {
-			t.Fatalf("%s: records kept = %v, want all %d", directory, kept, len(sweepRecords))
-		}
-	}
-	if lines := reception.complaints(); len(lines) != 0 {
-		t.Fatalf("the sweep complained: %v", lines)
-	}
-}
-
-// A card's workspace is a field on a board and names any directory on the
-// volume; the sweep removes rather than reads, so it asks the directory
-// for this delivery's sealed envelope before it takes anything out of it.
-// Pointed at a directory that is not the run's, it takes nothing.
+// The runs root is configuration and names any directory on the volume;
+// the sweep removes rather than reads, so it asks the directory for this
+// delivery's sealed envelope before it takes anything out of it. Sitting
+// on a directory that is not the run's, it takes nothing.
 func TestADirectoryThatIsNotTheRunsIsLeftWhole(t *testing.T) {
 	for _, testcase := range []struct {
 		name  string
@@ -447,8 +393,11 @@ func TestADirectoryThatIsNotTheRunsIsLeftWhole(t *testing.T) {
 		},
 	} {
 		t.Run(testcase.name, func(t *testing.T) {
-			reception := newSweepReception(t, "runner", finishedRunState)
-			elsewhere := filepath.Join(t.TempDir(), "someone-elses-directory")
+			reception := newSweepReception(t, finishedRunState)
+			// The delivery's own directory under the runs root, holding
+			// someone else's work: the path is right and the envelope is
+			// not, which is the only thing the sweep goes by.
+			elsewhere := reception.dirs["TICKET-500"]
 			keep := filepath.Join(elsewhere, "target-repo", "src", "keep.txt")
 			if err := os.MkdirAll(filepath.Dir(keep), 0o755); err != nil {
 				t.Fatal(err)
@@ -457,9 +406,6 @@ func TestADirectoryThatIsNotTheRunsIsLeftWhole(t *testing.T) {
 				t.Fatal(err)
 			}
 			testcase.stage(t, reception, elsewhere)
-			reception.board(t, []runtime.BoardTask{{
-				ID: "task-1", Status: "done", IdempotencyKey: reception.deliveries["TICKET-500"], WorkspacePath: elsewhere,
-			}})
 
 			reception.tick(t)
 
@@ -483,7 +429,7 @@ func TestADirectoryThatIsNotTheRunsIsLeftWhole(t *testing.T) {
 // sealed shape is measured instead, the way a runner claim measures the
 // same file. The run's own envelope in the same place is swept.
 func TestAFileThatOnlyNamesTheDeliveryIsNotTheRunsEnvelope(t *testing.T) {
-	reception := newSweepReception(t, "cards", finishedRunState)
+	reception := newSweepReception(t, finishedRunState)
 	directory := reception.dirs["TICKET-500"]
 	stageClones(t, directory)
 	forged := []byte(`{"delivery_id":"` + reception.deliveries["TICKET-500"] + `"}`)
@@ -513,7 +459,7 @@ func TestAFileThatOnlyNamesTheDeliveryIsNotTheRunsEnvelope(t *testing.T) {
 // the link's target is this run's, so the link itself is the only thing
 // refusing it.
 func TestARunDirectoryThatIsALinkIsLeftAlone(t *testing.T) {
-	reception := newSweepReception(t, "cards", finishedRunState)
+	reception := newSweepReception(t, finishedRunState)
 	target := filepath.Join(t.TempDir(), "outside-the-runs-root")
 	reception.stage(t, "TICKET-500", target)
 	stageClones(t, target)
@@ -541,7 +487,7 @@ func TestARunDirectoryThatIsALinkIsLeftAlone(t *testing.T) {
 // that deadline is the tick's: the second run of a tick whose first run
 // spent it is swept without asking rather than waiting again.
 func TestTheSweepWillNotWaitPastItsBudget(t *testing.T) {
-	reception := newSweepReception(t, "cards", finishedRunState, finishedRunState)
+	reception := newSweepReception(t, finishedRunState, finishedRunState)
 	for _, id := range reception.ids {
 		reception.stage(t, id, reception.dirs[id])
 		stageClones(t, reception.dirs[id])

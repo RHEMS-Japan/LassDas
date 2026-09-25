@@ -17,48 +17,17 @@ import (
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
-// Run drives the whole ticket path and returns the outcome for the terminal
-// logic.
-func (p *Pipeline) Run(ctx context.Context) (Outcome, error) {
-	prep, outcome, err := p.pretrip(ctx)
-	if err != nil || outcome.Code != "" {
-		return outcome, err
-	}
-	repoRoot, baseRoot, baseSHA := prep.repoRoot, prep.baseRoot, prep.baseSHA
-	config, err := worker.LoadConfig(p.Config.ConsumerConfigPath)
-	if err != nil {
-		return Outcome{Code: hook.TerminalInternalFailed}, err
-	}
-	reviewFiles := chainReviewFiles(configuredReviewerIDs(config))
-
-	// ---- model: readiness gate, then the configured finite stages ----
-	outcome, err = p.modelStage(ctx, repoRoot, baseRoot, baseSHA)
-	if err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
-		return outcome, err
-	}
-
-	// ---- validation ----
-	if failed, err := p.validationStage(ctx, outcome.Stage, reviewFiles); err != nil {
-		return Outcome{Code: "internal_failed"}, err
-	} else if failed {
-		return Outcome{Code: hook.TerminalValidationFailed}, nil
-	}
-
-	// ---- delivery ----
-	return p.deliveryStage(ctx, outcome.Stage, reviewFiles)
-}
-
-// ChainPrep is what the cards orchestration needs from a prepared run.
+// ChainPrep is what a prepared run hands to its chain of stage cards.
 type ChainPrep struct {
 	RepoRoot string
 	BaseRoot string
 	BaseSHA  string
 }
 
-// PrepareChainRun readies a delivery for the cards orchestration: the whole
+// PrepareChainRun readies a delivery for its chain: the whole
 // pre-implementation half of a run — workspace preparation, intake, source
-// binding, the readiness gate — exactly as the runner mode executes it,
-// stopping where the implement stage would start. A non-empty outcome code
+// binding, the readiness gate — stopping where the implement stage would
+// start. A non-empty outcome code
 // (or a question decision path) means the run must not reach a chain.
 func (p *Pipeline) PrepareChainRun(ctx context.Context) (ChainPrep, Outcome, error) {
 	prep, outcome, err := p.pretrip(ctx)
@@ -82,9 +51,8 @@ type pretripResult struct {
 }
 
 // pretrip is the pre-model half of a run — workspace preparation, intake,
-// source binding, workspace shaping — shared verbatim by the runner mode
-// (Run) and the cards orchestration (PrepareChainRun). A non-empty outcome
-// code means the run stops here.
+// source binding, workspace shaping. A non-empty outcome code means the run
+// stops here.
 func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) {
 	if err := p.Prepare(); err != nil {
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
@@ -485,18 +453,9 @@ func (p *Pipeline) clarificationArgs() []string {
 	return nil
 }
 
-// modelStage gates readiness, then runs the configured finite model stages.
-func (p *Pipeline) modelStage(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
-	if outcome, err := p.readinessGate(ctx); err != nil || outcome.Code != "" || outcome.QuestionDecisionPath != "" {
-		return outcome, err
-	}
-	return p.implementRounds(ctx, repoRoot, baseRoot, baseSHA)
-}
-
 // readinessGate is the pre-generation gate — up to three assess/check
-// attempts and the decision — shared verbatim by the runner mode and the
-// cards orchestration. An empty outcome means ready: implementation may
-// start.
+// attempts and the decision. An empty outcome means ready: implementation
+// may start.
 func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	historyDir := p.path("history")
 	readinessDir := historyDir + "/readiness"
@@ -588,124 +547,6 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		p.noteReceptionRecord("受付の判定のまとめ")
 		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), nil
 	}
-}
-
-// implementRounds is the runner mode's in-process sequencing of the finite
-// implement/review/decide rounds. The cards orchestration replaces exactly
-// this function with the stage-card chain.
-func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, baseSHA string) (Outcome, error) {
-	config, err := worker.LoadConfig(p.Config.ConsumerConfigPath)
-	if err != nil {
-		return Outcome{Code: hook.TerminalInternalFailed}, err
-	}
-	reviewers := configuredReviewerIDs(config)
-	historyDir := p.path("history")
-	for stage := 1; stage <= config.MaxStages; stage++ {
-		stageDir := fmt.Sprintf("%s/stage-%d", historyDir, stage)
-		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return Outcome{Code: hook.TerminalInternalFailed}, err
-		}
-		implementArgs := []string{
-			"implement", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--draft", p.path("ticket-draft.json"), "--repo-root", repoRoot,
-			"--base-root", baseRoot, "--base-sha", baseSHA,
-			"--knowledge-root", p.Config.KnowledgeRoot, "--stage", strconv.Itoa(stage),
-		}
-		if stage > 1 {
-			previous := fmt.Sprintf("%s/stage-%d", historyDir, stage-1)
-			for _, reviewer := range reviewers {
-				implementArgs = append(implementArgs, "--previous-findings", previous+"/"+reviewer+".json")
-			}
-		}
-		implementArgs = append(implementArgs, p.clarificationArgs()...)
-		implementArgs = append(implementArgs,
-			"--run-out", stageDir+"/implement-run.json",
-			"--ticket-out", stageDir+"/ticket.json",
-			"--source-out", stageDir+"/source.json",
-			"--out", stageDir+"/candidate.json",
-		)
-		if code, err := p.worker(ctx, "implement", implementArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-			// The implementer may report instead of changing: it is told to
-			// leave the working copy alone and say why when it cannot carry
-			// the request out. The seal refuses that as "the agent changed
-			// nothing", which used to end the run as a model failure with
-			// the reason nowhere on the ticket (live 2026-09-25).
-			if worker.RoundReturnedWork(historyDir, stage) {
-				return Outcome{Code: hook.TerminalImplementationReturned}, nil
-			}
-			return Outcome{Code: hook.TerminalModelFailed}, err
-		}
-		for index, reviewer := range reviewers {
-			// Preserve the original workflow's direct-model review only for
-			// its legacy, unbound seat. Explicit agent bindings always win.
-			if reviewer != "claude-correctness" || len(config.Agents.ReviewerAgents) > 0 {
-				// A runner round is fresh, not a resumed card: a file left by
-				// another agent is never proof that this reviewer already ran.
-				if err := p.reviewSealed(ctx, reviewers, index, repoRoot, baseSHA, stage, false); err != nil {
-					return Outcome{Code: hook.TerminalModelFailed}, err
-				}
-				continue
-			}
-			reviewArgs := []string{
-				"review", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-				"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-				"--candidate", stageDir + "/candidate.json",
-			}
-			reviewArgs = append(reviewArgs, p.clarificationArgs()...)
-			reviewArgs = append(reviewArgs, "--reviewer", reviewer, "--out", stageDir+"/"+reviewer+".json")
-			if code, err := p.worker(ctx, "review", reviewArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-				return Outcome{Code: hook.TerminalModelFailed}, err
-			}
-		}
-		reviewArgs := reviewFileArgs(stageDir, chainReviewFiles(reviewers))
-		decideArgs := append([]string{
-			"decide", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-			"--candidate", stageDir + "/candidate.json",
-		}, reviewArgs...)
-		decideArgs = append(decideArgs, "--out", stageDir+"/decision.json")
-		if code, err := p.worker(ctx, "decide", decideArgs); err != nil || code != 0 {
-			return Outcome{Code: hook.TerminalModelFailed}, err
-		}
-		stageOutcome, err := p.readJSONField(relPath(p.Workspace, stageDir+"/decision.json"), "outcome")
-		if err != nil {
-			return Outcome{Code: hook.TerminalModelFailed}, err
-		}
-		switch stageOutcome {
-		case "converged":
-			return Outcome{Stage: stage}, nil
-		case "revise":
-			if stage == config.MaxStages {
-				return Outcome{Code: hook.TerminalModelFailed}, nil
-			}
-		case "nonconverged":
-			if stage != config.MaxStages {
-				return Outcome{Code: hook.TerminalModelFailed}, nil
-			}
-			questionArgs := append([]string{
-				"impasse-question", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-				"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-				"--candidate", stageDir + "/candidate.json",
-			}, reviewArgs...)
-			questionArgs = append(questionArgs, p.clarificationArgs()...)
-			questionDecision := historyDir + "/question/decision.json"
-			if err := os.MkdirAll(historyDir+"/question", 0o755); err != nil {
-				return Outcome{Code: hook.TerminalInternalFailed}, err
-			}
-			questionArgs = append(questionArgs, "--out", questionDecision)
-			code, err := p.worker(ctx, "impasse-question", questionArgs, p.modelKeyEnv()...)
-			if err == nil && code == 0 {
-				impasseOutcome, readErr := p.readJSONField(relPath(p.Workspace, questionDecision), "outcome")
-				if readErr == nil && impasseOutcome == "clarification_required" {
-					return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: questionDecision}, nil
-				}
-			}
-			return Outcome{Code: hook.TerminalNonconverged}, nil
-		default:
-			return Outcome{Code: hook.TerminalModelFailed}, nil
-		}
-	}
-	return Outcome{Code: hook.TerminalModelFailed}, nil
 }
 
 func relPath(base, full string) string {

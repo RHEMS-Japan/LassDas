@@ -2,15 +2,12 @@ package attendant
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
 
@@ -32,45 +29,16 @@ var (
 // started after the change was recorded within seconds). The reader is now
 // told which digest the run recorded, and the merge is written down.
 func TestAFinishedRunsMergeIsRecordedAfterTheConfigurationChanged(t *testing.T) {
-	for _, mode := range []string{"runner", "cards"} {
-		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
-			config := mergeObservationConfig(t, root, mode)
-			runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("c", 32), recordedRunDigest)
-			writeFakeReader(t, config.ControllerBin, recordedRunDigest)
-			logger := &recordingLogger{}
-
-			recordFeatureMerge(context.Background(), config, state.RunOverview{RunID: "TICKET-77"}, runDir, logger)
-
-			merge, known := readFeatureMerge(runDir)
-			if !known || merge.MergeCommitSHA != observedMergeSHA {
-				t.Fatalf("merge = %+v known = %v log = %v", merge, known, logger.lines)
-			}
-		})
-	}
-}
-
-// The same, reached the way the runner-mode reception tick reaches it: a real
-// ledger row, an empty board, and no run directory but the configured one.
-func TestSyncRunnerMergesRecordsAMergeOfARunSealedUnderAnotherConfiguration(t *testing.T) {
 	root := t.TempDir()
-	config := mergeObservationConfig(t, root, "runner")
-	store, deliveryID := seedTerminalSuccessRun(t, root)
-	defer store.Close()
-	runDir := seedDeliveredRun(t, config, deliveryID, recordedRunDigest)
+	config := mergeObservationConfig(t, root)
+	runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("c", 32), recordedRunDigest)
 	writeFakeReader(t, config.ControllerBin, recordedRunDigest)
-
-	hermesBin := filepath.Join(root, "hermes")
-	if err := os.WriteFile(hermesBin, []byte("#!/bin/sh\ncase \"$2\" in list) echo '[]' ;; *) : ;; esac\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	hermes := runtime.NewHermes(runtime.Config{HermesBin: hermesBin, HermesBoard: "board"})
 	logger := &recordingLogger{}
 
-	if err := SyncRunnerMerges(context.Background(), config, &runtime.Services{Store: store}, hermes, logger); err != nil {
-		t.Fatal(err)
-	}
-	if merge, known := readFeatureMerge(runDir); !known || merge.MergeCommitSHA != observedMergeSHA {
+	recordFeatureMerge(context.Background(), config, state.RunOverview{RunID: "TICKET-77"}, runDir, logger)
+
+	merge, known := readFeatureMerge(runDir)
+	if !known || merge.MergeCommitSHA != observedMergeSHA {
 		t.Fatalf("merge = %+v known = %v log = %v", merge, known, logger.lines)
 	}
 }
@@ -80,7 +48,7 @@ func TestSyncRunnerMergesRecordsAMergeOfARunSealedUnderAnotherConfiguration(t *t
 // told at all, which is the half that was missing.
 func TestAFinishedRunWhoseRecordsCannotBeReadIsSaidOnce(t *testing.T) {
 	root := t.TempDir()
-	config := mergeObservationConfig(t, root, "runner")
+	config := mergeObservationConfig(t, root)
 	runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("d", 32), recordedRunDigest)
 	// A reader bound to a digest this run did not record: every wake-up ends
 	// the same way.
@@ -131,7 +99,7 @@ func TestAPublishedDeliveryWithAnUnreadableRecordIsSaidOnce(t *testing.T) {
 	for name, breakIt := range tests {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			config := mergeObservationConfig(t, root, "runner")
+			config := mergeObservationConfig(t, root)
 			runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("a", 32), recordedRunDigest)
 			writeFakeReader(t, config.ControllerBin, recordedRunDigest)
 			breakIt(t, runDir)
@@ -165,7 +133,7 @@ func TestAPublishedDeliveryWithAnUnreadableRecordIsSaidOnce(t *testing.T) {
 // minute would bury the runs that do need looking at.
 func TestAFinishedRunThatPublishedNothingIsNotSaid(t *testing.T) {
 	root := t.TempDir()
-	config := mergeObservationConfig(t, root, "runner")
+	config := mergeObservationConfig(t, root)
 	runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("b", 32), recordedRunDigest)
 	if err := os.Remove(filepath.Join(runDir, "feature-pr.json")); err != nil {
 		t.Fatal(err)
@@ -187,7 +155,7 @@ func TestAFinishedRunThatPublishedNothingIsNotSaid(t *testing.T) {
 // that is simply not merged yet, and the next wake-up may well succeed.
 func TestATransientRefusalIsNotSaid(t *testing.T) {
 	root := t.TempDir()
-	config := mergeObservationConfig(t, root, "runner")
+	config := mergeObservationConfig(t, root)
 	runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("e", 32), recordedRunDigest)
 	script := "#!/bin/sh\necho 'controller: read_merged: 503 from api' >&2\necho 'controller: read_merged_failed' >&2\nexit 1\n"
 	if err := os.WriteFile(config.ControllerBin, []byte(script), 0o755); err != nil {
@@ -224,24 +192,23 @@ func TestEndingCodeIsTheLastBareCode(t *testing.T) {
 	}
 }
 
-// mergeObservationConfig is one reception's configuration in the orchestration
-// under test. The two modes reach the same reader by different routes: cards
-// seals the destination token into a file, runner keeps it in the environment.
-func mergeObservationConfig(t *testing.T, root, mode string) runtime.Config {
+// mergeObservationConfig is one reception's configuration. The destination
+// token is read from the sealed file, never from the environment: every
+// stage is spawned from the attendant's own environment, so a token there
+// would ride into the implementing agent.
+func mergeObservationConfig(t *testing.T, root string) runtime.Config {
 	t.Helper()
 	config := runtime.Config{
+		Orchestration:      "cards",
 		ControllerBin:      filepath.Join(root, "controller"),
 		ConsumerConfigPath: filepath.Join(root, "m1-consumer.json"),
-		Chain:              runtime.ChainConfig{RunsRoot: filepath.Join(root, "runs")},
+		Chain: runtime.ChainConfig{
+			RunsRoot:        filepath.Join(root, "runs"),
+			TargetTokenPath: filepath.Join(root, "target-token"),
+		},
 	}
-	if mode == "cards" {
-		config.Orchestration = "cards"
-		config.Chain.TargetTokenPath = filepath.Join(root, "target-token")
-		if err := os.WriteFile(config.Chain.TargetTokenPath, []byte("token-from-file\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		t.Setenv("TARGET_GITHUB_TOKEN", "token-from-environment")
+	if err := os.WriteFile(config.Chain.TargetTokenPath, []byte("token-from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	return config
 }
@@ -308,44 +275,4 @@ func writeFakeReader(t *testing.T, path, accepts string) {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// seedTerminalSuccessRun puts one finished, successful delivery in a real
-// ledger and answers with its delivery id.
-func seedTerminalSuccessRun(t *testing.T, root string) (*state.LocalStore, string) {
-	t.Helper()
-	ledger := filepath.Join(root, "ledger.db")
-	store, err := state.NewLocalStore(ledger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope, err := hook.SealSnapshot(hook.TicketSnapshot{
-		SchemaVersion: hook.SnapshotSchemaVersion, SpaceKey: "example", ActivityID: 9001, ActivityType: 1,
-		ProjectID: 42, ProjectKey: "TICKET", IssueID: 30, IssueKey: "TICKET-77", IssueKeyID: 77, CreatorID: 7,
-		RunID: "TICKET-77", CreatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC),
-		Target: runtime.Config{
-			Identity: runtime.IdentityConfig{RepositoryID: 1, Repository: "o/r", WorkflowRef: "o/r/wf@main", EngineSHA: strings.Repeat("a", 40)},
-		}.Target(),
-		Untrusted: hook.UntrustedTicketData{Summary: "s", Description: "d"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Enqueue(context.Background(), hook.QueueRequest{Envelope: envelope, QueuedAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", ledger+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE ledger SET attrs = json_set(attrs, '$.state', 'terminal', '$.terminal_code', ?, '$.terminal_completed_at', ?) WHERE pk LIKE 'run#%'`,
-		string(hook.TerminalSuccess), time.Now().UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-	runs, err := store.ScanRuns(context.Background())
-	if err != nil || len(runs) != 1 || runs[0].State != "terminal" {
-		t.Fatalf("seeded run = %+v err = %v", runs, err)
-	}
-	return store, envelope.DeliveryID
 }
