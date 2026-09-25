@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -352,9 +353,18 @@ func TestTheWaitReadsTheHistoryOnceAndThenOnlyTheTail(t *testing.T) {
 	if harness.backlog.listedFrom[0] != 0 {
 		t.Fatalf("the first tick read from %d, not the start of the thread", harness.backlog.listedFrom[0])
 	}
-	if harness.backlog.listedFrom[1] != questionCommentID {
+	// One before the question, so the question's own comment is in every
+	// listing: when it was posted is what keeps an older comment from being
+	// read as its answer.
+	if harness.backlog.listedFrom[1] != questionCommentID-1 {
 		t.Fatalf("the second tick read from %d, want the question at %d - it is re-reading %d comments of settled history every minute",
-			harness.backlog.listedFrom[1], questionCommentID, questionCommentID-harness.backlog.listedFrom[1])
+			harness.backlog.listedFrom[1], questionCommentID-1, questionCommentID-1-harness.backlog.listedFrom[1])
+	}
+	// The position is on the run, not in this process: a restart reads the
+	// tail too.
+	_, runKey := itemKeys(envelope)
+	if through, ok := attributeInt64(api.items[runKey], "question_scan_through"); !ok || through < questionCommentID {
+		t.Fatalf("the read position on the run is %d (recorded: %v), want at least the question at %d", through, ok, questionCommentID)
 	}
 
 	// Reading only the tail loses nothing: a stop written now is in the
@@ -387,5 +397,74 @@ func TestAStopDeepInTheHistoryIsFoundByTheOneFullRead(t *testing.T) {
 	harness.clock = harness.clock.Add(time.Minute)
 	if result := harness.tick(t); result.Code != "question_tick_stopped" {
 		t.Fatalf("a stop 120 comments back was never read: %+v", result)
+	}
+}
+
+// A ticket can outgrow what one listing can hold. Reading it whole is an
+// extra - it is what catches a stop written before the question - and the
+// wait runs on the tail, so a ticket too long to read whole is read from the
+// question on instead of being retried forever. Before this, every wake-up
+// failed on the listing and returned before the deadline was even looked at:
+// the run could not be answered, cancelled or expired, and never ended.
+func TestATicketTooLongToReadWholeIsStillAnsweredAndStillExpires(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	envelope := claimForTerminal(t, harness.store)
+	record := testQuestionRecord(t, envelope)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: record, IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	questionCommentID := harness.backlog.comments[len(harness.backlog.comments)-1].CommentID
+	harness.backlog.tooLongFromStart = true
+	harness.backlog.listedFrom = nil
+
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("a ticket too long to read whole stalled the wait: %+v", result)
+	}
+	if len(harness.backlog.listedFrom) != 2 || harness.backlog.listedFrom[0] != 0 ||
+		harness.backlog.listedFrom[1] != questionCommentID-1 {
+		t.Fatalf("listings = %v, want the whole thread tried once and then the tail from %d",
+			harness.backlog.listedFrom, questionCommentID-1)
+	}
+
+	// The answer still arrives and is still taken.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.backlog.post(harness.route.AllowedCreatorID, "回答 C1 Q1:a")
+	if result := harness.tick(t); result.Code != "question_tick_resumed" {
+		t.Fatalf("an answer on a very long ticket was not taken: %+v", result)
+	}
+}
+
+// And when the listing cannot be had at all, the clock still ends the wait:
+// a run whose ticket cannot be read must not sit in the answer wait for
+// good.
+func TestAWaitThatCannotBeReadStillEndsAtItsDeadline(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	envelope := claimForTerminal(t, harness.store)
+	record := testQuestionRecord(t, envelope)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: record, IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	harness.backlog.listErr = errors.New("the tracker cannot be reached")
+
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_comments_failed" {
+		t.Fatalf("an unreadable ticket before the deadline = %+v, want the failure reported", result)
+	}
+	_, runKey := itemKeys(envelope)
+	if state, _ := attributeString(api.items[runKey], "state"); state != stateAwaitingAnswer {
+		t.Fatalf("state = %s, want the run still waiting before its deadline", state)
+	}
+
+	harness.clock = time.UnixMilli(record.AnswerDeadlineAt).Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_expired" {
+		t.Fatalf("an unreadable ticket past its deadline = %+v, want it ended", result)
+	}
+	if state, _ := attributeString(api.items[runKey], "state"); state == stateAwaitingAnswer {
+		t.Fatal("the run is still waiting for an answer past its deadline")
 	}
 }

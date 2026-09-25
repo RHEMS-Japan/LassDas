@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -169,14 +168,28 @@ type QuestionWaitSnapshot struct {
 	ClarificationJSON   string
 	ClarificationSHA256 string
 	Posting             bool
+	// ScannedThroughCommentID is how far this wait has already read the
+	// ticket. Once it reaches the question, everything written before the
+	// question has been read and can never change, so the wake-ups after it
+	// read only from the question on - which is what keeps a long ticket
+	// inside the tracker's listing window and down to one request a minute.
+	ScannedThroughCommentID int64
 }
 
 type QuestionWaitStore interface {
 	LoadQuestionWait(context.Context, ReportRouteConfig) (QuestionWaitSnapshot, bool, error)
 }
 
+// QuestionScanStore records how far a wait has read its ticket. It is a
+// cursor, not a decision: losing it costs one more read of the thread and
+// can never cost a missed stop, so the write is best-effort and monotone.
+type QuestionScanStore interface {
+	StoreQuestionScan(context.Context, ReportRouteConfig, int64) error
+}
+
 type QuestionTickStore interface {
 	QuestionWaitStore
+	QuestionScanStore
 	QuestionStore
 	NotifyStore
 	ReplyStore
@@ -242,56 +255,6 @@ type QuestionTickService struct {
 	board    BoardProjector
 	now      func() time.Time
 	token    func() (string, error)
-	// scanned is what each waiting run's thread has already told this
-	// process about the part of it that cannot change any more. See
-	// waitScan.
-	scannedMu sync.Mutex
-	scanned   map[string]waitScan
-}
-
-// waitScan is what one wait has learned from the comments written before its
-// question: that none of them was a stop, and when the question itself was
-// posted. That half of the thread is closed the moment the question goes
-// out, so it is read once and not again; the half after the question is
-// live and is re-read on every wake-up. Holding it in memory is deliberate:
-// losing it - a restart, a new process - costs one more full read and can
-// never cost a missed stop.
-type waitScan struct {
-	questionCommentID int64
-	questionPostedAt  int64
-}
-
-// maxRememberedScans bounds what this map can grow to if a run ever leaves
-// the wait without passing through one of the endings below. Forgetting is
-// only ever a re-read.
-const maxRememberedScans = 1024
-
-// historyScanned reports what this process already knows about the thread
-// before the given question, and hands back the instant that question was
-// posted.
-func (s *QuestionTickService) historyScanned(runID string, questionCommentID int64) (int64, bool) {
-	s.scannedMu.Lock()
-	defer s.scannedMu.Unlock()
-	scan, known := s.scanned[runID]
-	if !known || scan.questionCommentID != questionCommentID {
-		return 0, false
-	}
-	return scan.questionPostedAt, true
-}
-
-func (s *QuestionTickService) rememberHistoryScan(runID string, questionCommentID, questionPostedAt int64) {
-	s.scannedMu.Lock()
-	defer s.scannedMu.Unlock()
-	if s.scanned == nil || len(s.scanned) >= maxRememberedScans {
-		s.scanned = map[string]waitScan{}
-	}
-	s.scanned[runID] = waitScan{questionCommentID: questionCommentID, questionPostedAt: questionPostedAt}
-}
-
-func (s *QuestionTickService) forgetHistoryScan(runID string) {
-	s.scannedMu.Lock()
-	defer s.scannedMu.Unlock()
-	delete(s.scanned, runID)
 }
 
 // UseBoard mirrors a recovered posting and an adopted answer onto the board
@@ -381,31 +344,66 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	// and listing from the question hid it for as long as the run waited
 	// (live 2026-09-25: 「停止」 eight seconds before the question, unread
 	// while the ticket sat in the answer wait). So the thread is read whole
-	// - once. Nothing can be added before the question any more, so what
+	// - once. Nothing can be written before the question any more, so what
 	// that read found holds for the rest of the wait, and every wake-up
-	// after it reads only the tail: one request a minute on a long ticket
-	// instead of one for every hundred comments on it.
-	runID := snapshot.Record.AutomationRunID
-	questionPostedAt, scanned := s.historyScanned(runID, snapshot.QuestionCommentID)
+	// after it reads from the question on: one request a minute on a long
+	// ticket, and a listing that stays inside the tracker's window however
+	// long the ticket already was.
+	//
+	// The listing starts one before the question so the question's own
+	// comment is always in it: when it was posted is what keeps a comment
+	// written earlier from being read as its answer.
 	from := int64(0)
-	if scanned {
-		from = snapshot.QuestionCommentID
+	if snapshot.ScannedThroughCommentID >= snapshot.QuestionCommentID {
+		from = snapshot.QuestionCommentID - 1
 	}
+	questionPostedAt := int64(0)
 	comments, err := s.backlog.ListComments(ctx, snapshot.IssueID, from)
+	if err != nil && from == 0 {
+		// The thread is longer than one listing can hold. The history is an
+		// extra - the tail is what the wait runs on - so it is given up
+		// rather than retried forever, and the wait goes on from the
+		// question. Without this a ticket that outgrew the window could
+		// never be answered, cancelled or expired (review of the whole-
+		// thread read).
+		s.logger.Error("the ticket is too long to read whole; reading from the question on",
+			"delivery_id", deliveryID, "issue_id", snapshot.IssueID, "error", err.Error())
+		from = snapshot.QuestionCommentID - 1
+		comments, err = s.backlog.ListComments(ctx, snapshot.IssueID, from)
+	}
 	if err != nil {
+		// Whatever the comments could not say, the clock still can: a wait
+		// that cannot be read must still end at its deadline rather than
+		// sit in the answer wait for good.
+		if DecideQuestionTick(snapshot.Record, now.UnixMilli()).Kind == QuestionTickExpire {
+			return s.terminate(ctx, snapshot.Record, TerminalClarificationExpired, now, deliveryID, "question_tick_expired")
+		}
 		return s.failure("question_tick_comments", err, deliveryID)
 	}
+	highestSeen := snapshot.ScannedThroughCommentID
 	for _, comment := range comments {
+		if comment.CommentID > highestSeen {
+			highestSeen = comment.CommentID
+		}
 		if comment.CommentID == snapshot.QuestionCommentID {
 			questionPostedAt = comment.PostedAt
 		}
 		if comment.UserID == s.config.AllowedCreatorID && IsStopComment(comment.Body) {
-			s.forgetHistoryScan(runID)
 			return s.terminate(ctx, snapshot.Record, TerminalCancelled, now, deliveryID, "question_tick_stopped")
 		}
 	}
-	if !scanned {
-		s.rememberHistoryScan(runID, snapshot.QuestionCommentID, questionPostedAt)
+	// Recorded only once the whole thread has been read: the cursor says
+	// "everything before the question has been seen", and nothing less than
+	// a full read may claim that.
+	if from == 0 && highestSeen < snapshot.QuestionCommentID {
+		highestSeen = snapshot.QuestionCommentID
+	}
+	if highestSeen > snapshot.ScannedThroughCommentID && from == 0 {
+		if scanErr := s.store.StoreQuestionScan(ctx, s.config, highestSeen); scanErr != nil {
+			// A cursor that could not be written costs the next wake-up
+			// another read of the thread, nothing else.
+			s.logger.Error("the read position could not be recorded", "delivery_id", deliveryID, "error", scanErr.Error())
+		}
 	}
 	// Every comment in scope is read by a model, against the questions as
 	// they were sealed. A reading that cannot be taken leaves the comment
@@ -453,20 +451,14 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if err != nil {
 		return s.result(DecisionInvalid, "question_tick_intake_invalid", deliveryID)
 	}
-	// Every way out of the wait forgets what the wait had read: the next
-	// question this run asks, if it asks one, has a thread of its own to
-	// read once.
 	if decision.Cancel != nil {
-		s.forgetHistoryScan(runID)
 		return s.terminate(ctx, snapshot.Record, TerminalCancelled, now, deliveryID, "question_tick_cancelled")
 	}
 	if decision.Adopted != nil {
-		s.forgetHistoryScan(runID)
 		return s.resume(ctx, snapshot, *decision.Adopted, now, deliveryID)
 	}
 	action := DecideQuestionTick(snapshot.Record, now.UnixMilli())
 	if action.Kind == QuestionTickExpire {
-		s.forgetHistoryScan(runID)
 		return s.terminate(ctx, snapshot.Record, TerminalClarificationExpired, now, deliveryID, "question_tick_expired")
 	}
 	if action.Kind == QuestionTickNotify {

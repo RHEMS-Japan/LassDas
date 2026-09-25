@@ -25,6 +25,12 @@ type fakeBacklog struct {
 	// listedFrom records the id each listing started after, so a test can
 	// see how much of the thread a caller asked the tracker for.
 	listedFrom []int64
+	// tooLongFromStart makes a listing that starts at the beginning fail the
+	// way the real client fails on a ticket with more comments than one
+	// listing window holds.
+	tooLongFromStart bool
+	// listErr makes every listing fail, the way an unreachable tracker does.
+	listErr error
 }
 
 func (f *fakeBacklog) FindExactComment(_ context.Context, _ int64, content string) (int64, bool, error) {
@@ -59,6 +65,12 @@ func (f *fakeBacklog) AddComment(ctx context.Context, issueID int64, content str
 
 func (f *fakeBacklog) ListComments(_ context.Context, _ int64, minCommentID int64) ([]hook.BacklogComment, error) {
 	f.listedFrom = append(f.listedFrom, minCommentID)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if f.tooLongFromStart && minCommentID == 0 {
+		return nil, hook.NewExternalFailure("backlog", hook.FailureRetryable, "comment_window_exhausted")
+	}
 	result := []hook.BacklogComment{}
 	for _, comment := range f.comments {
 		if comment.CommentID > minCommentID {

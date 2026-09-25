@@ -1130,12 +1130,47 @@ func (s *LocalStore) LoadQuestionWait(ctx context.Context, route hook.ReportRout
 	}
 	clarificationJSON, _ := binding.runRow.str("clarification_json")
 	clarificationDigest, _ := binding.runRow.str("clarification_sha256")
+	scannedThrough, _ := binding.runRow.int64At(questionScanAttribute)
 	return hook.QuestionWaitSnapshot{
 		Record: record, RecordJSON: recordJSON, RecordSHA256: recordDigest,
 		QuestionCommentID: commentID, IssueID: snapshot.IssueID,
 		ClarificationJSON: clarificationJSON, ClarificationSHA256: clarificationDigest,
-		Posting: posting,
+		Posting: posting, ScannedThroughCommentID: scannedThrough,
 	}, true, nil
+}
+
+// StoreQuestionScan advances the answer wait's read position on the run row.
+// Forward only, and a position already further along is a success: the
+// cursor saves a read, it never decides anything.
+func (s *LocalStore) StoreQuestionScan(ctx context.Context, route hook.ReportRouteConfig, throughCommentID int64) error {
+	if route.Validate() != nil || throughCommentID <= 0 {
+		return localFailure(hook.FailureRejected, "invalid_question_scan")
+	}
+	resolved, err := s.resolveRunRoute(ctx, route)
+	if err != nil {
+		return err
+	}
+	txn, err := s.begin(ctx)
+	if err != nil {
+		return localFailure(hook.FailureRetryable, "question_scan_write_failed")
+	}
+	defer txn.rollback()
+	binding, err := txn.loadTerminalBinding(resolved.ExpectedRunID, resolved)
+	if err != nil {
+		return err
+	}
+	if current, ok := binding.runRow.int64At(questionScanAttribute); ok && current >= throughCommentID {
+		return nil
+	}
+	row := binding.runRow
+	row[questionScanAttribute] = throughCommentID
+	if err := txn.setItem(binding.runKey, row); err != nil {
+		return localFailure(hook.FailureRetryable, "question_scan_write_failed")
+	}
+	if err := txn.commit(); err != nil {
+		return localFailure(hook.FailureRetryable, "question_scan_write_failed")
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

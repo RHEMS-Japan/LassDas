@@ -280,12 +280,54 @@ func (s *DynamoStore) LoadQuestionWait(ctx context.Context, route hook.ReportRou
 		commentID = 0
 	}
 	clarificationJSON, _ := attributeString(binding.runItem, "clarification_json")
+	scannedThrough, _ := attributeInt64(binding.runItem, questionScanAttribute)
 	return hook.QuestionWaitSnapshot{
 		Record: record, RecordJSON: recordJSON, RecordSHA256: recordDigest,
 		QuestionCommentID: commentID, IssueID: snapshot.IssueID,
 		ClarificationJSON: clarificationJSON, ClarificationSHA256: clarificationDigest,
-		Posting: posting,
+		Posting: posting, ScannedThroughCommentID: scannedThrough,
 	}, true, nil
+}
+
+// questionScanAttribute is how far the answer wait has read the ticket. It
+// is a cursor on the run row and nothing is sealed to it: it may be lost,
+// and losing it costs one more read of the thread.
+const questionScanAttribute = "question_scan_through"
+
+// StoreQuestionScan advances that cursor. It only ever moves forward, and a
+// concurrent tick that moved it further already is a success - the same
+// tolerance the ingest cursor has, for the same reason.
+func (s *DynamoStore) StoreQuestionScan(ctx context.Context, route hook.ReportRouteConfig, throughCommentID int64) error {
+	if route.Validate() != nil || throughCommentID <= 0 {
+		return hook.NewExternalFailure("dynamodb", hook.FailureRejected, "invalid_question_scan")
+	}
+	route, err := s.resolveRunRoute(ctx, route)
+	if err != nil {
+		return err
+	}
+	binding, err := s.loadTerminalBinding(ctx, route.ExpectedRunID, route)
+	if err != nil {
+		return err
+	}
+	_, err = s.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		{Update: &types.Update{
+			TableName: aws.String(s.table), Key: map[string]types.AttributeValue{"pk": stringValue(binding.runKey)},
+			UpdateExpression:    aws.String("SET #scan = :scan"),
+			ConditionExpression: aws.String("attribute_exists(#scan_key) AND (attribute_not_exists(#scan) OR #scan < :scan)"),
+			ExpressionAttributeNames: map[string]string{
+				"#scan": questionScanAttribute, "#scan_key": "pk",
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":scan": numberValue(throughCommentID)},
+		}},
+	}})
+	if err == nil {
+		return nil
+	}
+	var canceled *types.TransactionCanceledException
+	if errors.As(err, &canceled) && onlyConditionalCancellation(canceled) {
+		return nil
+	}
+	return hook.NewExternalFailure("dynamodb", hook.FailureRetryable, "question_scan_write_failed")
 }
 
 func questionBindingMatches(binding terminalStoredBinding, record hook.QuestionRecord, route hook.ReportRouteConfig) bool {

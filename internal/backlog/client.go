@@ -360,9 +360,12 @@ func validCommentMarker(marker string) bool {
 
 const (
 	commentPageSize = 100
-	// maxCommentPages bounds one listing to 1,000 comments after the question.
-	// A single-issue M1 thread never approaches this; the bound only protects
-	// against a runaway loop on a hostile or broken server.
+	// maxCommentPages bounds one listing to 1,000 comments after whatever it
+	// was asked to start from. Every caller that must see everything starts
+	// from a recent point - the open question, or the position it last read
+	// to - so the bound is never the answer window; a caller that reads a
+	// whole ticket is asking for something extra and is told when the
+	// ticket is too long to give it.
 	maxCommentPages = 10
 )
 
@@ -371,7 +374,10 @@ const (
 // This is the source of truth for answer intake: comment ID, author and
 // server time come from this read, never from webhook payloads. When the
 // server still reports full pages past the bound, the listing fails closed —
-// an incomplete view must never feed an expiry or adoption decision.
+// an incomplete view must never feed an adoption decision. It is a
+// retryable failure and it names itself, so a caller that asked to read
+// more of the ticket than fits can ask for less instead of giving up on
+// the run.
 func (c *Client) ListComments(ctx context.Context, issueID, minCommentID int64) ([]hook.BacklogComment, error) {
 	if issueID <= 0 || minCommentID < 0 {
 		return nil, hook.NewExternalFailure("backlog", hook.FailureRejected, "invalid_comment_lookup")
