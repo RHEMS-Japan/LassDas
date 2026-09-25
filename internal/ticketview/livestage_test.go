@@ -4,11 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/runner"
-	"sort"
 )
 
 // stepCall finds every step the runner starts, with the step name as it is

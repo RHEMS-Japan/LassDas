@@ -483,17 +483,19 @@ func TestClassifyStageFailureReadsASpentKeyAsCredit(t *testing.T) {
 			t.Fatalf("classifyStageFailure(%q) = credit", paused)
 		}
 	}
-	// The dangerous one: a burst refused with the very words a spent key
-	// uses. The status the worker parsed is what tells them apart.
+	// The dangerous one: a burst refused in the very words a spent key uses,
+	// printed where words are read. The status the worker parsed is the only
+	// thing that tells them apart.
 	throttled, err := json.Marshal(worker.ModelFailureDetail{
-		Phrase: worker.TransportFailedPhrase + ": quota exceeded for requests per minute",
-		Model:  "m", Calls: 2, ProviderErrors: 2, LastHTTPStatus: 429,
+		Phrase: worker.TransportFailedPhrase, Model: "m", Calls: 2,
+		ProviderErrors: 2, LastHTTPStatus: 429,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	paused := &verbFailure{verb: "agent-review", code: 1,
-		stderr: worker.FailureDetailLinePrefix + string(throttled) + "\n"}
+		stderr: "quota exceeded for requests per minute\n" +
+			worker.FailureDetailLinePrefix + string(throttled) + "\n"}
 	if class := classifyStageFailure(paused); class != FailureClassModel {
 		t.Fatalf("classifyStageFailure(status 429) = %q", class)
 	}
@@ -714,5 +716,53 @@ exit 0
 	}
 	if record.Class != FailureClassValidation {
 		t.Fatalf("class = %q, want validation (error %q)", record.Class, record.Error)
+	}
+}
+
+// The worker's account of a turn carries the head of the model's last answer,
+// and a request reaches that answer: a page about payments, a branch about
+// quotas, a balance in a billing file. Read for words, that line lets an
+// answer name its own failure class — and this class stops the run and waits
+// for a person. The line is read through its parsed fields only.
+func TestClassifyStageFailureWillNotLetAnAnswerNameItsOwnClass(t *testing.T) {
+	for _, objection := range []string{
+		"model response content is invalid (answer 3 of 3, request req-1, " +
+			"began: the credit balance check in billing.go is wrong)",
+		"model response content is invalid (answer 3 of 3, request req-1, " +
+			"began: the quota exceeded branch is never taken)",
+		"model response content is invalid (answer 3 of 3, request req-1, " +
+			"began: findings about the payment required page)",
+	} {
+		encoded, err := json.Marshal(worker.ModelFailureDetail{
+			Phrase: worker.AnswerUnusablePhrase, Model: "m", Calls: 3, Malformed: 3,
+			LastHTTPStatus: 200, Objection: objection,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failure := &verbFailure{verb: "agent-review", code: 1,
+			stderr: worker.FailureDetailLinePrefix + string(encoded) + "\n"}
+		if class := classifyStageFailure(failure); class != FailureClassModel {
+			t.Fatalf("classifyStageFailure(objection %q) = %q", objection, class)
+		}
+	}
+	// And the numbers a stage prints are its own. An applier working on an
+	// order or a delivery writes them to its output, where they are neither a
+	// status nor a refusal.
+	for _, written := range []string{
+		`{"status_code":402,"unit":"parcels awaiting pickup"}`,
+		`{"order_code": 402, "state": "awaiting pickup"}`,
+	} {
+		failure := fmt.Errorf("the applier did not finish: %w",
+			&verbFailure{verb: "run-instruction", code: 1, stderr: written})
+		if class := classifyStageFailure(failure); class != FailureClassModel {
+			t.Fatalf("classifyStageFailure(%s) = %q", written, class)
+		}
+	}
+	// A provider's own body is not that line, so a refusal still reads.
+	body := &verbFailure{verb: "agent-review", code: 1,
+		stderr: `{"error":{"code":402,"message":"Insufficient credits"}}`}
+	if class := classifyStageFailure(body); class != FailureClassCredit {
+		t.Fatalf("classifyStageFailure(a provider body) = %q", class)
 	}
 }

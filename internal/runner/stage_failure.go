@@ -247,13 +247,35 @@ var (
 // paymentRequiredPattern finds the payment status where a status word puts
 // it, and nowhere else.
 //
-// A standalone number is not enough, even away from longer digit runs. The
-// text this reads includes the worker's own record of the turn, and several
-// of its numeric fields can honestly hold 402 — an allowance, a completion
-// count, a request id with those digits inside it. Each of those is a model
-// answer that went wrong, and reading one as a key out of money would put a
-// person in the way of a run that nothing was stopping.
-var paymentRequiredPattern = regexp.MustCompile(`(status|code|http)"?\s*[:=]?\s*402(\D|$)`)
+// A standalone number is not enough, even away from longer digit runs: the
+// numbers a stage prints are its own, and an order code or a parcel count of
+// 402 says nothing about money. The status word has to be a word of its own
+// too — "order_code": 402 is not a status.
+var paymentRequiredPattern = regexp.MustCompile(`(^|\W)(status|code|http)"?\s*[:=]?\s*402(\D|$)`)
+
+// withoutModelEvidence drops the worker's own account of the turn from text
+// that words are then read out of.
+//
+// That line carries the head of the model's last answer, and a request
+// reaches that answer: a review of a payment page, an objection naming a
+// credit balance or a quota branch, and the answer has written the words this
+// file classifies on. The worker states the rule where it composes the line —
+// keyed on the message, an answer could name its own failure class — and the
+// only safe reading of that line is its parsed fields, never its prose.
+func withoutModelEvidence(stderr string) string {
+	if !strings.Contains(stderr, worker.FailureDetailLinePrefix) {
+		return stderr
+	}
+	lines := strings.Split(stderr, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(line, worker.FailureDetailLinePrefix) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
 
 // rateLimitMarkers are the refusals that read like a spending limit and are
 // not one. Providers answer a burst with "rate limit exceeded" often enough
@@ -264,7 +286,9 @@ var rateLimitMarkers = []string{"rate limit", "rate_limit", "too many requests"}
 
 // spendingLimitReached reports whether the provider refused over money. The
 // status the worker parsed out of the answer is the reliable half; the words
-// are what a refusal looks like when it arrives as text instead.
+// are what a refusal looks like when it arrives as text instead — and the
+// text it is given has the worker's own account of the turn taken out of it,
+// because a model's answer must not be able to name its own failure class.
 func spendingLimitReached(text string, detail worker.ModelFailureDetail) bool {
 	if detail.LastHTTPStatus == 402 {
 		return true
@@ -301,7 +325,11 @@ func classifyStageFailure(err error) FailureClass {
 		stderr = failed.stderr
 	}
 	detail, spoke := worker.ParseFailureDetailLine(stderr)
-	text := strings.ToLower(err.Error() + "\n" + stderr)
+	// Every word match below reads the failure's own sentence and whatever the
+	// step printed beside its account of the turn — never the account itself.
+	// The account is read through the fields the worker parsed, which the
+	// model's answer cannot write into.
+	text := strings.ToLower(err.Error() + "\n" + withoutModelEvidence(stderr))
 	switch {
 	case errors.Is(err, syscall.ENOSPC) || containsAny(text, diskMarkers):
 		return FailureClassDisk
