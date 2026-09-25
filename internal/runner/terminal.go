@@ -162,10 +162,33 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 // The run stays claimed and the next tick drives it again. Only a run with
 // no claim row (or no store, in tests) reports under the current identity,
 // which the store then judges on its own.
+//
+// The row holds whoever owns the claim now, and that is not always this
+// execution. When a claim is handed back to the queue as lost and a fresh
+// execution claims it, an earlier execution that turns out to be alive
+// would read the newer one's identity here and end the run wearing it.
+// That is what happened live on 2026-09-24: an earlier execution finished,
+// read the identity of the execution that had replaced it, and posted a
+// terminal comment saying the delivery had succeeded and citing the
+// replacement's run reference — while the replacement was still running,
+// and went on to fail. The requester was told one execution's outcome
+// under another execution's name. So the claim is taken only while it is
+// still this execution's; a claim that has moved on ends the call with an
+// error, nothing is posted, nothing in the ledger changes, and the
+// execution that does own the run is left to report for it.
+//
+// Both orchestrations pass the identity they claimed with. A dispatched
+// worker carries its own dispatch's run id, which is exactly why a
+// re-dispatch of the same card is a different execution to compare
+// against. The attendant carries an id derived from the delivery id
+// (chainOwnerRunID), so its reports are the same identity on every tick,
+// across process restarts and across a recovered claim: it keeps one
+// delivery rather than being one execution of it, and this check never
+// stands in its way.
 func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
-	fallback := t.config.Owner(t.hermesRunID)
+	mine := t.config.Owner(t.hermesRunID)
 	if t.services == nil || t.services.Store == nil {
-		return fallback, nil
+		return mine, nil
 	}
 	route := t.services.Route
 	route.ExpectedRunID = t.envelope.Snapshot.RunID
@@ -179,7 +202,11 @@ func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
 		claimed, found, err = t.services.Store.ClaimOwner(ctx, route)
 		if err == nil {
 			if !found {
-				return fallback, nil
+				return mine, nil
+			}
+			if difference := ownerDifference(mine, claimed); difference != "" {
+				return hook.PullOwner{}, fmt.Errorf(
+					"claim owner changed: %s; this execution no longer owns the run and reports nothing for it", difference)
 			}
 			return claimed, nil
 		}
@@ -192,6 +219,31 @@ func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
 		}
 	}
 	return hook.PullOwner{}, fmt.Errorf("claim owner unreadable: %w", err)
+}
+
+// ownerDifference says how the claim's owner block differs from this
+// execution's own, or "" when the two are the same execution. The engine
+// revision is the single field allowed to move under a running delivery,
+// so it is copied across before the blocks are compared whole: everything
+// else — the engine repository, the workflow, the run id, the attempt —
+// has to match, and a field added to the block later is strict by default
+// rather than quietly permitted.
+func ownerDifference(mine, claimed hook.PullOwner) string {
+	mine.WorkflowSHA = claimed.WorkflowSHA
+	if mine == claimed {
+		return ""
+	}
+	switch {
+	case claimed.WorkflowRunID != mine.WorkflowRunID:
+		return fmt.Sprintf("the run is claimed by execution %d, not %d", claimed.WorkflowRunID, mine.WorkflowRunID)
+	case claimed.RunAttempt != mine.RunAttempt:
+		return fmt.Sprintf("the run is claimed by attempt %d, not %d", claimed.RunAttempt, mine.RunAttempt)
+	case claimed.RepositoryID != mine.RepositoryID || claimed.RepositorySHA256 != mine.RepositorySHA256:
+		return "the run is claimed under another engine repository"
+	case claimed.WorkflowRefSHA256 != mine.WorkflowRefSHA256:
+		return "the run is claimed under another workflow"
+	}
+	return "the run is claimed under another identity"
 }
 
 // loadTrail reads the delivery trail when the run composed one. The
