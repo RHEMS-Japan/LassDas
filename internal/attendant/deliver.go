@@ -230,7 +230,7 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 	// and the report says which part of the path was not there rather than
 	// letting a promote card wait three hours for a deployment that was
 	// never going to start.
-	if reason, built := verifyBuiltPath(config, runDir); !built {
+	if reason, built := verifyBuiltPath(config, runDir, report); !built {
 		holdReleasePath(runDir, reason, logger)
 		logger.Info("the path to production is not complete; the delivery stops at staging",
 			"run", run.RunID, "reason", reason)
@@ -284,7 +284,12 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 // that a changed configuration otherwise causes (chains.go). The three
 // reads that fail open below are faults rather than answers, and each says
 // at its own line why proceeding is the safer of the two.
-func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
+//
+// The staging record is the caller's, not read again here. It is the one
+// thing this needs that the caller has already parsed, and reading it a
+// third time meant an unlucky read had to fail open on the very field the
+// caller never looks at.
+func verifyBuiltPath(config runtime.Config, runDir string, staging runner.DeliverReport) (string, bool) {
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {
 		// Unreachable from here: the delivery only got this far because the
@@ -315,12 +320,18 @@ func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
 	}
 	tree := filepath.Join(runDir, "target-repo")
 	if _, err := os.Stat(tree); err != nil {
-		// The working copy is not on the volume. It is re-fetchable by
-		// design and the ladder sweeps copies to make room, so its absence
-		// is a fact about disk rather than about the path: refusing here
-		// would stop a delivery that is perfectly healthy, and the workflow
-		// it would have looked for is the same one staging just deployed
-		// through.
+		// The working copy is not on the volume, so the file below cannot
+		// be looked for at all. It is re-fetchable by design and the ladder
+		// sweeps run clones to make room, so its absence is a fact about
+		// disk and says nothing about the destination's repository — and
+		// refusing every promotion that follows a sweep would stop
+		// deliveries that are fine.
+		//
+		// The cost of being wrong is the promote card's own wall clock: a
+		// workflow that really is missing ends that card with a deployment
+		// that never started, and the ladder takes it from there. That is
+		// the slow ending this check exists to avoid, accepted here because
+		// the alternative stops healthy deliveries on a disk fact.
 		return "", true
 	}
 	if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(workflow))); err != nil {
@@ -334,12 +345,12 @@ func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
 	if !deliverFileExists(runDir, runner.DeliverStagingProofFile) {
 		return "staging へのデプロイが実際に動いた記録が無いため、本番反映は行わず staging までで止めています。", false
 	}
-	// Unreadable on this second read is a fault, not an answer: the caller
-	// read the same file a moment ago and found a pass, which is how the
-	// delivery arrived here at all. The screen check is skipped rather than
-	// refused, because what it would have told us is already known.
-	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
-	if err == nil && report.ScreenChecked && !deliverFileExists(runDir, runner.DeliverStagingVisibleFile) {
+	// The staging record comes from the caller, which already parsed it to
+	// decide that this delivery may be promoted at all. Read again here it
+	// was a third read of one file, and an unlucky one had to fail open on
+	// a field the caller never looks at — so the one case this check exists
+	// for was also the one case it could silently skip.
+	if staging.ScreenChecked && !deliverFileExists(runDir, runner.DeliverStagingVisibleFile) {
 		return "staging の画面を確かめた記録が無いため、本番反映は行わず staging までで止めています。", false
 	}
 	return "", true

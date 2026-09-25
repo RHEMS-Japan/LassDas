@@ -444,3 +444,49 @@ func TestAnUnreadableConfigurationDoesNotStopThePromotion(t *testing.T) {
 		t.Fatalf("an unlucky read stopped a healthy delivery: %s (log: %v)", h.calls(), h.logger.lines)
 	}
 }
+
+// The screen check reads the record the caller already parsed, not the file
+// again.
+//
+// Read again it was a third read of one file, and an unlucky one had to
+// fail open on ScreenChecked — the only field this check needs and the one
+// the caller never looks at. So the single case the check exists for was
+// also the one case it could silently skip. Here the file on the volume
+// says the opposite of the record passed in, and the record wins both ways.
+func TestTheScreenCheckReadsTheRecordItWasGiven(t *testing.T) {
+	config, _, runDir := releasePathFixture(t, completeReleasePath, true)
+	for _, name := range []string{"ops/deploy-staging.yml", "ops/deploy-production.yml"} {
+		path := filepath.Join(runDir, "target-repo", filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("on: push\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(runDir, runner.DeliverStagingProofFile), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The file claims no screen was promised; the caller's record says one
+	// was, and no screen was sealed.
+	if err := os.WriteFile(filepath.Join(runDir, runner.DeliverStagingReportFile),
+		[]byte(`{"schema_version":1,"phase":"staging","verdict":"pass"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reason, built := verifyBuiltPath(config, runDir, runner.DeliverReport{Verdict: "pass", ScreenChecked: true})
+	if built || !strings.Contains(reason, "画面を確かめた記録") {
+		t.Fatalf("a promised screen with nothing sealed was promoted on: %q / %v", reason, built)
+	}
+	// And the other way: the record says no screen was promised, so the
+	// absent seal is not a shortfall.
+	if _, built := verifyBuiltPath(config, runDir, runner.DeliverReport{Verdict: "pass"}); !built {
+		t.Fatal("a delivery that promised no screen was refused for want of one")
+	}
+	// With the screen sealed, a promised screen passes.
+	if err := os.WriteFile(filepath.Join(runDir, runner.DeliverStagingVisibleFile), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, built := verifyBuiltPath(config, runDir, runner.DeliverReport{Verdict: "pass", ScreenChecked: true}); !built {
+		t.Fatal("a sealed screen was not accepted")
+	}
+}

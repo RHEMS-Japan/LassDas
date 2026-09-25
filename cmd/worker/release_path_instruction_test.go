@@ -209,3 +209,94 @@ func TestAReleasePathSurvivesTheOverflowRebuild(t *testing.T) {
 		t.Fatalf("the release path was dropped with the objections:\n%s", withFindings)
 	}
 }
+
+// The boundary around a destination's release machinery is decided by two
+// facts at once, and all four answers are pinned here because three of them
+// are reachable only in combination and the wrong one is not visibly wrong:
+// every sentence forbids something, so a round handed the sentence for
+// another case still reads as a rule being obeyed.
+func TestTheAutomationBoundaryNamesWhatStaysOutOfBoundsInEveryCase(t *testing.T) {
+	infrastructure := &worker.InfrastructureConfig{
+		Provider: "aws", Region: "ap-northeast-1", Credential: "cloud",
+		Resources: []string{"sqs"}, NamingPrefix: "lassdas-",
+	}
+	for _, testCase := range []struct {
+		name              string
+		infrastructure    *worker.InfrastructureConfig
+		buildsReleasePath bool
+		want              string
+	}{
+		{
+			name: "nothing handed and nothing to build",
+			want: "- 自動化・リリース手順・資格情報・権限設定には触れないでください。",
+		},
+		{
+			name:              "a path to build and no infrastructure",
+			buildsReleasePath: true,
+			want:              "- 資格情報・権限設定・利用上限には触れないでください。リリース手順のうち、上で作るよう指示された部分だけが対象です。",
+		},
+		{
+			name:           "infrastructure handed and nothing to build",
+			infrastructure: infrastructure,
+			want: "- 自動化・リリース手順・権限設定には触れないでください。資格情報は、下の「使ってよい基盤」に挙げた環境変数を読んで使うだけにしてください " +
+				"(値を出力・記録・コミットしない)。",
+		},
+		{
+			// Both at once. The release procedure opens because building it
+			// is the work, and the two things that never open stay shut:
+			// the permissions, and the credentials, which may be read from
+			// the named variables and put nowhere.
+			name:              "infrastructure handed and a path to build",
+			infrastructure:    infrastructure,
+			buildsReleasePath: true,
+			want: "- 権限設定・利用上限には触れないでください。リリース手順のうち、上で作るよう指示された部分だけが対象です。" +
+				"資格情報は、下の「使ってよい基盤」に挙げた環境変数を読んで使うだけにしてください (値を出力・記録・コミットしない)。",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			consumer := worker.ConsumerConfig{Repository: "example/consumer", Infrastructure: testCase.infrastructure}
+			if got := automationBoundary(consumer, testCase.buildsReleasePath); got != testCase.want {
+				t.Fatalf("boundary =\n%s\nwant\n%s", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The fourth case, in the instruction a round actually receives: a
+// destination that hands the engine infrastructure AND has no release path.
+// Nothing exercised it before — every test that handed infrastructure
+// passed no plan, and every test that passed a plan used a destination that
+// hands nothing.
+func TestAnInstructionThatBuildsAPathWithInfrastructureKeepsBothRules(t *testing.T) {
+	draft, consumer, agent := releasePathConsumer()
+	consumer.Infrastructure = &worker.InfrastructureConfig{
+		Provider: "aws", Region: "ap-northeast-1", Credential: "cloud",
+		Resources: []string{"sqs"}, NamingPrefix: "lassdas-",
+	}
+	plan := releasePathPlanFixture(t)
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, nil, &plan,
+		"/work/repo", []string{"AWS_SHARED_CREDENTIALS_FILE"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, plan.Instruction) {
+		t.Fatalf("the path-building work is missing:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "## 使ってよい基盤") {
+		t.Fatalf("the infrastructure the agent may use is missing:\n%s", prompt)
+	}
+	// Both halves of the boundary, in the one sentence that carries them.
+	for _, rule := range []string{
+		"- 権限設定・利用上限には触れないでください。",
+		"資格情報は、下の「使ってよい基盤」に挙げた環境変数を読んで使うだけにしてください (値を出力・記録・コミットしない)。",
+	} {
+		if !strings.Contains(prompt, rule) {
+			t.Fatalf("the boundary dropped %q:\n%s", rule, prompt)
+		}
+	}
+	// And the release procedure is no longer forbidden, because building it
+	// is what this round was asked to do.
+	if strings.Contains(prompt, "自動化・リリース手順・権限設定には触れないでください") {
+		t.Fatalf("the round was told to build a release path and forbidden to touch one:\n%s", prompt)
+	}
+}
