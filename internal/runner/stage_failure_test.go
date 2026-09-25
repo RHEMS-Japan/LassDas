@@ -420,3 +420,105 @@ func TestDesignDecideSealsItsAccountInTheRoundItDecided(t *testing.T) {
 		t.Fatal("the decided round has no account of the card that failed on it")
 	}
 }
+
+// A key that has reached its spending limit refuses like a provider error and
+// answers to none of the same remedies: every seat behind that key meets the
+// same wall, and only a person raising the limit moves it.
+func TestClassifyStageFailureReadsASpentKeyAsCredit(t *testing.T) {
+	said := "model invocation failed with status 402: {\"error\":{\"code\":402," +
+		"\"message\":\"Insufficient credits to run this request.\"}}"
+	if class := classifyStageFailure(&verbFailure{verb: "agent-review", code: 1, stderr: said}); class != FailureClassCredit {
+		t.Fatalf("classifyStageFailure(402, insufficient credits) = %q", class)
+	}
+	for _, refusal := range []string{
+		"402 Payment Required",
+		"your key limit has been reached",
+		"monthly quota exceeded for this account",
+		"billing: this organisation has no active payment method",
+	} {
+		failure := fmt.Errorf("review by review-a did not finish: %w",
+			&verbFailure{verb: "agent-review", code: 1, stderr: refusal})
+		if class := classifyStageFailure(failure); class != FailureClassCredit {
+			t.Fatalf("classifyStageFailure(%q) = %q", refusal, class)
+		}
+	}
+	// The status the worker parsed out of the answer decides on its own, with
+	// no words to read at all. Through a sealed record the number is restated
+	// in the record's own text, so the two halves are only separable here.
+	if !spendingLimitReached("model invocation failed", worker.ModelFailureDetail{LastHTTPStatus: 402}) {
+		t.Fatal("a parsed 402 did not read as a spending limit on its own")
+	}
+	// The status the worker parsed out of the answer says it on its own, with
+	// no words to read.
+	encoded, err := json.Marshal(worker.ModelFailureDetail{
+		Phrase: "model invocation failed with status 402", Model: "m", Calls: 1,
+		ProviderErrors: 1, LastHTTPStatus: 402,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structured := &verbFailure{verb: "agent-review", code: 1,
+		stderr: worker.FailureDetailLinePrefix + string(encoded) + "\n"}
+	if class := classifyStageFailure(structured); class != FailureClassCredit {
+		t.Fatalf("classifyStageFailure(status 402) = %q", class)
+	}
+	// A volume out of room says "disk quota exceeded" and is still a volume:
+	// the reclaim is the remedy, and it is read before any of this.
+	full := &verbFailure{verb: "run-instruction", code: 1, stderr: "write failed: disk quota exceeded"}
+	if class := classifyStageFailure(full); class != FailureClassDisk {
+		t.Fatalf("classifyStageFailure(disk quota) = %q", class)
+	}
+	// A provider asking for a pause is not a provider asking for money, and
+	// it says so in words that would otherwise read as one.
+	for _, paused := range []string{
+		"429 Too Many Requests: rate limit exceeded for this model",
+		"rate_limit_error: quota exceeded for requests per minute",
+	} {
+		failure := &verbFailure{verb: "agent-review", code: 1, stderr: paused}
+		if class := classifyStageFailure(failure); class == FailureClassCredit {
+			t.Fatalf("classifyStageFailure(%q) = credit", paused)
+		}
+	}
+	// The dangerous one: a burst refused with the very words a spent key
+	// uses. The status the worker parsed is what tells them apart.
+	throttled, err := json.Marshal(worker.ModelFailureDetail{
+		Phrase: worker.TransportFailedPhrase + ": quota exceeded for requests per minute",
+		Model:  "m", Calls: 2, ProviderErrors: 2, LastHTTPStatus: 429,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused := &verbFailure{verb: "agent-review", code: 1,
+		stderr: worker.FailureDetailLinePrefix + string(throttled) + "\n"}
+	if class := classifyStageFailure(paused); class != FailureClassModel {
+		t.Fatalf("classifyStageFailure(status 429) = %q", class)
+	}
+	// The numbers a turn reports sit beside the status it got, and an
+	// allowance that happens to end in the payment status is not one.
+	wide, err := json.Marshal(worker.ModelFailureDetail{
+		Phrase: worker.AnswerUnusablePhrase, Model: "m", Calls: 1, Malformed: 1,
+		MaxOutputTokens: 8402, FinalMaxOutputTokens: 8402,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomy := &verbFailure{verb: "agent-review", code: 1,
+		stderr: worker.FailureDetailLinePrefix + string(wide) + "\n"}
+	if class := classifyStageFailure(roomy); class != FailureClassModel {
+		t.Fatalf("classifyStageFailure(8402 tokens) = %q", class)
+	}
+	// A turn that spent its own allowance is still a model failure: the
+	// phrase for it names no limit that a payment lifts.
+	spent, err := json.Marshal(worker.ModelFailureDetail{
+		Phrase: worker.TransportFailedPhrase + ": " + worker.SpentAllowancePhrase,
+		Model:  "m", Calls: 4, AllowanceSpent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowance := &verbFailure{verb: "agent-review", code: 1,
+		stderr: worker.FailureDetailLinePrefix + string(spent) + "\n"}
+	if class := classifyStageFailure(allowance); class != FailureClassModel {
+		t.Fatalf("classifyStageFailure(allowance spent) = %q", class)
+	}
+}

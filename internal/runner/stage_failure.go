@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -57,6 +58,17 @@ const (
 	FailureClassValidation FailureClass = "validation"
 	// FailureClassDisk covers a volume with no room left.
 	FailureClassDisk FailureClass = "disk"
+	// FailureClassCredit covers the provider refusing because the key has
+	// reached its spending limit or the account has nothing left to spend.
+	//
+	// It is the one failure no seat can be moved around. The limit is set on
+	// the provider's key by the person who owns it, not in this engine, so
+	// every candidate model and vendor reached through that key meets the
+	// same refusal — the remedy is a person raising or resetting the limit.
+	// Filed as a plain model failure it would read as "try someone else",
+	// which is exactly the night that ends with nothing done; the record has
+	// to say which one it was by the morning.
+	FailureClassCredit FailureClass = "credit"
 	// FailureClassUnknown is the honest answer when none of the above
 	// recognised it. It is a class like the others, not an error: a record
 	// that says "unknown" still says which stage and round stopped, and when.
@@ -183,12 +195,19 @@ var modelSpendingVerbs = []string{
 	"compose-trail",
 }
 
-// diskMarkers, toolMarkers and networkMarkers are read against the failure's
-// own text and the failed verb's output. They are lowercase and matched
-// case-insensitively.
+// diskMarkers, toolMarkers, creditMarkers and networkMarkers are read against
+// the failure's own text and the failed verb's output. They are lowercase and
+// matched case-insensitively.
 var (
 	diskMarkers = []string{
 		"no space left on device", "enospc", "disk quota exceeded",
+	}
+	// "credit" carries the phrase forms with it — insufficient credits, out
+	// of credit, credit balance — so they are not listed again. A full volume
+	// is read before these, which is what keeps "disk quota exceeded" a disk.
+	creditMarkers = []string{
+		"credit", "key limit", "limit exceeded", "quota exceeded",
+		"billing", "payment required",
 	}
 	toolMarkers = []string{
 		"executable file not found", "command not found", "no such command",
@@ -204,6 +223,32 @@ var (
 	}
 )
 
+// paymentRequiredPattern finds the status a spending limit answers with,
+// standing alone. A bare substring would read an allowance of 8402 tokens as
+// one, and the numbers a turn reports sit right beside the status it got.
+var paymentRequiredPattern = regexp.MustCompile(`(^|[^0-9])402([^0-9]|$)`)
+
+// rateLimitMarkers are the refusals that read like a spending limit and are
+// not one. Providers answer a burst with "rate limit exceeded" often enough
+// that the words below would take it for money, and the two want opposite
+// things: a pause or another seat clears a rate limit without anyone being
+// asked for anything, while a spent key answers the same to every seat.
+var rateLimitMarkers = []string{"rate limit", "rate_limit", "too many requests"}
+
+// spendingLimitReached reports whether the provider refused over money. The
+// status the worker parsed out of the answer is the reliable half; the words
+// are what a refusal looks like when it arrives as text instead.
+func spendingLimitReached(text string, detail worker.ModelFailureDetail) bool {
+	if detail.LastHTTPStatus == 402 {
+		return true
+	}
+	// 429 is the provider saying "not so fast", never "not until you pay".
+	if detail.LastHTTPStatus == 429 || containsAny(text, rateLimitMarkers) {
+		return false
+	}
+	return containsAny(text, creditMarkers) || paymentRequiredPattern.MatchString(text)
+}
+
 // classifyStageFailure decides which kind of thing went wrong.
 //
 // The order is the order of certainty, not the order of the ladder. A branch
@@ -212,6 +257,10 @@ var (
 // account of a model turn beats the text around it. Only after all of those
 // does a keyword decide anything, and a verb that spends a model turn is the
 // last resort before "unknown".
+//
+// The one place the order is not certainty is money, which runs ahead of
+// every model arm. A refusal over a spending limit looks exactly like a
+// provider error and answers to nothing a provider error answers to.
 func classifyStageFailure(err error) FailureClass {
 	if err == nil {
 		return FailureClassUnknown
@@ -224,6 +273,7 @@ func classifyStageFailure(err error) FailureClass {
 	if errors.As(err, &failed) {
 		stderr = failed.stderr
 	}
+	detail, spoke := worker.ParseFailureDetailLine(stderr)
 	text := strings.ToLower(err.Error() + "\n" + stderr)
 	switch {
 	case errors.Is(err, syscall.ENOSPC) || containsAny(text, diskMarkers):
@@ -235,7 +285,13 @@ func classifyStageFailure(err error) FailureClass {
 		// the same absence, and the second is only read where the step never
 		// started — an artifact that is missing says so somewhere else.
 		return FailureClassTool
-	case modelTurnGaveUp(stderr):
+	case spendingLimitReached(text, detail):
+		// Ahead of every model arm on purpose. A refusal over money is a
+		// model failure in shape and nothing like one in remedy, and read as
+		// the generic kind it would send the run round the candidate seats
+		// all night to meet the same wall at each of them.
+		return FailureClassCredit
+	case spoke && modelTurnGaveUp(detail):
 		// The worker says so itself, on its own stderr line: a provider that
 		// refused, an answer that would not decode, an allowance spent. That
 		// is a stronger statement than any word found in the surrounding text,
@@ -254,11 +310,7 @@ func classifyStageFailure(err error) FailureClass {
 // modelTurnGaveUp reads the worker's machine-readable account of a model turn
 // that ended badly. The line exists precisely so a reader outside the process
 // can tell a model failure from anything else.
-func modelTurnGaveUp(stderr string) bool {
-	detail, ok := worker.ParseFailureDetailLine(stderr)
-	if !ok {
-		return false
-	}
+func modelTurnGaveUp(detail worker.ModelFailureDetail) bool {
 	return detail.ProviderErrors > 0 || detail.Malformed > 0 || detail.AllowanceSpent > 0 ||
 		detail.Objection != "" || detail.Phrase != ""
 }
