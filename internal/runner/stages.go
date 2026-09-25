@@ -456,6 +456,14 @@ func (p *Pipeline) modelKeyEnv() []string {
 	return []string{
 		"MODEL_API_KEY_IMPLEMENTER=" + os.Getenv("MODEL_API_KEY_IMPLEMENTER"),
 		"MODEL_API_KEY_REVIEWER=" + os.Getenv("MODEL_API_KEY_REVIEWER"),
+		// The reception's optional decision model reads its key here,
+		// listed beside the other roles' keys so that the worker's key
+		// variables can be read off one place. The list restricts nothing:
+		// the worker inherits this process's environment, so a variable
+		// this process was given reaches it whether or not it is named
+		// here. What closes the workflow path to one name is the reusable
+		// workflow's own secrets block, which passes only what it declares.
+		"MODEL_API_KEY_DECISIONS=" + os.Getenv("MODEL_API_KEY_DECISIONS"),
 	}
 }
 

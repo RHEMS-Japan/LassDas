@@ -513,15 +513,28 @@ func composeAssumptionsText(runDir, pullRequestURL string, notes *outcomeNotes) 
 func composeDecisions(runDir string, items, budget int, rest string, notes *outcomeNotes) (string, bool) {
 	var builder strings.Builder
 	whole := true
-	decided, assumed := receptionAssumptions(runDir, notes)
+	decided, assumed, settledConfidence := receptionAssumptions(runDir, notes)
 	decided = append(decided, ruledAssumptions(runDir, notes)...)
 	decided = append(decided, returnedAssumptions(runDir, notes)...)
+
+	// The first list, then why it was never put to the requester. A run
+	// whose questions the gate settled reaches this comment having asked
+	// nobody anything, and the points would otherwise read as points nobody
+	// thought worth asking about. The sentence is the plan notice's own, so
+	// a requester meeting it twice meets the same words; what the notice
+	// adds - how to stop the run - is left off, because by now there is
+	// nothing left to stop.
+	if !writeOutcomeList(&builder, "## 確認せずに本体が決めたこと", decided, items, rest) {
+		whole = false
+	}
+	if sentence := hook.SettledWithoutAskingSentence(settledConfidence); sentence != "" && len(decided) > 0 {
+		builder.WriteString(sentence + "\n")
+	}
 
 	for _, list := range []struct {
 		heading string
 		items   []string
 	}{
-		{"## 確認せずに本体が決めたこと", decided},
 		{"## 前提とした解釈", assumed},
 		{"## 担当の AI を入れ替えたところ", seatMoveLines(runDir, notes)},
 		{"## この依頼で作った資源（リポジトリの外にあり、自動では消えません）", createdResourceLines(runDir, notes)},
@@ -602,8 +615,35 @@ const deliveryPreambleBytes = deliveryAssumptionBytes + hook.MaxOutcomeTextBytes
 // because they are worth different amounts: the first is a decision that was
 // the requester's to make, and with nothing asking them anything afterwards
 // this comment is the only place they meet it.
-func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []string) {
+func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []string, float64) {
 	var decided, assumed []string
+	var settledConfidence float64
+	// The gate's own settled points first, when it settled any. They are
+	// the points it had written down to ask about and answered itself
+	// instead, so they belong at the head of the list the requester reads
+	// for exactly that.
+	var sealed struct {
+		Assumptions       []runAssumption `json:"assumptions"`
+		ReceptionJudgment *struct {
+			Confidence float64 `json:"confidence"`
+		} `json:"reception_judgment"`
+	}
+	//
+	// Read without a note of its own. A decision carries these only when
+	// something settled questions, so most runs have none and a run whose
+	// decision cannot be read here has the same nothing to show - while the
+	// assessment read just below already tells the requester when the
+	// reception's record could not be read at all.
+	if readOutcomeArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &sealed) == nil {
+		if sealed.ReceptionJudgment != nil {
+			settledConfidence = sealed.ReceptionJudgment.Confidence
+		}
+		for _, assumption := range sealed.Assumptions {
+			if line := assumptionLine(assumption); line != "" && assumption.Kind == assumptionDefensibleDefault {
+				decided = append(decided, line)
+			}
+		}
+	}
 	for attempt := readinessAssessmentAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []runAssumption `json:"assumptions"`
@@ -638,7 +678,7 @@ func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []strin
 		}
 		assumed = append(assumed, line)
 	}
-	return decided, assumed
+	return decided, assumed, settledConfidence
 }
 
 // RecordedDecision is one thing the engine settled while the delivery ran,

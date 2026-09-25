@@ -55,18 +55,33 @@ const (
 	SizeLarge  = "large"
 )
 
-// proceedable restates the conditions the reception asks under: a point is
-// only the requester's when two or more permitted answers lead to materially
-// different results, the answer is in neither the request nor the
-// repository, and no default can be defended for it. Anything else the
-// reception decides itself and records.
+// proceedable restates the conditions the reception asks under, and states
+// the two sides truthfully.
+//
+// The first wording asked whether every open point could be settled, and
+// read "no" onto anything a request had left open. That is the wrong
+// question, because it weighs proceeding against a costless alternative
+// that does not exist. Proceeding is not deciding in silence: each point
+// the run settles is written down as a stated assumption the requester
+// reads before any of the work is delivered, and any one of them is a
+// reason for them to stop the run. Not proceeding puts the request back to
+// them and does nothing until they answer.
+//
+// So yes is the ordinary answer - a request that left something open is
+// every request - and no is the exception, available only where a
+// particular point can be named whose two readings deliver different
+// things and where a recorded assumption would come too late to help.
 const (
-	proceedableInstructions = "An automated implementer will carry out `request` on its own, reading the repository as it goes, and will not be able to ask the requester anything. " +
-		"Can it act on the request as written - settling every point the request leaves open by a default a careful engineer could name and defend - or is there a point only the requester can decide?"
-	proceedableYes = "Every open point can be settled by reading the repository, or by a default a careful engineer could defend in one sentence. " +
-		"Nothing is left where deciding it either way would change what the requester asked for."
-	proceedableNo = "At least one point is left where two or more permitted answers lead to materially different user-visible behaviour, acceptance criteria, pre-approved scope, safety or data behaviour; " +
-		"the answer is in neither the request nor the repository; and only the requester can decide it."
+	proceedableInstructions = "An automated implementer will carry out `request` on its own, reading the repository as it goes, and cannot ask the requester anything while it works. " +
+		"Whatever it settles on the way is written down as a stated assumption the requester reads before any of the work is delivered, and any one of them is a reason for them to stop the run. " +
+		"The alternative is not a safer version of the same thing: it puts the request back to the requester and nothing happens until they answer. " +
+		"Is this a request to get on with, or is there a particular point where getting on with it would deliver something they did not ask for?"
+	proceedableYes = "Get on with it. Points are left open - they are in every request - and each of them is ordinary implementation judgement: " +
+		"settled by reading the repository, or by a default an engineer could defend in one sentence, recorded where the requester sees it and can stop the run over it. " +
+		"This is the ordinary answer, and it does not ask that the request left nothing open - only that what it left open is the kind of thing an implementer decides."
+	proceedableNo = "Ask first. A particular point can be named here - not a general thinness of detail, not that the work looks large or unfamiliar - " +
+		"which has two defensible readings that lead to materially different results: which user-visible behaviour is wanted, what would count as done, how far the change may reach, or what becomes of somebody's data or safety. " +
+		"The answer is in neither the request nor the repository, only the requester has it, and a recorded assumption does not save them: by the time they read it the wrong thing is built."
 )
 
 // targetNamed is how much of the starting point the request hands over.

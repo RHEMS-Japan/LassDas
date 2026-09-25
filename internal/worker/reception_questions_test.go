@@ -138,7 +138,7 @@ func TestQuestionsNoneLeavesNothingToWaitFor(t *testing.T) {
 	if !strings.Contains(assessment.Assumptions[0].Statement, asked.Questions[0].Question) {
 		t.Fatalf("the recorded decision does not say what the point was: %q", assessment.Assumptions[0].Statement)
 	}
-	decision, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestQuestionsNoneLeavesNothingToWaitFor(t *testing.T) {
 		failed, failedCheck := receptionPair(t, attempt, testClarificationOutput(), "fail", source, request, config)
 		assessments, checks = append(assessments, failed), append(checks, failedCheck)
 	}
-	exhausted, err := DecideReadiness(assessments, checks, source, request, config)
+	exhausted, err := DecideReadiness(t.Context(), assessments, checks, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestMinimalSettlesWhatADefaultSettles(t *testing.T) {
 	if len(assessment.Questions) != 0 || len(assessment.Assumptions) != 1 {
 		t.Fatalf("assessment asked %d questions and recorded %d decisions", len(assessment.Questions), len(assessment.Assumptions))
 	}
-	decision, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil || decision.Outcome != ReadinessOutcomeReady {
 		t.Fatalf("decision = %+v, error = %v", decision, err)
 	}

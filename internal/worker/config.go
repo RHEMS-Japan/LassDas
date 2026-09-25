@@ -1050,6 +1050,34 @@ type ReceptionJudgeConfig struct {
 	Model     string `json:"model"`
 	BaseURL   string `json:"base_url,omitempty"`
 	APIKeyEnv string `json:"api_key_env"`
+	// ProceedThreshold is how sure the judge has to be before the reception
+	// settles its own questions instead of putting them to the requester.
+	// It is a pointer so that a destination saying nothing is told apart
+	// from one that wrote a zero: an omitted setting takes the measured
+	// default, and a zero is refused rather than read as "always settle".
+	//
+	// Omitted is also how a destination's digest stays where it was, which
+	// matters because the field sits inside a role that is itself optional.
+	ProceedThreshold *float64 `json:"proceed_threshold,omitempty"`
+}
+
+// The bounds the threshold is held to. Below the floor the setting would be
+// a number the measurement never covered, and there is no point in a judge
+// consulted at less certainty than a coin toss; the ceiling is a judge that
+// never settles anything, which is the honest way to turn the feature off
+// without removing the role and losing the address with it.
+const (
+	MinReceptionProceedThreshold = 0.5
+	MaxReceptionProceedThreshold = 1.0
+)
+
+// Threshold is the confidence this role settles questions at, filling in the
+// default for a destination that named none.
+func (r ReceptionJudgeConfig) Threshold() float64 {
+	if r.ProceedThreshold == nil {
+		return DefaultReceptionProceedThreshold
+	}
+	return *r.ProceedThreshold
 }
 
 // DecisionsBaseURL is the decisions service's published address, used when
@@ -1080,6 +1108,14 @@ func (r ReceptionJudgeConfig) validate() error {
 	}
 	if !apiKeyEnvPattern.MatchString(r.APIKeyEnv) {
 		return errors.New("reception judge api key environment name is invalid")
+	}
+	// A NaN is refused by the same comparison that refuses a number outside
+	// the bounds: it fails both, and a threshold no confidence can reach or
+	// miss would decide the feature's behaviour by which way the comparison
+	// happened to be written.
+	if r.ProceedThreshold != nil &&
+		!(*r.ProceedThreshold >= MinReceptionProceedThreshold && *r.ProceedThreshold <= MaxReceptionProceedThreshold) {
+		return errors.New("reception judge proceed threshold is outside 0.5 to 1.0")
 	}
 	return nil
 }

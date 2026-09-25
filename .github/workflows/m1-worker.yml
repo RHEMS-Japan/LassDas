@@ -29,6 +29,12 @@ on:
         required: false
       MODEL_API_KEY_REVIEWER:
         required: false
+      # The reception's optional decision model. Unset on every
+      # destination that has not named the role, which is why it is
+      # not required; a destination that names it and leaves this
+      # empty gets a reception that asks its questions, as before.
+      MODEL_API_KEY_DECISIONS:
+        required: false
       BACKLOG_API_KEY:
         required: false
       # Read-only deploy key for the engine repository. A customer instance
@@ -183,6 +189,7 @@ jobs:
           TOOL_SHA: ${{ job.workflow_sha }}
           MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
           MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+          MODEL_API_KEY_DECISIONS: ${{ secrets.MODEL_API_KEY_DECISIONS }}
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT"
@@ -287,6 +294,7 @@ jobs:
           TOOL_SHA: ${{ job.workflow_sha }}
           MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
           MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+          MODEL_API_KEY_DECISIONS: ${{ secrets.MODEL_API_KEY_DECISIONS }}
         run: |
           set -euo pipefail
           "$TOOLS/worker" read-contract \
@@ -686,6 +694,7 @@ jobs:
           TOOL_SHA: ${{ job.workflow_sha }}
           MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
           MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
+          MODEL_API_KEY_DECISIONS: ${{ secrets.MODEL_API_KEY_DECISIONS }}
           BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
         run: |
           set -euo pipefail

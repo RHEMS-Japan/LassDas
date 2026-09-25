@@ -293,3 +293,64 @@ func TestAStopWrittenWhileTheReceptionRanIsHeardBeforeItActs(t *testing.T) {
 		t.Fatalf("the log does not say what proceeding means here: %v", logger.lines)
 	}
 }
+
+// A gate that settled its own questions writes them where the plan notice
+// reads them, and the notice says so. Without the line the points read as
+// things nobody thought worth asking about, when they are the opposite: the
+// points this run had written down to ask, and stopping is the only way the
+// requester gets to answer one.
+func TestThePlanNoticeSaysWhenTheReceptionSettledItsOwnQuestions(t *testing.T) {
+	runDir := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(runDir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("readiness-ticket.json", `{"request":"ラベルを差し替える"}`)
+	write("history/readiness/assessment-1.json",
+		`{"assumptions":[{"kind":"repository_convention","statement":"命名は既存のファイルに合わせる"}]}`)
+	write("history/readiness/decision.json", `{"outcome":"ready","needs_design":false,"design_reason":"approach_in_ticket",`+
+		`"assumptions":[{"kind":"defensible_default","statement":"両方の言語画面を直す"},`+
+		`{"kind":"non_user_visible_implementation","statement":"読まれない種類は出さない"}],`+
+		`"reception_judgment":{"model":"typesafe/jev-1.13","answer":"yes","confidence":0.93,"threshold":0.85}}`)
+
+	facts := loadPlanFacts(runDir)
+	if len(facts.Decided) != 1 || facts.Decided[0] != "両方の言語画面を直す" {
+		t.Fatalf("Decided = %v, want the point the gate settled instead of asking", facts.Decided)
+	}
+	if facts.SettledConfidence != 0.93 {
+		t.Fatalf("SettledConfidence = %v, want 0.93", facts.SettledConfidence)
+	}
+	content := hook.PlanCommentContent("run-42", facts)
+	for _, want := range []string{
+		"確認せずにこちらで決めた点（違う場合は停止してください）",
+		"- 両方の言語画面を直す",
+		"確信度 0.93",
+		"お伺いせずに受付が決めました",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the plan notice lacks %q:\n%s", want, content)
+		}
+	}
+	// The sentence sits with the list it is about, so an overflowing body
+	// cuts the two together rather than leaving a sentence pointing at
+	// something that is no longer there.
+	if strings.Index(content, "- 両方の言語画面を直す") > strings.Index(content, "確信度 0.93") {
+		t.Fatal("the sentence is printed before the points it explains")
+	}
+
+	// A run where nothing settled its questions says nothing about it.
+	write("history/readiness/decision.json", `{"outcome":"ready","needs_design":false,"design_reason":"approach_in_ticket"}`)
+	quiet := loadPlanFacts(runDir)
+	if quiet.SettledConfidence != 0 || len(quiet.Decided) != 0 {
+		t.Fatalf("a decision that settled nothing produced %v at confidence %v", quiet.Decided, quiet.SettledConfidence)
+	}
+	if body := hook.PlanCommentContent("run-42", quiet); strings.Contains(body, "確信度") {
+		t.Fatalf("the notice explains a judgment nobody made:\n%s", body)
+	}
+}

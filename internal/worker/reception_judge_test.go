@@ -157,3 +157,46 @@ func loadWithReceptionJudge(t *testing.T, mutate func(judge map[string]any)) (Co
 	}
 	return LoadConfig(path)
 }
+
+// The threshold is part of what the destination said, and a destination that
+// says nothing about it is a destination that has not said it. The first
+// keeps the shipped digests where they are - the role is optional and the
+// setting inside it is too - and the second is what makes moving the number
+// a deliberate act with a visible cost, like every other setting.
+func TestTheProceedThresholdIsPartOfWhatTheDestinationSaid(t *testing.T) {
+	shipped, err := LoadConfig("../../config/m1-consumer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := shipped.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role, present := shipped.Models.ReceptionJudgeRole(); present {
+		t.Fatalf("the shipped destination names a reception judge: %+v", role)
+	}
+	silent, err := withReceptionJudge(t, func(judge map[string]any) {}).SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := withReceptionJudge(t, func(judge map[string]any) { judge["proceed_threshold"] = 0.85 }).SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if silent == named {
+		t.Error("naming a threshold left the destination's digest unchanged")
+	}
+	// And the shipped destination, which names neither, digests as it did
+	// before either of them existed.
+	if unchanged == silent || unchanged == named {
+		t.Error("the shipped destination digests as one that named a judge")
+	}
+	loaded := withReceptionJudge(t, func(judge map[string]any) { judge["proceed_threshold"] = 0.85 })
+	role, present := loaded.Models.ReceptionJudgeRole()
+	if !present || role.Threshold() != 0.85 {
+		t.Fatalf("the threshold read back as %v", role.Threshold())
+	}
+	if _, err := loadWithReceptionJudge(t, func(judge map[string]any) { judge["proceed_threshold"] = 0.2 }); err == nil {
+		t.Error("a destination naming a threshold under the floor loaded anyway")
+	}
+}

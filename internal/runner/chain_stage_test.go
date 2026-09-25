@@ -299,3 +299,47 @@ func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) 
 		t.Fatalf("applier without its design: %v", err)
 	}
 }
+
+// The list of keys handed to the worker is closed, so a role whose variable
+// is missing from it fails on every call however carefully an operator set
+// it — and fails in the one way that reads as a model with no opinion.
+func TestTheReceptionJudgeKeyReachesTheWorker(t *testing.T) {
+	t.Setenv("MODEL_API_KEY_IMPLEMENTER", "implementer-value")
+	t.Setenv("MODEL_API_KEY_REVIEWER", "reviewer-value")
+	t.Setenv("MODEL_API_KEY_DECISIONS", "decisions-value")
+	carried := map[string]string{}
+	for _, entry := range (&Pipeline{}).modelKeyEnv() {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			t.Fatalf("an environment entry is not a name and a value: %q", entry)
+		}
+		carried[name] = value
+	}
+	for name, want := range map[string]string{
+		"MODEL_API_KEY_IMPLEMENTER": "implementer-value",
+		"MODEL_API_KEY_REVIEWER":    "reviewer-value",
+		"MODEL_API_KEY_DECISIONS":   "decisions-value",
+	} {
+		got, present := carried[name]
+		if !present {
+			t.Errorf("%s never reaches the worker", name)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s reaches the worker as something else", name)
+		}
+	}
+	// An unset variable still travels, empty. The worker refuses an empty
+	// key where it is read, which is a sentence naming the variable rather
+	// than a call that looks like the model being down.
+	t.Setenv("MODEL_API_KEY_DECISIONS", "")
+	var found bool
+	for _, entry := range (&Pipeline{}).modelKeyEnv() {
+		if entry == "MODEL_API_KEY_DECISIONS=" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an unset judge key does not travel at all")
+	}
+}

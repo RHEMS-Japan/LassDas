@@ -93,7 +93,7 @@ func testAssessmentPair(t *testing.T, attempt int, output ModelReadinessOutput, 
 func testReadyDecision(t *testing.T, source SourceSnapshot, request TicketRequest, config Config) ReadinessDecision {
 	t.Helper()
 	assessment, check := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
-	decision, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,30 +234,30 @@ func TestDecideReadinessOutcomes(t *testing.T) {
 	}
 
 	assessment, check := testAssessmentPair(t, 1, testClarificationOutput(), "pass", source, request, config)
-	clarification, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	clarification, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil || clarification.Outcome != ReadinessOutcomeClarification || len(clarification.Questions) != 1 {
 		t.Fatalf("decision = %+v, error = %v", clarification, err)
 	}
 
 	failedOnce, failedCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
-	if _, err := DecideReadiness([]ReadinessAssessment{failedOnce}, []ReadinessCheck{failedCheck}, source, request, config); err == nil {
-		t.Fatal("DecideReadiness() sealed a decision before the required retry")
+	if _, err := DecideReadiness(t.Context(), []ReadinessAssessment{failedOnce}, []ReadinessCheck{failedCheck}, source, request, config, nil); err == nil {
+		t.Fatal("DecideReadiness(t.Context(), , nil) sealed a decision before the required retry")
 	}
 
 	secondAssessment, secondCheck := testAssessmentPair(t, 2, testClarificationOutput(), "fail", source, request, config)
-	if _, err := DecideReadiness([]ReadinessAssessment{failedOnce, secondAssessment}, []ReadinessCheck{failedCheck, secondCheck}, source, request, config); err == nil {
-		t.Fatal("DecideReadiness() sealed a decision before the final permitted attempt")
+	if _, err := DecideReadiness(t.Context(), []ReadinessAssessment{failedOnce, secondAssessment}, []ReadinessCheck{failedCheck, secondCheck}, source, request, config, nil); err == nil {
+		t.Fatal("DecideReadiness(t.Context(), , nil) sealed a decision before the final permitted attempt")
 	}
 
 	thirdAssessment, thirdCheck := testAssessmentPair(t, 3, testClarificationOutput(), "fail", source, request, config)
-	unresolved, err := DecideReadiness([]ReadinessAssessment{failedOnce, secondAssessment, thirdAssessment}, []ReadinessCheck{failedCheck, secondCheck, thirdCheck}, source, request, config)
+	unresolved, err := DecideReadiness(t.Context(), []ReadinessAssessment{failedOnce, secondAssessment, thirdAssessment}, []ReadinessCheck{failedCheck, secondCheck, thirdCheck}, source, request, config, nil)
 	if err != nil || unresolved.Outcome != ReadinessOutcomeUnresolved || len(unresolved.Questions) != 0 {
 		t.Fatalf("decision = %+v, error = %v", unresolved, err)
 	}
 
 	passedFirst, passedCheck := testAssessmentPair(t, 1, testReadyOutput(), "pass", source, request, config)
-	if _, err := DecideReadiness([]ReadinessAssessment{passedFirst, secondAssessment}, []ReadinessCheck{passedCheck, secondCheck}, source, request, config); err == nil {
-		t.Fatal("DecideReadiness() accepted a retry after a passing check")
+	if _, err := DecideReadiness(t.Context(), []ReadinessAssessment{passedFirst, secondAssessment}, []ReadinessCheck{passedCheck, secondCheck}, source, request, config, nil); err == nil {
+		t.Fatal("DecideReadiness(t.Context(), , nil) accepted a retry after a passing check")
 	}
 }
 
@@ -267,7 +267,7 @@ func TestGenerateCandidateRequiresReadyDecision(t *testing.T) {
 	invoker, _ := NewModelInvoker(api)
 
 	assessment, check := testAssessmentPair(t, 1, testClarificationOutput(), "pass", source, request, config)
-	clarification, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	clarification, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,10 +370,10 @@ func TestDecideReadinessSurvivingQuestionsOutliveABlamedOne(t *testing.T) {
 		first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
 		second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
 		third, thirdCheck := testCheckedPair(t, 3, testTwoQuestionOutput(), finalCheck, source, request, config)
-		return DecideReadiness(
+		return DecideReadiness(t.Context(),
 			[]ReadinessAssessment{first, second, third},
 			[]ReadinessCheck{firstCheck, secondCheck, thirdCheck},
-			source, request, config)
+			source, request, config, nil)
 	}
 
 	// Every objection names Q1; Q2 survives, renumbered to Q1.
@@ -412,7 +412,7 @@ func TestDecideReadinessSurvivingQuestionsOutliveABlamedOne(t *testing.T) {
 	first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
 	second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
 	third, thirdCheck := testAssessmentPair(t, 3, testReadyOutput(), "fail", source, request, config)
-	decision, err = DecideReadiness([]ReadinessAssessment{first, second, third}, []ReadinessCheck{firstCheck, secondCheck, thirdCheck}, source, request, config)
+	decision, err = DecideReadiness(t.Context(), []ReadinessAssessment{first, second, third}, []ReadinessCheck{firstCheck, secondCheck, thirdCheck}, source, request, config, nil)
 	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved {
 		t.Fatalf("decision = %+v, error = %v", decision, err)
 	}
@@ -430,7 +430,7 @@ func TestDecideReadinessRescueRoundTripsThroughValidate(t *testing.T) {
 		}}, source, request, config)
 	assessments := []ReadinessAssessment{first, second, third}
 	checks := []ReadinessCheck{firstCheck, secondCheck, thirdCheck}
-	decision, err := DecideReadiness(assessments, checks, source, request, config)
+	decision, err := DecideReadiness(t.Context(), assessments, checks, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,10 +483,10 @@ func TestDecideReadinessRescueIgnoresSetLevelCodes(t *testing.T) {
 			Verdict: "fail", Reasons: []ReadinessCheckReason{
 				{Code: code, Message: "A defect attributed to a question.", QuestionID: "Q1"},
 			}}, source, request, config)
-		decision, err := DecideReadiness(
+		decision, err := DecideReadiness(t.Context(),
 			[]ReadinessAssessment{first, second, third},
 			[]ReadinessCheck{firstCheck, secondCheck, thirdCheck},
-			source, request, config)
+			source, request, config, nil)
 		if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
 			t.Fatalf("code %s: decision = %+v, error = %v", code, decision, err)
 		}

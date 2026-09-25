@@ -95,7 +95,7 @@ func designPair(t *testing.T, output ModelReadinessOutput, checkKind string, che
 func designDecision(t *testing.T, output ModelReadinessOutput, checkKind string, checkNeedsDesign bool, source SourceSnapshot, request TicketRequest, config Config) ReadinessDecision {
 	t.Helper()
 	assessment, check := designPair(t, output, checkKind, checkNeedsDesign, source, request, config)
-	decision, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+	decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestNeedsDesignFallsToSafeSide(t *testing.T) {
 	if !silentCheck.NeedsDesign || silentCheck.RequestKind != RequestKindChange {
 		t.Fatalf("silent check = (%v, %q)", silentCheck.NeedsDesign, silentCheck.RequestKind)
 	}
-	silent, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{silentCheck}, source, request, config)
+	silent, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{silentCheck}, source, request, config, nil)
 	if err != nil || !silent.NeedsDesign || silent.DesignReason != DesignReasonChecker {
 		t.Fatalf("silent checker, decision = (%v, %q), error = %v", silent.NeedsDesign, silent.DesignReason, err)
 	}
@@ -431,8 +431,8 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 	if strings.Contains(readinessSystemPrompt(defaultTestPolicy()), "target_files") {
 		t.Error("the assessor prompt still judges a ticket by its target files")
 	}
-	if readinessPromptVersion != 14 {
-		t.Fatalf("prompt version = %d, want 14 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary; 13 drops the target-file count; 14 hands both roles the destination's asking policy)", readinessPromptVersion)
+	if readinessPromptVersion != 15 {
+		t.Fatalf("prompt version = %d, want 15 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary; 13 drops the target-file count; 14 hands both roles the destination's asking policy; 15 asks each question for the choice the assessor would take alone)", readinessPromptVersion)
 	}
 	if strings.Contains(readinessSystemPrompt(defaultTestPolicy()), "no skip is possible") || strings.Contains(checker, "no skip is possible") {
 		t.Fatal("the prompts still say an absent vocabulary forbids the skip")

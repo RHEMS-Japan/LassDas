@@ -80,17 +80,38 @@ func TestTheReceptionQuestionsAreTheFixedSet(t *testing.T) {
 // The reception's one question that gates the run says, in its own words,
 // what the reception's rules say: a point is the requester's only when
 // nothing can be read or defended for it.
+//
+// It also has to weigh the two sides against each other truthfully, and
+// that is what this pins. A criterion that offers "no" as the careful
+// answer, without saying that proceeding is recorded and can be stopped and
+// that asking halts the request until somebody answers, measures a question
+// nobody is deciding.
 func TestTheProceedableCriteriaRestateTheReceptionRules(t *testing.T) {
-	criteria := ReceptionQuestions()[QuestionProceedable].Criteria.(map[string]string)
-	for _, phrase := range []string{"defend", "repository"} {
+	question := ReceptionQuestions()[QuestionProceedable]
+	criteria := question.Criteria.(map[string]string)
+	for _, phrase := range []string{"defend", "repository", "stop the run", "ordinary"} {
 		if !strings.Contains(strings.ToLower(criteria[AnswerYes]), phrase) {
 			t.Errorf("the yes criterion does not mention %q: %q", phrase, criteria[AnswerYes])
 		}
 	}
-	for _, phrase := range []string{"only the requester", "materially different"} {
+	for _, phrase := range []string{"only the requester", "materially different", "particular point"} {
 		if !strings.Contains(strings.ToLower(criteria[AnswerNo]), phrase) {
 			t.Errorf("the no criterion does not mention %q: %q", phrase, criteria[AnswerNo])
 		}
+	}
+	// Both alternatives, in the question itself: what proceeding costs and
+	// what asking costs. Either one missing leaves the model weighing a
+	// choice against something that is not on offer.
+	for _, phrase := range []string{"stated assumption", "stop the run", "nothing happens until they answer"} {
+		if !strings.Contains(strings.ToLower(question.Instructions), phrase) {
+			t.Errorf("the question does not say %q: %q", phrase, question.Instructions)
+		}
+	}
+	// The old wording made "nothing is left open" the condition for yes,
+	// which no real request meets. Keeping yes available to a request that
+	// left something open is the whole recalibration.
+	if !strings.Contains(strings.ToLower(criteria[AnswerYes]), "does not ask that the request left nothing open") {
+		t.Errorf("the yes criterion still reads as requiring a request that left nothing open: %q", criteria[AnswerYes])
 	}
 }
 
