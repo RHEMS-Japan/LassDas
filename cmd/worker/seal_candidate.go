@@ -411,10 +411,23 @@ func sealWorkflowRefusal(path string, round int, draft worker.TicketDraft, refus
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
-	// Removed before the write for the reason every other record here is: a
-	// link left at the path must not carry the write somewhere else.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	// Written through a temporary and renamed, the way its sibling record
+	// is (internal/runner's validation failure): the reader is another
+	// process on another card, and a card that started while a direct write
+	// was half done would read half a record and call it not ours.
+	temporary := path + ".tmp"
+	for _, leftover := range []string{temporary, path} {
+		// Removed before the write for the reason every other record here
+		// is: a link left at the path must not carry the write somewhere
+		// else.
+		if err := os.Remove(leftover); err != nil && !os.IsNotExist(err) {
+			return
+		}
+	}
+	if err := os.WriteFile(temporary, encoded, 0o600); err != nil {
 		return
 	}
-	_ = os.WriteFile(path, encoded, 0o600)
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+	}
 }

@@ -57,14 +57,9 @@ const MaxDeployWorkflowBytes = 64 * 1024
 // than against the policy: the branches are already written down once, and
 // a second copy would be a second thing to keep true.
 const (
-	WorkflowTriggerPush             = "push"
-	WorkflowTriggerPullRequest      = "pull_request"
-	WorkflowTriggerDispatch         = "workflow_dispatch"
-	WorkflowTriggerWorkflowCall     = "workflow_call"
-	WorkflowTriggerWorkflowRun      = "workflow_run"
-	WorkflowTriggerRelease          = "release"
-	WorkflowTriggerDeployment       = "deployment"
-	WorkflowTriggerDeploymentStatus = "deployment_status"
+	WorkflowTriggerPush        = "push"
+	WorkflowTriggerPullRequest = "pull_request"
+	WorkflowTriggerDispatch    = "workflow_dispatch"
 )
 
 // deployWorkflowTriggers are the events a policy may name at all. Anything
@@ -72,10 +67,12 @@ const (
 // workflow is written, because an event nobody thought about is an event
 // nobody bounded: repository_dispatch, issue_comment and pull_request_target
 // all start a job from something a stranger can send.
+// Three, and only these three. Each of the others starts a job from
+// something outside the branch filter this gate checks — a release being
+// published, another workflow finishing, a deployment somebody created —
+// so admitting one would be admitting a start nothing here bounds.
 var deployWorkflowTriggers = map[string]bool{
 	WorkflowTriggerPush: true, WorkflowTriggerPullRequest: true, WorkflowTriggerDispatch: true,
-	WorkflowTriggerWorkflowCall: true, WorkflowTriggerWorkflowRun: true, WorkflowTriggerRelease: true,
-	WorkflowTriggerDeployment: true, WorkflowTriggerDeploymentStatus: true,
 }
 
 // workflowPermissionScopes are the permissions a job's token can be given.

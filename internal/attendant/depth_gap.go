@@ -233,13 +233,14 @@ func detectReleasePathGap(config runtime.Config, run state.RunOverview, runDir s
 	plan.Items = append(plan.Items, missingWorkflowItems(settings, tree, production)...)
 	plan.Items = append(plan.Items, missingObservationItems(settings, production)...)
 	plan.Items = append(plan.Items, missingCardItems(config, run)...)
-	// The digest-commit policy is the engine's own to write when the engine
-	// wrote the workflow that makes the commit: the shape of that commit is
-	// whatever the file it just authored produces, so there is nothing to
-	// observe and nobody to ask. Where the means was not handed, somebody
-	// else's workflow makes that commit and the engine reports the setting
-	// by name instead.
-	if production && settings.GitHub.StagingDigestCommit == nil && settings.workflowPolicy() == nil {
+	// Reported by name whether or not the means was handed, because the
+	// engine cannot make this setting true either way. It says which files
+	// the deployment's own commit modifies, with which message and by whom,
+	// and the promotion holds the real commit to it exactly; nothing asks
+	// any round to make such a commit. A workflow the engine authored does
+	// not change that on its own — the digest-commit step has to be built
+	// and asked for first (deliver_depth.go names what that change needs).
+	if production && settings.GitHub.StagingDigestCommit == nil {
 		plan.Items = append(plan.Items, worker.ReleasePathItem{
 			Name: "github_contract.staging_digest_commit", Kind: worker.ReleasePathDigestCommit,
 			Detail: "staging へ反映された内容を記録するコミットの形 (メッセージの接頭辞・対象パス・実行者) の申告です。" +
@@ -490,6 +491,10 @@ func workflowInstructionLines(plan worker.ReleasePathPlan, settings consumerRele
 		"  - uses: に書いてよいのは " + actionsPhrase(policy) + " だけです (この形のまま、コミット id も含めて一致すること)。",
 		"  - runs-on: に書いてよいのは " + strings.Join(policy.Runners, " / ") + " だけです。",
 		"  - run: の中で環境変数の一覧を出力しないでください (env / printenv / set / export -p)。",
+		"  - run: は bash か sh で書いてください。defaults の shell 指定は使えません。",
+		"  - 依頼した人が書いた文字列 (github.event.* / github.head_ref) を run: の中に直接展開しないでください。" +
+			"env: で環境変数に渡してから読んでください。",
+		"  - if: の条件にも同じ secrets の決まりが掛かります。",
 	}
 	return lines
 }
@@ -660,4 +665,31 @@ func withinWritableScope(name string, scope []string) bool {
 		}
 	}
 	return false
+}
+
+// prepareReleasePath is what the reception is given before it asks.
+//
+// It reads the destination's settings and its checked-out tree and seals
+// what the release path is missing, and it is handed to the preparation
+// rather than run beside it because the order is the whole point: the
+// reception is the only place anything asks the requester anything, so a
+// means this engine was not handed has to be known before it runs. Run
+// afterwards — where this lived until the ordering was measured — the plan
+// was sealed 58 lines after the questions had already gone out, and the
+// single question about a missing means could never be asked at all.
+func prepareReleasePath(config runtime.Config, run state.RunOverview, runDir string, logger Logger) func() error {
+	return func() error {
+		plan, err := detectReleasePathGap(config, run, runDir)
+		if err != nil {
+			return err
+		}
+		if plan.Empty() {
+			return nil
+		}
+		sealReleasePathPlan(runDir, plan, logger)
+		logger.Info("the destination asks for a depth it has no path for; this round builds what it can",
+			"run", run.RunID, "configured", plan.Configured,
+			"builds", len(plan.Buildable()), "unapplied", len(plan.Unapplied()))
+		return nil
+	}
 }

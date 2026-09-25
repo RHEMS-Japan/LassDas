@@ -138,14 +138,27 @@ func advanceDelivery(
 		// evidence, which is the honest end for it.
 		return deliverReached, nil
 	}
-	// Past the pull request, which is the one window a destination's
-	// configuration may be written in: from here the cards re-verify their
+	// Nothing writes the destination's configuration here, and this is the
+	// seam where something one day will. Past the pull request is the one
+	// window it could be written in — from here the cards re-verify their
 	// sealed records under the digest the pull request recorded, so a
-	// configuration that moves now cannot make them unreadable and does not
-	// restart this delivery (chains.go's exemption). Where this engine wrote
-	// the workflow that records what landed, the policy describing that
-	// record is the engine's own to write, and it writes it once.
-	writeReleaseSettings(config, runDir, logger)
+	// configuration that moved now could not make them unreadable and does
+	// not restart this delivery (chains.go's exemption).
+	//
+	// What would be written is the staging digest-commit policy, and it is
+	// not written because the engine cannot yet make it true. That policy
+	// says which files the deployment's own commit modifies, with which
+	// message and by whom, and the promotion holds the real commit to it
+	// exactly (internal/githubapi/waits.go's digest comparison). Nothing
+	// asks the implementer to make such a commit, so a policy written here
+	// would describe a commit that never happens, and the destination would
+	// stop short of production for ever afterwards. Writing it belongs with
+	// the change that has the round build the digest-commit step itself:
+	// the workflow committing the image digest into named files with that
+	// exact prefix and actor, the policy naming THOSE files, the
+	// instruction asking for it, and contents: write admitted by the
+	// destination's policy for that step alone. Until then the setting is
+	// reported by name as one this delivery did not apply.
 	cards := deliverCards(runDir, run.DeliveryID, tasks)
 	climb := func(stage, verdict string) (deliverProgress, error) {
 		return climbDeliverPhase(ctx, config, services, hermes, envelope, run, view, plan, stage, verdict, cards, logger)

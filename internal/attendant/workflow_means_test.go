@@ -65,11 +65,24 @@ func TestTheHandedMeansPutsTheWorkflowFilesInTheRoundsInstruction(t *testing.T) 
 			t.Fatalf("the instruction does not quote %q: %s", quoted, plan.Instruction)
 		}
 	}
-	// The digest-commit policy is no longer somebody else's to write, so it
-	// is not reported as a setting this delivery left alone.
-	for _, name := range releasePathUnapplied(plan) {
-		if strings.Contains(name, "staging_digest_commit") {
-			t.Fatalf("a setting the engine now writes is still reported as unapplied: %v", releasePathUnapplied(plan))
+	// The settings the engine still cannot make true are reported by name,
+	// handed means or not. The digest-commit policy describes a commit
+	// nothing asks any round to make, so writing it would leave this
+	// destination unable to reach production at all.
+	if unapplied := releasePathUnapplied(plan); !contains(unapplied, "github_contract.staging_digest_commit") {
+		t.Fatalf("the report does not name the digest-commit policy: %v", unapplied)
+	}
+	// And the instance's own execution settings, where they are missing.
+	noCards, run, runDir := releasePathFixture(t, handedWorkflowMeans, false)
+	without, err := detectReleasePathGap(noCards, run, runDir)
+	if err != nil {
+		t.Fatalf("detectReleasePathGap: %v", err)
+	}
+	for _, key := range []string{
+		"chain.deliver.checks_profile", "chain.deliver.integrate_profile", "chain.deliver.promote_profile",
+	} {
+		if !contains(releasePathUnapplied(without), key) {
+			t.Fatalf("the report does not name %q: %v", key, releasePathUnapplied(without))
 		}
 	}
 }

@@ -46,9 +46,14 @@ const (
 // The top-level keys a workflow this engine writes may hold. Everything
 // else is refused as unclassifiable: a key the rules below do not read is a
 // key nothing bounds.
+// defaults is absent on purpose. defaults.run.shell names the interpreter
+// every run: step is handed to, so a workflow declaring one could be read
+// as a shell script by every rule below and then executed as something
+// else entirely — every check on what a step runs would be reading a
+// different language from the one that runs.
 var workflowTopLevelKeys = map[string]bool{
 	"name": true, "run-name": true, "on": true, "permissions": true,
-	"env": true, "defaults": true, "concurrency": true, "jobs": true,
+	"env": true, "concurrency": true, "jobs": true,
 }
 
 // The job keys it may hold. container and services are absent on purpose:
@@ -58,7 +63,7 @@ var workflowTopLevelKeys = map[string]bool{
 var workflowJobKeys = map[string]bool{
 	"name": true, "needs": true, "if": true, "permissions": true, "runs-on": true,
 	"environment": true, "concurrency": true, "outputs": true, "env": true,
-	"defaults": true, "steps": true, "timeout-minutes": true, "strategy": true,
+	"steps": true, "timeout-minutes": true, "strategy": true,
 	"continue-on-error": true,
 }
 
@@ -68,6 +73,11 @@ var workflowStepKeys = map[string]bool{
 	"env": true, "shell": true, "working-directory": true, "continue-on-error": true,
 	"timeout-minutes": true,
 }
+
+// workflowStepShells are the interpreters a step may name. The rules below
+// read a run: step as a POSIX shell script, so a step that names anything
+// else would be measured in one language and run in another.
+var workflowStepShells = map[string]bool{"bash": true, "sh": true}
 
 // environmentDumps are the shell words that print the whole environment. A
 // step that runs one has put every secret the job holds into a log that
@@ -150,6 +160,15 @@ func checkOneWorkflow(file CandidateFile, policy *DeployWorkflowPolicy, branches
 	decoder := yaml.NewDecoder(strings.NewReader(file.Content))
 	var document yaml.Node
 	if err := decoder.Decode(&document); err != nil {
+		if strings.TrimSpace(file.Content) == "" {
+			// Emptied or deleted. The plan named this file as one the round
+			// would build, so an empty one is the round having taken the
+			// release path away rather than a file that will not parse —
+			// and an objection about YAML would send the next round looking
+			// for a syntax error in nothing.
+			return workflowObjection(file.Path, workflowRuleShape,
+				"この workflow は今回の巡が作るものとして計画に載っています。消さずに、中身のあるファイルとして残してください。")
+		}
 		return workflowObjection(file.Path, workflowRuleShape, "YAML として読めません。")
 	}
 	var extra yaml.Node
@@ -336,9 +355,16 @@ func checkBranchFilter(path string, filter *yaml.Node, branches []string) error 
 		return workflowObjection(path, workflowRuleTrigger,
 			"push / pull_request には branches を書いてください。branches-ignore や paths だけでは、他のブランチで走るのを止められません。")
 	}
-	if len(keys) != 1 {
-		return workflowObjection(path, workflowRuleTrigger,
-			"push / pull_request に書けるのは branches だけです。")
+	for name := range keys {
+		// branches decides WHICH branches start the workflow; paths only
+		// narrows that further, and a narrowing cannot widen what branches
+		// already settled. Anything else beside it could.
+		switch name {
+		case "branches", "paths", "paths-ignore":
+		default:
+			return workflowObjection(path, workflowRuleTrigger,
+				"push / pull_request に書けるのは branches と paths だけです。")
+		}
 	}
 	values, err := scalarList(path, listed, workflowRuleTrigger)
 	if err != nil {
@@ -422,6 +448,11 @@ func checkOneJob(path string, node *yaml.Node, policy *DeployWorkflowPolicy) err
 	if err != nil {
 		return err
 	}
+	if condition, found := job["if"]; found {
+		if err := checkCondition(path, condition, policy); err != nil {
+			return err
+		}
+	}
 	if permissions, found := job["permissions"]; found {
 		if err := checkPermissions(path, permissions, policy); err != nil {
 			return err
@@ -499,12 +530,75 @@ func checkStep(path string, node *yaml.Node, policy *DeployWorkflowPolicy) error
 		if run.Kind != yaml.ScalarNode {
 			return workflowObjection(path, workflowRuleRunStep, "run: はコマンドの文字列で書いてください。")
 		}
+		if shell, named := step["shell"]; named {
+			if shell.Kind != yaml.ScalarNode || !workflowStepShells[shell.Value] {
+				return workflowObjection(path, workflowRuleRunStep,
+					"shell: に書けるのは bash か sh だけです。別の言語で走らせると、ここで確かめた内容と実際に走るものが食い違います。")
+			}
+		}
 		if dumpsEnvironment(run.Value) {
 			return workflowObjection(path, workflowRuleRunStep,
 				"環境変数の一覧を出力する命令が含まれています。実行記録は誰でも読めるので、そこへ資格情報が出ます。")
 		}
+		if err := refuseUntrustedText(path, run.Value); err != nil {
+			return err
+		}
+	}
+	if condition, found := step["if"]; found {
+		if err := checkCondition(path, condition, policy); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// refuseUntrustedText refuses a run: step that pastes something a stranger
+// wrote into the script.
+//
+// A ticket's own words reach this engine as data. A commit message, a
+// branch name and a pull request title reach a workflow as text the shell
+// expands before it runs: ${{ github.event.head_commit.message }} in a run:
+// step is that text becoming commands, on the destination's own account,
+// with whatever the job's token can do. The value has to travel as an
+// environment variable instead, which is what the objection says.
+func refuseUntrustedText(path, script string) error {
+	for _, expression := range expressionsIn(script) {
+		tokens, err := tokenizeExpression(expression)
+		if err != nil {
+			return workflowObjection(path, workflowRuleRunStep,
+				"run: の ${{ }} に、この engine が意味を確かめられない書き方があります。")
+		}
+		for index, token := range tokens {
+			if token.kind != 'n' || !strings.EqualFold(token.value, "github") ||
+				index+2 >= len(tokens) || tokens[index+1].value != "." {
+				continue
+			}
+			switch strings.ToLower(tokens[index+2].value) {
+			case "event", "head_ref":
+				return workflowObjection(path, workflowRuleRunStep,
+					"依頼した人が書いた文字列を run: の中に直接展開しています。"+
+						"その文字列はそのまま命令として実行されるので、env: で環境変数に渡してから読んでください。")
+			}
+		}
+	}
+	return nil
+}
+
+// checkCondition holds an if: to the same secrets rule every other
+// expression is held to. An if: takes a bare expression with no ${{ }}
+// around it, so the scan that reads those spans never sees one — and
+// "if: secrets.SOMETHING != ”" is a perfectly good way to ask whether a
+// secret exists.
+func checkCondition(path string, node *yaml.Node, policy *DeployWorkflowPolicy) error {
+	if node.Kind != yaml.ScalarNode {
+		return workflowObjection(path, workflowRuleShape, "if: は 1 つの条件式で書いてください。")
+	}
+	if strings.Contains(node.Value, "${{") {
+		// Wrapped in the ordinary span, which the document-wide scan has
+		// already read.
+		return nil
+	}
+	return checkExpression(path, node.Value, policy)
 }
 
 // dumpsEnvironment reports whether a shell script prints the environment.
@@ -608,20 +702,32 @@ func checkExpressions(path string, node *yaml.Node, policy *DeployWorkflowPolicy
 }
 
 func checkExpressionsIn(path, text string, policy *DeployWorkflowPolicy) error {
+	if strings.Count(text, "${{") != len(expressionsIn(text)) {
+		return workflowObjection(path, workflowRuleShape, "${{ が閉じられていません。")
+	}
+	for _, expression := range expressionsIn(text) {
+		if err := checkExpression(path, expression, policy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// expressionsIn are the ${{ }} spans of one scalar, in the order written.
+func expressionsIn(text string) []string {
+	expressions := make([]string, 0, 2)
 	rest := text
 	for {
 		start := strings.Index(rest, "${{")
 		if start < 0 {
-			return nil
+			return expressions
 		}
 		rest = rest[start+3:]
 		end := strings.Index(rest, "}}")
 		if end < 0 {
-			return workflowObjection(path, workflowRuleShape, "${{ が閉じられていません。")
+			return expressions
 		}
-		if err := checkExpression(path, rest[:end], policy); err != nil {
-			return err
-		}
+		expressions = append(expressions, rest[:end])
 		rest = rest[end+2:]
 	}
 }
@@ -714,7 +820,7 @@ func tokenizeExpression(expression string) ([]expressionToken, error) {
 			}
 			tokens = append(tokens, expressionToken{kind: 'n', value: string(runes[index:end])})
 			index = end
-		case strings.ContainsRune(".[](),*", character):
+		case strings.ContainsRune(".[](),*+-/%", character):
 			tokens = append(tokens, expressionToken{kind: 'p', value: string(character)})
 			index++
 		case strings.ContainsRune("!<>=&|", character):
