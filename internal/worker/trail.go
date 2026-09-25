@@ -95,8 +95,13 @@ func summarizeTrailStages(stages []trailStage) TrailSummary {
 // missing stage-1 is an error; the trail of a run that never implemented
 // anything is not this function's business.
 func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailStage, error) {
-	stages := make([]trailStage, 0, config.MaxStages)
-	for number := 1; number <= config.MaxStages; number++ {
+	// Up to the ceiling every round-numbered record is held to, not up to a
+	// configured budget: the budget stopped bounding rounds, and a trail
+	// that stopped at it would silently drop the rounds past it. The loop
+	// still ends at the first round with no decision, which is where the
+	// run actually ends.
+	stages := make([]trailStage, 0, config.StageCeiling())
+	for number := 1; number <= config.StageCeiling(); number++ {
 		stageDir := filepath.Join(historyDir, "stage-"+strconv.Itoa(number))
 		if _, err := os.Stat(filepath.Join(stageDir, "decision.json")); err != nil {
 			break
@@ -127,7 +132,14 @@ func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailS
 			}
 			reviews = append(reviews, review)
 		}
-		decision, err := DecideStage(candidate, reviews, source, request, config)
+		// A round the arbiter ruled on was counted under that ruling, so
+		// re-deriving it without one would find objections the verdict did
+		// not count and refuse the whole trail.
+		ruling, err := ReadRulingFile(filepath.Join(stageDir, RulingFileName))
+		if err != nil {
+			return nil, errors.New("trail stage ruling could not be read")
+		}
+		decision, err := DecideStage(candidate, reviews, source, request, config, ruling)
 		if err != nil {
 			return nil, errors.New("trail stage did not rederive")
 		}

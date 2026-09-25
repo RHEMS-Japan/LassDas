@@ -54,7 +54,7 @@ func runSealCandidate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *stage > config.MaxStages {
+	if *stage > config.StageCeiling() {
 		return errors.New("seal-candidate stage is invalid")
 	}
 	var draft worker.TicketDraft

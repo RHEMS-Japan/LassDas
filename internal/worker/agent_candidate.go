@@ -259,7 +259,7 @@ func candidateFromObservedChanges(
 	generatedAt time.Time,
 	designSHA256 string,
 ) (Candidate, error) {
-	if err := source.Validate(request, config); err != nil || stage < 1 || stage > config.MaxStages {
+	if err := source.Validate(request, config); err != nil || stage < 1 || stage > config.StageCeiling() {
 		return Candidate{}, errors.New("candidate input is invalid")
 	}
 	if run.Validate(config) != nil || run.Stage != stage {

@@ -848,33 +848,15 @@ jobs:
                 if (( stage != 3 )); then
                   exit 1
                 fi
-                # The reviews and the implementation each held a defensible
-                # behavior. That is the requester's decision, so the run asks
-                # it as a bounded question through the existing answer rail
-                # instead of demanding that future tickets anticipate it.
-                # When the question cannot be produced (rounds spent, model
-                # failure), the run ends as an honest nonconverged terminal.
-                question_dir="$HISTORY/question"
-                mkdir -p "$question_dir"
-                set +e
-                "$TOOLS/worker" impasse-question \
-                  --config "$TOOLS/m1-consumer.json" \
-                  --tool-sha "$TOOL_SHA" \
-                  --ticket "$stage_dir/ticket.json" \
-                  --source "$stage_dir/source.json" \
-                  --candidate "$stage_dir/candidate.json" \
-                  --review "$stage_dir/claude-correctness.json" \
-                  --review "$stage_dir/codex-adversarial.json" \
-                  "${clarification_args[@]}" \
-                  --out "$question_dir/decision.json"
-                impasse_status=$?
-                set -e
-                if (( impasse_status == 0 )) &&
-                   [[ "$(jq -r '.outcome' "$question_dir/decision.json")" == clarification_required ]]; then
-                  printf 'publish=false\nstage=%s\nterminal-code=clarification_required\n' "$stage" >> "$GITHUB_OUTPUT"
-                else
-                  printf 'publish=false\nstage=%s\nterminal-code=nonconverged\n' "$stage" >> "$GITHUB_OUTPUT"
-                fi
+                # An outcome the decide verb no longer produces, kept so a
+                # record sealed by an older build is still read rather than
+                # falling through. The reviews and the implementation each
+                # held a defensible behavior; that used to be put to the
+                # requester as a question and the run stopped until somebody
+                # answered it. The engine decides it itself now, and this
+                # workflow has no engine to do it, so the run ends and says
+                # so.
+                printf 'publish=false\nstage=%s\nterminal-code=nonconverged\n' "$stage" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
             esac

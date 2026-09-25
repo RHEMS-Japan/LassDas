@@ -89,7 +89,6 @@ case "$verb" in
       */stage-"$RUNNER_TEST_ROUNDS"/*) printf '{"outcome":"%s"}' "$RUNNER_TEST_OUTCOME" > "$out" ;;
       *) printf '{"outcome":"revise"}' > "$out" ;;
     esac ;;
-  impasse-question) printf '{"outcome":"unresolved"}' > "$out" ;;
   compose-trail) printf 'Reviewed change\n' > "$out" ;;
   create-feature-pr) printf '{"payload":{"pull_request":{"HTMLURL":"https://github.com/example/consumer/pull/7"}}}' > "$out" ;;
   *) [ -z "$out" ] || printf '{}' > "$out" ;;

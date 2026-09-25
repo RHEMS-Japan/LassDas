@@ -96,7 +96,7 @@ func TestClassifyChainFailureIgnoresTheCardsOwnAccount(t *testing.T) {
 			sealFailureRecord(t, runDir, runtime.StageReviewA, 1, runner.ErrValidationRejected)
 		}
 		for _, want := range expectations {
-			action, code := classifyChainFailure(want.stage, want.decision, undecided, unchanged)
+			action, code := classifyChainFailure(want.stage, want.decision, unchanged)
 			if action != want.action || code != want.code {
 				t.Fatalf("classifyChainFailure(%s) with sealed=%v = %v %v, want %v %v",
 					want.stage, sealed, action, code, want.action, want.code)

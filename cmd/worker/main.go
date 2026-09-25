@@ -86,12 +86,10 @@ func run(ctx context.Context, args []string) error {
 		return runDecide(args[1:])
 	case "decide-design":
 		return runDecideDesign(args[1:])
-	case "impasse-question":
-		return runImpasseQuestion(ctx, args[1:])
+	case "arbitrate":
+		return runArbitrate(ctx, args[1:])
 	case "read-answer":
 		return runReadAnswer(ctx, args[1:])
-	case "design-impasse-question":
-		return runDesignImpasseQuestion(ctx, args[1:])
 	case "compose-trail":
 		return runComposeTrail(args[1:])
 	case "preserve-answers":
@@ -626,7 +624,7 @@ func runGenerate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *stage > config.MaxStages {
+	if *stage > config.StageCeiling() {
 		return errors.New("generate stage is invalid")
 	}
 	var readiness worker.ReadinessDecision
@@ -898,6 +896,7 @@ func runDecide(args []string) error {
 	ticketPath := flags.String("ticket", "", "")
 	sourcePath := flags.String("source", "", "")
 	candidatePath := flags.String("candidate", "", "")
+	rulingPath := flags.String("ruling", "", "")
 	outputPath := flags.String("out", "", "")
 	var reviewPaths stringList
 	flags.Var(&reviewPaths, "review", "")
@@ -916,120 +915,20 @@ func runDecide(args []string) error {
 	if err != nil {
 		return err
 	}
-	decision, err := worker.DecideStage(candidate, reviews, source, request, config)
+	// A round the engine had to rule on is counted under that ruling. The
+	// ruling is sealed before this verb runs and travels with the decision
+	// it produced, so nothing downstream has to be handed it separately.
+	ruling, err := readRuling(*rulingPath)
+	if err != nil {
+		return err
+	}
+	decision, err := worker.DecideStage(candidate, reviews, source, request, config, ruling)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "stage decision was rejected", err)
 		return errors.New("stage decision was rejected")
 	}
 	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxDecisionJSONBytes); err != nil {
 		return errors.New("decision artifact could not be written")
-	}
-	return nil
-}
-
-// runImpasseQuestion turns a nonconverged final stage into requester
-// questions for the ask-and-resume rail, or records that the question rounds
-// are spent so the workflow falls back to an honest nonconverged terminal.
-func runImpasseQuestion(ctx context.Context, args []string) error {
-	flags := commandFlags("impasse-question")
-	configPath := flags.String("config", "", "")
-	toolSHA := flags.String("tool-sha", "", "")
-	ticketPath := flags.String("ticket", "", "")
-	sourcePath := flags.String("source", "", "")
-	candidatePath := flags.String("candidate", "", "")
-	impasseClarificationPath := flags.String("clarification", "", "")
-	outputPath := flags.String("out", "", "")
-	var reviewPaths stringList
-	flags.Var(&reviewPaths, "review", "")
-	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *outputPath) || !worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 {
-		return errors.New("impasse-question arguments are invalid")
-	}
-	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
-	if err != nil {
-		return err
-	}
-	var candidate worker.Candidate
-	if err := worker.ReadJSONFile(*candidatePath, worker.MaxArtifactJSONBytes, &candidate); err != nil {
-		return errors.New("candidate artifact could not be read")
-	}
-	reviews, err := readReviews(reviewPaths)
-	if err != nil {
-		return err
-	}
-	clarification, err := readClarificationContext(*impasseClarificationPath)
-	if err != nil {
-		return err
-	}
-	invoker, err := newModelInvoker(ctx, config.Models.Readiness.Assessor)
-	if err != nil {
-		return err
-	}
-	decision, err := invoker.AskImpasse(ctx, candidate, reviews, clarification, source, request, config, time.Now().UTC())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "impasse question failed", err)
-		return errors.New("impasse question failed")
-	}
-	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReviewJSONBytes); err != nil {
-		return errors.New("impasse decision could not be written")
-	}
-	return nil
-}
-
-// runDesignImpasseQuestion writes the question a design that would not
-// converge puts to its requester. It is the design half of
-// runImpasseQuestion: the same decision file, read by the same poster.
-func runDesignImpasseQuestion(ctx context.Context, args []string) error {
-	flags := commandFlags("design-impasse-question")
-	configPath := flags.String("config", "", "")
-	toolSHA := flags.String("tool-sha", "", "")
-	ticketPath := flags.String("ticket", "", "")
-	designPath := flags.String("design", "", "")
-	clarificationPath := flags.String("clarification", "", "")
-	outputPath := flags.String("out", "", "")
-	var reviewPaths stringList
-	flags.Var(&reviewPaths, "review", "")
-	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *designPath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 {
-		return errors.New("design-impasse-question arguments are invalid")
-	}
-	config, err := readConfig(*configPath)
-	if err != nil {
-		return err
-	}
-	var request worker.TicketRequest
-	if err := worker.ReadJSONFile(*ticketPath, worker.MaxTicketJSONBytes, &request); err != nil {
-		return errors.New("reception ticket could not be read")
-	}
-	if request.ToolSHA != *toolSHA || request.Validate(config) != nil {
-		return errors.New("reception ticket is not bound to this run")
-	}
-	design, err := investigate.ReadDesign(*designPath)
-	if err != nil {
-		return errors.New("design could not be read")
-	}
-	reviews := make([]investigate.DesignReview, 0, len(reviewPaths))
-	for _, path := range reviewPaths {
-		review, err := investigate.ReadDesignReview(path)
-		if err != nil {
-			return errors.New("design review could not be read")
-		}
-		reviews = append(reviews, review)
-	}
-	clarification, err := readClarificationContext(*clarificationPath)
-	if err != nil {
-		return err
-	}
-	invoker, err := newModelInvoker(ctx, config.Models.Readiness.Assessor)
-	if err != nil {
-		return err
-	}
-	decision, err := invoker.AskDesignImpasse(ctx, design, reviews, clarification, request, config, time.Now().UTC())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "design impasse question failed", err)
-		return errors.New("design impasse question failed")
-	}
-	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReviewJSONBytes); err != nil {
-		return errors.New("design impasse decision could not be written")
 	}
 	return nil
 }

@@ -31,14 +31,14 @@ var pinnedStages = map[string]string{
 
 	"investigate": "investigate",
 
-	"agent-design-review": "design", "decide-design": "design", "design-impasse-question": "design",
+	"agent-design-review": "design", "decide-design": "design",
 
 	"implement-instruction": "implement", "run-instruction": "implement",
 
 	"agent-review": "review", "seal-candidate": "review",
 
 	"decide": "checks", "apply": "checks", "run-validation": "checks",
-	"verify-applied": "checks", "verify-publish-gate": "checks", "impasse-question": "checks",
+	"verify-applied": "checks", "verify-publish-gate": "checks", "arbitrate": "checks",
 	"wait-feature": "checks",
 
 	"create-feature-pr": "staging", "publish-feature": "staging", "compose-trail": "staging",
@@ -63,7 +63,11 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	// smaller engine, it is a scan that stopped seeing call sites, or an
 	// engine that lost one - and a lost step is how a rail stage went empty
 	// (review of #200).
-	if len(names) < 39 {
+	//
+	// Thirty-eight, not thirty-nine: the two questions a deadlocked round
+	// used to put to its requester were removed together and one ruling put
+	// in their place, which is a step fewer on purpose.
+	if len(names) < 38 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
@@ -375,9 +379,12 @@ var receptionSteps = []string{
 	"locate-target", "read-contract", "read-ticket", "reception-ticket", "snapshot",
 }
 
+// The ruling is not here. It is started by the attendant when it finds a
+// delivery that has stopped moving, not from inside a card's own work, so
+// the walk has no card to decide its stage from and the table decides it.
 var derivedSteps = []string{
 	"agent-design-review", "agent-review", "apply", "decide", "decide-design",
-	"impasse-question", "investigate", "run-instruction", "run-validation",
+	"investigate", "run-instruction", "run-validation",
 	"seal-candidate", "verify-applied", "verify-publish-gate",
 }
 

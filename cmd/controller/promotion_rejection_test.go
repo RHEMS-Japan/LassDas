@@ -194,7 +194,7 @@ func newPromotionRejectionFixture(t *testing.T) promotionRejectionFixture {
 		}
 		reviews = append(reviews, review)
 	}
-	decision, err := worker.DecideStage(candidate, reviews, source, request, config)
+	decision, err := worker.DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

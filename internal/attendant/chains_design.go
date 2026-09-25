@@ -14,6 +14,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"time"
 )
@@ -23,11 +24,13 @@ import (
 // attendant, the card's state is only the alarm; the sealed records in the
 // run directory are the classification.
 
-// defaultDesignMaxRounds is the design doc's default for design_max_rounds.
-const defaultDesignMaxRounds = 3
-
 // errDesignRoundLimit says the design rounds are spent; the run ends as
 // nonconverged instead of starting another round.
+//
+// Only the ceiling reaches it now. design_max_rounds used to stop a design
+// here after three rounds, which is how a design whose judges kept objecting
+// ended the delivery; rounds are no longer counted out, so what is left is
+// the highest round number a record may carry at all.
 var errDesignRoundLimit = errors.New("design round limit reached")
 
 // designReturnCause says who sent the delivery back to the designer. The two
@@ -60,20 +63,14 @@ func (c designReturnCause) terminalCode(shape runtime.ChainShape) hook.TerminalC
 	return hook.TerminalDesignNonconverged
 }
 
-// consumerDesignMaxRounds reads the destination's design round limit
-// leniently: absent means the default.
-func consumerDesignMaxRounds(consumerConfigPath string) int {
-	raw, err := os.ReadFile(consumerConfigPath)
-	if err != nil {
-		return defaultDesignMaxRounds
-	}
-	var parsed struct {
-		DesignMaxRounds int `json:"design_max_rounds"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.DesignMaxRounds < 1 || parsed.DesignMaxRounds > 10 {
-		return defaultDesignMaxRounds
-	}
-	return parsed.DesignMaxRounds
+// consumerDesignMaxRounds is how far the design rounds may count.
+//
+// It is the artifact ceiling, not a budget. A destination declaring
+// design_max_rounds still loads and still means what it says about the
+// records it seals; what it no longer does is end a delivery whose design
+// reviews have not agreed by that round.
+func consumerDesignMaxRounds(string) int {
+	return worker.StageCeiling
 }
 
 func designRoundDir(runDir string, round int) string {
@@ -162,13 +159,14 @@ func handleDesignChainFailure(
 		case outcome == "nonconverged" && plan.Shape == runtime.ShapeInvestigation:
 			code = hook.TerminalInvestigationNonconverged
 		case outcome == "nonconverged":
-			// This is where a design's rounds actually end: the decide verb
-			// turns the final round's revise into nonconverged, so the
-			// revise branch above is never taken at the limit. The ask
-			// belonged here (review of #199).
-			if asked, err := askDesignImpasse(ctx, config, services, envelope, run, hermes, view, logger); err != nil || asked {
-				return true, err
-			}
+			// A record this engine can no longer seal. The decide verb used
+			// to rewrite the final round's revise as nonconverged, and this
+			// is where that ended the delivery — after putting the
+			// disagreement to the requester as a question, who then had to
+			// answer it before anything moved again. Rounds are not counted
+			// out any more, so nothing produces this outcome; an upgrade can
+			// still find one sealed by the engine that was running an hour
+			// ago, and it is reported as what it says it is.
 			code = hook.TerminalDesignNonconverged
 		default:
 			// Approved and still failed: the applier's instruction could not
@@ -554,7 +552,7 @@ func nextDesignRoundOrEnd(
 	// refusal; that delivery has nothing left to try.
 	_, candidateSealed := os.Stat(filepath.Join(runDir, fmt.Sprintf("history/stage-%d/candidate.json", view.round)))
 	if cause == designCalledWrongLater && plan.Shape == runtime.ShapeDesign && candidateSealed == nil {
-		if limit, limitErr := consumerMaxStages(config.ConsumerConfigPath); limitErr == nil && view.round < limit {
+		if limit, limitErr := consumerRoundLimit(config.ConsumerConfigPath); limitErr == nil && (limit == 0 || view.round < limit) {
 			logger.Info("design rounds spent; the change is written again under the design it has",
 				"run", run.RunID, "round", view.round+1, "of", limit, "why", why)
 			return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
@@ -566,16 +564,6 @@ func nextDesignRoundOrEnd(
 		repository = ""
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	// The question is built from the design reviews' standing objections, so
-	// it exists only for the ending those objections produced. The other
-	// ending's objections are the implementation reviewer's or the
-	// applier's, which the design question does not carry; that requester is
-	// told what happened and a person picks it up.
-	if code == hook.TerminalDesignNonconverged {
-		if asked, askErr := askDesignImpasse(ctx, config, services, envelope, run, hermes, view, logger); askErr != nil || asked {
-			return askErr
-		}
-	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
 		return err
 	}
@@ -806,58 +794,3 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 	}
 	return ids, omitted
 }
-
-// askDesignImpasse puts the disagreement to the requester when a design's
-// rounds are spent, and reports whether a question was posted. A run whose
-// implementation rounds ran out has always asked; this half ended without a
-// word (live 2026-09-17).
-//
-// Every failure here is only a question not asked: the caller then ends the
-// run as it did before, which is the honest fallback.
-func askDesignImpasse(
-	ctx context.Context,
-	config runtime.Config,
-	services *runtime.Services,
-	envelope hook.DispatchEnvelope,
-	run state.RunOverview,
-	hermes *runtime.Hermes,
-	view chainView,
-	logger Logger,
-) (bool, error) {
-	reviewers, err := consumerReviewerIDs(config.ConsumerConfigPath)
-	if err != nil {
-		logger.Error("design question not written; the run ends as nonconverged", "run", run.RunID, "error", err.Error())
-		return false, nil
-	}
-	runDir := runDirectory(config, run.DeliveryID)
-	// The question is one model call, and this is the attendant's own loop:
-	// without a deadline a slow assessor holds every other run's tick
-	// (review of #199).
-	askCtx, cancel := context.WithTimeout(ctx, designImpasseTimeout)
-	defer cancel()
-	pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: logger}
-	asked, err := pipeline.AskDesignImpasse(askCtx, reviewers)
-	if err != nil {
-		logger.Error("design question not written; the run ends as nonconverged", "run", run.RunID, "error", err.Error())
-		return false, nil
-	}
-	if !asked {
-		return false, nil
-	}
-	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
-		// The question is written but unposted; the run stays where it is
-		// and the next tick tries again. Said out loud so a deployment that
-		// cannot post is visible rather than quiet.
-		logger.Error("the design question could not be posted", "run", run.RunID, "error", err.Error())
-		return false, err
-	}
-	logger.Info("design rounds spent; the requester was asked", "run", run.RunID)
-	return true, archiveChain(ctx, hermes, view.all)
-}
-
-// designImpasseTimeout bounds that one call inside the attendant's tick,
-// which runs every minute. A question author that cannot answer inside it
-// leaves the run ending as it did, which is better than holding every other
-// run's tick behind it (review of #199).
-const designImpasseTimeout = 2 * time.Minute

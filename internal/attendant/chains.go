@@ -756,8 +756,6 @@ func handleChainFailure(
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	action, code := classifyChainFailure(stageName, func() (string, error) {
 		return readField(runDir, fmt.Sprintf("history/stage-%d/decision.json", view.round), "outcome")
-	}, func() (string, error) {
-		return readField(runDir, "history/question/decision.json", "outcome")
 	}, func() bool {
 		return worker.RoundReturnedWork(filepath.Join(runDir, "history"), view.round)
 	})
@@ -807,7 +805,7 @@ func handleChainFailure(
 	}
 	switch action {
 	case actionRegenerate:
-		limit, limitErr := consumerMaxStages(config.ConsumerConfigPath)
+		limit, limitErr := consumerRoundLimit(config.ConsumerConfigPath)
 		if limitErr != nil {
 			return limitErr
 		}
@@ -820,7 +818,14 @@ func handleChainFailure(
 			// The requester asked the run to stop: finished cards stay
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
-		case view.round < limit:
+		case limit > 0 && view.round >= limit:
+			// An operator said how many rounds they were willing to pay for
+			// and this is the last of them. The code the classification
+			// carried stands, and it is the one place any of these codes is
+			// still produced. Nothing reaches here by default: a
+			// configuration that names no limit is unbounded, and a delivery
+			// that stops moving is ruled on below rather than counted out.
+		default:
 			// Why the round advanced, when it advanced over a refused
 			// validation rather than over an objection. Both arrive here as
 			// one action, and only the sealed record tells them apart: the
@@ -832,6 +837,25 @@ func handleChainFailure(
 			if failure, sealed := runner.ReadValidationFailure(runDir, view.round); sealed {
 				logger.Info("the deterministic validation refused the round; the next round is told what it printed",
 					"run", run.RunID, "round", view.round, "step", failure.Step, "output_sha256", failure.OutputSHA256)
+			}
+			// Before another round is paid for, whether this one did
+			// anything. A round that objected to exactly what the round
+			// before it objected to, or that wrote exactly the same bytes,
+			// is not going to be answered by starting another one just like
+			// it; the engine rules on it instead. Ruling may put this same
+			// round back to work without the objections the ticket does not
+			// require, and then this tick is done.
+			//
+			// Asked before the chain's shape is read, and not conditional on
+			// it: what the rounds did is readable from the records whatever
+			// shape the delivery has, and a shape that will not read must
+			// not be the reason a deadlock goes on being paid for.
+			ruled, ruleErr := ruleOnStagnation(ctx, config, services, hermes, envelope, run, view, logger)
+			if ruleErr != nil {
+				return ruleErr
+			}
+			if ruled {
+				return nil
 			}
 			plan, planErr := chainPlanFor(config, runDir, run, logger)
 			if planErr != nil || plan.Shape != runtime.ShapeDesign {
@@ -880,32 +904,7 @@ func handleChainFailure(
 			default:
 				return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
 			}
-		default:
-			// The round ceiling, and the one thing left that still ends a run
-			// the ladder would otherwise keep climbing. Two failures reach it.
-			// A revise at the limit: the decide verb converts a final-round
-			// revise into nonconverged, so a revise here means the artifacts
-			// and the configuration disagree. And a validation that refused
-			// the last round the configuration allows: the next round would
-			// have carried what it printed, and there is no next round to
-			// carry it.
-			//
-			// The code the classification carried stands, which is the one
-			// place a refused validation still ends a run as validation_failed.
-			// Calling it a model failure said the AI had not answered, and on
-			// this path the AI answered and both judges passed it — the
-			// repository's own commands are what refused. The requester reads
-			// that sentence, so it has to be the true one.
-			//
-			// The exception exists only because the ceiling does. When the
-			// round count stops being a ceiling, this arm goes with it and
-			// the code stops being produced anywhere.
 		}
-	case actionAskQuestion:
-		if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
-			return err
-		}
-		return archiveChain(ctx, hermes, view.all)
 	}
 	// The failure report carries the same round record a delivery would
 	// have (#10); composition failure never blocks the report.
@@ -947,12 +946,10 @@ const (
 	actionReport failureAction = iota
 	// actionRegenerate retires the round's remnant and starts the next.
 	actionRegenerate
-	// actionAskQuestion routes the sealed impasse question to the requester.
-	actionAskQuestion
 )
 
 // String names the action for the record. The type is an int, so a plain
-// conversion would log one unprintable rune. A fourth action added without
+// conversion would log one unprintable rune. A third action added without
 // a name here says so rather than borrowing one (review of #201).
 func (a failureAction) String() string {
 	switch a {
@@ -960,8 +957,6 @@ func (a failureAction) String() string {
 		return "report"
 	case actionRegenerate:
 		return "regenerate"
-	case actionAskQuestion:
-		return "ask_question"
 	default:
 		return "unknown"
 	}
@@ -969,10 +964,10 @@ func (a failureAction) String() string {
 
 // classifyChainFailure reads a failed card into an action. The card's state
 // is only the alarm; the sealed artifacts are the classification: a decided
-// revise regenerates, a nonconverged with a sealed question asks, a decided
-// converge that still failed means the deterministic validation refused,
-// and anything undecided is the machinery's own death.
-func classifyChainFailure(stageName string, decision, question func() (string, error), returned func() bool) (failureAction, hook.TerminalCode) {
+// revise goes on to the engine's own answer, a decided converge that still
+// failed means the deterministic validation refused, and anything undecided
+// is the machinery's own death.
+func classifyChainFailure(stageName string, decision func() (string, error), returned func() bool) (failureAction, hook.TerminalCode) {
 	switch stageName {
 	case runtime.StagePublish:
 		return actionReport, hook.TerminalReleaseFailed
@@ -993,11 +988,20 @@ func classifyChainFailure(stageName string, decision, question func() (string, e
 		}
 		switch outcome {
 		case "revise":
-			return actionRegenerate, hook.TerminalModelFailed
+			// The code travels with the action rather than being a
+			// placeholder. A regenerate reports nothing on the ordinary
+			// path, but an operator who configured a round limit ends the
+			// run out of this same arm, and there the code is what the
+			// requester is told: the reviews did not agree within the
+			// number of rounds that operator was willing to pay for. Said
+			// as a model failure it would claim the AI had not answered,
+			// and on this path both seats answered.
+			return actionRegenerate, hook.TerminalNonconverged
 		case "nonconverged":
-			if asked, askErr := question(); askErr == nil && asked == "clarification_required" {
-				return actionAskQuestion, hook.TerminalNonconverged
-			}
+			// A record this engine can no longer seal: the decide verb used
+			// to rewrite a final-round revise as nonconverged, and that is
+			// what ended a delivery on a count. An upgrade can still find
+			// one sealed an hour ago, and it is reported as what it says.
 			return actionReport, hook.TerminalNonconverged
 		case "converged":
 			// The judges passed the round and the deterministic validation
@@ -1008,12 +1012,11 @@ func classifyChainFailure(stageName string, decision, question func() (string, e
 			// round's instruction carries it, so the round is repeated with
 			// the one thing it was missing instead of being abandoned.
 			//
-			// The code travels with the action rather than being a
-			// placeholder like the revise arm's. A regenerate reports nothing
-			// on the ordinary path, but the round ceiling ends the run out of
-			// this same arm, and there the code is what the requester is told:
-			// this failure is the validation refusing the change, not the AI
-			// failing to answer.
+			// As in the revise arm, the code is what an operator's own
+			// round limit reports out of this path: the validation refusing
+			// the change, not the AI failing to answer. Without such a limit
+			// the next round carries what the commands printed and this code
+			// is produced nowhere.
 			return actionRegenerate, hook.TerminalValidationFailed
 		default:
 			return actionReport, hook.TerminalModelFailed
@@ -1144,23 +1147,6 @@ func readField(runDir, name string, keys ...string) (string, error) {
 		return "", errors.New("artifact field is not a string")
 	}
 	return value, nil
-}
-
-// consumerMaxStages reads the round limit out of the consumer configuration
-// — the same value the decide verb enforces, so the attendant's
-// regeneration and the kernel's nonconverged conversion stay one number.
-func consumerMaxStages(consumerConfigPath string) (int, error) {
-	raw, err := os.ReadFile(consumerConfigPath)
-	if err != nil {
-		return 0, errors.New("consumer config unreadable")
-	}
-	var parsed struct {
-		MaxStages int `json:"max_stages"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.MaxStages < 1 || parsed.MaxStages > 5 {
-		return 0, errors.New("consumer config max_stages invalid")
-	}
-	return parsed.MaxStages, nil
 }
 
 // consumerReviewerIDs reads the configured reviewer ids leniently, the way

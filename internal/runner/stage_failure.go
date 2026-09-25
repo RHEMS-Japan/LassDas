@@ -260,8 +260,7 @@ func (p *Pipeline) runController(ctx context.Context, name string, arguments []s
 var modelSpendingVerbs = []string{
 	"assess-readiness", "check-readiness", "decide-readiness",
 	"investigate", "agent-design-review", "agent-review",
-	"run-instruction", "impasse-question", "design-impasse-question",
-	"compose-trail",
+	"run-instruction", "arbitrate", "compose-trail",
 }
 
 // diskMarkers, toolMarkers, creditMarkers and networkMarkers are read against

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"automation.internal/ticket-ingress/internal/worker/investigate"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,25 +118,85 @@ func TestConfigRejectsSecondReviewerOnImplementerEndpoint(t *testing.T) {
 	}
 }
 
-// The design review round limit defaults when unset and is bounded when set;
-// the run-record stage bound follows the larger of the two limits.
-func TestConfigDesignMaxRoundsDefaultsAndBounds(t *testing.T) {
+// The declared budgets still load and are still bounded, and neither of them
+// bounds a round any more: the record ceiling does, and it is above both.
+func TestConfigDeclaredBudgetsNoLongerBoundTheRounds(t *testing.T) {
 	config := validTestConfig()
-	if config.DesignRounds() != DefaultDesignMaxRounds || config.maxRunStage() != config.MaxStages {
-		t.Fatalf("DesignRounds() = %d, maxRunStage() = %d", config.DesignRounds(), config.maxRunStage())
+	if config.DesignRounds() != DefaultDesignMaxRounds {
+		t.Fatalf("DesignRounds() = %d", config.DesignRounds())
+	}
+	if config.StageCeiling() != StageCeiling || config.maxRunStage() != StageCeiling {
+		t.Fatalf("StageCeiling() = %d, maxRunStage() = %d, want %d", config.StageCeiling(), config.maxRunStage(), StageCeiling)
 	}
 	config.DesignMaxRounds = 10
 	if err := config.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if config.DesignRounds() != 10 || config.maxRunStage() != 10 {
-		t.Fatalf("DesignRounds() = %d, maxRunStage() = %d", config.DesignRounds(), config.maxRunStage())
+	if config.StageCeiling() != StageCeiling {
+		t.Fatalf("a declared design budget moved the ceiling to %d", config.StageCeiling())
 	}
 	for _, value := range []int{11, -1} {
 		config.DesignMaxRounds = value
 		if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "design_max_rounds") {
 			t.Errorf("Validate() with design_max_rounds %d: %v", value, err)
 		}
+	}
+}
+
+// The round limit is the operator's own, and unbounded is what a
+// configuration that does not mention it means.
+func TestConfigRoundLimitAndStagnationSettings(t *testing.T) {
+	config := validTestConfig()
+	if config.RoundLimit() != 0 {
+		t.Fatalf("an unset max_rounds is %d, want unbounded", config.RoundLimit())
+	}
+	if config.StagnationRounds() != DefaultStagnationRepeatRounds {
+		t.Fatalf("StagnationRounds() = %d", config.StagnationRounds())
+	}
+	config.MaxRounds = 4
+	config.StagnationRepeatRounds = 2
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if config.RoundLimit() != 4 || config.StagnationRounds() != 2 {
+		t.Fatalf("RoundLimit() = %d, StagnationRounds() = %d", config.RoundLimit(), config.StagnationRounds())
+	}
+	config.MaxRounds = StageCeiling + 1
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "max_rounds") {
+		t.Errorf("Validate() with max_rounds above the ceiling: %v", err)
+	}
+	config.MaxRounds = 0
+	config.StagnationRepeatRounds = 11
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "stagnation_repeat_rounds") {
+		t.Errorf("Validate() with stagnation_repeat_rounds 11: %v", err)
+	}
+}
+
+// A configuration that declares neither of the new keys seals exactly the
+// digest it sealed before they existed: existing destinations must not have
+// every in-flight delivery restarted by an upgrade.
+func TestConfigDigestUnchangedWithoutTheNewKeys(t *testing.T) {
+	config := validTestConfig()
+	before, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"max_rounds", "stagnation_repeat_rounds", "arbiter"} {
+		if strings.Contains(string(encoded), key) {
+			t.Errorf("a configuration that declares no %s still encodes it", key)
+		}
+	}
+	config.MaxRounds = 2
+	after, err := config.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Error("declaring a round limit left the digest unchanged")
 	}
 }
 

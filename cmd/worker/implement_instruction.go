@@ -23,6 +23,7 @@ func runImplementInstruction(args []string) error {
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	validationFailurePath := flags.String("validation-failure", "", "")
+	rulingPath := flags.String("ruling", "", "")
 	rebuild := flags.String("rebuild-prompt", "", "")
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
@@ -59,14 +60,19 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
+	ruling, err := readRuling(*rulingPath)
+	if err != nil {
+		return err
+	}
 	if *rebuild != "" {
 		// The ladder has been here before and the implementer answered
 		// nothing. The request and the boundaries stay; what the earlier
 		// rounds objected to goes, because an instruction a model would not
-		// answer is asked again shorter rather than asked again.
+		// answer is asked again shorter rather than asked again. The ruling
+		// stays: it is the reason this round exists, not commentary on it.
 		findings = nil
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, *repoRoot)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, *repoRoot)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
