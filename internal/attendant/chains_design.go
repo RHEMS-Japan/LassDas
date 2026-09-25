@@ -201,6 +201,8 @@ func handleDesignChainFailure(
 			return true, nil
 		case verdict == ladderStopped:
 			code, evidence = hook.TerminalCancelled, nil
+		case verdict == ladderDeadlineReached:
+			code, evidence = hook.TerminalDeadlineReached, nil
 		}
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
@@ -212,6 +214,9 @@ func handleDesignChainFailure(
 		// Nothing else fills evidence on this code: the incomplete arm is
 		// the only other writer and it ends as a different code.
 		evidence = failedStepEvidence(config, runDir, stageName, view.designRound)
+	}
+	if code == hook.TerminalDeadlineReached {
+		evidence = deadlineEvidence(config, runDir, repository, stageName, view.designRound)
 	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return true, err

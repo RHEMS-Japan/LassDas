@@ -332,6 +332,29 @@ func successMessage(report TerminalReportRequest) string {
 	return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。マージと以後の反映は人が行います。本番環境は変更していません。"
 }
 
+// deadlineReachedMessage says that the delivery ran out of the time it was
+// given, and — like the stop below — what that left behind.
+//
+// The sentence has to carry both halves. A delivery cut short after its
+// change reached staging is not "nothing happened", and one cut short on
+// the first round is not "part of it is live"; a single fixed sentence
+// would be a false report for whichever of the two it did not describe.
+// What it kept meeting, how often, and what somebody would have to change
+// are in the account below the sentence, which the run composes from its
+// own records.
+func deadlineReachedMessage(report TerminalReportRequest) string {
+	const opening = "この依頼に使える処理時間を使い切ったため、自動処理をここで打ち切りました。"
+	switch {
+	case report.ProductionEvidenceURL != "":
+		return opening + "打ち切りの時点で本番環境への反映と表示の確認までが完了しています。自動での巻き戻しは行っていません。"
+	case report.StagingEvidenceURL != "":
+		return opening + "打ち切りの時点で staging への反映と表示の確認までが完了しています。本番環境は変更していません。"
+	case report.PullRequestURL != "":
+		return opening + "取り込み用の Pull Request は作成済みで、マージは行っていません。本番環境は変更していません。"
+	}
+	return opening + "対象リポジトリと本番環境は変更していません。どこまで進んで何が起きていたかは、下の記録に書いています。"
+}
+
 // cancelledMessage says what the stop stopped, which is not always nothing.
 //
 // The fixed sentence this replaces said the repository and production were
@@ -393,6 +416,7 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalInvestigationNonconverged:      "調査報告が、記録の上限（50 巡）に達しても根拠のレビューを通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
 		TerminalDesignNonconverged:             "直し方の設計が、記録の上限（50 巡）に達してもレビューの合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 		TerminalDesignRoundsSpent:              "直し方の設計は合意できましたが、その設計で作業に入った後、「設計そのものを変えるべき」という判断になりました。設計をやり直せる回数を使い切っていたため、リポジトリは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
+		TerminalDeadlineReached:                deadlineReachedMessage(report),
 		TerminalImplementationReturned:         "実装役が、変更を加えずに理由を報告して作業を返しました。対象リポジトリと本番環境は変更していません。報告の全文は下の実行の記録に載せています。どう進めるかは依頼者の判断です。内容を確認のうえ、必要な情報を書き足して起票し直してください。",
 	}[report.Code]
 	if message == "" {
@@ -618,6 +642,22 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 		// person who can act on the report away from it.
 		facts.NextActor = "起票者"
 		facts.Operation = "下の実行の記録にある実装役の報告をご確認のうえ、進めるかどうかをご判断ください（進める場合は、報告をふまえて書き直した新しいチケットとして起票してください）"
+	case TerminalDeadlineReached:
+		// The delivery ran out of night on a failure it could not get past,
+		// so what it owes the ticket is where it got to and what somebody
+		// would have to change. The default line — an operator will look —
+		// is right about who moves next; what it gets wrong is production,
+		// which a delivery cut short may well have reached.
+		facts.Operation = "下に書いた「続けるために必要なこと」をご確認ください（同じ内容で起票し直すと、最初からやり直します）"
+		facts.State = "処理時間の上限に達して終了（deadline_reached）"
+		switch {
+		case report.ProductionEvidenceURL != "":
+			facts.Production = "反映済み（打ち切りの時点で本番への反映と確認が完了しています。自動の巻き戻しは行いません）"
+		case report.StagingEvidenceURL != "":
+			facts.Production = "未変更（staging までは反映済み。自動の巻き戻しは行いません）"
+		case report.PullRequestURL != "":
+			facts.Production = "未変更（Pull Request 作成まで。マージは行っていません）"
+		}
 	case TerminalProductionVerificationFailed:
 		facts.Production = "変更済み（本番デプロイは完了、表示確認は失敗）"
 	case TerminalProductionDeploymentUnverified:

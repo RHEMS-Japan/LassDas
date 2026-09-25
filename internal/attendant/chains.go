@@ -1062,7 +1062,29 @@ func handleChainFailure(
 	// not — the requester asked the delivery to stop, or the engine will not
 	// answer this return again and it is now an ordinary model failure for
 	// the ladder below to climb.
-	if action == actionAnswerReturn {
+	//
+	// The wall the ladder is held to is asked here as well, because this
+	// path never reaches it. A round the engine answers is relaunched
+	// rather than climbed, so an agent that hands the work back every time
+	// is a delivery that runs all night without the ladder ever being
+	// consulted (measured 2026-09-26: fifteen returns, seventy cards
+	// rebuilt, nothing reported).
+	spent, outOfTime := runDeadlinePassed(config, run, time.Now().UTC())
+	switch {
+	case action == actionAnswerReturn && outOfTime:
+		logger.Info("the delivery used up the time it was given while the round was still being handed back; it ends with an account of where it got to",
+			"run", run.RunID, "stage", stageName, "round", view.round,
+			"spent_minutes", int(spent.Minutes()), "deadline_minutes", int(config.Chain.RunDeadline().Minutes()))
+		// The round's own account of why it stopped, sealed here because
+		// nothing else will now: the answer that would have sealed one is
+		// the step being skipped. Without it the report would say the time
+		// ran out and nothing about what it ran out on.
+		if _, err := refuseReturn(config, runDir, run, view, stageName,
+			"the delivery ran out of the time it was given while the work was still being handed back", logger); err != nil {
+			return err
+		}
+		action, code = actionReport, hook.TerminalDeadlineReached
+	case action == actionAnswerReturn:
 		verdict, answerErr := answerReturnedWork(ctx, config, services, hermes, envelope, run, view, stageName, logger)
 		if answerErr != nil {
 			return answerErr
@@ -1104,6 +1126,8 @@ func handleChainFailure(
 				return nil
 			case verdict == ladderStopped:
 				code = hook.TerminalCancelled
+			case verdict == ladderDeadlineReached:
+				code = hook.TerminalDeadlineReached
 			}
 		}
 	}
@@ -1218,9 +1242,12 @@ func handleChainFailure(
 					}
 					verdict = climbed
 				}
-				if verdict == ladderStopped {
+				switch verdict {
+				case ladderStopped:
 					code = hook.TerminalCancelled
-				} else {
+				case ladderDeadlineReached:
+					code = hook.TerminalDeadlineReached
+				default:
 					code, stopReason = unreadableReviewsOutcome(view.round)
 				}
 			case designWrong:
@@ -1265,6 +1292,9 @@ func handleChainFailure(
 	if code == hook.TerminalModelFailed {
 		evidence = failedStepEvidence(config, runDir, stageName, view.round)
 
+	}
+	if code == hook.TerminalDeadlineReached {
+		evidence = deadlineEvidence(config, runDir, repository, stageName, view.round)
 	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return err

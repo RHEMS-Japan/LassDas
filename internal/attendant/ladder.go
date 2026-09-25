@@ -223,6 +223,10 @@ const (
 	// has been reached. The caller ends the run the way it would have
 	// before the ladder existed.
 	ladderSpent
+	// ladderDeadlineReached: the delivery used up the time it was given
+	// while it was still climbing. The caller ends the run with an account
+	// of where it got to (deadline.go).
+	ladderDeadlineReached
 )
 
 // newClimb gathers one failed card's context. The tracker comes out of the
@@ -271,6 +275,21 @@ func climbLadder(ctx context.Context, climb ladderClimb) (ladderVerdict, error) 
 	}
 	record := readLadderRecord(runDir, stageName, round)
 	now := time.Now().UTC()
+
+	// Before any remedy, whether there is still time to play one.
+	//
+	// Asked here rather than beside the waiting rung because every rung is
+	// the same delivery going on: a run that spends its night moving seats
+	// and rebuilding cards has used the night just as surely as one that
+	// spent it waiting, and a card that keeps being replaced mid-turn is a
+	// delivery going nowhere for as long as it lasts.
+	if spent, passed := runDeadlinePassed(config, run, now); passed {
+		logger.Info("the delivery used up the time it was given while it was still climbing; it ends with an account of where it got to",
+			"run", run.RunID, "stage", stageName, "round", round, "class", string(class),
+			"spent_minutes", int(spent.Minutes()), "deadline_minutes", int(config.Chain.RunDeadline().Minutes()),
+			"attempts", record.Attempts)
+		return ladderDeadlineReached, nil
+	}
 
 	// A delivery whose ticket cannot be reached at all. The ladder can
 	// neither say that it is still going nor hear a stop, so it would climb

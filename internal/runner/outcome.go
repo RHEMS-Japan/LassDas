@@ -388,30 +388,132 @@ func outcomeWhatHappened(runDir string, code hook.TerminalCode, evidence map[str
 	}
 	failure, found := latestStageFailure(runDir, notes)
 	step := evidence["failed_step"]
-	if !found && step == "" {
+	ranOut := code == hook.TerminalDeadlineReached
+	if !found && step == "" && !ranOut {
 		return ""
 	}
 	var lines []string
+	// The clock first, for the one ending it belongs to. What follows is
+	// the failure the delivery was still working on when the time went, and
+	// without this line above it the report would read as a delivery that
+	// gave up on that failure rather than one that ran out of night.
+	if ranOut {
+		lines = append(lines, outcomeDeadlineSentence(evidence))
+	}
 	switch {
 	case step != "" && found && failure.Round > 0:
 		lines = append(lines, fmt.Sprintf("%s の工程が、%d 周目で完了しませんでした。", step, failure.Round))
 	case step != "":
 		lines = append(lines, step+" の工程が完了しませんでした。")
-	default:
+	case found || !ranOut:
 		lines = append(lines, "工程のひとつが完了しませんでした。")
 	}
 	if found {
-		if failure.Interrupted {
+		handedBack := handedBackCount(runDir, failure.Round, notes)
+		switch {
+		case failure.Interrupted:
 			lines = append(lines, "原因: 処理を動かしている場所が入れ替わり、工程が途中で止まりました。")
-		} else if reason := failureClassSentence(failure.Class); reason != "" {
-			lines = append(lines, "原因: "+reason)
+		case handedBack > 0:
+			// The implementing agent answering rather than working seals an
+			// ordinary model failure, so the class alone would report "the
+			// AI did not answer" for a round where it answered every time
+			// and refused every time. The round's own record of what was
+			// handed back is the only thing that tells them apart.
+			lines = append(lines, fmt.Sprintf("原因: AI が %d 回とも「この依頼はこのままでは実現できない」と作業を返してきました。", handedBack))
+		default:
+			if reason := failureClassSentence(failure.Class); reason != "" {
+				lines = append(lines, "原因: "+reason)
+			}
 		}
 	}
 	text := "## 何が起きたか\n" + strings.Join(lines, "\n") + "\n"
 	if tried := outcomeWhatWasTried(runDir, failure.Stage, failure.Round, notes); tried != "" {
 		text += "\n" + tried
 	}
+	if ranOut {
+		text += "\n" + outcomeReachedSoFar(evidence)
+		if needed := outcomeWhatIsNeeded(runDir, failure, found, notes); needed != "" {
+			text += "\n" + needed
+		}
+	}
 	return text
+}
+
+// outcomeDeadlineSentence says the delivery ran out of the time it was
+// given, and how much that was. The figure travels in the evidence because
+// it is the operator's setting rather than anything the run sealed; a
+// report from an engine that did not carry it keeps the sentence and drops
+// the number, which is still the fact the requester needs.
+func outcomeDeadlineSentence(evidence map[string]string) string {
+	hours := evidence["deadline_hours"]
+	if hours == "" {
+		return "この依頼に使える処理時間を使い切ったため、ここで打ち切って、いまの状態をお知らせします。"
+	}
+	return "この依頼に使える処理時間 (" + hours + " 時間) を使い切ったため、ここで打ち切って、いまの状態をお知らせします。"
+}
+
+// outcomeReachedSoFar says what exists now, which for a delivery cut short
+// is the question its requester asks first. It reads the same evidence the
+// comment's links are built from, so the prose and the links cannot
+// disagree about what landed.
+func outcomeReachedSoFar(evidence map[string]string) string {
+	var line string
+	switch {
+	case evidence["production_evidence_url"] != "":
+		line = "本番環境への反映と確認までは完了しています。自動での巻き戻しは行っていません。"
+	case evidence["staging_evidence_url"] != "":
+		line = "staging への反映と確認までは完了しています。本番環境は変更していません。"
+	case evidence["pull_request_url"] != "":
+		line = "取り込み用の Pull Request は作成済みで、マージは行っていません。本番環境は変更していません。"
+	default:
+		line = "動いている場所はまだありません。Pull Request も作成していないため、対象リポジトリと本番環境は変更していません。"
+	}
+	return "## ここまでに出来上がっているもの\n" + line + "\n"
+}
+
+// outcomeWhatIsNeeded names the one thing that would let the same request
+// go through next time. It is the half of an unfinished report that decides
+// whether anybody can act on it: "the AI did not answer" is a fact, and
+// "raise the key's limit" is a fact somebody can do something about.
+func outcomeWhatIsNeeded(runDir string, failure StageFailure, found bool, notes *outcomeNotes) string {
+	if !found {
+		return ""
+	}
+	line := ""
+	switch {
+	case handedBackCount(runDir, failure.Round, notes) > 0:
+		line = "AI が返してきた理由をこのチケットの記録でご確認のうえ、足りない情報を書き足して起票し直してください。"
+	case failure.Class == FailureClassCredit:
+		line = "AI の利用枠の上限を上げるか、枠のリセットを待ってから、同じ内容で起票し直してください。"
+	case failure.Class == FailureClassNetwork:
+		line = "外部との通信が回復していることを確認のうえ、同じ内容で起票し直してください。"
+	case failure.Class == FailureClassTool:
+		line = "作業に必要な道具が用意できる状態かを運用担当者にご確認のうえ、同じ内容で起票し直してください。"
+	case failure.Class == FailureClassDisk:
+		line = "作業用の保存領域を空ける必要があります。運用担当者の対応後、同じ内容で起票し直してください。"
+	case failure.Class == FailureClassTimeout:
+		line = "依頼の範囲を小さく分けて起票し直すと、同じ時間内で終わる見込みが上がります。"
+	case failure.Class == FailureClassModel:
+		line = "同じ内容で起票し直すと、別の AI と提供元で最初からやり直します。"
+	default:
+		return ""
+	}
+	return "## 続けるために必要なこと\n" + line + "\n"
+}
+
+// handedBackCount is how many times this round's implementing agent handed
+// the work back instead of doing it. A round nobody handed back reads zero,
+// which is the ordinary case.
+func handedBackCount(runDir string, round int, notes *outcomeNotes) int {
+	if round < 1 {
+		return 0
+	}
+	record, err := ReadReturns(runDir, round)
+	notes.failed(recordReturned, err)
+	if record == nil {
+		return 0
+	}
+	return len(record.Returns)
 }
 
 // failureClassSentence puts each kind of failure in words a requester can
@@ -432,6 +534,8 @@ func failureClassSentence(class FailureClass) string {
 		return "作業用の保存領域が足りなくなりました。"
 	case FailureClassCredit:
 		return "AI の利用枠を使い切りました。枠を上げるか、リセットを待つ必要があります。"
+	case FailureClassTimeout:
+		return "工程が、与えられた時間内に終わりませんでした。"
 	default:
 		return ""
 	}

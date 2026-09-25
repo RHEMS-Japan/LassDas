@@ -410,6 +410,18 @@ func classifyAfterTerminalInDirectory(status *RunStatus, config runtime.Config, 
 				"変更を加えずに理由を報告して作業を返しました。報告の全文はチケットのコメントにあります")
 			return
 		}
+		if run.TerminalCode == string(hook.TerminalDeadlineReached) {
+			// Not a failure of the request, and the board saying so would
+			// send an operator looking for a fault in the ticket. The
+			// delivery worked, met something it could not get past, and ran
+			// out of the time it was given; the detail names the step.
+			status.place("failed", "処理時間の上限に達して終了",
+				"解決できない失敗が続いたまま、この依頼に使える処理時間を使い切りました。どこまで進んだかはチケットの最終コメントにあります")
+			if step := runner.RecordedFailedStep(runDir)["failed_step"]; step != "" {
+				status.Detail += "。終了した工程: " + step
+			}
+			return
+		}
 		status.place("failed", "失敗で終了", hook.DescribeTerminalCode(run.TerminalCode))
 		evidence := runner.RecordedFailedStep(runDir)
 		if run.TerminalCode == string(hook.TerminalModelFailed) && evidence["model_failure_reason"] == hook.ModelFailureBudgetExhausted {

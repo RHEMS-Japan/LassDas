@@ -80,6 +80,19 @@ const (
 	// explanation was the only thing missing from the ticket (live
 	// 2026-09-25).
 	TerminalImplementationReturned TerminalCode = "implementation_returned"
+	// TerminalDeadlineReached is a delivery that ran out of the time it was
+	// given while it was still trying to get past a failure. It is the
+	// ending the ladder never had: every rung of it is a remedy and the
+	// last one is a wait that grows, so a failure nobody clears — a key
+	// nobody raises, a provider that stays down, an agent that keeps
+	// handing the work back — leaves a run climbing with nothing to show
+	// for it and no ending in sight.
+	//
+	// It is never internal_failed. Nothing broke inside the engine: the
+	// engine did the work, said what it tried, and ran out of night. The
+	// report says where the delivery got to, what kind of failure it kept
+	// meeting, and what a person would have to supply or fix.
+	TerminalDeadlineReached TerminalCode = "deadline_reached"
 )
 
 // Valid reports whether c is one of the terminal codes the automation ends
@@ -100,6 +113,7 @@ func AllTerminalCodes() []TerminalCode {
 		TerminalProductionVerificationFailed, TerminalInternalFailed,
 		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged,
 		TerminalDesignNonconverged, TerminalDesignRoundsSpent, TerminalImplementationReturned,
+		TerminalDeadlineReached,
 	}
 }
 

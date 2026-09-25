@@ -47,6 +47,10 @@ const (
 	// deliverSpent: an operator configured a limit on the attempts and a
 	// phase has reached it, so the delivery ends on the failure instead.
 	deliverSpent
+	// deliverOutOfTime: the delivery used up the time it was given while a
+	// phase was still being climbed, so it ends with an account of where it
+	// got to (deadline.go).
+	deliverOutOfTime
 )
 
 // The delivery cards, and the round their records are kept under. The names
@@ -317,6 +321,8 @@ func climbDeliverPhase(
 		return deliverWorking, err
 	case climbed == ladderStopped:
 		return deliverStopped, nil
+	case climbed == ladderDeadlineReached:
+		return deliverOutOfTime, nil
 	case climbed == ladderSpent:
 		return deliverSpent, nil
 	}
@@ -531,6 +537,8 @@ func completeDelivery(
 		// takes. With a bound configured, the delivery ends the way it would
 		// have before the ladder existed.
 		return endDeliveryEarly(ctx, config, services, hermes, envelope, run, view, runDir, hook.TerminalReleaseFailed, logger)
+	case deliverOutOfTime:
+		return endDeliveryEarly(ctx, config, services, hermes, envelope, run, view, runDir, hook.TerminalDeadlineReached, logger)
 	}
 	return reportChainSuccess(ctx, config, services, envelope, run, logger)
 }
@@ -555,6 +563,14 @@ func endDeliveryEarly(
 		repository = ""
 	}
 	evidence := stoppedDeliveryEvidence(runDir, repository, code)
+	if code == hook.TerminalDeadlineReached {
+		// A delivery cut short mid-carriage owes the same account as one
+		// cut short mid-round: the phases it got through are exactly what
+		// its requester has to go and look at. The delivery cards have no
+		// requester-facing step name of their own, so what this carries is
+		// the clock and what landed.
+		evidence = deadlineEvidence(config, runDir, repository, "", deliverLadderRound)
+	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return err
