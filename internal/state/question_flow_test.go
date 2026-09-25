@@ -625,3 +625,160 @@ func (readingStub) ReadAnswer(_ context.Context, _, body string) (hook.AnswerRea
 	}
 	return hook.AnswerReading{Kind: hook.AnswerReadingAnswer, Answers: answers}, nil
 }
+
+// flowCommentWithMarker returns the body of the comment carrying the marker
+// and how many comments carry it.
+func flowCommentWithMarker(h *flowHarness, marker string) (string, int) {
+	body, count := "", 0
+	for _, comment := range h.backlog.comments {
+		if strings.Contains(comment.Body, marker) {
+			body, count = comment.Body, count+1
+		}
+	}
+	return body, count
+}
+
+// assertAckFrame holds every acceptance notice to the lines the reception's
+// state does not move, whichever reading it got.
+func assertAckFrame(t *testing.T, body, marker string) {
+	t.Helper()
+	for _, line := range []string{
+		"処理の所有者: 自動処理（結果はこのチケットのコメントでお知らせします）",
+		"最終報告の目安: 受付から 2 時間以内（質問への回答待ちの期間は除きます）",
+		"状態: 受付済み・自動処理中",
+		"次回通知・期限: 最終結果または確認事項を、受付から 2 時間以内を目安に通知",
+		"本番の状態: 未変更",
+		"自動再試行: なし（webhook 未達時は 5 分周期の照合で受付を補完）",
+	} {
+		if !strings.Contains(body, "\n"+line+"\n") {
+			t.Fatalf("the acceptance notice lost the line %q:\n%s", line, body)
+		}
+	}
+	if !strings.HasPrefix(body, "【受付】このチケットの自動処理を受け付けました。\n") {
+		t.Fatalf("the acceptance notice does not open with the headline:\n%s", body)
+	}
+	if got := hook.ExtractCommentMarker(body); got != marker {
+		t.Fatalf("marker line = %q, want %q", got, marker)
+	}
+}
+
+const (
+	ackPendingRequest    = "ご対応のお願い: いまは何もありません。受付の確認が終わるまでお待ちください。依頼者にしか決められない点があれば、受付の時点でまとめて質問します。受付の質問は設定で許された回数（既定は 1 回）までで、それ以降は質問しません。"
+	ackProceededRequest  = "ご対応のお願い: ありません。受付の確認は完了しており、受付からの質問はこれ以上ありません。方針が違う場合は、方針コメントにある停止の方法をご利用ください。"
+	ackQuestionedRequest = "ご対応のお願い: 上の質問への回答だけです。受付の質問は設定で許された回数（既定は 1 回）までで、それ以降は質問しません。"
+)
+
+// A run is in flight from the claim, and the reception happens some way
+// after it: a budget hold, a sign-in hold, a target token that cannot be
+// read or a restart all leave a claimed run whose reception has not begun,
+// and the claim then goes back to the queue for the reception to run later.
+// The acceptance notice is posted on the first wake-up that finds the run in
+// flight — so it can precede the decision — and it is posted once per run and
+// never revised. A notice that told such a requester nothing would be asked
+// would be contradicted by the question that follows, with nothing left to
+// correct it.
+func TestAcceptanceNoticeBeforeTheReceptionDecidesPromisesNoSilence(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	envelope := claimForTerminal(t, harness.store)
+	marker := hook.CommentMarker("ack", envelope.Snapshot.RunID)
+
+	// Claimed, held, and not yet received: one notice pass.
+	if result := harness.tick(t); result.Decision != hook.DecisionAccepted {
+		t.Fatalf("tick = %+v", result)
+	}
+	body, count := flowCommentWithMarker(harness, marker)
+	if count != 1 {
+		t.Fatalf("acceptance notices = %d, want 1", count)
+	}
+	if !strings.Contains(body, "\n"+ackPendingRequest+"\n") {
+		t.Fatalf("the notice does not say the reception is unfinished:\n%s", body)
+	}
+	if strings.Contains(body, "これ以上ありません") || strings.Contains(body, "上の質問") {
+		t.Fatalf("the notice settled a reception that had not happened:\n%s", body)
+	}
+	assertAckFrame(t, body, marker)
+
+	// The reception then runs and asks. The notice already on the ticket must
+	// not contradict it, and nothing reposts or rewrites it.
+	harness.clock = harness.clock.Add(time.Minute)
+	record := testQuestionRecord(t, envelope)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: record, IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("tick while waiting = %+v", result)
+	}
+	after, count := flowCommentWithMarker(harness, marker)
+	if count != 1 || after != body {
+		t.Fatalf("the acceptance notice changed: count=%d\n%s", count, after)
+	}
+	if flowCountMarker(harness, hook.CommentMarker("question", envelope.Snapshot.RunID, "C1")) != 1 {
+		t.Fatal("the reception's question is not on the ticket")
+	}
+}
+
+// The reception concluded and went on: its plan notice is the run's own
+// record of that, and only then does the acceptance notice say the asking is
+// over and point at the comment the stop method is written in.
+func TestAcceptanceNoticeAfterThePlanNoticeSaysTheAskingIsOver(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	envelope := claimForTerminal(t, harness.store)
+	marker := hook.CommentMarker("ack", envelope.Snapshot.RunID)
+
+	if posted, reason := harness.ticker.PostPlanComment(context.Background(), envelope.DeliveryID,
+		hook.PlanCommentContent(envelope.Snapshot.RunID, hook.PlanFacts{Request: "一覧の取得失敗時に再試行の導線を出す"})); !posted {
+		t.Fatalf("plan notice not posted: %s", reason)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Decision != hook.DecisionAccepted {
+		t.Fatalf("tick = %+v", result)
+	}
+	body, count := flowCommentWithMarker(harness, marker)
+	if count != 1 {
+		t.Fatalf("acceptance notices = %d, want 1", count)
+	}
+	if !strings.Contains(body, "\n"+ackProceededRequest+"\n") {
+		t.Fatalf("the notice does not close the asking:\n%s", body)
+	}
+	if !strings.Contains(body, "\n次に行動する人: 自動処理\n") || !strings.Contains(body, "\n操作: 利用者操作なし\n") {
+		t.Fatalf("the footer asks for something nothing needs:\n%s", body)
+	}
+	assertAckFrame(t, body, marker)
+}
+
+// The reception asked: the notice names the answer that is owed and its
+// footer sends the requester to the same place as the question comment.
+func TestAcceptanceNoticeDuringAnAnswerWaitNamesTheAnswer(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarness(t, api)
+	envelope := claimForTerminal(t, harness.store)
+	marker := hook.CommentMarker("ack", envelope.Snapshot.RunID)
+
+	record := testQuestionRecord(t, envelope)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: record, IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("tick while waiting = %+v", result)
+	}
+	body, count := flowCommentWithMarker(harness, marker)
+	if count != 1 {
+		t.Fatalf("acceptance notices = %d, want 1", count)
+	}
+	if !strings.Contains(body, "\n"+ackQuestionedRequest+"\n") {
+		t.Fatalf("the notice does not name the open question:\n%s", body)
+	}
+	if strings.Contains(body, "操作: 利用者操作なし") {
+		t.Fatalf("the footer contradicts the open question:\n%s", body)
+	}
+	if !strings.Contains(body, "\n次に行動する人: 起票者（回答者）\n") {
+		t.Fatalf("the footer does not name the answerer:\n%s", body)
+	}
+	assertAckFrame(t, body, marker)
+}
