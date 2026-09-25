@@ -131,6 +131,9 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 	if until != DeliverUntilChecks && until != DeliverUntilStaging && until != DeliverUntilProduction {
 		return errors.New("deliver milestone is invalid")
 	}
+	// The same wall, for the same reason a chain stage holds itself to one.
+	ctx, wall := p.holdToTheCardsWall(ctx, DeliverStageOf(until))
+	defer wall()
 	if err := p.verifyToolPins(); err != nil {
 		return err
 	}

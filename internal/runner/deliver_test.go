@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runtime"
 )
 
 func deliverPipeline(t *testing.T) *Pipeline {
@@ -352,4 +353,28 @@ func readSealedDeliverReport(t *testing.T, pipeline *Pipeline, name string) Deli
 		t.Fatalf("report is not sealed: %s", raw)
 	}
 	return report
+}
+
+// A delivery phase holds itself to its card's wall too, and says so.
+//
+// Its own verbs read a killed process as a sealed verdict rather than as a
+// failure that kept its cause, so the class this bound produces is not
+// visible from here; what is visible, and what was missing, is the bound.
+// Without it a phase killed at its wall arrives as a cancelled context,
+// which is what a pod being replaced also looks like, and the ladder
+// replays it for free.
+func TestADeliveryPhaseHoldsItselfToItsCardsWall(t *testing.T) {
+	pipeline := deliverPipeline(t)
+	said := &wallLogger{}
+	pipeline.Logger = said
+	pipeline.Config.Chain.Deliver = runtime.DeliverConfig{
+		ChecksProfile: "c", IntegrateProfile: "i", PromoteProfile: "p",
+		EnabledAfter: "2026-09-01T00:00:00Z", ChecksMaxRuntimeSeconds: 600,
+	}
+	// It fails at once for want of a delivered pull request; what is
+	// measured is the bound installed before any of that.
+	_ = pipeline.RunDeliver(context.Background(), DeliverUntilChecks)
+	if !said.saw("the card holds itself to its own wall") {
+		t.Fatalf("the phase ran with no bound but the supervisor's signal: %v", said.lines)
+	}
 }

@@ -283,9 +283,16 @@ func outcomeRequest(runDir string, notes *outcomeNotes) string {
 // naming the environment they now have to go and see would be the worst
 // version of this comment. A stop that reached nowhere carries no evidence
 // and this writes nothing, which the stop's own sentence already covers.
+//
+// A delivery cut short by its own deadline is asked it for the same reason.
+// It can run out of night with its change already on staging — the
+// promotion is the phase most likely to keep failing — and a report that
+// said twice that staging holds the change without once giving the screen
+// would send its reader hunting for a URL the run had in hand.
 func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[string]string, notes *outcomeNotes) string {
 	switch code {
-	case hook.TerminalSuccess, hook.TerminalCancelled, hook.TerminalInvestigated:
+	case hook.TerminalSuccess, hook.TerminalCancelled, hook.TerminalInvestigated,
+		hook.TerminalDeadlineReached:
 	default:
 		return ""
 	}

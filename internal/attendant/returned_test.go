@@ -35,8 +35,9 @@ type returnedSetup struct {
 	tracker  *returnTracker
 	logger   *recordingLogger
 	// claimedAt is when the ledger says this delivery was claimed, which
-	// is what its deadline is measured from. Zero — the default — is a run
-	// whose row carries no claim time, and no deadline is read from it.
+	// is what its deadline is measured from. A minute ago by default, so a
+	// test about the answering is not also a test about the clock; a test
+	// about the clock moves it.
 	claimedAt time.Time
 }
 
@@ -141,7 +142,8 @@ exit 0
 	}, fixture.deliveryID)
 	hermes, board := fakeBoard(t)
 	return &returnedSetup{fixture: fixture, config: config, envelope: envelope, view: view,
-		runDir: runDir, hermes: hermes, board: board, tracker: tracker, logger: &recordingLogger{}}
+		runDir: runDir, hermes: hermes, board: board, tracker: tracker, logger: &recordingLogger{},
+		claimedAt: time.Now().UTC().Add(-time.Minute)}
 }
 
 // writeChainShape leaves the reception's decision about which cards this

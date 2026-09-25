@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
@@ -213,6 +214,8 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 // stage stopped — the difference between a model that would not answer, a
 // full volume and a missing binary lives in the record or nowhere.
 func (p *Pipeline) RunChainStage(ctx context.Context, stage string) error {
+	ctx, wall := p.holdToTheCardsWall(ctx, stage)
+	defer wall()
 	err := p.runChainStage(ctx, stage)
 	// Whatever this card made outside the repository, before the error is
 	// returned and before any later card seals this working copy. Every
@@ -569,4 +572,31 @@ func (p *Pipeline) chainPublish(ctx context.Context, reviewers []string) error {
 		return err
 	}
 	return os.WriteFile(p.path(ChainOutcomeFile), encoded, 0o600)
+}
+
+// holdToTheCardsWall bounds this card's work by the wall its card was
+// dispatched with, a minute short of it, and says when it will stop.
+//
+// The wall is enforced from outside: the attendant hands it to the kanban
+// as --max-runtime and the supervisor sends SIGTERM when it expires. From
+// inside the process that signal is a cancelled context — exactly what the
+// pod being replaced looks like — so a card that could not finish in its
+// time sealed as an interruption and was replayed for free, past whatever
+// bound an operator had set on the attempts. Both live tickets whose
+// reviews died at exactly seventy minutes ended that way.
+//
+// Reaching the deadline here first is what lets the seal say which of the
+// two happened. A signal arriving while this deadline is still ahead is
+// still a replacement, and still an interruption.
+func (p *Pipeline) holdToTheCardsWall(ctx context.Context, stage string) (context.Context, context.CancelFunc) {
+	ctx, wall := runtime.WithWall(ctx, runtime.CardWall(p.Config.Chain, stage))
+	// Said from the context rather than from the number, so the line and
+	// the bound cannot disagree: an operator reading the pod log sees the
+	// moment the card will stop itself, and sees nothing at all for a card
+	// running with no bound but the supervisor's.
+	if deadline, bounded := ctx.Deadline(); bounded && p.Logger != nil {
+		p.Logger.Info("the card holds itself to its own wall",
+			"stage", stage, "until", deadline.UTC().Format(time.RFC3339))
+	}
+	return ctx, wall
 }

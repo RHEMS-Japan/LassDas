@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // The cards orchestration runs one delivery as a chain of stage cards,
@@ -160,6 +161,67 @@ type ChainStage struct {
 	Name              string
 	Profile           string
 	MaxRuntimeSeconds int
+}
+
+// cardWallMargin is how far inside its own wall the process running a card
+// stops itself.
+//
+// The wall is enforced from outside: the attendant hands it to the kanban
+// as --max-runtime and the supervisor sends SIGTERM when it expires. A
+// signal is indistinguishable, from inside, from the pod being replaced —
+// and the two mean opposite things, one being a card that could not finish
+// in its time and the other a card that never got its time. Stopping a
+// minute early lets the card find out which of the two happened to it,
+// which is the whole difference between a failure that is counted and one
+// that is replayed for free. A minute is long enough to cover the gap
+// between the supervisor starting the process and the process reaching
+// this, and short enough to lose nothing on walls measured in tens of
+// minutes.
+const cardWallMargin = time.Minute
+
+// CardWall is the runtime bound the card for one stage is dispatched with:
+// the same number the attendant hands the kanban. A name no card carries —
+// or one whose card is dispatched without a bound — has no wall, and the
+// caller is then bounded by nothing but the supervisor.
+func CardWall(chain ChainConfig, stage string) time.Duration {
+	// Both shapes, because a stage belongs to whichever one runs it and
+	// this is asked by a card that knows only its own name. The plan is
+	// left at its zero value on purpose: that is the widest chain either
+	// shape builds, so both review cards are in the list.
+	for _, shape := range []ChainShape{ShapeImplement, ShapeDesign, ShapeInvestigation} {
+		for _, candidate := range ChainStagesFor(chain, ChainPlan{Shape: shape, ReviewInvestigation: true}) {
+			if candidate.Name == stage && candidate.MaxRuntimeSeconds > 0 {
+				return time.Duration(candidate.MaxRuntimeSeconds) * time.Second
+			}
+		}
+	}
+	switch stage {
+	case DeliverStageChecks:
+		return time.Duration(chain.Deliver.ChecksWallSeconds()) * time.Second
+	case DeliverStageIntegrate:
+		return time.Duration(chain.Deliver.IntegrateWallSeconds()) * time.Second
+	case DeliverStagePromote:
+		return time.Duration(chain.Deliver.PromoteWallSeconds()) * time.Second
+	}
+	return 0
+}
+
+// WithWall bounds ctx by a card's wall, less the margin, so the process
+// reaches its own deadline before the supervisor's signal reaches it.
+//
+// A wall shorter than the margin keeps half of itself rather than a
+// deadline that has already passed: every real wall is tens of minutes, and
+// a configuration that sets a tiny one still wants the card to stop itself
+// first. No wall at all leaves ctx alone.
+func WithWall(ctx context.Context, wall time.Duration) (context.Context, context.CancelFunc) {
+	if wall <= 0 {
+		return ctx, func() {}
+	}
+	within := wall - cardWallMargin
+	if within <= 0 {
+		within = wall / 2
+	}
+	return context.WithTimeout(ctx, within)
 }
 
 // ChainStages is the original chain for one configuration, in order.

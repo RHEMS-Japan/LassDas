@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +120,46 @@ func TestTheAccountOfARunOutOfTimeNamesAStepThatWouldNotFit(t *testing.T) {
 	}
 	if !strings.Contains(report, "小さく分けて") {
 		t.Fatalf("the report does not say what would make it fit:\n%s", report)
+	}
+}
+
+// A delivery cut short with its change already on staging gives the screen.
+//
+// It is the likeliest shape of this ending — the promotion is the phase
+// most apt to keep failing — and the one where saying where to look matters
+// most. The report said twice that staging holds the change and never once
+// gave the URL the run had in hand.
+func TestARunOutOfTimeAfterStagingNamesTheScreen(t *testing.T) {
+	h := newDepthHarnessClaimedAt(t, hook.DeliverProduction, true, "", time.Now().UTC().Add(-9*time.Hour))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	if err := os.MkdirAll(filepath.Join(h.runDir, "history", "deliver-1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.SealStageFailureRecord(h.runDir, runner.StageFailure{
+		Stage: deliverStagePromote, Round: deliverLadderRound, Class: runner.FailureClassNetwork,
+		Error: "connection reset by peer", FailedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1),
+		h.card(deliverStagePromote, "blocked", 1))
+
+	h.tick()
+
+	row := h.runRow()
+	if row.State != "terminal" || row.TerminalCode != string(hook.TerminalDeadlineReached) {
+		t.Fatalf("row = %s/%s, want a terminal delivery that ran out of time", row.State, row.TerminalCode)
+	}
+	if len(*h.posted) != 1 {
+		t.Fatalf("comments posted = %d, want exactly one final report: %q", len(*h.posted), *h.posted)
+	}
+	report := (*h.posted)[0]
+	if !strings.Contains(report, depthStagingHost+"/feature") {
+		t.Fatalf("the report says staging holds the change and never gives the screen:\n%s", report)
+	}
+	if !strings.Contains(report, "staging への反映と確認までは完了しています") {
+		t.Fatalf("the report does not say how far the delivery got:\n%s", report)
 	}
 }
 
@@ -241,7 +282,12 @@ func TestARunOutOfTimeBeforeTheReturnIsAnsweredIsNotLaunchedAgain(t *testing.T) 
 // runs again.
 func TestAReturnedRoundInsideTheDeadlineIsStillAnswered(t *testing.T) {
 	s := newReturnedSetup(t, "この依頼は、いまのままでは実現できません。")
-	s.claimedAt = time.Now().UTC().Add(-time.Hour)
+	// The fixture's own claim, not one this test sets: a row with no claim
+	// time is one whose deadline is never read, and this would then prove
+	// nothing about a delivery that is inside it.
+	if s.claimedAt.IsZero() {
+		t.Fatal("the fixture's ledger row carries no claim time, so no deadline is read from it")
+	}
 
 	if err := s.tick(t); err != nil {
 		t.Fatal(err)

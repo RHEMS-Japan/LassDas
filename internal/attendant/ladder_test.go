@@ -46,6 +46,11 @@ type ladderSetup struct {
 	calls    string
 	tracker  *fakeConfirmationSource
 	logger   *recordingLogger
+	// claimedAt is when the ledger says this delivery was claimed, which
+	// is what its deadline is measured from. A minute ago by default, so a
+	// test about a remedy is not also a test about the clock; a test about
+	// the clock moves it.
+	claimedAt time.Time
 }
 
 // newLadderSetup seals the failure the card would have sealed and puts the
@@ -126,11 +131,16 @@ func newLadderSetup(t *testing.T, failure runner.StageFailure) *ladderSetup {
 		fixture: fixture, config: config, envelope: envelope,
 		view: chainViewFor(tasks, fixture.deliveryID), runDir: runDir, stage: failure.Stage,
 		hermes: hermes, calls: calls, tracker: &fakeConfirmationSource{}, logger: &recordingLogger{},
+		claimedAt: time.Now().UTC().Add(-time.Minute),
 	}
 }
 
 func (s *ladderSetup) run() state.RunOverview {
-	return state.RunOverview{DeliveryID: s.fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	run := state.RunOverview{DeliveryID: s.fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if !s.claimedAt.IsZero() {
+		run.ClaimedAt = s.claimedAt.UnixMilli()
+	}
+	return run
 }
 
 // climb is one tick's pass over the failed card, with the fake tracker in
@@ -862,5 +872,58 @@ func TestAStepThatRanOutOfItsOwnTimeIsClimbedBeforeTheBound(t *testing.T) {
 	}
 	if created := createdStages(ladderBoardLines(t, setup.calls)); len(created) == 0 {
 		t.Fatal("the stage was not dispatched again")
+	}
+}
+
+// The audit's own reproduction, inverted.
+//
+// It kept one stage of one round failing for the same reason — a key at its
+// limit, a model that would not answer — with the wait always elapsed and
+// no bound configured, and measured twenty passes: nineteen attempts,
+// seventy-six cards rebuilt, the round still at one, and no final report.
+// Every one of those passes is still a pass; what has changed is that the
+// night ends.
+func TestTheRepeatedFailureTheAuditMeasuredNowReachesAnEnd(t *testing.T) {
+	for _, class := range []runner.FailureClass{runner.FailureClassCredit, runner.FailureClassModel} {
+		t.Run(string(class), func(t *testing.T) {
+			setup := newLadderSetup(t, runner.StageFailure{
+				Stage: runtime.StageReviewA, Round: 1, Class: class, Error: "persistent refusal",
+			})
+			if setup.config.Chain.RetryMaxAttempts != 0 {
+				t.Fatal("the fixture configures a bound; this measures the delivery without one")
+			}
+			// On a row that carries a claim, as the audit's did: a fixture
+			// with no claim time is one whose deadline is never read, and
+			// the twenty passes below would then prove nothing about it.
+			if setup.run().ClaimedAt <= 0 {
+				t.Fatal("the fixture's ledger row carries no claim time, so no deadline is read from it")
+			}
+			for pass := 0; pass < 20; pass++ {
+				// The wait moved into the past, as the audit did it: what is
+				// measured is the climbing, not how long a wait is.
+				record := setup.record()
+				if record.Attempts > 0 || record.LadderStep == rungWait {
+					record.LastAt = time.Now().UTC().Add(-48 * time.Hour)
+					writeLadderRecord(setup.runDir, setup.stage, 1, record, setup.logger)
+				}
+				verdict, err := setup.climb(t)
+				if err != nil || verdict != ladderHandled {
+					t.Fatalf("pass %d: verdict = %v err = %v, want the failure still being climbed", pass, verdict, err)
+				}
+			}
+			if attempts := setup.record().Attempts; attempts < 10 {
+				t.Fatalf("attempts = %d: the delivery was not climbing at all", attempts)
+			}
+			if len(setup.fixture.comments.posted) != 0 {
+				t.Fatalf("the delivery reported inside its deadline: %q", setup.fixture.comments.posted)
+			}
+
+			// And then the night is over.
+			setup.claimedAt = time.Now().UTC().Add(-9 * time.Hour)
+			verdict, err := setup.climb(t)
+			if err != nil || verdict != ladderDeadlineReached {
+				t.Fatalf("verdict = %v err = %v, want the delivery out of the time it was given", verdict, err)
+			}
+		})
 	}
 }
