@@ -44,6 +44,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,30 @@ type corpusCase struct {
 	ID     string            `json:"id"`
 	Text   string            `json:"text"`
 	Labels map[string]string `json:"labels"`
+	// Recorded is what the reception sealed for this request beyond its
+	// verdict: how many questions it wrote, and how many points it settled
+	// itself. Only a run corpus carries it, and only ever as counts - the
+	// questions are prose about somebody's request and never printed.
+	Recorded receptionRecord `json:"-"`
+}
+
+// receptionRecord is the reception's own record of one request, in numbers.
+//
+// It is worth having beside the verdict because the verdict alone does not
+// say how much was at stake. A request the reception asked one question
+// about and settled six points on is not the same case as one it asked
+// three questions about and settled nothing, and a threshold read off the
+// first kind would be read off the wrong thing.
+type receptionRecord struct {
+	// Questions is how many the reception put to the requester.
+	Questions int
+	// Settled is how many points it recorded deciding itself, and Known
+	// says whether the corpus holds that record at all: a corpus of sealed
+	// decisions alone does not, because the assessment is where they are
+	// written, and a zero there means "not in this corpus" rather than
+	// "the reception settled nothing".
+	Settled int
+	Known   bool
 }
 
 type judged struct {
@@ -169,8 +194,10 @@ func readCorpus(t *testing.T, path string) []corpusCase {
 func report(t *testing.T, cases []corpusCase, results []judged, questions decisions.Questions) {
 	t.Helper()
 	labels := make(map[string]map[string]string, len(cases))
+	byID := make(map[string]corpusCase, len(cases))
 	for _, one := range cases {
 		labels[one.ID] = one.Labels
+		byID[one.ID] = one
 	}
 	var failures int
 	var cost float64
@@ -190,7 +217,7 @@ func report(t *testing.T, cases []corpusCase, results []judged, questions decisi
 	for _, result := range results {
 		if result.failure != nil {
 			failures++
-			t.Logf("%s: no judgment: %v", result.id, result.failure)
+			t.Logf("%s: no judgment: %s", result.id, withoutServiceWords(result.failure))
 			continue
 		}
 		latencies = append(latencies, result.latency)
@@ -243,7 +270,14 @@ func report(t *testing.T, cases []corpusCase, results []judged, questions decisi
 			}
 			parts = append(parts, fmt.Sprintf("%s=%s(%.2f)%s", id, option, confidence, marked))
 		}
-		t.Logf("  %-12s %s", result.id, strings.Join(parts, " "))
+		recorded := ""
+		if one, known := byID[result.id]; known {
+			recorded = fmt.Sprintf("  reception asked %d", one.Recorded.Questions)
+			if one.Recorded.Known {
+				recorded += fmt.Sprintf(", settled %d", one.Recorded.Settled)
+			}
+		}
+		t.Logf("  %-12s %s%s", result.id, strings.Join(parts, " "), recorded)
 	}
 
 	var withLabels int
@@ -305,6 +339,29 @@ func report(t *testing.T, cases []corpusCase, results []judged, questions decisi
 		t.Fatal("no judgment was obtained for any case")
 	}
 	thresholdTable(t, cases, results)
+}
+
+// serviceAnswerPattern matches the one failure that carries words this
+// engine did not write: the decisions service's own answer to a call it
+// refused.
+var serviceAnswerPattern = regexp.MustCompile(`^decisions: the service answered (\d+): `)
+
+// withoutServiceWords keeps the part of a failure this engine wrote and
+// drops the part it did not.
+//
+// A service that refuses a call answers in its own words, and a service
+// that refuses a malformed one may quote the field it objected to - which
+// here is the state, which is somebody's request. The status is what an
+// operator acts on and it is kept; the words are counted and left out.
+// Every other failure this measurement can meet is a sentence from the
+// client itself, and travels whole.
+func withoutServiceWords(failure error) string {
+	text := failure.Error()
+	if match := serviceAnswerPattern.FindStringIndex(text); match != nil {
+		return fmt.Sprintf("%s(the service answered in its own words; %d bytes, not printed here)",
+			text[:match[1]], len(text)-match[1])
+	}
+	return text
 }
 
 func distribution(counts map[string]int) string {
@@ -395,10 +452,11 @@ const (
 func readRunCorpus(t *testing.T, root string) []corpusCase {
 	t.Helper()
 	type collected struct {
-		text  string
-		runs  int
-		asked bool
-		ready bool
+		text     string
+		runs     int
+		asked    bool
+		ready    bool
+		recorded receptionRecord
 	}
 	byRequest := map[string]*collected{}
 	var order []string
@@ -413,10 +471,11 @@ func readRunCorpus(t *testing.T, root string) []corpusCase {
 			return nil
 		}
 		var decision struct {
-			Outcome string `json:"outcome"`
+			Outcome   string            `json:"outcome"`
+			Questions []json.RawMessage `json:"questions"`
 		}
-		sealed := filepath.Join(filepath.Dir(path), "history", "readiness", runDecisionFile)
-		if readRunArtifact(sealed, &decision) != nil {
+		history := filepath.Join(filepath.Dir(path), "history", "readiness")
+		if readRunArtifact(filepath.Join(history, runDecisionFile), &decision) != nil {
 			return nil
 		}
 		one, seen := byRequest[ticket.Request]
@@ -431,6 +490,15 @@ func readRunCorpus(t *testing.T, root string) []corpusCase {
 			one.asked = true
 		case "ready":
 			one.ready = true
+		}
+		if count := len(decision.Questions); count > one.recorded.Questions {
+			one.recorded.Questions = count
+		}
+		if settled, known := settledPoints(history); known {
+			one.recorded.Known = true
+			if settled > one.recorded.Settled {
+				one.recorded.Settled = settled
+			}
 		}
 		return nil
 	})
@@ -455,14 +523,55 @@ func readRunCorpus(t *testing.T, root string) []corpusCase {
 			labels[decisions.QuestionProceedable] = decisions.AnswerYes
 			proceeded++
 		}
-		cases = append(cases, corpusCase{ID: fmt.Sprintf("run-%02d", index+1), Text: one.text, Labels: labels})
+		cases = append(cases, corpusCase{ID: fmt.Sprintf("run-%02d", index+1), Text: one.text, Labels: labels, Recorded: one.recorded})
 	}
 	if len(cases) == 0 {
 		t.Fatal("the corpus holds no run with both a request and a sealed decision")
 	}
 	t.Logf("run corpus: %d runs, %d distinct requests; the reception proceeded on %d and asked about %d, and neither on %d",
 		runs, len(cases), proceeded, asked, len(cases)-proceeded-asked)
+	var questions, settled, withSettled int
+	for _, one := range cases {
+		questions += one.Recorded.Questions
+		if one.Recorded.Known {
+			settled += one.Recorded.Settled
+			withSettled++
+		}
+	}
+	if withSettled == 0 {
+		t.Logf("the reception recorded %d questions in all; what it settled itself is not in this corpus (the assessments are not here)", questions)
+	} else {
+		t.Logf("the reception recorded %d questions in all, and %d settled points across the %d cases whose assessment is here",
+			questions, settled, withSettled)
+	}
 	return cases
+}
+
+// settledPoints counts what the reception recorded settling itself, newest
+// assessment winning, and says whether it found an assessment at all. A
+// corpus of sealed decisions alone has none, and reading an absent record
+// as a zero would report every request as one the reception settled nothing
+// on.
+func settledPoints(history string) (int, bool) {
+	for attempt := 3; attempt >= 1; attempt-- {
+		var assessment struct {
+			Assumptions []struct {
+				Kind string `json:"kind"`
+			} `json:"assumptions"`
+		}
+		path := filepath.Join(history, fmt.Sprintf("assessment-%d.json", attempt))
+		if readRunArtifact(path, &assessment) != nil {
+			continue
+		}
+		count := 0
+		for _, assumption := range assessment.Assumptions {
+			if assumption.Kind == "defensible_default" {
+				count++
+			}
+		}
+		return count, true
+	}
+	return 0, false
 }
 
 // requestKey orders the cases without ordering them by anything a reader of
@@ -490,7 +599,15 @@ func readRunArtifact(path string, out any) error {
 // proceed on, and how many of the ones it asked about the judge would
 // overrule. The first number is what the feature buys; the second is what
 // it costs, and a threshold is only worth setting where the second is zero.
-func thresholdTable(t *testing.T, cases []corpusCase, results []judged) {
+// logger is what the table writes through: *testing.T in a live pass, and
+// something that can be read back in the test that checks the table itself.
+type logger interface {
+	Helper()
+	Log(args ...any)
+	Logf(format string, args ...any)
+}
+
+func thresholdTable(t logger, cases []corpusCase, results []judged) {
 	t.Helper()
 	labels := make(map[string]string, len(cases))
 	for _, one := range cases {
@@ -634,3 +751,145 @@ func TestTheRunCorpusIsLabelledByWhatTheReceptionDid(t *testing.T) {
 		}
 	}
 }
+
+// The measurement runs against other people's requests, so the one failure
+// that can carry words this engine did not write must not print them. The
+// state travels to the service, and a service refusing a malformed call may
+// answer by quoting what it objected to.
+func TestAFailureNeverPrintsTheServicesOwnWords(t *testing.T) {
+	const request = "レポート画面の合計が合わないので直してほしい"
+	refused := fmt.Errorf("decisions: the service answered 400: state.request is invalid: %s", request)
+	printed := withoutServiceWords(refused)
+	if strings.Contains(printed, request) {
+		t.Errorf("the request is in the line the measurement prints: %q", printed)
+	}
+	if strings.Contains(printed, "state.request is invalid") {
+		t.Errorf("the service's own words are printed: %q", printed)
+	}
+	if !strings.Contains(printed, "400") {
+		t.Errorf("the status an operator acts on was dropped: %q", printed)
+	}
+	// Everything else is a sentence the client wrote, and travels whole so
+	// a misconfigured role still says what is wrong with it.
+	for _, whole := range []string{
+		"decisions: the key variable holds nothing usable",
+		"decisions: proceedable came back with no probability",
+		"decisions: the call failed: Post \"https://example.com/api/alpha/decisions\": dial tcp: i/o timeout",
+	} {
+		if got := withoutServiceWords(errors.New(whole)); got != whole {
+			t.Errorf("a failure the client wrote was cut: %q", got)
+		}
+	}
+}
+
+// The counts beside each verdict are counts. The questions themselves are
+// prose about somebody's request and never leave the corpus.
+func TestTheRunCorpusCountsWhatTheReceptionRecordedWithoutQuotingIt(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "one", "runs", "r1")
+	history := filepath.Join(dir, "history", "readiness")
+	if err := os.MkdirAll(history, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "どの画面を直すのか教えてください"
+	if err := os.WriteFile(filepath.Join(dir, runTicketFile), []byte(`{"request":"合計を直す"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decision := `{"outcome":"clarification_required","questions":[{"id":"Q1","question":"` + secret + `"}]}`
+	if err := os.WriteFile(filepath.Join(history, runDecisionFile), []byte(decision), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := readCorpus(t, root)
+	if len(cases) != 1 {
+		t.Fatalf("read %d cases, want 1", len(cases))
+	}
+	if cases[0].Recorded.Questions != 1 {
+		t.Errorf("the reception's question was not counted: %+v", cases[0].Recorded)
+	}
+	// No assessment beside the decision, so what it settled is unknown -
+	// not zero, which would report every request as one it settled nothing
+	// on.
+	if cases[0].Recorded.Known {
+		t.Errorf("a corpus with no assessment reported settled points anyway: %+v", cases[0].Recorded)
+	}
+	assessment := `{"assumptions":[{"kind":"defensible_default"},{"kind":"repository_convention"},{"kind":"defensible_default"}]}`
+	if err := os.WriteFile(filepath.Join(history, "assessment-1.json"), []byte(assessment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	with := readCorpus(t, root)
+	if !with[0].Recorded.Known || with[0].Recorded.Settled != 2 {
+		t.Errorf("the points the reception settled were not counted: %+v", with[0].Recorded)
+	}
+}
+
+// The table is the deliverable of a live pass, and a live pass is the one
+// run nobody gets to repeat cheaply. It is exercised here on answers made up
+// on the spot, so a mistake in it is found before somebody spends a corpus
+// of real calls finding it.
+func TestTheThresholdTableReadsTheFloorOffTheAnswers(t *testing.T) {
+	answer := func(option string, confidence float64) decisions.Answers {
+		picked, sure := option, confidence
+		return decisions.Answers{Answers: map[string]decisions.Answer{
+			decisions.QuestionProceedable: {Type: decisions.KindChoice, Choice: &picked, Confidence: &sure},
+		}}
+	}
+	cases := []corpusCase{
+		{ID: "run-01", Labels: map[string]string{decisions.QuestionProceedable: decisions.AnswerYes}},
+		{ID: "run-02", Labels: map[string]string{decisions.QuestionProceedable: decisions.AnswerYes}},
+		{ID: "run-03", Labels: map[string]string{decisions.QuestionProceedable: decisions.AnswerNo}},
+		{ID: "run-04", Labels: map[string]string{}},
+		{ID: "run-05", Labels: map[string]string{decisions.QuestionProceedable: decisions.AnswerYes}},
+	}
+	results := []judged{
+		{id: "run-01", answers: answer(decisions.AnswerYes, 0.94)},
+		{id: "run-02", answers: answer(decisions.AnswerYes, 0.81)},
+		{id: "run-03", answers: answer(decisions.AnswerYes, 0.55)},
+		{id: "run-04", answers: answer(decisions.AnswerNo, 0.99)},
+		{id: "run-05", failure: errors.New("decisions: the call failed")},
+	}
+	lines := &recordingLog{}
+	thresholdTable(lines, cases, results)
+	// Every request the reception proceeded on that was judged answers yes
+	// at 0.81 and above, so 0.81 is the floor; the failed one is not
+	// counted as a disagreement, because no judgment was obtained for it.
+	if !lines.contains("answered yes at confidence 0.81 and above") {
+		t.Errorf("the floor was not read off the answers:\n%s", lines)
+	}
+	// And the cost column: at 0.50 the one request the reception asked
+	// about would be overruled, at 0.70 it would not.
+	if !lines.contains("0.50          2 / 2                  1 / 1") {
+		t.Errorf("the cost of the lowest threshold is wrong:\n%s", lines)
+	}
+	if !lines.contains("0.70          2 / 2                  0 / 1") {
+		t.Errorf("a threshold above the judged disagreement still shows a cost:\n%s", lines)
+	}
+	// A judge that answers no on a request the reception proceeded on has
+	// no floor at all, and the table says so rather than naming one.
+	missed := &recordingLog{}
+	thresholdTable(missed, cases, append(append([]judged(nil), results[1:]...),
+		judged{id: "run-01", answers: answer(decisions.AnswerNo, 0.99)}))
+	if !missed.contains("no threshold covers every request the reception proceeded on") {
+		t.Errorf("a judge that overruled the reception was given a floor anyway:\n%s", missed)
+	}
+}
+
+// recordingLog is the part of *testing.T the table writes through, kept so
+// what it prints can be read back instead of only looked at.
+type recordingLog struct{ lines []string }
+
+func (r *recordingLog) Helper() {}
+func (r *recordingLog) Log(args ...any) {
+	r.lines = append(r.lines, fmt.Sprint(args...))
+}
+func (r *recordingLog) Logf(format string, args ...any) {
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+func (r *recordingLog) contains(want string) bool {
+	for _, line := range r.lines {
+		if strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
+}
+func (r *recordingLog) String() string { return strings.Join(r.lines, "\n") }
