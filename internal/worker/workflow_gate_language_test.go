@@ -57,6 +57,44 @@ func TestTheContentGateReadsABareConditionToo(t *testing.T) {
 	}
 }
 
+// One condition may be half a ${{ }} span and half bare, and reading only
+// the span leaves the other half unread — a hole exactly the shape of the
+// rule this is about. The platform does not hand secrets to an if: today,
+// so the half nobody read could not reach one; the rule says every
+// expression touching secrets is refused, and half an expression is still
+// the expression.
+func TestTheContentGateReadsBothHalvesOfAMixedCondition(t *testing.T) {
+	const mixed = "${{ success() }} && secrets.TARGET_GITHUB_TOKEN != ''"
+	for name, content := range map[string]string{
+		"on a step": strings.Replace(passingWorkflow,
+			"      - run: ./ops/deploy.sh", "      - run: ./ops/deploy.sh\n        if: "+mixed, 1),
+		"on a job": strings.Replace(passingWorkflow,
+			"    runs-on: ubuntu-latest", "    if: "+mixed+"\n    runs-on: ubuntu-latest", 1),
+	} {
+		if err := checkWorkflow(t, content); err == nil {
+			t.Fatalf("%s was sealed", name)
+		} else if !strings.Contains(err.Error(), workflowRuleSecrets) {
+			t.Fatalf("%s was refused without naming the secrets rule: %v", name, err)
+		}
+	}
+	// The same shape with nothing about a secret in either half is
+	// ordinary, so the refusal above is the rule rather than the shape.
+	ordinary := strings.Replace(passingWorkflow,
+		"    runs-on: ubuntu-latest",
+		"    if: ${{ success() }} && github.ref == 'refs/heads/prod'\n    runs-on: ubuntu-latest", 1)
+	if err := checkWorkflow(t, ordinary); err != nil {
+		t.Fatalf("a mixed condition about no secret was refused: %v", err)
+	}
+	// And a condition that is only a span still reads, through the scan
+	// that owns it.
+	spanOnly := strings.Replace(passingWorkflow,
+		"    runs-on: ubuntu-latest",
+		"    if: ${{ secrets.OTHER_TOKEN != '' }}\n    runs-on: ubuntu-latest", 1)
+	if err := checkWorkflow(t, spanOnly); err == nil {
+		t.Fatal("a condition wholly inside a span was sealed")
+	}
+}
+
 // A commit message, a branch name and a pull request title are written by
 // whoever opened them. Pasted into a run: step they stop being text and
 // become commands, on the destination's account, with whatever the job's

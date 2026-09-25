@@ -587,18 +587,52 @@ func refuseUntrustedText(path, script string) error {
 // checkCondition holds an if: to the same secrets rule every other
 // expression is held to. An if: takes a bare expression with no ${{ }}
 // around it, so the scan that reads those spans never sees one — and
-// "if: secrets.SOMETHING != ”" is a perfectly good way to ask whether a
-// secret exists.
+// comparing secrets.SOMETHING against an empty string is a perfectly good
+// way to ask whether a secret exists.
+//
+// A condition may be both at once: a ${{ }} span, then && , then a bare
+// comparison against secrets. That is one expression written half inside a
+// span and half outside, and reading only the span leaves the other half
+// unread — which is a hole the shape of the rule this function exists to
+// apply. The spans go to the document-wide scan, the rest comes here, and
+// the two together are the whole condition.
 func checkCondition(path string, node *yaml.Node, policy *DeployWorkflowPolicy) error {
 	if node.Kind != yaml.ScalarNode {
 		return workflowObjection(path, workflowRuleShape, "if: は 1 つの条件式で書いてください。")
 	}
-	if strings.Contains(node.Value, "${{") {
-		// Wrapped in the ordinary span, which the document-wide scan has
-		// already read.
+	bare := withoutExpressionSpans(node.Value)
+	if strings.TrimSpace(bare) == "" {
 		return nil
 	}
-	return checkExpression(path, node.Value, policy)
+	return checkExpression(path, bare, policy)
+}
+
+// withoutExpressionSpans is one scalar with its ${{ }} spans taken out, so
+// what is left is the part no span scan reads.
+//
+// Each span becomes a space rather than nothing: "a${{ x }}b" is two
+// fragments of a larger expression, and joining them would make one name
+// that appears nowhere in the file. An unterminated span is left where it
+// is — the scan that owns it refuses the file, and the stray characters
+// make this refuse it too rather than reading past them.
+func withoutExpressionSpans(text string) string {
+	var bare strings.Builder
+	rest := text
+	for {
+		start := strings.Index(rest, "${{")
+		if start < 0 {
+			bare.WriteString(rest)
+			return bare.String()
+		}
+		end := strings.Index(rest[start+3:], "}}")
+		if end < 0 {
+			bare.WriteString(rest)
+			return bare.String()
+		}
+		bare.WriteString(rest[:start])
+		bare.WriteString(" ")
+		rest = rest[start+3+end+2:]
+	}
 }
 
 // dumpsEnvironment reports whether a shell script prints the environment.
