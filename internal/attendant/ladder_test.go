@@ -142,6 +142,29 @@ func (s *ladderSetup) climb(t *testing.T) (ladderVerdict, error) {
 	return climbLadder(context.Background(), climb)
 }
 
+// climbWithoutTracker is the same tick for a delivery whose ticket cannot
+// be reached at all.
+func (s *ladderSetup) climbWithoutTracker(t *testing.T) (ladderVerdict, error) {
+	t.Helper()
+	shape := runtime.ShapeImplement
+	if runtime.IsDesignStage(s.stage) {
+		shape = runtime.ShapeDesign
+	}
+	climb := newClimb(s.config, s.fixture.services, s.hermes, s.envelope, s.run(), s.view,
+		runtime.ChainPlan{Shape: shape}, s.stage, s.logger)
+	climb.tracker = nil
+	return climbLadder(context.Background(), climb)
+}
+
+// rewindStopRead moves this stage's last stop read back, so a test can
+// stand on the far side of the throttle without waiting out a minute.
+func (s *ladderSetup) rewindStopRead(t *testing.T, by time.Duration) {
+	t.Helper()
+	record := s.record()
+	record.LastStopReadAt = time.Now().UTC().Add(-by)
+	writeLadderRecord(s.runDir, s.stage, 1, record, s.logger)
+}
+
 func (s *ladderSetup) record() ladderRecord {
 	round := 1
 	return readLadderRecord(s.runDir, s.stage, round)
@@ -579,6 +602,145 @@ func TestAStopAskedForDuringTheClimbEndsTheDelivery(t *testing.T) {
 	}
 	if archived := archivedCards(ladderBoardLines(t, setup.calls)); len(archived) != 0 {
 		t.Fatalf("the stage was dispatched after a stop: %v", archived)
+	}
+}
+
+// And it is heard during the wait, not only when the wait is over. The
+// waits reach half an hour, so a stop read only at the next dispatch would
+// leave a requester who wrote 停止 a minute into one waiting out the rest of
+// it with the delivery still holding its claim.
+func TestAStopIsHeardWhileTheStageIsWaitingNotOnlyAtTheNextDispatch(t *testing.T) {
+	setup := newLadderSetup(t, runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,
+		Error: "the agent-review step exited 1",
+	})
+	setup.config.Tracker.AllowedCreatorID = 7
+	// An hour between attempts, so nothing here could be the wait elapsing.
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	setup.config.Chain.RetryBackoffMaxSeconds = 3600
+
+	if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
+		t.Fatalf("entering the wait: verdict = %v err = %v", verdict, err)
+	}
+	if got := setup.record().LadderStep; got != rungWait {
+		t.Fatalf("the stage is not waiting: rung %d", got)
+	}
+	// The requester writes 停止 a moment into the hour.
+	setup.tracker.comments = []hook.BacklogComment{{CommentID: 1, UserID: 7, Body: "停止"}}
+	// The read is throttled, and entering the wait spent this minute's. The
+	// clock is moved rather than waited on: what is being measured is that
+	// a stop lands during the wait, not how long a minute is.
+	setup.rewindStopRead(t, 2*stopReadInterval)
+	verdict, err := setup.climb(t)
+	if err != nil || verdict != ladderStopped {
+		t.Fatalf("verdict = %v err = %v, want the stop heard during the wait", verdict, err)
+	}
+	if got := setup.record().Attempts; got != 0 {
+		t.Fatalf("attempts = %d: the stop was heard only because the wait had elapsed", got)
+	}
+}
+
+// A delivery that reaches the waiting rung with a stop already on its
+// ticket is obeyed there. A key at its limit arrives on the first tick
+// after its card failed, and the longest waits would otherwise leave the
+// request unheard until the first dispatch, half an hour away.
+func TestAStopAlreadyOnTheTicketIsHeardOnEnteringTheWait(t *testing.T) {
+	setup := newLadderSetup(t, runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,
+		Error: "the agent-review step exited 1",
+	})
+	setup.config.Tracker.AllowedCreatorID = 7
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	setup.tracker.comments = []hook.BacklogComment{{CommentID: 1, UserID: 7, Body: "停止"}}
+	verdict, err := setup.climb(t)
+	if err != nil || verdict != ladderStopped {
+		t.Fatalf("verdict = %v err = %v, want the stop heard as the wait began", verdict, err)
+	}
+	if len(setup.tracker.added) != 0 {
+		t.Fatalf("a delivery being stopped was told it was still going: %q", setup.tracker.added)
+	}
+}
+
+// And the reading of it is throttled, because the loop that passes over a
+// waiting card passes every few seconds. Unthrottled, one card waiting out
+// the longest interval would list its ticket six times a minute, and a
+// night of deliveries held behind one spent key would spend it on that.
+func TestTheStopIsReadAtMostOnceAMinuteWhileWaiting(t *testing.T) {
+	setup := newLadderSetup(t, runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,
+		Error: "the agent-review step exited 1",
+	})
+	setup.config.Tracker.AllowedCreatorID = 7
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	setup.config.Chain.RetryBackoffMaxSeconds = 3600
+
+	if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
+		t.Fatalf("entering the wait: verdict = %v err = %v", verdict, err)
+	}
+	// What entering costs is one stop read and the notice's own look for
+	// its marker; what matters below is that neither happens again.
+	entering := setup.tracker.listings
+	if entering == 0 {
+		t.Fatal("entering the wait read nothing, so a stop already on the ticket would wait for the first dispatch")
+	}
+	// Six more ticks inside the same minute — the loop's cadence for a
+	// minute — read nothing.
+	for tick := 0; tick < 6; tick++ {
+		if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
+			t.Fatalf("tick %d: verdict = %v err = %v", tick, verdict, err)
+		}
+	}
+	if setup.tracker.listings != entering {
+		t.Fatalf("listings after six ticks in the same minute = %d, want the one from entering", setup.tracker.listings)
+	}
+	// A minute later it reads again, so the stop still lands.
+	setup.rewindStopRead(t, 2*stopReadInterval)
+	if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
+		t.Fatalf("after the throttle: verdict = %v err = %v", verdict, err)
+	}
+	if setup.tracker.listings != entering+1 {
+		t.Fatalf("listings after the throttle passed = %d, want one more", setup.tracker.listings)
+	}
+	// The tick that dispatches reads without a throttle: it is the last
+	// thing between a stop and a card that starts spending again.
+	setup.tracker.comments = []hook.BacklogComment{{CommentID: 1, UserID: 7, Body: "停止"}}
+	record := setup.record()
+	record.LastAt = time.Now().UTC().Add(-2 * time.Hour)
+	writeLadderRecord(setup.runDir, setup.stage, 1, record, setup.logger)
+	if verdict, err := setup.climb(t); err != nil || verdict != ladderStopped {
+		t.Fatalf("the dispatching tick did not read the stop: verdict = %v err = %v", verdict, err)
+	}
+}
+
+// A delivery whose ticket cannot be reached at all can be neither told that
+// it is still going nor stopped, so it would climb on in silence. It says
+// so once per stage — once, because a line repeated every tick for hours is
+// the shape an operator learns to scroll past.
+func TestAClimbWithNoTrackerSaysSoOncePerStage(t *testing.T) {
+	setup := newLadderSetup(t, runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,
+		Error: "the agent-review step exited 1",
+	})
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	for tick := 0; tick < 3; tick++ {
+		if verdict, err := setup.climbWithoutTracker(t); err != nil || verdict != ladderHandled {
+			t.Fatalf("tick %d: verdict = %v err = %v", tick, verdict, err)
+		}
+	}
+	said := 0
+	for _, line := range setup.logger.lines {
+		if strings.Contains(line, "no tracker is configured for this delivery") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Fatalf("the missing tracker was said %d times across three ticks, want once:\n%s", said, strings.Join(setup.logger.lines, "\n"))
+	}
+	if !setup.record().LoggedNoTracker {
+		t.Fatal("the record does not remember that it was said, so a restart would say it again every tick")
+	}
+	if len(setup.tracker.added) != 0 || len(setup.fixture.comments.posted) != 0 {
+		t.Fatal("something was posted for a delivery with no tracker")
 	}
 }
 

@@ -260,8 +260,12 @@ fabricated workflow link.
   reached its spending limit is told at once, because no model the engine
   could move to is reached any other way. The record of the climb is
   `retry/<stage>-r<N>.json` in the run directory, so a pod replaced
-  mid-climb resumes where it was. A 「停止」 from the requester is read
-  before each dispatch and ends the delivery as cancelled.
+  mid-climb resumes where it was. A 「停止」 from the requester ends the
+  delivery as cancelled: it is read without a throttle on the tick that
+  dispatches, and at most once a minute while a stage only waits — not
+  only when the next attempt is due, or a stop written a minute into a
+  half-hour wait would wait it out. A delivery with no tracker configured
+  can be neither told nor stopped, and the log says so once per stage.
 - **The failure streak hold is retired**: it stopped intake when the same
   failure ended the last N deliveries. Nothing counts now — a failed card
   is climbed away from rather than reported — so `chain.failure_streak_limit`

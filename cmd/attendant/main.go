@@ -56,11 +56,18 @@ func runContext(ctx context.Context) error {
 	configPath := flags.String("config", os.Getenv("LASSDAS_RUNTIME_CONFIG"), "runtime.json path")
 	interval := flags.Duration("interval", time.Minute, "tick interval")
 	observeInterval := flags.Duration("observe-interval", 5*time.Second, "status-board snapshot interval (0 disables the fast loop)")
-	// Advancing a chain is local work: the ledger and the cards. It was tied
-	// to the tracker poll, so a stage that finished waited for the next
-	// minute before the next one started - with a dozen stages, most of a
-	// delivery's wall clock was that wait. The tracker keeps its own slower
-	// interval; nothing here adds a call to it.
+	// Advancing a chain is mostly local work: the ledger and the cards. It
+	// was tied to the tracker poll, so a stage that finished waited for the
+	// next minute before the next one started - with a dozen stages, most of
+	// a delivery's wall clock was that wait. The tracker keeps its own
+	// slower interval for reception.
+	//
+	// One thing here does reach the tracker: a stage the ladder is waiting
+	// on reads its ticket for a 「停止」, because a delivery can now sit half
+	// an hour inside one stage and the requester's stop has to land before
+	// the next attempt rather than after it. That read is on its own clock —
+	// at most once a minute per waiting stage, whatever this interval is —
+	// so shortening this one does not multiply calls to the tracker.
 	chainInterval := flags.Duration("chain-interval", 10*time.Second, "how often finished stages are advanced (0 ties it to the tick interval)")
 	once := flags.Bool("once", false, "run a single tick and exit (for tests and cron)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
