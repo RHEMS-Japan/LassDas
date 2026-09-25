@@ -467,7 +467,12 @@ func (r TerminalReportRequest) ValidateShape() error {
 	if r.ModelFailureReason != "" && (r.ModelFailureReason != ModelFailureBudgetExhausted || r.Code != TerminalModelFailed) {
 		return errors.New("terminal report model failure reason is invalid")
 	}
-	if r.ReachedDelivery != "" && (!validDelivery(r.ReachedDelivery) || r.Code != TerminalSuccess) {
+	// A depth belongs to an ending that got somewhere: a delivery that
+	// finished, or one the requester stopped after part of it had already
+	// landed. Every other ending either reached nowhere or reached
+	// somewhere it is already forbidden to claim.
+	if r.ReachedDelivery != "" && (!validDelivery(r.ReachedDelivery) ||
+		(r.Code != TerminalSuccess && r.Code != TerminalCancelled)) {
 		return errors.New("terminal report reached delivery is invalid")
 	}
 	if len(r.DeliveryShortfall) > MaxDeliveryShortfallBytes || !utf8.ValidString(r.DeliveryShortfall) ||
@@ -528,57 +533,78 @@ func (r TerminalReportRequest) ValidateRoute(config ReportRouteConfig) error {
 func validateTerminalEvidenceShape(r TerminalReportRequest, destination ReportDestination) error {
 	switch r.Code {
 	case TerminalSuccess:
-		// Success means the run reached a stopping point, so the evidence it
-		// must carry is exactly what that stopping point produces — no less,
-		// and nothing it never reached.
+		return evidenceMatchesDepth(r, destination)
+	case TerminalCancelled:
+		// A stop before anything left the pod claims nothing, exactly as
+		// every pre-generation stop does.
 		//
-		// Which stopping point is the destination's setting, unless the
-		// report names a shallower one it actually reached. That is the one
-		// direction this opens: a destination configured for production
-		// whose release path is not configured is delivered to its pull
-		// request and says so, and the evidence is then judged against the
-		// pull request. Claiming more than the destination allows stays
-		// refused, and so does naming a depth that is not one of the three.
-		reached := destination.Delivery
-		if r.ReachedDelivery != "" {
-			if !validDelivery(r.ReachedDelivery) ||
-				deliveryDepthRank(r.ReachedDelivery) > deliveryDepthRank(destination.Delivery) {
-				return errors.New("success cannot claim a depth its destination was not configured for")
+		// A stop after part of the delivery had landed says where it got
+		// to and carries that depth's evidence. The release branch moved
+		// and the deployment ran; a report stripped of every link, over a
+		// footer saying production is untouched, would be false about the
+		// environment the requester now has to look at.
+		if r.ReachedDelivery == "" {
+			if r.PullRequestURL != "" || r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
+				return errors.New("a stop that reached nowhere cannot claim repository evidence")
 			}
-			reached = r.ReachedDelivery
+			return nil
 		}
-		switch reached {
-		case DeliverPullRequest:
-			if r.PullRequestURL == "" {
-				return errors.New("successful terminal report is missing evidence")
-			}
-			if r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
-				return errors.New("proposal-only success cannot claim a deployment")
-			}
-		case DeliverIntegration:
-			if r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "" {
-				return errors.New("successful terminal report is missing evidence")
-			}
-			if r.ProductionEvidenceURL != "" {
-				return errors.New("integration success cannot claim production evidence")
-			}
-		default:
-			if r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "" || r.ProductionEvidenceURL == "" {
-				return errors.New("successful terminal report is missing evidence")
-			}
-		}
+		return evidenceMatchesDepth(r, destination)
 	case TerminalProductionDeploymentUnverified, TerminalProductionVerificationFailed:
 		if r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "" || r.ProductionEvidenceURL != "" {
 			return errors.New("post-promotion failure evidence is invalid")
 		}
 	case TerminalReadinessRejected, TerminalClarificationRequired, TerminalReadinessUnresolved,
-		TerminalClarificationExpired, TerminalCancelled:
+		TerminalClarificationExpired:
 		if r.PullRequestURL != "" || r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
 			return errors.New("pre-generation stop cannot claim repository evidence")
 		}
 	default:
 		if r.ProductionEvidenceURL != "" {
 			return errors.New("failed terminal report cannot claim production evidence")
+		}
+	}
+	return nil
+}
+
+// evidenceMatchesDepth checks a report against the depth it got to: the
+// evidence it must carry is exactly what that stopping point produces — no
+// less, and nothing it never reached.
+//
+// Which stopping point is the destination's setting, unless the report
+// names a shallower one it actually reached. That is the one direction this
+// opens: a destination configured for production whose release path is not
+// configured is delivered to its pull request and says so, and is then
+// judged against the pull request. Claiming more than the destination
+// allows stays refused, and so does naming a depth that is not one of the
+// three.
+func evidenceMatchesDepth(r TerminalReportRequest, destination ReportDestination) error {
+	reached := destination.Delivery
+	if r.ReachedDelivery != "" {
+		if !validDelivery(r.ReachedDelivery) ||
+			deliveryDepthRank(r.ReachedDelivery) > deliveryDepthRank(destination.Delivery) {
+			return errors.New("a report cannot claim a depth its destination was not configured for")
+		}
+		reached = r.ReachedDelivery
+	}
+	switch reached {
+	case DeliverPullRequest:
+		if r.PullRequestURL == "" {
+			return errors.New("terminal report is missing the evidence of the depth it names")
+		}
+		if r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
+			return errors.New("a proposal cannot claim a deployment")
+		}
+	case DeliverIntegration:
+		if r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "" {
+			return errors.New("terminal report is missing the evidence of the depth it names")
+		}
+		if r.ProductionEvidenceURL != "" {
+			return errors.New("a delivery that reached staging cannot claim production evidence")
+		}
+	default:
+		if r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "" || r.ProductionEvidenceURL == "" {
+			return errors.New("terminal report is missing the evidence of the depth it names")
 		}
 	}
 	return nil

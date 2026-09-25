@@ -44,5 +44,27 @@ func runDeliver(ctx context.Context, arguments []string) error {
 	pipeline := &runner.Pipeline{Config: config, Workspace: workspace, TargetToken: token, Logger: logger}
 	// The card is done when this returns; nothing is running.
 	defer runner.ClearCurrentStep(workspace)
-	return pipeline.RunDeliver(ctx, *until)
+	err = pipeline.RunDeliver(ctx, *until)
+	// Why this card is about to return non-zero, sealed where the tick
+	// looks for it. Without it every delivery failure reads as one nobody
+	// could name, and the ladder goes straight to waiting — so a volume
+	// that filled would be waited on instead of swept, and a registry that
+	// answered once would be waited on instead of reached again.
+	pipeline.SealStageFailure(deliverStageOf(*until), err)
+	return err
+}
+
+// deliverStageOf names the card behind a milestone. The verb is told how
+// far to go; the record has to name which card wrote it, because that is
+// what the tick reads it by.
+func deliverStageOf(until string) string {
+	switch until {
+	case runner.DeliverUntilChecks:
+		return runtime.DeliverStageChecks
+	case runner.DeliverUntilStaging:
+		return runtime.DeliverStageIntegrate
+	case runner.DeliverUntilProduction:
+		return runtime.DeliverStagePromote
+	}
+	return ""
 }

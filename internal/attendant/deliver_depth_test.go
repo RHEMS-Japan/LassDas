@@ -38,6 +38,7 @@ type depthHarness struct {
 	callsFile  string
 	posted     *[]string
 	comments   *[]backlogComment
+	board      *recordingBoard
 	logger     *recordingLogger
 }
 
@@ -86,7 +87,7 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 	config := runtime.Config{
 		ConsumerConfigPath: consumerConfig,
 		Tracker: runtime.TrackerConfig{SpaceKey: "example", ProjectID: 42, ProjectKey: "TICKET",
-			AllowedCreatorID: depthRequester, AllowedActivityType: 1},
+			AllowedCreatorID: depthRequester, AllowedActivityType: 1, BoardStatuses: boardTestStatuses},
 		Identity: runtime.IdentityConfig{RepositoryID: 1, Repository: "o/r", WorkflowRef: "o/r/wf@main", EngineSHA: strings.Repeat("a", 40)},
 		Chain: runtime.ChainConfig{RunsRoot: filepath.Join(root, "runs"), Profiles: runtime.ChainProfiles{
 			Implementer: "impl", ReviewA: "ra", ReviewB: "rb", Validate: "val", Publish: "pub",
@@ -170,6 +171,9 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 			case strings.HasSuffix(r.URL.Path, "/comments"):
 				encoded, _ := json.Marshal(*comments)
 				return jsonResponse(200, string(encoded)), nil
+			case r.URL.Path == "/api/v2/issues/30":
+				// The ticket sits in the automation's own "running" status.
+				return jsonResponse(200, `{"id":30,"status":{"id":11}}`), nil
 			}
 			return jsonResponse(200, "[]"), nil
 		}))
@@ -227,11 +231,12 @@ esac
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	board := &recordingBoard{}
 	harness := &depthHarness{
 		t: t, config: config, hermes: runtime.NewHermes(runtime.Config{HermesBin: bin, HermesBoard: "board"}),
 		runDir: runDir, deliveryID: envelope.DeliveryID, boardFile: boardFile, callsFile: callsFile,
-		posted: posted, comments: comments, logger: &recordingLogger{},
-		services: &runtime.Services{Store: store, Backlog: client, Report: reportService, Tick: tick, Route: route},
+		posted: posted, comments: comments, board: board, logger: &recordingLogger{},
+		services: &runtime.Services{Store: store, Backlog: client, Report: reportService, Tick: tick, Route: route, Board: board},
 	}
 	harness.setBoard()
 	return harness
@@ -577,10 +582,14 @@ func TestDeliverRetryDropsKeepWhatLanded(t *testing.T) {
 			[]string{runner.DeliverStagingReportFile, runner.DeliverStagingProofFile},
 			[]string{runner.DeliverMergeFile},
 		},
+		// The gate's own record is written only when it goes green, so a red
+		// gate has none of it to drop; what goes is the record that says the
+		// phase is over. Dropping the gate record on any other verdict would
+		// send the delivery back to waiting for a CI run that already passed.
 		"a red gate redoes the wait": {
 			deliverStageChecks, "checks_failed",
-			[]string{runner.DeliverStagingReportFile, runner.DeliverChecksFile},
-			[]string{runner.DeliverMergeFile},
+			[]string{runner.DeliverStagingReportFile},
+			[]string{runner.DeliverMergeFile, runner.DeliverChecksFile},
 		},
 		"a refused production screen redoes that screen": {
 			deliverStagePromote, "observe_failed",
@@ -706,4 +715,150 @@ func h1StagingHold() runner.DeliverReport {
 	return runner.DeliverReport{SchemaVersion: 1, Phase: "staging", Verdict: "pass", ScreenChecked: true,
 		MergedSHA: depthMergeSHA, TargetURL: depthStagingHost + "/feature",
 		PromotionHold: "本番にはステージングに無い変更が入っています（分岐状態）。", ObservedAt: time.Now().UTC()}
+}
+
+// While the run is still claimed nothing is projected onto the board.
+//
+// The projection reads a delivery through the classification that names its
+// ending, and a claimed run has no ending to name — which that
+// classification calls 「失敗で終了」. Projected from inside the delivery, a
+// healthy production run would sit on the board as needing attention from
+// the tick that posted its staging report until the tick that ended it,
+// which is every hour the promotion takes.
+func TestAClaimedDeliveryIsNotProjectedAsNeedingAttention(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report and seals the board outcome
+	h.tick() // promotes
+	if row := h.runRow(); row.State != "claimed" {
+		t.Fatalf("the run ended: %s / %s", row.State, row.TerminalCode)
+	}
+	if len(h.board.phases) != 0 {
+		t.Fatalf("a claimed delivery was projected onto the board: %v", h.board.phases)
+	}
+}
+
+// A destination that stops at staging is never promoted, however well the
+// staging observation went.
+func TestAnIntegrationDestinationIsNeverPromoted(t *testing.T) {
+	h := newDepthHarness(t, "integration", true, "")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	h.tick() // this is where a production destination would promote
+	if strings.Contains(h.calls(), "deliver:promote") {
+		t.Fatalf("a destination that stops at staging was promoted: %s", h.calls())
+	}
+	row := h.runRow()
+	if row.State != "terminal" || row.TerminalCode != string(hook.TerminalSuccess) {
+		t.Fatalf("run = %s / %s, want a terminal success (log: %v)", row.State, row.TerminalCode, h.logger.lines)
+	}
+	reached, evidence, shortfall := deliveryOutcome(h.runDir, depthRepository, depthPlanFor(t, h.runDir),
+		map[string]string{"pull_request_url": "https://github.com/example/consumer/pull/9"})
+	if reached != "integration" || shortfall != "" {
+		t.Fatalf("reached = %q shortfall = %q", reached, shortfall)
+	}
+	if evidence["staging_evidence_url"] == "" || evidence["production_evidence_url"] != "" {
+		t.Fatalf("evidence = %v", evidence)
+	}
+}
+
+// A stop that arrives after the change is already on staging says so. The
+// fixed sentence a stop used to carry — the repository and production are
+// unchanged — was written when a delivery was over the moment its pull
+// request existed; it would now send the requester away from an environment
+// they have to go and look at.
+func TestAStopAfterStagingLandedSaysWhatLanded(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	*h.comments = append(*h.comments, ticketComment(953, depthRequester, "停止"))
+	h.tick()
+
+	if row := h.runRow(); row.TerminalCode != string(hook.TerminalCancelled) {
+		t.Fatalf("run = %s / %s, want cancelled (log: %v)", row.State, row.TerminalCode, h.logger.lines)
+	}
+	final := ""
+	for _, content := range *h.posted {
+		if strings.Contains(content, string(hook.TerminalCancelled)) {
+			final = content
+		}
+	}
+	if final == "" {
+		t.Fatalf("no stop report reached the ticket: %q", *h.posted)
+	}
+	if !strings.Contains(final, depthStagingHost+"/feature") {
+		t.Fatalf("the stop report does not say where the change is: %q", final)
+	}
+	if !strings.Contains(final, depthMergeSHA) {
+		t.Fatalf("the stop report does not name the commit staging is on: %q", final)
+	}
+	if strings.Contains(final, "対象リポジトリと本番環境は変更せず停止しました") {
+		t.Fatalf("the stop report claims nothing changed: %q", final)
+	}
+	if strings.Contains(final, "本番の状態: 未変更\n") {
+		t.Fatalf("the footer claims production is untouched with no qualification: %q", final)
+	}
+}
+
+// A delivery card that dies seals the same account of its failure that a
+// chain card does, so the ladder can pick a remedy instead of waiting.
+// Without it every delivery failure reads as one nobody could name: a
+// volume that filled would be waited on rather than swept.
+func TestADeliveryCardsFailureRecordIsReadByTheLadder(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.config.Chain.RetryBackoffBaseSeconds = 1
+	if err := os.MkdirAll(filepath.Join(h.runDir, "history", "deliver-1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.SealStageFailureRecord(h.runDir, runner.StageFailure{
+		Stage: deliverStageIntegrate, Round: deliverLadderRound,
+		Class: runner.FailureClassDisk, Error: "no space left on device",
+	}); err != nil {
+		t.Fatalf("a delivery card could not seal its failure: %v", err)
+	}
+	record, ok := runner.ReadStageFailure(h.runDir, deliverStageIntegrate, deliverLadderRound)
+	if !ok || record.Class != runner.FailureClassDisk {
+		t.Fatalf("the sealed record did not read back: %+v (%v)", record, ok)
+	}
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "blocked", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.tick()
+	ladder := readLadderRecord(h.runDir, deliverStageIntegrate, deliverLadderRound)
+	if ladder.LadderStep != rungReclaim {
+		t.Fatalf("a volume that filled went to rung %d rather than being reclaimed: %+v", ladder.LadderStep, ladder)
+	}
+	if !strings.Contains(strings.Join(ladder.Tried, " "), "reclaim") {
+		t.Fatalf("no reclaiming hand was played: %v", ladder.Tried)
+	}
+}
+
+// A red gate is the wait card's own answer, sealed in the record every
+// phase shares. Climbed against the merge card it would spend that card's
+// attempts and leave the wait card's record untouched, so the wait would be
+// repeated once more than the ladder had counted, every time.
+func TestARedGateIsClimbedAgainstTheCardThatWaited(t *testing.T) {
+	if owner := stagingVerdictOwner("checks_failed"); owner != deliverStageChecks {
+		t.Fatalf("a red gate is attributed to %q", owner)
+	}
+	for _, verdict := range []string{"merge_failed", "deploy_failed", "observe_failed", "observe_blocked", "merge_unverified"} {
+		if owner := stagingVerdictOwner(verdict); owner != deliverStageIntegrate {
+			t.Errorf("%s is attributed to %q", verdict, owner)
+		}
+	}
+	h := newDepthHarness(t, "production", true, "")
+	h.setBoard(h.card(deliverStageChecks, "done", 1))
+	h.sealPhase(runner.DeliverStagingReportFile, runner.DeliverReport{Phase: "staging", Verdict: "checks_failed"})
+	h.tick()
+	if record := readLadderRecord(h.runDir, deliverStageChecks, deliverLadderRound); record.LadderStep != rungWait {
+		t.Fatalf("the wait card kept no record of the climb: %+v", record)
+	}
+	if record := readLadderRecord(h.runDir, deliverStageIntegrate, deliverLadderRound); record.LadderStep != 0 || record.Attempts != 0 {
+		t.Fatalf("the merge card was charged for the gate: %+v", record)
+	}
 }

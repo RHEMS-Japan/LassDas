@@ -25,16 +25,21 @@ import (
 
 // View is the ticket page's data.
 type View struct {
-	DeliveryID     string   `json:"delivery_id"`
-	IssueKey       string   `json:"issue_key,omitempty"`
-	Summary        string   `json:"summary,omitempty"`
-	Repository     string   `json:"repository,omitempty"`
-	Request        string   `json:"request,omitempty"`
-	PullRequestURL string   `json:"pr_url,omitempty"`
-	MergeSHA       string   `json:"merge_sha,omitempty"`
-	Timeline       []Event  `json:"timeline"`
-	Cost           Cost     `json:"cost"`
-	Failure        *Failure `json:"failure,omitempty"`
+	DeliveryID     string `json:"delivery_id"`
+	IssueKey       string `json:"issue_key,omitempty"`
+	Summary        string `json:"summary,omitempty"`
+	Repository     string `json:"repository,omitempty"`
+	Request        string `json:"request,omitempty"`
+	PullRequestURL string `json:"pr_url,omitempty"`
+	MergeSHA       string `json:"merge_sha,omitempty"`
+	// DeliveryConfigured is how far this destination asks a change to
+	// travel, and DeliveryReached how far the engine could take it. They
+	// differ only when something the deeper points need is not configured.
+	DeliveryConfigured string   `json:"delivery_configured,omitempty"`
+	DeliveryReached    string   `json:"delivery_reached,omitempty"`
+	Timeline           []Event  `json:"timeline"`
+	Cost               Cost     `json:"cost"`
+	Failure            *Failure `json:"failure,omitempty"`
 	// Running is the step the runner started and has not finished. It is
 	// what tells a reader that a run is working rather than stuck: before
 	// it existed, a reception of a dozen steps showed one unchanging line
@@ -725,6 +730,7 @@ func (v *View) readValidation(runDir string) {
 }
 
 func (v *View) readDelivery(runDir string) {
+	v.readDeliveryDepth(runDir)
 	var pr struct {
 		Payload struct {
 			PullRequest struct {
@@ -1020,5 +1026,41 @@ func (v *View) readMeasurements(runDir string) {
 		At: first, Step: "investigate", Tone: "neutral",
 		Title:    fmt.Sprintf("調査・設計: 計測 %d 件 (うち拒否 %d 件)", len(lines), refused),
 		Evidence: []Evidence{{Label: "計測の一覧", Text: strings.Join(lines, "\n")}}, Record: "measurements",
+	})
+}
+
+// readDeliveryDepth puts how far this delivery was meant to travel on the
+// page, and — when the engine could not take it that far — what stopped it.
+//
+// Without this the page shows a pull request and nothing else, and a reader
+// looking at a destination configured for production cannot tell whether
+// the delivery is still going, finished early on purpose, or stopped
+// because a setting is missing. The engine wrote the answer down when it
+// decided; this reads it back.
+func (v *View) readDeliveryDepth(runDir string) {
+	var depth struct {
+		SchemaVersion int       `json:"schema_version"`
+		Configured    string    `json:"configured"`
+		Reached       string    `json:"reached"`
+		Missing       []string  `json:"missing"`
+		DecidedAt     time.Time `json:"decided_at"`
+	}
+	// A record of another shape is not read at all. Half a depth read as a
+	// whole one would put a claim on the page that nothing wrote.
+	if !readJSON(filepath.Join(runDir, "delivery-depth.json"), &depth) ||
+		depth.SchemaVersion != 1 || depth.Reached == "" || depth.Configured == "" {
+		return
+	}
+	v.DeliveryConfigured, v.DeliveryReached = depth.Configured, depth.Reached
+	if depth.Reached == depth.Configured {
+		return
+	}
+	v.Timeline = append(v.Timeline, Event{
+		At: depth.DecidedAt, Step: "pr", Tone: "warn",
+		Title: "納品の深さ: " + depth.Configured + " の設定に対して " + depth.Reached + " までで止めています",
+		Why:   "この環境にそこまで運ぶ設定が揃っていません",
+		Evidence: []Evidence{{Label: "不足している設定",
+			Text: strings.Join(depth.Missing, ", ")}},
+		Record: "delivery-depth",
 	})
 }

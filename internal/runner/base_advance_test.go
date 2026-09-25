@@ -86,7 +86,6 @@ func baseAdvancePipeline(t *testing.T, controllerScript string, cloneFrom string
 	config := runtime.Config{WorkerBin: workerBin, ControllerBin: controllerBin, ConsumerConfigPath: "consumer.json"}
 	config.Identity.EngineSHA = strings.Repeat("ab", 20)
 	pipeline := &Pipeline{Config: config, Workspace: t.TempDir(), Logger: baseAdvanceLogger{}}
-	pipeline.delivery = "pull_request"
 	pipeline.cloneTarget = func(_ context.Context, destination string) error {
 		return exec.Command("git", "clone", "-q", cloneFrom, destination).Run()
 	}

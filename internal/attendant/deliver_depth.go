@@ -2,6 +2,8 @@ package attendant
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,17 +49,15 @@ const (
 	deliverSpent
 )
 
-// deliverLadderRound is the round delivery cards keep their ladder records
-// under. They have no rounds of their own — a change is merged, deployed
-// and observed once, however many times each of those is attempted — and
-// the record's own stage name keeps it apart from any chain stage's.
-const deliverLadderRound = 1
-
-// The delivery cards, in the order they run.
+// The delivery cards, and the round their records are kept under. The names
+// and the round come from the chain package so that the card which seals an
+// account of its own failure and the tick which reads it cannot drift
+// apart: they are the same two values on both sides.
 const (
-	deliverStageChecks    = "checks"
-	deliverStageIntegrate = "integrate"
-	deliverStagePromote   = "promote"
+	deliverStageChecks    = runtime.DeliverStageChecks
+	deliverStageIntegrate = runtime.DeliverStageIntegrate
+	deliverStagePromote   = runtime.DeliverStagePromote
+	deliverLadderRound    = runtime.DeliverRound
 )
 
 // deliverCardDied is what a delivery card that stopped without sealing
@@ -142,9 +142,13 @@ func advanceDelivery(
 	climb := func(stage, verdict string) (deliverProgress, error) {
 		return climbDeliverPhase(ctx, config, services, hermes, envelope, run, view, plan, stage, verdict, cards, logger)
 	}
-	// The ticket's board phase follows the delivery, whichever tick posted
-	// the phase report (board_phase.go).
-	projectDeliveryEnd(ctx, config, services, run, tasks, logger)
+	// Nothing is projected onto the board here. The projection reads the
+	// delivery through classifyAfterTerminal, which has no terminal code to
+	// read while the run is still claimed and calls that 「失敗で終了」 — so a
+	// healthy production delivery would sit on the board as needing
+	// attention from the tick that posted its staging report until the tick
+	// that ended it, which is every hour the promotion takes. The end is
+	// projected once the run has one, on the terminal side (syncDeliver).
 
 	if report, err := readDeliverReport(runDir, runner.DeliverProductionReportFile); err == nil {
 		if report.Verdict != "pass" {
@@ -217,7 +221,7 @@ func advancePastStaging(
 	// merge landed and the destination's own deployment covers nothing this
 	// change touched, so nothing started and there is no screen to look at.
 	if report.Verdict != "pass" && report.Verdict != "deploy_not_applicable" {
-		return climb(deliverStageIntegrate, report.Verdict)
+		return climb(stagingVerdictOwner(report.Verdict), report.Verdict)
 	}
 	posted, err := services.Tick.StagingReportPosted(ctx, run.RunID)
 	if err != nil {
@@ -235,6 +239,20 @@ func advancePastStaging(
 		return deliverReached, nil
 	}
 	return advanceTowardsPromotion(ctx, config, services, hermes, run, runDir, logger)
+}
+
+// stagingVerdictOwner names the card that produced a staging record.
+//
+// The record is one file whichever phase wrote it, and the gate the CI wait
+// ends on writes the same file as the merge and the observation do. Climbed
+// against the wrong card, a red gate would spend the merge card's attempts
+// and leave the wait card's own record untouched — so the wait would be
+// repeated once more than the ladder had counted, every time.
+func stagingVerdictOwner(verdict string) string {
+	if verdict == "checks_failed" {
+		return deliverStageChecks
+	}
+	return deliverStageIntegrate
 }
 
 // climbDeliverPhase hands one delivery phase that did not do what it
@@ -326,13 +344,17 @@ func deliverRetryDrops(stage, verdict string) []string {
 		return drops
 	}
 	drops := []string{runner.DeliverStagingReportFile}
+	if stage == deliverStageChecks {
+		// The gate's own record is written only when it goes green, so
+		// there is nothing of it to drop; what goes is the record that says
+		// the phase is over.
+		return drops
+	}
 	switch verdict {
 	case "observe_failed", "observe_blocked":
 		return append(drops, runner.DeliverStagingVisibleFile, runner.DeliverStagingShotFile)
 	case "deploy_failed", "deploy_absent":
 		return append(drops, runner.DeliverStagingProofFile, runner.DeliverStagingPlainProofFile)
-	case "checks_failed":
-		return append(drops, runner.DeliverChecksFile)
 	}
 	return drops
 }
@@ -491,8 +513,9 @@ func endDeliveryEarly(
 	if err != nil {
 		repository = ""
 	}
+	evidence := stoppedDeliveryEvidence(runDir, repository, code)
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
 		return err
 	}
 	logger.Info("the delivery ended before its configured depth", "run", run.RunID, "code", string(code))
@@ -500,4 +523,53 @@ func endDeliveryEarly(
 		return err
 	}
 	return archiveChain(ctx, hermes, view.all)
+}
+
+// stoppedDeliveryEvidence is what a stop has to say about what had already
+// landed when it arrived.
+//
+// A stop used to mean nothing had happened: the delivery was over the
+// moment its pull request existed, so the report claimed no links and the
+// footer said production was untouched. A requester can now stop one whose
+// change is merged, deployed and looked at — and telling them nothing moved
+// would send them away from the environment they have to go and see. So the
+// stop carries the depth it reached and that depth's evidence, read from
+// the records the cards sealed.
+//
+// Nothing for an ending that is not a stop: the endings a bound on the
+// attempts still produces are failures, and what they may carry is the
+// failure reporting's own question.
+func stoppedDeliveryEvidence(runDir, repository string, code hook.TerminalCode) map[string]string {
+	if code != hook.TerminalCancelled || repository == "" {
+		return nil
+	}
+	depth, sealed := readDepthRecord(runDir)
+	if !sealed {
+		return nil
+	}
+	outcome, err := readChainOutcome(runDir)
+	if err != nil {
+		return nil
+	}
+	_, evidence, _ := deliveryOutcome(runDir, repository, depth, outcome.Evidence)
+	// The shortfall line explains a delivery that stopped because its
+	// instance could not take it further. This one stopped because it was
+	// told to, and the stop's own sentence says so; the line would read as
+	// a second, wrong reason.
+	delete(evidence, "delivery_shortfall")
+	return evidence
+}
+
+// readChainOutcome reads what the publish card sealed: the adopted round
+// and the pull request it opened.
+func readChainOutcome(runDir string) (runner.ChainOutcome, error) {
+	var outcome runner.ChainOutcome
+	raw, err := os.ReadFile(filepath.Join(runDir, runner.ChainOutcomeFile))
+	if err != nil {
+		return outcome, err
+	}
+	if err := json.Unmarshal(raw, &outcome); err != nil || outcome.Stage < 1 {
+		return runner.ChainOutcome{}, errors.New("chain outcome artifact invalid")
+	}
+	return outcome, nil
 }

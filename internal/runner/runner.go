@@ -51,7 +51,6 @@ type Pipeline struct {
 	}
 
 	consumerRepository string
-	delivery           string
 	// cloneTarget lets package tests stand in for the network clone of the
 	// destination repository; nil means the real github.com clone.
 	// Production never sets it.
@@ -353,19 +352,18 @@ func (p *Pipeline) resolveConsumer() error {
 		if consumer.Repository != repository {
 			continue
 		}
+		// The depth is read, not kept: what this stage does is the same at
+		// every depth, and the delivery cards after it are told how far to
+		// go by the attendant, which reads the destination configuration
+		// through its own loader. A value that is not one of the three is
+		// still refused here — the run would otherwise start against a
+		// configuration nothing downstream can act on.
 		switch consumer.Delivery {
-		case "pull_request", "integration", "production":
-		case "":
-			// The same default the destination configuration applies when
-			// the file says nothing, read here from the raw JSON: this
-			// stage decodes the few fields it needs rather than the whole
-			// typed configuration, so it has to agree with it by hand.
-			consumer.Delivery = "production"
+		case "pull_request", "integration", "production", "":
 		default:
 			return fmt.Errorf("consumer %s has unknown delivery %q", repository, consumer.Delivery)
 		}
 		p.consumerRepository = repository
-		p.delivery = consumer.Delivery
 		for _, tool := range consumer.Mode.Toolchain {
 			// The workflow provisioned this toolchain per run (pinned Node
 			// and pnpm); the pod image ships it. Assert it is really there
