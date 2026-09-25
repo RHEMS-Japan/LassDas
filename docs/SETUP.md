@@ -415,7 +415,7 @@ lassdas run spec --project NAME
 | 常時動く本体 (Pod / EC2) | その環境変数に入れる | **自由**。入れた変数名をそのまま書く |
 | GitHub Actions | repo の Secrets に `MODEL_API_KEY_DECISIONS` という名前で入れる | **`MODEL_API_KEY_DECISIONS` のみ** |
 
-GitHub Actions で動かす場合、本体に渡る環境変数は名前を列挙した固定の一覧で決まっており、そこに無い名前は**どこに入れても本体まで届かない**。他の役の鍵 (`MODEL_API_KEY_IMPLEMENTER` / `MODEL_API_KEY_REVIEWER`) と同じ仕組みで、判定役の分として `MODEL_API_KEY_DECISIONS` を足してある。**自分で決めた名前を `api_key_env` に書くと、鍵が届かないまま動く。**
+GitHub Actions で動かす場合、本体を呼ぶ再利用 workflow が受け取る Secrets は名前を宣言した閉じた一覧で、宣言に無い名前は呼び出し側がどう渡しても workflow の中に入らない (本体そのものは起動時の環境変数をそのまま引き継ぐので、本体の側に壁は無い)。他の役の鍵 (`MODEL_API_KEY_IMPLEMENTER` / `MODEL_API_KEY_REVIEWER`) と同じ仕組みで、判定役の分として `MODEL_API_KEY_DECISIONS` を宣言し、各 step へ渡してある。**自分で決めた名前を `api_key_env` に書くと、鍵が届かないまま動く。**
 
 **鍵が届かなかったときは黙って素通りしない。**判定役を呼んで答えが返らなかった場合 (鍵が無い・時間切れ・窓口に届かない)、その run の記録に 1 行出る。
 
