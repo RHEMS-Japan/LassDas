@@ -95,8 +95,13 @@ func summarizeTrailStages(stages []trailStage) TrailSummary {
 // missing stage-1 is an error; the trail of a run that never implemented
 // anything is not this function's business.
 func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailStage, error) {
-	stages := make([]trailStage, 0, config.MaxStages)
-	for number := 1; number <= config.MaxStages; number++ {
+	// Up to the ceiling every round-numbered record is held to, not up to a
+	// configured budget: the budget stopped bounding rounds, and a trail
+	// that stopped at it would silently drop the rounds past it. The loop
+	// still ends at the first round with no decision, which is where the
+	// run actually ends.
+	stages := make([]trailStage, 0, config.StageCeiling())
+	for number := 1; number <= config.StageCeiling(); number++ {
 		stageDir := filepath.Join(historyDir, "stage-"+strconv.Itoa(number))
 		if _, err := os.Stat(filepath.Join(stageDir, "decision.json")); err != nil {
 			break
@@ -127,13 +132,26 @@ func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailS
 			}
 			reviews = append(reviews, review)
 		}
-		decision, err := DecideStage(candidate, reviews, source, request, config)
-		if err != nil {
-			return nil, errors.New("trail stage did not rederive")
-		}
 		var sealed StageDecision
 		if err := ReadJSONFile(filepath.Join(stageDir, "decision.json"), MaxReviewJSONBytes, &sealed); err != nil {
 			return nil, errors.New("trail stage decision could not be read")
+		}
+		// Under the ruling the round was actually counted under, which the
+		// sealed decision carries and the round's own directory does not.
+		//
+		// Only one of the two rulings is in a decision. An overruling is
+		// made before the round is decided and the verdict is counted
+		// without the objections it set aside, so the decision has it. The
+		// other ruling is made after a round was decided and sent back: it
+		// tells the next round what to satisfy and changes nothing about
+		// this one, so this decision was sealed without it and must be
+		// re-derived without it. Reading the round's ruling file here
+		// handed the second kind to the tally, which changed the digest,
+		// and the mismatch took the whole record of the run out of the
+		// requester's final comment and the pull request.
+		decision, err := DecideStage(candidate, reviews, source, request, config, sealed.Ruling)
+		if err != nil {
+			return nil, errors.New("trail stage did not rederive")
 		}
 		if sealed.DecisionSHA256 != decision.DecisionSHA256 {
 			return nil, errors.New("trail stage decision does not match")

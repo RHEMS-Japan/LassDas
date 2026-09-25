@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // The cards orchestration runs each pipeline stage as its own kanban card;
@@ -140,6 +141,15 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 		// instruction that quietly lost the one thing it is being run for.
 		if _, sealed := ReadValidationFailure(p.Workspace, round-1); sealed {
 			args = append(args, "--validation-failure", ValidationFailureFile(p.Workspace, round-1))
+		}
+		// The previous round had stopped moving and the engine ruled that
+		// the change really was short of what the ticket asks. What it
+		// ruled is the reason this round exists, so it rides in — and
+		// only for that ruling: an overruling took objections out of the
+		// previous round's count and has nothing to tell this one.
+		if ruling, err := ReadRuling(p.Workspace, round-1); err == nil && ruling != nil &&
+			ruling.Ruling == worker.RulingInstructImplementer {
+			args = append(args, "--ruling", RulingFile(p.Workspace, round-1))
 		}
 	}
 	args = append(args, p.clarificationArgs()...)
@@ -371,12 +381,11 @@ func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, in
 }
 
 // chainValidate tallies the round — every configured reviewer's sealed
-// verdict — and, when the round converged, runs the deterministic
-// validation. A revise outcome exits non-zero after sealing the decision:
-// this card's work (carrying a converged change) genuinely cannot proceed,
-// and the attendant reads the decision to regenerate the next round. A
-// nonconverged final round additionally seals the impasse question decision
-// before failing, so the attendant can route it to the requester.
+// verdict, counted under the engine's ruling when the round had to be ruled
+// on — and, when the round converged, runs the deterministic validation. A
+// revise outcome exits non-zero after sealing the decision: this card's work
+// (carrying a converged change) genuinely cannot proceed, and the attendant
+// reads the decision to decide what happens to the round.
 func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error {
 	round := p.latestCandidateRound()
 	if round == 0 {
@@ -396,6 +405,17 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
 			"--candidate", stageDir + "/candidate.json",
 		}, reviewFlags...)
+		// This round was ruled on and is being decided again. The ruling
+		// says which objections the ticket does not require, and the
+		// verdict is counted without them; a round nobody ruled on has no
+		// such file and is counted exactly as it always was.
+		ruling, err := ReadRuling(p.Workspace, round)
+		if err != nil {
+			return err
+		}
+		if ruling != nil && ruling.Ruling == worker.RulingOverruleReviewer {
+			decideArgs = append(decideArgs, "--ruling", RulingFile(p.Workspace, round))
+		}
 		decideArgs = append(decideArgs, "--out", stageDir+"/decision.json")
 		if err := p.runVerb(ctx, "decide", decideArgs); err != nil {
 			return fmt.Errorf("the round could not be decided: %w", err)
@@ -409,21 +429,6 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 	case "converged":
 	case "revise":
 		return errors.New("the round was sent back for revision")
-	case "nonconverged":
-		questionArgs := append([]string{
-			"impasse-question", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-			"--candidate", stageDir + "/candidate.json",
-		}, reviewFlags...)
-		questionArgs = append(questionArgs, p.clarificationArgs()...)
-		if err := os.MkdirAll(p.path("history/question"), 0o755); err != nil {
-			return err
-		}
-		questionArgs = append(questionArgs, "--out", p.path("history/question/decision.json"))
-		// Best effort: the question is how a nonconverged run escalates,
-		// but a question author that dies must not hide the nonconvergence.
-		_, _ = p.worker(ctx, "impasse-question", questionArgs, p.modelKeyEnv()...)
-		return errors.New("the final round did not converge")
 	default:
 		return fmt.Errorf("the decision outcome %q is not one this chain knows", outcome)
 	}

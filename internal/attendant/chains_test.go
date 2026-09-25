@@ -54,49 +54,49 @@ func TestClassifyChainFailure(t *testing.T) {
 	changed := func() bool { return false }
 	reported := func() bool { return true }
 
-	action, code := classifyChainFailure(runtime.StageImplement, undecided, undecided, changed)
+	action, code := classifyChainFailure(runtime.StageImplement, undecided, changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("implement failure = %v %v", action, code)
 	}
 	// An implement card whose agent reported instead of changing ends on
 	// its own code: saying the AI failed was false on a run where the AI
 	// had explained itself (live 2026-09-25).
-	action, code = classifyChainFailure(runtime.StageImplement, undecided, undecided, reported)
+	action, code = classifyChainFailure(runtime.StageImplement, undecided, reported)
 	if action != actionReport || code != hook.TerminalImplementationReturned {
 		t.Fatalf("implement report = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StagePublish, undecided, undecided, reported)
+	action, code = classifyChainFailure(runtime.StagePublish, undecided, reported)
 	if action != actionReport || code != hook.TerminalReleaseFailed {
 		t.Fatalf("publish failure = %v %v", action, code)
 	}
-	// The code a revise carries is no longer inert. The round ceiling ends a
-	// run out of the regenerate arm under whatever the classification carried,
-	// and that arm stopped assigning one of its own, so this value is what a
-	// requester reads when a revise reaches the last configured round.
-	action, code = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
-	if action != actionRegenerate || code != hook.TerminalModelFailed {
+	// The code a revise carries is not inert, and it is no longer a model
+	// failure. An operator who configured a round limit ends a run out of
+	// the regenerate arm under whatever the classification carried, and on
+	// this path both seats answered — what the requester reads is that the
+	// reviews did not agree within the rounds that operator paid for.
+	action, code = classifyChainFailure(runtime.StageValidate, decided("revise"), changed)
+	if action != actionRegenerate || code != hook.TerminalNonconverged {
 		t.Fatalf("revise = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), decided("clarification_required"), changed)
-	if action != actionAskQuestion || code != hook.TerminalNonconverged {
-		t.Fatalf("nonconverged with question = %v %v", action, code)
-	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), undecided, changed)
+	// A record this engine can no longer seal, kept because an upgrade can
+	// find one in flight. Nothing asks the requester about it.
+	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), changed)
 	if action != actionReport || code != hook.TerminalNonconverged {
-		t.Fatalf("nonconverged without question = %v %v", action, code)
+		t.Fatalf("nonconverged = %v %v", action, code)
 	}
 	// A converged round the deterministic validation refused starts another
 	// round instead of ending the delivery. The code travels with it for the
-	// one path that still ends a run out of that arm, the round ceiling.
-	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), undecided, changed)
+	// one path that still ends a run out of that arm, an operator's own
+	// round limit.
+	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), changed)
 	if action != actionRegenerate || code != hook.TerminalValidationFailed {
 		t.Fatalf("converged but failed = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, undecided, undecided, changed)
+	action, code = classifyChainFailure(runtime.StageValidate, undecided, changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("undecided validate = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("elsewhere"), undecided, changed)
+	action, code = classifyChainFailure(runtime.StageValidate, decided("elsewhere"), changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("unknown decision = %v %v", action, code)
 	}
@@ -135,20 +135,29 @@ func TestReadEnvelopeRefusesAnotherDelivery(t *testing.T) {
 	}
 }
 
-func TestConsumerMaxStagesReadsTheKernelLimit(t *testing.T) {
+// The round limit is the operator's own and the default is none. A
+// destination that declares three stages — which is every destination
+// written before this — gets a delivery that is not stopped by that number.
+func TestConsumerRoundLimitDefaultsToUnbounded(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "consumer.json")
 	if err := os.WriteFile(path, []byte(`{"max_stages":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	limit, err := consumerMaxStages(path)
-	if err != nil || limit != 3 {
-		t.Fatalf("consumerMaxStages = %d, %v", limit, err)
+	limit, err := consumerRoundLimit(path)
+	if err != nil || limit != 0 {
+		t.Fatalf("consumerRoundLimit = %d, %v; want unbounded", limit, err)
 	}
-	if err := os.WriteFile(path, []byte(`{"max_stages":9}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"max_stages":3,"max_rounds":4}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := consumerMaxStages(path); err == nil {
-		t.Fatal("an out-of-range limit was accepted")
+	if limit, err := consumerRoundLimit(path); err != nil || limit != 4 {
+		t.Fatalf("consumerRoundLimit = %d, %v; want 4", limit, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"max_rounds":999}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumerRoundLimit(path); err == nil {
+		t.Fatal("a limit above the record ceiling was accepted")
 	}
 }

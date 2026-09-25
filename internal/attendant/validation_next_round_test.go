@@ -148,16 +148,19 @@ func TestARefusedValidationStartsTheNextRoundInsteadOfEndingTheRun(t *testing.T)
 	}
 }
 
-// The round ceiling is the one thing left that still ends a run from here,
-// and it is the one place a refused validation still names itself. The
-// requester reads that sentence: on this path the AI answered and both judges
-// passed the change, and the repository's own commands are what refused, so
-// saying the AI failed would be false. The exception lasts exactly as long as
-// the ceiling does.
-func TestTheRoundCeilingEndsARefusedValidationAsAValidationFailure(t *testing.T) {
+// An operator's own round limit is the one thing left that still ends a run
+// from here, and it is the one place a refused validation still names
+// itself. The requester reads that sentence: on this path the AI answered
+// and both judges passed the change, and the repository's own commands are
+// what refused, so saying the AI failed would be false.
+//
+// A destination declaring three stages no longer reaches this. The number
+// that stops a delivery is max_rounds, which is unset by default and has to
+// be written down by somebody who wants it.
+func TestAConfiguredRoundLimitEndsARefusedValidationAsAValidationFailure(t *testing.T) {
 	fixture, config, envelope, _, _ := refusedValidationFixture(t)
 	if err := os.WriteFile(config.ConsumerConfigPath,
-		[]byte(`{"max_stages":1,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
+		[]byte(`{"max_stages":1,"max_rounds":1,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	card := func(id, stage, status string) runtime.BoardTask {
@@ -202,5 +205,42 @@ func TestTheRoundCeilingEndsARefusedValidationAsAValidationFailure(t *testing.T)
 	if len(fixture.comments.posted) != 1 ||
 		!strings.Contains(fixture.comments.posted[0], "生成した変更が検証を通過しなかった") {
 		t.Fatalf("the requester was not told the validation refused the change: %q", fixture.comments.posted)
+	}
+}
+
+// And with no limit written down, the same delivery does not end at all: the
+// declared stage budget of the destination stops nothing, and the next round
+// is told what the validation printed.
+func TestADeclaredStageBudgetNoLongerEndsARefusedValidation(t *testing.T) {
+	fixture, config, envelope, _, _ := refusedValidationFixture(t)
+	if err := os.WriteFile(config.ConsumerConfigPath,
+		[]byte(`{"max_stages":1,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	card := func(id, stage, status string) runtime.BoardTask {
+		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, 1)}
+	}
+	view := chainViewFor([]runtime.BoardTask{
+		card("t_impl", runtime.StageImplement, "done"),
+		card("t_v", runtime.StageValidate, "blocked"),
+	}, fixture.deliveryID)
+	hermes, boardLog := fakeBoard(t)
+	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, &recordingLogger{}); err != nil {
+		t.Fatalf("the failure was not handled: %v", err)
+	}
+	if len(fixture.store.digests) != 0 {
+		t.Fatalf("the delivery ended at the declared budget: %v", fixture.store.digests)
+	}
+	if len(fixture.comments.posted) != 0 {
+		t.Fatalf("the requester was told the run ended: %q", fixture.comments.posted)
+	}
+	board, err := os.ReadFile(boardLog)
+	if err != nil {
+		t.Fatalf("the board was not called: %v", err)
+	}
+	if !strings.Contains(string(board), "|create|") {
+		t.Fatalf("no card was created for the next round:\n%s", board)
 	}
 }

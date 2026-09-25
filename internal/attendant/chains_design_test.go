@@ -18,6 +18,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 func TestChainViewForSeparatesDesignRounds(t *testing.T) {
@@ -61,22 +62,19 @@ func TestChainViewForSeparatesDesignRounds(t *testing.T) {
 	}
 }
 
-func TestConsumerDesignMaxRoundsReadsTheLimit(t *testing.T) {
+// A destination that declares two design rounds no longer gets a delivery
+// that ends at the second one. The declared number still loads; what bounds
+// the rounds is the ceiling every round-numbered record shares.
+func TestDesignRoundsAreNoLongerBoundedByTheDeclaredBudget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "consumer.json")
 	if err := os.WriteFile(path, []byte(`{"max_stages":3,"design_max_rounds":2}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := consumerDesignMaxRounds(path); got != 2 {
-		t.Errorf("limit = %d", got)
+	if got := consumerDesignMaxRounds(path); got != worker.StageCeiling {
+		t.Errorf("limit = %d, want the ceiling %d", got, worker.StageCeiling)
 	}
-	if err := os.WriteFile(path, []byte(`{"max_stages":3}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := consumerDesignMaxRounds(path); got != defaultDesignMaxRounds {
-		t.Errorf("default = %d", got)
-	}
-	if got := consumerDesignMaxRounds(filepath.Join(t.TempDir(), "missing.json")); got != defaultDesignMaxRounds {
-		t.Errorf("missing file = %d", got)
+	if got := consumerDesignMaxRounds(filepath.Join(t.TempDir(), "missing.json")); got != worker.StageCeiling {
+		t.Errorf("missing file = %d, want the ceiling %d", got, worker.StageCeiling)
 	}
 }
 
@@ -297,13 +295,17 @@ func designRunConfig(t *testing.T, designMaxRounds int) (runtime.Config, string)
 // objectedBoard is the board after the applier objected in implementation
 // round 1 of design round 1: the design cards are done, the apply card is
 // done, the sealing review card failed, the tail never started.
-func objectedBoard() chainView {
+func objectedBoard() chainView { return objectedBoardAt(1) }
+
+// objectedBoardAt is the same board with the design cards on a given design
+// round, for the one number that still stops a design: the ceiling.
+func objectedBoardAt(designRound int) chainView {
 	card := func(id, stage, status string, round int) runtime.BoardTask {
 		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey("delivery-1", stage, round)}
 	}
 	tasks := []runtime.BoardTask{
-		card("t_i1", runtime.StageInvestigate, "done", 1), card("t_a1", runtime.StageDesignReviewA, "done", 1),
-		card("t_b1", runtime.StageDesignReviewB, "done", 1), card("t_d1", runtime.StageDesignDecide, "done", 1),
+		card("t_i1", runtime.StageInvestigate, "done", designRound), card("t_a1", runtime.StageDesignReviewA, "done", designRound),
+		card("t_b1", runtime.StageDesignReviewB, "done", designRound), card("t_d1", runtime.StageDesignDecide, "done", designRound),
 		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "blocked", 1),
 		card("t_rb", runtime.StageReviewB, "todo", 1), card("t_v", runtime.StageValidate, "todo", 1), card("t_p", runtime.StagePublish, "todo", 1),
 	}
@@ -377,18 +379,38 @@ func TestDesignObjectionReopensDesignRound(t *testing.T) {
 	}
 }
 
-func TestDesignRoundsStopAtLimit(t *testing.T) {
+// A destination declaring one design round no longer stops at it. Rounds
+// are not counted out any more, so the design is tried again rather than the
+// delivery ending on the number.
+func TestDesignRoundsAdvancePastTheDeclaredBudget(t *testing.T) {
 	config, runDir := designRunConfig(t, 1)
 	if err := os.WriteFile(filepath.Join(runDir, "history", "design-1", "objection.json"), []byte(`{"reason":"x","section":"files"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	hermes, callLog := fakeBoard(t)
-	err := nextDesignRound(context.Background(), hermes, config, state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, objectedBoard(), runtime.ChainPlan{Shape: runtime.ShapeDesign}, "objection", &recordingLogger{})
+	if err := nextDesignRound(context.Background(), hermes, config, state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, objectedBoard(), runtime.ChainPlan{Shape: runtime.ShapeDesign}, "objection", &recordingLogger{}); err != nil {
+		t.Fatalf("the declared budget stopped the design: %v", err)
+	}
+	_, created := boardCalls(t, callLog)
+	if len(created) == 0 {
+		t.Fatal("no cards were created for the next design round")
+	}
+	if !strings.Contains(strings.Join(created, " "), ":investigate:d2") {
+		t.Errorf("created keys = %v, want a second design round", created)
+	}
+}
+
+// The ceiling still stops it. Past it no record could carry its own round
+// number, so there is nothing to start.
+func TestDesignRoundsStopAtTheRecordCeiling(t *testing.T) {
+	config, _ := designRunConfig(t, 1)
+	hermes, callLog := fakeBoard(t)
+	err := nextDesignRound(context.Background(), hermes, config, state.RunOverview{DeliveryID: "delivery-1", RunID: "run-1"}, objectedBoardAt(worker.StageCeiling), runtime.ChainPlan{Shape: runtime.ShapeDesign}, "objection", &recordingLogger{})
 	if !errors.Is(err, errDesignRoundLimit) {
-		t.Fatalf("at the limit: %v", err)
+		t.Fatalf("at the ceiling: %v", err)
 	}
 	if archived, created := boardCalls(t, callLog); len(archived) != 0 || len(created) != 0 {
-		t.Errorf("the board was touched at the limit: archived %v created %v", archived, created)
+		t.Errorf("the board was touched at the ceiling: archived %v created %v", archived, created)
 	}
 }
 

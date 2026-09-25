@@ -57,11 +57,9 @@ var liveStages = map[string]string{
 	// 調査 — the investigate card.
 	"investigate": "investigate",
 
-	// 設計 — the design review and decide cards, and the question a plan
-	// nobody passed puts to its requester.
-	"agent-design-review":     "design",
-	"decide-design":           "design",
-	"design-impasse-question": "design",
+	// 設計 — the design review and decide cards.
+	"agent-design-review": "design",
+	"decide-design":       "design",
 
 	// 実装 — the implement and apply cards: the instruction and the agent
 	// that carries it out.
@@ -75,15 +73,21 @@ var liveStages = map[string]string{
 
 	// 検査 — the validate card and the checks card: the round's verdict,
 	// the candidate applied into a sandbox, the project's own checks, the
-	// wait for the branch's CI, and the question asked when the reviews
-	// never agreed.
+	// wait for the branch's CI, and the engine's own ruling when the rounds
+	// stopped moving.
+	//
+	// The ruling is here rather than with the round it decides because it
+	// is what the verdict is counted under: it is sealed before the
+	// decision and read by it. The two questions this stage used to carry —
+	// one for a change the reviews never passed, one for a plan they never
+	// passed — are gone; the engine decides those itself now.
 	"decide":              "checks",
 	"wait-feature":        "checks",
 	"apply":               "checks",
 	"run-validation":      "checks",
 	"verify-applied":      "checks",
 	"verify-publish-gate": "checks",
-	"impasse-question":    "checks",
+	"arbitrate":           "checks",
 
 	// STG — the publish card: the branch, the merge, and the wait for the
 	// staging deployment.

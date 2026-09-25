@@ -717,7 +717,7 @@ func (i *ModelInvoker) GenerateCandidate(
 	previousReviews []Review,
 	config Config,
 ) (Candidate, InvocationUsage, error) {
-	if i == nil || i.api == nil || source.Validate(request, config) != nil || stage < 1 || stage > config.MaxStages {
+	if i == nil || i.api == nil || source.Validate(request, config) != nil || stage < 1 || stage > config.StageCeiling() {
 		return Candidate{}, InvocationUsage{}, errors.New("generation input is invalid")
 	}
 	if readiness.ValidateBinding(source, request, config) != nil || readiness.Outcome != ReadinessOutcomeReady {
@@ -1316,7 +1316,12 @@ func validatePreviousStage(stage int, previous *Candidate, reviews []Review, sou
 	if previous == nil || previous.Stage != stage-1 {
 		return errors.New("previous candidate is missing")
 	}
-	decision, err := DecideStage(*previous, reviews, source, request, config)
+	// Counted as the seats gave it. This is the kernel's own generation
+	// path, which the card chain does not run and which therefore never
+	// meets a round the arbiter ruled on; a ruling could only take
+	// objections out of the count, so reading the verdicts raw is the
+	// stricter of the two answers here.
+	decision, err := DecideStage(*previous, reviews, source, request, config, nil)
 	if err != nil || decision.Outcome != "revise" {
 		return errors.New("previous stage is not revisable")
 	}

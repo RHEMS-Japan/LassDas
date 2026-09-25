@@ -17,6 +17,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 	"fmt"
 	"log/slog"
 )
@@ -81,13 +82,22 @@ func TestDesignReviewsThatNeverAgreedKeepTheirOwnEnding(t *testing.T) {
 	}
 }
 
-// designSpentFixture is a delivery at its last design round whose applier
+// designCeilingDir is the design round directory at the record ceiling.
+//
+// These fixtures used to sit at the destination's declared budget of three
+// design rounds, which is where a design's rounds ran out. The budget stops
+// nothing now, so the endings below are reached only at the ceiling — the
+// highest round number any record may carry — and a delivery gets there only
+// after fifty tries rather than three.
+var designCeilingDir = fmt.Sprintf("history/design-%d", worker.StageCeiling)
+
+// designSpentFixture is a delivery at the design round ceiling whose applier
 // objected to the agreed design: the point where the rounds run out.
 func designSpentFixture(t *testing.T) (pendingFixture, hook.DispatchEnvelope, chainView, string) {
 	t.Helper()
 	fixture := newPendingFixture(t, "")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
-	round := filepath.Join(runDir, "history", "design-3")
+	round := filepath.Join(runDir, designCeilingDir)
 	if err := os.MkdirAll(round, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +114,8 @@ func designSpentFixture(t *testing.T) (pendingFixture, hook.DispatchEnvelope, ch
 	}
 	// Three design rounds, all decided, and the apply card that objected.
 	tasks := []runtime.BoardTask{
-		card("t_i3", runtime.StageInvestigate, 3), card("t_a3", runtime.StageDesignReviewA, 3),
-		card("t_b3", runtime.StageDesignReviewB, 3), card("t_d3", runtime.StageDesignDecide, 3),
+		card("t_i3", runtime.StageInvestigate, worker.StageCeiling), card("t_a3", runtime.StageDesignReviewA, worker.StageCeiling),
+		card("t_b3", runtime.StageDesignReviewB, worker.StageCeiling), card("t_d3", runtime.StageDesignDecide, worker.StageCeiling),
 		{ID: "t_apply", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, runtime.StageApply, 1)},
 	}
 	return fixture, envelope, chainViewFor(tasks, fixture.deliveryID), runDir
@@ -120,7 +130,7 @@ func designSpentFixture(t *testing.T) (pendingFixture, hook.DispatchEnvelope, ch
 func TestAReviewFindingTheDesignWrongAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 	fixture := newPendingFixture(t, "")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
-	for _, dir := range []string{"history/readiness", "history/stage-1", "history/design-3"} {
+	for _, dir := range []string{"history/readiness", "history/stage-1", designCeilingDir} {
 		if err := os.MkdirAll(filepath.Join(runDir, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -168,8 +178,8 @@ func TestAReviewFindingTheDesignWrongAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, round)}
 	}
 	view := chainViewFor([]runtime.BoardTask{
-		card("t_i3", runtime.StageInvestigate, "done", 3), card("t_a3", runtime.StageDesignReviewA, "done", 3),
-		card("t_b3", runtime.StageDesignReviewB, "done", 3), card("t_d3", runtime.StageDesignDecide, "done", 3),
+		card("t_i3", runtime.StageInvestigate, "done", worker.StageCeiling), card("t_a3", runtime.StageDesignReviewA, "done", worker.StageCeiling),
+		card("t_b3", runtime.StageDesignReviewB, "done", worker.StageCeiling), card("t_d3", runtime.StageDesignDecide, "done", worker.StageCeiling),
 		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "done", 1),
 		card("t_rb", runtime.StageReviewB, "done", 1), card("t_v", runtime.StageValidate, "blocked", 1),
 		card("t_p", runtime.StagePublish, "todo", 1),
@@ -201,7 +211,7 @@ func TestAReviewFindingTheDesignWrongAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 func TestAResumedObjectionAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 	fixture := newPendingFixture(t, "")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
-	for _, dir := range []string{"history/readiness", "history/design-3"} {
+	for _, dir := range []string{"history/readiness", designCeilingDir} {
 		if err := os.MkdirAll(filepath.Join(runDir, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +220,7 @@ func TestAResumedObjectionAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 		[]byte(`{"request_kind":"change","needs_design":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(runDir, "history/design-3/objection.json"),
+	if err := os.WriteFile(filepath.Join(runDir, designCeilingDir+"/objection.json"),
 		[]byte(`{"reason":"the label is not in that file","section":"files"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -243,10 +253,10 @@ func TestAResumedObjectionAtTheLimitEndsAsRoundsSpent(t *testing.T) {
 		return runtime.BoardTask{ID: id, Status: "done", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, round)}
 	}
 	view := chainViewFor([]runtime.BoardTask{
-		card("t_i3", runtime.StageInvestigate, 3), card("t_a3", runtime.StageDesignReviewA, 3),
-		card("t_b3", runtime.StageDesignReviewB, 3), card("t_d3", runtime.StageDesignDecide, 3),
+		card("t_i3", runtime.StageInvestigate, worker.StageCeiling), card("t_a3", runtime.StageDesignReviewA, worker.StageCeiling),
+		card("t_b3", runtime.StageDesignReviewB, worker.StageCeiling), card("t_d3", runtime.StageDesignDecide, worker.StageCeiling),
 	}, fixture.deliveryID)
-	if view.round != 0 || view.designRound != 3 {
+	if view.round != 0 || view.designRound != worker.StageCeiling {
 		t.Fatalf("view rounds: %+v", view.rounds())
 	}
 
@@ -356,8 +366,19 @@ func TestARoundsSpentEndingDoesNotAskTheDesignQuestion(t *testing.T) {
 func TestAChangeIsWrittenAgainWhenTheDesignCannotBe(t *testing.T) {
 	fixture := newPendingFixture(t, "")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
-	for _, dir := range []string{"history/readiness", "history/stage-1", "history/design-3"} {
+	for _, dir := range []string{"history/readiness", "history/stage-1", designCeilingDir} {
 		if err := os.MkdirAll(filepath.Join(runDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Every design round up to the ceiling, because the newest one is found
+	// by walking up from the first and a gap is where the walk stops.
+	for round := 1; round < worker.StageCeiling; round++ {
+		directory := filepath.Join(runDir, fmt.Sprintf("history/design-%d", round))
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "investigation.json"), []byte(`{}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -371,13 +392,11 @@ func TestAChangeIsWrittenAgainWhenTheDesignCannotBe(t *testing.T) {
 		"history/stage-1/review-b.json":  `{"findings":[{"code":"design-wrong"}]}`,
 		// The design the reviews approved, which the next attempt writes
 		// again from.
-		"history/design-1/investigation.json": `{}`,
-		"history/design-2/investigation.json": `{}`,
-		"history/design-3/investigation.json": `{}`,
-		"history/design-3/decision.json":      `{"outcome":"approved"}`,
-		"history/design-3/design.json":        `{}`,
-		"history/design-3/DESIGN.md":          "# 設計\n\nREADME.md のみを変更する。\n",
-		"ticket-draft.json":                   `{"repository":"example/consumer"}`,
+		designCeilingDir + "/investigation.json": `{}`,
+		designCeilingDir + "/decision.json":      `{"outcome":"approved"}`,
+		designCeilingDir + "/design.json":        `{}`,
+		designCeilingDir + "/DESIGN.md":          "# 設計\n\nREADME.md のみを変更する。\n",
+		"ticket-draft.json":                      `{"repository":"example/consumer"}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(runDir, name)), 0o755); err != nil {
 			t.Fatal(err)
@@ -409,8 +428,8 @@ func TestAChangeIsWrittenAgainWhenTheDesignCannotBe(t *testing.T) {
 		return runtime.BoardTask{ID: id, Status: status, IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, round)}
 	}
 	view := chainViewFor([]runtime.BoardTask{
-		card("t_i3", runtime.StageInvestigate, "done", 3), card("t_a3", runtime.StageDesignReviewA, "done", 3),
-		card("t_b3", runtime.StageDesignReviewB, "done", 3), card("t_d3", runtime.StageDesignDecide, "done", 3),
+		card("t_i3", runtime.StageInvestigate, "done", worker.StageCeiling), card("t_a3", runtime.StageDesignReviewA, "done", worker.StageCeiling),
+		card("t_b3", runtime.StageDesignReviewB, "done", worker.StageCeiling), card("t_d3", runtime.StageDesignDecide, "done", worker.StageCeiling),
 		card("t_apply", runtime.StageApply, "done", 1), card("t_ra", runtime.StageReviewA, "done", 1),
 		card("t_rb", runtime.StageReviewB, "done", 1), card("t_v", runtime.StageValidate, "blocked", 1),
 		card("t_p", runtime.StagePublish, "todo", 1),
@@ -489,4 +508,25 @@ func TestTheEngineCheckComesFirst(t *testing.T) {
 	if reads := strings.Index(within, "readEnvelope("); reads >= 0 && reads < checked {
 		t.Error("a record is read before the engine is compared, so the delivery fails on it instead of starting again")
 	}
+}
+
+// designQuestionFakes is the ticket and the ledger as the question poster
+// needs them: it accepts the question and remembers what was posted.
+type designQuestionFakes struct{ posted []string }
+
+func (f *designQuestionFakes) BeginQuestion(_ context.Context, request hook.QuestionBeginRequest) (hook.TerminalBinding, hook.QuestionBeginDisposition, error) {
+	return hook.TerminalBinding{IssueID: 4242, IssueKey: "TKT-4242"}, hook.QuestionBeginAcquired, nil
+}
+
+func (f *designQuestionFakes) CompleteQuestion(context.Context, hook.QuestionCompleteRequest) (hook.QuestionCompleteDisposition, error) {
+	return hook.QuestionCompleted, nil
+}
+
+func (f *designQuestionFakes) FindExactComment(context.Context, int64, string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+func (f *designQuestionFakes) AddCommentNotifying(_ context.Context, _ int64, content string, _ []int64) (int64, error) {
+	f.posted = append(f.posted, content)
+	return int64(700 + len(f.posted)), nil
 }

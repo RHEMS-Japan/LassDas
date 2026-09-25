@@ -289,7 +289,7 @@ func TestReviewsAndStageDecision(t *testing.T) {
 		}
 		reviews = append(reviews, review)
 	}
-	decision, err := DecideStage(candidate, reviews, source, request, config)
+	decision, err := DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestReviewsAndStageDecision(t *testing.T) {
 	}
 	tampered := reviews[0]
 	tampered.Invocation.RequestedModel = "another-model"
-	if _, err := DecideStage(candidate, []Review{tampered, reviews[1]}, source, request, config); err == nil {
+	if _, err := DecideStage(candidate, []Review{tampered, reviews[1]}, source, request, config, nil); err == nil {
 		t.Fatal("DecideStage() accepted review invocation tampering")
 	}
 }
@@ -323,7 +323,7 @@ func TestStageDecisionRejectsDuplicateInvocationRequestID(t *testing.T) {
 		}
 		reviews = append(reviews, review)
 	}
-	if _, err := DecideStage(candidate, reviews, source, request, config); err == nil {
+	if _, err := DecideStage(candidate, reviews, source, request, config, nil); err == nil {
 		t.Fatal("DecideStage() accepted duplicate model request ids")
 	}
 }
@@ -361,7 +361,14 @@ func TestReviewRejectsTimestampBeforeCandidate(t *testing.T) {
 	}
 }
 
-func TestFinalStageBecomesNonconverged(t *testing.T) {
+// A round at the destination's declared budget is a round to do again, and
+// nothing more.
+//
+// It used to become nonconverged here, and that is how a delivery ended on a
+// count: the decide verb rewrote the last allowed round's objection into an
+// ending, and the requester was told the reviews had not converged. Rounds
+// are not counted out any more, so the objection stays what it is.
+func TestTheDeclaredBudgetNoLongerRewritesAnObjectionIntoAnEnding(t *testing.T) {
 	config, request, source, first := validCandidate(t)
 	last, err := NewCandidate(config.MaxStages, ModelCandidateOutput{
 		Files:     []ModelCandidateFile{{Path: request.TargetFiles[0], Content: first.Files[0].Content}},
@@ -384,12 +391,21 @@ func TestFinalStageBecomesNonconverged(t *testing.T) {
 		}
 		reviews = append(reviews, review)
 	}
-	decision, err := DecideStage(last, reviews, source, request, config)
+	decision, err := DecideStage(last, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Outcome != "nonconverged" {
-		t.Fatalf("outcome = %q", decision.Outcome)
+	if decision.Outcome != "revise" {
+		t.Fatalf("outcome = %q, want revise", decision.Outcome)
+	}
+	// And a round past the declared budget seals at all: an existing
+	// destination declaring three rounds does not refuse the fourth.
+	beyond := config.MaxStages + 1
+	if _, err := NewCandidate(beyond, ModelCandidateOutput{
+		Files:     []ModelCandidateFile{{Path: request.TargetFiles[0], Content: first.Files[0].Content}},
+		Rationale: "Past the declared budget.",
+	}, source, request, config, validTestInvocation(config.Models.Implementer), testInvocationTime); err != nil {
+		t.Fatalf("round %d was refused by a configuration declaring %d: %v", beyond, config.MaxStages, err)
 	}
 }
 

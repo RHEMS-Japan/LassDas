@@ -132,7 +132,33 @@ type StageDecision struct {
 	CandidateSHA256 string   `json:"candidate_sha256"`
 	Outcome         string   `json:"outcome"`
 	ReviewSHA256s   []string `json:"review_sha256s"`
-	DecisionSHA256  string   `json:"decision_sha256"`
+	// Ruling is what the engine decided about a round that had stopped
+	// moving, absent from every round nobody had to rule on.
+	//
+	// It is carried whole rather than named by digest, which is not how the
+	// other records refer to each other. The reason is that a decision is
+	// read by gates that are handed artifacts from four different places —
+	// a run directory, a command line, a staging bundle, a release proof —
+	// and every one of them re-derives the outcome. Named by digest, each
+	// would have to be taught to find and carry the ruling too, and any one
+	// that was not would refuse a delivery the engine had legitimately
+	// decided. Carried here, a decision proves itself wherever it goes.
+	//
+	// Omitted when absent, so a round decided the ordinary way seals
+	// exactly the bytes it always did and every digest bound to those bytes
+	// still holds.
+	Ruling         *Ruling `json:"ruling,omitempty"`
+	DecisionSHA256 string  `json:"decision_sha256"`
+}
+
+// Overruled is what the round's ruling set aside, in seat order: the
+// objections a reader counting the reviews again would otherwise find
+// standing. Empty for a round nobody ruled on.
+func (d StageDecision) Overruled() []OverruledFinding {
+	if d.Ruling == nil {
+		return nil
+	}
+	return d.Ruling.Overruled
 }
 
 func ReadSourceSnapshot(repoRoot, baseSHA string, request TicketRequest, config Config) (SourceSnapshot, error) {
@@ -244,7 +270,7 @@ func (s SourceSnapshot) Validate(request TicketRequest, config Config) error {
 }
 
 func NewCandidate(stage int, output ModelCandidateOutput, source SourceSnapshot, request TicketRequest, config Config, invocation InvocationUsage, generatedAt time.Time) (Candidate, error) {
-	if err := source.Validate(request, config); err != nil || stage < 1 || stage > config.MaxStages {
+	if err := source.Validate(request, config); err != nil || stage < 1 || stage > config.StageCeiling() {
 		return Candidate{}, errors.New("candidate input is invalid")
 	}
 	if invocation.Validate(config.Models.Implementer) != nil || generatedAt.IsZero() || generatedAt.Location() != time.UTC {
@@ -291,7 +317,7 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 	if err != nil {
 		return errors.New("ticket request is invalid")
 	}
-	if c.SchemaVersion != ArtifactSchemaVersion || c.Stage < 1 || c.Stage > config.MaxStages ||
+	if c.SchemaVersion != ArtifactSchemaVersion || c.Stage < 1 || c.Stage > config.StageCeiling() ||
 		c.DeliveryID != request.DeliveryID || c.InputSHA256 != request.InputSHA256 ||
 		c.ConfigSHA256 != request.ConfigSHA256 || c.ToolSHA != request.ToolSHA ||
 		c.SourceSHA256 != source.SourceSHA256 || c.BaseSHA != source.BaseSHA || !implementerSeated(c.Implementer, config) ||
@@ -451,7 +477,15 @@ func (r Review) seatedIn(seat ModelEndpoint) (ModelEndpoint, bool) {
 	return ModelEndpoint{}, false
 }
 
-func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, request TicketRequest, config Config) (StageDecision, error) {
+// DecideStage tallies one round: every configured seat's sealed verdict,
+// and the ruling — when the engine had to make one — that says which of
+// their objections the ticket does not require.
+//
+// The round limit is deliberately not here. It used to be: a revise at the
+// last configured round was rewritten as nonconverged, which is how a
+// delivery ended on a count. Rounds end when the seats agree or when the
+// arbiter rules, so what this verb answers is only what the seats said.
+func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, request TicketRequest, config Config, ruling *Ruling) (StageDecision, error) {
 	if err := candidate.Validate(source, request, config); err != nil || len(reviews) != len(config.Models.Reviewers) {
 		return StageDecision{}, errors.New("stage decision input is invalid")
 	}
@@ -467,31 +501,22 @@ func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, r
 		}
 		requestIDs[review.Invocation.RequestID] = struct{}{}
 	}
-	outcome := "converged"
-	digests := make([]string, 0, len(reviews))
-	for _, seat := range config.Models.Reviewers {
-		review, exists := byID[seat.ID]
-		if !exists || review.Validate(seat, candidate, request) != nil {
-			return StageDecision{}, errors.New("stage review set is invalid")
-		}
-		digests = append(digests, review.ReviewSHA256)
-		if review.Verdict == "revise" {
-			outcome = "revise"
-		}
-	}
-	if err := seatsStayDiverse(reviews, config); err != nil {
+	// The ruling is held to this round's artifacts by the decision itself,
+	// which is re-derived below before anything is returned. Checking it
+	// here as well would be the same refusal, one step earlier, and a second
+	// place to keep the rule in step with the reader's.
+	outcome, digests, err := tallyRound(candidate, byID, reviews, request, config, ruling)
+	if err != nil {
 		return StageDecision{}, err
-	}
-	if outcome == "revise" && candidate.Stage == config.MaxStages {
-		outcome = "nonconverged"
 	}
 	decision := StageDecision{
 		SchemaVersion: ArtifactSchemaVersion, Stage: candidate.Stage, DeliveryID: request.DeliveryID,
 		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA,
 		CandidateSHA256: candidate.CandidateSHA256, Outcome: outcome, ReviewSHA256s: digests,
+		Ruling: ruling,
 	}
-	digest, err := stageDecisionDigest(decision)
-	if err != nil {
+	digest, digestErr := stageDecisionDigest(decision)
+	if digestErr != nil {
 		return StageDecision{}, errors.New("stage decision could not be sealed")
 	}
 	decision.DecisionSHA256 = digest
@@ -499,6 +524,49 @@ func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, r
 		return StageDecision{}, err
 	}
 	return decision, nil
+}
+
+// tallyRound counts one round's verdicts under the ruling, if any, that the
+// engine made about it.
+//
+// A seat's revise stands unless every objection it raised is set aside: a
+// seat that still has one standing is still asking for a change, and a seat
+// that objected without naming anything cannot be answered by a ruling at
+// all.
+func tallyRound(
+	candidate Candidate,
+	byID map[string]Review,
+	reviews []Review,
+	request TicketRequest,
+	config Config,
+	ruling *Ruling,
+) (string, []string, error) {
+	outcome := "converged"
+	digests := make([]string, 0, len(reviews))
+	for _, seat := range config.Models.Reviewers {
+		review, exists := byID[seat.ID]
+		if !exists || review.Validate(seat, candidate, request) != nil {
+			return "", nil, errors.New("stage review set is invalid")
+		}
+		digests = append(digests, review.ReviewSHA256)
+		if review.Verdict != "revise" {
+			continue
+		}
+		standing := 0
+		for _, finding := range review.Findings {
+			if ruling != nil && ruling.Overrules(review.ReviewerID, finding.Code, finding.Path) {
+				continue
+			}
+			standing++
+		}
+		if standing > 0 || len(review.Findings) == 0 {
+			outcome = "revise"
+		}
+	}
+	if err := seatsStayDiverse(reviews, config); err != nil {
+		return "", nil, err
+	}
+	return outcome, digests, nil
 }
 
 func (d StageDecision) Validate(candidate Candidate, reviews []Review, source SourceSnapshot, request TicketRequest, config Config) error {
@@ -521,21 +589,23 @@ func (d StageDecision) Validate(candidate Candidate, reviews []Review, source So
 		}
 		requestIDs[review.Invocation.RequestID] = struct{}{}
 	}
-	expectedOutcome := "converged"
-	for index, seat := range config.Models.Reviewers {
-		review, exists := byID[seat.ID]
-		if !exists || review.Validate(seat, candidate, request) != nil || d.ReviewSHA256s[index] != review.ReviewSHA256 {
-			return errors.New("stage decision review set is invalid")
-		}
-		if review.Verdict == "revise" {
-			expectedOutcome = "revise"
+	// A ruling the decision carries is held to this round's own artifacts
+	// before it is allowed to change the count. A forged one — naming
+	// objections nobody raised, or another round's change — fails here, so
+	// a decision cannot talk itself into converging.
+	if d.Ruling != nil {
+		if err := d.Ruling.Validate(candidate, reviews, request, config); err != nil {
+			return err
 		}
 	}
-	if err := seatsStayDiverse(reviews, config); err != nil {
+	expectedOutcome, digests, err := tallyRound(candidate, byID, reviews, request, config, d.Ruling)
+	if err != nil {
 		return err
 	}
-	if expectedOutcome == "revise" && candidate.Stage == config.MaxStages {
-		expectedOutcome = "nonconverged"
+	for index := range digests {
+		if d.ReviewSHA256s[index] != digests[index] {
+			return errors.New("stage decision review set is invalid")
+		}
 	}
 	if d.Outcome != expectedOutcome {
 		return errors.New("stage decision outcome is invalid")

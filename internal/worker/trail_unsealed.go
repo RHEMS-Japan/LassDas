@@ -45,7 +45,7 @@ type UnsealedRound struct {
 // its trail is the ordinary one — and neither is a directory with no run
 // record at all.
 func LoadUnsealedRound(historyDir string, config Config) (UnsealedRound, error) {
-	for number := config.MaxStages; number >= 1; number-- {
+	for number := config.StageCeiling(); number >= 1; number-- {
 		if candidateSealedFor(historyDir, number) {
 			// This round got as far as a candidate, so the sealed history
 			// is what renders it, whatever happened afterwards.

@@ -575,7 +575,7 @@ func TestImplementPromptNamesNoPerRequestFileList(t *testing.T) {
 		MaxFiles:            5, MaxChangedLines: 400, MaxChangedBytes: 32768, MaxFileBytes: 65536,
 	}}
 	agent := worker.AgentConfig{ID: "implementer", Command: "agent"}
-	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, "/work/repo")
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, nil, nil, "/work/repo")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -644,9 +644,6 @@ func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
 	if !strings.Contains(checker, "would be answered by a measurement with a probe in USER_DATA_JSON.catalogue when that key is present") {
 		t.Error("checker's false-block does not name the catalogue")
 	}
-	if impasse := impasseSystemPrompt(); !strings.Contains(impasse, "question and why_blocking are at most 2000 bytes") || strings.Contains(impasse, "reject_code") {
-		t.Error("impasse contract lacks the question limits, or talks about fields it has none of")
-	}
 	if len(readinessCatalogue(Config{}, ConsumerConfig{})) != 0 {
 		t.Error("an empty catalogue invented entries")
 	}

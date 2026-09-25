@@ -81,7 +81,7 @@ func TestRunValidationEvidenceBindsExecutionAndPublishGate(t *testing.T) {
 		}
 		reviews = append(reviews, review)
 	}
-	decision, err := DecideStage(candidate, reviews, source, request, config)
+	decision, err := DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

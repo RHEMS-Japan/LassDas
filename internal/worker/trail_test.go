@@ -10,7 +10,7 @@ import (
 // decisions and the validation verdict — in the requester's language.
 func TestComposeTrailRendersTheRunRecord(t *testing.T) {
 	config, request, source, candidate, reviews := nonconvergedFixture(t)
-	decision, err := DecideStage(candidate, reviews, source, request, config)
+	decision, err := DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,11 @@ func TestComposeTrailRendersTheRunRecord(t *testing.T) {
 
 	trail := ComposeTrail(stages, clarification, true)
 	for _, expected := range []string{
-		"実装とレビューの経過 (1 周で収束せず)",
+		// A round the seats did not agree on is a round to do again. It
+		// used to read "did not converge" here, because the round budget
+		// rewrote a final-round objection into the ending the delivery
+		// stopped on; nothing rewrites it now.
+		"実装とレビューの経過 (1 周でやり直し)",
 		"指摘 1 件",
 		"missed-escalation",
 		request.TargetFiles[0],
@@ -60,7 +64,7 @@ func TestComposeTrailRendersTheRunRecord(t *testing.T) {
 
 func TestTrailSummaryUsesTheLatestValidatedCycle(t *testing.T) {
 	config, request, source, candidate, reviews := nonconvergedFixture(t)
-	decision, err := DecideStage(candidate, reviews, source, request, config)
+	decision, err := DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +88,7 @@ func TestTrailSummaryUsesTheLatestValidatedCycle(t *testing.T) {
 // dropped both before the requester ever saw them.
 func TestComposeTrailCarriesTheWholeImplementerReport(t *testing.T) {
 	config, request, source, candidate, reviews := nonconvergedFixture(t)
-	decision, err := DecideStage(candidate, reviews, source, request, config)
+	decision, err := DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

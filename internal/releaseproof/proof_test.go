@@ -306,7 +306,7 @@ func stagingFixtureCheckedOut(t *testing.T, checkedOut string) StagingInputs {
 		}
 		reviews = append(reviews, review)
 	}
-	decision, err := worker.DecideStage(candidate, reviews, source, request, config)
+	decision, err := worker.DecideStage(candidate, reviews, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

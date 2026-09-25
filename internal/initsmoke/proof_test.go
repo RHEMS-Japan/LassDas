@@ -120,7 +120,7 @@ func proofFixture(t *testing.T) (map[string]json.RawMessage, worker.Config, Reco
 		designReviews = append(designReviews, designReview)
 		put("history/design-1/"+endpoint.ID+"-design-review.json", designReview)
 	}
-	decision, err := worker.DecideStage(candidate, reviews, source, ticket, config)
+	decision, err := worker.DecideStage(candidate, reviews, source, ticket, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

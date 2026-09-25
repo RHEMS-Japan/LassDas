@@ -61,6 +61,18 @@ type Config struct {
 	// DefaultDesignMaxRounds; omitempty keeps existing configurations'
 	// digests unchanged.
 	DesignMaxRounds int `json:"design_max_rounds,omitempty"`
+	// MaxRounds bounds the implementation rounds an operator is willing to
+	// pay for. Zero — the default, and what every configuration written
+	// before this says — means unbounded: a round that does not converge is
+	// followed by another one, and a delivery that repeats itself is ended
+	// by the arbiter rather than by a count. An operator who sets a number
+	// gets a delivery that stops at it.
+	MaxRounds int `json:"max_rounds,omitempty"`
+	// StagnationRepeatRounds is how many consecutive rounds must be
+	// identical before the engine rules on the deadlock. Zero means
+	// DefaultStagnationRepeatRounds. omitempty keeps existing
+	// configurations' digests unchanged.
+	StagnationRepeatRounds int `json:"stagnation_repeat_rounds,omitempty"`
 
 	// finishedRunSHA256 pins the digest this configuration's sealed records
 	// are held to. It is unexported so that SHA256, which marshals the
@@ -75,7 +87,30 @@ type Config struct {
 // gets when it sets none.
 const DefaultDesignMaxRounds = 3
 
-// DesignRounds is the effective design review round limit.
+// DefaultStagnationRepeatRounds is how many consecutive identical rounds
+// make a deadlock when a configuration sets no number: one. A round that
+// objects to exactly what the round before it objected to, or that changes
+// not one byte of what that round changed, has already shown that asking
+// again produces the same thing.
+const DefaultStagnationRepeatRounds = 1
+
+// StageCeiling is the highest round number any sealed record may carry.
+//
+// It is not a budget. Rounds end when the reviewers agree or when the
+// arbiter rules, and neither of those is a count; this is the bound every
+// record's round field is read and written under, so that a corrupt or
+// forged number is refused by the same rule everywhere. Fifty is far above
+// any delivery that has ever been seen and far below a number that could
+// make a run directory unreadable.
+const StageCeiling = 50
+
+// DesignRounds is the design review round budget a configuration declares.
+//
+// It no longer stops a design: a design whose judges keep objecting is
+// ruled on, not abandoned at a count (§6 of the plan). What the declared
+// number still does is take part in the artifact ceiling below, so a
+// configuration that declares more rounds than the ceiling allows cannot
+// seal a record the ceiling would refuse.
 func (c Config) DesignRounds() int {
 	if c.DesignMaxRounds == 0 {
 		return DefaultDesignMaxRounds
@@ -83,16 +118,42 @@ func (c Config) DesignRounds() int {
 	return c.DesignMaxRounds
 }
 
-// maxRunStage bounds the stage an agent run record may carry. An
-// implementing or reviewing run belongs to an implementation stage, a
-// design reviewer's run to a design round, and the record's one field is
-// held to whichever limit is larger; the stages that consume a run hold it
-// to their own limit as well.
-func (c Config) maxRunStage() int {
-	if rounds := c.DesignRounds(); rounds > c.MaxStages {
-		return rounds
+// StageCeiling is the highest round number this configuration's records may
+// carry: the ceiling, or a declared budget above it.
+func (c Config) StageCeiling() int {
+	ceiling := StageCeiling
+	if rounds := c.DesignRounds(); rounds > ceiling {
+		ceiling = rounds
 	}
-	return c.MaxStages
+	if c.MaxStages > ceiling {
+		ceiling = c.MaxStages
+	}
+	return ceiling
+}
+
+// RoundLimit is the number of implementation rounds this configuration
+// allows, or zero for unbounded.
+func (c Config) RoundLimit() int {
+	if c.MaxRounds < 1 {
+		return 0
+	}
+	return c.MaxRounds
+}
+
+// StagnationRounds is how many consecutive identical rounds make a deadlock.
+func (c Config) StagnationRounds() int {
+	if c.StagnationRepeatRounds < 1 {
+		return DefaultStagnationRepeatRounds
+	}
+	return c.StagnationRepeatRounds
+}
+
+// maxRunStage bounds the stage an agent run record may carry. An
+// implementing or reviewing run belongs to an implementation stage and a
+// design reviewer's run to a design round; both are held to the one
+// ceiling every other round-numbered record is held to.
+func (c Config) maxRunStage() int {
+	return c.StageCeiling()
 }
 
 // AgentSet names the coding agents the framework runs: one that implements
@@ -801,6 +862,21 @@ type ModelConfig struct {
 	// doc §11, decision 3). The sealed DesignReview records the judge that
 	// ran. Unset, the candidate reviewers judge designs as before.
 	DesignReviewers []ModelEndpoint `json:"design_reviewers,omitempty"`
+	// Arbiter, when present, is the endpoint that rules on a deadlock: a
+	// delivery whose rounds have stopped moving is decided by this role
+	// rather than handed back to the requester (§6 of the plan). Unset, the
+	// reception assessor rules, which is the role already trusted to read a
+	// ticket and say what it asks for. Optional, and omitted when empty, so
+	// an existing configuration's canonical form is untouched.
+	//
+	// Candidates declared on this seat load and are held to the same rules
+	// as any other seat's, and nothing moves the arbiter onto one yet: a
+	// ruling is made in the attendant's own tick rather than on a card, so
+	// there is no failed card for the ladder to climb from. An arbiter that
+	// will not answer leaves the round to go on to the next one, which is
+	// the delivery carrying itself rather than stopping. Moving the seat is
+	// work for whoever gives the ruling a card of its own.
+	Arbiter *ModelEndpoint `json:"arbiter,omitempty"`
 	// VendorHosts, when present, pins every declared vendor name to the hosts
 	// its endpoints may be reached through. The different-vendor rules below
 	// otherwise trust the vendor string as written: a config could call two
@@ -825,6 +901,17 @@ type ReadinessModels struct {
 // framework never holds a provider credential itself: BaseURL says where the
 // consumer's gateway listens and APIKeyEnv names the environment variable the
 // consumer injects the key through.
+// ArbiterEndpoint is the seat that rules on a deadlocked delivery. A
+// configuration that names no arbiter is ruled on by its reception
+// assessor: the deadlock is a question about what the ticket asks for, and
+// that is the role that already answers those.
+func (m ModelConfig) ArbiterEndpoint() ModelEndpoint {
+	if m.Arbiter != nil {
+		return *m.Arbiter
+	}
+	return m.Readiness.Assessor
+}
+
 // DesignReviewerFor returns the endpoint that judges designs and
 // investigation reports for reviewer id: the design judge when one is
 // configured, else the candidate reviewer of that id.
@@ -1022,6 +1109,15 @@ func (c Config) Validate() error {
 	}
 	if c.DesignMaxRounds < 0 || c.DesignMaxRounds > 10 {
 		return errors.New("design_max_rounds must be between 1 and 10")
+	}
+	// Zero is the whole point of the round limit, so the range starts below
+	// one: an operator who wants a delivery to stop after so many rounds
+	// says so, and everyone else gets a delivery that runs until it is done.
+	if c.MaxRounds < 0 || c.MaxRounds > StageCeiling {
+		return fmt.Errorf("max_rounds must be between 0 and %d", StageCeiling)
+	}
+	if c.StagnationRepeatRounds < 0 || c.StagnationRepeatRounds > 10 {
+		return errors.New("stagnation_repeat_rounds must be between 0 and 10")
 	}
 	if c.AnswerKnowledge != nil {
 		if err := c.AnswerKnowledge.validate(); err != nil {
@@ -1357,6 +1453,18 @@ func (c ModelConfig) validate() error {
 		}
 		ids[id] = struct{}{}
 	}
+	// The arbiter is a seat like the others: it spends a model turn, its id
+	// names it in the records, and a delivery with two seats under one name
+	// cannot say which of them answered.
+	if c.Arbiter != nil {
+		if err := c.Arbiter.validate(false); err != nil {
+			return fmt.Errorf("arbiter: %w", err)
+		}
+		if _, exists := ids[c.Arbiter.ID]; exists {
+			return errors.New("arbiter model id duplicates another seat")
+		}
+		ids[c.Arbiter.ID] = struct{}{}
+	}
 	if strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
 		return errors.New("readiness assessor and checker must use different vendors")
 	}
@@ -1366,6 +1474,9 @@ func (c ModelConfig) validate() error {
 		}
 		seats := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
 		seats = append(seats, c.DesignReviewers...)
+		if c.Arbiter != nil {
+			seats = append(seats, *c.Arbiter)
+		}
 		// Every occupant, not only the configured one. The table is what
 		// stops a vendor name from pointing anywhere it likes, and a seat
 		// that could be moved onto an unregistered host would be a way

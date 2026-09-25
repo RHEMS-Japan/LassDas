@@ -77,7 +77,7 @@ func TestDecideAcceptsAReviewFromACandidateSeat(t *testing.T) {
 	if moved.Model != "model-c" || moved.ReviewerID != "review-a" {
 		t.Fatalf("the sealed review names %s by %s, want the candidate under the seat's own id", moved.Model, moved.ReviewerID)
 	}
-	decision, err := DecideStage(candidate, []Review{moved, other}, source, request, config)
+	decision, err := DecideStage(candidate, []Review{moved, other}, source, request, config, nil)
 	if err != nil {
 		t.Fatalf("decide refused a review by a candidate seat: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestDecideStillRefusesAReviewThatIsNotThisSeats(t *testing.T) {
 		if err := spoiled.Validate(config.Models.Reviewers[0], candidate, request); err == nil {
 			t.Fatalf("a review naming %s was admitted to the seat", name)
 		}
-		if _, err := DecideStage(candidate, []Review{spoiled, other}, source, request, config); err == nil {
+		if _, err := DecideStage(candidate, []Review{spoiled, other}, source, request, config, nil); err == nil {
 			t.Fatalf("decide accepted a review naming %s", name)
 		}
 	}
@@ -131,12 +131,12 @@ func TestDecideRefusesTwoSeatsOnOneVendor(t *testing.T) {
 	if err := clashing.Validate(config.Models.Reviewers[0], candidate, request); err != nil {
 		t.Fatalf("the review itself is the seat's own: %v", err)
 	}
-	if _, err := DecideStage(candidate, []Review{clashing, other}, source, request, config); err == nil {
+	if _, err := DecideStage(candidate, []Review{clashing, other}, source, request, config, nil); err == nil {
 		t.Fatal("decide accepted two seats answering from one vendor")
 	}
 	decision, err := DecideStage(candidate, []Review{
 		seatedReview(t, config, config.Models.Reviewers[0], 0, candidate, source, request), other,
-	}, source, request, config)
+	}, source, request, config, nil)
 	if err != nil {
 		t.Fatalf("decide refused the seats where the configuration put them: %v", err)
 	}

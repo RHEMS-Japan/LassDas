@@ -112,8 +112,7 @@ func modelFailureSentence(comment string) string {
 // of a requester unmeasured.
 func TestThePublishCardNeverEndsARunAsAModelFailure(t *testing.T) {
 	action, code := classifyChainFailure(runtime.StagePublish,
-		func() (string, error) { return "", nil }, func() (string, error) { return "", nil },
-		func() bool { return false })
+		func() (string, error) { return "", nil }, func() bool { return false })
 	if action != actionReport || code != hook.TerminalReleaseFailed {
 		t.Fatalf("publish failure = (%v, %q), want a release failure", action, code)
 	}

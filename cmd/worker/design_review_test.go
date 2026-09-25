@@ -457,7 +457,7 @@ func TestDecideDesignSealsTheRoundOutcome(t *testing.T) {
 		t.Fatalf("approved decision: %+v", decision)
 	}
 	reviews := []investigate.DesignReview{approved.readReview(t, "design-review-a"), approved.readReview(t, "design-review-b")}
-	if err := decision.Validate(approved.identity, investigate.DesignSubject(approved.design), reviews, approved.config.DesignRounds(), 2); err != nil {
+	if err := decision.Validate(approved.identity, investigate.DesignSubject(approved.design), reviews, approved.config.StageCeiling(), 2); err != nil {
 		t.Fatalf("the sealed decision was rejected: %v", err)
 	}
 	// One review is not a decision; a round the subject is not in is refused; a
@@ -495,7 +495,9 @@ func TestDecideDesignSealsTheRoundOutcome(t *testing.T) {
 		t.Fatalf("revise decision outcome = %q", outcome)
 	}
 
-	// At the configured round limit the same veto ends the delivery honestly.
+	// A destination declaring one design round no longer turns the same
+	// veto into an ending. Rounds are not counted out, so the veto stays a
+	// veto and the design is tried again.
 	last := newDesignFixture(t, objectUnderApproachLens, func(_ string, config *worker.Config) { config.DesignMaxRounds = 1 })
 	for _, reviewer := range []string{"review-a", "review-b"} {
 		if err := last.review(t, "design-"+reviewer, reviewer, true); err != nil {
@@ -505,8 +507,8 @@ func TestDecideDesignSealsTheRoundOutcome(t *testing.T) {
 	if err := last.decide(t, "design-decision", 1, true, "design-review-a", "design-review-b"); err != nil {
 		t.Fatal(err)
 	}
-	if outcome := last.readDecision(t, "design-decision").Outcome; outcome != investigate.OutcomeNonconverged {
-		t.Fatalf("last-round decision outcome = %q", outcome)
+	if outcome := last.readDecision(t, "design-decision").Outcome; outcome != investigate.OutcomeRevise {
+		t.Fatalf("decision at the declared budget = %q, want revise", outcome)
 	}
 }
 
