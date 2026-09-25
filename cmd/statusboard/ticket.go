@@ -51,11 +51,10 @@ var recordServing sync.Mutex
 
 // boardRow is the board.json row as the ticket page needs it.
 type boardRow struct {
-	WorkspacePath string          `json:"workspace_path"`
-	DeliveryID    string          `json:"delivery_id"`
-	IssueKey      string          `json:"issue_key"`
-	ClaimedAt     int64           `json:"claimed_at_ms"`
-	Raw           json.RawMessage `json:"-"`
+	DeliveryID string          `json:"delivery_id"`
+	IssueKey   string          `json:"issue_key"`
+	ClaimedAt  int64           `json:"claimed_at_ms"`
+	Raw        json.RawMessage `json:"-"`
 }
 
 // runsRoot is where the run directories live: LASSDAS_RUNS_ROOT, or the
@@ -132,13 +131,11 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "この票は盤面にありません", http.StatusNotFound)
 		return
 	}
+	// The delivery's own directory under the configured runs root, which
+	// every card of its chain shares. No row and no request names a
+	// directory: the id is the only thing that comes from outside, and it
+	// is reduced to one path element.
 	runDir := filepath.Join(s.runsRoot(), filepath.Base(row.DeliveryID))
-	// The runner's workspace is supplied by the attendant's canonical
-	// Hermes listing, never by a client. Old cards keep their existing
-	// directories; observing them must not move or recreate their records.
-	if filepath.IsAbs(row.WorkspacePath) && filepath.Clean(row.WorkspacePath) != string(os.PathSeparator) {
-		runDir = filepath.Clean(row.WorkspacePath)
-	}
 	if rest == "live" || strings.HasPrefix(rest, "live/") {
 		s.serveTicketLive(w, r, runDir, strings.TrimPrefix(strings.TrimPrefix(rest, "live"), "/"))
 		return

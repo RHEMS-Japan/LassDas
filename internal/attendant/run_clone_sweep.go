@@ -53,16 +53,15 @@ var sweepRunClones = runner.SweepRunClones
 // space left on device" (live 2026-09-25).
 //
 // Nothing is removed until the directory has shown itself to be that
-// run's own. Neither path that offers one is trusted for this: the runs
-// root is configuration and the card's workspace is a field on a board,
-// and both are strings that can name any directory on the volume. What
-// is asked of the directory instead is that it hold that delivery's
-// sealed envelope, which the preparation writes into a directory it has
-// just cleared, before the first clone is made — so a directory with
-// clones in it holds the envelope of the run that made them, and a
-// directory that holds someone else's, or none, is not this run's and is
-// left whole. The three names are then joined straight onto it, so
-// nothing outside it is ever reached.
+// run's own. The path that offers one is not trusted for this: the runs
+// root is configuration, a string that can name any directory on the
+// volume. What is asked of the directory instead is that it hold that
+// delivery's sealed envelope, which the preparation writes into a
+// directory it has just cleared, before the first clone is made — so a
+// directory with clones in it holds the envelope of the run that made
+// them, and a directory that holds someone else's, or none, is not this
+// run's and is left whole. The three names are then joined straight onto
+// it, so nothing outside it is ever reached.
 //
 // A refusal is written down once for the run and nothing else happens:
 // the next tick finds the same directory and tries again. The sweep never
@@ -70,13 +69,11 @@ var sweepRunClones = runner.SweepRunClones
 // cleared is a reason to say so every minute, not a reason to stop
 // receiving tickets — and no tick spends longer than reclaimBudget
 // waiting for a tree to be handed back.
-func SweepFinishedRunClones(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, logger Logger) error {
+func SweepFinishedRunClones(ctx context.Context, config runtime.Config, services *runtime.Services, logger Logger) error {
 	runs, err := services.Store.ScanRuns(ctx)
 	if err != nil {
 		return err
 	}
-	var tasks []runtime.BoardTask
-	listed := false
 	unnamed, unowned := 0, 0
 	// The budget's clock starts at the first run that actually needs a
 	// tree handed back, not at the top of a pass that may find nothing to
@@ -95,23 +92,7 @@ func SweepFinishedRunClones(ctx context.Context, config runtime.Config, services
 		if run.State != finishedRunState {
 			continue
 		}
-		directory := ""
-		if config.OrchestrationCards() {
-			directory = finishedRunDirectory(config, run.DeliveryID)
-		} else {
-			// The board is read at most once a tick, and only once a
-			// finished run has actually been found.
-			if !listed {
-				if tasks, err = hermes.ListBoardTasks(ctx); err != nil {
-					return err
-				}
-				listed = true
-			}
-			directory, _ = runnerWorkspace(tasks, run.DeliveryID)
-			if directory == "" {
-				directory = finishedRunDirectory(config, run.DeliveryID)
-			}
-		}
+		directory := finishedRunDirectory(config, run.DeliveryID)
 		if directory == "" {
 			unnamed++
 			continue

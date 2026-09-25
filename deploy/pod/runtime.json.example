@@ -31,11 +31,10 @@
   "browsercheck_bin": "",
   "hermes_bin": "/usr/local/bin/hermes",
   "hermes_board": "lassdas",
-  "hermes_profile": "lassdas-runner",
   "worker_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
   "controller_sha256": "<from /etc/lassdas/tool-pins.txt in the image>",
 
-  "orchestration": "runner",
+  "orchestration": "cards",
   "chain": {
     "runs_root": "/data/runs",
     "failure_streak_limit": 3,

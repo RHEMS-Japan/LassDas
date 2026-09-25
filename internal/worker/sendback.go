@@ -22,9 +22,9 @@ import (
 // code, and the report the agent wrote is what the requester reads.
 
 // implementingRunRecords are the run records an implementation round may
-// leave, in the order they are looked for. The cards orchestration names
-// them for the role that ran; the one-process mode writes the implement
-// verb's own record.
+// leave, in the order they are looked for: the card names its record for
+// the role that ran, and the seal that follows writes the implement verb's
+// own record beside it.
 var implementingRunRecords = []string{"implementer-run.json", "applier-run.json", "implement-run.json"}
 
 // IsSendBack reports whether an implementing run returned the work instead

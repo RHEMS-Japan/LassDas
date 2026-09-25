@@ -9,12 +9,11 @@ import (
 )
 
 // runImplementInstruction renders the implementer's instruction into a file,
-// for orchestrations that launch the implementing agent themselves (the M2
-// cards mode, where the implement card is a native kanban worker): the
-// prompt stays kernel-authored even when the launch is not, and the earlier
-// rounds' objections ride in exactly as the in-process implementer receives
-// them. The file is plainly overwritten — each round's instruction replaces
-// the one before it on the shared run directory.
+// because the implement card is a native kanban worker and launches the
+// implementing agent itself: the prompt stays kernel-authored even when the
+// launch is not, and the earlier rounds' objections ride in with it. The
+// file is plainly overwritten — each round's instruction replaces the one
+// before it on the shared run directory.
 func runImplementInstruction(args []string) error {
 	flags := commandFlags("implement-instruction")
 	configPath := flags.String("config", "", "")

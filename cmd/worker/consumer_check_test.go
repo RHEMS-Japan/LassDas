@@ -71,6 +71,14 @@ func TestCheckRuntimeCLIOpensLocalServicesWithoutPolling(t *testing.T) {
 		AutomationRunID:    "run_20260908_" + strings.Repeat("a", 24),
 		Tracker:            runtimecfg.TrackerConfig{Origin: "https://example.backlog.com", SpaceKey: "example", ProjectID: 100, ProjectKey: "TKT", AllowedCreatorID: 7, AllowedActivityType: 1},
 		ReportDestinations: []hook.ReportDestination{{Repository: "example/consumer", Delivery: "pull_request", StagingOrigin: "https://stg.example.com", ProductionOrigin: "https://example.com"}},
+		Orchestration:      "cards",
+		Chain: runtimecfg.ChainConfig{
+			RunsRoot: filepath.Join(directory, "runs"), TargetTokenPath: filepath.Join(directory, "target-token"),
+			Profiles: runtimecfg.ChainProfiles{
+				Implementer: "lassdas-implementer", ReviewA: "lassdas-review-a", ReviewB: "lassdas-review-b",
+				Validate: "lassdas-validate", Publish: "lassdas-publish",
+			},
+		},
 	}
 	path := filepath.Join(directory, "runtime.json")
 	writeTestJSON(t, path, config)
@@ -92,5 +100,16 @@ func TestCheckRuntimeCLIOpensLocalServicesWithoutPolling(t *testing.T) {
 	resumed, _ := os.ReadFile(filepath.Join(directory, "route.key"))
 	if string(resumed) != string(key) {
 		t.Fatal("runtime resume replaced its route key")
+	}
+	// The operator's own preflight is where the retired mode has to be
+	// caught: the pod that still asks for it is told what to change here,
+	// before an image that cannot run it is ever started.
+	retired := config
+	retired.Orchestration = "runner"
+	retiredPath := filepath.Join(directory, "runtime-runner.json")
+	writeTestJSON(t, retiredPath, retired)
+	err = run(context.Background(), []string{"check-runtime", "--config", retiredPath})
+	if err == nil || err.Error() != runtimecfg.OrchestrationRefusal {
+		t.Fatalf("check-runtime accepted the retired mode: %v", err)
 	}
 }

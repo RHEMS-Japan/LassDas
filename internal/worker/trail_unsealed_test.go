@@ -62,8 +62,8 @@ func TestTheTrailOfARoundThatSealedNothingCarriesTheImplementersReport(t *testin
 	}
 }
 
-// The one-process mode names the implement verb's own record, the cards
-// name the role that ran, and a later round is the one that stopped.
+// The seal names the implement verb's own record, the card names the role
+// that ran, and a later round is the one that stopped.
 func TestTheUnsealedRoundIsTheNewestOneWithAReport(t *testing.T) {
 	history := t.TempDir()
 	config := Config{MaxStages: 3}

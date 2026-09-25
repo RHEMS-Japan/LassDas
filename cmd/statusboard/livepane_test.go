@@ -42,12 +42,12 @@ func TestLivePaneBehaviour(t *testing.T) {
 }
 
 // Every card entry point clears the record that says which step is
-// running. Only the one-process mode did, so in the cards the record
-// outlived the card and the ticket page pulsed "いま動いています" beside a
-// finished run until the two-hour bound expired (review of #200).
+// running. Where one did not, the record outlived the card and the ticket
+// page pulsed "いま動いています" beside a finished run until the two-hour
+// bound expired (review of #200).
 func TestEveryCardEntryPointClearsTheRunningStep(t *testing.T) {
-	// Found rather than named: a fourth entry point added later would not
-	// be in a list of three, and would keep the record alive again.
+	// Found rather than named: an entry point added later would not be in
+	// a list, and would keep the record alive again.
 	entries, err := os.ReadDir(filepath.Join("..", "runner"))
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestEveryCardEntryPointClearsTheRunningStep(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A file that builds a Pipeline and runs something on it is an
-		// entry point; main.go's one-process mode clears it already.
+		// entry point.
 		source := string(body)
 		if !strings.Contains(source, "&runner.Pipeline{") || !strings.Contains(source, "pipeline.Run") {
 			continue
@@ -72,7 +72,7 @@ func TestEveryCardEntryPointClearsTheRunningStep(t *testing.T) {
 			t.Errorf("cmd/runner/%s runs a card and never clears the running step", entry.Name())
 		}
 	}
-	if checked < 4 {
+	if checked < 3 {
 		t.Errorf("only %d entry points were found; this check is looking in the wrong place", checked)
 	}
 }

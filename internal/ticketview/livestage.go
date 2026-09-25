@@ -65,14 +65,12 @@ var liveStages = map[string]string{
 
 	// 実装 — the implement and apply cards: the instruction and the agent
 	// that carries it out.
-	"implement":             "implement",
 	"implement-instruction": "implement",
 	"run-instruction":       "implement",
 
 	// 審査 — the review cards. The seal runs on the first of them, which is
 	// why it is here and not with the implementation it records.
 	"agent-review":   "review",
-	"review":         "review",
 	"seal-candidate": "review",
 
 	// 検査 — the validate card and the checks card: the round's verdict,

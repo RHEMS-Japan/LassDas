@@ -145,10 +145,9 @@ func (s *consoleServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 // intakePausedNow reads the operator's pause as the config file says now
-// (the cards attendant re-reads it the same way); it is meaningless under
-// any other orchestration.
+// (the attendant re-reads it the same way).
 func (s *consoleServer) intakePausedNow() bool {
-	if s.runtimeConfig == nil || !s.runtimeConfig.OrchestrationCards() {
+	if s.runtimeConfig == nil {
 		return false
 	}
 	s.pauseMu.Lock()

@@ -54,9 +54,8 @@ func writeRunnerConfig(t *testing.T, c worker.Config) string {
 	return path
 }
 
-// Every orchestration step is real; only the external worker/controller
-// binaries and remote clone are substituted. The call log tests that the
-// configured judges reach implementation, decision, validation and publish.
+// Every step is real; only the external worker/controller binaries and the
+// remote clone are substituted.
 func configuredRunner(t *testing.T, c worker.Config, finalOutcome string) (*Pipeline, string) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
@@ -110,136 +109,54 @@ exit 0
 	return p, log
 }
 
-func TestRunnerAgentSetupUsesLaunchConfigurationNotReviewerName(t *testing.T) {
-	for _, mode := range []string{"runner", "cards"} {
-		t.Run(mode, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			c := runnerFixtureConfig(t, 2, 3, true)
-			// Even the old identity can now be backed by a Hermes profile.
-			c.Models.Reviewers[1].ID = "codex-adversarial"
-			c.Agents.ReviewerAgents[1].ReviewerID = "codex-adversarial"
-			p := &Pipeline{Config: runtime.Config{ConsumerConfigPath: writeRunnerConfig(t, c), Orchestration: mode}, Workspace: t.TempDir()}
-			stale := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
-			if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(stale, []byte("old model"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := p.writeAgentConfigs(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := os.Stat(stale); !os.IsNotExist(err) {
-				t.Fatal("unused provider file remains")
-			}
-			if _, err := os.Stat(p.path("agent-mcp.json")); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestRunnerUsesConfiguredJudgesThroughDelivery(t *testing.T) {
-	for _, tc := range []struct {
-		count, rounds int
-		bound         bool
-	}{{2, 2, true}, {4, 5, true}, {1, 1, true}, {2, 1, false}} {
-		t.Run(fmt.Sprintf("judges%d-rounds%d-bound%v", tc.count, tc.rounds, tc.bound), func(t *testing.T) {
-			c := runnerFixtureConfig(t, tc.count, tc.rounds, tc.bound)
-			p, log := configuredRunner(t, c, "converged")
-			outcome, err := p.Run(context.Background())
-			if err != nil || outcome.Code != "" || outcome.Stage != tc.rounds || outcome.Evidence["pull_request_url"] == "" {
-				t.Fatalf("Run = %+v, %v", outcome, err)
-			}
-			raw, err := os.ReadFile(log)
-			if err != nil {
-				t.Fatal(err)
-			}
-			calls := string(raw)
-			for _, reviewer := range c.Models.Reviewers {
-				wantVerb := "agent-review"
-				if !tc.bound && reviewer.ID == "claude-correctness" {
-					wantVerb = "review"
-				}
-				count := 0
-				for _, line := range strings.Split(calls, "\n") {
-					if strings.HasPrefix(line, wantVerb+" ") && strings.Contains(line, "--reviewer "+reviewer.ID+" ") {
-						count++
-					}
-					for _, verb := range []string{"decide", "verify-publish-gate", "publish-feature"} {
-						if strings.HasPrefix(line, verb+" ") && !strings.Contains(line, "/"+reviewer.ID+".json") {
-							t.Fatalf("%s lost reviewer %s: %s", verb, reviewer.ID, line)
-						}
-					}
-					if strings.HasPrefix(line, "implement ") && !strings.Contains(line, "--stage 1 ") && !strings.Contains(line, "--previous-findings "+p.path("history/stage-")) {
-						t.Fatalf("revision lost findings: %s", line)
-					}
-				}
-				if count != tc.rounds {
-					t.Fatalf("reviewer %s ran %d times, expected %d", reviewer.ID, count, tc.rounds)
-				}
-				if tc.rounds > 1 && !strings.Contains(calls, "--previous-findings "+p.path("history/stage-1/"+reviewer.ID+".json")) {
-					t.Fatalf("previous findings lost for %s", reviewer.ID)
-				}
-			}
-			if !strings.Contains(calls, "verify-publish-gate ") || !strings.Contains(calls, "publish-feature ") {
-				t.Fatal("delivery gates were not exercised")
-			}
-			if tc.bound && strings.Contains(calls, "codex-adversarial") {
-				t.Fatal("fixed reviewer leaked into configured path")
-			}
-		})
-	}
-}
-
-func TestRunnerStopsAtConfiguredLimitWithoutPublishing(t *testing.T) {
-	c := runnerFixtureConfig(t, 2, 2, true)
-	p, log := configuredRunner(t, c, "nonconverged")
-	outcome, err := p.Run(context.Background())
-	if err != nil || outcome.Code != hook.TerminalNonconverged {
-		t.Fatalf("Run = %+v, %v", outcome, err)
-	}
-	raw, err := os.ReadFile(log)
-	if err != nil {
+func TestAgentSetupUsesLaunchConfigurationNotReviewerName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := runnerFixtureConfig(t, 2, 3, true)
+	// Even the old identity can now be backed by a Hermes profile.
+	c.Models.Reviewers[1].ID = "codex-adversarial"
+	c.Agents.ReviewerAgents[1].ReviewerID = "codex-adversarial"
+	p := &Pipeline{Config: runtime.Config{ConsumerConfigPath: writeRunnerConfig(t, c), Orchestration: "cards"}, Workspace: t.TempDir()}
+	stale := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "publish-feature") || strings.Contains(string(raw), "--stage 3") {
-		t.Fatalf("ran beyond convergence bound: %s", raw)
+	if err := os.WriteFile(stale, []byte("old model"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "impasse-question ") {
-		t.Fatal("no impasse question was attempted")
+	if err := p.writeAgentConfigs(); err != nil {
+		t.Fatal(err)
 	}
-	for _, reviewer := range c.Models.Reviewers {
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.HasPrefix(line, "impasse-question ") && !strings.Contains(line, "/"+reviewer.ID+".json") {
-				t.Fatalf("impasse lost %s", reviewer.ID)
-			}
-		}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("unused provider file remains")
+	}
+	if _, err := os.Stat(p.path("agent-mcp.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestRunnerDoesNotTrustAPreplacedReview(t *testing.T) {
+// A card that is dispatched again finds its own sealed review and leaves
+// it alone: redoing it would double the judge's spend.
+func TestAResumedCardKeepsItsSealedReview(t *testing.T) {
 	p := chainStagePipeline(t)
 	sealStageFiles(t, p, 1, "")
 	path := p.path("history/stage-1/judge-a.json")
 	if err := os.WriteFile(path, []byte(`{"verdict":"pass"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.reviewSealed(context.Background(), []string{"judge-a"}, 0, p.path("repo"), strings.Repeat("a", 40), 1, false); err == nil {
-		t.Fatal("runner trusted a review before starting its reviewer")
-	}
 	if err := p.chainReviewSealed(context.Background(), []string{"judge-a"}, 0, p.path("repo"), strings.Repeat("a", 40), 1); err != nil {
 		t.Fatalf("existing card resume behavior changed: %v", err)
 	}
 }
 
-func TestRunnerSetupFailureReachesRequesterAndBoard(t *testing.T) {
+// A run whose agents cannot be configured stops before the implement card
+// exists, and the reason reaches the requester's trail and the board.
+func TestSetupFailureReachesRequesterAndBoard(t *testing.T) {
 	c := runnerFixtureConfig(t, 2, 1, false)
 	c.Models.Reviewers[1].Effort = "" // Valid endpoint, insufficient for the legacy CLI provider file.
 	p, log := configuredRunner(t, c, "converged")
-	outcome, err := p.Run(context.Background())
+	_, outcome, err := p.PrepareChainRun(context.Background())
 	if err == nil || outcome.Code != hook.TerminalInternalFailed || outcome.Evidence["failed_step"] == "" {
-		t.Fatalf("Run = %+v, %v", outcome, err)
+		t.Fatalf("PrepareChainRun = %+v, %v", outcome, err)
 	}
 	trail := readReceptionTrail(t, p)
 	if !strings.Contains(trail, "推論設定") || !p.trailWritten {

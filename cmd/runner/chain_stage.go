@@ -12,8 +12,8 @@ import (
 	"automation.internal/ticket-ingress/internal/runtime"
 )
 
-// runChainStage is the cards orchestration's per-card entry: every stage
-// profile's worker.command invokes this binary as `runner chain-stage
+// runChainStage is the per-card entry: every stage profile's
+// worker.command invokes this binary as `runner chain-stage
 // --stage <name>`, and the kanban dispatcher supplies the shared run
 // directory in HERMES_KANBAN_WORKSPACE. No ledger access happens here —
 // claims, questions and terminal reports belong to the attendant — so a
@@ -31,9 +31,6 @@ func runChainStage(ctx context.Context, arguments []string) error {
 	config, err := runtime.Load(*configPath)
 	if err != nil {
 		return err
-	}
-	if !config.OrchestrationCards() {
-		return errors.New("chain-stage requires the cards orchestration")
 	}
 	workspace := os.Getenv("HERMES_KANBAN_WORKSPACE")
 	if workspace == "" {
@@ -58,10 +55,9 @@ func runChainStage(ctx context.Context, arguments []string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	pipeline := &runner.Pipeline{Config: config, Workspace: workspace, TargetToken: token, Logger: logger}
 	// Whatever this card was running is no longer running when it returns.
-	// Only the one-process mode cleared this, so in the cards the record
-	// outlived every card and the ticket page kept a pulsing "いま動いて
-	// います" beside a run that had finished, for two hours (review of
-	// #200).
+	// Where this was missing, the record outlived every card and the
+	// ticket page kept a pulsing "いま動いています" beside a run that had
+	// finished, for two hours (review of #200).
 	defer runner.ClearCurrentStep(workspace)
 	return pipeline.RunChainStage(ctx, *stage)
 }

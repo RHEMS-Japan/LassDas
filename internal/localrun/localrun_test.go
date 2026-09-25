@@ -30,7 +30,7 @@ func fixture(t *testing.T) Instance {
 		"ledger_path": "/data/ledger.db", "consumer_config_path": "/etc/lassdas/config/m1-consumer.json", "knowledge_root": "/data/instance",
 		"worker_bin": "/usr/local/bin/worker", "controller_bin": "/usr/local/bin/controller", "hermes_bin": "/usr/local/bin/hermes",
 		"worker_sha256": strings.Repeat("c", 64), "controller_sha256": strings.Repeat("d", 64),
-		"hermes_board": "project-example", "hermes_profile": "lassdas-runner", "orchestration": "cards",
+		"hermes_board": "project-example", "orchestration": "cards",
 		"automation_run_id":   "run_20260908_" + strings.Repeat("ab", 12),
 		"identity":            map[string]any{"repository_id": 1, "repository": "example/runtime", "workflow_ref": "example/runtime/local-runtime@" + i.EngineSHA, "engine_sha": i.EngineSHA},
 		"tracker":             map[string]any{"origin": "https://example.backlog.com", "space_key": "example", "project_id": 1, "project_key": "EXAMPLE", "allowed_creator_id": 7, "allowed_activity_type": 1},

@@ -127,9 +127,8 @@ func pruneClones(workspace string, reclaim func(string)) CloneSweep {
 // sealed, and writes down what happened directory by directory.
 //
 // It is done here because this is the line every ending the run itself
-// produces passes through in both orchestrations — the pipeline reports
-// its own outcome in the runner mode, the attendant reports every stage's
-// in the cards mode, and both report through this method — and because a
+// produces passes through — the attendant reports every stage's outcome
+// through this method — and because a
 // run that is not finished never reaches it: a run with a question to ask
 // posts the question instead of reporting, and a report the store would
 // not seal returns above this call and leaves the directory whole for the
