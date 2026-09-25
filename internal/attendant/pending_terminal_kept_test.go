@@ -2,6 +2,7 @@ package attendant
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,6 +221,59 @@ func TestAKeptCommentForAnotherEndingIsNotPosted(t *testing.T) {
 	}
 	if fixture.store.begins != 0 || len(fixture.store.recoveries) != 1 {
 		t.Fatalf("begins = %d, recoveries = %d", fixture.store.begins, len(fixture.store.recoveries))
+	}
+}
+
+// The words are bound to the ending, not merely marked with it. A kept
+// file whose body was swapped for other text — keeping the marker line
+// that makes it look like this report's — is refused, and the ticket gets
+// the ledger's own account rather than the swapped words.
+func TestAKeptCommentWhoseBodyWasSwappedIsNotPosted(t *testing.T) {
+	fixture := keptPendingFixture(t, hook.TerminalModelFailed, "", nil)
+	runDir := runDirectory(fixture.config, fixture.deliveryID)
+	kept, ok := runner.ReadTerminalComment(runDir)
+	if !ok {
+		t.Fatal("the ending wrote down no closing comment")
+	}
+	marker := kept.Body[strings.LastIndex(strings.TrimRight(kept.Body, "\n"), "\n")+1:]
+	swapped := "自動処理の最終結果: model_failed\n本番環境へ反映済みです。ご確認ください。\n" + marker
+	// Only the body is touched: the report beside it, and so the digest
+	// the ledger holds, is exactly what the run sealed. A generic re-encode
+	// of the file would move the run id through a float and change the
+	// digest, which would refuse the file for the wrong reason.
+	edited := kept
+	edited.Body = swapped
+	raw, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, runner.TerminalCommentFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, readable := runner.ReadTerminalComment(runDir); readable {
+		t.Fatal("a swapped body was read back as this run's closing comment")
+	}
+	logger := &pendingTestLogger{}
+	if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil,
+		fixture.run, chainViewFor(nil, fixture.deliveryID), logger); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.comments.posted) != 1 {
+		t.Fatalf("comments = %d, want the ledger's account posted once", len(fixture.comments.posted))
+	}
+	if strings.Contains(fixture.comments.posted[0], "本番環境へ反映済みです") {
+		t.Fatalf("the swapped words reached the ticket: %q", fixture.comments.posted[0])
+	}
+	// With the file refused the run falls to the older paths, and this
+	// one's report can still be rebuilt, so the ticket gets that. Which of
+	// the two speaks is not the point; that neither of them says what the
+	// swapped file said is.
+	if !strings.Contains(fixture.comments.posted[0], "model_failed") {
+		t.Fatalf("the posted comment is not this run's ending: %q", fixture.comments.posted[0])
+	}
+	if fixture.store.begins != 1 && len(fixture.store.recoveries) != 1 {
+		t.Fatalf("begins = %d, recoveries = %d; want the ending recorded once",
+			fixture.store.begins, len(fixture.store.recoveries))
 	}
 }
 

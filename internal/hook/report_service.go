@@ -195,12 +195,18 @@ func (s *TerminalReportService) processTerminalReport(ctx context.Context, repor
 		return s.reportResult(DecisionInternal, "terminal_report_state_invalid", report.DeliveryID)
 	}
 
-	// A kept comment is the closing one by construction: it was rendered
-	// when the ending was decided, which is past anything this report
-	// could still be followed by, so nothing here is a continuation. It
-	// also carries the prose — the run record, the cost line — that the
+	// Whether the delivery has more to do is a fact about the run, so it
+	// is read the same way whichever text reports it: the board shows such
+	// a run as still running either way.
+	//
+	// The wording is the part that differs. A kept comment is the closing
+	// one by construction — it was rendered when the ending was decided,
+	// which is past anything this report could still be followed by — and
+	// on this path that is the right thing to say, because the re-send
+	// happens after whatever was still to come has already happened. It
+	// also carries the prose, the run record and the cost line, that the
 	// sealed record never held and this path could not rebuild.
-	deliveryContinues := kept == "" && s.deliveryContinues(report, binding)
+	deliveryContinues := s.deliveryContinues(report, binding)
 	comment := kept
 	if kept == "" {
 		comment = terminalCommentContent(report, reportDigest, deliveryContinues)

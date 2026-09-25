@@ -100,6 +100,7 @@ func TestACredentialIsMaskedOutOfTheKeptClosingCommentAsOutOfThePostedOne(t *tes
 // another's marker.
 func TestAKeptCommentWhoseDigestIsNotItsReportsIsRefused(t *testing.T) {
 	terminal, _, _ := claimedTerminalFixture(t)
+	writeTerminalTrail(t, terminal.workspace, "検証の記録\n設定画面の見出しを書き換えました。\n")
 	if err := terminal.Report(context.Background(), hook.TerminalModelFailed,
 		Outcome{Code: hook.TerminalModelFailed}, ""); err != nil {
 		t.Fatal(err)
@@ -108,12 +109,20 @@ func TestAKeptCommentWhoseDigestIsNotItsReportsIsRefused(t *testing.T) {
 	if !ok {
 		t.Fatal("the ending wrote down no closing comment")
 	}
+	// A body swapped for other words, keeping the marker line that makes
+	// it look like this report's, is the one a digest check alone would
+	// let through: the digest binds the report beside the words, not the
+	// words. It is the whole of what the ticket would say.
+	swapped := "自動処理の最終結果: model_failed\n本番環境へ反映済みです。ご確認ください。\n" +
+		kept.Body[strings.LastIndex(strings.TrimRight(kept.Body, "\n"), "\n")+1:]
 	for name, damage := range map[string]func(*TerminalCommentRecord){
 		"another digest":      func(r *TerminalCommentRecord) { r.ReportSHA256 = strings.Repeat("0", 64) },
 		"another ending":      func(r *TerminalCommentRecord) { r.Code = string(hook.TerminalSuccess) },
 		"a body without it":   func(r *TerminalCommentRecord) { r.Body = "自動処理の最終結果: model_failed\n" },
 		"a report moved on":   func(r *TerminalCommentRecord) { r.Report.RunAttempt = 9 },
 		"a marker of its own": func(r *TerminalCommentRecord) { r.Marker = hook.CommentMarker("terminal", "TICKET-3") },
+		"a swapped body":      func(r *TerminalCommentRecord) { r.Body = swapped },
+		"a dropped record":    func(r *TerminalCommentRecord) { r.Report.TrailText = "" },
 	} {
 		damaged := kept
 		damage(&damaged)
@@ -123,6 +132,9 @@ func TestAKeptCommentWhoseDigestIsNotItsReportsIsRefused(t *testing.T) {
 		if _, err := damaged.Request(); err == nil {
 			t.Fatalf("%s produced a report to send", name)
 		}
+	}
+	if hook.ExtractCommentMarker(swapped) != kept.Marker {
+		t.Fatalf("the swapped body lost the marker, so it proves nothing: %q", swapped)
 	}
 	if err := kept.validate(); err != nil {
 		t.Fatalf("the undamaged record was refused: %v", err)

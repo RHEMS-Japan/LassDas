@@ -33,22 +33,30 @@ const TerminalCommentFile = "terminal-comment.json"
 
 // maxTerminalCommentRecordBytes bounds the file on the way in. The body
 // inside it is held to the tracker's own limit and the report beside it to
-// the envelope's, so twice their sum is room to spare for the encoding and
-// still refuses a file that is not this.
-const maxTerminalCommentRecordBytes = 2 * (hook.MaxTrackerCommentBytes + hook.MaxTerminalReportRequestBytes)
+// the envelope's; JSON can roughly double either one, since a record is
+// mostly lines and every newline it carries costs two bytes encoded. Four
+// times their sum is room to spare for that and still refuses a file that
+// is not this.
+const maxTerminalCommentRecordBytes = 4 * (hook.MaxTrackerCommentBytes + hook.MaxTerminalReportRequestBytes)
 
 // TerminalCommentRecord is one run's closing comment as it was decided.
 //
 // Body is the whole comment, footer and marker included, exactly as it
 // would be posted. Report is what the ledger was asked to seal, and
 // ReportSHA256 is the digest it sealed — which is also what the row holds.
-// The digest is not believed: it is taken again over the report below, and
-// a file whose parts disagree is not posted.
 //
-// The report's own prose — the run record, the cost line, what the
-// delivery made possible — is left out of it. None of that is part of the
-// sealed record, all of it is already in the body, and keeping a second
-// copy would only be a second thing to drift.
+// None of it is believed. The digest is taken again over the report, and
+// the body is rendered again from that same report and compared: a file
+// whose parts disagree is not posted. Both halves matter. The digest alone
+// binds the report, not the words — a body swapped for some other text,
+// keeping the marker line that makes it look like this report's, would
+// pass a digest check and be posted as the run's own account of itself.
+// Rendering it again is what ties the words to the ending.
+//
+// That is why the report keeps its prose — the run record, the cost line,
+// what the delivery made possible. None of it is in the sealed record, but
+// all of it is in the body, so without it the body could not be rendered
+// again and there would be nothing to compare.
 type TerminalCommentRecord struct {
 	Code         string                     `json:"code"`
 	ReportSHA256 string                     `json:"report_sha256"`
@@ -81,13 +89,10 @@ func (t *Terminal) persistTerminalComment(report hook.TerminalReportRequest) {
 	// kept copy and the posted one are the same words — including whatever
 	// the card that wrote each part had already masked out of it.
 	body := hook.TerminalCommentContent(stamped, digest)
-	// The words are kept; the prose the words were made from is not.
-	bare := stamped
-	bare.TrailText, bare.SpendText, bare.OutcomeText, bare.AssumptionsText = "", "", "", ""
 	kept := TerminalCommentRecord{
 		Code: string(stamped.Code), ReportSHA256: digest,
 		Marker: hook.ExtractCommentMarker(body), Body: body,
-		Report: bare, RecordedAt: stamped.IssuedAt,
+		Report: stamped, RecordedAt: stamped.IssuedAt,
 	}
 	if err := kept.validate(); err != nil {
 		t.logger.Error("closing comment not written down", "reason", err.Error())
@@ -138,10 +143,8 @@ func ReadTerminalComment(runDir string) (TerminalCommentRecord, bool) {
 
 // validate holds the record to what makes it safe to post without reading
 // anything else: a body the tracker will accept, a marker that is really
-// the marker on that body, and a digest the sealed record actually hashes
-// to. The last one is the binding — a body whose digest was written down
-// from somewhere other than its own record could be posted against a
-// different ending.
+// the marker on that body, a report that hashes to the digest beside it,
+// and a body that is what that report renders.
 func (r TerminalCommentRecord) validate() error {
 	if r.Body == "" || len(r.Body) > hook.MaxTrackerCommentBytes {
 		return errors.New("the closing comment is empty or over the tracker's limit")
@@ -158,11 +161,17 @@ func (r TerminalCommentRecord) validate() error {
 	if err != nil {
 		return fmt.Errorf("the report beside the closing comment is not a report: %w", err)
 	}
-	// The binding. A body kept beside a report that seals to some other
-	// digest is a body that could be posted against a different ending, so
-	// it is refused and the caller reports from the ledger instead.
-	if hook.TerminalReportDigest(record) != r.ReportSHA256 {
+	// The binding, in two parts. The report has to be the one the ledger
+	// sealed, and the words have to be that report's own — rendered again
+	// here from it, rather than trusted because a marker at the end of
+	// them says they are. Either failing means the caller reports from the
+	// ledger instead of posting this.
+	digest := hook.TerminalReportDigest(record)
+	if digest != r.ReportSHA256 {
 		return errors.New("the closing comment's digest is not its report's")
+	}
+	if r.Body != hook.TerminalCommentContent(stamped, digest) {
+		return errors.New("the closing comment is not the one this report renders")
 	}
 	return nil
 }
