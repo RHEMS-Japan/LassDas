@@ -339,6 +339,13 @@ func (p *Pipeline) readJSONField(name string, keys ...string) (string, error) {
 	}
 }
 
+// ReceptionAgainFile is the note a delivery carries when its reception was
+// run a second time because the decision the first one sealed could not be
+// read. It lives in the run directory and survives Prepare's clearing, so
+// that the regeneration it records can happen once and never twice
+// (internal/attendant/reception_again.go).
+const ReceptionAgainFile = "reception-again.json"
+
 // Prepare clears the workspace and materializes the claimed envelope. The
 // workflow got a fresh runner filesystem per attempt; a Hermes task keeps
 // its workspace across re-dispatches, so a retried card must not see the
@@ -356,6 +363,17 @@ func (p *Pipeline) Prepare() error {
 		if entry.Name() == ".agent-lend.lock" {
 			// The launcher's lend lock beside the workspace stays: an
 			// earlier launch may still hold it while returning the tree.
+			continue
+		}
+		if entry.Name() == ReceptionAgainFile {
+			// The note that this delivery's reception has already been run
+			// a second time. Everything else here is cleared so that a
+			// restarted delivery re-derives from the ticket instead of
+			// from what the last attempt left; this has to outlive the
+			// clearing, because it is the whole bound on the regeneration
+			// it records. Without it the second unreadable decision would
+			// ask for a third reception, and a fourth, and the delivery
+			// would never end.
 			continue
 		}
 		if err := forceRemoveAll(filepath.Join(p.Workspace, entry.Name())); err != nil {

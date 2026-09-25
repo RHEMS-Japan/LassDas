@@ -65,6 +65,13 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	if readPlanArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &decision) == nil {
 		facts.NeedsDesign, facts.DesignReason, facts.RequestKind = decision.NeedsDesign, decision.DesignReason, decision.RequestKind
 	}
+	// A reception that had to be run twice says so where the reception's
+	// other assumptions are shown. It is one: what the delivery is built on
+	// is what the second reception decided, and nobody was asked whether
+	// the first one had decided the same (reception_again.go).
+	if line := receptionAgainAssumption(runDir); line != "" {
+		facts.Assumptions = append(facts.Assumptions, line)
+	}
 	for attempt := readinessAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []struct {
