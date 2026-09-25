@@ -274,3 +274,141 @@ func TestInvestigationReportTooLongForOneCommentIsAttachedWhole(t *testing.T) {
 		t.Fatalf("comment is %d bytes; the tracker takes %d", len(unattached), MaxTrackerCommentBytes)
 	}
 }
+
+// The next-step line is written whatever else the budget leaves out, so it
+// has to be paid for inside the budget. It was not: with the lists budgeted
+// alone, a next step at its schema length (600 runes, 1,800 bytes) overran
+// the reserve held for the pointer, and the whole comment was then replaced
+// by the pointer alone — zero findings on the ticket, and nothing at all if
+// the attachment upload had failed (review of this change).
+func TestInvestigationCommentKeepsFindingsWithALongNextStep(t *testing.T) {
+	for _, nextRunes := range []int{200, 400, 600} {
+		facts := investigationFixture(600, 300)
+		facts.Next = strings.Repeat("次", nextRunes)
+		facts.ReportAttached, facts.AttachedCount = true, 4
+		content := InvestigationCommentContent("run-1", facts)
+		if len(content) > MaxTrackerCommentBytes {
+			t.Fatalf("next=%d runes: comment is %d bytes; the tracker takes %d", nextRunes, len(content), MaxTrackerCommentBytes)
+		}
+		if !strings.Contains(content, facts.Findings[0].Claim) {
+			t.Fatalf("next=%d runes: the comment carries no finding at all:\n%s", nextRunes, content)
+		}
+		if !strings.Contains(content, InvestigationReportFilename) {
+			t.Fatalf("next=%d runes: the comment does not say where the rest is:\n%s", nextRunes, content)
+		}
+		if !strings.Contains(content, "次の一手: ") {
+			t.Fatalf("next=%d runes: the next step was dropped:\n%s", nextRunes, content)
+		}
+		if ValidateCommentContract(content, CommentMarker("investigation", "run-1")) != nil {
+			t.Fatalf("next=%d runes: comment lost its contract footer", nextRunes)
+		}
+		if overflow := InvestigationReportOverflow("run-1", facts); overflow == nil ||
+			!strings.Contains(string(overflow), facts.Findings[19].Claim) {
+			t.Fatalf("next=%d runes: the attachment does not carry the whole report", nextRunes)
+		}
+	}
+}
+
+// Everything the comment carries beside the report — the headline, the
+// measurement sentence, the footer — is fixed, so a report shortened to fit
+// must fit whatever those come to. Driven at the schema's own limits with
+// every optional line at its longest.
+func TestInvestigationCommentFitsWithEveryFixedLineAtItsLongest(t *testing.T) {
+	facts := investigationFixture(600, 300)
+	facts.Round, facts.EndsHere = 3, false
+	facts.Next = strings.Repeat("次", 600)
+	facts.MeasurementsCount, facts.AttachedCount, facts.AttachmentsOmitted = 200, 10, 200
+	facts.Questions = nil
+	for index := 0; index < 8; index++ {
+		facts.Questions = append(facts.Questions, strings.Repeat("問", 100))
+	}
+	for _, attached := range []bool{true, false} {
+		facts.ReportAttached = attached
+		content := InvestigationCommentContent("run-1", facts)
+		if len(content) > MaxTrackerCommentBytes {
+			t.Fatalf("attached=%v: comment is %d bytes; the tracker takes %d", attached, len(content), MaxTrackerCommentBytes)
+		}
+		if !strings.Contains(content, facts.Findings[0].Claim) {
+			t.Fatalf("attached=%v: the comment carries no finding at all:\n%s", attached, content)
+		}
+		if !utf8.ValidString(content) {
+			t.Fatalf("attached=%v: comment is not valid UTF-8", attached)
+		}
+	}
+}
+
+// The budget is the whole of what the renderer writes, not just its two
+// lists. Leaving the next step out of it let a report at the schema's
+// lengths overrun the comment by up to 1,800 bytes against a 512-byte
+// reserve (review of this change).
+func TestWriteInvestigationReportStaysInsideItsBudget(t *testing.T) {
+	facts := investigationFixture(600, 300)
+	facts.Next = strings.Repeat("次", 600)
+	facts.Questions = nil
+	for index := 0; index < 8; index++ {
+		facts.Questions = append(facts.Questions, strings.Repeat("問", 100))
+	}
+	for _, budget := range []int{1, 200, 900, 2_000, 8_000, 15_054} {
+		var builder strings.Builder
+		findings, unknowns := writeInvestigationReport(&builder, facts, budget)
+		if builder.Len() > budget {
+			t.Fatalf("budget %d wrote %d bytes", budget, builder.Len())
+		}
+		if !utf8.ValidString(builder.String()) {
+			t.Fatalf("budget %d produced invalid UTF-8", budget)
+		}
+		shown := len(facts.Findings) - findings
+		if strings.Count(builder.String(), "\n- finding-") != shown {
+			t.Fatalf("budget %d says %d findings were left out but shows %d",
+				budget, findings, strings.Count(builder.String(), "\n- finding-"))
+		}
+		if unknowns < 0 || unknowns > len(facts.Unknowns) {
+			t.Fatalf("budget %d reports %d unknowns left out", budget, unknowns)
+		}
+	}
+	// A budget of zero is the word for "no budget" and writes all of it.
+	var whole strings.Builder
+	if findings, unknowns := writeInvestigationReport(&whole, facts, 0); findings != 0 || unknowns != 0 {
+		t.Fatalf("an unbudgeted render left out %d findings and %d unknowns", findings, unknowns)
+	}
+	if !strings.Contains(whole.String(), facts.Findings[19].Claim) || !strings.Contains(whole.String(), "次の一手: ") {
+		t.Fatal("an unbudgeted render dropped content")
+	}
+}
+
+// Whatever the report's shape, the comment the tracker is handed fits the
+// tracker. This is the invariant the budgeting and the shrinking retry both
+// serve, pinned on its own so a later fixed line cannot quietly break it the
+// way the next step did.
+func TestInvestigationCommentAlwaysFitsTheTracker(t *testing.T) {
+	for _, claim := range []int{1, 120, 600} {
+		for _, unknown := range []int{1, 150, 300} {
+			for _, next := range []int{0, 1, 600} {
+				for _, attached := range []bool{true, false} {
+					facts := investigationFixture(claim, unknown)
+					facts.Next = strings.Repeat("次", next)
+					facts.ReportAttached, facts.AttachedCount, facts.AttachmentsOmitted = attached, 10, 40
+					content := InvestigationCommentContent("run-1", facts)
+					if len(content) > MaxTrackerCommentBytes {
+						t.Fatalf("claim=%d unknown=%d next=%d attached=%v: comment is %d bytes",
+							claim, unknown, next, attached, len(content))
+					}
+					if !utf8.ValidString(content) {
+						t.Fatalf("claim=%d unknown=%d next=%d: comment is not valid UTF-8", claim, unknown, next)
+					}
+					if ValidateCommentContract(content, CommentMarker("investigation", "run-1")) != nil {
+						t.Fatalf("claim=%d unknown=%d next=%d: comment lost its contract footer", claim, unknown, next)
+					}
+					// Whatever the comment could not show is in the attachment.
+					if overflow := InvestigationReportOverflow("run-1", facts); overflow != nil {
+						if !strings.Contains(string(overflow), facts.Findings[19].Claim) {
+							t.Fatalf("claim=%d unknown=%d next=%d: the attachment is not whole", claim, unknown, next)
+						}
+					} else if !strings.Contains(content, facts.Findings[19].Claim) {
+						t.Fatalf("claim=%d unknown=%d next=%d: no attachment and the last finding is missing", claim, unknown, next)
+					}
+				}
+			}
+		}
+	}
+}

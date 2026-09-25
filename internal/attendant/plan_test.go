@@ -177,7 +177,7 @@ func TestPlanCommentContentStaysWithinTheTrackerLimit(t *testing.T) {
 		TargetFiles: files,
 		Assumptions: assumptions,
 	})
-	if len(content) > 16*1024 {
+	if len(content) > hook.MaxTrackerCommentBytes {
 		t.Fatalf("plan comment is %d bytes, above the tracker limit", len(content))
 	}
 	if err := hook.ValidateCommentContract(content, hook.CommentMarker("plan", "run-42")); err != nil {

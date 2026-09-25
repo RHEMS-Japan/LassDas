@@ -100,16 +100,24 @@ func renderInvestigationComment(runID string, facts InvestigationFacts) (string,
 	if whole.Len() <= room {
 		return head + whole.String() + tail + footer, true
 	}
-	var shortened strings.Builder
-	findings, unknowns := writeInvestigationReport(&shortened, facts, room-investigationOverflowReserveBytes)
-	comment := head + shortened.String() + investigationOverflowLine(facts, findings, unknowns) + tail + footer
-	if len(comment) > MaxTrackerCommentBytes {
-		// Nothing of the report fits beside the rest of the comment. Say that
-		// and keep the pointer, rather than letting the tracker refuse the
-		// whole comment.
-		comment = head + investigationOverflowLine(facts, len(facts.Findings), len(facts.Unknowns)) + tail + footer
+	// The budget shrinks until the whole comment fits, so a render that
+	// overshot leaves out more items and says how many — reaching straight
+	// for the pointer would throw away every finding the comment still had
+	// room for, which is the failure this change exists to remove.
+	for budget := max(room-investigationOverflowReserveBytes, 1); ; budget = max(budget/2, 1) {
+		var shortened strings.Builder
+		findings, unknowns := writeInvestigationReport(&shortened, facts, budget)
+		comment := head + shortened.String() + investigationOverflowLine(facts, findings, unknowns) + tail + footer
+		if len(comment) <= MaxTrackerCommentBytes {
+			return comment, false
+		}
+		if budget == 1 {
+			// Not even the questions and the next step fit beside the rest of
+			// the comment. Keep the pointer: the report is elsewhere whole and
+			// the ticket has to say where.
+			return head + investigationOverflowLine(facts, len(facts.Findings), len(facts.Unknowns)) + tail + footer, false
+		}
 	}
-	return comment, false
 }
 
 func investigationHead(facts InvestigationFacts) string {
@@ -128,12 +136,33 @@ func investigationHead(facts InvestigationFacts) string {
 
 // writeInvestigationReport writes what the requester reads as the report:
 // what was asked, what was found, what stayed unknown and what comes next.
-// A budget of zero writes all of it. A positive budget writes whole items
-// until the next one would not fit, and returns how many findings and
-// unknowns were left for the attachment to carry — an item is written whole
-// or not at all, so no line ends mid-sentence.
+// It is given an empty builder. A budget of zero writes all of it; a
+// positive budget bounds every byte written, and returns how many findings
+// and unknowns were left for the attachment to carry — an item is written
+// whole or not at all, so no line ends mid-sentence.
+//
+// Every line counts against the budget, the questions and the next step
+// included. Budgeting only the two lists left the next step to overrun the
+// comment by its own length, up to three times the reserve held back for the
+// pointer, and the caller then had nothing to post but the pointer (review
+// of this change).
 func writeInvestigationReport(builder *strings.Builder, facts InvestigationFacts, budget int) (int, int) {
-	writePlanList(builder, "確かめようとしたこと", facts.Questions)
+	nextLine := ""
+	if next := truncatePlanText(facts.Next); next != "" {
+		nextLine = "\n次の一手: " + next + "\n"
+	}
+	writeReportList(builder, "確かめようとしたこと", facts.Questions, budget)
+	// The next step is paid for before the lists when there is room for it
+	// at all, so a long one narrows the lists instead of emptying them, and
+	// a budget too small for it drops it rather than overrunning.
+	listBudget := budget
+	if budget > 0 {
+		if builder.Len()+len(nextLine) <= budget {
+			listBudget = max(budget-len(nextLine), 1)
+		} else {
+			nextLine = ""
+		}
+	}
 	findings := make([]string, 0, len(facts.Findings))
 	for _, finding := range facts.Findings {
 		standing := "推測"
@@ -142,11 +171,9 @@ func writeInvestigationReport(builder *strings.Builder, facts InvestigationFacts
 		}
 		findings = append(findings, fmt.Sprintf("%s（%s）", strings.TrimSpace(finding.Claim), standing))
 	}
-	droppedFindings := writeReportList(builder, "分かったこと", findings, budget)
-	droppedUnknowns := writeReportList(builder, "分からなかったこと", facts.Unknowns, budget)
-	if next := truncatePlanText(facts.Next); next != "" {
-		builder.WriteString("\n次の一手: " + next + "\n")
-	}
+	droppedFindings := writeReportList(builder, "分かったこと", findings, listBudget)
+	droppedUnknowns := writeReportList(builder, "分からなかったこと", facts.Unknowns, listBudget)
+	builder.WriteString(nextLine)
 	return droppedFindings, droppedUnknowns
 }
 
