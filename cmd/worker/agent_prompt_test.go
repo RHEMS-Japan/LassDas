@@ -132,3 +132,81 @@ func TestTheCandidateReviewerIsToldHowToWriteTheSignal(t *testing.T) {
 		}
 	}
 }
+
+// A reviewer is not the one that runs the build. A live review returned
+// revise for the sole reason that its sandbox had no compiler, so it had not
+// seen the build, the vet pass or the tests succeed - and the round repeated
+// until the ceiling ended the run, because the next reviewer had no compiler
+// either. The commands run in the validation stage, after the verdict.
+func TestTheCandidateReviewerIsNotAskedToRunTheBuild(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "", "/tmp/review repo")
+	if err != nil {
+		t.Fatalf("reviewAgentPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"評決の対象は差分そのものです",
+		"ビルド・vet・テストの成否は、この評決のあとの検証段が、隔離した環境で実際にコマンドを実行して確かめます",
+		"実行結果を見ていないことを理由に revise にしないでください",
+		"この実行環境にコマンドが無くても同じです",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the reviewer's instruction lacks %q", want)
+		}
+	}
+}
+
+// What a delivery's description will say, and what the environment will look
+// like once the change ships, are not in front of the reviewer. A live review
+// returned revise because the request wanted a configuration example and a
+// check command in the pull request description: text that does not exist
+// while the code is judged, and that no round of implementation could add.
+func TestTheCandidateReviewerIsToldWhatLiesOutsideTheDiff(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "", "/tmp/review repo")
+	if err != nil {
+		t.Fatalf("reviewAgentPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"PR の説明文",
+		"納品後の環境の状態",
+		"は評決の対象外です",
+		"差分を読んで判断できる部分だけを見てください",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the reviewer's instruction lacks %q", want)
+		}
+	}
+}
+
+// The instruction told the reviewer twice to turn anything it could not
+// confirm into a revise. Read literally that covers everything outside the
+// diff, which is how both looping runs began. Both sentences now hold only
+// for what reading the diff was supposed to settle.
+func TestTheCandidateReviewerRevisesOnlyForWhatTheDiffCanShow(t *testing.T) {
+	candidate, source := promptFixtureFiles(1, 40)
+	prompt, err := reviewAgentPrompt(candidate, source, promptFixtureRequest(),
+		worker.ModelEndpoint{Lens: "correctness"}, nil, nil, "", "/tmp/review repo")
+	if err != nil {
+		t.Fatalf("reviewAgentPrompt: %v", err)
+	}
+	for _, gone := range []string{
+		"判断に迷ったら、未確認の点と確かめられなかった理由を findings の message に書いて revise にしてください",
+		"確信が持てない点が残ったら、未確認の点と確かめられなかった理由を findings の message に書いて revise としてください",
+	} {
+		if strings.Contains(prompt, gone) {
+			t.Errorf("the unconditional unconfirmed-means-revise rule survives: %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"差分を読めば確かめられるはずのことが確かめられなかったときだけ",
+		"差分を読めば確かめられるはずのことが確かめられないまま残ったときだけ",
+		"対象外のものを未確認として revise にしないでください",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the reviewer's instruction lacks %q", want)
+		}
+	}
+}
