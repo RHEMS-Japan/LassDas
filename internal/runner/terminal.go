@@ -201,23 +201,29 @@ func (t *Terminal) owner(ctx context.Context) (hook.PullOwner, error) {
 // trail as fatal and so does this: the run stays claimed and the recovery
 // path surfaces it, rather than a report being sealed without the trail
 // that explains it.
+//
+// The record on disk is the whole thing; the report envelope carries only
+// what one ticket comment can hold, so a longer record is shortened here and
+// says so. A record over the comment's size used to make the file "invalid"
+// and end the run with no report at all, which is the opposite of what a
+// fuller record should cost.
 func (t *Terminal) loadTrail(hook.TerminalCode) (string, error) {
 	path := t.workspace + "/m1-trail.txt"
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(hook.MaxTerminalTrailBytes) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(hook.MaxTrailRecordBytes) {
 		return "", errors.New("trail file invalid")
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("trail unreadable: %w", err)
 	}
-	if hook.ValidateTrailText(string(encoded)) != nil {
+	if hook.ValidateTrailTextWithin(string(encoded), hook.MaxTrailRecordBytes) != nil {
 		return "", errors.New("trail text invalid")
 	}
-	return string(encoded), nil
+	return hook.ShortenTrailForComment(string(encoded), hook.MaxTerminalTrailBytes), nil
 }
 
 // AskQuestion posts the clarification decision the model stage produced.

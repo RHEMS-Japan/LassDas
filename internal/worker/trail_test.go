@@ -75,3 +75,38 @@ func TestTrailSummaryUsesTheLatestValidatedCycle(t *testing.T) {
 		t.Fatalf("reviews = %v", summary.Cycles[0].Reviews)
 	}
 }
+
+// The implementer's final report is its own account of what it did, and a
+// requester's acceptance criterion is routinely answered inside it, so the
+// trail carries all of it. A live run (2026-09-25) was asked for a
+// configuration example and a verification command in the pull request
+// description, wrote both in its report, and the clip at seven hundred runes
+// dropped both before the requester ever saw them.
+func TestComposeTrailCarriesTheWholeImplementerReport(t *testing.T) {
+	config, request, source, candidate, reviews := nonconvergedFixture(t)
+	decision, err := DecideStage(candidate, reviews, source, request, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := "有効化の設定例:\n" + strings.Repeat("設定の行を書く。\n", 120) + "確認手順: 反映後に一覧画面を開いて件数を数える。"
+	if len([]rune(report)) < 900 || len(report) > 4096 {
+		t.Fatalf("fixture report is %d runes / %d bytes; it must be longer than the old clip and inside the candidate bound", len([]rune(report)), len(report))
+	}
+	candidate.Rationale = report
+	trail := ComposeTrail([]trailStage{{
+		Stage: 1, Candidate: candidate, Reviews: reviews, Decision: decision,
+		Source: source, Request: request,
+	}}, nil, true)
+	if !strings.Contains(trail, "実装者の説明 (要点): ") {
+		t.Fatalf("trail lacks the report's heading:\n%s", trail)
+	}
+	if !strings.Contains(trail, report) {
+		t.Fatalf("trail carries only part of the report:\n%s", trail)
+	}
+	if strings.Contains(trail, "確認手順: 反映後に一覧画面を開いて件数を数える。…") {
+		t.Fatalf("the report was clipped:\n%s", trail)
+	}
+	if len(trail) > MaxTrailBytes {
+		t.Fatalf("trail exceeds the bound: %d bytes", len(trail))
+	}
+}

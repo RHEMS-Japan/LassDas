@@ -104,11 +104,13 @@ func runWithRetryWait(args []string, getenv func(string) string, now func() time
 	}
 	trail := ""
 	if flags.trailFile != "" {
-		encoded, err := readRegularFile(flags.trailFile, hook.MaxTerminalTrailBytes, false)
-		if err != nil || hook.ValidateTrailText(string(encoded)) != nil {
+		// The file holds the whole record; the report carries what one ticket
+		// comment holds, shortened with a line saying where the rest is.
+		encoded, err := readRegularFile(flags.trailFile, hook.MaxTrailRecordBytes, false)
+		if err != nil || hook.ValidateTrailTextWithin(string(encoded), hook.MaxTrailRecordBytes) != nil {
 			return commandOutput{}, reporterFailure("trail_invalid")
 		}
-		trail = string(encoded)
+		trail = hook.ShortenTrailForComment(string(encoded), hook.MaxTerminalTrailBytes)
 	}
 	identity, err := loadGitHubIdentity(getenv, envelope)
 	if err != nil {

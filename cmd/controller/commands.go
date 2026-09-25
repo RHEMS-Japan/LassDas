@@ -949,13 +949,17 @@ func (binding deliveryBinding) matchesArtifacts(
 }
 
 // readTrailFile loads the requester-facing run record composed by the worker.
-// It is held to the same plain-text bounds as the terminal report's copy.
+// It is held to the same plain-text discipline as the terminal report's copy,
+// but to the record's own bound rather than the comment's: this copy goes
+// into the pull request body, which is where the whole record is meant to be
+// readable. Bounding it at the comment's size was how an implementer's report
+// reached the ticket and the pull request already cut (live 2026-09-25).
 func readTrailFile(filename string) (string, error) {
 	encoded, err := os.ReadFile(filename)
-	if err != nil || len(encoded) == 0 || len(encoded) > hook.MaxTerminalTrailBytes {
+	if err != nil || len(encoded) == 0 || len(encoded) > hook.MaxTrailRecordBytes {
 		return "", errors.New("trail file is invalid")
 	}
-	if hook.ValidateTrailText(string(encoded)) != nil {
+	if hook.ValidateTrailTextWithin(string(encoded), hook.MaxTrailRecordBytes) != nil {
 		return "", errors.New("trail file is invalid")
 	}
 	return string(encoded), nil

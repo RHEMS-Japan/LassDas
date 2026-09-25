@@ -609,8 +609,13 @@ func (c *Client) doJSON(request *http.Request, expectedStatus int, destination a
 	return nil
 }
 
+// validCommentContent holds a comment body to the tracker's own size limit
+// before the request leaves this process: the API rejects a longer body, and
+// a rejection here is a comment the requester never sees. The number is
+// hook.MaxTrackerCommentBytes so the composers that have to fit inside it and
+// the client that enforces it cannot drift apart.
 func validCommentContent(content string) bool {
-	return content != "" && len([]byte(content)) <= 16*1024 && !strings.ContainsRune(content, '\x00')
+	return content != "" && len([]byte(content)) <= hook.MaxTrackerCommentBytes && !strings.ContainsRune(content, '\x00')
 }
 
 func backlogStatusFailure(status int) error {

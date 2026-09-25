@@ -514,10 +514,12 @@ func nextDesignRound(
 	return nil
 }
 
-// maxAttachedMeasurements is the per-comment attachment budget: the
-// measurements file plus this many raw outputs (the tracker takes ten
-// attachments per comment; docs/INVESTIGATING_DESIGNER.md §4.4).
-const maxAttachedMeasurements = 9
+// maxCommentAttachments is the tracker's per-comment attachment budget: the
+// measurements index, the raw outputs the report cites, and — when the
+// report is too long for one comment — the report itself all come out of it
+// (the tracker takes ten attachments per comment;
+// docs/INVESTIGATING_DESIGNER.md §4.4).
+const maxCommentAttachments = 10
 
 // maxMeasurementAttachmentBytes is the per-file cap of §4.4 (256 KiB).
 const maxMeasurementAttachmentBytes = 256 * 1024
@@ -570,8 +572,25 @@ func postDesignComments(ctx context.Context, config runtime.Config, services *ru
 		return
 	}
 	if !posted {
-		attachments, omitted := uploadMeasurements(ctx, services, runDir, investigation, logger)
-		facts := investigationFacts(investigation, plan.Shape == runtime.ShapeInvestigation, len(attachments), omitted)
+		facts := investigationFacts(investigation, plan.Shape == runtime.ShapeInvestigation, 0, 0)
+		attachments, slots := []int64(nil), maxCommentAttachments
+		// A report longer than one comment travels whole as an attachment,
+		// uploaded before the measurements so the per-comment attachment
+		// budget cannot be spent before the report itself has a place: the
+		// report is what the requester asked for, the measurements back it.
+		if overflow := hook.InvestigationReportOverflow(run.RunID, facts); len(overflow) > 0 && services.Backlog != nil {
+			id, err := services.Backlog.UploadAttachment(ctx, hook.InvestigationReportFilename, overflow)
+			if err != nil {
+				logger.Error("investigation report not attached; the comment names the run record instead", "run", run.RunID, "error", err.Error())
+			} else {
+				attachments = append(attachments, id)
+				facts.ReportAttached = true
+				slots--
+			}
+		}
+		measured, omitted := uploadMeasurements(ctx, services, runDir, investigation, slots, logger)
+		attachments = append(attachments, measured...)
+		facts.AttachedCount, facts.AttachmentsOmitted = len(attachments), omitted
 		if !services.Tick.PostInvestigationComment(ctx, run.RunID, run.DeliveryID, qualifier, hook.InvestigationCommentContent(run.RunID, facts), attachments) {
 			logger.Error("investigation report not posted; run continues", "run", run.RunID)
 		}
@@ -612,8 +631,11 @@ func investigationFacts(investigation investigate.Investigation, endsHere bool, 
 // uploadMeasurements attaches the measurements file and the raw outputs the
 // report cites, re-scanning each for secret shapes before it leaves the
 // pod. Uploads that fail are skipped and counted; the comment still posts.
-func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir string, investigation investigate.Investigation, logger Logger) ([]int64, int) {
-	if services.Backlog == nil {
+// slots is how many files this may attach in all, the index included: the
+// caller spends the same per-comment budget on the report when the report
+// itself was too long for the comment.
+func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir string, investigation investigate.Investigation, slots int, logger Logger) ([]int64, int) {
+	if services.Backlog == nil || slots <= 0 {
 		return nil, 0
 	}
 	path := filepath.Join(runDir, "measurements.jsonl")
@@ -638,12 +660,12 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 		}
 	}
 	cited := investigation.MeasuredEvidence()
-	attached, omitted := 0, 0
+	omitted := 0
 	for _, measurement := range measurements {
 		if measurement.Refused || measurement.Output == "" || !cited[measurement.ID] {
 			continue
 		}
-		if attached >= maxAttachedMeasurements {
+		if len(ids) >= slots {
 			omitted++
 			continue
 		}
@@ -664,7 +686,6 @@ func uploadMeasurements(ctx context.Context, services *runtime.Services, runDir 
 			continue
 		}
 		ids = append(ids, id)
-		attached++
 	}
 	return ids, omitted
 }

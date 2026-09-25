@@ -291,9 +291,56 @@ type TerminalReportRequest struct {
 	IssuedAt           time.Time `json:"issued_at"`
 }
 
-// MaxTerminalTrailBytes bounds the requester-facing run record a terminal
-// report may carry. It matches the composer's bound on the worker side.
-const MaxTerminalTrailBytes = 6 * 1024
+// MaxTrailRecordBytes bounds the whole composed run record: the version the
+// composer writes, the pull request body carries and the run directory keeps.
+// The carrier that takes it whole is the pull request body -- GitHub allows
+// 65,536 characters there and the API client refuses a body over 64 KiB of
+// bytes -- so this leaves the digest header above the record room of its own.
+// It lives in this package because every reader of the record file already
+// depends on it and none of them should be guessing a different number.
+const MaxTrailRecordBytes = 60 * 1024
+
+// MaxTerminalTrailBytes bounds the run record one terminal report may carry
+// to the ticket. It is not the composer's bound any more: the whole record
+// goes to the pull request body, which holds far more, and this is only what
+// the report envelope (MaxTerminalReportRequestBytes) can carry beside the
+// report's other fields. A record longer than this is shortened for the
+// comment by ShortenTrailForComment, which says so in the comment, never cut
+// in silence.
+const MaxTerminalTrailBytes = 8 * 1024
+
+// TrailShortenedNote is what a shortened run record ends with. It replaces a
+// bare ellipsis, which reads as "that was all there was": a live run
+// (2026-09-25) answered a requester's acceptance criterion in the
+// implementer's report, the cut fell before the answer, and nothing on the
+// ticket said there was more to read.
+const TrailShortenedNote = "\n…（この記録はコメントに収まらないため、ここまでを掲示しています。" +
+	"全文は上の実行履歴に残してあり、Pull Request がある依頼ではその説明にも全文があります）\n"
+
+// ShortenTrailForComment cuts a run record down to a byte budget and says,
+// in the requester's words, that it was cut and where the whole record is. A
+// record that already fits comes back untouched, and the cut lands on a line
+// boundary so the record stays readable and valid UTF-8.
+func ShortenTrailForComment(trail string, limit int) string {
+	if len(trail) <= limit {
+		return trail
+	}
+	budget := limit - len(TrailShortenedNote)
+	if budget <= 0 {
+		return ""
+	}
+	clipped := trail[:budget]
+	// Prefer the end of the last whole line; fall back to a rune boundary so
+	// a record with no newline in reach still comes out as valid UTF-8.
+	if cut := strings.LastIndexByte(clipped, '\n'); cut > 0 {
+		clipped = clipped[:cut]
+	} else {
+		for len(clipped) > 0 && !utf8.ValidString(clipped) {
+			clipped = clipped[:len(clipped)-1]
+		}
+	}
+	return clipped + TrailShortenedNote
+}
 
 // MaxFailedStepBytes bounds the step name a model_failed report carries. The
 // names are a fixed short vocabulary; the bound is what stops anything else
@@ -312,7 +359,15 @@ const BudgetFailureAction = "運用担当者が、終了した役に設定され
 // ValidateTrailText holds the trail to the same plain-text discipline as
 // every other requester-facing string: bounded, valid UTF-8, newlines only.
 func ValidateTrailText(value string) error {
-	if len(value) > MaxTerminalTrailBytes || !utf8.ValidString(value) ||
+	return ValidateTrailTextWithin(value, MaxTerminalTrailBytes)
+}
+
+// ValidateTrailTextWithin is ValidateTrailText against the caller's own
+// bound. The two carriers of the record have very different room: a pull
+// request body takes the whole thing, a ticket comment takes what one comment
+// holds. Both still owe the same plain-text discipline.
+func ValidateTrailTextWithin(value string, limit int) error {
+	if len(value) > limit || !utf8.ValidString(value) ||
 		strings.ContainsAny(value, "\x00\r") {
 		return errors.New("trail text is invalid")
 	}

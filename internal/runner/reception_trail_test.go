@@ -995,3 +995,51 @@ func TestDeriveNoteSurvivesTheAnswerUnusableClass(t *testing.T) {
 		t.Fatalf("the class overruled the phrase:\n%s", note)
 	}
 }
+
+// The record file holds the whole run record; the terminal report carries
+// what one ticket comment holds. A record longer than a comment used to make
+// the file "invalid", which ended the run with no report at all -- a fuller
+// record cost the requester the report entirely. Now it is shortened, and
+// the comment says where the whole of it is.
+func TestLoadTrailShortensALongRecordInsteadOfRefusingIt(t *testing.T) {
+	workspace := t.TempDir()
+	record := strings.Repeat("実装とレビューの記録の行。\n", 800)
+	if len(record) <= hook.MaxTerminalTrailBytes {
+		t.Fatalf("fixture record is %d bytes; it must be longer than one comment carries", len(record))
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "m1-trail.txt"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	terminal := NewTerminal(runtime.Config{}, nil, hook.DispatchEnvelope{}, 1, workspace, trailTestLogger{})
+	trail, err := terminal.loadTrail(hook.TerminalSuccess)
+	if err != nil {
+		t.Fatalf("loadTrail() = %v; a long record was refused", err)
+	}
+	if len(trail) > hook.MaxTerminalTrailBytes {
+		t.Fatalf("trail is %d bytes; the report carries %d", len(trail), hook.MaxTerminalTrailBytes)
+	}
+	if !strings.HasSuffix(trail, hook.TrailShortenedNote) {
+		t.Fatalf("the shortened record does not say where the rest is: %q", trail[len(trail)-200:])
+	}
+	if hook.ValidateTrailText(trail) != nil {
+		t.Fatalf("the shortened record is not a valid trail: %d bytes", len(trail))
+	}
+
+	// A record that fits reaches the report byte for byte.
+	fitting := "### 実装とレビューの経過 (1 周で収束)\n"
+	if err := os.WriteFile(filepath.Join(workspace, "m1-trail.txt"), []byte(fitting), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if trail, err := terminal.loadTrail(hook.TerminalSuccess); err != nil || trail != fitting {
+		t.Fatalf("loadTrail() = %q, %v", trail, err)
+	}
+
+	// A file past the record's own bound is still refused: it sits where the
+	// model agents can reach it.
+	if err := os.WriteFile(filepath.Join(workspace, "m1-trail.txt"), []byte(strings.Repeat("a", hook.MaxTrailRecordBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := terminal.loadTrail(hook.TerminalSuccess); err == nil {
+		t.Fatal("an oversize record file was accepted")
+	}
+}
