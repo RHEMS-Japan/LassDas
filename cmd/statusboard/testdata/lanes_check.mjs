@@ -98,3 +98,65 @@ assert.match(stamp, /2026\/09\/25 11:00 JST$/, "stamp = " + stamp);
 assert.equal(call("fmtStamp", ""), "");
 assert.equal(call("fmtStamp", "not a time"), "");
 console.log("PASS a time is shown on the engine's clock");
+
+// 8-11. What a finished card actually says. The times are the whole reason
+// the card waits here, so they are read off the card the page builds, not
+// inferred from the row.
+const guidanceFrom = script.indexOf("function buildGuidance(run) {");
+const guidanceTo = script.indexOf("function buildResolveRow(run) {");
+const ackFrom = script.indexOf("function acknowledgeState(deliveryID) {");
+const ackTo = script.indexOf("function decisionState(");
+if (guidanceFrom < 0 || guidanceTo < guidanceFrom || ackFrom < 0 || ackTo < ackFrom) {
+  console.log("FAIL harness: the card's guidance block is not where this check looks for it");
+  process.exit(1);
+}
+class Small {
+  constructor(tag, cls) { this.tag = tag; this.cls = cls || ""; this.kids = []; this.own = ""; this.disabled = false; }
+  appendChild(child) { this.kids.push(child); return child; }
+  get childNodes() { return this.kids; }
+  addEventListener() {}
+  setAttribute() {}
+  get textContent() { return this.own + this.kids.map(k => k.textContent).join(""); }
+  set textContent(value) { this.own = value; this.kids = []; }
+  labels() { return [this.cls, ...this.kids.flatMap(k => k.labels())]; }
+}
+const smallEl = (tag, cls, text) => { const n = new Small(tag, cls); if (text != null) n.textContent = text; return n; };
+const smallDoc = { createElement: tag => new Small(tag), createTextNode: text => smallEl("#text", null, text) };
+const makeGuidance = (enabled) => new Function(
+  "document", "el", "trackerURL", "actionsEnabled", "acknowledgeEnabled", "acknowledgePending",
+  "isFinished", "acknowledgedAt", "fmtStamp", "buildResolveRow", "URL",
+  script.slice(ackFrom, ackTo) + "\n" + script.slice(guidanceFrom, guidanceTo) + "\nreturn buildGuidance;")(
+  smallDoc, smallEl, () => "", false, enabled, new Map(),
+  vm.runInContext("isFinished", context), vm.runInContext("acknowledgedAt", context),
+  vm.runInContext("fmtStamp", context), () => smallEl("div"), URL);
+
+const guidance = makeGuidance(true);
+let card = guidance(finished("g1", "failed", { finished_at: "2026-09-25T02:00:00Z", next_action: "確認してください" }));
+assert.match(card.textContent, /この状態になった時刻\s*2026\/09\/25 11:00 JST/, card.textContent);
+assert.ok(card.textContent.includes("確認して片付ける"), "no control on a card waiting to be cleared");
+// The label the row is written with, so the sentence on the control that
+// merely mentions clearing is not mistaken for a recorded time.
+const clearedLabel = /片付けた時刻\s*\d{4}\//;
+assert.ok(!clearedLabel.test(card.textContent), "a card nobody cleared claims a time for it: " + card.textContent);
+console.log("PASS a finished card says when it got there and offers the control");
+
+card = guidance(finished("g2", "done", { finished_at: "2026-09-25T02:00:00Z", acknowledged_at: "2026-09-25T07:45:00Z" }));
+assert.match(card.textContent, /この状態になった時刻\s*2026\/09\/25 11:00 JST/, card.textContent);
+assert.match(card.textContent, /片付けた時刻\s*2026\/09\/25 16:45 JST/, card.textContent);
+assert.ok(clearedLabel.test(card.textContent), card.textContent);
+assert.ok(!card.textContent.includes("確認して片付ける"), "a cleared card still offers to be cleared");
+console.log("PASS a cleared card shows both times and no longer offers the control");
+
+card = guidance(finished("g3", "stopped", {}));
+assert.match(card.textContent, /この状態になった時刻\s*記録が残っていません/, card.textContent);
+console.log("PASS a card whose ending was never written down says so rather than showing a blank");
+
+card = makeGuidance(false)(finished("g4", "failed", { finished_at: "2026-09-25T02:00:00Z" }));
+assert.ok(!card.textContent.includes("確認して片付ける"), "a read-only board offered a control it would refuse");
+assert.ok(card.textContent.includes("閲覧専用"), card.textContent);
+console.log("PASS a read-only board says why the card cannot be cleared");
+
+const live = guidance(running("g5", "implement", 1));
+assert.ok(!live.textContent.includes("この状態になった時刻") && !live.textContent.includes("確認して片付ける"),
+  "a running card claims to have finished: " + live.textContent);
+console.log("PASS a running card is offered neither a finish time nor the control");

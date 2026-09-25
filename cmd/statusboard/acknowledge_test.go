@@ -290,7 +290,7 @@ func TestFinishedCardsWaitInTheRunningLaneUntilCleared(t *testing.T) {
 	}
 	// A harness that stops checking leaves no FAIL line and says nothing,
 	// so the count is what says it ran.
-	if ran < 7 {
+	if ran < 12 {
 		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", ran, output)
 	}
 }
