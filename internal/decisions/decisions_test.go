@@ -44,8 +44,10 @@ func asked() Questions {
 		"kind": {Type: KindChoice, Instructions: "What kind of work is this?", Criteria: map[string]string{
 			"docs": "prose only", "code": "the program changes", "investigation": "read-only", "design": "the approach is not stated",
 		}},
-		"settled": {Type: KindNoul, Instructions: "Is every open point settled?"},
-		"reach":   {Type: KindScore, Instructions: "How far does it reach?", Criteria: []string{"one file", "a few", "many"}},
+		"settled": {Type: KindNoul, Instructions: "Is every open point settled?", Criteria: map[string]string{
+			"true": "nothing is left open", "false": "something is left open",
+		}},
+		"reach": {Type: KindScore, Instructions: "How far does it reach?", Criteria: []string{"one file", "a few", "many"}},
 	}
 }
 
@@ -147,8 +149,11 @@ func TestJudgeBuildsTheRequestTheServiceDocuments(t *testing.T) {
 	if !strings.HasPrefix(string(sent.Questions["reach"].Criteria), "[") {
 		t.Errorf("a score's criteria did not travel as a list: %s", sent.Questions["reach"].Criteria)
 	}
-	if len(sent.Questions["settled"].Criteria) != 0 {
-		t.Errorf("a noul travelled with criteria: %s", sent.Questions["settled"].Criteria)
+	// A noul's two sides travel as a map under the names the service reads.
+	if !strings.HasPrefix(string(sent.Questions["settled"].Criteria), "{") ||
+		!strings.Contains(string(sent.Questions["settled"].Criteria), `"true"`) ||
+		!strings.Contains(string(sent.Questions["settled"].Criteria), `"false"`) {
+		t.Errorf("a noul's sides did not travel as true and false: %s", sent.Questions["settled"].Criteria)
 	}
 }
 
@@ -201,6 +206,57 @@ func TestADeadlineEndsTheCallWithoutPanicking(t *testing.T) {
 	}
 	if len(answers.Answers) != 0 {
 		t.Errorf("a failed call still returned answers: %+v", answers)
+	}
+}
+
+// A noul carrying its two sides is a shape the service documents, so it has
+// to survive encoding exactly as documented: the two names, spelled the way
+// the service reads them, under the question's own criteria key.
+func TestANoulTravelsWithTheMeaningOfTrueAndFalse(t *testing.T) {
+	question := Question{Type: KindNoul, Instructions: "Does it hold?", Criteria: map[string]string{
+		"true":  "it holds",
+		"false": "it does not hold",
+	}}
+	encoded, err := json.Marshal(question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"type":"noul","instructions":"Does it hold?","criteria":{"false":"it does not hold","true":"it holds"}}`
+	if string(encoded) != want {
+		t.Errorf("a noul encodes as\n  %s\nwant\n  %s", encoded, want)
+	}
+	if err := (Request{Model: "m", State: ReceptionState{Request: "x"}, Questions: Questions{"q": question}}).Validate(); err != nil {
+		t.Errorf("a noul carrying its two sides was refused: %v", err)
+	}
+	// Without them it is still a question. The service does not require the
+	// sides, and a caller that has nothing to add must not be forced to.
+	bare := Question{Type: KindNoul, Instructions: "Does it hold?"}
+	if err := (Request{Model: "m", State: ReceptionState{Request: "x"}, Questions: Questions{"q": bare}}).Validate(); err != nil {
+		t.Errorf("a noul without criteria was refused: %v", err)
+	}
+}
+
+// The address is written out here, not compared against the constant that
+// holds it. The decisions verb does not live beside the chat completions
+// this engine posts to, and a constant quietly moved to the completions
+// address would fail every live call while every test stayed green.
+func TestThePublishedAddressIsPinned(t *testing.T) {
+	if DefaultBaseURL != "https://openrouter.ai/api/alpha" {
+		t.Errorf("DefaultBaseURL = %q, which is not the decisions service's published address", DefaultBaseURL)
+	}
+}
+
+// The bounds this engine holds itself to are written out for the same
+// reason: a limit compared against itself measures nothing.
+func TestTheBoundsThisEngineHoldsItselfToArePinned(t *testing.T) {
+	if MaxStateBytes != 48*1024 {
+		t.Errorf("MaxStateBytes = %d, want %d", MaxStateBytes, 48*1024)
+	}
+	if MaxQuestions != 32 {
+		t.Errorf("MaxQuestions = %d, want 32", MaxQuestions)
+	}
+	if MaxReceptionRequestBytes != 20000 {
+		t.Errorf("MaxReceptionRequestBytes = %d, want 20000", MaxReceptionRequestBytes)
 	}
 }
 
@@ -385,7 +441,9 @@ func TestACallThatCannotMeanAnythingIsRefused(t *testing.T) {
 		{"a choice with one option", ReceptionState{Request: "x"}, Questions{"q": {Type: KindChoice, Instructions: "?", Criteria: map[string]string{"a": "one"}}}, "q"},
 		{"a choice whose options are a list", ReceptionState{Request: "x"}, Questions{"q": {Type: KindChoice, Instructions: "?", Criteria: []string{"a", "b"}}}, "q"},
 		{"a score whose bands are a map", ReceptionState{Request: "x"}, Questions{"q": {Type: KindScore, Instructions: "?", Criteria: map[string]string{"a": "one"}}}, "q"},
-		{"a noul carrying criteria", ReceptionState{Request: "x"}, Questions{"q": {Type: KindNoul, Instructions: "?", Criteria: []string{"a"}}}, "q"},
+		{"a noul whose sides are a list", ReceptionState{Request: "x"}, Questions{"q": {Type: KindNoul, Instructions: "?", Criteria: []string{"a"}}}, "q"},
+		{"a noul offering a third side", ReceptionState{Request: "x"}, Questions{"q": {Type: KindNoul, Instructions: "?", Criteria: map[string]string{"true": "so", "maybe": "perhaps"}}}, "q"},
+		{"a noul whose side means nothing", ReceptionState{Request: "x"}, Questions{"q": {Type: KindNoul, Instructions: "?", Criteria: map[string]string{"true": "so", "false": " "}}}, "q"},
 		{"a kind that does not exist", ReceptionState{Request: "x"}, Questions{"q": {Type: "guess", Instructions: "?"}}, "q"},
 		{"a state too large to send", ReceptionState{Request: strings.Repeat("x", MaxStateBytes+1)}, asked(), ""},
 	} {

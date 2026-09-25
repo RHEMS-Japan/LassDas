@@ -71,7 +71,8 @@ const (
 	// the options: an id for each, and what that id means.
 	KindChoice Kind = "choice"
 	// KindNoul asks whether a condition holds, answered as the probability
-	// that it does. It takes no criteria.
+	// that it does. Its criteria, when it carries any, say what true means
+	// and what false means, under exactly those two names.
 	KindNoul Kind = "noul"
 	// KindScore asks where something falls on an ordered scale. Its criteria
 	// are the scale's bands, lowest first.
@@ -288,8 +289,23 @@ func (r Request) Validate() error {
 		}
 		switch question.Type {
 		case KindNoul:
+			// A noul may go without criteria, and when it carries them the
+			// service names exactly two sides. Another key is a meaning the
+			// answer has no room to carry: a noul comes back as one
+			// probability, so a third side could never be reported.
 			if question.Criteria != nil {
-				return errors.New("decisions: question " + id + " is a noul and takes no criteria")
+				sides, ok := question.Criteria.(map[string]string)
+				if !ok {
+					return errors.New("decisions: question " + id + " is a noul and needs its criteria as the meaning of true and false")
+				}
+				for side, meaning := range sides {
+					if side != "true" && side != "false" {
+						return errors.New("decisions: question " + id + " is a noul offering " + side + ", which is neither true nor false")
+					}
+					if strings.TrimSpace(meaning) == "" {
+						return errors.New("decisions: question " + id + " has a side that means nothing")
+					}
+				}
 			}
 		case KindChoice:
 			options, ok := question.Criteria.(map[string]string)
@@ -385,6 +401,10 @@ func (c *Client) Judge(ctx context.Context, state any, questions Questions) (Ans
 	if err != nil || len(body) > maxResponseBytes {
 		return Answers{}, errors.New("decisions: the answer could not be read")
 	}
+	// Only 200 is an answer. The service documents no other success status
+	// for this verb, so anything else is refused rather than parsed: reading
+	// a body the service did not mean as an answer is how a redirect or a
+	// maintenance page becomes a judgment.
 	if httpResponse.StatusCode != http.StatusOK {
 		// The service's own words: a key that is not allowed this model is
 		// refused with a sentence saying so, and dropping it would leave the

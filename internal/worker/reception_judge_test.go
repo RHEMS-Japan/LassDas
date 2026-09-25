@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"automation.internal/ticket-ingress/internal/decisions"
 )
 
 // The reception judge is optional, and a destination that says nothing about
@@ -12,6 +14,16 @@ import (
 // because the digest is folded from the encoded configuration and every
 // sealed record of a delivery in flight is bound to it. A field that encoded
 // even as a null would invalidate every flying delivery at once.
+// The address is stated twice, here and in the client, so that a
+// configuration can be checked without the client being built. Two
+// spellings of one address is exactly how they drift apart, so they are
+// held equal in one line, and the client's own test writes the literal out.
+func TestTheTwoSpellingsOfTheAddressAgree(t *testing.T) {
+	if DecisionsBaseURL != decisions.DefaultBaseURL {
+		t.Errorf("the configuration reaches %q and the client reaches %q", DecisionsBaseURL, decisions.DefaultBaseURL)
+	}
+}
+
 func TestTheReceptionJudgeRoleIsOptional(t *testing.T) {
 	const shipped = "../../config/m1-consumer.json"
 	config, err := LoadConfig(shipped)
