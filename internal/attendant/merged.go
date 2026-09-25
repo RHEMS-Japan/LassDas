@@ -38,13 +38,20 @@ const mergeUnreadableFile = "feature-merged.unreadable.json"
 // last — and the detail may name an endpoint, never a credential.
 const mergeReadStderrBytes = 4096
 
-// mergeRecordFailures are the reader's refusals that mean this run's own
-// sealed records could not be read at all: nothing about them will be
-// different on the next wake-up, and an operator has to look. Every other
-// refusal — the destination unreachable, the token rejected, the reading
-// itself failing — is transient and stays quiet, because a pull request that
-// is simply not merged yet looks the same from here.
+// mergeDeliveryRecordCode is the reason a run that DID publish a pull
+// request cannot be asked about at all: the record naming that pull request,
+// or the round ticket the reading is held to, is missing or unreadable. It
+// never reaches the reader, so it carries no code of its own.
+const mergeDeliveryRecordCode = "delivery_record_invalid"
+
+// mergeRecordFailures are the refusals that mean this run's own sealed
+// records could not be read at all: nothing about them will be different on
+// the next wake-up, and an operator has to look. Every other refusal — the
+// destination unreachable, the token rejected, the reading itself failing —
+// is transient and stays quiet, because a pull request that is simply not
+// merged yet looks the same from here.
 var mergeRecordFailures = map[string]bool{
+	mergeDeliveryRecordCode:   true,
 	"ticket_artifact_invalid": true,
 	"config_invalid":          true,
 	"config_sha256_invalid":   true,
@@ -127,12 +134,24 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 	if _, known := readFeatureMerge(runDir); known {
 		return
 	}
+	// A run that published no pull request has no merge to observe, and
+	// most finished runs are that. A run that DID publish one, whose record
+	// of it cannot be read, would otherwise rest at waiting-for-merge with
+	// nothing said — the very shape this reader exists to close, so it is
+	// said once rather than passed over.
 	number, recordedConfigSHA, err := featureDelivery(runDir)
 	if err != nil {
+		if !errors.Is(err, errNoDelivery) {
+			noteUnreadableRun(runDir, run, mergeDeliveryRecordCode, logger)
+		}
 		return
 	}
 	ticket, err := newestStageTicket(runDir)
 	if err != nil {
+		// The round history outlives the run — pruning takes the copies of
+		// the destination and leaves the sealed records — so a published
+		// delivery without one is the same unreadable run.
+		noteUnreadableRun(runDir, run, mergeDeliveryRecordCode, logger)
 		return
 	}
 	// Match entrypoint.sh: runner retains the existing environment token,
@@ -205,8 +224,11 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 // pull request is being asked about.
 func featureDelivery(runDir string) (int64, string, error) {
 	raw, err := os.ReadFile(filepath.Join(runDir, "feature-pr.json"))
-	if err != nil || len(raw) > 1<<20 {
-		return 0, "", errors.New("no delivered pull request")
+	if err != nil {
+		return 0, "", errNoDelivery
+	}
+	if len(raw) > 1<<20 {
+		return 0, "", errors.New("the delivered pull request record is too large")
 	}
 	var record struct {
 		Binding struct {
@@ -226,6 +248,11 @@ func featureDelivery(runDir string) (int64, string, error) {
 	}
 	return record.Payload.PullRequest.Number, record.Binding.ConfigSHA256, nil
 }
+
+// errNoDelivery says this run published no pull request, which is an
+// ordinary thing for a finished run to be. Every other refusal from
+// featureDelivery is a record that IS there and cannot be read.
+var errNoDelivery = errors.New("no delivered pull request")
 
 var recordedDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 

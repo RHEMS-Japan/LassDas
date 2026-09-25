@@ -108,6 +108,80 @@ func TestAFinishedRunWhoseRecordsCannotBeReadIsSaidOnce(t *testing.T) {
 	}
 }
 
+// A run that published a pull request whose record cannot be read never
+// reaches the reader at all, so it carries no refusal of its own. Passing
+// over it silently leaves the delivery at waiting-for-merge for ever with
+// nothing said — the same shape this reader exists to close — so it is said
+// once, and the tick goes on.
+func TestAPublishedDeliveryWithAnUnreadableRecordIsSaidOnce(t *testing.T) {
+	tests := map[string]func(*testing.T, string){
+		"no binding at all": func(t *testing.T, runDir string) {
+			writeRunFile(t, runDir, "feature-pr.json", `{"payload":{"pull_request":{"Number":76}}}`)
+		},
+		"malformed digest": func(t *testing.T, runDir string) {
+			writeRunFile(t, runDir, "feature-pr.json",
+				`{"binding":{"config_sha256":"NOT-A-DIGEST"},"payload":{"pull_request":{"Number":76}}}`)
+		},
+		"no round ticket": func(t *testing.T, runDir string) {
+			if err := os.RemoveAll(filepath.Join(runDir, "history")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, breakIt := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			config := mergeObservationConfig(t, root, "runner")
+			runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("a", 32), recordedRunDigest)
+			writeFakeReader(t, config.ControllerBin, recordedRunDigest)
+			breakIt(t, runDir)
+			logger := &recordingLogger{}
+
+			for range 3 {
+				recordFeatureMerge(context.Background(), config, state.RunOverview{RunID: "TICKET-80"}, runDir, logger)
+			}
+
+			said := 0
+			for _, line := range logger.lines {
+				if strings.Contains(line, "could not be read") {
+					said++
+				}
+			}
+			if said != 1 {
+				t.Fatalf("said %d times, want once: %v", said, logger.lines)
+			}
+			if !strings.Contains(strings.Join(logger.lines, "\n"), mergeDeliveryRecordCode) {
+				t.Fatalf("the reason was not said: %v", logger.lines)
+			}
+			if _, known := readFeatureMerge(runDir); known {
+				t.Fatal("an unreadable delivery was written down as a merge")
+			}
+		})
+	}
+}
+
+// A finished run that published no pull request at all is the ordinary case,
+// and most finished runs are it. Saying something about each of them every
+// minute would bury the runs that do need looking at.
+func TestAFinishedRunThatPublishedNothingIsNotSaid(t *testing.T) {
+	root := t.TempDir()
+	config := mergeObservationConfig(t, root, "runner")
+	runDir := seedDeliveredRun(t, config, "delivery_"+strings.Repeat("b", 32), recordedRunDigest)
+	if err := os.Remove(filepath.Join(runDir, "feature-pr.json")); err != nil {
+		t.Fatal(err)
+	}
+	logger := &recordingLogger{}
+
+	recordFeatureMerge(context.Background(), config, state.RunOverview{RunID: "TICKET-81"}, runDir, logger)
+
+	if len(logger.lines) != 0 {
+		t.Fatalf("a run that delivered nothing was said: %v", logger.lines)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, mergeUnreadableFile)); !os.IsNotExist(err) {
+		t.Fatalf("a run that delivered nothing was recorded: %v", err)
+	}
+}
+
 // A refusal that says nothing about the run's own records — the destination
 // unreachable, say — stays quiet: it is indistinguishable from a pull request
 // that is simply not merged yet, and the next wake-up may well succeed.
@@ -192,9 +266,7 @@ func seedDeliveredRun(t *testing.T, config runtime.Config, deliveryID, recorded 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(runDir, "feature-pr.json"), encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeRunFile(t, runDir, "feature-pr.json", string(encoded))
 	// The reader validates the ticket itself; here it only has to exist, so
 	// that the one path under test is which digest the reader is told to
 	// hold it to.
@@ -202,6 +274,14 @@ func seedDeliveredRun(t *testing.T, config runtime.Config, deliveryID, recorded 
 		t.Fatal(err)
 	}
 	return runDir
+}
+
+// writeRunFile writes one record into a run directory.
+func writeRunFile(t *testing.T, runDir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(runDir, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // writeFakeReader stands in for the delivery binary's read-merged verb: it
