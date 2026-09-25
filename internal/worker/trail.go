@@ -174,6 +174,12 @@ func ComposeTrail(stages []trailStage, clarification *ClarificationContext, vali
 	return ComposeTrailWithDesign(stages, clarification, validationPassed, "")
 }
 
+// CreatedTrailInput is what a run made outside the repository, carried into
+// the trail beside the change itself. A separate parameter rather than a
+// field of a stage: resources belong to the run, not to a round, and a card
+// that created one may have failed before it sealed anything.
+type CreatedTrailInput = []CreatedResource
+
 // trailDesignRunes bounds the design summary a trail carries; the trail's
 // own cap still applies to the whole text.
 const trailDesignRunes = 900
@@ -183,6 +189,18 @@ const trailDesignRunes = 900
 // applied one, so the PR body and the report say what was decided before
 // the code was written.
 func ComposeTrailWithDesign(stages []trailStage, clarification *ClarificationContext, validationPassed bool, designSummary string) string {
+	return composeTrailFull(stages, clarification, validationPassed, designSummary, nil)
+}
+
+// ComposeTrailWithResources is ComposeTrailWithDesign plus what the run
+// brought into existence outside the repository. A pull request says
+// nothing about a queue or a database the change needs and the run created;
+// this is the only place the requester is told they exist.
+func ComposeTrailWithResources(stages []trailStage, clarification *ClarificationContext, validationPassed bool, designSummary string, created CreatedTrailInput) string {
+	return composeTrailFull(stages, clarification, validationPassed, designSummary, created)
+}
+
+func composeTrailFull(stages []trailStage, clarification *ClarificationContext, validationPassed bool, designSummary string, created CreatedTrailInput) string {
 	var builder strings.Builder
 	final := stages[len(stages)-1]
 	if summary := strings.TrimSpace(designSummary); summary != "" {
@@ -246,6 +264,8 @@ func ComposeTrailWithDesign(stages []trailStage, clarification *ClarificationCon
 			}
 		}
 	}
+
+	builder.WriteString(composeCreatedResources(created))
 
 	builder.WriteString("\n### 独立検証 (隔離サンドボックス)\n")
 	if validationPassed {

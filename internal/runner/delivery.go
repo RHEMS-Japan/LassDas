@@ -144,6 +144,12 @@ func (p *Pipeline) EnsureTrail(ctx context.Context) error {
 		"--history", p.path("history"), "--validation", p.path("validation.json"),
 	}
 	trailArgs = append(trailArgs, p.clarificationArgs()...)
+	if p.exists(ResourcesFile) {
+		// Only when the run made something. The composer treats a missing
+		// path as "created nothing", so passing it always would work too,
+		// and this way an argument list read in a log says which runs did.
+		trailArgs = append(trailArgs, "--resources", p.path(ResourcesFile))
+	}
 	if design := p.approvedDesignPath(); design != "" {
 		trailArgs = append(trailArgs, "--design", design)
 	}

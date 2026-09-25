@@ -947,10 +947,14 @@ func runComposeTrail(args []string) error {
 	trailClarificationPath := flags.String("clarification", "", "")
 	trailDesignPath := flags.String("design", "", "")
 	blockedStep := flags.String("blocked-step", "", "")
+	resourcesPath := flags.String("resources", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *historyDir, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("compose-trail arguments are invalid")
 	}
+	// What the run brought into existence outside the repository. Absent on
+	// every run that created nothing, which is most of them.
+	created := worker.LoadCreatedResources(*resourcesPath)
 	designSummary := ""
 	if *trailDesignPath != "" {
 		design, err := investigate.ReadDesign(*trailDesignPath)
@@ -975,7 +979,7 @@ func runComposeTrail(args []string) error {
 			fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "trail could not be composed", err)
 			return errors.New("trail could not be composed")
 		}
-		trail := worker.ComposeUnsealedTrail(round, *blockedStep)
+		trail := worker.ComposeUnsealedTrailWithResources(round, *blockedStep, created)
 		if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
 			return errors.New("trail could not be written")
 		}
@@ -993,7 +997,7 @@ func runComposeTrail(args []string) error {
 			validationPassed = true
 		}
 	}
-	trail := worker.ComposeTrailWithDesign(stages, clarification, validationPassed, designSummary)
+	trail := worker.ComposeTrailWithResources(stages, clarification, validationPassed, designSummary, created)
 	if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
 		return errors.New("trail could not be written")
 	}

@@ -234,9 +234,9 @@ func (p *Pipeline) runChainStage(ctx context.Context, stage string) error {
 	case runtime.StagePublish:
 		return p.chainPublish(ctx, reviewers)
 	case runtime.StageImplement:
-		return p.chainRunInstruction(ctx, "implementer", repoRoot, baseSHA)
+		return p.chainRunInstruction(ctx, stage, "implementer", repoRoot, baseSHA)
 	case runtime.StageApply:
-		return p.chainRunInstruction(ctx, "applier", repoRoot, baseSHA)
+		return p.chainRunInstruction(ctx, stage, "applier", repoRoot, baseSHA)
 	default:
 		return fmt.Errorf("chain stage %q is not runnable as a command", stage)
 	}
@@ -249,7 +249,7 @@ func (p *Pipeline) runChainStage(ctx context.Context, stage string) error {
 // under the engine's user (issue #23); the seal of what it left stays with
 // the first review card, as before. The run record goes to the round the
 // seal will complete.
-func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, baseSHA string) error {
+func (p *Pipeline) chainRunInstruction(ctx context.Context, stage, role, repoRoot, baseSHA string) error {
 	instruction := p.path("INSTRUCTION.md")
 	if _, err := os.Stat(instruction); err != nil {
 		return errors.New("no instruction to run")
@@ -293,7 +293,16 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 			args = append(args, "--investigation", filepath.Join(filepath.Dir(design), "investigation.json"), "--measurements", p.path("measurements.jsonl"))
 		}
 	}
-	if err := p.runVerb(ctx, "run-instruction", args); err != nil {
+	err := p.runVerb(ctx, "run-instruction", args)
+	// Before the error is returned, and before the next card seals this
+	// working copy: an agent that reached a provider and made something
+	// there has made it whether or not its card then finished, and the
+	// claim file must not travel into the candidate as a change to the
+	// destination's repository.
+	if collected := p.RecordCreatedResources(stage, repoRoot); collected != nil && err == nil {
+		return collected
+	}
+	if err != nil {
 		return fmt.Errorf("the %s did not finish: %w", role, err)
 	}
 	return nil

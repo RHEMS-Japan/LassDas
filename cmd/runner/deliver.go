@@ -42,6 +42,13 @@ func runDeliver(ctx context.Context, arguments []string) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	pipeline := &runner.Pipeline{Config: config, Workspace: workspace, TargetToken: token, Logger: logger}
+	// A delivery card reaches the destination's own environments, so it is
+	// the card a deployment credential is usually named in.
+	credentials, err := stageCredentials(config, deliverStage(*until))
+	if err != nil {
+		return err
+	}
+	pipeline.StageCredentials = credentials
 	// The card is done when this returns; nothing is running.
 	defer runner.ClearCurrentStep(workspace)
 	err = pipeline.RunDeliver(ctx, *until)
@@ -58,6 +65,21 @@ func runDeliver(ctx context.Context, arguments []string) error {
 // far to go; the record has to name which card wrote it, because that is
 // what the tick reads it by.
 func deliverStageOf(until string) string {
+	switch until {
+	case runner.DeliverUntilChecks:
+		return runtime.DeliverStageChecks
+	case runner.DeliverUntilStaging:
+		return runtime.DeliverStageIntegrate
+	case runner.DeliverUntilProduction:
+		return runtime.DeliverStagePromote
+	}
+	return ""
+}
+
+// deliverStage is the card name behind one milestone. The kanban dispatches
+// these three cards by name and each asks for its own milestone, so this is
+// the one place the two vocabularies meet.
+func deliverStage(until string) string {
 	switch until {
 	case runner.DeliverUntilChecks:
 		return runtime.DeliverStageChecks

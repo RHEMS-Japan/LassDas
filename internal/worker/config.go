@@ -574,6 +574,100 @@ type ConsumerConfig struct {
 	// what stopped the engine from standing alone as a product).
 	GitHub ConsumerGitHubContract `json:"github_contract"`
 	Mode   ModeConfig             `json:"mode"`
+	// Infrastructure is what this destination lets the engine create and
+	// use outside the repository. A pointer so a destination that declares
+	// none keeps its canonical form, and every digest bound to it, exactly
+	// as it was.
+	Infrastructure *InfrastructureConfig `json:"infrastructure,omitempty"`
+}
+
+// InfrastructureConfig is the destination's standing permission: which
+// provider, in which region, under which provisioned credential, and which
+// kinds of resource the engine may bring into existence to finish a
+// request.
+//
+// It is a declaration, not a description of anything that exists. A kind
+// listed here is one the engine may create when the request needs it; a
+// kind left out is one it may not, and a request that needs it is carried
+// as far as the means allow and reported with what was missing named.
+// Nothing here is read as an instruction to create anything.
+type InfrastructureConfig struct {
+	// Provider is the service the resources live in, in that service's own
+	// word for itself. The engine does not interpret it — it reaches the
+	// provider through the credential's own tooling — so it is a label for
+	// the record and for the person reading the report.
+	Provider string `json:"provider"`
+	// Region is where they are created, again in the provider's own word.
+	Region string `json:"region,omitempty"`
+	// Credential names the entry in the runtime configuration's
+	// chain.credentials that reaches this provider. The two files are
+	// loaded apart, so the name is checked where they meet rather than
+	// here.
+	Credential string `json:"credential,omitempty"`
+	// Resources are the kinds the engine may create. Empty means it may
+	// use what the credential reaches and create nothing.
+	Resources []string `json:"resources,omitempty"`
+	// NamingPrefix goes in front of every name the engine chooses, so that
+	// what it made can be told apart afterwards from what was already
+	// there.
+	NamingPrefix string `json:"naming_prefix,omitempty"`
+}
+
+var (
+	// A provider, a region and a resource kind are all short identifiers in
+	// somebody else's vocabulary; they end up in the record and in the
+	// report, so they are held to a shape that prints as it stands.
+	infrastructureWordPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+	infrastructurePrefixPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,30}$`)
+)
+
+// ValidateInfrastructure is the same check the setup runs before it writes
+// a configuration, so a mistyped answer is named where it was written.
+func ValidateInfrastructure(i InfrastructureConfig) error { return i.validate() }
+
+// validate refuses a block that could not mean what it says.
+func (i InfrastructureConfig) validate() error {
+	if !infrastructureWordPattern.MatchString(i.Provider) {
+		return errors.New("consumer infrastructure provider is invalid")
+	}
+	if i.Region != "" && !infrastructureWordPattern.MatchString(i.Region) {
+		return errors.New("consumer infrastructure region is invalid")
+	}
+	if i.Credential != "" && !infrastructureWordPattern.MatchString(i.Credential) {
+		return errors.New("consumer infrastructure credential name is invalid")
+	}
+	if len(i.Resources) > 32 {
+		return errors.New("consumer infrastructure names too many resource kinds")
+	}
+	seen := make(map[string]bool, len(i.Resources))
+	for _, kind := range i.Resources {
+		if !infrastructureWordPattern.MatchString(kind) {
+			return errors.New("consumer infrastructure resource kind is invalid")
+		}
+		if seen[kind] {
+			return errors.New("consumer infrastructure names a resource kind twice")
+		}
+		seen[kind] = true
+	}
+	if i.NamingPrefix != "" && !infrastructurePrefixPattern.MatchString(i.NamingPrefix) {
+		return errors.New("consumer infrastructure naming prefix is invalid")
+	}
+	return nil
+}
+
+// MayCreate reports whether this destination allows a kind of resource to
+// be brought into existence. A destination that declared no infrastructure
+// allows none, which is every destination configured before this existed.
+func (c ConsumerConfig) MayCreate(kind string) bool {
+	if c.Infrastructure == nil {
+		return false
+	}
+	for _, allowed := range c.Infrastructure.Resources {
+		if allowed == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // ConsumerGitHubContract mirrors githubapi.Contract as configuration. There
@@ -1188,6 +1282,11 @@ func (c ConsumerConfig) EffectiveKind() string {
 func (c ConsumerConfig) validate() error {
 	if !repositoryPattern.MatchString(c.Repository) || c.RepositoryID <= 0 {
 		return errors.New("consumer repository is invalid")
+	}
+	if c.Infrastructure != nil {
+		if err := c.Infrastructure.validate(); err != nil {
+			return err
+		}
 	}
 	if c.Description != "" && validatePlainText(c.Description, 256, false) != nil {
 		return errors.New("consumer description is invalid")

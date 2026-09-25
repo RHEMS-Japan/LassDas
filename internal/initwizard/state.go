@@ -51,8 +51,12 @@ type State struct {
 	AutomationRunID       string                          `json:"automation_run_id"`
 	Completed             map[string]string               `json:"completed"`
 	Checks                map[string]json.RawMessage      `json:"checks"`
-	Smoke                 json.RawMessage                 `json:"smoke,omitempty"`
-	Metrics               Metrics                         `json:"metrics"`
+	// Means is what this project hands its engine beyond the repository
+	// (see means.go). A pointer so a project that hands over nothing — the
+	// ordinary one — keeps the journal it always had.
+	Means   *Means          `json:"means,omitempty"`
+	Smoke   json.RawMessage `json:"smoke,omitempty"`
+	Metrics Metrics         `json:"metrics"`
 }
 
 type Metrics struct {

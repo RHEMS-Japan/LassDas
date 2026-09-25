@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -45,7 +46,14 @@ type Pipeline struct {
 	// same-UID /proc exposure of the runner's own exec image is recorded in
 	// docs/RUNTIME_POD.md as the Phase-3 UID-separation gate).
 	TargetToken string
-	Logger      interface {
+	// StageCredentials are the operator-provisioned secrets this card was
+	// named in, already read, as NAME=value assignments. Every step this
+	// card runs gets them, the launched agent included: a card is named in
+	// a credential precisely so that what runs inside it can reach the
+	// service. No other card sees them, because no other card's entry read
+	// the files. Empty for a card no credential names.
+	StageCredentials []string
+	Logger           interface {
 		Info(string, ...any)
 		Error(string, ...any)
 	}
@@ -151,8 +159,13 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 	command.Stdout = live.Tee(os.Stdout)
 	stderrTail := &tailBuffer{limit: stepStderrTailBytes}
 	command.Stderr = live.Tee(io.MultiWriter(os.Stderr, stderrTail))
-	defer func() { p.lastStepStderr = stderrTail.String() }()
-	command.Env = append(os.Environ(), extraEnv...)
+	// Redacted on the way in, at the one place a child's output becomes
+	// something this process keeps. From here the tail travels into the
+	// round's failure record, into the next round's instruction, and onto
+	// the ticket; a credential echoed by a failing command would ride all
+	// three, and each of them outlives the card.
+	defer func() { p.lastStepStderr = p.redactCredentials(stderrTail.String()) }()
+	command.Env = append(append(os.Environ(), p.StageCredentials...), extraEnv...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {
@@ -205,6 +218,45 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *tailBuffer) String() string { return string(b.data) }
+
+// redactedCredential is what a credential's value reads as once it is out
+// of the card. The name of the variable is not printed with it: what is
+// worth knowing downstream is that something was taken out, and naming the
+// variable in a record that travels to the ticket would say which secret a
+// destination holds.
+const redactedCredential = "[secret]"
+
+// redactCredentials removes this card's credential values from text the
+// engine is about to keep. A value long enough to matter is replaced
+// wherever it appears; the assignments are sorted longest first so a value
+// that contains a shorter one is taken out whole rather than in pieces.
+//
+// Short values are left alone deliberately. Anything under the bound would
+// match ordinary words in build output, and a record where every third word
+// reads [secret] tells a reader nothing about why the card failed — which
+// is the only reason the record exists.
+func (p *Pipeline) redactCredentials(text string) string {
+	if text == "" || len(p.StageCredentials) == 0 {
+		return text
+	}
+	values := make([]string, 0, len(p.StageCredentials))
+	for _, assignment := range p.StageCredentials {
+		_, value, found := strings.Cut(assignment, "=")
+		if found && len(value) >= minRedactedCredentialBytes {
+			values = append(values, value)
+		}
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	for _, value := range values {
+		text = strings.ReplaceAll(text, value, redactedCredential)
+	}
+	return text
+}
+
+// minRedactedCredentialBytes is the shortest value worth taking out of a
+// record. Every credential this engine is given — a token, a connection
+// string, a key file — is far longer.
+const minRedactedCredentialBytes = 8
 
 func (p *Pipeline) worker(ctx context.Context, name string, arguments []string, extraEnv ...string) (int, error) {
 	argv := append([]string{p.Config.WorkerBin}, arguments...)

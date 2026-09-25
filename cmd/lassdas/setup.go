@@ -5,16 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/initsmoke"
 	"automation.internal/ticket-ingress/internal/initwizard"
 	"automation.internal/ticket-ingress/internal/localrun"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // errSmokePending ends `setup apply` where the person takes over: the body
@@ -33,7 +37,7 @@ func runSetup(ctx context.Context, command, project, repoRoot, home, redo string
 	}
 	switch command {
 	case "setup check":
-		return setupCheck(root, home, output)
+		return setupCheck(ctx, root, home, project, nil, output)
 	case "setup secrets":
 		return setupSecrets(ctx, project, root, home, output)
 	case "setup apply", "setup smoke":
@@ -125,7 +129,7 @@ func loadAnswersWithDistribution(root, home string) (initwizard.Answers, error) 
 	return answers, nil
 }
 
-func setupCheck(root, home string, output io.Writer) error {
+func setupCheck(ctx context.Context, root, home, project string, client *http.Client, output io.Writer) error {
 	var problems []string
 	// The same three the wizard requires before it starts (source build,
 	// clone, container), named here so the gap is known before anything runs.
@@ -159,6 +163,9 @@ func setupCheck(root, home string, output io.Writer) error {
 	if notice := initwizard.HostNotice(answers); notice != "" {
 		_, _ = fmt.Fprintln(output, notice)
 	}
+	if notice := keyLimitNotice(ctx, home, project, client); notice != "" {
+		_, _ = fmt.Fprintln(output, notice)
+	}
 	if len(problems) == 0 {
 		_, err := fmt.Fprintln(output, "不足なし。次は利用者が `lassdas setup secrets --project <name>` で鍵を入れ、AI が `lassdas setup apply --project <name>` を実行します")
 		return err
@@ -167,6 +174,72 @@ func setupCheck(root, home string, output io.Writer) error {
 		_, _ = fmt.Fprintln(output, "- "+problem)
 	}
 	return fmt.Errorf("不足が %d 件あります", len(problems))
+}
+
+// keyLimitNotice warns when a stored provider key has no spending limit on
+// it. The engine carries no budget: it goes on changing its approach until
+// the request is done, and what stops a delivery that never will be is the
+// provider refusing the key. A key with no limit removes that stop, and
+// nothing downstream would ever say so.
+//
+// It reads, never writes, and never prints a key. A project with no stored
+// key yet — the ordinary state the first time this runs — has nothing to
+// check and is passed over in silence; a provider that cannot be reached is
+// said plainly rather than reported as "no limit", which would be a claim
+// this could not support.
+func keyLimitNotice(ctx context.Context, home, project string, client *http.Client) string {
+	if project == "" {
+		return ""
+	}
+	dir, err := initwizard.ProjectDir(home, project)
+	if err != nil {
+		return ""
+	}
+	state, secrets, err := initwizard.Load(dir)
+	if err != nil || state.BaseURL == "" {
+		return ""
+	}
+	// One reading per distinct key, not per variable: a setup that shares
+	// one key across every role would otherwise ask the provider about the
+	// same key seven times and say the same thing seven times.
+	checked := map[string]bool{}
+	unlimited, unreachable := 0, 0
+	for _, name := range providerKeyNames(secrets) {
+		value := secrets[name]
+		if value == "" || checked[value] {
+			continue
+		}
+		checked[value] = true
+		limit, err := worker.ReadKeyLimit(ctx, client, state.BaseURL, value)
+		if err != nil {
+			unreachable++
+			continue
+		}
+		if !limit.Limited() {
+			unlimited++
+		}
+	}
+	switch {
+	case unlimited > 0:
+		return "警告: モデルの鍵に利用上限が設定されていません (" + strconv.Itoa(unlimited) + " 本)。本体は自分では費用を打ち切りません — 依頼が終わるまで手を替えて進み続けるので、止まるのは提供元が鍵を断ったときだけです。" + initwizard.ProviderName(state.BaseURL) + " の鍵の設定画面で上限とリセット周期 (日次・週次・月次) を決めてください。上限に達したら本体は課題にその旨を書いて待ち、上限が上がるかリセットされた時点で続きから再開します"
+	case unreachable > 0 && len(checked) == unreachable:
+		return "鍵の利用上限を確認できませんでした (" + initwizard.ProviderName(state.BaseURL) + " に接続できないか、鍵が使えません)。上限が未設定のままだと本体は費用を自分で打ち切りません"
+	}
+	return ""
+}
+
+// providerKeyNames are the stored variables that hold a key to the model
+// provider, in a stable order. The destination and tracker keys are not
+// among them: they are not billed by the gateway and have no limit to read.
+func providerKeyNames(secrets initwizard.Secrets) []string {
+	names := make([]string, 0, len(secrets))
+	for name := range secrets {
+		if strings.HasPrefix(name, "LASSDAS_") && strings.HasSuffix(name, "_KEY") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // setupSecrets is the person's turn: the keys the setup needs, typed here
