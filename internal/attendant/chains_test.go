@@ -58,12 +58,26 @@ func TestClassifyChainFailure(t *testing.T) {
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("implement failure = %v %v", action, code)
 	}
-	// An implement card whose agent reported instead of changing ends on
-	// its own code: saying the AI failed was false on a run where the AI
-	// had explained itself (live 2026-09-25).
+	// An implement card whose agent reported instead of changing is not an
+	// ending at all: the engine decides what the report asked about and
+	// starts the same round again. The code travels for the case where the
+	// engine will not answer the return any more, and it is the ladder's —
+	// a round handed back past the answers the engine makes is the seat's
+	// model refusing the work.
 	action, code = classifyChainFailure(runtime.StageImplement, undecided, reported)
-	if action != actionReport || code != hook.TerminalImplementationReturned {
+	if action != actionAnswerReturn || code != hook.TerminalModelFailed {
 		t.Fatalf("implement report = %v %v", action, code)
+	}
+	// The applier of a designed request can do exactly the same thing, and
+	// its empty working copy used to go to the review and end as a model
+	// failure with the report nowhere.
+	action, code = classifyChainFailure(runtime.StageApply, undecided, reported)
+	if action != actionAnswerReturn || code != hook.TerminalModelFailed {
+		t.Fatalf("apply report = %v %v", action, code)
+	}
+	action, code = classifyChainFailure(runtime.StageApply, undecided, changed)
+	if action != actionReport || code != hook.TerminalModelFailed {
+		t.Fatalf("apply failure = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StagePublish, undecided, reported)
 	if action != actionReport || code != hook.TerminalReleaseFailed {

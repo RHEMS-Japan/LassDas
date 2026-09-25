@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"automation.internal/ticket-ingress/internal/worker"
@@ -152,7 +151,7 @@ func runRunInstruction(ctx context.Context, args []string) error {
 			// it happened, not what was said).
 			first, sealErr := worker.SealAgentRun(agentRunOf(outcome, draft, *baseSHA, *stage, len(prompt), 0))
 			if sealErr == nil {
-				_ = worker.WriteJSONFileExclusive(emptyAttemptRecordPath(*runOutPath), first, worker.MaxArtifactJSONBytes)
+				_ = worker.WriteJSONFileExclusive(worker.EmptyAttemptRecordPath(*runOutPath), first, worker.MaxArtifactJSONBytes)
 			}
 			emptyAttempts = 1
 			second, secondHalted, secondErr := worker.RunAgentUnlessHaltedWithHomeFiles(ctx, agent, *repoRoot, retry,
@@ -191,14 +190,25 @@ func runRunInstruction(ctx context.Context, args []string) error {
 	if halted {
 		return sealAppliersHalt(*repoRoot, *objectionOutPath, consumer, draft, *baseSHA, *stage, design)
 	}
-	if *role == "implementer" && worker.IsSendBack(run) {
-		// The implementer is told to change nothing and say why when it
-		// cannot carry the request out. Finishing this card would send the
-		// empty working copy to the first review, where the seal refuses
-		// it as "the agent changed nothing" and the run ends as a model
-		// failure with the reason nowhere on the ticket (live 2026-09-25).
-		// The record beside this card is what the report then carries.
-		return errors.New("the implementer changed nothing and returned the work to the requester")
+	if worker.IsSendBack(run) {
+		// The implementing agent is told to change nothing and say why when
+		// it cannot carry the request out. Finishing this card would send
+		// the empty working copy to the first review, where the seal
+		// refuses it as "the agent changed nothing" and the run ends as a
+		// model failure with the reason nowhere on the ticket (live
+		// 2026-09-25).
+		//
+		// Both roles, because both are an agent on the same instruction
+		// file and either can leave the working copy alone. The applier's
+		// other way of stopping — an objection against the design — was
+		// sealed above and never reaches here.
+		//
+		// Stopping here is the whole of this card's part. What the agent
+		// said goes no further than the record beside it; the engine reads
+		// that record, decides what the report asked about, and starts this
+		// same round again with what it decided. Nothing reaches the
+		// requester as a question.
+		return errors.New("the " + *role + " changed nothing and explained why; the round is answered and run again")
 	}
 	return nil
 }
@@ -214,13 +224,6 @@ func agentRunOf(outcome worker.AgentOutcome, draft worker.TicketDraft, baseSHA s
 		DurationMs: outcome.Duration.Milliseconds(), ChangedFiles: outcome.ChangedFiles,
 		Transcript: outcome.Transcript, EmptyAttempts: emptyAttempts, RanAt: time.Now().UTC(),
 	}
-}
-
-// emptyAttemptRecordPath is where the attempt that changed nothing is kept:
-// beside the run record, under a name nothing else writes.
-func emptyAttemptRecordPath(runOut string) string {
-	extension := filepath.Ext(runOut)
-	return strings.TrimSuffix(runOut, extension) + "-empty-attempt" + extension
 }
 
 // retryTimeShare is the part of an agent's own timeout a first attempt may

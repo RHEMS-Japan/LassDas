@@ -821,14 +821,36 @@ func handleChainFailure(
 	// decision that sent it back is in the record too (live 2026-09-17).
 	//
 	// The code is deliberately not on this line. Two of the three actions
-	// never report it - regenerate starts another round, ask-question posts
-	// a question - and the value classifyChainFailure carries alongside
-	// them is a placeholder. Logged here it named model_failed for the very
+	// usually do not report it - regenerate starts another round, and
+	// answering a returned round starts the same one again - and the value
+	// classifyChainFailure carries alongside them is what a failure of that
+	// would be reported as. Logged here it named model_failed for the very
 	// run that ends as design_rounds_spent, which is the misreading this
 	// line exists to prevent. The code the run does end with is on the
 	// "chain terminalized" line, which is written after the report is
 	// accepted rather than before it (review of #201).
 	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName, "action", action.String())
+	// A round whose agent handed the work back, before anything else looks
+	// at it. The engine decides what the report asked about and starts the
+	// same round again; what comes back here is only the cases where it did
+	// not — the requester asked the delivery to stop, or the engine will not
+	// answer this return again and it is now an ordinary model failure for
+	// the ladder below to climb.
+	if action == actionAnswerReturn {
+		verdict, answerErr := answerReturnedWork(ctx, config, services, hermes, envelope, run, view, stageName, logger)
+		if answerErr != nil {
+			return answerErr
+		}
+		action = actionReport
+		switch verdict {
+		case returnRelaunched:
+			return nil
+		case returnStopped:
+			code = hook.TerminalCancelled
+		default:
+			code = hook.TerminalModelFailed
+		}
+	}
 	// Three of the endings this could choose were never decisions about the
 	// request: something broke, and the delivery was over. The ladder takes
 	// those instead — it reads what the card said went wrong, changes
@@ -1033,10 +1055,13 @@ const (
 	actionReport failureAction = iota
 	// actionRegenerate retires the round's remnant and starts the next.
 	actionRegenerate
+	// actionAnswerReturn answers a round whose agent handed the work back
+	// and starts that same round again.
+	actionAnswerReturn
 )
 
 // String names the action for the record. The type is an int, so a plain
-// conversion would log one unprintable rune. A third action added without
+// conversion would log one unprintable rune. A fourth action added without
 // a name here says so rather than borrowing one (review of #201).
 func (a failureAction) String() string {
 	switch a {
@@ -1044,6 +1069,8 @@ func (a failureAction) String() string {
 		return "report"
 	case actionRegenerate:
 		return "regenerate"
+	case actionAnswerReturn:
+		return "answer_return"
 	default:
 		return "unknown"
 	}
@@ -1058,14 +1085,26 @@ func classifyChainFailure(stageName string, decision func() (string, error), ret
 	switch stageName {
 	case runtime.StagePublish:
 		return actionReport, hook.TerminalReleaseFailed
-	case runtime.StageImplement:
-		// The implementer is told to change nothing and say why when it
-		// cannot carry the request out. What it wrote is an answer, not a
-		// breakdown, so the run ends on its own code and the trail carries
-		// the report. A card that blocked for any other reason left no
-		// such record and ends as it did before.
+	case runtime.StageImplement, runtime.StageApply:
+		// The implementing agent is told to change nothing and say why when
+		// it cannot carry the request out. What it wrote is an answer, not
+		// a breakdown — and it is not an ending either. The engine decides
+		// what the report asked about, records what it decided, and starts
+		// the same round again; nothing is handed to the requester.
+		//
+		// Both cards, because both run an implementing agent on the same
+		// instruction file and both can leave the working copy untouched. A
+		// designed request's applier has one more way to stop — an
+		// objection against the design, which halts and goes back to the
+		// designer — and that leaves a record of its own, well before this.
+		//
+		// The code is what the caller reports if the answering is declined,
+		// and it is the ladder's: a round handed back more times than the
+		// engine answers is the seat's model refusing the work, which is
+		// the thing the ladder exists for. A card that blocked for any
+		// other reason left no such record and takes the arm below.
 		if returned() {
-			return actionReport, hook.TerminalImplementationReturned
+			return actionAnswerReturn, hook.TerminalModelFailed
 		}
 		return actionReport, hook.TerminalModelFailed
 	case runtime.StageValidate:

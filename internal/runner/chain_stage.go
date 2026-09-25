@@ -152,6 +152,25 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 			args = append(args, "--ruling", RulingFile(p.Workspace, round-1))
 		}
 	}
+	// This round has been handed back before, and what the engine decided
+	// in the agent's place is the reason it is being rendered again. Keyed
+	// on this round rather than the one before it: a return does not start
+	// a new round, it restates the one that was returned — including the
+	// first, which has no previous round at all.
+	//
+	// A record that will not read stops the render rather than being
+	// skipped. Skipped, the round would be started again under the
+	// instruction it has already answered, and the command that reads the
+	// file refuses it for exactly that reason; the failure belongs here,
+	// where the caller can try again, not in a plausible instruction that
+	// has lost the point of the round.
+	returned, err := ReadReturns(p.Workspace, round)
+	if err != nil {
+		return err
+	}
+	if returned.Latest() != nil {
+		args = append(args, "--returned", ReturnRecordFile(p.Workspace, round))
+	}
 	args = append(args, p.clarificationArgs()...)
 	// The implementer's seat has one launch, so the ladder's remedy for an
 	// implementer that will not answer is the instruction rather than the
@@ -242,9 +261,16 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 	}
 	record := fmt.Sprintf("%s/%s-run.json", stageDir, role)
 	// A re-dispatched card writes its own record; the record is
-	// exclusive-create, so the earlier attempt's must go first.
-	if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	// exclusive-create, so the earlier attempt's must go first. The account
+	// of a launch that reported work and changed nothing sits beside it
+	// under its own name and is exclusive-create too, so it goes with it:
+	// left behind, every later attempt's account of itself is dropped
+	// without a word, and it is evidence about the very failure a round
+	// that keeps being handed back is made of.
+	for _, leftover := range []string{record, worker.EmptyAttemptRecordPath(record)} {
+		if err := os.Remove(leftover); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	args := []string{
 		"run-instruction", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,

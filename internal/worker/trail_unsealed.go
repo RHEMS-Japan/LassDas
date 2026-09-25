@@ -3,6 +3,8 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +40,11 @@ type UnsealedRound struct {
 	// EmptyAttempts counts the launches before this one that reported work
 	// and left the tree alone.
 	EmptyAttempts int
+	// EngineAnswers counts the times the engine answered this round itself
+	// and started it again rather than passing the report on. Without it a
+	// record of a round that stopped at a return reads as though nobody had
+	// done anything about it, which stopped being true.
+	EngineAnswers int
 }
 
 // LoadUnsealedRound reads the newest implementation round that ran an agent
@@ -59,10 +66,18 @@ func LoadUnsealedRound(historyDir string, config Config) (UnsealedRound, error) 
 		if report == "" {
 			continue
 		}
-		return UnsealedRound{
+		unsealed := UnsealedRound{
 			Round: number, AgentID: run.AgentID, Report: report,
 			ReturnedWork: IsSendBack(run), EmptyAttempts: run.EmptyAttempts,
-		}, nil
+		}
+		// What the engine did about this round, when it was handed back.
+		// Read leniently: a record that will not read leaves the count at
+		// zero, and a trail is never worth failing to compose over.
+		if returns, err := ReadReturnedRoundFile(
+			filepath.Join(historyDir, "stage-"+strconv.Itoa(number), ReturnRecordFileName)); err == nil {
+			unsealed.EngineAnswers = len(returns.Assumptions())
+		}
+		return unsealed, nil
 	}
 	return UnsealedRound{}, errors.New("no implementing round left a report")
 }
@@ -76,7 +91,12 @@ func ComposeUnsealedTrail(round UnsealedRound, blocked string) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "### 実装の経過 (%d 周目で停止)\n", round.Round)
 	if round.ReturnedWork {
-		builder.WriteString("- 実装役は、変更を加えずに理由を報告して作業を返しました。対象リポジトリと本番環境は変更していません。\n")
+		builder.WriteString("- 実装役は、変更を加えずに理由を報告して終了しました。対象リポジトリと本番環境は変更していません。\n")
+		if round.EngineAnswers > 0 {
+			fmt.Fprintf(&builder,
+				"- この報告は依頼者に返していません。本体が %d 回、足りない点の扱いを決めて同じ周をやり直させています。決めた内容は前提として記録にあります。\n",
+				round.EngineAnswers)
+		}
 	} else {
 		builder.WriteString("- 変更を確定できなかったため、この周の記録は残っていません。対象リポジトリと本番環境は変更していません。\n")
 	}
