@@ -119,6 +119,12 @@ func (p *Pipeline) EnsureTrail(ctx context.Context) error {
 	if design := p.approvedDesignPath(); design != "" {
 		trailArgs = append(trailArgs, "--design", design)
 	}
+	if p.blockedStep != "" {
+		// Only the attendant knows which card stopped moving; the composer
+		// needs it for a round that sealed nothing, where the artifacts
+		// alone cannot say where the run got to.
+		trailArgs = append(trailArgs, "--blocked-step", p.blockedStep)
+	}
 	trailArgs = append(trailArgs, "--out", trailPath)
 	if code, err := p.worker(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 		// The workflow wrote this exact fixed line on compose failure, and it
@@ -292,6 +298,11 @@ func (p *Pipeline) writeStopReason(reason string) {
 // run it is ending in its own process, the same way a card's runner does.
 // Without it a run the attendant stops carries only its failure class.
 func (p *Pipeline) WriteStopReason(reason string) { p.writeStopReason(reason) }
+
+// NoteBlockedStep tells the trail which step a card stopped on. Call it
+// before EnsureTrail: a round that sealed no candidate is rendered from the
+// run record alone, and the record cannot say where the chain then stopped.
+func (p *Pipeline) NoteBlockedStep(step string) { p.blockedStep = step }
 
 // AttachDeliveryStopReason appends the recorded stop reason (if any) to the
 // trail this pipeline composed. Call it after EnsureTrail: the attendant's

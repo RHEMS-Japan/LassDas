@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/hook"
 )
@@ -264,7 +265,16 @@ func trailTruncate(value string) string {
 		return value
 	}
 	clipped := value[:MaxTrailBytes-len("\n…(切り詰め)")]
-	for len(clipped) > 0 && !strings.HasSuffix(clipped, "\n") {
+	// The cut lands on a character, not on the last line break before it.
+	// Rewinding to a line boundary was tidier but cost an unbounded
+	// amount of text: an agent's report written as one long paragraph has
+	// no break of its own, so the rewind went back to the heading above it
+	// and the whole section came back empty. A cut in the middle of a line
+	// reads as what it is, and the line below says the text was cut.
+	for len(clipped) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(clipped); r != utf8.RuneError || size > 1 {
+			break
+		}
 		clipped = clipped[:len(clipped)-1]
 	}
 	return clipped + "\n…(切り詰め)"

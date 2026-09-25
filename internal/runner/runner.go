@@ -71,6 +71,10 @@ type Pipeline struct {
 	// stage that failed can tell the requester why in the trail (the worker
 	// explains its refusal there and nowhere else).
 	lastStepStderr string
+	// blockedStep is the requester-facing name of the step a card stopped
+	// on, set by the attendant before it composes the trail of a run it is
+	// ending. Empty in the one-process mode, which has no cards.
+	blockedStep string
 }
 
 // Outcome is what the pipeline hands back to the runner's terminal logic.

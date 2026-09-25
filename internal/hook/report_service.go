@@ -278,6 +278,7 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalInvestigationNonconverged:      "調査報告が根拠のレビューを規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
 		TerminalDesignNonconverged:             "直し方の設計がレビューで規定回数内に合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 		TerminalDesignRoundsSpent:              "直し方の設計は合意できましたが、その設計で作業に入った後、「設計そのものを変えるべき」という判断になりました。設計をやり直せる回数を使い切っていたため、リポジトリは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
+		TerminalImplementationReturned:         "実装役が、変更を加えずに理由を報告して作業を返しました。対象リポジトリと本番環境は変更していません。報告の全文は下の実行の記録に載せています。どう進めるかは依頼者の判断です。内容を確認のうえ、必要な情報を書き足して起票し直してください。",
 	}[report.Code]
 	if message == "" {
 		message = "自動処理は終了しました。詳細は実行履歴を参照してください。"
@@ -384,6 +385,13 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 	case TerminalCancelled:
 		facts.NextActor = "起票者"
 		facts.Operation = "対応は不要です（中止の指示どおり停止しました）"
+	case TerminalImplementationReturned:
+		// The implementer answered and the answer is on the ticket, so the
+		// next move is the requester's. The default line — an operator will
+		// look and the requester need do nothing — would send the one
+		// person who can act on the report away from it.
+		facts.NextActor = "起票者"
+		facts.Operation = "下の実行の記録にある実装役の報告をご確認のうえ、進めるかどうかをご判断ください（進める場合は、報告をふまえて書き直した新しいチケットとして起票してください）"
 	case TerminalProductionVerificationFailed:
 		facts.Production = "変更済み（本番デプロイは完了、表示確認は失敗）"
 	case TerminalProductionDeploymentUnverified:

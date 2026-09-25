@@ -398,6 +398,14 @@ func classifyAfterTerminalInDirectory(status *RunStatus, config runtime.Config, 
 			status.place("stopped", "停止済み", "ご指示により停止しました")
 			return
 		}
+		if run.TerminalCode == string(hook.TerminalImplementationReturned) {
+			// Nothing failed: the implementer answered, and the board saying
+			// "ended in failure" over a detail line that says otherwise
+			// leaves the operator to work out which half to believe.
+			status.place("stopped", "実装役の報告で終了",
+				"変更を加えずに理由を報告して作業を返しました。報告の全文はチケットのコメントにあります")
+			return
+		}
 		status.place("failed", "失敗で終了", hook.DescribeTerminalCode(run.TerminalCode))
 		evidence := runner.RecordedFailedStep(runDir)
 		if run.TerminalCode == string(hook.TerminalModelFailed) && evidence["model_failure_reason"] == hook.ModelFailureBudgetExhausted {

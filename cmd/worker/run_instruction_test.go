@@ -423,14 +423,18 @@ func TestTheRetryNoteNamesOnlyWhatTheRoleHas(t *testing.T) {
 	if err := os.WriteFile(instruction, []byte("Change the label.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(context.Background(), []string{"run-instruction", "--role", "implementer", "--config", fixture.configPath,
+	// The stand-in reports and changes nothing through both launches, which
+	// is the implementer handing the work back, so the card ends on that
+	// report. What is measured here is the prompt the retry carried.
+	err := run(context.Background(), []string{"run-instruction", "--role", "implementer", "--config", fixture.configPath,
 		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
-		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "run.json")}); err != nil {
+		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "run.json")})
+	if err == nil || !strings.Contains(err.Error(), "returned the work to the requester") {
 		t.Fatalf("run-instruction as the implementer: %v", err)
 	}
-	sent, err := os.ReadFile(promptFile)
-	if err != nil {
-		t.Fatal(err)
+	sent, readErr := os.ReadFile(promptFile)
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
 	if !strings.Contains(string(sent), "The working copy is unchanged") {
 		t.Fatal("the implementer was not asked again")

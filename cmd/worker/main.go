@@ -1035,6 +1035,7 @@ func runComposeTrail(args []string) error {
 	validationPath := flags.String("validation", "", "")
 	trailClarificationPath := flags.String("clarification", "", "")
 	trailDesignPath := flags.String("design", "", "")
+	blockedStep := flags.String("blocked-step", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *historyDir, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
 		return errors.New("compose-trail arguments are invalid")
@@ -1053,8 +1054,21 @@ func runComposeTrail(args []string) error {
 	}
 	stages, err := worker.LoadTrailStages(*historyDir, config, *toolSHA)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "trail could not be composed", err)
-		return errors.New("trail could not be composed")
+		// A round that sealed no candidate has no chain to render, and
+		// until now that meant the requester got the fallback line while
+		// the implementing agent's own report of why it changed nothing
+		// sat unread in the run directory (live 2026-09-25). The report is
+		// the record of that run, so it is what the trail carries.
+		round, unsealedErr := worker.LoadUnsealedRound(*historyDir, config)
+		if unsealedErr != nil {
+			fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "trail could not be composed", err)
+			return errors.New("trail could not be composed")
+		}
+		trail := worker.ComposeUnsealedTrail(round, *blockedStep)
+		if err := writeRawFileExclusive(*outputPath, []byte(trail), worker.MaxTrailBytes); err != nil {
+			return errors.New("trail could not be written")
+		}
+		return nil
 	}
 	clarification, err := readClarificationContext(*trailClarificationPath)
 	if err != nil {

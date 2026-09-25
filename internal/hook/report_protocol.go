@@ -72,6 +72,14 @@ const (
 	// passed looking for a disagreement that never happened (live
 	// 2026-09-17).
 	TerminalDesignRoundsSpent TerminalCode = "design_rounds_spent"
+	// TerminalImplementationReturned is the implementing agent handing the
+	// request back: it is told to change nothing and say why when it
+	// cannot carry the request out, and what it wrote is an answer, not a
+	// breakdown. Reporting it as model_failed told a requester the AI had
+	// failed on a run where the AI had explained itself and the
+	// explanation was the only thing missing from the ticket (live
+	// 2026-09-25).
+	TerminalImplementationReturned TerminalCode = "implementation_returned"
 )
 
 // Valid reports whether c is one of the terminal codes the automation ends
@@ -91,7 +99,7 @@ func AllTerminalCodes() []TerminalCode {
 		TerminalValidationFailed, TerminalReleaseFailed, TerminalProductionDeploymentUnverified,
 		TerminalProductionVerificationFailed, TerminalInternalFailed,
 		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged,
-		TerminalDesignNonconverged, TerminalDesignRoundsSpent,
+		TerminalDesignNonconverged, TerminalDesignRoundsSpent, TerminalImplementationReturned,
 	}
 }
 
@@ -330,14 +338,18 @@ func ShortenTrailForComment(trail string, limit int) string {
 		return ""
 	}
 	clipped := trail[:budget]
-	// Prefer the end of the last whole line; fall back to a rune boundary so
-	// a record with no newline in reach still comes out as valid UTF-8.
-	if cut := strings.LastIndexByte(clipped, '\n'); cut > 0 {
-		clipped = clipped[:cut]
-	} else {
-		for len(clipped) > 0 && !utf8.ValidString(clipped) {
-			clipped = clipped[:len(clipped)-1]
+	// The cut lands on a character, not on the end of the last whole line.
+	// Ending on a line was tidier but cost an unbounded amount of text: a
+	// section whose body is one long paragraph has no break of its own, so
+	// the last line boundary in reach is the heading above it, and the
+	// whole body went. The comment then showed a heading, the note saying
+	// there was more, and none of what it was introducing, while the
+	// comment's own fixed fields told the requester to read it.
+	for len(clipped) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(clipped); r != utf8.RuneError || size > 1 {
+			break
 		}
+		clipped = clipped[:len(clipped)-1]
 	}
 	return clipped + TrailShortenedNote
 }

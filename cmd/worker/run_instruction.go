@@ -191,6 +191,15 @@ func runRunInstruction(ctx context.Context, args []string) error {
 	if halted {
 		return sealAppliersHalt(*repoRoot, *objectionOutPath, consumer, draft, *baseSHA, *stage, design)
 	}
+	if *role == "implementer" && worker.IsSendBack(run) {
+		// The implementer is told to change nothing and say why when it
+		// cannot carry the request out. Finishing this card would send the
+		// empty working copy to the first review, where the seal refuses
+		// it as "the agent changed nothing" and the run ends as a model
+		// failure with the reason nowhere on the ticket (live 2026-09-25).
+		// The record beside this card is what the report then carries.
+		return errors.New("the implementer changed nothing and returned the work to the requester")
+	}
 	return nil
 }
 

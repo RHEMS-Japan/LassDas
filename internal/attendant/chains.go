@@ -23,6 +23,7 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // Logger is the narrow logging surface the sync needs; it is also exactly
@@ -743,6 +744,8 @@ func handleChainFailure(
 		return readField(runDir, fmt.Sprintf("history/stage-%d/decision.json", view.round), "outcome")
 	}, func() (string, error) {
 		return readField(runDir, "history/question/decision.json", "outcome")
+	}, func() bool {
+		return worker.RoundReturnedWork(filepath.Join(runDir, "history"), view.round)
 	})
 	// What the tick decided, beside the card it found. The card is only
 	// where the chain stopped moving: a validate card blocked because the
@@ -819,6 +822,10 @@ func handleChainFailure(
 		if stopReason != "" {
 			pipeline.WriteStopReason(stopReason)
 		}
+		// A round that sealed no candidate is rendered from the
+		// implementing agent's report, which cannot say which card then
+		// blocked; the step's requester-facing name is this tick's to give.
+		pipeline.NoteBlockedStep(failedStepFor(runDir, stageName, view.round))
 		_ = pipeline.EnsureTrail(ctx)
 		// The publish card records why a delivery stopped in its own
 		// process; the recomposed trail would silently drop it otherwise.
@@ -873,10 +880,20 @@ func (a failureAction) String() string {
 // revise regenerates, a nonconverged with a sealed question asks, a decided
 // converge that still failed means the deterministic validation refused,
 // and anything undecided is the machinery's own death.
-func classifyChainFailure(stageName string, decision, question func() (string, error)) (failureAction, hook.TerminalCode) {
+func classifyChainFailure(stageName string, decision, question func() (string, error), returned func() bool) (failureAction, hook.TerminalCode) {
 	switch stageName {
 	case runtime.StagePublish:
 		return actionReport, hook.TerminalReleaseFailed
+	case runtime.StageImplement:
+		// The implementer is told to change nothing and say why when it
+		// cannot carry the request out. What it wrote is an answer, not a
+		// breakdown, so the run ends on its own code and the trail carries
+		// the report. A card that blocked for any other reason left no
+		// such record and ends as it did before.
+		if returned() {
+			return actionReport, hook.TerminalImplementationReturned
+		}
+		return actionReport, hook.TerminalModelFailed
 	case runtime.StageValidate:
 		outcome, err := decision()
 		if err != nil {
