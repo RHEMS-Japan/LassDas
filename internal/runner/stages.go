@@ -479,6 +479,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 			)
 		}
 		assessArgs = append(assessArgs, p.clarificationArgs()...)
+		assessArgs = append(assessArgs, p.releasePathArgs()...)
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の判定")
@@ -490,6 +491,7 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 			"--knowledge-root", p.Config.KnowledgeRoot, "--assessment", assessment,
 		}
 		checkArgs = append(checkArgs, p.clarificationArgs()...)
+		checkArgs = append(checkArgs, p.releasePathArgs()...)
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
 			p.noteReceptionCutoff("受付の確認")

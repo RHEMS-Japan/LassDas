@@ -38,11 +38,11 @@ func sealObservedForTest(t *testing.T, config Config, draft TicketDraft, root, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	observed, err := ReadObservedChanges(root, base, changed, consumer)
+	observed, err := ReadObservedChanges(root, base, changed, consumer, WorkflowAllowance{})
 	if err != nil {
 		return Candidate{}, err
 	}
-	request, err := TicketWithObservedTargets(draft, observed, config)
+	request, err := TicketWithObservedTargets(draft, observed, nil, config)
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -93,7 +93,7 @@ func TestASealAcceptsAFileTheRequestNeverNamed(t *testing.T) {
 	}
 	// The contract's file set is the observation, so nothing had to be
 	// declared in advance for the created file to be deliverable.
-	request, err := TicketWithObservedTargets(draft, []ObservedChange{{Path: "client/src/module/helper.ts", Created: true}}, config)
+	request, err := TicketWithObservedTargets(draft, []ObservedChange{{Path: "client/src/module/helper.ts", Created: true}}, nil, config)
 	if err != nil {
 		t.Fatalf("the contract refused a file the ticket never named: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestASealStillEnforcesTheDestinationsLimits(t *testing.T) {
 	t.Run("a hidden path", func(t *testing.T) {
 		root, _ := buildAgentRepository(t)
 		writeAgentFile(t, root, "client/src/.env", "SECRET=1\n")
-		if _, err := ChangedFilesUnder(root, consumer.Mode.AllowedFilePrefixes, nil); err == nil {
+		if _, err := ChangedFilesUnder(root, consumer.Mode.AllowedFilePrefixes, nil, WorkflowAllowance{}); err == nil {
 			t.Fatal("a hidden path inside the writable scope was observed as a change")
 		}
 	})

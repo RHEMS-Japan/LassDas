@@ -177,25 +177,25 @@ func TestConfirmTreeMatchesCandidateRejectsAReviewerThatEdits(t *testing.T) {
 	writeAgentFile(t, root, "client/src/label.ts", submitted)
 	candidate := Candidate{Files: []CandidateFile{{Path: "client/src/label.ts", Content: submitted}}}
 
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err != nil {
 		t.Fatalf("an untouched tree was rejected: %v", err)
 	}
 
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Reviewer edited this';\n")
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a reviewer that rewrote the change was accepted")
 	}
 
 	// Reverting the submitted file to its base content leaves no tracked
 	// change at all — the content check is what still catches it.
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Send';\n")
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a reviewer that reverted the change was accepted")
 	}
 
 	writeAgentFile(t, root, "client/src/label.ts", submitted)
 	writeAgentFile(t, root, "README.md", "fixture rewritten by the reviewer\n")
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a reviewer that edited a tracked file outside the candidate was accepted")
 	}
 }
@@ -214,7 +214,7 @@ func TestConfirmTreeMatchesCandidateToleratesReviewerToolingByproducts(t *testin
 	writeAgentFile(t, root, "client/src/vitest.config.ts.timestamp-1.mjs", "export default {};\n")
 	writeAgentFile(t, root, ".gitignore", "*.tsbuildinfo\n")
 	writeAgentFile(t, root, "client/src/tsconfig.tsbuildinfo", "{}\n")
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err != nil {
 		t.Fatalf("a reviewer's tooling byproducts were treated as tampering: %v", err)
 	}
 }
@@ -260,7 +260,7 @@ func TestCleanReviewByproductsRemovesOnlyWhatTheReviewerLeft(t *testing.T) {
 			t.Fatalf("%s was not left alone: %q %v", path, actual, err)
 		}
 	}
-	if err := ConfirmTreeMatchesCandidate(root, candidate, fixtureConsumerForAgent()); err != nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, fixtureConsumerForAgent(), WorkflowAllowance{}); err != nil {
 		t.Fatalf("the cleaned tree no longer matches the candidate: %v", err)
 	}
 }
@@ -312,19 +312,19 @@ func TestConfirmTreeMatchesCandidateChecksASubmittedNewFile(t *testing.T) {
 	writeAgentFile(t, root, "client/src/extra.test.ts", submitted)
 	candidate := Candidate{Files: []CandidateFile{{Path: "client/src/extra.test.ts", Content: submitted}}}
 
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err != nil {
 		t.Fatalf("an untouched new file was rejected: %v", err)
 	}
 
 	writeAgentFile(t, root, "client/src/extra.test.ts", "export const added = false;\n")
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a reviewer that rewrote a submitted new file was accepted")
 	}
 
 	if err := os.Remove(filepath.Join(root, "client", "src", "extra.test.ts")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err == nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a reviewer that deleted a submitted new file was accepted")
 	}
 }

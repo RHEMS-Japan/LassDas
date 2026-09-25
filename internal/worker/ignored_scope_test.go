@@ -22,7 +22,7 @@ func TestAWritableScopeTheRepositoryIgnoresIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ChangedFilesUnder(root, []string{"client/src/generated/"}, nil)
+	_, err := ChangedFilesUnder(root, []string{"client/src/generated/"}, nil, WorkflowAllowance{})
 	if err == nil {
 		t.Fatal("無視されている書き込み先が、何も納品しないまま成功しました")
 	}
@@ -41,7 +41,7 @@ func TestAWritableScopeTheRepositoryIgnoresIsRefused(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(modules, "pkg.js"), []byte("module.exports = {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil); err != nil {
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{}); err != nil {
 		t.Fatalf("依存の導入物で実行が落ちました: %v", err)
 	}
 }
@@ -56,7 +56,7 @@ func TestAnIgnoredFileInsideTheScopeNamesBothWaysOut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	_, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err == nil {
 		t.Fatal("無視される納品物が黙って消えました")
 	}
@@ -66,7 +66,7 @@ func TestAnIgnoredFileInsideTheScopeNamesBothWaysOut(t *testing.T) {
 		}
 	}
 	// Declared as a byproduct, the same file no longer stops the run.
-	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, []string{"app.map"}); err != nil {
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, []string{"app.map"}, WorkflowAllowance{}); err != nil {
 		t.Fatalf("宣言済みの副産物で落ちました: %v", err)
 	}
 }

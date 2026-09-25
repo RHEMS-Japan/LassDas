@@ -170,13 +170,13 @@ func TestUnappliedPartsAreNamedAndNeverAskedFor(t *testing.T) {
 // engine everywhere, the other is one line of this destination's own
 // configuration.
 func TestAWorkflowOutOfReachSaysWhichLimitItIs(t *testing.T) {
-	if means := workflowMeans(".github/workflows/deploy.yml", []string{"ops/"}); !strings.Contains(means, "ドット") {
+	if means := workflowMeans(".github/workflows/deploy.yml", []string{"ops/"}, nil); !strings.Contains(means, "ドット") {
 		t.Fatalf("a dotted directory was explained as %q", means)
 	}
-	if means := workflowMeans("ops/deploy.yml", []string{"src/"}); !strings.Contains(means, "allowed_file_prefixes") {
+	if means := workflowMeans("ops/deploy.yml", []string{"src/"}, nil); !strings.Contains(means, "allowed_file_prefixes") {
 		t.Fatalf("a path outside the writable scope was explained as %q", means)
 	}
-	if means := workflowMeans("ops/deploy.yml", []string{"ops/"}); means != "" {
+	if means := workflowMeans("ops/deploy.yml", []string{"ops/"}, nil); means != "" {
 		t.Fatalf("a path inside the writable scope was refused: %q", means)
 	}
 }

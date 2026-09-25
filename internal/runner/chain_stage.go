@@ -369,6 +369,18 @@ func (p *Pipeline) chainSealAndReview(ctx context.Context, reviewers []string, i
 				"--objection", p.path("revise-design.json"), "--objection-out", p.designObjectionPath(designRound))
 		}
 		sealArgs = append(sealArgs, "--report-run", reportRun)
+		// The same plan the instruction was rendered from. The seal admits
+		// the workflow files it names and nothing else outside the declared
+		// scope, so what the round was told to build and what it is allowed
+		// to have built are one record rather than two.
+		if ReleasePathPlanSealed(p.Workspace) {
+			sealArgs = append(sealArgs, "--release-path", ReleasePathPlanFile(p.Workspace),
+				// Where the content gate leaves its objection when a
+				// workflow file breaks the destination's policy: the same
+				// file the deterministic validation writes, read by the
+				// next round's instruction exactly the same way.
+				"--refusal-out", ValidationFailureFile(p.Workspace, round))
+		}
 		if err := p.runVerb(ctx, "seal-candidate", sealArgs); err != nil {
 			return fmt.Errorf("the implemented change could not be sealed: %w", err)
 		}

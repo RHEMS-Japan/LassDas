@@ -256,7 +256,7 @@ func (proof StagingProof) validateStatic(consumer worker.ConsumerConfig) error {
 		!validSHA256(proof.SourceSHA256) || !validSHA256(proof.CandidateSHA256) ||
 		!validSHA256(proof.DecisionSHA256) || !validSHA256(proof.ValidationSHA256) ||
 		!validObjectID(proof.SourceBaseSHA) || !validSHA256(proof.ProofSHA256) ||
-		!validProductPaths(proof.ProductPaths) {
+		!validProductPaths(proof.ProductPaths, consumer) {
 		return errors.New("staging proof identity is invalid")
 	}
 	// SourceBaseSHA is the base the implementation READ; the baseline is the
@@ -475,14 +475,30 @@ func candidatePaths(candidate worker.Candidate) []string {
 	return paths
 }
 
-func validProductPaths(paths []string) bool {
+// validProductPaths holds the delivered file set to the path vocabulary,
+// with one exception: a deploy workflow file the destination's own handed
+// policy names.
+//
+// The exception is bounded by the policy rather than by the run's sealed
+// plan, which the proof does not carry. That is enough here and only here:
+// this reads a set that is already identical to the sealed contract's
+// target files, and the contract admitted them against the plan AND the
+// policy before any of this existed. What this check is for is a proof
+// whose paths do not match what was sealed at all.
+func validProductPaths(paths []string, consumer worker.ConsumerConfig) bool {
 	if len(paths) == 0 || !slices.IsSorted(paths) {
 		return false
 	}
+	policy := consumer.DeployWorkflows()
 	for index, productPath := range paths {
+		if index > 0 && productPath == paths[index-1] {
+			return false
+		}
+		if policy.Allows(productPath) {
+			continue
+		}
 		if !relativePathPattern.MatchString(productPath) || strings.HasPrefix(productPath, "/") ||
-			path.Clean(productPath) != productPath ||
-			(index > 0 && productPath == paths[index-1]) {
+			path.Clean(productPath) != productPath {
 			return false
 		}
 	}

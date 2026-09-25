@@ -166,7 +166,7 @@ func TestReadObservedChangesTakesBeforeBytesFromTheUntouchedBase(t *testing.T) {
 	base := copyAgentBase(t, root)
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	observed, err := ReadObservedChanges(root, base, []string{"client/src/label.ts"}, fixtureConsumerForAgent())
+	observed, err := ReadObservedChanges(root, base, []string{"client/src/label.ts"}, fixtureConsumerForAgent(), WorkflowAllowance{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,9 +189,9 @@ func TestReadObservedChangesCarriesACreatedFile(t *testing.T) {
 	base := copyAgentBase(t, root)
 	writeAgentFile(t, root, "client/src/new.ts", "export const added = true;\n")
 
-	observed, err := ReadObservedChanges(root, base, []string{"client/src/new.ts"}, fixtureConsumerForAgent())
+	observed, err := ReadObservedChanges(root, base, []string{"client/src/new.ts"}, fixtureConsumerForAgent(), WorkflowAllowance{})
 	if err != nil {
-		t.Fatalf("ReadObservedChanges() error = %v", err)
+		t.Fatalf("ReadObservedChanges(, WorkflowAllowance{}) error = %v", err)
 	}
 	if len(observed) != 1 || !observed[0].Created || len(observed[0].Before) != 0 ||
 		string(observed[0].After) != "export const added = true;\n" {
@@ -206,7 +206,7 @@ func TestReadObservedChangesRejectsACreatedFileOutsideTheScope(t *testing.T) {
 	base := copyAgentBase(t, root)
 	writeAgentFile(t, root, "outside/new.ts", "export const added = true;\n")
 
-	if _, err := ReadObservedChanges(root, base, []string{"outside/new.ts"}, fixtureConsumerForAgent()); err == nil {
+	if _, err := ReadObservedChanges(root, base, []string{"outside/new.ts"}, fixtureConsumerForAgent(), WorkflowAllowance{}); err == nil {
 		t.Fatal("a created file outside the writable scope was accepted")
 	}
 }
@@ -218,7 +218,7 @@ func TestReadObservedChangesRejectsMoreFilesThanTheDestinationAllows(t *testing.
 	consumer.Mode.MaxFiles = 1
 	writeAgentFile(t, root, "client/src/label.ts", "a\n")
 
-	if _, err := ReadObservedChanges(root, base, []string{"client/src/label.ts", "client/src/other.ts"}, consumer); err == nil {
+	if _, err := ReadObservedChanges(root, base, []string{"client/src/label.ts", "client/src/other.ts"}, consumer, WorkflowAllowance{}); err == nil {
 		t.Fatal("a change larger than the destination allows was accepted")
 	}
 }
@@ -274,7 +274,7 @@ func TestChangedFilesUnderReadsAStagedRenameAsBothPaths(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	agentGit(t, root, "mv", "client/src/label.ts", "client/src/renamed.ts")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestChangedFilesUnderRejectsARenameLeavingTheScope(t *testing.T) {
 	root, _ := buildAgentRepository(t)
 	agentGit(t, root, "mv", "client/src/label.ts", "moved-out.ts")
 
-	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil); err == nil {
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{}); err == nil {
 		t.Fatal("a rename out of the writable scope was accepted")
 	}
 }
@@ -335,7 +335,7 @@ func TestChangedFilesUnderFailsWhenACreatedFileIsIgnored(t *testing.T) {
 	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
 	writeAgentFile(t, root, "client/src/messages.generated.ts", "export const x = 1;\n")
 
-	_, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	_, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err == nil {
 		t.Fatal("an ignored created file inside the scope was silently dropped")
 	}
@@ -355,7 +355,7 @@ func TestChangedFilesUnderKeepsToleratingIrrelevantIgnoredFiles(t *testing.T) {
 	writeAgentFile(t, root, "client/src/.DS_Store", "junk\n")
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestChangedFilesUnderIgnoreCheckIsScopedToWritablePrefixes(t *testing.T) {
 	agentGit(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore rule")
 	writeAgentFile(t, root, "node_modules/left/pad.js", "module.exports = 1\n")
 
-	changed, err := ChangedFilesUnder(root, nil, nil)
+	changed, err := ChangedFilesUnder(root, nil, nil, WorkflowAllowance{})
 	if err != nil {
 		t.Fatalf("a run without a writable scope must not police ignore rules: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestChangedFilesUnderToleratesIgnoredDirectoriesInsideTheScope(t *testing.T
 	writeAgentFile(t, root, "client/src/generated/out.js", "generated\n")
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err != nil {
 		t.Fatalf("an ignored directory inside the scope killed the run: %v", err)
 	}
@@ -419,10 +419,10 @@ func TestChangedFilesUnderToleratesDeclaredByproducts(t *testing.T) {
 	writeAgentFile(t, root, "client/src/package-lock.json", "{}\n")
 	writeAgentFile(t, root, "client/src/label.ts", "export const submitLabel = 'Submit';\n")
 
-	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil); err == nil {
+	if _, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{}); err == nil {
 		t.Fatal("an undeclared ignored file inside the scope was tolerated")
 	}
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, []string{"package-lock.json"})
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, []string{"package-lock.json"}, WorkflowAllowance{})
 	if err != nil {
 		t.Fatalf("a declared byproduct killed the run: %v", err)
 	}

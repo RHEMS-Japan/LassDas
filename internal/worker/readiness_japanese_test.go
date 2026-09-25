@@ -35,7 +35,7 @@ func TestReadinessOutputValidationHoldsJapaneseProse(t *testing.T) {
 // rejection would be the default state rather than an edge case.
 func TestReadinessPromptCarriesTheWholeWritableScope(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
-	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

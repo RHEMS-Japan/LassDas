@@ -132,7 +132,7 @@ type ObservedChange struct {
 // from the base. The first live migration ticket measurably needed this -
 // adding a numbered SQL file is ordinary development, and rejecting creation
 // outright made that ticket impossible.
-func ReadObservedChanges(workspace, base string, changed []string, consumer ConsumerConfig) ([]ObservedChange, error) {
+func ReadObservedChanges(workspace, base string, changed []string, consumer ConsumerConfig, allowance WorkflowAllowance) ([]ObservedChange, error) {
 	if len(changed) == 0 {
 		return nil, errors.New("the agent changed nothing")
 	}
@@ -141,17 +141,17 @@ func ReadObservedChanges(workspace, base string, changed []string, consumer Cons
 	}
 	observed := make([]ObservedChange, 0, len(changed))
 	for _, path := range changed {
-		if !allowedPath(path, consumer.Mode.AllowedFilePrefixes) {
+		if !allowedPathWithin(path, consumer.Mode.AllowedFilePrefixes, allowance) {
 			return nil, errors.New("the agent changed a file outside the writable scope")
 		}
 		created := false
 		var before []byte
-		if beforeName, err := regularFileWithin(base, path); err != nil {
+		if beforeName, err := regularFileWithinAllowing(base, path, allowance); err != nil {
 			created = true
 		} else if before, err = readTextFile(beforeName, consumer.Mode.MaxFileBytes); err != nil {
 			return nil, errors.New("the file this change started from could not be read: " + path)
 		}
-		afterName, err := regularFileWithin(workspace, path)
+		afterName, err := regularFileWithinAllowing(workspace, path, allowance)
 		if err != nil {
 			return nil, errors.New("a changed file is not addressable: " + path)
 		}
@@ -167,13 +167,18 @@ func ReadObservedChanges(workspace, base string, changed []string, consumer Cons
 // TicketWithObservedTargets completes the contract from what the agent
 // actually changed. Which files a change touches is discovered by working in
 // the repository, not declared in advance, so the target set is sealed here.
-func TicketWithObservedTargets(draft TicketDraft, observed []ObservedChange, config Config) (TicketRequest, error) {
+//
+// The workflow files the round was told to build are sealed with it. They
+// are what the contract needs to hold a path the writable scope does not
+// reach, and sealing them here is what makes every later reader of the
+// contract admit the same set without carrying the plan.
+func TicketWithObservedTargets(draft TicketDraft, observed []ObservedChange, releaseWorkflows []string, config Config) (TicketRequest, error) {
 	paths := make([]string, 0, len(observed))
 	for _, change := range observed {
 		paths = append(paths, change.Path)
 	}
 	sort.Strings(paths)
-	return draft.WithTargetFiles(paths, config)
+	return draft.WithTargetFilesBuilding(paths, releaseWorkflows, config)
 }
 
 // SourceFromObservedChanges seals the before-bytes as the source snapshot the

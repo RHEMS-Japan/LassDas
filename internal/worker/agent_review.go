@@ -68,7 +68,7 @@ func AgentReviewFromRun(
 // strict scan that refuses ignored files inside the writable scope protects
 // the implementing run's deliverables and stays there; applied after a review
 // it killed a live run whose review had passed.
-func ConfirmTreeMatchesCandidate(root string, candidate Candidate, consumer ConsumerConfig) error {
+func ConfirmTreeMatchesCandidate(root string, candidate Candidate, consumer ConsumerConfig, allowance WorkflowAllowance) error {
 	inCandidate := make(map[string]bool, len(candidate.Files))
 	for _, file := range candidate.Files {
 		inCandidate[file.Path] = true
@@ -87,7 +87,7 @@ func ConfirmTreeMatchesCandidate(root string, candidate Candidate, consumer Cons
 	// to its base content no longer shows as changed, and a submitted new
 	// file is untracked.
 	for _, file := range candidate.Files {
-		filename, err := regularFileWithin(root, file.Path)
+		filename, err := regularFileWithinAllowing(root, file.Path, allowance)
 		if err != nil {
 			return errors.New("the tree could not be read after review: " + file.Path)
 		}

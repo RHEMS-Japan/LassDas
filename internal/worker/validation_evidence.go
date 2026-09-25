@@ -94,9 +94,10 @@ func RunValidationEvidence(
 	if err != nil {
 		return ValidationEvidence{}, errors.New("validation root changed")
 	}
+	allowance := request.WorkflowAllowance()
 	files := make([]ValidationFileEvidence, 0, len(candidate.Files))
 	for _, file := range candidate.Files {
-		_, _, content, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes)
+		_, _, content, err := currentBoundFile(root, file.Path, consumer.Mode.MaxFileBytes, allowance)
 		if err != nil || string(content) != file.Content {
 			return ValidationEvidence{}, errors.New("validated candidate bytes changed")
 		}

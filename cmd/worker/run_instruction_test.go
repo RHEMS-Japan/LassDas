@@ -99,7 +99,7 @@ func TestRunInstructionSealsTheAppliersObjectionWrittenInTheWorkingDirectory(t *
 	if _, statErr := os.Stat(fixture.path("history/design-1/revise-design.json")); statErr != nil {
 		t.Fatal("the applier's file was not kept with the round")
 	}
-	if changed, err := worker.ChangedFilesUnder(fixture.repoRoot, nil, nil); err != nil || len(changed) != 0 {
+	if changed, err := worker.ChangedFilesUnder(fixture.repoRoot, nil, nil, worker.WorkflowAllowance{}); err != nil || len(changed) != 0 {
 		t.Fatalf("the tree after the objection: %v %v", changed, err)
 	}
 

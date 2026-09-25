@@ -189,7 +189,7 @@ func TestPreservedAnswersReachReadinessAndBindThePair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, answers, source, request, config)
+	assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, answers, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,10 +202,10 @@ func TestPreservedAnswersReachReadinessAndBindThePair(t *testing.T) {
 
 	checkerAPI := &fakeChatAPI{output: chatOutput(`{"verdict":"pass","reasons":[]}`)}
 	checker, _ := NewModelInvoker(checkerAPI)
-	if _, _, err := checker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config); err == nil {
+	if _, _, err := checker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil); err == nil {
 		t.Fatal("a checker without the assessor's answers must be refused")
 	}
-	check, _, err := checker.CheckReadiness(context.Background(), assessment, nil, answers, source, request, config)
+	check, _, err := checker.CheckReadiness(context.Background(), assessment, nil, answers, source, request, config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

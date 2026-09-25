@@ -303,6 +303,7 @@ func (i *ModelInvoker) AssessReadiness(
 	source SourceSnapshot,
 	request TicketRequest,
 	config Config,
+	releasePath *ReleasePathPlan,
 ) (ReadinessAssessment, InvocationUsage, error) {
 	if i == nil || i.api == nil || source.Validate(request, config) != nil || attempt < 1 || attempt > MaxReadinessAttempts {
 		return ReadinessAssessment{}, InvocationUsage{}, errors.New("readiness input is invalid")
@@ -320,7 +321,7 @@ func (i *ModelInvoker) AssessReadiness(
 	if err := clarificationMatchesRequest(clarification, request); err != nil {
 		return ReadinessAssessment{}, InvocationUsage{}, err
 	}
-	prompt, err := readinessPrompt(source, request, config, previous, previousCheck, clarification, answers)
+	prompt, err := readinessPrompt(source, request, config, previous, previousCheck, clarification, answers, releasePath)
 	if err != nil {
 		return ReadinessAssessment{}, InvocationUsage{}, errors.New("readiness prompt could not be built")
 	}
@@ -360,6 +361,7 @@ func (i *ModelInvoker) CheckReadiness(
 	source SourceSnapshot,
 	request TicketRequest,
 	config Config,
+	releasePath *ReleasePathPlan,
 ) (ReadinessCheck, InvocationUsage, error) {
 	if i == nil || i.api == nil || assessment.Validate(source, request, config) != nil {
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check input is invalid")
@@ -379,7 +381,7 @@ func (i *ModelInvoker) CheckReadiness(
 	if assessment.ClarificationSHA256 != clarificationDigestOf(clarification) {
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check input is invalid")
 	}
-	prompt, err := readinessCheckPrompt(assessment, source, request, config, clarification, answers)
+	prompt, err := readinessCheckPrompt(assessment, source, request, config, clarification, answers, releasePath)
 	if err != nil {
 		return ReadinessCheck{}, InvocationUsage{}, errors.New("readiness check prompt could not be built")
 	}
@@ -1436,6 +1438,45 @@ const readinessQuestionLimits = `Text limits the engine enforces (a refusal name
 
 const readinessTextLimits = readinessQuestionLimits + ` An assumption's statement and evidence are at most 2000 bytes each; reject_code matches ^[a-z][a-z0-9-]{1,63}$ (for example out-of-scope).`
 
+// readinessMissingMeans is one part of a destination's release path that
+// the engine was not handed the means to apply, in the shape the reception
+// is given it: the settings key an operator knows it by, and the one
+// sentence saying why the engine cannot write it itself.
+type readinessMissingMeans struct {
+	Name string `json:"name"`
+	Why  string `json:"why"`
+}
+
+// missingMeansFor is what a sealed release path plan says this engine
+// cannot apply. Empty for every destination whose path is complete, and for
+// every destination that stops at the proposal.
+func missingMeansFor(plan *ReleasePathPlan) []readinessMissingMeans {
+	if plan == nil {
+		return nil
+	}
+	unapplied := plan.Unapplied()
+	means := make([]readinessMissingMeans, 0, len(unapplied))
+	for _, item := range unapplied {
+		means = append(means, readinessMissingMeans{Name: item.Name, Why: item.Means})
+	}
+	if len(means) == 0 {
+		return nil
+	}
+	return means
+}
+
+// readinessMissingMeansRule is the one thing the reception is told about a
+// release path the engine cannot finish.
+//
+// It is a question because it is a permission, and a permission is the one
+// kind of point a requester holds that no amount of reading the repository
+// settles. It is asked HERE because here is the only place anything asks:
+// the round that follows builds what it can and the report names the rest,
+// so a means not raised in this single set is a means nobody is ever asked
+// about. And it is asked ONCE, with everything else, because that is what
+// the reception is.
+const readinessMissingMeansRule = `When USER_DATA_JSON.missing_means is present, this destination asks for its change to reach an environment and the engine has not been handed what it needs to build part of the way there; each entry names a setting and why the engine cannot write it. That is a permission rather than a judgement, so it satisfies the conditions above and belongs in this one set of questions: ask a single question covering the missing means, whose choices are the ways the requester can settle it (hand the engine the named means, have somebody else set it up, or accept that the change stops short of that environment and say so). Ask it once, with everything else, in this set. Do not ask a separate question per entry, and do not ask it at all when missing_means is absent.`
+
 // readinessMeasurementRule tells the reception what the pipeline can find
 // out on its own, so it never asks the requester for a value, a state or a
 // timing a probe would give, and never assumes production is out of reach.
@@ -1483,6 +1524,7 @@ Return exactly one JSON object and no Markdown. Its schema is:
 {"decision":"ready|clarification_required|reject|unresolvable","questions":[{"id":"Q1","dimension":"user_visible_behavior|acceptance_criterion|preapproved_scope_choice|safety_or_data","question":"...","why_blocking":"...","choices":[{"id":"a","label":"...","effect":"user-visible result of choosing it"}]}],"assumptions":[{"kind":"repository_convention|non_user_visible_implementation|defensible_default","statement":"...","evidence":"..."}],"reject_code":"","request_kind":"change|investigation","approach_in_ticket":false,"approach_excerpt":"","needs_design":true}
 ` + askingConditions(policy) + `
 ` + readinessMeasurementRule + `
+` + readinessMissingMeansRule + `
 ` + readinessTextLimits + `
 Also decide, from the ticket text alone, whether the change needs a design before code. ` + designPromptRules + `
 approach_in_ticket is true only when the ticket text states how the change is to be made, and approach_excerpt must then quote that whole statement verbatim from the ticket request in USER_DATA_JSON - the full sentence or clause, never a fragment of a few words, never the ticket's title alone, never a paraphrase, never text from anywhere else; the engine checks that the quote is really there and drops the claim otherwise. When the ticket says only what should be different, approach_in_ticket is false and approach_excerpt is an empty string.
@@ -1490,7 +1532,7 @@ Every question must offer 2 to 4 mutually exclusive choices, and each effect mus
 You measure nothing. A question, a choice or an assumption must not present a measured value (a latency, a count, a rate), a threshold derived from one, or a measurement record number as if it existed; such choices are refused as invented. When the ambiguity is which basis a later measurement should use, describe the basis in words (for example: from inside the cluster, through the public entry point) and leave every number and record number to the investigation stage.
 Never ask about variable names, styling technique, component structure, test implementation, anything that can be found by reading the repository, optional improvements, or preferences that do not change the user-visible outcome. Record such autonomous choices as assumptions with their evidence instead of asking.
 Never ask for API keys, passwords, private keys, tokens, cookies, or any other credential or secret, and never instruct anyone to post one. If required credentials appear to be missing, return decision unresolvable; that is an operator configuration failure, not a requester question.
-` + askingBudget(policy) + ` If satisfying the ticket would require new CI/CD, release machinery, credentials, IAM, repository governance, or changes to files outside the writable_scope prefixes in USER_DATA_JSON, do not ask about it; return decision reject with reject_code out-of-scope.
+` + askingBudget(policy) + ` If satisfying the ticket would require credentials, IAM or repository governance the engine does not hold, do not ask about it here beyond the missing_means rule above; return decision reject with reject_code out-of-scope. Deployment machinery inside the destination's own repository is NOT out of scope: where this destination has no way to reach the environment it asks for, building that way is part of the work and a later stage does it, so a ticket is never rejected for needing it.
 USER_DATA_JSON.source.files is empty for an ordinary change request: no file is chosen before the change is made, and the implementer reads the repository itself. It carries files only when the ticket promises a visible wording change, and they are then the files holding that wording today, found by exact search. Either way it is not the implementation boundary: the implementer may change any existing file - or create a new one - whose path starts with a writable_scope prefix. Judge readiness against that whole scope, and never reject a ticket because no file is shown to you. You cannot read the repository; every stage after you does, so anything that can be found there is not a requester's decision and is not a question. Ask only what the requester alone can decide: user-visible behavior, acceptance criteria, pre-approved scope, safety or data behavior.
 When USER_DATA_JSON contains resolved_clarification, those are the requester's binding decisions from an earlier question round: treat each chosen option as part of the request, never re-ask a question whose answer is present there, and ask again only to sharpen a point that stayed ambiguous or contradictory after those answers.
 When USER_DATA_JSON contains preserved_answers, those are the requester's binding decisions preserved from earlier tickets: apply them exactly like resolved_clarification - a point they settle is settled, and asking it again is a defect.
@@ -1520,7 +1562,7 @@ Use verdict pass with an empty reasons array only when none of these defects exi
 Attribution: set question_id when the defect is one question's own and its code is false-block, invalid-question, or unbounded-question. Under those three codes, questions you do not name are treated as approved by you - on the final attempt they go to the requester without another check - so never leave a defective question unnamed. Every other code condemns the assessment as a whole regardless of question_id; you may still set question_id there as a pointer to where the defect shows, but it does not narrow the failure.`, endpoint.Lens, askingConditions(policy)))
 }
 
-func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config, previous *ReadinessAssessment, previousCheck *ReadinessCheck, clarification *ClarificationContext, answers []PreservedAnswer) (string, error) {
+func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config, previous *ReadinessAssessment, previousCheck *ReadinessCheck, clarification *ClarificationContext, answers []PreservedAnswer, releasePath *ReleasePathPlan) (string, error) {
 	consumer, err := request.Consumer(config)
 	if err != nil {
 		return "", err
@@ -1534,6 +1576,7 @@ func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config
 		DesignTriggerWords    []string                   `json:"design_trigger_words,omitempty"`
 		ResolvedClarification []ClarificationExchange    `json:"resolved_clarification,omitempty"`
 		PreservedAnswers      []PreservedAnswer          `json:"preserved_answers,omitempty"`
+		MissingMeans          []readinessMissingMeans    `json:"missing_means,omitempty"`
 		PreviousAssessment    *ModelReadinessOutput      `json:"previous_assessment,omitempty"`
 		PreviousCheck         *ModelReadinessCheckOutput `json:"previous_check_feedback,omitempty"`
 	}{
@@ -1541,6 +1584,7 @@ func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config
 		DesignTriggerWords: consumer.EffectiveDesignTriggerWords(), Catalogue: readinessCatalogue(config, consumer),
 	}
 	contextValue.PreservedAnswers = answers
+	contextValue.MissingMeans = missingMeansFor(releasePath)
 	if clarification != nil {
 		contextValue.ResolvedClarification = clarification.Exchanges
 	}
@@ -1558,7 +1602,7 @@ func readinessPrompt(source SourceSnapshot, request TicketRequest, config Config
 	return marshalPrompt(contextValue)
 }
 
-func readinessCheckPrompt(assessment ReadinessAssessment, source SourceSnapshot, request TicketRequest, config Config, clarification *ClarificationContext, answers []PreservedAnswer) (string, error) {
+func readinessCheckPrompt(assessment ReadinessAssessment, source SourceSnapshot, request TicketRequest, config Config, clarification *ClarificationContext, answers []PreservedAnswer, releasePath *ReleasePathPlan) (string, error) {
 	consumer, err := request.Consumer(config)
 	if err != nil {
 		return "", err
@@ -1572,6 +1616,7 @@ func readinessCheckPrompt(assessment ReadinessAssessment, source SourceSnapshot,
 		DesignTriggerWords    []string                  `json:"design_trigger_words,omitempty"`
 		ResolvedClarification []ClarificationExchange   `json:"resolved_clarification,omitempty"`
 		PreservedAnswers      []PreservedAnswer         `json:"preserved_answers,omitempty"`
+		MissingMeans          []readinessMissingMeans   `json:"missing_means,omitempty"`
 		Assessment            ModelReadinessOutput      `json:"assessment"`
 	}{
 		Label: "USER_DATA_JSON", Ticket: request, Source: source, WritableScope: consumer.Mode.AllowedFilePrefixes,
@@ -1582,6 +1627,7 @@ func readinessCheckPrompt(assessment ReadinessAssessment, source SourceSnapshot,
 		contextValue.ResolvedClarification = clarification.Exchanges
 	}
 	contextValue.PreservedAnswers = answers
+	contextValue.MissingMeans = missingMeansFor(releasePath)
 	return marshalPrompt(contextValue)
 }
 

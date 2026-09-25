@@ -138,6 +138,14 @@ func advanceDelivery(
 		// evidence, which is the honest end for it.
 		return deliverReached, nil
 	}
+	// Past the pull request, which is the one window a destination's
+	// configuration may be written in: from here the cards re-verify their
+	// sealed records under the digest the pull request recorded, so a
+	// configuration that moves now cannot make them unreadable and does not
+	// restart this delivery (chains.go's exemption). Where this engine wrote
+	// the workflow that records what landed, the policy describing that
+	// record is the engine's own to write, and it writes it once.
+	writeReleaseSettings(config, runDir, logger)
 	cards := deliverCards(runDir, run.DeliveryID, tasks)
 	climb := func(stage, verdict string) (deliverProgress, error) {
 		return climbDeliverPhase(ctx, config, services, hermes, envelope, run, view, plan, stage, verdict, cards, logger)

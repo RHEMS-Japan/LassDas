@@ -106,6 +106,12 @@ type ReleasePathPlan struct {
 	// destination it was decided for.
 	Configured string            `json:"configured"`
 	Items      []ReleasePathItem `json:"items,omitempty"`
+	// WorkflowFiles are the deploy workflow files this plan says the round
+	// will create, as repository paths under the workflow directory. Empty
+	// unless the destination handed the means to author them, and it is
+	// this list — not the configuration, and not a flag — that the path
+	// gates admit for the run the plan belongs to.
+	WorkflowFiles []string `json:"workflow_files,omitempty"`
 	// Instruction is what the implementing round is told to build, composed
 	// from the buildable items. Empty when there is nothing to build.
 	Instruction string `json:"instruction,omitempty"`
@@ -121,6 +127,21 @@ type ReleasePathPlan struct {
 // with nothing in it is the ordinary case and changes nothing about the
 // round that follows.
 func (p ReleasePathPlan) Empty() bool { return len(p.Items) == 0 }
+
+// UnappliedNames are the names of the parts the engine did not apply, for
+// a report to say what the delivery left undone.
+//
+// Names only, and never a sentence asking for them. The report says what it
+// did and what it did not; a line telling a person to go and configure
+// something is the shape this whole record exists to remove.
+func (p ReleasePathPlan) UnappliedNames() []string {
+	unapplied := p.Unapplied()
+	names := make([]string, 0, len(unapplied))
+	for _, item := range unapplied {
+		names = append(names, item.Name)
+	}
+	return names
+}
 
 // Buildable is the parts the engine applies itself.
 func (p ReleasePathPlan) Buildable() []ReleasePathItem {
@@ -162,6 +183,14 @@ func (p ReleasePathPlan) Bound() bool {
 		return false
 	}
 	if len(p.Items) > MaxReleasePathItems || len(p.Instruction) > MaxReleasePathInstructionBytes {
+		return false
+	}
+	// A record read back from a volume is still a record. The files it
+	// names open the one hole in the path vocabulary, so a plan naming
+	// anything that is not a plain workflow file reads as not ours rather
+	// than having that name quietly dropped later.
+	if len(p.WorkflowFiles) > MaxDeployWorkflowPaths ||
+		len(NewWorkflowAllowance(p.WorkflowFiles).Files()) != len(p.WorkflowFiles) {
 		return false
 	}
 	for _, item := range p.Items {
@@ -211,4 +240,13 @@ func BoundedReleasePathInstruction(text string) string {
 		cut--
 	}
 	return text[:cut]
+}
+
+// WorkflowFileNames are the deploy workflow files a plan says the round
+// will build, nil-safe for the ordinary caller that has no plan at all.
+func (p *ReleasePathPlan) WorkflowFileNames() []string {
+	if p == nil {
+		return nil
+	}
+	return p.WorkflowFiles
 }

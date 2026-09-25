@@ -309,7 +309,7 @@ func TestGatewayClientRequiresAPIKey(t *testing.T) {
 func TestConverseLetsTheTransportsOwnCauseTravel(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	invoker, _ := NewModelInvoker(&fakeChatAPI{err: safeModelError("model invocation failed: context deadline exceeded")})
-	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil)
 	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("the transport's cause was flattened: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestConverseUnwrapsTheMarkBeforeLettingItTravel(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	wrapped := fmt.Errorf("upstream said %q: %w", "SECRET UPSTREAM DETAIL", safeModelError("model invocation failed"))
 	invoker, _ := NewModelInvoker(&fakeChatAPI{err: wrapped})
-	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config)
+	_, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil)
 	if err == nil || strings.Contains(err.Error(), "SECRET UPSTREAM DETAIL") {
 		t.Fatalf("the wrapper's text travelled: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
 	broken := chatOutput(strings.Replace(testReadinessAnswerJSON, `"decision"`, `"decision_note":"x","decision"`, 1))
 	api := &sequenceChatAPI{outputs: []*ChatResponse{broken, valid}}
 	invoker, _ := NewModelInvoker(api)
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config); err != nil {
+	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err != nil {
 		t.Fatalf("the corrected readiness answer was not accepted: %v", err)
 	}
 	if len(api.requests) != 2 {
@@ -481,7 +481,7 @@ func TestAReadinessCheckIsTakenAsGiven(t *testing.T) {
 		chatOutput(`{"verdict":"pass","reasons":[]}`),
 	}}
 	invoker, _ := NewModelInvoker(api)
-	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config)
+	check, _, err := invoker.CheckReadiness(context.Background(), assessment, nil, nil, source, request, config, nil)
 	if err != nil {
 		t.Fatalf("the corrected check was not accepted: %v", err)
 	}

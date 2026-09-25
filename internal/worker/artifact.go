@@ -180,9 +180,10 @@ func ReadSourceSnapshot(repoRoot, baseSHA string, request TicketRequest, config 
 		return SourceSnapshot{}, errors.New("source root is invalid")
 	}
 
+	allowance := request.WorkflowAllowance()
 	files := make([]SourceFile, 0, len(request.TargetFiles))
 	for _, name := range request.TargetFiles {
-		filename, err := regularFileWithin(root, name)
+		filename, err := regularFileWithinAllowing(root, name, allowance)
 		if err != nil {
 			// A target the change is to create has no before-side: the file
 			// is absent from the base, and the snapshot records that rather
@@ -191,7 +192,7 @@ func ReadSourceSnapshot(repoRoot, baseSHA string, request TicketRequest, config 
 			// when the target files were derived. Anything else that makes
 			// the path unreadable — a component that is a symlink, a
 			// directory in the way — is still a refusal.
-			if created, createdErr := newFileTarget(root, name); createdErr != nil {
+			if created, createdErr := newFileTarget(root, name, allowance); createdErr != nil {
 				return SourceSnapshot{}, fmt.Errorf("source file %q is invalid", name)
 			} else if created {
 				files = append(files, SourceFile{Path: name, GitBlobSHA: gitBlobDigest(nil), SHA256: digestBytes(nil), Created: true})
@@ -329,6 +330,14 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 	}
 	if validatePlainText(c.Rationale, 4096, true) != nil || len(c.Files) != len(source.Files) {
 		return errors.New("candidate content is invalid")
+	}
+	// A workflow file in the candidate is held to the destination's content
+	// policy here, which is before this candidate is sealed and therefore
+	// before any branch carrying it is pushed. It is checked again by every
+	// later reader of the candidate for the same reason every other binding
+	// is: the seal proves what the bytes are, not that they were allowed.
+	if err := CheckDeployWorkflows(c.Files, consumer); err != nil {
+		return err
 	}
 	changed := false
 	total := 0
@@ -659,9 +668,13 @@ func validateModelCandidateOutput(output ModelCandidateOutput, request TicketReq
 	if err != nil {
 		return errors.New("model candidate response is invalid")
 	}
+	// Gate five of five. The allowance is the contract's own, so a file the
+	// sealed plan named is sealable and a dotted sibling of it is not —
+	// and neither is the same file in a delivery whose contract names none.
+	allowance := request.WorkflowAllowance()
 	seen := make(map[string]struct{}, len(output.Files))
 	for _, file := range output.Files {
-		if !allowedPath(file.Path, consumer.Mode.AllowedFilePrefixes) || !utf8.ValidString(file.Content) ||
+		if !allowedPathWithin(file.Path, consumer.Mode.AllowedFilePrefixes, allowance) || !utf8.ValidString(file.Content) ||
 			strings.ContainsRune(file.Content, '\x00') || len(file.Content) > consumer.Mode.MaxFileBytes {
 			return errors.New("model candidate response is invalid")
 		}
@@ -706,8 +719,8 @@ func validateModelReviewOutput(output ModelReviewOutput, request TicketRequest) 
 // from the base — the shape of a request to create a file. Every component
 // that does exist must be an ordinary directory: a symlink or a file in the
 // path is a refusal, not a file to create.
-func newFileTarget(root, relative string) (bool, error) {
-	if !validRelativePath(relative) || hasHiddenComponent(relative) {
+func newFileTarget(root, relative string, allowance WorkflowAllowance) (bool, error) {
+	if !allowance.Admits(relative) && (!validRelativePath(relative) || hasHiddenComponent(relative)) {
 		return false, errors.New("relative path is invalid")
 	}
 	current := root
@@ -737,7 +750,16 @@ func newFileTarget(root, relative string) (bool, error) {
 }
 
 func regularFileWithin(root, relative string) (string, error) {
-	if !validRelativePath(relative) {
+	return regularFileWithinAllowing(root, relative, WorkflowAllowance{})
+}
+
+// regularFileWithinAllowing is regularFileWithin for a caller that carries
+// a run's workflow allowance. The walk itself is unchanged — every
+// component is still lstat'd and a symlink anywhere still refuses — and
+// what the allowance moves is only the shape check at the top, which is the
+// path vocabulary rather than a safety property.
+func regularFileWithinAllowing(root, relative string, allowance WorkflowAllowance) (string, error) {
+	if !validRelativePathWithin(relative, allowance) {
 		return "", errors.New("relative path is invalid")
 	}
 	current := root
@@ -765,8 +787,8 @@ func regularFileWithin(root, relative string) (string, error) {
 // inside root - never a symlink - and the final element must be absent. The
 // created path measurably escaped the root through a committed symlink
 // directory before this walk existed, while the edit path was protected.
-func createdFileWithin(root, relative string) (string, error) {
-	if !validRelativePath(relative) {
+func createdFileWithin(root, relative string, allowance WorkflowAllowance) (string, error) {
+	if !validRelativePathWithin(relative, allowance) {
 		return "", errors.New("relative path is invalid")
 	}
 	current := root

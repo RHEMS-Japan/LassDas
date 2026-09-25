@@ -134,7 +134,7 @@ func TestLiveAgentConsultsTheKnowledgeLibrary(t *testing.T) {
 	}
 	// Placed knowledge must still be invisible as a change, or the run that
 	// used it would be thrown away.
-	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil)
+	changed, err := ChangedFilesUnder(root, []string{"client/src/"}, nil, WorkflowAllowance{})
 	if err != nil || len(changed) != 0 {
 		t.Fatalf("the library was seen as a change: %v (%v)", changed, err)
 	}
@@ -237,7 +237,7 @@ func TestLiveImplementingAgentFindsAndChangesTheFile(t *testing.T) {
 		t.Fatalf("the implementing agent did not finish: %v", err)
 	}
 
-	observed, err := ReadObservedChanges(root, base, outcome.ChangedFiles, consumer)
+	observed, err := ReadObservedChanges(root, base, outcome.ChangedFiles, consumer, WorkflowAllowance{})
 	if err != nil {
 		t.Fatalf("what the agent changed could not be read: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestLiveReviewingAgentReportsAVerdictThatSeals(t *testing.T) {
 		Content: "export const confirmLabel = '変更を保存';\n" +
 			"export const cancelLabel = 'キャンセル';\n",
 	}}}
-	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer); err != nil {
+	if err := ConfirmTreeMatchesCandidate(root, candidate, consumer, WorkflowAllowance{}); err != nil {
 		t.Fatalf("the reviewer changed the tree it was asked to read: %v", err)
 	}
 }

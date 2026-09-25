@@ -45,6 +45,8 @@ func runSealCandidate(args []string) error {
 	designPath := flags.String("design", "", "")
 	objectionPath := flags.String("objection", "", "")
 	objectionOutPath := flags.String("objection-out", "", "")
+	releasePathPath := flags.String("release-path", "", "")
+	refusalOutPath := flags.String("refusal-out", "", "")
 	if !parseFlags(flags, args) || (*reportPath != "" && *reportRunPath != "") ||
 		!allPresent(*configPath, *toolSHA, *draftPath, *repoRoot, *baseRoot, *baseSHA, *runOutPath, *ticketOutPath, *sourceOutPath, *outputPath) ||
 		!worker.ValidToolSHA(*toolSHA) || *stage < 1 || (*objectionPath == "") != (*objectionOutPath == "") {
@@ -124,7 +126,20 @@ func runSealCandidate(args []string) error {
 		}
 	}
 
-	changed, err := worker.ChangedFilesUnder(*repoRoot, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts)
+	// What this round was told to build of the destination's release path.
+	// The workflow files it names are the only paths outside the declared
+	// scope this seal will accept, and only while this plan is the one on
+	// the volume: a round with no plan seals exactly what it always did.
+	releasePath, err := readReleasePath(*releasePathPath)
+	if err != nil {
+		return err
+	}
+	if releasePath != nil && releasePath.Repository != draft.Repository {
+		return errors.New("the release path plan is not bound to this run")
+	}
+	workflows := releasePath.WorkflowFileNames()
+	allowance := worker.NewWorkflowAllowance(workflows)
+	changed, err := worker.ChangedFilesUnder(*repoRoot, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, allowance)
 	if err != nil {
 		return err
 	}
@@ -150,7 +165,7 @@ func runSealCandidate(args []string) error {
 	if design != nil {
 		designSHA = design.DesignSHA256
 	}
-	return sealObservedChain(changed, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, designSHA)
+	return sealObservedChain(changed, workflows, draft, run, *repoRoot, *baseRoot, config, *ticketOutPath, *sourceOutPath, *outputPath, designSHA, *refusalOutPath, *stage)
 }
 
 // DesignObjection is the sealed record of an applier that would not apply
@@ -300,22 +315,35 @@ func readImplementerReport(filename string) (string, error) {
 // artifacts. The two verbs differ only in who started the agent.
 func sealObservedChain(
 	changed []string,
+	releaseWorkflows []string,
 	draft worker.TicketDraft,
 	run worker.AgentRun,
 	repoRoot, baseRoot string,
 	config worker.Config,
 	ticketOutPath, sourceOutPath, outputPath string,
 	designSHA256 string,
+	refusalOutPath string,
+	round int,
 ) error {
 	consumer, err := config.ConsumerFor(draft.Repository)
 	if err != nil {
 		return errors.New("ticket draft repository is not a configured consumer")
 	}
-	observed, err := worker.ReadObservedChanges(repoRoot, baseRoot, changed, consumer)
+	observed, err := worker.ReadObservedChanges(repoRoot, baseRoot, changed, consumer, worker.NewWorkflowAllowance(releaseWorkflows))
 	if err != nil {
 		return err
 	}
-	request, err := worker.TicketWithObservedTargets(draft, observed, config)
+	// The one check that reads what was written rather than where it was
+	// written. It runs before the ticket, the source and the candidate are
+	// sealed, so a workflow file that breaks the destination's content
+	// policy never becomes an artifact and never reaches a pushed branch.
+	// The refusal is left where the next round's instruction reads it: the
+	// implementer is told which rule it broke and writes the file again.
+	if err := worker.CheckDeployWorkflows(observedCandidateFiles(observed), consumer); err != nil {
+		sealWorkflowRefusal(refusalOutPath, round, draft, err)
+		return err
+	}
+	request, err := worker.TicketWithObservedTargets(draft, observed, releaseWorkflows, config)
 	if err != nil {
 		return errors.New("the files the agent changed do not form a valid contract")
 	}
@@ -342,4 +370,51 @@ func sealObservedChain(
 		return errors.New("candidate artifact could not be written")
 	}
 	return nil
+}
+
+// observedCandidateFiles is what the agent left, in the shape the content
+// gate reads. The after-bytes, read from the working copy by the caller,
+// never the agent's own account of them.
+func observedCandidateFiles(observed []worker.ObservedChange) []worker.CandidateFile {
+	files := make([]worker.CandidateFile, 0, len(observed))
+	for _, change := range observed {
+		files = append(files, worker.CandidateFile{Path: change.Path, Content: string(change.After)})
+	}
+	return files
+}
+
+// workflowPolicyStep is the step name the refusal is recorded under,
+// alongside the deterministic validation's own four.
+const workflowPolicyStep = "check-workflow-policy"
+
+// sealWorkflowRefusal leaves the content gate's objection where the round
+// after this one reads it.
+//
+// Best-effort, like every other record written beside a round: what is lost
+// when the volume refuses the write is the next round's material, not the
+// next round. The card fails either way, which is what makes this a round
+// that gets done again rather than a delivery that stops.
+func sealWorkflowRefusal(path string, round int, draft worker.TicketDraft, refusal error) {
+	if path == "" || round < 1 {
+		return
+	}
+	record := worker.NewValidationFailure(round, workflowPolicyStep, refusal.Error())
+	record.DeliveryID, record.InputSHA256 = draft.DeliveryID, draft.InputSHA256
+	record.ConfigSHA256, record.ToolSHA = draft.ConfigSHA256, draft.ToolSHA
+	if record.Seal() != nil {
+		return
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	// Removed before the write for the reason every other record here is: a
+	// link left at the path must not carry the write somewhere else.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return
+	}
+	_ = os.WriteFile(path, encoded, 0o600)
 }
