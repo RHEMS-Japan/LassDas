@@ -81,12 +81,17 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 		view := chainViewFor(tasks, run.DeliveryID)
 		switch run.State {
 		case "queued":
+			// The requester's own stop is read before any of it, and it
+			// outranks all of it (stop_now.go). Held or not, a request that
+			// has been withdrawn is ended rather than kept waiting for the
+			// thing the hold was waiting for.
+			stopped := queuedStopRequested(ctx, config, services, run, logger)
 			// The operator's pause keeps a queued run queued; claimed runs
 			// below keep going either way.
-			if holdQueuedRun(ctx, config, services.Backlog, run, runDirectory(config, run.DeliveryID), logger) {
+			if !stopped && holdQueuedRun(ctx, config, services.Backlog, run, runDirectory(config, run.DeliveryID), logger) {
 				continue
 			}
-			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
+			if err := startQueuedRun(ctx, config, services, hermes, run, view, stopped, logger); err != nil {
 				logger.Error("chain start failed", "run", run.RunID, "error", err.Error())
 			}
 		case "claimed":
@@ -260,6 +265,7 @@ func startQueuedRun(
 	hermes *runtime.Hermes,
 	run state.RunOverview,
 	view chainView,
+	stopRead bool,
 	logger Logger,
 ) error {
 	for _, task := range view.all {
@@ -274,7 +280,13 @@ func startQueuedRun(
 	now := time.Now().UTC()
 	// A budget or session hold throttles its own retry: the run stays
 	// queued and unclaimed until the interval since the refusal has passed.
-	if budgetHeldRecently(runDir, now) || sessionHeldRecently(runDir, now) {
+	//
+	// Unless the requester has already stopped it, which was read before
+	// this tick chose to come here at all. Waiting out a ten-minute budget
+	// probe to find out whether a withdrawn request can afford to start is
+	// a wait with no answer worth having; the claim below is taken so the
+	// stop can be reported, and nothing is spent on the work itself.
+	if !stopRead && (budgetHeldRecently(runDir, now) || sessionHeldRecently(runDir, now)) {
 		return nil
 	}
 	envelope, disposition, err := services.Store.Pull(ctx, hook.PullClaimRequest{
@@ -303,9 +315,12 @@ func startQueuedRun(
 	// whereas a failure after the readiness gate would re-run the whole
 	// assessment on every retry. A stop arriving later is honoured at the
 	// next round boundary.
-	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
-	if err != nil {
-		return fmt.Errorf("stop check before intake: %w", err)
+	stopped := stopRead
+	if !stopped {
+		stopped, err = stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, envelope.Snapshot.IssueID)
+		if err != nil {
+			return fmt.Errorf("stop check before intake: %w", err)
+		}
 	}
 	if stopped {
 		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
@@ -540,11 +555,19 @@ func advanceClaimedRun(
 	view chainView,
 	logger Logger,
 ) error {
+	runDir := runDirectory(config, run.DeliveryID)
+	// 「停止」 first, before anything reads what the cards are doing. Every
+	// other read of it in this engine sits at a boundary — before a round,
+	// before a dispatch, before the merge — and a delivery spends nearly
+	// all of its time between boundaries, which is where a requester who
+	// asked it to stop used to be left waiting (stop_now.go).
+	if handled, err := honourStopNow(ctx, config, services, hermes, run, view, runDir, logger); handled || err != nil {
+		return err
+	}
 	if !view.hasChain() {
 		logger.Info("claimed run has no chain; requeueing", "run", run.RunID)
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
-	runDir := runDirectory(config, run.DeliveryID)
 	// Every stage refuses a draft written by a different engine, because a
 	// record has to re-derive under the engine that reads it. So a
 	// delivery that was in flight when the engine was updated could not

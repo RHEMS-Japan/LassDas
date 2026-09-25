@@ -18,6 +18,7 @@ func TestEveryRunCommentKindIsStoredOrMarkerScanned(t *testing.T) {
 		RunCommentResolved: true, RunCommentBudgetHold: true, RunCommentSessionHold: true,
 		RunCommentStreakHold: true, RunCommentStreakResolved: true, RunCommentLadder: true,
 		RunCommentIntakePaused: true, RunCommentGoReminder: true, RunCommentLateWord: true,
+		RunCommentStopAck: true,
 	}
 	stored := map[RunCommentKind]bool{}
 	for _, kind := range StoreRunCommentKinds() {
