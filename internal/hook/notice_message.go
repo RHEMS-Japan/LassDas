@@ -192,7 +192,7 @@ const (
 // planStopSentence is the one true description of how a requester stops a
 // run and when the stop takes effect. Every comment that offers a stop
 // reuses it, so no comment promises a gate the chain does not have.
-const planStopSentence = "\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。指摘によるやり直し（次のラウンド）が始まる前に停止指示を確認し、読み取れた場合は以後の処理を止めます。実行中の工程は完了まで進む場合があり、停止指示が確認されるまでに行われた取り込みや反映は自動では取り消しません。停止の結果はこのチケットの通知をご確認ください。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n"
+const planStopSentence = "\n方針を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。受け付け次第、新しい工程の開始を止め、受け付けたことをこのチケットにコメントしたうえで、ここまでに届いた範囲を最終コメントで報告します。実行中の工程はそのまま完了まで進む場合がありますが、その結果は使いません（staging や本番への取り込みが実行中のときだけ、その完了を待ってから終了します）。停止指示が確認されるまでに行われた取り込みや反映は自動では取り消しません。確認の質問が出ている間は、質問コメントに記載の中止方法（「中止 C番号」）に従ってください。\n"
 
 func PlanCommentContent(runID string, facts PlanFacts) string {
 	var head strings.Builder
