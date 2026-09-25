@@ -57,6 +57,13 @@ func runSealCandidate(args []string) error {
 	if *stage > config.StageCeiling() {
 		return errors.New("seal-candidate stage is invalid")
 	}
+	// Every credential this deployment provisions, so the candidate check
+	// covers the ones handed to the card that wrote the change and not to
+	// this one. Read before anything is sealed: a change that cannot be
+	// compared is not sealed at all.
+	if err := registerCredentialsForScan(); err != nil {
+		return err
+	}
 	var draft worker.TicketDraft
 	if err := worker.ReadJSONFile(*draftPath, worker.MaxTicketJSONBytes, &draft); err != nil {
 		return errors.New("ticket draft could not be read")

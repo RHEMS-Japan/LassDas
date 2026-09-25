@@ -303,6 +303,45 @@ func TestACandidateCarryingAHandedValueIsRefused(t *testing.T) {
 	}
 }
 
+// The usual configuration hands a credential to the card that writes the
+// change, and a different card seals it. The sealing process was handed
+// nothing and still has to catch it, so it reads the configured files for
+// the comparison alone.
+func TestACandidateIsCheckedAgainstACredentialThisCardNeverReceived(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	secret := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
+	// Registered the way the sealing worker registers what it read: for
+	// the comparison and for nothing else.
+	cardsecret.RegisterForScan([]cardsecret.Entry{{Name: "DATABASE_URL", Secret: secret}})
+
+	config, request, source, candidate := validCandidate(t)
+	carried := candidate
+	carried.Files = append([]CandidateFile(nil), candidate.Files...)
+	carried.Files[0].Content += "\nconst dsn = \"" + secret + "\"\n"
+	err := carried.Validate(source, request, config)
+	if err == nil {
+		t.Fatal("a change carrying a value this card never received was accepted")
+	}
+	if !strings.Contains(err.Error(), "DATABASE_URL") || strings.Contains(err.Error(), "hunter2hunter2") {
+		t.Fatalf("the refusal is wrong: %v", err)
+	}
+	// And nothing about this card changed: it was handed no credential, so
+	// its agent environment and its logs are as they were.
+	environment, envErr := agentEnvironment(AgentConfig{ID: "review-a", Command: "agent"}, t.TempDir(), "")
+	if envErr != nil {
+		t.Fatal(envErr)
+	}
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "DATABASE_URL=") {
+			t.Fatalf("the reviewer's agent environment gained a credential: %v", environment)
+		}
+	}
+	if got := cardsecret.Redact("psql: " + secret); !strings.Contains(got, "hunter2hunter2") {
+		t.Fatalf("this card's masking changed: %q", got)
+	}
+}
+
 // The head of a model's answer travels into the run's failure record and
 // the job log, both of which outlive the turn. A model asked to work
 // against a service can repeat the credential it was given back at the
@@ -319,5 +358,48 @@ func TestTheAnswerHeadKeepsNoHandedCredential(t *testing.T) {
 	}
 	if head == "" {
 		t.Fatal("the head says nothing at all about what the model answered")
+	}
+}
+
+// A pod replaced mid-card leaves the launch home behind, lent to the AI
+// user, with whatever the launch placed in it for the AI to read. Every
+// launch makes a fresh directory of its own, so the stale one is never
+// reused — but it stays readable, and the next card's AI must not find a
+// credential its own card was not given.
+func TestAStaleLaunchHomeIsSweptBeforeTheNextLaunch(t *testing.T) {
+	run := t.TempDir()
+	root := filepath.Join(run, "target-repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(run, "agent-home", "implementer-abandoned")
+	if err := os.MkdirAll(filepath.Join(stale, credentialLendDir), 0o711); err != nil {
+		t.Fatal(err)
+	}
+	left := filepath.Join(stale, credentialLendDir, "AWS_SHARED_CREDENTIALS_FILE")
+	if err := os.WriteFile(left, []byte("a-credential-a-later-card-must-not-read\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	// Through the function that makes the home, which is where the launch
+	// reaches it. No launcher here, which is the one-user case; the sweep
+	// is the same call either way.
+	fresh, err := prepareAgentHome(AgentConfig{ID: "implementer", Command: "agent"}, root, "")
+	if err != nil {
+		t.Fatalf("prepareAgentHome: %v", err)
+	}
+	if fresh == stale {
+		t.Fatal("the launch reused the abandoned home")
+	}
+
+	if _, err := os.Stat(left); !os.IsNotExist(err) {
+		t.Fatalf("a credential from an abandoned launch is still readable: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("the abandoned launch home is still there: %v", err)
+	}
+	// The parent stays: the next launch makes its own directory under it.
+	if _, err := os.Stat(filepath.Join(run, "agent-home")); err != nil {
+		t.Fatalf("the launch homes' parent was removed: %v", err)
 	}
 }

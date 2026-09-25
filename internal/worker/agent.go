@@ -260,7 +260,7 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		// A launch that died with the pod left the tree to the agent user;
 		// it comes back before it is lent again.
 		reclaimWorkspace(launcher, root)
-		agentHome, err = prepareAgentHome(config, root)
+		agentHome, err = prepareAgentHome(config, root, launcher)
 		if err != nil {
 			return AgentOutcome{}, "", err
 		}
@@ -780,11 +780,46 @@ var agentHomeSeeds = []string{".codex/config.toml"}
 // running at once never share one. The launcher lends the directory to
 // the agent user; the worker takes it back when the run ends, so the
 // engine can read what was left and the next dispatch can clear it.
-func prepareAgentHome(config AgentConfig, root string) (string, error) {
+// sweepStaleAgentHomes removes the launch homes of launches that did not
+// end. A card runs one launch at a time and the chain runs one card at a
+// time on a run directory, so anything already under the parent belongs to
+// a launch that is over.
+//
+// Best effort throughout: a home that will not go is a full volume or a
+// launcher that cannot reach it, and neither is a reason to refuse to start
+// this launch. What it must not do is leave one readable and say nothing,
+// which is why the failure is printed.
+func sweepStaleAgentHomes(launcher, base string) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		stale := filepath.Join(base, entry.Name())
+		// The agent user owns what it was lent; the launcher is what can
+		// give it back, exactly as at the end of a launch that finished.
+		reclaimWorkspace(launcher, stale)
+		if err := removeAgentHome(stale); err != nil {
+			fmt.Fprintf(os.Stderr, "worker: a launch home from an earlier card was not removed: %v\n", err)
+		}
+	}
+}
+
+func prepareAgentHome(config AgentConfig, root, launcher string) (string, error) {
 	base := filepath.Join(filepath.Dir(root), "agent-home")
 	if err := os.MkdirAll(base, 0o711); err != nil {
 		return "", errors.New("agent home could not be prepared")
 	}
+	// The homes of launches that did not end. Every launch makes a fresh
+	// directory of its own, so a stale one is never reused — but it is
+	// still lent to the agent user, and a credential a launch placed there
+	// for the AI to read would stay readable to the next card's AI, which
+	// the list of stages says must not have it. The deferred cleanup cannot
+	// cover a pod replaced mid-card; this is what does.
+	sweepStaleAgentHomes(launcher, base)
 	home, err := os.MkdirTemp(base, config.ID+"-")
 	if err != nil {
 		return "", errors.New("agent home could not be prepared")

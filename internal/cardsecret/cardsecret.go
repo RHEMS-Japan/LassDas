@@ -70,6 +70,12 @@ var (
 	names     []string
 	pathNames map[string]bool
 	secrets   []secret
+	// scanned are credentials this process holds only to check that none
+	// of them got into a change. They are kept apart from secrets on
+	// purpose: what a card carries decides what its processes receive and
+	// what is masked out of its logs, and neither may widen because a gate
+	// elsewhere needed to read more.
+	scanned []secret
 )
 
 // Register records what this card carries. It is additive and idempotent:
@@ -100,6 +106,34 @@ func Register(entries []Entry) {
 	// Longest first, so a value that contains a shorter one is taken out
 	// whole rather than in pieces.
 	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i].text) > len(secrets[j].text) })
+}
+
+// RegisterForScan records a credential the engine holds only to check that
+// its value did not end up in a change.
+//
+// The card that seals a round is not always the card the credential was
+// handed to — the usual configuration hands one to the card that writes the
+// change, and another card seals it — so a check that could only see what
+// its own card received would never look at the ordinary case. Handing the
+// value to the sealing card instead would be worse: that is what the list
+// of stages exists to prevent. So the sealing worker, which is the engine's
+// own process and not the AI's, reads the files itself and registers them
+// here.
+//
+// Nothing registered this way reaches an agent's environment, a validation
+// sandbox or a mask: Names and Literals do not see it. Only VariableIn
+// does.
+func RegisterForScan(entries []Entry) {
+	mutex.Lock()
+	defer mutex.Unlock()
+	for _, entry := range entries {
+		for _, text := range expand(entry.Secret) {
+			if !held(scanned, text) && !held(secrets, text) {
+				scanned = append(scanned, secret{text: text, owner: entry.Name})
+			}
+		}
+	}
+	sort.SliceStable(scanned, func(i, j int) bool { return len(scanned[i].text) > len(scanned[j].text) })
 }
 
 // expand is one secret as every form of it that can appear on its own: the
@@ -191,9 +225,11 @@ func VariableIn(text string) string {
 	}
 	mutex.RLock()
 	defer mutex.RUnlock()
-	for _, held := range secrets {
-		if strings.Contains(text, held.text) {
-			return held.owner
+	for _, group := range [][]secret{secrets, scanned} {
+		for _, held := range group {
+			if strings.Contains(text, held.text) {
+				return held.owner
+			}
 		}
 	}
 	return ""
@@ -271,5 +307,5 @@ func held(values []secret, want string) bool {
 func Forget() {
 	mutex.Lock()
 	defer mutex.Unlock()
-	names, pathNames, secrets = nil, nil, nil
+	names, pathNames, secrets, scanned = nil, nil, nil, nil
 }
