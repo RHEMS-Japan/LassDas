@@ -42,11 +42,13 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	ticketPath := flags.String("ticket", "", "")
 	clarificationPath := flags.String("clarification", "", "")
 	knowledgeRoot := flags.String("knowledge-root", "", "")
+	seatCandidate := flags.Int("seat-candidate", 0, "")
+	rebuild := flags.String("rebuild-prompt", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) ||
 		!allPresent(*configPath, *toolSHA, *investigationPath, *measurementsPath, *repoRoot, *baseSHA, *reviewerID, *runOutPath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) {
+		!worker.ValidToolSHA(*toolSHA) || *seatCandidate < 0 || !validRebuild(*rebuild) {
 		return errors.New("agent-design-review arguments are invalid")
 	}
 	config, err := readConfig(*configPath)
@@ -59,18 +61,33 @@ func runAgentDesignReview(ctx context.Context, args []string) error {
 	}
 	// The design judge of this id: its own endpoint and launch when the
 	// configuration gives it one, else the candidate reviewer's (#45).
-	endpoint, ok := config.Models.DesignReviewerFor(*reviewerID)
+	seat, ok := config.Models.DesignReviewerFor(*reviewerID)
 	if !ok {
 		return errors.New("reviewer is not configured")
+	}
+	// The occupant the ladder left this seat on, and the launch that goes
+	// with it. Zero is the configured judge, which is every delivery that
+	// has not had to move a seat.
+	endpoint, seated := seat.SeatOccupant(*seatCandidate)
+	if !seated {
+		return errors.New("design reviewer seat has no such candidate")
 	}
 	lens, err := worker.ResolveDesignLens(config, endpoint.ID, *lensSelector, inputs.subject.Kind)
 	if err != nil {
 		return err
 	}
-	agent := config.Agents.DesignReviewerAgentFor(endpoint.ID)
+	agent, launched := config.Agents.DesignReviewerAgentSeat(endpoint.ID, *seatCandidate)
+	if !launched {
+		return errors.New("design reviewer seat candidate has no launch")
+	}
 	previous, err := readPreviousDesignFindings(findingsPaths)
 	if err != nil {
 		return err
+	}
+	if *rebuild != "" {
+		// Asked again, shorter: a judge that would not answer is given the
+		// subject without the earlier rounds' objections around it.
+		previous = nil
 	}
 	if *objectionPath != "" {
 		objection, err := readPreviousObjection(*objectionPath)

@@ -29,7 +29,13 @@ func AgentReviewFromRun(
 	// run naming any other configured agent — the implementer's above all —
 	// is not this reviewer's judgment however valid its verdict reads. This
 	// is where the profile binding is enforced, not merely checkable.
-	if run.Validate(config) != nil || run.AgentID != config.Agents.ReviewerAgentFor(endpoint.ID).ID {
+	// The launch that belongs with this occupant, not merely one of the
+	// seat's: moving a seat moves the endpoint and the launch together, so
+	// a run launched under another occupant's profile judged under another
+	// provider's key than the record names.
+	place, seated := SeatPlaceOf(endpoint, config.Models.Reviewers)
+	launch, launched := config.Agents.ReviewerAgentSeat(endpoint.ID, place)
+	if !seated || !launched || run.Validate(config) != nil || run.AgentID != launch.ID {
 		return Review{}, errors.New("review run is not the reviewer's own launch")
 	}
 	output, err := DecodeAgentReviewOutput(run.Transcript)

@@ -130,6 +130,26 @@ type AgentSet struct {
 type ReviewerAgent struct {
 	ReviewerID string      `json:"reviewer_id"`
 	Agent      AgentConfig `json:"agent"`
+	// Candidates are the launches for the seat's candidate endpoints, in
+	// the same order. A seat moves to another vendor by being launched
+	// differently — another profile, another credential source — so an
+	// endpoint candidate without a launch beside it would name a second
+	// provider and go on talking to the first. Validation holds the two
+	// lists to the same length for that reason. Omitted when empty, which
+	// leaves an existing configuration's encoding untouched.
+	Candidates []AgentConfig `json:"candidates,omitempty"`
+}
+
+// AgentFor is the launch for one occupant of this seat: place 0 is the
+// configured launch, place 1 the first candidate's.
+func (r ReviewerAgent) AgentFor(place int) (AgentConfig, bool) {
+	if place == 0 {
+		return r.Agent, true
+	}
+	if place < 1 || place > len(r.Candidates) {
+		return AgentConfig{}, false
+	}
+	return r.Candidates[place-1], true
 }
 
 // applierConfigured reports whether the consumer gave the applier a launch.
@@ -168,13 +188,9 @@ func (a AgentSet) validate() error {
 			return errors.New("reviewer agent reviewer ids contain duplicates")
 		}
 		reviewers[entry.ReviewerID] = struct{}{}
-		if err := entry.Agent.validate(); err != nil {
+		if err := entry.seatLaunches(ids); err != nil {
 			return fmt.Errorf("reviewer agent %s: %w", entry.ReviewerID, err)
 		}
-		if _, exists := ids[entry.Agent.ID]; exists {
-			return errors.New("agent ids must differ")
-		}
-		ids[entry.Agent.ID] = struct{}{}
 	}
 	// Every pair of launch definitions that can actually run must be
 	// separated, not only the implementer against each judge: two judges
@@ -194,13 +210,9 @@ func (a AgentSet) validate() error {
 			return errors.New("design reviewer agent reviewer ids contain duplicates")
 		}
 		judges[entry.ReviewerID] = struct{}{}
-		if err := entry.Agent.validate(); err != nil {
+		if err := entry.seatLaunches(ids); err != nil {
 			return fmt.Errorf("design reviewer agent %s: %w", entry.ReviewerID, err)
 		}
-		if _, exists := ids[entry.Agent.ID]; exists {
-			return errors.New("agent ids must differ")
-		}
-		ids[entry.Agent.ID] = struct{}{}
 	}
 	launchable := []AgentConfig{a.Implementer}
 	if a.applierConfigured() {
@@ -209,11 +221,18 @@ func (a AgentSet) validate() error {
 	if len(a.ReviewerAgents) == 0 {
 		launchable = append(launchable, a.Reviewer)
 	}
+	// The candidate launches are in here too. They are alternatives to each
+	// other and never run at once, but each of them runs against the other
+	// seat and against the implementer — so a candidate that was another
+	// launch under a different name would collapse the separation the
+	// moment the seat moved onto it.
 	for _, entry := range a.ReviewerAgents {
 		launchable = append(launchable, entry.Agent)
+		launchable = append(launchable, entry.Candidates...)
 	}
 	for _, entry := range a.DesignReviewerAgents {
 		launchable = append(launchable, entry.Agent)
+		launchable = append(launchable, entry.Candidates...)
 	}
 	for i := 0; i < len(launchable); i++ {
 		for j := i + 1; j < len(launchable); j++ {
@@ -291,14 +310,15 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 	if a.Applier != nil && a.Applier.ID == id {
 		return *a.Applier, nil
 	}
-	for _, entry := range a.ReviewerAgents {
-		if entry.Agent.ID == id {
-			return entry.Agent, nil
-		}
-	}
-	for _, entry := range a.DesignReviewerAgents {
-		if entry.Agent.ID == id {
-			return entry.Agent, nil
+	// Every occupant's launch, not only the configured one: a run sealed by
+	// a seat that had moved names the launch that ran it, and a lookup that
+	// stopped at the configured launches would refuse the delivery's own
+	// record.
+	for _, entry := range append(append([]ReviewerAgent(nil), a.ReviewerAgents...), a.DesignReviewerAgents...) {
+		for _, launch := range append([]AgentConfig{entry.Agent}, entry.Candidates...) {
+			if launch.ID == id {
+				return launch, nil
+			}
 		}
 	}
 	return AgentConfig{}, errors.New("agent run names an agent that is not configured")
@@ -308,24 +328,50 @@ func (a AgentSet) byID(id string) (AgentConfig, error) {
 // its own when the configuration gives it one, else the candidate
 // reviewer's of the same id.
 func (a AgentSet) DesignReviewerAgentFor(reviewerID string) AgentConfig {
+	agent, _ := a.DesignReviewerAgentSeat(reviewerID, 0)
+	return agent
+}
+
+// DesignReviewerAgentSeat is the same lookup for one occupant of the seat.
+// A judge bound to its own launches uses that seat's list; one that falls
+// back to the candidate reviewer's launch falls back to that seat's list
+// too, so a design judge moves exactly as far as the launches allow.
+func (a AgentSet) DesignReviewerAgentSeat(reviewerID string, place int) (AgentConfig, bool) {
 	for _, entry := range a.DesignReviewerAgents {
 		if entry.ReviewerID == reviewerID {
-			return entry.Agent
+			return entry.AgentFor(place)
 		}
 	}
-	return a.ReviewerAgentFor(reviewerID)
+	return a.ReviewerAgentSeat(reviewerID, place)
 }
 
 // ReviewerAgentFor picks the launch definition for one reviewer endpoint:
 // its own entry when the configuration carries one, the shared reviewer
 // agent otherwise.
 func (a AgentSet) ReviewerAgentFor(reviewerID string) AgentConfig {
+	agent, _ := a.ReviewerAgentSeat(reviewerID, 0)
+	return agent
+}
+
+// ReviewerAgentSeat is the launch for one occupant of a reviewer seat.
+//
+// Only place 0 exists for a seat on the shared reviewer definition: that
+// launch is one program with one credential source, and handing it a
+// second endpoint's work would run the new vendor's review through the old
+// vendor's key. Validation refuses that configuration outright; this
+// refuses it again at the moment of use, because a lookup that quietly
+// returned the wrong launch would seal a review naming a model that never
+// saw the change.
+func (a AgentSet) ReviewerAgentSeat(reviewerID string, place int) (AgentConfig, bool) {
 	for _, entry := range a.ReviewerAgents {
 		if entry.ReviewerID == reviewerID {
-			return entry.Agent
+			return entry.AgentFor(place)
 		}
 	}
-	return a.Reviewer
+	if place != 0 {
+		return AgentConfig{}, false
+	}
+	return a.Reviewer, true
 }
 
 // ConsumerFor selects the destination a ticket names. The repository string is
@@ -821,6 +867,12 @@ type ModelEndpoint struct {
 	// the second the approach (the framework's built-in lenses). Reviewers
 	// only.
 	DesignLens string `json:"design_lens,omitempty"`
+	// Candidates are the other models that may take this seat when the one
+	// above will not answer (seat.go). They are tried in order and each is
+	// a whole endpoint: another vendor, another address, another key. The
+	// field is omitted when empty, so a configuration written before seats
+	// existed encodes — and therefore digests — exactly as it did.
+	Candidates []ModelEndpoint `json:"candidates,omitempty"`
 }
 
 // MaxConfiguredOutputTokens is the ceiling of a model endpoint's
@@ -961,6 +1013,9 @@ func (c Config) Validate() error {
 	// candidate reviewers' declared endpoints.
 	if (len(c.Models.DesignReviewers) > 0) != (len(c.Agents.DesignReviewerAgents) > 0) {
 		return errors.New("design reviewers and design reviewer agents must be configured together")
+	}
+	if err := c.validateSeatLaunches(); err != nil {
+		return err
 	}
 	if c.MaxStages < 1 || c.MaxStages > 5 {
 		return errors.New("max_stages must be between 1 and 5")
@@ -1309,11 +1364,17 @@ func (c ModelConfig) validate() error {
 		if err := validateVendorHosts(c.VendorHosts); err != nil {
 			return err
 		}
-		endpoints := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
-		endpoints = append(endpoints, c.DesignReviewers...)
-		for _, endpoint := range endpoints {
-			if err := vendorHostMatch(c.VendorHosts, endpoint); err != nil {
-				return fmt.Errorf("%s: %w", endpoint.ID, err)
+		seats := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
+		seats = append(seats, c.DesignReviewers...)
+		// Every occupant, not only the configured one. The table is what
+		// stops a vendor name from pointing anywhere it likes, and a seat
+		// that could be moved onto an unregistered host would be a way
+		// round it that opens the moment the first model fails.
+		for _, seat := range seats {
+			for _, endpoint := range seat.Seat() {
+				if err := vendorHostMatch(c.VendorHosts, endpoint); err != nil {
+					return fmt.Errorf("%s: %w", endpoint.ID, err)
+				}
 			}
 		}
 	}
@@ -1406,7 +1467,7 @@ func (m ModelEndpoint) validateAs(reviewer, judge bool) error {
 	default:
 		return errors.New("model effort is invalid")
 	}
-	return nil
+	return m.validateCandidates(reviewer, judge)
 }
 
 func validBranch(value string) bool {

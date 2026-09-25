@@ -229,6 +229,9 @@ func (p *Pipeline) chainDesignReview(ctx context.Context, reviewers []string, in
 	if _, err := os.Stat(p.path("readiness-ticket.json")); err == nil {
 		args = append(args, "--ticket", p.path("readiness-ticket.json"))
 	}
+	// The same two decisions the candidate reviews carry: where this judge's
+	// seat is sitting, and whether its instruction has been rebuilt.
+	args = append(args, p.seatArguments(designReviewStage(index), reviewer, round)...)
 	args = append(args, "--run-out", filepath.Join(roundDir, reviewer+"-design-review-run.json"), "--out", out)
 	if err := p.runVerb(ctx, "agent-design-review", args, p.modelKeyEnv()...); err != nil {
 		return fmt.Errorf("design review by %s did not finish: %w", reviewer, err)

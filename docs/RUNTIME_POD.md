@@ -497,6 +497,36 @@ the designer's key and every judge's key under their own labels (a judge
 sharing the reviewer's key folds into that probe), and the spend report
 lists the designer and the judges as their own seats.
 
+### Candidate seats
+
+A role is a seat, and a seat may have more than one occupant. Under
+`models.<role>.candidates[]` a consumer lists, in order, the other
+endpoints that role may run as — another vendor, another model, another
+key variable — and under `agents.reviewer_agents[].candidates[]` (or
+`agents.design_reviewer_agents[].candidates[]`) the launch that goes with
+each of them, in the same order. The two lists move together: an endpoint
+candidate without a launch beside it would name a second provider while
+the same program went on talking to the first through the same key, and
+loading refuses it. A candidate carries the seat's id and the seat's
+lenses, because it changes who answers and not what the seat is for; it
+may not repeat an address and model the seat already has, and no more than
+four may be listed. A seat with no candidates is every configuration
+written before this existed, and its encoding — and its digest — is
+unchanged.
+
+When a card fails because the model would not answer, the tick moves the
+seat to the next candidate it can actually launch and dispatches the stage
+again, writing `history/stage-<N>/<seat-id>-seat.json` (design rounds:
+`history/design-<N>/…`) with the place, where the seat came from and why.
+A candidate sitting on the vendor the other review seat currently holds is
+passed over rather than taken: two judges on one provider are one
+provider's blind spot counted twice, and the decision gate refuses a
+review set that reaches it anyway. When the seat has nowhere left to move,
+the same occupant is asked once more with a shorter instruction — the
+earlier rounds' objections out, the change as a map of where to look — and
+only then does the delivery wait. The judges are never reduced to one to
+get past it.
+
 ## Agents under their own user
 
 The implementer, the candidate reviewers, the design judges and the

@@ -66,6 +66,19 @@ const FailureDetailLinePrefix = "worker-evidence: model-failure "
 // maxFailureDetailBytes bounds the line on both sides.
 const maxFailureDetailBytes = 4096
 
+// MaxFailureDetailLineBytes is the whole line at its longest, prefix
+// included. A reader that keeps only the end of a worker's stderr has to
+// keep more than this, or the longest detail arrives with its prefix cut
+// off: unparseable as a detail, and still there as text — which would hand
+// the classifier the very words this line exists to keep out of it.
+const MaxFailureDetailLineBytes = len(FailureDetailLinePrefix) + maxFailureDetailBytes
+
+// AnswerHeadMarker begins the head of a model's own answer where an error
+// message carries one (converseJSON, when every answer was refused). The
+// words after it are the model's, not this engine's, so a reader that
+// classifies on words cuts each line here.
+const AnswerHeadMarker = ", began: "
+
 var (
 	failureDetailPhrasePattern = regexp.MustCompile(`^[\x20-\x7e]{1,600}$`)
 	// A model name, an effort, a finish reason: provider and configuration

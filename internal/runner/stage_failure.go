@@ -302,24 +302,36 @@ var (
 // too — "order_code": 402 is not a status.
 var paymentRequiredPattern = regexp.MustCompile(`(^|\W)(status|code|http)"?\s*[:=]?\s*402(\D|$)`)
 
-// withoutModelEvidence drops the worker's own account of the turn from text
-// that words are then read out of.
+// withoutModelWords drops everything a model wrote from text that words are
+// then read out of.
 //
-// That line carries the head of the model's last answer, and a request
-// reaches that answer: a review of a payment page, an objection naming a
-// credit balance or a quota branch, and the answer has written the words this
-// file classifies on. The worker states the rule where it composes the line —
-// keyed on the message, an answer could name its own failure class — and the
-// only safe reading of that line is its parsed fields, never its prose.
-func withoutModelEvidence(stderr string) string {
-	if !strings.Contains(stderr, worker.FailureDetailLinePrefix) {
-		return stderr
-	}
+// Two things it wrote can be there. The worker's own account of the turn is
+// one line, and it carries the head of the model's last answer; a request
+// reaches that answer — a review of a payment page, an objection naming a
+// credit balance or a quota branch — and the answer has then written the
+// words this file classifies on. The worker states the rule where it
+// composes the line, and the only safe reading of that line is its parsed
+// fields, never its prose.
+//
+// The head of the answer has a second way out, though: an error message
+// carries it too (AnswerHeadMarker), and that message reaches this stderr
+// as an ordinary line. So every line is cut at the marker as well — what
+// stands before it is this engine's own words, an attempt count and a
+// request id, and what follows is the model's.
+//
+// A line is recognised the way the parser recognises it, surrounding space
+// and all. The two used to differ: an evidence line written with a leading
+// space parsed as one and survived this strip, which is a way in for the
+// only text the strip exists to remove.
+func withoutModelWords(stderr string) string {
 	lines := strings.Split(stderr, "\n")
 	kept := lines[:0]
 	for _, line := range lines {
-		if strings.HasPrefix(line, worker.FailureDetailLinePrefix) {
+		if strings.HasPrefix(strings.TrimSpace(line), worker.FailureDetailLinePrefix) {
 			continue
+		}
+		if head := strings.Index(line, worker.AnswerHeadMarker); head >= 0 {
+			line = line[:head]
 		}
 		kept = append(kept, line)
 	}
@@ -378,7 +390,7 @@ func classifyStageFailure(err error) FailureClass {
 	// step printed beside its account of the turn — never the account itself.
 	// The account is read through the fields the worker parsed, which the
 	// model's answer cannot write into.
-	text := strings.ToLower(err.Error() + "\n" + withoutModelEvidence(stderr))
+	text := strings.ToLower(withoutModelWords(err.Error() + "\n" + stderr))
 	switch {
 	case errors.Is(err, syscall.ENOSPC) || containsAny(text, diskMarkers):
 		return FailureClassDisk

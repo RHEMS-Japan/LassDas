@@ -521,16 +521,18 @@ func TestAnInterruptedCardIsNotCountedAsAModelFailure(t *testing.T) {
 	if len(setup.tracker.added) != 0 {
 		t.Fatalf("the ticket was told about a restart: %q", setup.tracker.added)
 	}
-	// The same card failing for real does reach the waiting rung, so what
-	// makes the difference is the flag and not the class.
+	// The same card failing for real does spend a hand — this fixture's
+	// seats have nobody else in them, so the hand is the rebuilt
+	// instruction — which is what makes the difference the flag and not
+	// the class.
 	sealCardFailure(t, setup.runDir, runner.StageFailure{
 		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassModel, Error: "the provider gave up",
 	})
 	if _, err := setup.climb(t); err != nil {
 		t.Fatal(err)
 	}
-	if got := setup.record(); got.LadderStep != rungWait {
-		t.Fatalf("a real model failure did not reach the waiting rung: %+v", got)
+	if got := setup.record(); got.Attempts != 1 || !slices.Contains(got.Tried, "prompt:shorten") {
+		t.Fatalf("a real model failure spent nothing: %+v", got)
 	}
 }
 

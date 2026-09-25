@@ -181,7 +181,15 @@ func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEn
 
 // stepStderrTailBytes bounds what a step's stderr leaves behind for the
 // trail note; the worker's refusal line sits at the end of it.
-const stepStderrTailBytes = 4096
+//
+// Larger than one whole evidence line, deliberately. That line carries the
+// worker's machine-readable account of a model turn and can run to its own
+// limit; kept in a buffer no bigger, a long one would arrive with its
+// prefix cut away — no longer parseable as evidence, and still present as
+// text for the classifier to read words out of, which is the one thing the
+// evidence line exists to prevent. Room for the line and for the refusal
+// sentence that follows it.
+const stepStderrTailBytes = 2 * worker.MaxFailureDetailLineBytes
 
 // tailBuffer keeps the last limit bytes written to it.
 type tailBuffer struct {

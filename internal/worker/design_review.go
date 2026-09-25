@@ -124,7 +124,12 @@ func AgentDesignReviewFromRun(
 	if !configuredReviewer(endpoint, config.Models.DesignJudges()) {
 		return investigate.DesignReview{}, errors.New("design reviewer is not configured")
 	}
-	if run.Validate(config) != nil || run.AgentID != config.Agents.DesignReviewerAgentFor(endpoint.ID).ID {
+	// The launch that belongs with this occupant of the judge's seat, for
+	// the reason the candidate reviews hold to: the endpoint and the launch
+	// move together or the record names a model that never judged.
+	place, seated := SeatPlaceOf(endpoint, config.Models.DesignJudges())
+	launch, launched := config.Agents.DesignReviewerAgentSeat(endpoint.ID, place)
+	if !seated || !launched || run.Validate(config) != nil || run.AgentID != launch.ID {
 		return investigate.DesignReview{}, errors.New("design review run is not the reviewer's own launch")
 	}
 	if run.DeliveryID != identity.DeliveryID || run.InputSHA256 != identity.InputSHA256 || run.ConfigSHA256 != identity.ConfigSHA256 ||
