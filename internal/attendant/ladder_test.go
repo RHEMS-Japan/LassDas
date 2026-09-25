@@ -164,15 +164,6 @@ func (s *ladderSetup) climbWithoutTracker(t *testing.T) (ladderVerdict, error) {
 	return climbLadder(context.Background(), climb)
 }
 
-// rewindStopRead moves this stage's last stop read back, so a test can
-// stand on the far side of the throttle without waiting out a minute.
-func (s *ladderSetup) rewindStopRead(t *testing.T, by time.Duration) {
-	t.Helper()
-	record := s.record()
-	record.LastStopReadAt = time.Now().UTC().Add(-by)
-	writeLadderRecord(s.runDir, s.stage, 1, record, s.logger)
-}
-
 func (s *ladderSetup) record() ladderRecord {
 	round := 1
 	return readLadderRecord(s.runDir, s.stage, round)
@@ -637,10 +628,10 @@ func TestAStopIsHeardWhileTheStageIsWaitingNotOnlyAtTheNextDispatch(t *testing.T
 	}
 	// The requester writes 停止 a moment into the hour.
 	setup.tracker.comments = []hook.BacklogComment{{CommentID: 1, UserID: 7, Body: "停止"}}
-	// The read is throttled, and entering the wait spent this minute's. The
-	// clock is moved rather than waited on: what is being measured is that
-	// a stop lands during the wait, not how long a minute is.
-	setup.rewindStopRead(t, 2*stopReadInterval)
+	// No clock is moved. The very next pass is what has to hear it: the
+	// stop read used to run on the wait's own minute-long throttle, and a
+	// requester who wrote 停止 could watch six passes go by without the
+	// ticket being read at all (measured 2026-09-26).
 	verdict, err := setup.climb(t)
 	if err != nil || verdict != ladderStopped {
 		t.Fatalf("verdict = %v err = %v, want the stop heard during the wait", verdict, err)
@@ -671,11 +662,15 @@ func TestAStopAlreadyOnTheTicketIsHeardOnEnteringTheWait(t *testing.T) {
 	}
 }
 
-// And the reading of it is throttled, because the loop that passes over a
-// waiting card passes every few seconds. Unthrottled, one card waiting out
-// the longest interval would list its ticket six times a minute, and a
-// night of deliveries held behind one spent key would spend it on that.
-func TestTheStopIsReadAtMostOnceAMinuteWhileWaiting(t *testing.T) {
+// And it is read on every pass, not on a clock of its own.
+//
+// The wait belongs to the failure — how long before this stage is worth
+// another attempt — and a requester's 停止 has nothing to do with it. While
+// the two shared a clock, the engine's promise that a stop is honoured on
+// the next tick was false for the whole of every wait: six consecutive
+// passes over a waiting card never read the ticket (measured 2026-09-26).
+// The cost of the fix is one comment listing per waiting card per tick.
+func TestTheStopIsReadOnEveryPassWhileWaiting(t *testing.T) {
 	setup := newLadderSetup(t, runner.StageFailure{
 		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,
 		Error: "the agent-review step exited 1",
@@ -693,26 +688,18 @@ func TestTheStopIsReadAtMostOnceAMinuteWhileWaiting(t *testing.T) {
 	if entering == 0 {
 		t.Fatal("entering the wait read nothing, so a stop already on the ticket would wait for the first dispatch")
 	}
-	// Six more ticks inside the same minute — the loop's cadence for a
-	// minute — read nothing.
+	// Six more ticks inside the same minute, each of which reads.
 	for tick := 0; tick < 6; tick++ {
 		if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
 			t.Fatalf("tick %d: verdict = %v err = %v", tick, verdict, err)
 		}
 	}
-	if setup.tracker.listings != entering {
-		t.Fatalf("listings after six ticks in the same minute = %d, want the one from entering", setup.tracker.listings)
+	if setup.tracker.listings != entering+6 {
+		t.Fatalf("listings after six ticks in the same minute = %d, want one per tick on top of entering's %d",
+			setup.tracker.listings, entering)
 	}
-	// A minute later it reads again, so the stop still lands.
-	setup.rewindStopRead(t, 2*stopReadInterval)
-	if verdict, err := setup.climb(t); err != nil || verdict != ladderHandled {
-		t.Fatalf("after the throttle: verdict = %v err = %v", verdict, err)
-	}
-	if setup.tracker.listings != entering+1 {
-		t.Fatalf("listings after the throttle passed = %d, want one more", setup.tracker.listings)
-	}
-	// The tick that dispatches reads without a throttle: it is the last
-	// thing between a stop and a card that starts spending again.
+	// The tick that dispatches reads as well: it is the last thing between
+	// a stop and a card that starts spending again.
 	setup.tracker.comments = []hook.BacklogComment{{CommentID: 1, UserID: 7, Body: "停止"}}
 	record := setup.record()
 	record.LastAt = time.Now().UTC().Add(-2 * time.Hour)
@@ -816,4 +803,64 @@ func TestTheThreeBrokenEndingsAreNoLongerProduced(t *testing.T) {
 
 func retiredCodes() []hook.TerminalCode {
 	return []hook.TerminalCode{hook.TerminalModelFailed, hook.TerminalInternalFailed, hook.TerminalReleaseFailed}
+}
+
+// A step cut off by its own wall clock is a failure, not an interruption.
+//
+// Both arrive as a cancelled context, and while they were filed as the same
+// thing a card that could not finish inside its wall was replayed for free,
+// for ever: measured 2026-09-26, ten consecutive wall expiries against
+// retry_max_attempts=1 spent nothing, counted nothing and rebuilt forty
+// cards. Nothing about a wall that expires is free — the same seat on the
+// same prompt meets the same wall — so it is counted, climbed, and bounded
+// like every other failure.
+func TestAStepThatRanOutOfItsOwnTimeIsCountedAgainstTheLimit(t *testing.T) {
+	failure := runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassTimeout,
+		Error: "the agent-review step was stopped part-way: context deadline exceeded",
+	}
+	setup := newLadderSetup(t, failure)
+	// One attempt allowed, and it is spent: the operator's own bound, on
+	// the far side of which a delivery ends on the failure.
+	setup.config.Chain.RetryMaxAttempts = 1
+	writeLadderRecord(setup.runDir, setup.stage, 1, ladderRecord{Attempts: 1}, setup.logger)
+
+	for pass := 0; pass < 10; pass++ {
+		sealCardFailure(t, setup.runDir, failure)
+		verdict, err := setup.climb(t)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if verdict != ladderSpent {
+			t.Fatalf("pass %d: verdict = %v, want the delivery ended on the operator's bound", pass, verdict)
+		}
+	}
+	record := setup.record()
+	if record.Interruptions != 0 {
+		t.Fatalf("interruptions = %d: a wall that expired was counted as a pod being replaced", record.Interruptions)
+	}
+	if created := createdStages(ladderBoardLines(t, setup.calls)); len(created) != 0 {
+		t.Fatalf("the stage was dispatched again past the bound: %v", created)
+	}
+}
+
+// And below the bound it is climbed like any other failure: the seat moves,
+// which is the remedy for a role that cannot answer in the time it is given.
+// Without this the fix could be "end every delivery that meets a wall".
+func TestAStepThatRanOutOfItsOwnTimeIsClimbedBeforeTheBound(t *testing.T) {
+	setup := newLadderSetup(t, runner.StageFailure{
+		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassTimeout,
+		Error: "the agent-review step was stopped part-way: context deadline exceeded",
+	})
+	verdict, err := setup.climb(t)
+	if err != nil || verdict != ladderHandled {
+		t.Fatalf("verdict = %v err = %v, want the wall climbed", verdict, err)
+	}
+	record := setup.record()
+	if record.Attempts != 1 || record.LadderStep != rungSeat {
+		t.Fatalf("record = %+v, want one attempt spent on the seat's rung", record)
+	}
+	if created := createdStages(ladderBoardLines(t, setup.calls)); len(created) == 0 {
+		t.Fatal("the stage was not dispatched again")
+	}
 }
