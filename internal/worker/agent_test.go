@@ -807,3 +807,47 @@ func TestQuotaRefusalDoesNotStartAnotherReviewConversation(t *testing.T) {
 		}
 	}
 }
+
+// A reclaim the reception asks for while it passes over finished runs is
+// given a deadline. The request waits on the lend lock the whole runs root
+// shares, which a live launch can hold for minutes, and a caller on a
+// clock cannot stop there for one directory. Past the deadline the
+// launcher is killed and the call comes back; the tree simply stays lent
+// until the next pass asks again.
+func TestAReclaimWithADeadlineComesBack(t *testing.T) {
+	launcher := filepath.Join(t.TempDir(), "launcher")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AgentLauncherEnv, launcher)
+	ctx, giveUp := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer giveUp()
+
+	started := time.Now()
+	ReclaimWorkspaceWithin(ctx, t.TempDir())
+	waited := time.Since(started)
+
+	if waited > 5*time.Second {
+		t.Fatalf("the reclaim outlived its deadline: %s", waited)
+	}
+}
+
+// The ending's own reclaim keeps its old shape: no deadline, because
+// nothing else is happening in that process and a cleanup abandoned
+// halfway leaves the tree to a user the engine cannot unlink.
+func TestTheEndingsReclaimWaitsForTheLauncher(t *testing.T) {
+	launcher := filepath.Join(t.TempDir(), "launcher")
+	marker := filepath.Join(t.TempDir(), "asked")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nsleep 0.2\necho \"$@\" > "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AgentLauncherEnv, launcher)
+	root := t.TempDir()
+
+	ReclaimWorkspace(root)
+
+	asked, err := os.ReadFile(marker)
+	if err != nil || !strings.Contains(string(asked), "--reclaim "+root) {
+		t.Fatalf("the launcher was not asked for the tree: %q, %v", asked, err)
+	}
+}

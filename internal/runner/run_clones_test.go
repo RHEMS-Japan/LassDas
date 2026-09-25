@@ -34,7 +34,7 @@ var runCloneRecords = map[string]string{
 func runCloneWorkspace(t *testing.T) string {
 	t.Helper()
 	workspace := t.TempDir()
-	for _, clone := range runCloneDirectories {
+	for _, clone := range CloneDirectories {
 		deep := filepath.Join(workspace, clone, "src", "nested")
 		if err := os.MkdirAll(deep, 0o755); err != nil {
 			t.Fatal(err)
@@ -90,7 +90,7 @@ func runCloneServices(t *testing.T, config runtime.Config, envelope hook.Dispatc
 
 func runCloneState(t *testing.T, workspace string) (clones []string, records []string) {
 	t.Helper()
-	for _, name := range runCloneDirectories {
+	for _, name := range CloneDirectories {
 		if _, err := os.Lstat(filepath.Join(workspace, name)); err == nil {
 			clones = append(clones, name)
 		}
@@ -227,7 +227,7 @@ func TestARunThatIsNotTerminalKeepsItsClones(t *testing.T) {
 			terminal := NewTerminal(config, services, envelope, 4242, workspace, trailTestLogger{})
 			testcase.act(t, terminal, workspace)
 			clones, records := runCloneState(t, workspace)
-			if len(clones) != len(runCloneDirectories) {
+			if len(clones) != len(CloneDirectories) {
 				t.Fatalf("a run that is not finished lost clones: kept %v", clones)
 			}
 			if len(records) != len(runCloneRecords) {

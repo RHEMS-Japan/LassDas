@@ -182,6 +182,13 @@ func runContext(ctx context.Context) error {
 				logger.Error("runner merge observation failed", "error", err.Error())
 			}
 		}
+		// Both orchestrations leave the same thing behind, so the sweep sits
+		// outside the branch: a run sealed by the question tick above — an
+		// expired question, a stop asked for while it waited — keeps its
+		// copies of the destination whatever mode created them.
+		if err := attendant.SweepFinishedRunClones(ctx, currentConfig(), services, hermes, logger); err != nil {
+			logger.Error("finished run clone sweep failed", "error", err.Error())
+		}
 		observe()
 	}
 

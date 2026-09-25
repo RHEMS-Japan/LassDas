@@ -646,11 +646,41 @@ func removeAgentHome(home string) error {
 	return os.RemoveAll(home)
 }
 
+// ReclaimWorkspaceWithin is ReclaimWorkspace with a deadline on it. The
+// request waits on the lend lock the whole runs root shares, which a
+// launch of another run can hold for minutes, and then walks every inode
+// of the tree. A caller on a clock — the reception, passing over every
+// run it knows once a minute — cannot stop there for one directory, so it
+// says how long it will wait. When the wait runs out the launcher is
+// killed, the tree stays lent, and the next pass asks again.
+func ReclaimWorkspaceWithin(ctx context.Context, root string) {
+	if launcher := agentLauncher(); launcher != "" {
+		reclaimWorkspaceWithin(ctx, launcher, root)
+	}
+}
+
 // reclaimWorkspace asks the launcher to return a workspace to this user.
 // The launcher does it itself when the agent exits; this covers an agent
-// the engine killed together with the launcher (the process group).
+// the engine killed together with the launcher (the process group). It
+// waits for as long as the launcher takes: a launch cleaning up after
+// itself has nothing else to do, and a cleanup abandoned halfway leaves
+// the tree to a user the engine cannot unlink.
 func reclaimWorkspace(launcher, root string) {
-	if output, err := exec.Command(launcher, "--reclaim", root).CombinedOutput(); err != nil { // #nosec G204 -- the configured launcher.
+	reportReclaim(exec.Command(launcher, "--reclaim", root)) // #nosec G204 -- the configured launcher.
+}
+
+func reclaimWorkspaceWithin(ctx context.Context, launcher, root string) {
+	command := exec.CommandContext(ctx, launcher, "--reclaim", root) // #nosec G204 -- the configured launcher.
+	// A deadline on the launcher alone is not always a deadline on the
+	// call: the output is read to the end, and a child the launcher left
+	// behind can hold it open after its parent is killed. The whole group
+	// goes instead, and the pipes close with it.
+	configureProcessGroup(command)
+	reportReclaim(command)
+}
+
+func reportReclaim(command *exec.Cmd) {
+	if output, err := command.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "worker: workspace not reclaimed: %v: %s\n", err, strings.TrimSpace(string(output)))
 	}
 }
