@@ -152,6 +152,14 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 			args = append(args, "--ruling", RulingFile(p.Workspace, round-1))
 		}
 	}
+	// This round has been handed back before, and what the engine decided
+	// in the agent's place is the reason it is being rendered again. Keyed
+	// on this round rather than the one before it: a return does not start
+	// a new round, it restates the one that was returned — including the
+	// first, which has no previous round at all.
+	if returned, err := ReadReturns(p.Workspace, round); err == nil && returned.Latest() != nil {
+		args = append(args, "--returned", ReturnRecordFile(p.Workspace, round))
+	}
 	args = append(args, p.clarificationArgs()...)
 	// The implementer's seat has one launch, so the ladder's remedy for an
 	// implementer that will not answer is the instruction rather than the

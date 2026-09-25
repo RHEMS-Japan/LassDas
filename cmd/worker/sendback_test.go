@@ -12,17 +12,18 @@ import (
 )
 
 // sayItCannotBeDone stands in for an implementer that finds it cannot carry
-// the request out: it changes nothing, says why, and leaves the decision to
-// the requester — exactly what the instruction tells it to do.
+// the request out: it changes nothing and says why. That is what the agent
+// is told to do, and it is the engine — not the requester — that decides
+// what happens next.
 const sayItCannotBeDone = `echo "この依頼は、いまのままでは実現できません。" >&2; ` +
 	`echo "理由を報告します。何も変更していません。その判断は依頼者に返します。"`
 
 // The implementer's report used to travel to the first review card as an
 // empty working copy: the seal refused it, the card blocked, and the
 // requester was told "model_failed" with neither the report nor its reason
-// (live 2026-09-25). The card ends on the report instead, so the chain
-// stops before the review and the record beside it is what the run reports.
-func TestRunInstructionEndsTheCardWhenTheImplementerReportsInsteadOfChanging(t *testing.T) {
+// (live 2026-09-25). The card stops before the review instead, and the
+// record beside it is what the engine reads to answer the round.
+func TestRunInstructionStopsTheCardWhenTheImplementerReportsInsteadOfChanging(t *testing.T) {
 	fixture := newAgentFixture(t, sayItCannotBeDone, "true")
 	instruction := filepath.Join(t.TempDir(), "INSTRUCTION.md")
 	if err := os.WriteFile(instruction, []byte("Change the label exactly as the ticket says.\n"), 0o600); err != nil {
@@ -34,8 +35,8 @@ func TestRunInstructionEndsTheCardWhenTheImplementerReportsInsteadOfChanging(t *
 		"--instruction", instruction, "--repo-root", fixture.repoRoot, "--base-sha", fixture.baseSHA, "--stage", "1",
 		"--role", "implementer", "--out", record,
 	})
-	if err == nil || !strings.Contains(err.Error(), "returned the work to the requester") {
-		t.Fatalf("the card did not end on the report: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "the round is answered and run again") {
+		t.Fatalf("the card did not stop on the report: %v", err)
 	}
 
 	// The run record is the evidence the report is read from afterwards.

@@ -424,12 +424,13 @@ func TestTheRetryNoteNamesOnlyWhatTheRoleHas(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The stand-in reports and changes nothing through both launches, which
-	// is the implementer handing the work back, so the card ends on that
-	// report. What is measured here is the prompt the retry carried.
+	// is the implementer handing the work back, so the card stops there and
+	// the engine answers the round. What is measured here is the prompt the
+	// retry carried.
 	err := run(context.Background(), []string{"run-instruction", "--role", "implementer", "--config", fixture.configPath,
 		"--tool-sha", cliToolSHA, "--draft", fixture.draftPath, "--instruction", instruction, "--repo-root", fixture.repoRoot,
 		"--base-sha", fixture.baseSHA, "--stage", "1", "--out", filepath.Join(t.TempDir(), "run.json")})
-	if err == nil || !strings.Contains(err.Error(), "returned the work to the requester") {
+	if err == nil || !strings.Contains(err.Error(), "the round is answered and run again") {
 		t.Fatalf("run-instruction as the implementer: %v", err)
 	}
 	sent, readErr := os.ReadFile(promptFile)

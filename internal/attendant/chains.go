@@ -821,9 +821,10 @@ func handleChainFailure(
 	// decision that sent it back is in the record too (live 2026-09-17).
 	//
 	// The code is deliberately not on this line. Two of the three actions
-	// never report it - regenerate starts another round, ask-question posts
-	// a question - and the value classifyChainFailure carries alongside
-	// them is a placeholder. Logged here it named model_failed for the very
+	// usually do not report it - regenerate starts another round, and
+	// answering a returned round starts the same one again - and the value
+	// classifyChainFailure carries alongside them is what a failure of that
+	// would be reported as. Logged here it named model_failed for the very
 	// run that ends as design_rounds_spent, which is the misreading this
 	// line exists to prevent. The code the run does end with is on the
 	// "chain terminalized" line, which is written after the report is
@@ -860,6 +861,17 @@ func handleChainFailure(
 		}
 	}
 	switch action {
+	case actionAnswerReturn:
+		verdict, answerErr := answerReturnedWork(ctx, config, services, hermes, envelope, run, view, logger)
+		if answerErr != nil {
+			return answerErr
+		}
+		switch verdict {
+		case returnRelaunched:
+			return nil
+		case returnStopped:
+			code = hook.TerminalCancelled
+		}
 	case actionRegenerate:
 		limit, limitErr := consumerRoundLimit(config.ConsumerConfigPath)
 		if limitErr != nil {
@@ -1033,10 +1045,13 @@ const (
 	actionReport failureAction = iota
 	// actionRegenerate retires the round's remnant and starts the next.
 	actionRegenerate
+	// actionAnswerReturn answers a round whose agent handed the work back
+	// and starts that same round again.
+	actionAnswerReturn
 )
 
 // String names the action for the record. The type is an int, so a plain
-// conversion would log one unprintable rune. A third action added without
+// conversion would log one unprintable rune. A fourth action added without
 // a name here says so rather than borrowing one (review of #201).
 func (a failureAction) String() string {
 	switch a {
@@ -1044,6 +1059,8 @@ func (a failureAction) String() string {
 		return "report"
 	case actionRegenerate:
 		return "regenerate"
+	case actionAnswerReturn:
+		return "answer_return"
 	default:
 		return "unknown"
 	}
@@ -1061,11 +1078,17 @@ func classifyChainFailure(stageName string, decision func() (string, error), ret
 	case runtime.StageImplement:
 		// The implementer is told to change nothing and say why when it
 		// cannot carry the request out. What it wrote is an answer, not a
-		// breakdown, so the run ends on its own code and the trail carries
-		// the report. A card that blocked for any other reason left no
-		// such record and ends as it did before.
+		// breakdown — and it is not an ending either. The engine decides
+		// what the report asked about, records what it decided, and starts
+		// the same round again; nothing is handed to the requester.
+		//
+		// The code is what a failure of that answering would be reported
+		// as, and it names the machinery rather than the agent: on this
+		// path the agent answered, and the only way the delivery stops here
+		// is the engine failing to act on it. A card that blocked for any
+		// other reason left no such record and takes the arm below.
 		if returned() {
-			return actionReport, hook.TerminalImplementationReturned
+			return actionAnswerReturn, hook.TerminalInternalFailed
 		}
 		return actionReport, hook.TerminalModelFailed
 	case runtime.StageValidate:

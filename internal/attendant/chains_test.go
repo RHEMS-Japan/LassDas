@@ -58,11 +58,13 @@ func TestClassifyChainFailure(t *testing.T) {
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("implement failure = %v %v", action, code)
 	}
-	// An implement card whose agent reported instead of changing ends on
-	// its own code: saying the AI failed was false on a run where the AI
-	// had explained itself (live 2026-09-25).
+	// An implement card whose agent reported instead of changing is not an
+	// ending at all: the engine decides what the report asked about and
+	// starts the same round again. The code travels for the one way that
+	// can fail — the engine not managing to start it — and names the
+	// machinery, because on this path the AI answered.
 	action, code = classifyChainFailure(runtime.StageImplement, undecided, reported)
-	if action != actionReport || code != hook.TerminalImplementationReturned {
+	if action != actionAnswerReturn || code != hook.TerminalInternalFailed {
 		t.Fatalf("implement report = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StagePublish, undecided, reported)

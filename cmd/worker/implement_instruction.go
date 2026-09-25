@@ -24,6 +24,7 @@ func runImplementInstruction(args []string) error {
 	flags.Var(&findingsPaths, "previous-findings", "")
 	validationFailurePath := flags.String("validation-failure", "", "")
 	rulingPath := flags.String("ruling", "", "")
+	returnedPath := flags.String("returned", "", "")
 	rebuild := flags.String("rebuild-prompt", "", "")
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
@@ -64,6 +65,10 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
+	returned, err := readReturnedRound(*returnedPath)
+	if err != nil {
+		return err
+	}
 	if *rebuild != "" {
 		// The ladder has been here before and the implementer answered
 		// nothing. The request and the boundaries stay; what the earlier
@@ -72,7 +77,7 @@ func runImplementInstruction(args []string) error {
 		// stays: it is the reason this round exists, not commentary on it.
 		findings = nil
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, *repoRoot)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, returned, *repoRoot)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -100,4 +105,27 @@ func readValidationFailure(path string) (*worker.ValidationFailure, error) {
 		return nil, errors.New("the previous round's validation failure could not be read")
 	}
 	return &record, nil
+}
+
+// readReturnedRound loads what the engine decided when this round's agent
+// handed the work back, or nil when the flag was not given — the ordinary
+// case, because almost no round is handed back at all.
+//
+// A path that was given and cannot be read is a failure rather than an
+// absence. The round is being rendered again for what is in that file, and
+// rendering without it would hand the agent back the instruction it has
+// already answered, which is the loop this exists to end.
+func readReturnedRound(path string) (*worker.ReturnedWork, error) {
+	if path == "" {
+		return nil, nil
+	}
+	record, err := worker.ReadReturnedRoundFile(path)
+	if err != nil {
+		return nil, errors.New("this round's returned-work record could not be read")
+	}
+	latest := record.Latest()
+	if latest == nil {
+		return nil, errors.New("this round's returned-work record holds no answer")
+	}
+	return latest, nil
 }

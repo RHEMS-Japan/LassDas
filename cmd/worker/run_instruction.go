@@ -197,8 +197,13 @@ func runRunInstruction(ctx context.Context, args []string) error {
 		// empty working copy to the first review, where the seal refuses
 		// it as "the agent changed nothing" and the run ends as a model
 		// failure with the reason nowhere on the ticket (live 2026-09-25).
-		// The record beside this card is what the report then carries.
-		return errors.New("the implementer changed nothing and returned the work to the requester")
+		//
+		// Stopping here is the whole of this card's part. What the agent
+		// said goes no further than the record beside it; the engine reads
+		// that record, decides what the report asked about, and starts this
+		// same round again with what it decided. Nothing reaches the
+		// requester as a question.
+		return errors.New("the implementer changed nothing and explained why; the round is answered and run again")
 	}
 	return nil
 }
