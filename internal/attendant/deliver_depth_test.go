@@ -959,8 +959,8 @@ func TestAStopThatReachedStagingCanBeSentAgain(t *testing.T) {
 		t.Fatalf("resubmitPendingTerminal: %v", err)
 	}
 	log := strings.Join(h.logger.lines[before:], "\n")
-	if strings.Contains(log, "needs an operator") {
-		t.Fatalf("the pending stop was handed to an operator: %q", log)
+	if strings.Contains(log, "cannot be rebuilt") {
+		t.Fatalf("the pending stop could not be rebuilt: %q", log)
 	}
 	if !strings.Contains(log, "pending terminal report completed") {
 		t.Fatalf("the pending stop was not completed: %q", log)

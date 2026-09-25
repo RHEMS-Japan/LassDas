@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
@@ -77,6 +78,12 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	// to delete with every test still green — twice, on the same asymmetry
 	// (review of #132). Every report goes through this one line.
 	recordFailedStep(t.workspace, outcome.Evidence)
+	// The ending is decided here, so the comment that says so is written
+	// down here — before the ledger is told and before the tracker is
+	// asked. Everything after this line can be lost (this process, the
+	// tracker post, the completion) and the same words can still be sent,
+	// without the board and the artifacts they were assembled from.
+	t.persistTerminalComment(report)
 	if err := t.submit(ctx, "terminal report", func(issuedAt time.Time) (hook.Result, error) {
 		report.IssuedAt = issuedAt
 		if _, err := hook.MarshalTerminalReportRequest(report); err != nil {
@@ -342,7 +349,14 @@ func (t *Terminal) loadTrail(hook.TerminalCode) (string, error) {
 	if hook.ValidateTrailTextWithin(string(encoded), hook.MaxTrailRecordBytes) != nil {
 		return "", errors.New("trail text invalid")
 	}
-	return hook.ShortenTrailForComment(string(encoded), hook.MaxTerminalTrailBytes), nil
+	// The record is assembled from several files, each written by the card
+	// that produced it, and each of those cards masked what it was holding.
+	// This is the boundary where all of it becomes a ticket comment, so it
+	// is masked once more here — before the shortening, because a value cut
+	// in half is a value no whole-value replacement will find afterwards.
+	// The closing comment kept in the run directory is rendered from this
+	// same report, so it can never carry more than the posted one.
+	return hook.ShortenTrailForComment(cardsecret.Redact(string(encoded)), hook.MaxTerminalTrailBytes), nil
 }
 
 // AskQuestion posts the clarification decision the model stage produced.
@@ -415,6 +429,19 @@ func (t *Terminal) answerWeekdays() int {
 // "ignored" both close the run — ignored is the idempotent replay of a
 // report the store already sealed.
 func (t *Terminal) submit(ctx context.Context, kind string, attempt func(time.Time) (hook.Result, error)) error {
+	return submitWithRetry(ctx, t.logger, kind, attempt)
+}
+
+// TerminalLogger is the little the submission loop needs of a logger. It is
+// named because the loop is now reachable without a Terminal: a kept
+// closing comment is re-sent with no envelope and no identity to build one
+// from.
+type TerminalLogger interface {
+	Info(string, ...any)
+	Error(string, ...any)
+}
+
+func submitWithRetry(ctx context.Context, logger TerminalLogger, kind string, attempt func(time.Time) (hook.Result, error)) error {
 	for round := 0; round < terminalSubmitAttempts; round++ {
 		result, err := attempt(time.Now().UTC())
 		if err != nil {
@@ -422,10 +449,10 @@ func (t *Terminal) submit(ctx context.Context, kind string, attempt func(time.Ti
 		}
 		switch result.Decision {
 		case hook.DecisionAccepted, hook.DecisionIgnored:
-			t.logger.Info(kind+" sealed", "decision", string(result.Decision), "code", result.Code)
+			logger.Info(kind+" sealed", "decision", string(result.Decision), "code", result.Code)
 			return nil
 		case hook.DecisionRetryRequested, hook.DecisionDependencyFailed, hook.DecisionInternal:
-			t.logger.Error(kind+" deferred", "decision", string(result.Decision), "code", result.Code)
+			logger.Error(kind+" deferred", "decision", string(result.Decision), "code", result.Code)
 			if round == terminalSubmitAttempts-1 {
 				return fmt.Errorf("%s not sealed after %d attempts: %s (%s)", kind, terminalSubmitAttempts, result.Decision, result.Code)
 			}
