@@ -232,6 +232,13 @@ func TestSealStageFailureWritesBesideTheRoundsOtherRecords(t *testing.T) {
 // from inside the process it is one, because the turn did not finish. The
 // record says which it was, so a reader deciding the model will not answer
 // does not count a rolling restart towards it.
+//
+// A card cut off by its own wall clock is the other half of that, and it is
+// not an interruption. Both arrive as a cancelled context and they mean
+// opposite things: nothing is learnt from a pod being replaced, whereas a
+// step that will not fit in the time the delivery allows it has told the
+// delivery something it has to act on. Filed as an interruption it was
+// replayed for free, for ever, past whatever limit an operator had set.
 func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T) {
 	pipeline := stageFailurePipeline(t)
 	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-1"), 0o755); err != nil {
@@ -242,13 +249,14 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 		stage       string
 		failure     error
 		interrupted bool
+		class       FailureClass
 	}{
 		{"the pod was replaced mid-turn", runtime.StageReviewA,
-			&verbFailure{verb: "agent-review", err: context.Canceled}, true},
+			&verbFailure{verb: "agent-review", err: context.Canceled}, true, FailureClassModel},
 		{"the card met its own wall", runtime.StageReviewB,
-			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, true},
+			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, false, FailureClassTimeout},
 		{"the provider gave up", runtime.StageValidate,
-			&verbFailure{verb: "agent-review", code: 1}, false},
+			&verbFailure{verb: "agent-review", code: 1}, false, FailureClassModel},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pipeline.SealStageFailure(tc.stage, tc.failure)
@@ -261,8 +269,8 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 			}
 			// The class still says what kind of thing it was, which is what
 			// makes this a second fact rather than a replacement for one.
-			if record.Class != FailureClassModel {
-				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			if record.Class != tc.class {
+				t.Fatalf("class = %q, want %q", record.Class, tc.class)
 			}
 		})
 	}
@@ -296,18 +304,20 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 // that would not answer.
 func TestAStepKilledByItsContextIsSealedAsInterrupted(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		stage   string
-		context func() (context.Context, context.CancelFunc)
+		name        string
+		stage       string
+		context     func() (context.Context, context.CancelFunc)
+		interrupted bool
+		class       FailureClass
 	}{
 		{"the pod was replaced mid-step", runtime.StageReviewA, func() (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(context.Background())
 			time.AfterFunc(75*time.Millisecond, cancel)
 			return ctx, cancel
-		}},
+		}, true, FailureClassModel},
 		{"the step met its own wall", runtime.StageReviewB, func() (context.Context, context.CancelFunc) {
 			return context.WithTimeout(context.Background(), 75*time.Millisecond)
-		}},
+		}, false, FailureClassTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pipeline := stageFailurePipeline(t)
@@ -323,13 +333,18 @@ func TestAStepKilledByItsContextIsSealedAsInterrupted(t *testing.T) {
 			if !ok {
 				t.Fatal("nothing was sealed")
 			}
-			if !record.Interrupted {
-				t.Fatalf("interrupted = false for a step its context killed (class %q, error %q)", record.Class, record.Error)
+			if record.Interrupted != tc.interrupted {
+				t.Fatalf("interrupted = %v, want %v (class %q, error %q)",
+					record.Interrupted, tc.interrupted, record.Class, record.Error)
 			}
-			// The class is untouched: what kind of thing it was is still
-			// worth knowing about a card that was stopped.
-			if record.Class != FailureClassModel {
-				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			if record.Class != tc.class {
+				t.Fatalf("class = %q, want %q (error %q)", record.Class, tc.class, record.Error)
+			}
+			// The sentence still says the step ran and was cut off, which
+			// is true of both and is what stops a reader going to look for
+			// a binary that was never missing.
+			if !strings.Contains(record.Error, "stopped part-way") {
+				t.Fatalf("error = %q, want the sentence for a step that ran and was cut off", record.Error)
 			}
 		})
 	}

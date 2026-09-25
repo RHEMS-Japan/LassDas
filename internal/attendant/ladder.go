@@ -167,6 +167,15 @@ func ladderHands(class runner.FailureClass, climb ladderClimb) []ladderHand {
 	switch class {
 	case runner.FailureClassModel:
 		return modelHands(climb)
+	case runner.FailureClassTimeout:
+		// A step that did not fit in its wall gets the model's hands. The
+		// remedy for a role that cannot answer in the time it is given is
+		// another occupant of that seat and, after that, a shorter ask —
+		// exactly the two things this rung does. What it must not get is
+		// the interruption's free replay: the same seat on the same prompt
+		// meets the same wall, and the delivery would spend the night
+		// re-dispatching a step that never finishes.
+		return modelHands(climb)
 	case runner.FailureClassDisk:
 		return []ladderHand{
 			// Other deliveries' leavings before this delivery's own. The

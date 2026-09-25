@@ -58,6 +58,19 @@ const (
 	FailureClassValidation FailureClass = "validation"
 	// FailureClassDisk covers a volume with no room left.
 	FailureClassDisk FailureClass = "disk"
+	// FailureClassTimeout covers a step that ran out of its own time: the
+	// card's wall clock expired while the step was still going.
+	//
+	// It is deliberately not the interruption below. Both arrive as a
+	// cancelled context and they mean opposite things: an interruption is
+	// the pod being replaced, which teaches nothing and is replayed for
+	// free, whereas a wall that expired is this step having failed to
+	// finish inside the time the delivery allowed it. Read as an
+	// interruption, a step that takes longer than its wall is dispatched
+	// again for ever and walks straight past the limit an operator set on
+	// the attempts (measured 2026-09-26: ten consecutive wall expiries
+	// against retry_max_attempts=1, none of them counted).
+	FailureClassTimeout FailureClass = "timeout"
 	// FailureClassCredit covers the provider refusing because the key has
 	// reached its spending limit or the account has nothing left to spend.
 	//
@@ -122,6 +135,12 @@ type StageFailure struct {
 	// decide the model will not answer must not count these: the answer
 	// was never asked for, and treating a rolling restart as a provider
 	// that gave up walks a whole delivery down the remedies for one.
+	//
+	// Only a replacement from outside sets it. A card cut off by its own
+	// wall clock is a failure and carries FailureClassTimeout instead: it
+	// is counted, climbed and bounded like any other, because "nothing was
+	// learnt, dispatch it again" is true of a pod being replaced and false
+	// of a step that cannot finish in the time it is given.
 	Interrupted bool `json:"interrupted,omitempty"`
 	// CardRunID is the dispatch this card ran as, when the dispatcher said.
 	// Each re-dispatch gets a fresh one, so two failures of the same round can
@@ -152,7 +171,7 @@ type verbFailure struct {
 
 func (f *verbFailure) Error() string {
 	switch {
-	case interrupted(f.err):
+	case stoppedPartWay(f.err):
 		// The step did run — it was stopped part-way. Saying it could not
 		// run would put a sentence in the record that a person reading it
 		// the next morning would act on, and the thing they would go
@@ -176,7 +195,7 @@ func (f *verbFailure) Unwrap() error { return f.err }
 // context killed: that step started, ran, and was stopped, so it is excluded
 // by name rather than left to the arm below to exclude by accident.
 func (f *verbFailure) couldNotStart() bool {
-	return f != nil && f.err != nil && !interrupted(f.err)
+	return f != nil && f.err != nil && !stoppedPartWay(f.err)
 }
 
 // deliveryRefusal carries the delivery's own terminal code out of the publish
@@ -379,6 +398,15 @@ func classifyStageFailure(err error) FailureClass {
 	if errors.Is(err, ErrValidationRejected) {
 		return FailureClassValidation
 	}
+	// A wall that expired, read from the chain before any word is. It is
+	// what the step was doing when the clock ran out that the text below
+	// would classify — an agent turn reads as the model, a fetch as the
+	// network — and each of those would send the ladder after a remedy for
+	// something that may not have been wrong at all. The step not fitting
+	// in its time is the finding.
+	if ranOutOfItsOwnTime(err) {
+		return FailureClassTimeout
+	}
 	var failed *verbFailure
 	stderr := ""
 	if errors.As(err, &failed) {
@@ -430,16 +458,36 @@ func modelTurnGaveUp(detail worker.ModelFailureDetail) bool {
 		detail.Objection != "" || detail.Phrase != ""
 }
 
-// interrupted reports whether the card was stopped from outside rather than
-// having failed. Both cancellations are read: the signal handler's, and the
-// deadline a card's own wall clock imposes — a card cut off at its wall did
-// not find out anything about the model it was talking to either.
+// stoppedPartWay reports whether the step ran and was cut off, by either
+// cancellation: the signal handler's, and the deadline a card's own wall
+// clock imposes. It answers one question only — did the step start — and
+// both cancellations answer it the same way, which is why the sentence a
+// failure carries and the "could not start" test below share it.
 //
 // The chain is walked rather than the text searched. Every verb failure
 // keeps its cause, so the sentinel arrives here whole; a sentence that
 // merely contains the word would also match a model that quoted it.
-func interrupted(err error) bool {
+func stoppedPartWay(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// replacedFromOutside reports whether the card was stopped by something
+// other than its own clock — the pod being replaced, a parent cancelled.
+// That is the one cancellation nothing is learnt from, and the only one
+// the ladder replays without spending anything on it.
+//
+// The deadline is excluded explicitly rather than by ordering. A wall that
+// expires inside a context the parent has also cancelled is both, and the
+// honest reading of that pair is the interruption: the run is going away,
+// and the card never got the time the wall was measuring.
+func replacedFromOutside(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
+// ranOutOfItsOwnTime reports whether the step was cut off by a deadline and
+// not by a replacement.
+func ranOutOfItsOwnTime(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)
 }
 
 func containsAny(text string, markers []string) bool {
@@ -502,7 +550,7 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 		Round:         round,
 		Class:         classifyStageFailure(failure),
 		Error:         boundedFailureText(failure.Error()),
-		Interrupted:   interrupted(failure),
+		Interrupted:   replacedFromOutside(failure),
 		CardRunID:     cardRunID(),
 		FailedAt:      time.Now().UTC(),
 	}
