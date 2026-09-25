@@ -60,6 +60,13 @@ const (
 	// RunCommentIntakePaused tells a queued ticket that the operator paused
 	// intake and the run will start once intake resumes.
 	RunCommentIntakePaused RunCommentKind = "intake-paused"
+	// RunCommentStopAck answers the requester's 「停止」 in the tick that
+	// read it: the stop was received and the steps that are running are
+	// being stopped. It is posted before anything is retired and before the
+	// ending is decided, because deciding the ending can take another tick
+	// when a step that merges has to be let finish — and a requester who
+	// asked to stop should not have to guess whether they were heard.
+	RunCommentStopAck RunCommentKind = "stop-ack"
 	// RunCommentGoReminder reminds the requester, on the weekday schedule the
 	// questions use, that the staging report waits for their Go.
 	RunCommentGoReminder RunCommentKind = "go-reminder"

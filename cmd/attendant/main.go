@@ -62,12 +62,16 @@ func runContext(ctx context.Context) error {
 	// a delivery's wall clock was that wait. The tracker keeps its own
 	// slower interval for reception.
 	//
-	// One thing here does reach the tracker: a stage the ladder is waiting
-	// on reads its ticket for a 「停止」, because a delivery can now sit half
-	// an hour inside one stage and the requester's stop has to land before
-	// the next attempt rather than after it. That read is on its own clock —
-	// at most once a minute per waiting stage, whatever this interval is —
-	// so shortening this one does not multiply calls to the tracker.
+	// Two things here reach the tracker, and both are the requester's
+	// 「停止」: every claimed run reads its ticket at the top of its pass, so
+	// that a stop lands wherever the delivery happens to be rather than only
+	// at a boundary, and a stage the ladder is waiting on reads it again
+	// before the next attempt. Both reads are on clocks of their own rather
+	// than on this one — at most twice a minute per run, once a minute per
+	// waiting stage — so shortening this interval does not multiply calls to
+	// the tracker. Lengthening it past those clocks is what would slow a
+	// stop down: a stop is honoured within its own interval plus one pass of
+	// this loop.
 	chainInterval := flags.Duration("chain-interval", 10*time.Second, "how often finished stages are advanced (0 ties it to the tick interval)")
 	once := flags.Bool("once", false, "run a single tick and exit (for tests and cron)")
 	if err := flags.Parse(os.Args[1:]); err != nil {

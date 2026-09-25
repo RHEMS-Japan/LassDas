@@ -187,3 +187,36 @@ func IntakePausedContent(runID string, since time.Time) string {
 func IntakePausedMarker(runID string, since time.Time) string {
 	return CommentMarker(string(RunCommentIntakePaused), runID, strconv.FormatInt(since.Unix(), 10))
 }
+
+// StopAcknowledgedMarker names the one acknowledgement a run's stop gets,
+// so the tick that reads the stop again — and a tick will, for as long as
+// the comment is on the ticket — finds its own answer rather than posting
+// a second one.
+func StopAcknowledgedMarker(runID string) string {
+	return CommentMarker(string(RunCommentStopAck), runID)
+}
+
+// StopAcknowledgedContent answers 「停止」 in the tick that read it.
+//
+// It is one line because it says one thing: you were heard, and the steps
+// that are running are being stopped. Everything else a requester needs —
+// what had already landed, what was left where — belongs to the closing
+// report, which is written from the records the steps sealed rather than
+// from what the engine believes it did. Saying any of it here would be
+// guessing at a moment when a step may still be finishing.
+//
+// So the production line does not answer either. A stop can arrive after a
+// merge has landed and after a deployment has run, and this notice has not
+// read the records that would tell it which; the closing report has.
+func StopAcknowledgedContent(runID string) string {
+	body := "停止を受け付けました。実行中の工程を止めています。\n"
+	return body + CommentFacts{
+		State:      "停止の処理中",
+		NextActor:  "なし（自動で停止します）",
+		Operation:  "対応不要（起票者の操作は不要です）",
+		NextEvent:  "停止した時点で、ここまでに届いた範囲を最終コメントで報告します",
+		Production: "最終コメントで報告します",
+		AutoRetry:  "なし（停止します）",
+		Marker:     StopAcknowledgedMarker(runID),
+	}.render()
+}
