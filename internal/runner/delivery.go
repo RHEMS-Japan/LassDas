@@ -314,7 +314,7 @@ func (p *Pipeline) appendTrailNote(note string) {
 		return
 	}
 	info, err := os.Stat(p.path("m1-trail.txt"))
-	if err != nil || info.Size()+int64(len(note))+2 > int64(hook.MaxTerminalTrailBytes) {
+	if err != nil || info.Size()+int64(len(note))+2 > int64(hook.MaxTrailRecordBytes) {
 		return
 	}
 	file, err := os.OpenFile(p.path("m1-trail.txt"), os.O_APPEND|os.O_WRONLY, 0o600)

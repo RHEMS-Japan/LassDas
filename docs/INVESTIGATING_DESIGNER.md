@@ -180,8 +180,8 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 ### 4.4 頼んだ人に見えるもの
 
 - **調査報告コメント** (marker `investigation`、1 回だけ): findings の要点 (measured / inferred を明示)、unknowns、次の一手。`measurements.jsonl` は添付する (§3.3 の走査を通ったものだけ。添付前に関所がもう一度走査する)
-- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**・失敗連続保留の streak を切る) を `report_protocol` に足す。コメント本文は 16 KiB 内に収め、`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (添付は `measurements.jsonl` 自身を 1 件と数えて最大 10 件 = 生出力は 9 件まで。1 件 256 KiB・合計 2.5 MiB。橋は 1 コメントに 10 件まで・1 件 8 MiB まで (`internal/backlog/client.go`)。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として数える (streak を切らない)
-- **実装方針コメント** (既存 marker `plan`) の中身を、設計書の要約 (cause / approach / files / verification) に置き換える。**頼んだ人は、コードが書かれる前に方針を読める**。証跡 (trail、6 KiB 上限) と PR 本文にも「設計の要約」節を足す
+- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**・失敗連続保留の streak を切る) を `report_protocol` に足す。コメント本文は 16 KiB 内に収める (分かったこと・分からなかったことは全件・全文を載せ、それで収まらないときだけ全文を添付にして、コメントに何件をどこに回したかを書く)。`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (添付は `measurements.jsonl` 自身を 1 件と数えて最大 10 件。報告が 1 コメントに収まらないときは全文が `investigation-report.txt` として 1 件を占めるので、生出力はその分 1 件減る。1 件 256 KiB・合計 2.5 MiB。橋は 1 コメントに 10 件まで・1 件 8 MiB まで (`internal/backlog/client.go`)。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として数える (streak を切らない)
+- **実装方針コメント** (既存 marker `plan`) の中身を、設計書の要約 (cause / approach / files / verification) に置き換える。**頼んだ人は、コードが書かれる前に方針を読める**。証跡 (trail、60 KiB 上限。PR 本文は全文を運び、チケットのコメントは 1 コメントに収まる分だけを運んで残りの在り処を書く) と PR 本文にも「設計の要約」節を足す
 - 板 (状態ボード) の段階: `investigating` (調査中) / `designing` (設計中) / `design-review` (設計のレビュー中) を足す。レールの節点「調査」「設計」は受付と実装の間に置く
 
 ## 5. AC3 — 設計レビュー (コードの前に方針を止める)

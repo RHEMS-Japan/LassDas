@@ -16,6 +16,15 @@ import (
 // CommentMarkerPrefix is what every marker this automation writes opens with.
 const CommentMarkerPrefix = "ticket-automation:v1"
 
+// MaxTrackerCommentBytes is the tracker's own limit on one comment body. It
+// lives here because every comment this package renders has to be held to it
+// before it is posted: the tracker client refuses a longer body at the API
+// boundary, and a refusal there loses the comment entirely. A body that would
+// overflow is shortened around its footer -- the marker on the final line is
+// what the exactly-once machinery anchors on, so it is never the part that is
+// cut.
+const MaxTrackerCommentBytes = 16 * 1024
+
 // The kind class admits digits since the "e2e" kind joined; the end-of-body
 // anchor in ExtractCommentMarker stays the forgery defence either way.
 var commentMarkerPattern = regexp.MustCompile(`^\[ticket-automation:v1:[a-z0-9-]{1,32}:[A-Za-z0-9_-]{1,128}(?::[A-Za-z0-9_.-]{1,64})*\]$`)

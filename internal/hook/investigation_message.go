@@ -23,6 +23,11 @@ type InvestigationFacts struct {
 	AttachmentsOmitted int
 	// EndsHere says the request asked for the investigation only.
 	EndsHere bool
+	// ReportAttached says the whole report travels as an attachment beside
+	// this comment because it did not fit inside one. The comment then names
+	// that file for the part it could not show, instead of ending in an
+	// ellipsis that reads as "there was no more".
+	ReportAttached bool
 }
 
 // InvestigationFindingFact is one finding as the requester reads it.
@@ -32,10 +37,90 @@ type InvestigationFindingFact struct {
 	Evidence []string
 }
 
-const investigationBodyMaxBytes = 16 * 1024
+// InvestigationReportFilename is the file that carries the whole report when
+// one ticket comment cannot. The measurements this report cites already
+// travel to the requester as attachments, so its overflow takes the same
+// road rather than a new one.
+const InvestigationReportFilename = "investigation-report.txt"
+
+// investigationOverflowReserveBytes is what the renderer holds back from the
+// comment's budget for the sentence naming where the rest of the report is.
+// It is well over the longest such sentence on purpose: underestimating it
+// would push the comment past the tracker's limit, and a comment the tracker
+// refuses is a report nobody reads at all.
+const investigationOverflowReserveBytes = 512
+
+// maxTrackerCommentAttachments is how many files the tracker binds to one
+// comment. It is used here only to size the sentence that counts them; the
+// caller owns how the budget is spent.
+const maxTrackerCommentAttachments = 10
 
 // InvestigationCommentContent renders the investigation report comment.
 func InvestigationCommentContent(runID string, facts InvestigationFacts) string {
+	comment, _ := renderInvestigationComment(runID, facts)
+	return comment
+}
+
+// InvestigationReportOverflow is the whole report as the body of a file to
+// attach beside the comment, or nil when one comment holds all of it. A
+// caller that uploads it reserves an attachment slot for it and sets
+// ReportAttached, so the comment names the file for what it could not show.
+//
+// Findings used to stop at a dozen items with each line clipped, and the
+// rest became "他 N 件" — on a live investigation (2026-09-25) twenty
+// findings reached the ticket as ten, several of them cut, and the whole
+// text existed only inside the run directory, where the requester cannot
+// look.
+func InvestigationReportOverflow(runID string, facts InvestigationFacts) []byte {
+	if _, fits := renderInvestigationComment(runID, facts); fits {
+		return nil
+	}
+	var whole strings.Builder
+	writeInvestigationReport(&whole, facts, 0)
+	return []byte(whole.String())
+}
+
+// renderInvestigationComment builds the comment and says whether the whole
+// report fitted inside it. The report gives way to the tracker's comment
+// limit; the heading, the measurement sentence and the footer never do — the
+// footer's final line is the marker the exactly-once machinery anchors on.
+func renderInvestigationComment(runID string, facts InvestigationFacts) (string, bool) {
+	head := investigationHead(facts)
+	tail := investigationTail(facts)
+	footer := investigationFooter(runID, facts)
+	var whole strings.Builder
+	writeInvestigationReport(&whole, facts, 0)
+	// The budget is taken against the longest the measurement sentence can
+	// grow to, not the one this render happens to carry. Whether the report
+	// fits is asked before the attachments exist and answered again after
+	// they do, and the two answers have to agree: otherwise a file is
+	// attached that the comment never mentions, or the comment cuts the
+	// report with nothing behind it.
+	room := MaxTrackerCommentBytes - len(head) - len(investigationLongestTail(facts)) - len(footer)
+	if whole.Len() <= room {
+		return head + whole.String() + tail + footer, true
+	}
+	// The budget shrinks until the whole comment fits, so a render that
+	// overshot leaves out more items and says how many — reaching straight
+	// for the pointer would throw away every finding the comment still had
+	// room for, which is the failure this change exists to remove.
+	for budget := max(room-investigationOverflowReserveBytes, 1); ; budget = max(budget/2, 1) {
+		var shortened strings.Builder
+		findings, unknowns := writeInvestigationReport(&shortened, facts, budget)
+		comment := head + shortened.String() + investigationOverflowLine(facts, findings, unknowns) + tail + footer
+		if len(comment) <= MaxTrackerCommentBytes {
+			return comment, false
+		}
+		if budget == 1 {
+			// Not even the questions and the next step fit beside the rest of
+			// the comment. Keep the pointer: the report is elsewhere whole and
+			// the ticket has to say where.
+			return head + investigationOverflowLine(facts, len(facts.Findings), len(facts.Unknowns)) + tail + footer, false
+		}
+	}
+}
+
+func investigationHead(facts InvestigationFacts) string {
 	var builder strings.Builder
 	builder.WriteString("【調査報告】稼働環境とリポジトリを読み取りだけで計り、分かったことを報告します。")
 	if facts.EndsHere {
@@ -46,25 +131,98 @@ func InvestigationCommentContent(runID string, facts InvestigationFacts) string 
 	if facts.Round > 1 {
 		fmt.Fprintf(&builder, "\n（%d 巡目の報告です。前の巡の指摘を受けて計り直しました）\n", facts.Round)
 	}
-	writePlanList(&builder, "確かめようとしたこと", facts.Questions)
-	if len(facts.Findings) > 0 {
-		builder.WriteString("\n分かったこと:\n")
-		for index, finding := range facts.Findings {
-			if index >= planListMaxItems {
-				fmt.Fprintf(&builder, "- …他 %d 件\n", len(facts.Findings)-index)
-				break
-			}
-			standing := "推測"
-			if finding.Measured {
-				standing = "実測 " + strings.Join(finding.Evidence, ", ")
-			}
-			fmt.Fprintf(&builder, "- %s（%s）\n", truncatePlanRunes(strings.TrimSpace(finding.Claim), planItemMaxRunes), standing)
+	return builder.String()
+}
+
+// writeInvestigationReport writes what the requester reads as the report:
+// what was asked, what was found, what stayed unknown and what comes next.
+// It is given an empty builder. A budget of zero writes all of it; a
+// positive budget bounds every byte written, and returns how many findings
+// and unknowns were left for the attachment to carry — an item is written
+// whole or not at all, so no line ends mid-sentence.
+//
+// Every line counts against the budget, the questions and the next step
+// included. Budgeting only the two lists left the next step to overrun the
+// comment by its own length, up to three times the reserve held back for the
+// pointer, and the caller then had nothing to post but the pointer (review
+// of this change).
+func writeInvestigationReport(builder *strings.Builder, facts InvestigationFacts, budget int) (int, int) {
+	nextLine := ""
+	if next := truncatePlanText(facts.Next); next != "" {
+		nextLine = "\n次の一手: " + next + "\n"
+	}
+	writeReportList(builder, "確かめようとしたこと", facts.Questions, budget)
+	// The next step is paid for before the lists when there is room for it
+	// at all, so a long one narrows the lists instead of emptying them, and
+	// a budget too small for it drops it rather than overrunning.
+	listBudget := budget
+	if budget > 0 {
+		if builder.Len()+len(nextLine) <= budget {
+			listBudget = max(budget-len(nextLine), 1)
+		} else {
+			nextLine = ""
 		}
 	}
-	writePlanList(&builder, "分からなかったこと", facts.Unknowns)
-	if next := truncatePlanText(facts.Next); next != "" {
-		builder.WriteString("\n次の一手: " + next + "\n")
+	findings := make([]string, 0, len(facts.Findings))
+	for _, finding := range facts.Findings {
+		standing := "推測"
+		if finding.Measured {
+			standing = "実測 " + strings.Join(finding.Evidence, ", ")
+		}
+		findings = append(findings, fmt.Sprintf("%s（%s）", strings.TrimSpace(finding.Claim), standing))
 	}
+	droppedFindings := writeReportList(builder, "分かったこと", findings, listBudget)
+	droppedUnknowns := writeReportList(builder, "分からなかったこと", facts.Unknowns, listBudget)
+	builder.WriteString(nextLine)
+	return droppedFindings, droppedUnknowns
+}
+
+// writeReportList writes every item whole, heading included only once there
+// is something under it. It returns how many trailing items the budget left
+// out; a budget of zero leaves out none.
+func writeReportList(builder *strings.Builder, heading string, items []string, budget int) int {
+	written := 0
+	for index, item := range items {
+		entry := "- " + strings.TrimSpace(item) + "\n"
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		opening := ""
+		if written == 0 {
+			opening = "\n" + heading + ":\n"
+		}
+		if budget > 0 && builder.Len()+len(opening)+len(entry) > budget {
+			return len(items) - index
+		}
+		builder.WriteString(opening + entry)
+		written++
+	}
+	return 0
+}
+
+// investigationOverflowLine says what the comment could not show and where
+// it is. Nothing is dropped in silence: either the whole report travels as
+// an attachment beside this comment, or it waits in the run record.
+func investigationOverflowLine(facts InvestigationFacts, findings, unknowns int) string {
+	where := "運用担当者が実行記録から取り出します"
+	if facts.ReportAttached {
+		where = "添付ファイル " + InvestigationReportFilename + " に全文があります"
+	}
+	return fmt.Sprintf("\nこの報告はコメントに収まらないため、分かったこと %d 件・分からなかったこと %d 件をここでは省いています（%s）。\n",
+		findings, unknowns, where)
+}
+
+// investigationLongestTail is the measurement sentence at the largest it can
+// become once the attachments are uploaded: every slot the tracker binds
+// filled, and every measurement left over.
+func investigationLongestTail(facts InvestigationFacts) string {
+	crowded := facts
+	crowded.AttachedCount, crowded.AttachmentsOmitted = maxTrackerCommentAttachments, facts.MeasurementsCount
+	return investigationTail(crowded)
+}
+
+func investigationTail(facts InvestigationFacts) string {
+	var builder strings.Builder
 	fmt.Fprintf(&builder, "\n実測は %d 件です。", facts.MeasurementsCount)
 	switch {
 	case facts.AttachedCount > 0:
@@ -76,11 +234,15 @@ func InvestigationCommentContent(runID string, facts InvestigationFacts) string 
 		fmt.Fprintf(&builder, "添付の上限を超えた %d 件は省略しました（運用担当者は実行記録から取り出せます）。", facts.AttachmentsOmitted)
 	}
 	builder.WriteString("\n")
+	return builder.String()
+}
+
+func investigationFooter(runID string, facts InvestigationFacts) string {
 	state, nextActor, nextEvent := "調査報告を掲示・設計へ進行中", "自動処理", "設計書の要約を、この報告のあとに通知"
 	if facts.EndsHere {
 		state, nextActor, nextEvent = "調査のみの依頼として完了", "なし", "なし（このチケットでの自動処理は終了）"
 	}
-	return capBody(builder.String(), investigationBodyMaxBytes) + CommentFacts{
+	return CommentFacts{
 		State:      state,
 		NextActor:  nextActor,
 		Operation:  "不要",

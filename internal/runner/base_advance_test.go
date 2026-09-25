@@ -277,7 +277,7 @@ func TestAppendTrailNoteStaysInsideTheReportBound(t *testing.T) {
 		t.Fatal("a note was written without a composed trail")
 	}
 	pipeline.trailWritten = true
-	if err := os.WriteFile(pipeline.path("m1-trail.txt"), []byte(strings.Repeat("a", 6*1024-4)), 0o600); err != nil {
+	if err := os.WriteFile(pipeline.path("m1-trail.txt"), []byte(strings.Repeat("a", hook.MaxTrailRecordBytes-4)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pipeline.appendTrailNote("この行は入らない")

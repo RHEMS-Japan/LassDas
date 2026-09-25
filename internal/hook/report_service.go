@@ -309,14 +309,36 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 	if report.ProductionEvidenceURL != "" {
 		lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
 	}
-	if report.TrailText != "" {
-		lines = append(lines, "", "## 証跡 (自動処理の実行記録)", report.TrailText)
-	}
+	footer := facts.render()
+	head := strings.Join(lines, "\n")
+	tail := ""
 	if report.SpendText != "" {
-		lines = append(lines, "", "## この依頼にかかった費用", report.SpendText)
+		tail = "\n\n## この依頼にかかった費用\n" + report.SpendText
 	}
-	return strings.Join(lines, "\n") + facts.render()
+	if report.TrailText == "" {
+		return head + tail + footer
+	}
+	// The run record is the only part of this comment that can be long, so
+	// it is the part that gives way when the tracker's comment limit binds --
+	// never the footer, whose final line is the marker the exactly-once
+	// machinery anchors on, and never the cost line the requester is owed.
+	// The record is shortened with a sentence saying where the whole of it
+	// is, so nothing is dropped without the ticket saying so.
+	room := MaxTrackerCommentBytes - len(head) - len(terminalTrailHeading) - len(tail) - len(footer)
+	trail := ShortenTrailForComment(report.TrailText, room)
+	if trail == "" {
+		return head + "\n\n" + terminalTrailElsewhere + tail + footer
+	}
+	return head + terminalTrailHeading + trail + tail + footer
 }
+
+const (
+	terminalTrailHeading = "\n\n## 証跡 (自動処理の実行記録)\n"
+	// terminalTrailElsewhere stands in for the record when the rest of the
+	// comment leaves it no room at all, so the ticket still says the record
+	// exists and where to read it.
+	terminalTrailElsewhere = "この実行の記録はこのコメントに収まらないため、上の実行履歴をご確認ください。"
+)
 
 // terminalCommentFacts maps every finite terminal code onto the seven-item
 // comment contract: who acts next, what production verifiably looks like, and

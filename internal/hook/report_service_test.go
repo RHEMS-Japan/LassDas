@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type terminalFakeStore struct {
@@ -406,5 +407,95 @@ func TestTheRoundsSpentSentenceAssertsNothingThatDidNotHappen(t *testing.T) {
 	}
 	if !strings.Contains(comment, "設計をやり直せる回数を使い切っていた") {
 		t.Errorf("the sentence does not say why the run stopped: %q", comment)
+	}
+}
+
+// The run record is what the terminal comment gives up when the tracker's
+// comment limit binds, and it gives up only as much as it must: the footer
+// stays whole, because its final line is the marker the exactly-once
+// machinery finds a posted comment by, and the cost line stays whole too.
+func TestTerminalCommentFitsTheTrackerLimit(t *testing.T) {
+	report := terminalTestRequest(TerminalSuccess)
+	report.TrailText = strings.Repeat("実装とレビューの記録の行。\n", 600)
+	report.SpendText = "合計: $1.00 (150 円)\n"
+	if len(report.TrailText) <= MaxTrackerCommentBytes {
+		t.Fatalf("fixture record is %d bytes; it must be longer than one comment", len(report.TrailText))
+	}
+	comment := TerminalCommentContent(report, strings.Repeat("a", 64))
+	if len(comment) > MaxTrackerCommentBytes {
+		t.Fatalf("comment is %d bytes; the tracker takes %d", len(comment), MaxTrackerCommentBytes)
+	}
+	if !strings.Contains(comment, "この記録はコメントに収まらないため") {
+		t.Fatalf("the comment does not say the record was shortened:\n%s", comment)
+	}
+	if !strings.Contains(comment, "この依頼にかかった費用") || !strings.Contains(comment, "合計: $1.00") {
+		t.Fatalf("the cost line was cut instead of the record:\n%s", comment)
+	}
+	if ExtractCommentMarker(comment) != terminalCommentFacts(report, strings.Repeat("a", 64)).Marker {
+		t.Fatalf("the marker is not the final line:\n%s", comment)
+	}
+	if ValidateCommentContract(comment, terminalCommentFacts(report, strings.Repeat("a", 64)).Marker) != nil {
+		t.Fatalf("comment lost its contract footer:\n%s", comment)
+	}
+}
+
+// A record that fits is posted exactly as composed: the shortening is for
+// the comment that cannot hold it, not a rewrite every run pays for.
+func TestTerminalCommentLeavesAFittingRecordAlone(t *testing.T) {
+	report := terminalTestRequest(TerminalSuccess)
+	report.TrailText = "### 実装とレビューの経過 (1 周で収束)\n実装者の説明 (要点): 設定例と確認手順。\n"
+	comment := TerminalCommentContent(report, strings.Repeat("a", 64))
+	if !strings.Contains(comment, report.TrailText) {
+		t.Fatalf("a record that fits was altered:\n%s", comment)
+	}
+	if strings.Contains(comment, "収まらない") {
+		t.Fatalf("a record that fits was reported as shortened:\n%s", comment)
+	}
+}
+
+// The report envelope is the other carrier with a limit of its own, and a
+// report the receiver refuses is a run that never ends.
+func TestATerminalReportWithAFullRecordStillDecodes(t *testing.T) {
+	report := terminalTestRequest(TerminalSuccess)
+	report.TrailText = ShortenTrailForComment(strings.Repeat("あ", 40_000), MaxTerminalTrailBytes)
+	report.SpendText = strings.Repeat("- 役: $1.00 (150 円)\n", 40)
+	encoded, err := MarshalTerminalReportRequest(report)
+	if err != nil {
+		t.Fatalf("MarshalTerminalReportRequest() error = %v", err)
+	}
+	if len(encoded) > MaxTerminalReportRequestBytes {
+		t.Fatalf("report is %d bytes; the receiver takes %d", len(encoded), MaxTerminalReportRequestBytes)
+	}
+	if _, err := DecodeTerminalReportRequest(encoded); err != nil {
+		t.Fatalf("DecodeTerminalReportRequest() error = %v", err)
+	}
+}
+
+// A shortened record says it was shortened and where the whole of it is; a
+// record that fits comes back byte for byte.
+func TestShortenTrailForCommentSaysWhereTheRestIs(t *testing.T) {
+	short := "### 記録\n- 1 周目: 収束\n"
+	if got := ShortenTrailForComment(short, 1024); got != short {
+		t.Fatalf("a record that fits was changed: %q", got)
+	}
+	lines := strings.Repeat("記録の行。\n", 400)
+	got := ShortenTrailForComment(lines, 1024)
+	if len(got) > 1024 {
+		t.Fatalf("shortened record is %d bytes; the budget was 1024", len(got))
+	}
+	if !strings.HasSuffix(got, TrailShortenedNote) || !strings.Contains(got, "実行履歴") {
+		t.Fatalf("shortened record does not say where the rest is: %q", got)
+	}
+	if !utf8.ValidString(got) || strings.Contains(got, "�") {
+		t.Fatalf("shortened record is not valid UTF-8: %q", got)
+	}
+	// A record with no line break in reach is still cut on a rune boundary.
+	unbroken := ShortenTrailForComment(strings.Repeat("あ", 4000), 900)
+	if !utf8.ValidString(unbroken) || len(unbroken) > 900 || !strings.HasSuffix(unbroken, TrailShortenedNote) {
+		t.Fatalf("unbroken record shortened to %d bytes: %q", len(unbroken), unbroken)
+	}
+	// No room at all leaves nothing rather than an overflowing comment.
+	if got := ShortenTrailForComment(lines, 8); got != "" {
+		t.Fatalf("a record was written into a budget it could not fit: %q", got)
 	}
 }

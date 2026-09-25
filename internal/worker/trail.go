@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/hook"
 )
 
 // The trail is the requester-facing record of what the automation actually
@@ -25,12 +27,13 @@ import (
 // the pipeline enforces everywhere else.
 
 const (
-	// MaxTrailBytes bounds the rendered trail. Terminal comments and pull
-	// request bodies both carry it verbatim.
-	MaxTrailBytes = 6 * 1024
+	// MaxTrailBytes bounds the rendered trail. It is the protocol's bound on
+	// the record file, which the pull request body carries whole; the ticket
+	// comment has far less room and takes as much as one comment holds, with
+	// a line saying where the rest is. The composer does not cut for both.
+	MaxTrailBytes = hook.MaxTrailRecordBytes
 
-	trailFindingRunes   = 240
-	trailRationaleRunes = 700
+	trailFindingRunes = 240
 )
 
 // trailStage is one loaded, cross-validated stage of the model history.
@@ -200,7 +203,13 @@ func ComposeTrailWithDesign(stages []trailStage, clarification *ClarificationCon
 	sort.Strings(paths)
 	fmt.Fprintf(&builder, "\n### 変更内容 (%d ファイル・約 %d 行)\n%s\n", len(paths), changedLines, strings.Join(paths, "\n"))
 	if final.Candidate.Rationale != "" {
-		builder.WriteString("\n実装者の説明 (要点): " + trailClip(final.Candidate.Rationale, trailRationaleRunes) + "\n")
+		// Whole, never clipped. This is the implementer's own account of what
+		// it did, and a requester's acceptance criterion is routinely answered
+		// inside it -- a live run (2026-09-25) was asked for a configuration
+		// example and a verification command in the pull request description,
+		// wrote both here, and the clip dropped both. The candidate schema
+		// already bounds this text, and MaxTrailBytes bounds the whole record.
+		builder.WriteString("\n実装者の説明 (要点): " + strings.TrimSpace(final.Candidate.Rationale) + "\n")
 	}
 
 	if clarification != nil && len(clarification.Exchanges) > 0 {
