@@ -98,5 +98,6 @@
 
 ## 詳細
 
-- 設計の正本: [README.md](README.md)
+- 設計の正本: [README.md](README.md)。いま動いている契約は同ファイルの「いまの契約（実装済みの動き）」
+- 現在地・残っていること・最初に確かめること: [docs/HANDOVER.md](docs/HANDOVER.md)
 - Codex 向けの同内容: [AGENTS.md](AGENTS.md)
