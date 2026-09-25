@@ -3,7 +3,11 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"sync"
 
 	"automation.internal/ticket-ingress/internal/decisions"
 )
@@ -124,6 +128,15 @@ func consultReceptionJudge(ctx context.Context, judge ReceptionJudge, outcome st
 	}
 	opinion, err := judge.Proceedable(ctx, text)
 	if err != nil {
+		// Said out loud, because it is silent everywhere else. A judge that
+		// cannot answer is a run that asks its questions, which is exactly
+		// what a run with no judge configured does - so an operator who has
+		// just turned the role on, and given it a key variable this process
+		// was never handed, sees the feature do nothing and has nothing to
+		// read. The error names the class of failure and never the key: the
+		// client keeps the key out of every message it builds, and takes it
+		// back out of the words the service sends.
+		noteReceptionJudgeSilent(err)
 		return nil
 	}
 	// An answer from a model this destination did not name is not this
@@ -144,6 +157,19 @@ func consultReceptionJudge(ctx context.Context, judge ReceptionJudge, outcome st
 		return nil
 	}
 	return &judgment
+}
+
+// receptionJudgeSink is where that line is written; tests swap it.
+var (
+	receptionJudgeSink   io.Writer = os.Stderr
+	receptionJudgeSinkMu sync.Mutex
+)
+
+func noteReceptionJudgeSilent(err error) {
+	receptionJudgeSinkMu.Lock()
+	defer receptionJudgeSinkMu.Unlock()
+	fmt.Fprintf(receptionJudgeSink,
+		"worker: the reception judge gave no opinion, so the questions stand: %v\n", err)
 }
 
 // applyReceptionJudgment turns the questions the reception was about to ask

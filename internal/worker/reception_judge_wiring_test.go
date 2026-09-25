@@ -519,3 +519,128 @@ func TestAReceptionJudgeThatCannotBeBuiltIsReported(t *testing.T) {
 		t.Error("a role naming no model was built anyway")
 	}
 }
+
+// The boundary the word "threshold" leaves open: a judge exactly as sure as
+// it was asked to be settles the questions, and one a hundredth below does
+// not. Without this, "at least" and "more than" both pass, and which one
+// the engine means would be decided by whichever a later reader happened to
+// write.
+func TestAJudgeExactlyAsSureAsAskedSettlesTheQuestions(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		threshold  float64
+		confidence float64
+		settles    bool
+	}{
+		{"exactly the default", DefaultReceptionProceedThreshold, DefaultReceptionProceedThreshold, true},
+		{"a hundredth under the default", DefaultReceptionProceedThreshold, 0.89, false},
+		{"exactly the floor", MinReceptionProceedThreshold, MinReceptionProceedThreshold, true},
+		{"exactly the ceiling", MaxReceptionProceedThreshold, MaxReceptionProceedThreshold, true},
+		{"a hundredth under the ceiling", MaxReceptionProceedThreshold, 0.99, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			config, request, source := judgedFixture(t, testCase.threshold)
+			judge := &countingJudge{opinion: ReceptionOpinion{
+				Model: testJudgeModel, Answer: "yes", Confidence: testCase.confidence,
+			}}
+			decision, err := decideWithJudge(t, t.Context(), testProposedDefaultOutput("b", "a"), judge, config, request, source)
+			if err != nil {
+				t.Fatalf("deciding: %v", err)
+			}
+			if judge.calls != 1 {
+				t.Fatalf("the judge was consulted %d times, want once", judge.calls)
+			}
+			settled := decision.Outcome == ReadinessOutcomeReady
+			if settled != testCase.settles {
+				t.Errorf("confidence %v against threshold %v settled = %v, want %v",
+					testCase.confidence, testCase.threshold, settled, testCase.settles)
+			}
+			if settled != (decision.ReceptionJudgment != nil) {
+				t.Errorf("the record and the outcome disagree about whether anything was settled")
+			}
+		})
+	}
+	// The literal, so the boundary above is pinned against a number and not
+	// against itself.
+	if DefaultReceptionProceedThreshold != 0.90 {
+		t.Errorf("the default is %v; the boundary cases above were written against 0.90", DefaultReceptionProceedThreshold)
+	}
+}
+
+// A judge that cannot answer is a run that asks its questions, which is what
+// a run with no judge configured does. An operator who has just turned the
+// role on, and handed it a key variable this process was never given, would
+// otherwise watch the feature do nothing and have nothing to read.
+func TestAJudgeThatCannotAnswerSaysSoInTheStepOutput(t *testing.T) {
+	config, request, source := judgedFixture(t, 0.80)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, testCase := range []struct {
+		name  string
+		ctx   context.Context
+		judge *countingJudge
+		want  string
+	}{
+		{
+			name:  "the key variable holds nothing",
+			ctx:   t.Context(),
+			judge: &countingJudge{failure: errors.New("decisions: the key variable holds nothing usable")},
+			want:  "the key variable holds nothing usable",
+		},
+		{
+			name:  "the call ran out of time",
+			ctx:   cancelled,
+			judge: &countingJudge{opinion: ReceptionOpinion{Model: testJudgeModel, Answer: "yes", Confidence: 1.0}},
+			want:  "context canceled",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var written strings.Builder
+			receptionJudgeSinkMu.Lock()
+			saved := receptionJudgeSink
+			receptionJudgeSink = &written
+			receptionJudgeSinkMu.Unlock()
+			defer func() {
+				receptionJudgeSinkMu.Lock()
+				receptionJudgeSink = saved
+				receptionJudgeSinkMu.Unlock()
+			}()
+
+			if _, err := decideWithJudge(t, testCase.ctx, testProposedDefaultOutput("b", "a"), testCase.judge, config, request, source); err != nil {
+				t.Fatalf("deciding: %v", err)
+			}
+			line := written.String()
+			if !strings.Contains(line, "the reception judge gave no opinion, so the questions stand") {
+				t.Errorf("nothing was written about a judge that could not answer: %q", line)
+			}
+			if !strings.Contains(line, testCase.want) {
+				t.Errorf("the line does not say what went wrong: %q", line)
+			}
+			if strings.Count(line, "\n") != 1 {
+				t.Errorf("the step output got %d lines for one silent judge: %q", strings.Count(line, "\n"), line)
+			}
+		})
+	}
+	// Nothing else writes there: a judge that answered, and a run with
+	// nothing to ask, leave the step output alone.
+	var quiet strings.Builder
+	receptionJudgeSinkMu.Lock()
+	saved := receptionJudgeSink
+	receptionJudgeSink = &quiet
+	receptionJudgeSinkMu.Unlock()
+	defer func() {
+		receptionJudgeSinkMu.Lock()
+		receptionJudgeSink = saved
+		receptionJudgeSinkMu.Unlock()
+	}()
+	answering := &countingJudge{opinion: ReceptionOpinion{Model: testJudgeModel, Answer: "no", Confidence: 1.0}}
+	if _, err := decideWithJudge(t, t.Context(), testProposedDefaultOutput("b", "a"), answering, config, request, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decideWithJudge(t, t.Context(), testReadyOutput(), answering, config, request, source); err != nil {
+		t.Fatal(err)
+	}
+	if quiet.Len() != 0 {
+		t.Errorf("a judge that answered still wrote to the step output: %q", quiet.String())
+	}
+}

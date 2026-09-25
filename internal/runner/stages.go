@@ -456,6 +456,12 @@ func (p *Pipeline) modelKeyEnv() []string {
 	return []string{
 		"MODEL_API_KEY_IMPLEMENTER=" + os.Getenv("MODEL_API_KEY_IMPLEMENTER"),
 		"MODEL_API_KEY_REVIEWER=" + os.Getenv("MODEL_API_KEY_REVIEWER"),
+		// The reception's optional decision model reads its key here. The
+		// list is closed, so a variable missing from it never reaches the
+		// worker however the process that started this one was given it,
+		// and the role would fail on every call in the one way that looks
+		// exactly like a model with no opinion.
+		"MODEL_API_KEY_DECISIONS=" + os.Getenv("MODEL_API_KEY_DECISIONS"),
 	}
 }
 
