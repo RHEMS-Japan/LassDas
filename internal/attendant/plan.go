@@ -136,23 +136,14 @@ func stopRequested(ctx context.Context, backlog commentLister, allowedCreatorID,
 }
 
 // containsStopComment scans for a comment by the allowed requester whose
-// first non-blank line is exactly 「停止」. Only the first content line
-// decides: a comment that merely mentions the word further down stays an
-// ordinary comment, and nobody but the requester can stop the run.
+// first non-blank line is exactly 「停止」. What counts as that comment is
+// one rule, kept where the answer wait can read it too, so the stop a
+// requester writes means the same thing to every part of the engine that
+// looks for one. Nobody but the requester can stop the run.
 func containsStopComment(comments []hook.BacklogComment, allowedCreatorID int64) bool {
 	for _, comment := range comments {
-		if comment.UserID != allowedCreatorID {
-			continue
-		}
-		for _, line := range strings.Split(comment.Body, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if trimmed == "停止" {
-				return true
-			}
-			break
+		if comment.UserID == allowedCreatorID && hook.IsStopComment(comment.Body) {
+			return true
 		}
 	}
 	return false

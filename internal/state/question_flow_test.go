@@ -94,6 +94,14 @@ type flowHarness struct {
 
 func newFlowHarness(t *testing.T, api *memoryDynamo) *flowHarness {
 	t.Helper()
+	return newFlowHarnessReading(t, api, readingStub{})
+}
+
+// newFlowHarnessReading is newFlowHarness with the reading substituted, so a
+// test can put the engine in front of a model that makes nothing of what the
+// requester wrote.
+func newFlowHarnessReading(t *testing.T, api *memoryDynamo, reader hook.AnswerReader) *flowHarness {
+	t.Helper()
 	store := testStore(t, api)
 	route := testTerminalRoute(t)
 	logger := slog.New(slog.DiscardHandler)
@@ -108,7 +116,7 @@ func newFlowHarness(t *testing.T, api *memoryDynamo) *flowHarness {
 		t.Fatalf("NewQuestionReportService() error = %v", err)
 	}
 	harness.ingest = &ingestStub{}
-	ticker, err := hook.NewQuestionTickService(route, store, harness.backlog, reporter, harness.ingest, readingStub{}, logger)
+	ticker, err := hook.NewQuestionTickService(route, store, harness.backlog, reporter, harness.ingest, reader, logger)
 	if err != nil {
 		t.Fatalf("NewQuestionTickService() error = %v", err)
 	}

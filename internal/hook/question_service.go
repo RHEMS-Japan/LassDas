@@ -294,16 +294,19 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	// the run waits past its expiry with no ending at all. The unfinished
 	// notice is carried to the end and reported only when nothing more
 	// decisive happened on this wake-up.
-	var noticeResult Result
-	noticePending := false
-	if !notice.Terminal {
-		if result, blocked := s.postRunNotices(ctx, notice); blocked {
-			noticeResult, noticePending = result, true
-		}
-	}
+	// Whether this run is waiting is read before the notices are posted: the
+	// answer receipt says the run resumed, which cannot be said while it is
+	// still waiting for an answer.
 	snapshot, waiting, err := s.store.LoadQuestionWait(ctx, s.config)
 	if err != nil {
 		return s.failure("question_tick_load", err, "")
+	}
+	var noticeResult Result
+	noticePending := false
+	if !notice.Terminal {
+		if result, blocked := s.postRunNotices(ctx, notice, waiting); blocked {
+			noticeResult, noticePending = result, true
+		}
 	}
 	if !waiting {
 		s.logger.Info("the run in flight is not waiting for an answer",
@@ -323,9 +326,23 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if snapshot.Posting {
 		return s.recoverPosting(ctx, snapshot, deliveryID)
 	}
-	comments, err := s.backlog.ListComments(ctx, snapshot.IssueID, snapshot.QuestionCommentID)
+	// The whole thread, not only what came after the question: a stop
+	// written moments before the question was posted is still a stop, and
+	// listing from the question hid it for as long as the run waited (live
+	// 2026-09-25: 「停止」 eight seconds before the question, unread while
+	// the ticket sat in the answer wait). One listing either way.
+	comments, err := s.backlog.ListComments(ctx, snapshot.IssueID, 0)
 	if err != nil {
 		return s.failure("question_tick_comments", err, deliveryID)
+	}
+	questionPostedAt := int64(0)
+	for _, comment := range comments {
+		if comment.CommentID == snapshot.QuestionCommentID {
+			questionPostedAt = comment.PostedAt
+		}
+		if comment.UserID == s.config.AllowedCreatorID && IsStopComment(comment.Body) {
+			return s.terminate(ctx, snapshot.Record, TerminalCancelled, now, deliveryID, "question_tick_stopped")
+		}
 	}
 	// Every comment in scope is read by a model, against the questions as
 	// they were sealed. A reading that cannot be taken leaves the comment
@@ -334,7 +351,15 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	readings := make(map[int64]AnswerReading, len(comments))
 	for _, comment := range comments {
 		if comment.UserID != s.config.AllowedCreatorID || comment.CommentID <= snapshot.QuestionCommentID ||
-			comment.PostedAt <= 0 || comment.PostedAt >= snapshot.Record.AnswerDeadlineAt {
+			comment.PostedAt <= 0 || comment.PostedAt >= snapshot.Record.AnswerDeadlineAt ||
+			(questionPostedAt > 0 && comment.PostedAt < questionPostedAt) {
+			continue
+		}
+		// A comment written for another round is not this question's to
+		// read. Asking a model what it means invites the answer to an
+		// earlier attempt's question to be taken as the answer to this one.
+		if BelongsToAnotherRound(comment.Body, snapshot.Record.QuestionRevision) ||
+			IsCancelComment(comment.Body, snapshot.Record.QuestionRevision) {
 			continue
 		}
 		if strings.TrimSpace(comment.Body) == "" {
@@ -356,6 +381,7 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	decision, err := EvaluateAnswerIntake(AnswerIntakeInput{
 		Question:          snapshot.Record,
 		QuestionCommentID: snapshot.QuestionCommentID,
+		QuestionPostedAt:  questionPostedAt,
 		AnswererID:        s.config.AllowedCreatorID,
 		HandledCommentIDs: map[int64]bool{},
 		Comments:          comments,
@@ -596,7 +622,7 @@ func (s *QuestionTickService) result(decision Decision, code, deliveryID string)
 // postRunNotices posts the owed acceptance and answer-receipt notices. A
 // transient failure returns (result, true) so the tick retries next wake-up;
 // otherwise processing continues.
-func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoticeSnapshot) (Result, bool) {
+func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoticeSnapshot, waiting bool) (Result, bool) {
 	deliveryID := notice.Snapshot.DeliveryID
 	posted, err := s.store.RunCommentState(ctx, s.config, RunCommentAck, "")
 	if err != nil {
@@ -614,6 +640,25 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 	record, err := DecodeClarificationRecord([]byte(notice.ClarificationJSON))
 	if err != nil {
 		return s.result(DecisionInvalid, "question_tick_notice_invalid", deliveryID), true
+	}
+	// The receipt says an answer was taken and the run resumed with it. Two
+	// things can make that untrue, and both were live on 2026-09-25, when a
+	// ticket that had been closed the day before was received again and
+	// answered its requester's stop with 「回答受領 C1】…その内容で自動処理を
+	// 再開しました」 for a comment they had written the previous day, while
+	// the board still showed the new run waiting on C2.
+	//
+	// The run is waiting: whatever happened earlier, it did not resume, and
+	// saying so sends the requester away from a question that is open.
+	if waiting {
+		return Result{}, false
+	}
+	// The round belongs to another run: this run was given those answers as
+	// input, it did not receive them. Announcing them announces someone
+	// else's event, and the per-run marker cannot recognize the comment the
+	// earlier run already posted.
+	if record.AutomationRunID != s.config.ExpectedRunID {
+		return Result{}, false
 	}
 	lastRound := record.Rounds[len(record.Rounds)-1]
 	question, err := DecodeQuestionRecord([]byte(lastRound.QuestionRecordJSON))
