@@ -390,20 +390,28 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		switch {
 		case fixed+len("\n\n")+len(decided) <= MaxTrackerCommentBytes:
 			assumptions = "\n\n" + decided
-		case fixed+len("\n\n")+len(terminalAssumptionsElsewhere) <= MaxTrackerCommentBytes:
-			assumptions = "\n\n" + terminalAssumptionsElsewhere
+		case fixed+len("\n\n")+len(assumptionsElsewhere(report)) <= MaxTrackerCommentBytes:
+			assumptions = "\n\n" + assumptionsElsewhere(report)
 		}
 	}
 	body := head + assumptions + cost + links
 	if report.TrailText == "" {
-		return body + footer
+		return fitCommentWithin(body, footer)
 	}
 	room := MaxTrackerCommentBytes - len(body) - len(terminalTrailHeading) - len(footer)
 	trail := ShortenTrailForComment(report.TrailText, room)
 	if trail == "" {
-		return body + "\n\n" + terminalTrailElsewhere + footer
+		// The sentence saying where the record is costs bytes of its own,
+		// and the room left may have none: appending it unmeasured pushed
+		// the comment past the tracker's limit, which loses the whole
+		// comment rather than the record it was standing in for.
+		elsewhere := "\n\n" + terminalTrailElsewhere
+		if len(body)+len(elsewhere)+len(footer) > MaxTrackerCommentBytes {
+			return fitCommentWithin(body, footer)
+		}
+		return fitCommentWithin(body+elsewhere, footer)
 	}
-	return body + terminalTrailHeading + trail + footer
+	return fitCommentWithin(body+terminalTrailHeading+trail, footer)
 }
 
 const (
@@ -412,14 +420,58 @@ const (
 	// comment leaves it no room at all, so the ticket still says the record
 	// exists and where to read it.
 	terminalTrailElsewhere = "この実行の記録はこのコメントに収まらないため、上の実行履歴をご確認ください。"
-	// terminalAssumptionsElsewhere stands in for what the engine decided on
-	// its own when the comment has no room for the list. The list itself is
-	// long only on a delivery that decided a great deal, which is exactly
-	// the delivery whose requester must not be left unaware that anything
-	// was decided at all.
-	terminalAssumptionsElsewhere = "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
-		"Pull Request の説明と上の実行履歴に残してあります。"
+	// commentBodyCutNote ends a comment held back from the tracker's limit.
+	commentBodyCutNote = "\n…（このコメントに収まらないため、ここまでを掲示しています）\n"
 )
+
+// assumptionsElsewhere stands in for what the engine decided on its own when
+// the comment has no room for the list, and it has to name a place that
+// really holds the rest.
+//
+// The pull request description does: it is written after the last round that
+// can decide anything and it carries the whole list. The run record does
+// not — it is an account of the rounds, with no decisions section in it — so
+// with no pull request the honest answer is the run's own records, which an
+// operator can read. Sending a requester to a page that does not hold what
+// they were sent for is worse than telling them it is not here.
+func assumptionsElsewhere(report TerminalReportRequest) string {
+	if report.PullRequestURL != "" {
+		return "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
+			"Pull Request の説明に全文を載せています: " + report.PullRequestURL
+	}
+	return "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
+		"運用担当者が保管しているこの実行の記録に残してあります。"
+}
+
+// fitCommentWithin holds the whole comment to the tracker's limit without
+// losing the footer, whose final line is the marker the exactly-once
+// machinery anchors on.
+//
+// Both halves of that matter. A comment over the limit is refused by the
+// client before it leaves this process, so the requester sees no report at
+// all; a comment that posted without its marker is one the next attempt
+// cannot recognise, so it gets posted again. The parts above gave way in
+// order and this is the last guard, for the case where even what never
+// gives way does not fit.
+func fitCommentWithin(body, footer string) string {
+	if len(body)+len(footer) <= MaxTrackerCommentBytes {
+		return body + footer
+	}
+	room := MaxTrackerCommentBytes - len(footer) - len(commentBodyCutNote)
+	if room <= 0 {
+		return footer
+	}
+	clipped := body[:room]
+	// Back off to a rune boundary, then off the rune that boundary begins,
+	// so the comment never ends on half a character.
+	for len(clipped) > 0 && !utf8.RuneStart(clipped[len(clipped)-1]) {
+		clipped = clipped[:len(clipped)-1]
+	}
+	if len(clipped) > 0 && clipped[len(clipped)-1] >= utf8.RuneSelf {
+		clipped = clipped[:len(clipped)-1]
+	}
+	return clipped + commentBodyCutNote + footer
+}
 
 // terminalCommentFacts maps every finite terminal code onto the seven-item
 // comment contract: who acts next, what production verifiably looks like, and

@@ -3,6 +3,7 @@ package hook
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // outcomeReportSample is a finished delivery whose run composed both of the
@@ -124,7 +125,7 @@ func TestTheRecordGivesWayBeforeAnythingTheRequesterCameFor(t *testing.T) {
 	if len(body) > MaxTrackerCommentBytes {
 		t.Fatalf("the comment is %d bytes, over the tracker's %d", len(body), MaxTrackerCommentBytes)
 	}
-	if !strings.Contains(body, terminalAssumptionsElsewhere) {
+	if !strings.Contains(body, assumptionsElsewhere(crowded)) {
 		t.Errorf("what was decided was dropped without the comment saying where it is:\n%s", body)
 	}
 	if !strings.Contains(body, crowded.OutcomeText) || !strings.Contains(body, crowded.SpendText) {
@@ -188,5 +189,94 @@ func TestTheComposedSectionsDoNotMoveTheReportDigest(t *testing.T) {
 	}
 	if TerminalReportDigest(before) != TerminalReportDigest(after) {
 		t.Errorf("the digest moved when the report composed its outcome")
+	}
+}
+
+// When the comment has no room for what the engine decided, the sentence
+// that stands in for the list has to name a place that really holds it. The
+// run record carries no decisions section, so with no pull request the
+// honest answer is the run's own records — never a page that does not exist.
+func TestTheStandInForTheDecisionsNamesAPlaceThatHoldsThem(t *testing.T) {
+	withPull := outcomeReportSample()
+	note := assumptionsElsewhere(withPull)
+	if !strings.Contains(note, withPull.PullRequestURL) {
+		t.Errorf("the stand-in does not name the description that holds the list: %q", note)
+	}
+
+	noPull := outcomeReportSample()
+	noPull.PullRequestURL = ""
+	orphan := assumptionsElsewhere(noPull)
+	if strings.Contains(orphan, "Pull Request") {
+		t.Errorf("a delivery with no pull request is sent to its description: %q", orphan)
+	}
+	if !strings.Contains(orphan, "運用担当者が保管しているこの実行の記録") {
+		t.Errorf("the stand-in names no place at all: %q", orphan)
+	}
+
+	// And it is that sentence the comment carries when the list will not fit.
+	crowded := noPull
+	crowded.TrailText = ""
+	crowded.AssumptionsText = strings.Repeat("- 決めたこと\n", MaxTrackerCommentBytes/8)
+	body := TerminalCommentContent(crowded, strings.Repeat("a", 64))
+	if !strings.Contains(body, orphan) {
+		t.Errorf("the comment dropped the list without naming where it is:\n%s", body)
+	}
+}
+
+// The comment must never go over the tracker's limit, because the client
+// refuses the whole body and the requester then sees no report at all — and
+// it must never lose the footer, whose last line is the marker that stops
+// the same report being posted twice.
+//
+// The sweep walks the region where the record stops fitting and the
+// sentence standing in for it is added: that sentence has a length of its
+// own, and adding it without measuring pushed the comment over the limit by
+// about a hundred bytes.
+func TestTheCommentStaysInsideTheTrackersLimitAtEveryBoundary(t *testing.T) {
+	marker := strings.Repeat("a", 64)
+	base := outcomeReportSample()
+	base.OutcomeText, base.AssumptionsText, base.TrailText, base.SpendText = "", "", "", ""
+	fixed := len(TerminalCommentContent(base, marker))
+	wanted := CommentMarker("terminal", base.AutomationRunID, string(base.Code), marker)
+
+	crossed := false
+	for length := MaxTrackerCommentBytes - fixed - 600; length <= MaxTrackerCommentBytes-fixed+400; length++ {
+		if length < 0 {
+			continue
+		}
+		report := base
+		// Single-byte filler so the sweep steps one byte at a time and
+		// cannot skip over the window this is looking for.
+		report.OutcomeText = strings.Repeat("x", length)
+		report.TrailText = strings.Repeat("y", 4096)
+		comment := TerminalCommentContent(report, marker)
+		if len(comment) > MaxTrackerCommentBytes {
+			t.Fatalf("outcome of %d bytes makes a %d byte comment, over the tracker's %d",
+				length, len(comment), MaxTrackerCommentBytes)
+		}
+		if !strings.HasSuffix(strings.TrimRight(comment, "\n"), wanted) {
+			t.Fatalf("outcome of %d bytes lost the marker the report is recognised by:\n%s", length, comment)
+		}
+		if strings.Contains(comment, terminalTrailElsewhere) {
+			crossed = true
+		}
+	}
+	if !crossed {
+		t.Fatalf("the sweep never reached the point where the record stops fitting; it proves nothing")
+	}
+
+	// And whatever the last guard cuts, it cuts on a character: a comment
+	// ending in half a rune is not one a tracker renders.
+	report := base
+	report.OutcomeText = strings.Repeat("お", MaxTrackerCommentBytes/3)
+	comment := TerminalCommentContent(report, marker)
+	if len(comment) > MaxTrackerCommentBytes {
+		t.Fatalf("the clamped comment is %d bytes, over the tracker's %d", len(comment), MaxTrackerCommentBytes)
+	}
+	if !utf8.ValidString(comment) {
+		t.Errorf("the clamped comment ends on half a character")
+	}
+	if !strings.HasSuffix(strings.TrimRight(comment, "\n"), wanted) {
+		t.Errorf("the clamped comment lost its marker:\n%s", comment[len(comment)-200:])
 	}
 }

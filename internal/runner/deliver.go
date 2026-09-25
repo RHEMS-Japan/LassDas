@@ -98,17 +98,22 @@ type DeliverReport struct {
 //
 // A record that is missing, oversized or malformed reads as no observation
 // at all. That is the honest answer for every one of those, and it keeps a
-// bad file out of the one place a delivery gets to describe itself.
-func ReadDeliverReport(runDir, name string) (DeliverReport, bool) {
+// bad file out of the one place a delivery gets to describe itself. The
+// error is returned beside the absence so a caller can tell a phase that
+// never ran from one whose record will not read, and say which it was.
+func ReadDeliverReport(runDir, name string) (DeliverReport, bool, error) {
 	var report DeliverReport
 	raw, err := readWorkspaceFile(filepath.Join(runDir, name), maxDeliverReportBytes)
 	if err != nil {
-		return DeliverReport{}, false
+		return DeliverReport{}, false, err
 	}
-	if json.Unmarshal(raw, &report) != nil || report.Verdict == "" {
-		return DeliverReport{}, false
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return DeliverReport{}, false, err
 	}
-	return report, true
+	if report.Verdict == "" {
+		return DeliverReport{}, false, errors.New("the delivery phase record names no verdict")
+	}
+	return report, true, nil
 }
 
 // maxDeliverReportBytes bounds that read. The record is a verdict, a URL and

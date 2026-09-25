@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // writeOutcomeRecord seals one record in a make-believe run directory, the
@@ -56,7 +58,7 @@ func TestTheOutcomeSaysWhatTheObservationSaw(t *testing.T) {
 		"production_evidence_url": "https://www.example.com/orders",
 	}
 
-	outcome := composeOutcomeText(runDir, hook.TerminalSuccess, evidence)
+	outcome := composeOutcomeText(runDir, hook.TerminalSuccess, evidence, &outcomeNotes{})
 	for name, want := range map[string]string{
 		"what was asked for":      "注文履歴を月ごとに絞り込めるようにする",
 		"the heading":             "## どこで見られるか",
@@ -75,7 +77,7 @@ func TestTheOutcomeSaysWhatTheObservationSaw(t *testing.T) {
 		SchemaVersion: 1, Phase: "production", Verdict: "pass",
 		TargetURL: "https://www.example.com/orders", ObservedAt: time.Now().UTC(),
 	})
-	unlooked := composeOutcomeText(runDir, hook.TerminalSuccess, evidence)
+	unlooked := composeOutcomeText(runDir, hook.TerminalSuccess, evidence, &outcomeNotes{})
 	if !strings.Contains(unlooked, "表示の照合は行っていません") {
 		t.Errorf("a pass with no screen check claims one:\n%s", unlooked)
 	}
@@ -84,7 +86,7 @@ func TestTheOutcomeSaysWhatTheObservationSaw(t *testing.T) {
 	// place the change never reached.
 	proposal := composeOutcomeText(t.TempDir(), hook.TerminalSuccess, map[string]string{
 		"reached_delivery": "pull_request",
-	})
+	}, &outcomeNotes{})
 	if !strings.Contains(proposal, "まだ動いている場所はありません") {
 		t.Errorf("a proposal-only delivery points at a screen:\n%s", proposal)
 	}
@@ -130,7 +132,7 @@ func TestEveryDecisionTheEngineMadeAloneReachesTheReport(t *testing.T) {
 	writeOutcomeRecord(t, runDir, "history/resources.jsonl",
 		`{"kind":"queue","identifier":"orders-export","provider":"aws","stage":"implement"}`+"\n")
 
-	decided := composeAssumptionsText(runDir)
+	decided := composeAssumptionsText(runDir, "", &outcomeNotes{})
 	for name, want := range map[string]string{
 		"the point decided instead of asked":  "絞り込みの初期値は今月とする",
 		"its reason":                          "一覧が今月から始まるため",
@@ -157,7 +159,7 @@ func TestEveryDecisionTheEngineMadeAloneReachesTheReport(t *testing.T) {
 
 	// A run that decided nothing writes nothing at all, rather than a
 	// heading over an empty list.
-	if empty := composeAssumptionsText(t.TempDir()); empty != "" {
+	if empty := composeAssumptionsText(t.TempDir(), "", &outcomeNotes{}); empty != "" {
 		t.Errorf("a run that decided nothing still wrote %q", empty)
 	}
 
@@ -167,7 +169,7 @@ func TestEveryDecisionTheEngineMadeAloneReachesTheReport(t *testing.T) {
 	writeOutcomeRecord(t, bare, "history/stage-3/ruling.json", map[string]any{
 		"ruling": "instruct_implementer", "instruction": "一覧に合計件数を出すこと",
 	})
-	if text := composeAssumptionsText(bare); !strings.Contains(text, "一覧に合計件数を出すこと") {
+	if text := composeAssumptionsText(bare, "", &outcomeNotes{}); !strings.Contains(text, "一覧に合計件数を出すこと") {
 		t.Errorf("a ruling without its own assumption vanished:\n%s", text)
 	}
 }
@@ -189,7 +191,7 @@ func TestARunThatDiedMidCardStillSaysWhatHappened(t *testing.T) {
 	})
 	evidence := map[string]string{"failed_step": "AI による変更の作成"}
 
-	outcome := composeOutcomeText(runDir, hook.TerminalModelFailed, evidence)
+	outcome := composeOutcomeText(runDir, hook.TerminalModelFailed, evidence, &outcomeNotes{})
 	for name, want := range map[string]string{
 		"which step stopped":   "AI による変更の作成",
 		"which round":          "2 周目",
@@ -217,13 +219,13 @@ func TestARunThatDiedMidCardStillSaysWhatHappened(t *testing.T) {
 	})
 	account := composeOutcomeText(spent, hook.TerminalModelFailed, map[string]string{
 		"failed_step": "AI による変更のレビュー",
-	})
+	}, &outcomeNotes{})
 	if !strings.Contains(account, "利用枠を使い切りました") {
 		t.Errorf("a spent allowance is not named:\n%s", account)
 	}
 
 	// A delivery that finished says nothing about failures.
-	if finished := composeOutcomeText(runDir, hook.TerminalSuccess, evidence); strings.Contains(finished, "何が起きたか") {
+	if finished := composeOutcomeText(runDir, hook.TerminalSuccess, evidence, &outcomeNotes{}); strings.Contains(finished, "何が起きたか") {
 		t.Errorf("a success carries a failure account:\n%s", finished)
 	}
 }
@@ -382,7 +384,7 @@ func TestAStopThatLandedSomewhereStillSaysWhereToLook(t *testing.T) {
 	landed := composeOutcomeText(runDir, hook.TerminalCancelled, map[string]string{
 		"reached_delivery":        "production",
 		"production_evidence_url": "https://www.example.com/orders",
-	})
+	}, &outcomeNotes{})
 	for name, want := range map[string]string{
 		"the heading":         "## どこで見られるか",
 		"the screen":          "https://www.example.com/orders",
@@ -399,8 +401,382 @@ func TestAStopThatLandedSomewhereStillSaysWhereToLook(t *testing.T) {
 
 	// A stop that reached nowhere invents no place to look: the stop's own
 	// sentence already says what it left behind, which is nothing.
-	nowhere := composeOutcomeText(t.TempDir(), hook.TerminalCancelled, map[string]string{})
+	nowhere := composeOutcomeText(runDir, hook.TerminalCancelled, map[string]string{}, &outcomeNotes{})
 	if strings.Contains(nowhere, "どこで見られるか") || strings.Contains(nowhere, "Pull Request") {
 		t.Errorf("a stop that reached nowhere points somewhere:\n%s", nowhere)
+	}
+	if strings.Contains(nowhere, "できるようになったこと") {
+		t.Errorf("a stop that reached nowhere opens as fulfilled:\n%s", nowhere)
+	}
+}
+
+// The heading over the request is the whole difference between a report and
+// a false completion. A run whose implementation card was killed rendered
+// 「この依頼でできるようになったこと」 above the request and 「完了しませんでした」
+// three lines below it; nothing that did not get somewhere may say the first.
+func TestAFailedRunNeverOpensAsIfTheRequestWereFulfilled(t *testing.T) {
+	const fulfilled = "できるようになったこと"
+	request := map[string]string{"request": "注文履歴を月ごとに絞り込めるようにする"}
+
+	failed := t.TempDir()
+	writeOutcomeRecord(t, failed, "readiness-ticket.json", request)
+	writeOutcomeRecord(t, failed, "history/stage-2/implement-failure.json", StageFailure{
+		SchemaVersion: StageFailureSchemaVersion, Stage: "implement", Round: 2,
+		Class: FailureClassModel, Interrupted: true, Error: "stopped part-way", FailedAt: time.Now().UTC(),
+	})
+	account := composeOutcomeText(failed, hook.TerminalModelFailed, map[string]string{
+		"failed_step": "AI による変更の作成",
+	}, &outcomeNotes{})
+	if strings.Contains(account, fulfilled) {
+		t.Errorf("a run that never got anywhere opens as fulfilled:\n%s", account)
+	}
+	for _, want := range []string{"## お預かりした依頼", "注文履歴を月ごとに絞り込めるようにする", "完了しませんでした"} {
+		if !strings.Contains(account, want) {
+			t.Errorf("%q is missing from the account:\n%s", want, account)
+		}
+	}
+
+	// Every ending that reached no environment reads the same way.
+	for _, code := range []hook.TerminalCode{
+		hook.TerminalInternalFailed, hook.TerminalValidationFailed, hook.TerminalNonconverged,
+		hook.TerminalModelFailed, hook.TerminalReleaseFailed, hook.TerminalInputRejected,
+		hook.TerminalClarificationRequired, hook.TerminalClarificationExpired,
+		hook.TerminalImplementationReturned, hook.TerminalInvestigated, hook.TerminalCancelled,
+	} {
+		text := composeOutcomeText(failed, code, map[string]string{}, &outcomeNotes{})
+		if strings.Contains(text, fulfilled) {
+			t.Errorf("%s opens as fulfilled:\n%s", code, text)
+		}
+	}
+}
+
+// Only a change that is running somewhere made anything possible. A pull
+// request asks for the change to be made, so a delivery that stopped at its
+// proposal — and a stop that arrived with only a proposal behind it — have
+// changed nothing a requester can go and use, however successfully they
+// stopped there.
+func TestOnlyAChangeThatIsRunningSaysWhatBecamePossible(t *testing.T) {
+	const (
+		fulfilled = "## この依頼でできるようになったこと"
+		asked     = "## お預かりした依頼"
+	)
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "readiness-ticket.json", map[string]string{
+		"request": "注文履歴を月ごとに絞り込めるようにする",
+	})
+	proposal := map[string]string{
+		"reached_delivery": "pull_request",
+		// The depth a proposal-only delivery names is deliberately not the
+		// test: this one names one too.
+		"pull_request_url": "https://github.com/example/target/pull/42",
+	}
+	staging := map[string]string{
+		"reached_delivery":     "integration",
+		"pull_request_url":     "https://github.com/example/target/pull/42",
+		"staging_evidence_url": "https://staging.example.com/orders",
+	}
+	production := map[string]string{
+		"reached_delivery":        "production",
+		"pull_request_url":        "https://github.com/example/target/pull/42",
+		"staging_evidence_url":    "https://staging.example.com/orders",
+		"production_evidence_url": "https://www.example.com/orders",
+	}
+
+	for _, shape := range []struct {
+		name     string
+		code     hook.TerminalCode
+		evidence map[string]string
+		running  bool
+	}{
+		{"a delivery confirmed in production", hook.TerminalSuccess, production, true},
+		{"a delivery confirmed on staging", hook.TerminalSuccess, staging, true},
+		{"a delivery that only proposed the change", hook.TerminalSuccess, proposal, false},
+		{"a stop after production landed", hook.TerminalCancelled, production, true},
+		{"a stop after staging landed", hook.TerminalCancelled, staging, true},
+		{"a stop with only a pull request behind it", hook.TerminalCancelled, proposal, false},
+		{"a stop that reached nowhere", hook.TerminalCancelled, map[string]string{}, false},
+		{"an investigation", hook.TerminalInvestigated, map[string]string{}, false},
+	} {
+		text := composeOutcomeText(runDir, shape.code, shape.evidence, &outcomeNotes{})
+		if shape.running && (!strings.Contains(text, fulfilled) || strings.Contains(text, asked)) {
+			t.Errorf("%s does not say what became possible:\n%s", shape.name, text)
+		}
+		if !shape.running && (strings.Contains(text, fulfilled) || !strings.Contains(text, asked)) {
+			t.Errorf("%s says something became possible:\n%s", shape.name, text)
+		}
+		if !strings.Contains(text, "注文履歴を月ごとに絞り込めるようにする") {
+			t.Errorf("%s lost the request itself:\n%s", shape.name, text)
+		}
+	}
+
+	// A proposal-only delivery still says where to look, and what it names
+	// is the pull request rather than an environment it never reached.
+	text := composeOutcomeText(runDir, hook.TerminalSuccess, proposal, &outcomeNotes{})
+	if !strings.Contains(text, "まだ動いている場所はありません") || !strings.Contains(text, "Pull Request") {
+		t.Errorf("a proposal-only delivery does not name the pull request as where to look:\n%s", text)
+	}
+}
+
+// Every decision lands where a person can read it. The pull request
+// description is that place, so it holds the whole list rather than the
+// comment's share of it.
+func TestThePullRequestDescriptionHoldsEveryDecision(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "readiness-ticket.json", map[string]string{"request": "一覧を直す"})
+	assumptions := make([]runAssumption, 0, 20)
+	for index := 1; index <= 20; index++ {
+		assumptions = append(assumptions, runAssumption{
+			Kind:      assumptionDefensibleDefault,
+			Statement: fmt.Sprintf("決めたこと %02d 番", index),
+			Evidence:  "ほかに擁護できる既定が立たないため",
+		})
+	}
+	writeOutcomeRecord(t, runDir, "history/readiness/assessment-1.json", map[string]any{"assumptions": assumptions})
+
+	preamble := composeDeliveryPreamble(runDir)
+	for index := 1; index <= 20; index++ {
+		if want := fmt.Sprintf("決めたこと %02d 番", index); !strings.Contains(preamble, want) {
+			t.Errorf("%q never reached the description:\n%s", want, preamble)
+		}
+	}
+	if strings.Contains(preamble, "ほか ") {
+		t.Errorf("the description counted decisions away instead of carrying them:\n%s", preamble)
+	}
+	// Whatever the description cannot carry, it never sends a reader to
+	// itself: it is the page they are already reading. A list past even
+	// the description's own reach is what proves it, so one is built.
+	beyond := t.TempDir()
+	past := make([]runAssumption, 0, deliveryListItems+50)
+	for index := 1; index <= deliveryListItems+50; index++ {
+		past = append(past, runAssumption{
+			Kind:      assumptionDefensibleDefault,
+			Statement: fmt.Sprintf("決めたこと %03d 番", index),
+			Evidence:  "ほかに擁護できる既定が立たないため",
+		})
+	}
+	writeOutcomeRecord(t, beyond, "history/readiness/assessment-1.json", map[string]any{"assumptions": past})
+	overflowed := composeDeliveryPreamble(beyond)
+	if !strings.Contains(overflowed, "ほか 50 件") {
+		t.Fatalf("the fixture did not exceed the description's own reach:\n%s", overflowed)
+	}
+	for _, page := range []string{preamble, overflowed} {
+		if strings.Contains(page, "Pull Request の説明") {
+			t.Errorf("the description points at itself:\n%s", page)
+		}
+	}
+	if !strings.Contains(overflowed, "運用担当者が保管しているこの実行の記録") {
+		t.Errorf("the description cut its list without naming where the rest is:\n%s", overflowed)
+	}
+	// And a comment for that same run is not sent to a description that
+	// does not hold the whole list either.
+	if beyondComment := composeAssumptionsText(beyond, "https://github.com/example/target/pull/7", &outcomeNotes{}); strings.Contains(beyondComment, "Pull Request の説明") {
+		t.Errorf("the comment names a description that does not hold the rest:\n%s", beyondComment)
+	}
+
+	// The comment carries what one comment holds. A list too long for it is
+	// cut, and the cut names the description by its address, because that
+	// is where the rest of it actually is.
+	many := t.TempDir()
+	const crowdedCount = 150
+	crowded := make([]runAssumption, 0, crowdedCount)
+	for index := 1; index <= crowdedCount; index++ {
+		crowded = append(crowded, runAssumption{
+			Kind:      assumptionDefensibleDefault,
+			Statement: fmt.Sprintf("決めたこと %03d 番、理由をそえて長めに書いたもの", index),
+			Evidence:  "ほかに擁護できる既定が立たないため",
+		})
+	}
+	writeOutcomeRecord(t, many, "history/readiness/assessment-1.json", map[string]any{"assumptions": crowded})
+	const url = "https://github.com/example/target/pull/42"
+	comment := composeAssumptionsText(many, url, &outcomeNotes{})
+	if len(comment) > hook.MaxAssumptionsTextBytes {
+		t.Fatalf("the comment's list is %d bytes, over its %d", len(comment), hook.MaxAssumptionsTextBytes)
+	}
+	if !strings.Contains(comment, "…（") {
+		t.Fatalf("four hundred decisions did not exceed the comment's share; the fixture proves nothing")
+	}
+	if !strings.Contains(comment, url) {
+		t.Errorf("the comment was cut without naming where the rest is:\n%s", comment)
+	}
+	// And the whole four hundred are in the description, which is what the
+	// comment just sent the reader to.
+	whole := composeDeliveryPreamble(many)
+	for _, index := range []int{1, crowdedCount / 2, crowdedCount} {
+		if want := fmt.Sprintf("決めたこと %03d 番", index); !strings.Contains(whole, want) {
+			t.Errorf("%q is not in the description the comment points at", want)
+		}
+	}
+
+	// With no pull request there is no description, and the honest answer
+	// is the run's own records rather than a page that does not exist.
+	orphan := composeAssumptionsText(many, "", &outcomeNotes{})
+	if !strings.Contains(orphan, "運用担当者が保管しているこの実行の記録") {
+		t.Errorf("a cut list with no pull request names no place that holds it:\n%s", orphan)
+	}
+	if strings.Contains(orphan, "Pull Request の説明") {
+		t.Errorf("a delivery with no pull request points at its description:\n%s", orphan)
+	}
+}
+
+// A declaration the destination refused is not something this delivery
+// created, and listing it under what was created would tell a requester the
+// engine did a thing it was configured not to do.
+func TestARefusedResourceIsNotListedAsCreated(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "history/resources.jsonl",
+		`{"kind":"queue","identifier":"orders-export","provider":"aws","stage":"implement"}`+"\n"+
+			`{"kind":"database","identifier":"orders-db","provider":"aws","stage":"implement","refused":true}`+"\n")
+	decided := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	if !strings.Contains(decided, "orders-export") {
+		t.Errorf("the resource that was created is missing:\n%s", decided)
+	}
+	if strings.Contains(decided, "orders-db") {
+		t.Errorf("a refused declaration is listed as created:\n%s", decided)
+	}
+}
+
+// A run that died in a delivery card has its cause written down in a
+// directory of its own, because a delivery card belongs to no round of the
+// implementation. Reading only the implementation's directories left every
+// one of those runs with a step name and no cause.
+func TestADeliveryCardsFailureIsReadBackForTheReport(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir,
+		fmt.Sprintf("history/deliver-%d/%s-failure.json", runtime.DeliverRound, runtime.DeliverStagePromote),
+		StageFailure{
+			SchemaVersion: StageFailureSchemaVersion, Stage: runtime.DeliverStagePromote,
+			Round: runtime.DeliverRound, Class: FailureClassDisk,
+			Error: "no space left on device", FailedAt: time.Now().UTC(),
+		})
+	writeOutcomeRecord(t, runDir, fmt.Sprintf("retry/%s-r%d.json", runtime.DeliverStagePromote, runtime.DeliverRound),
+		map[string]any{
+			"schema_version": 1, "stage": runtime.DeliverStagePromote, "round": runtime.DeliverRound,
+			"attempts": 2, "ladder_step": 0, "tried": []string{"reclaim:finished-runs"},
+		})
+	account := composeOutcomeText(runDir, hook.TerminalReleaseFailed, map[string]string{
+		"failed_step": "本番への反映",
+	}, &outcomeNotes{})
+	for name, want := range map[string]string{
+		"the cause":      "保存領域が足りなくなりました",
+		"what was tried": "保存領域を空けてから、やり直しました",
+	} {
+		if !strings.Contains(account, want) {
+			t.Errorf("%s is missing from a delivery card's account:\n%s", name, account)
+		}
+	}
+}
+
+// A record that is there and will not read is named. An absent section
+// otherwise reads as "nothing of that kind happened", which is a different
+// claim and not one this report has the evidence for.
+func TestARecordThatCannotBeReadIsNamedRatherThanSilentlyMissing(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "readiness-ticket.json", map[string]string{"request": "一覧を直す"})
+	writeOutcomeRecord(t, runDir, "history/readiness/assessment-1.json", "{ this is not json")
+
+	notes := &outcomeNotes{}
+	_ = composeAssumptionsText(runDir, "", notes)
+	outcome := composeOutcomeText(runDir, hook.TerminalSuccess, map[string]string{}, notes)
+	if !strings.Contains(outcome, "読み取れなかった記録") {
+		t.Fatalf("an unreadable record is not mentioned at all:\n%s", outcome)
+	}
+	if !strings.Contains(outcome, recordReception) {
+		t.Errorf("the unreadable record is not named:\n%s", outcome)
+	}
+
+	// A record that is simply not there says nothing: most rounds are never
+	// ruled on and most deliveries create nothing.
+	quiet := composeOutcomeText(t.TempDir(), hook.TerminalSuccess, map[string]string{}, &outcomeNotes{})
+	if strings.Contains(quiet, "読み取れなかった記録") {
+		t.Errorf("an ordinary absence is reported as a fault:\n%s", quiet)
+	}
+}
+
+// An investigation's whole product is a document, and the report used to say
+// nothing about where to read it.
+func TestAnInvestigationSaysWhereItsReportIs(t *testing.T) {
+	text := composeOutcomeText(t.TempDir(), hook.TerminalInvestigated, map[string]string{}, &outcomeNotes{})
+	if !strings.Contains(text, "## どこで見られるか") || !strings.Contains(text, "調査の報告はこのチケットに掲示しました") {
+		t.Errorf("an investigation does not say where its report is:\n%s", text)
+	}
+}
+
+// A Latin-script name takes a space before a Japanese particle. Without it
+// the same comment read 「stagingの画面」 in one line and 「staging の画面」
+// in the next.
+func TestTheEnvironmentsNameIsSpacedTheSameWayEverywhere(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, DeliverStagingReportFile, DeliverReport{
+		SchemaVersion: 1, Phase: "staging", Verdict: "pass", TargetURL: "https://staging.example.com/orders",
+		ExpectedText: "月で絞り込む", ScreenChecked: true, ObservedAt: time.Now().UTC(),
+	})
+	writeOutcomeRecord(t, runDir, DeliverProductionReportFile, DeliverReport{
+		SchemaVersion: 1, Phase: "production", Verdict: "pass", TargetURL: "https://www.example.com/orders",
+		ExpectedText: "月で絞り込む", ScreenChecked: true, ObservedAt: time.Now().UTC(),
+	})
+	text := composeOutcomeText(runDir, hook.TerminalSuccess, map[string]string{
+		"reached_delivery":        "production",
+		"staging_evidence_url":    "https://staging.example.com/orders",
+		"production_evidence_url": "https://www.example.com/orders",
+	}, &outcomeNotes{})
+	if strings.Contains(text, "stagingの") {
+		t.Errorf("the environment's name runs into the particle after it:\n%s", text)
+	}
+	if !strings.Contains(text, "staging の画面") || !strings.Contains(text, "本番の画面") {
+		t.Errorf("one of the environments is not named as expected:\n%s", text)
+	}
+}
+
+// The reception's decisions reach the report under the heading for points
+// the requester may want back, and this reader is pinned to the reception's
+// own vocabulary rather than to a copy of it: the reception settles a point
+// it would otherwise have asked about and seals it under a kind, and if that
+// kind is renamed there this stops compiling here.
+func TestTheReceptionsOwnDecisionsReachTheReport(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "history/readiness/assessment-1.json", map[string]any{
+		"assumptions": []worker.ReadinessAssumption{
+			{Kind: worker.AssumptionDefensibleDefault, Statement: "絞り込みの初期値は今月とした", Evidence: "一覧が今月から始まるため"},
+			{Kind: worker.AssumptionRepositoryConvention, Statement: "日付の書式は既存の一覧に合わせた", Evidence: "同じ画面の既存表示"},
+			{Kind: worker.AssumptionImplementationDetail, Statement: "内部の名前を変えた", Evidence: "利用者には見えない"},
+		},
+	})
+	if worker.AssumptionDefensibleDefault != assumptionDefensibleDefault {
+		t.Fatalf("this reader spells the kind %q and the reception seals %q",
+			assumptionDefensibleDefault, worker.AssumptionDefensibleDefault)
+	}
+
+	text := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	decided, _, split := strings.Cut(text, "## 前提とした解釈")
+	if !split {
+		t.Fatalf("the two headings did not both appear:\n%s", text)
+	}
+	if !strings.Contains(decided, "絞り込みの初期値は今月とした") {
+		t.Errorf("a point the reception decided instead of asking is not under what was decided:\n%s", text)
+	}
+	for _, settled := range []string{"日付の書式は既存の一覧に合わせた", "内部の名前を変えた"} {
+		if strings.Contains(decided, settled) {
+			t.Errorf("%q was filed as a decision the requester may want back:\n%s", settled, text)
+		}
+		if !strings.Contains(text, settled) {
+			t.Errorf("%q never reached the report at all:\n%s", settled, text)
+		}
+	}
+
+	// The same split governs the stream the run appends to while it works,
+	// so the plan notice and this comment cannot disagree about one decision.
+	stream := t.TempDir()
+	writeOutcomeRecord(t, stream, "history/assumptions.jsonl",
+		`{"kind":"`+assumptionArbiterRuling+`","statement":"範囲を越えた指摘は退けた","evidence":"検収条件に無い"}`+"\n"+
+			`{"kind":"seat_moved","statement":"レビュー役を別の提供元に移した","evidence":"26 分無応答"}`+"\n")
+	loaded := LoadRecordedDecisions(stream)
+	if len(loaded) != 2 {
+		t.Fatalf("the stream read back %d decisions, want 2", len(loaded))
+	}
+	if !loaded[0].Decided {
+		t.Errorf("a ruling is not counted as decided in place of asking")
+	}
+	if loaded[1].Decided {
+		t.Errorf("a seat that moved is counted as a decision the requester may want back")
 	}
 }

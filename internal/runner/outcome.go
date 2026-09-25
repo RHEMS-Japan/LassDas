@@ -2,13 +2,17 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // What a person wants out of a night's work is the result of it.
@@ -42,12 +46,30 @@ const (
 	// records the report is allowed to read.
 	maxOutcomeRounds = 50
 
-	// outcomeItemRunes bounds one line of a list, and outcomeListItems how
-	// many lines one list may have. What is over the count is counted rather
-	// than dropped in silence, so a delivery that decided thirty things
-	// still says it decided thirty.
+	// outcomeItemRunes bounds one line of a list.
 	outcomeItemRunes = 200
-	outcomeListItems = 8
+
+	// maxTriedRemedies bounds the remedies one failed step lists. The ladder
+	// has a handful of distinct hands and each is named once however often
+	// it was played, so this is a guard rather than a cut anything reaches.
+	maxTriedRemedies = 8
+
+	// The two carriers of what the engine decided have very different room,
+	// and every decision has to land in both.
+	//
+	// The pull request description takes the whole list: it has tens of
+	// kilobytes and it is the one place a person can read every decision, so
+	// its bound is set where no real delivery reaches it and the list is
+	// held whole in practice. The ticket comment takes what one comment
+	// holds — no count of its own, because a fixed count of eight dropped
+	// decisions a shorter list would have had room for, and the byte budget
+	// is the only honest limit. What either one cannot carry is named, and
+	// named by pointing somewhere that really holds it.
+	deliveryListItems       = 200
+	deliveryAssumptionBytes = 32 * 1024
+	// commentListItems is no limit at all: the comment's list is bounded by
+	// bytes alone.
+	commentListItems = 1 << 30
 
 	// outcomeProseRunes bounds the request read back as what was delivered.
 	// It is a paragraph, not the ticket.
@@ -78,47 +100,150 @@ const (
 	assumptionCredentialStandIn = "credential_substituted"
 )
 
+// outcomeNotes collects the records this report could not read.
+//
+// Every reader here is forgiving, and has to be: a delivery that finished
+// must not be unable to say so because one file went bad. But a section
+// that is silently absent reads as "nothing of that kind happened", which
+// is a different claim from "this could not be read" — and the first is a
+// claim this report has no business making on the second's evidence. So a
+// record that is there and will not read is named.
+//
+// A record that is simply not there is the ordinary case and says nothing:
+// most rounds are never ruled on, most deliveries create no resources.
+type outcomeNotes struct{ unreadable []string }
+
+func (n *outcomeNotes) failed(kind string, err error) {
+	if n == nil || err == nil || errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if !slices.Contains(n.unreadable, kind) {
+		n.unreadable = append(n.unreadable, kind)
+	}
+}
+
+// line is what the report says about them, in the section that never gives
+// way. Which records, not how they broke: the requester's question is what
+// is missing from what they are reading.
+func (n *outcomeNotes) line() string {
+	if n == nil || len(n.unreadable) == 0 {
+		return ""
+	}
+	return "## 読み取れなかった記録\n次の記録はこの実行に残っていますが読み取れませんでした。" +
+		"その分の内容はこの報告から抜けています: " + strings.Join(n.unreadable, "、") + "\n"
+}
+
+// The names those records go by on the ticket. They are the requester's
+// words for what the record is about, not the file it lives in.
+const (
+	recordRequest   = "依頼の解釈"
+	recordObserved  = "反映先の画面の確認結果"
+	recordFailure   = "工程の失敗の記録"
+	recordLadder    = "やり直しの記録"
+	recordReception = "受付が決めたこと"
+	recordDecisions = "実行中に決めたこと"
+	recordRuling    = "レビューの裁定"
+	recordReturned  = "実装役に返された仕事への答え"
+	recordSeatMove  = "担当の入れ替え"
+	recordResources = "作った資源"
+)
+
 // composeOutcome writes the two sections the report leads with, out of the
-// run directory. Nothing here can fail the report: a record that is missing,
-// unreadable or the wrong shape leaves its part out, because a delivery that
-// finished must not be unable to say so because one file went bad.
+// run directory. Nothing here can fail the report: a record that is missing
+// or unreadable leaves its part out and, when it was there, is named.
 func composeOutcome(runDir string, code hook.TerminalCode, evidence map[string]string) (string, string) {
-	return composeOutcomeText(runDir, code, evidence), composeAssumptionsText(runDir)
+	notes := &outcomeNotes{}
+	decided := composeAssumptionsText(runDir, evidence["pull_request_url"], notes)
+	// The outcome is composed second so that it carries the note about
+	// records neither section could read, including the decisions'.
+	return composeOutcomeText(runDir, code, evidence, notes), decided
 }
 
 // composeOutcomeText says what the delivery made possible and where that can
 // be seen — or, for a delivery that ended in a failure, what happened and
 // what the engine tried about it.
-func composeOutcomeText(runDir string, code hook.TerminalCode, evidence map[string]string) string {
+func composeOutcomeText(runDir string, code hook.TerminalCode, evidence map[string]string, notes *outcomeNotes) string {
 	var builder strings.Builder
-	if request := outcomeRequest(runDir); request != "" {
-		builder.WriteString("## この依頼でできるようになったこと\n")
+	if request := outcomeRequest(runDir, notes); request != "" {
+		builder.WriteString(outcomeRequestHeading(code, evidence) + "\n")
 		builder.WriteString(request + "\n")
 	}
-	if where := outcomeWhereToSee(runDir, code, evidence); where != "" {
+	if where := outcomeWhereToSee(runDir, code, evidence, notes); where != "" {
 		if builder.Len() > 0 {
 			builder.WriteString("\n")
 		}
 		builder.WriteString(where)
 	}
-	if happened := outcomeWhatHappened(runDir, code, evidence); happened != "" {
+	if happened := outcomeWhatHappened(runDir, code, evidence, notes); happened != "" {
 		if builder.Len() > 0 {
 			builder.WriteString("\n")
 		}
 		builder.WriteString(happened)
 	}
-	return boundOutcomeText(builder.String(), hook.MaxOutcomeTextBytes)
+	if unreadable := notes.line(); unreadable != "" {
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(unreadable)
+	}
+	// The outcome never sends a reader to the description: what it carries
+	// is the delivery's own account, which the description does not repeat.
+	text, _ := boundOutcomeText(builder.String(), hook.MaxOutcomeTextBytes,
+		"全文は、運用担当者が保管しているこの実行の記録にあります。")
+	return text
+}
+
+// outcomeRequestHeading decides what the request is called at the top of the
+// comment, and the choice is the whole difference between a report and a
+// false completion.
+//
+// A delivery that got somewhere may say what the requester can now do. One
+// that did not may not: a run whose implementation card was killed by a pod
+// being replaced rendered 「この依頼でできるようになったこと」 above the
+// request on one line and 「工程が完了しませんでした」 three lines below it,
+// which is the exact shape this report exists to end. Everything that did
+// not reach somewhere calls the request what it is — the thing that was
+// asked for — and leaves saying what happened to the section that says it.
+func outcomeRequestHeading(code hook.TerminalCode, evidence map[string]string) string {
+	if reachedSomewhere(code, evidence) {
+		return "## この依頼でできるようになったこと"
+	}
+	return "## お預かりした依頼"
+}
+
+// reachedSomewhere reports whether this ending put the change somewhere it
+// is running and a person can go and look at it.
+//
+// A proposed change is not that. A pull request asks for the change to be
+// made; until somebody merges it, nothing the requester asked for is
+// happening anywhere, so a delivery that stopped at its proposal has made
+// nothing possible yet — however successfully it stopped there. The same
+// for a stop that arrived with only a pull request behind it, and for one
+// that arrived before anything at all.
+//
+// So the test is a screen carrying the change: staging or production, which
+// is exactly the evidence the report gate makes those depths bring. The
+// depth the run names is deliberately not the test — a proposal-only
+// delivery names one too. An investigation delivers a report rather than a
+// change and reaches no environment by design.
+func reachedSomewhere(code hook.TerminalCode, evidence map[string]string) bool {
+	switch code {
+	case hook.TerminalSuccess, hook.TerminalCancelled:
+		return evidence["staging_evidence_url"] != "" || evidence["production_evidence_url"] != ""
+	}
+	return false
 }
 
 // outcomeRequest is the engine's own reading of what was asked for, written
 // back as the thing that is now done. It comes from the reception's sealed
 // ticket, and from the draft the reception was built from when the run never
 // got as far as sealing one.
-func outcomeRequest(runDir string) string {
+func outcomeRequest(runDir string, notes *outcomeNotes) string {
 	var ticket struct {
 		Request string `json:"request"`
 	}
-	if readOutcomeArtifact(filepath.Join(runDir, "readiness-ticket.json"), &ticket) == nil {
+	err := readOutcomeArtifact(filepath.Join(runDir, "readiness-ticket.json"), &ticket)
+	if err == nil {
 		if request := clipRunes(ticket.Request, outcomeProseRunes); request != "" {
 			return request
 		}
@@ -126,9 +251,15 @@ func outcomeRequest(runDir string) string {
 	var draft struct {
 		Request string `json:"request"`
 	}
-	if readOutcomeArtifact(filepath.Join(runDir, "ticket-draft.json"), &draft) == nil {
+	draftErr := readOutcomeArtifact(filepath.Join(runDir, "ticket-draft.json"), &draft)
+	if draftErr == nil {
 		return clipRunes(draft.Request, outcomeProseRunes)
 	}
+	// Only when neither could be read: a run that sealed the reception's
+	// ticket has no draft to miss, and naming the one it never wrote would
+	// report a fault that is not there.
+	notes.failed(recordRequest, err)
+	notes.failed(recordRequest, draftErr)
 	return ""
 }
 
@@ -144,29 +275,38 @@ func outcomeRequest(runDir string) string {
 // naming the environment they now have to go and see would be the worst
 // version of this comment. A stop that reached nowhere carries no evidence
 // and this writes nothing, which the stop's own sentence already covers.
-func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[string]string) string {
-	if code != hook.TerminalSuccess && code != hook.TerminalCancelled {
+func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[string]string, notes *outcomeNotes) string {
+	switch code {
+	case hook.TerminalSuccess, hook.TerminalCancelled, hook.TerminalInvestigated:
+	default:
 		return ""
 	}
 	var lines []string
 	if url := evidence["production_evidence_url"]; url != "" {
 		lines = append(lines, "production確認先: "+url)
-		if seen := observedLine(runDir, DeliverProductionReportFile, "本番"); seen != "" {
+		if seen := observedLine(runDir, DeliverProductionReportFile, "本番", notes); seen != "" {
 			lines = append(lines, seen)
 		}
 	}
 	if url := evidence["staging_evidence_url"]; url != "" {
 		lines = append(lines, "staging確認先: "+url)
-		if seen := observedLine(runDir, DeliverStagingReportFile, "staging"); seen != "" {
+		if seen := observedLine(runDir, DeliverStagingReportFile, "staging", notes); seen != "" {
 			lines = append(lines, seen)
 		}
 	}
 	if len(lines) == 0 {
 		// The merge-and-look card of the older delivery path leaves its own
 		// verdict, and a delivery that only proposed a change has neither.
+		observed := e2eObservedLine(runDir, notes)
 		switch {
-		case e2eObservedLine(runDir) != "":
-			lines = append(lines, e2eObservedLine(runDir))
+		case observed != "":
+			lines = append(lines, observed)
+		case code == hook.TerminalInvestigated:
+			// An investigation delivers a report, not a change, and the
+			// report is posted on this ticket. Saying nothing here left the
+			// one ending whose whole product is a document without a word
+			// about where to read it.
+			lines = append(lines, "調査の報告はこのチケットに掲示しました。計測を添付した場合は同じコメントに付いています。")
 		case code == hook.TerminalSuccess:
 			lines = append(lines, "まだ動いている場所はありません。提案した変更は、下の Pull Request でご確認ください。")
 		default:
@@ -182,10 +322,18 @@ func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[strin
 // actually saw. A phase that passed without looking at a screen says that
 // too: a pass the engine never verified with its eyes must not read as one
 // it did.
-func observedLine(runDir, file, place string) string {
-	report, found := ReadDeliverReport(runDir, file)
+func observedLine(runDir, file, place string, notes *outcomeNotes) string {
+	report, found, err := ReadDeliverReport(runDir, file)
+	notes.failed(recordObserved, err)
 	if !found {
 		return ""
+	}
+	// A Latin-script name takes a space before a Japanese particle and a
+	// Japanese one does not, so the spacing belongs to the name rather than
+	// to each sentence built on it: without this the ticket read
+	// 「stagingの画面」 here and 「staging の画面」 three lines below.
+	if place != "" && place[len(place)-1] < 0x80 {
+		place += " "
 	}
 	switch {
 	case report.Verdict == "pass" && report.ScreenChecked && report.ExpectedText != "":
@@ -204,8 +352,9 @@ func observedLine(runDir, file, place string) string {
 // e2eObservedLine is the same for the observation card that watches a merge
 // somebody else made. It is read only when no delivery phase sealed a report
 // of its own, so the two can never both speak for the same screen.
-func e2eObservedLine(runDir string) string {
-	result, found := ReadE2EResult(runDir)
+func e2eObservedLine(runDir string, notes *outcomeNotes) string {
+	result, found, err := ReadE2EResult(runDir)
+	notes.failed(recordObserved, err)
 	if !found {
 		return ""
 	}
@@ -225,11 +374,11 @@ func e2eObservedLine(runDir string) string {
 // requester: which step stopped, what kind of thing went wrong, and what the
 // engine did about it before it gave up. All of it was already written down
 // in the run directory while it was happening.
-func outcomeWhatHappened(runDir string, code hook.TerminalCode, evidence map[string]string) string {
+func outcomeWhatHappened(runDir string, code hook.TerminalCode, evidence map[string]string, notes *outcomeNotes) string {
 	if code == hook.TerminalSuccess || code == hook.TerminalInvestigated || code == hook.TerminalCancelled {
 		return ""
 	}
-	failure, found := latestStageFailure(runDir)
+	failure, found := latestStageFailure(runDir, notes)
 	step := evidence["failed_step"]
 	if !found && step == "" {
 		return ""
@@ -251,7 +400,7 @@ func outcomeWhatHappened(runDir string, code hook.TerminalCode, evidence map[str
 		}
 	}
 	text := "## 何が起きたか\n" + strings.Join(lines, "\n") + "\n"
-	if tried := outcomeWhatWasTried(runDir, failure.Stage, failure.Round); tried != "" {
+	if tried := outcomeWhatWasTried(runDir, failure.Stage, failure.Round, notes); tried != "" {
 		text += "\n" + tried
 	}
 	return text
@@ -284,8 +433,8 @@ func failureClassSentence(class FailureClass) string {
 // stopped. It is the half of the account that says the engine did not just
 // sit there, and the half a person needs to decide whether to change
 // anything before asking again.
-func outcomeWhatWasTried(runDir, stage string, round int) string {
-	record, found := readLadderAttempts(runDir, stage, round)
+func outcomeWhatWasTried(runDir, stage string, round int, notes *outcomeNotes) string {
+	record, found := readLadderAttempts(runDir, stage, round, notes)
 	if !found || (len(record.Tried) == 0 && record.Attempts <= 1) {
 		return ""
 	}
@@ -298,7 +447,7 @@ func outcomeWhatWasTried(runDir, stage string, round int) string {
 		}
 		seen[sentence] = true
 		lines = append(lines, "- "+sentence)
-		if len(lines) >= outcomeListItems {
+		if len(lines) >= maxTriedRemedies {
 			break
 		}
 	}
@@ -338,17 +487,62 @@ func ladderHandSentence(hand string) string {
 // ruled on when a round stopped agreeing, what was stood in for a key it was
 // not given, which roles were moved to another provider, and what now exists
 // outside the repository because this delivery made it.
-func composeAssumptionsText(runDir string) string {
-	var builder strings.Builder
-	decided, assumed := receptionAssumptions(runDir)
-	decided = append(decided, ruledAssumptions(runDir)...)
-	decided = append(decided, returnedAssumptions(runDir)...)
+func composeAssumptionsText(runDir, pullRequestURL string, notes *outcomeNotes) string {
+	// Where this list sends a reader for the rest depends on whether the
+	// description really holds it, so the description is composed first and
+	// asked. It costs one more pass over the same records, once per report,
+	// and it is the difference between naming a place and naming a page
+	// that turns out not to have it either.
+	_, whole := composeDecisions(runDir, deliveryListItems, deliveryAssumptionBytes, "", notes)
+	text, _ := composeDecisions(runDir, commentListItems, hook.MaxAssumptionsTextBytes,
+		outcomeRestPlace(pullRequestURL, whole), notes)
+	return text
+}
 
-	writeOutcomeList(&builder, "## 確認せずに本体が決めたこと", decided)
-	writeOutcomeList(&builder, "## 前提とした解釈", assumed)
-	writeOutcomeList(&builder, "## 担当の AI を入れ替えたところ", seatMoveLines(runDir))
-	writeOutcomeList(&builder, "## この依頼で作った資源（リポジトリの外にあり、自動では消えません）", createdResourceLines(runDir))
-	return boundOutcomeText(builder.String(), hook.MaxAssumptionsTextBytes)
+// composeDecisions builds the list for one carrier and says whether that
+// carrier held all of it. The two carriers differ only in how much they
+// hold and where they send a reader for the rest.
+func composeDecisions(runDir string, items, budget int, rest string, notes *outcomeNotes) (string, bool) {
+	var builder strings.Builder
+	whole := true
+	decided, assumed := receptionAssumptions(runDir, notes)
+	decided = append(decided, ruledAssumptions(runDir, notes)...)
+	decided = append(decided, returnedAssumptions(runDir, notes)...)
+
+	for _, list := range []struct {
+		heading string
+		items   []string
+	}{
+		{"## 確認せずに本体が決めたこと", decided},
+		{"## 前提とした解釈", assumed},
+		{"## 担当の AI を入れ替えたところ", seatMoveLines(runDir, notes)},
+		{"## この依頼で作った資源（リポジトリの外にあり、自動では消えません）", createdResourceLines(runDir, notes)},
+	} {
+		if !writeOutcomeList(&builder, list.heading, list.items, items, rest) {
+			whole = false
+		}
+	}
+	text, kept := boundOutcomeText(builder.String(), budget, rest)
+	return text, whole && kept
+}
+
+// outcomeRestPlace names where the rest of a list can actually be read.
+//
+// It has to be somewhere that really holds it. The ticket comment used to
+// send a reader to "the pull request description and the run history" from
+// inside the pull request description, and the run record carries no list of
+// decisions at all — so a delivery that decided twenty things told the
+// requester that twelve of them were somewhere, and they were nowhere.
+//
+// The description holds every decision when there is one, because it is
+// written after the last round that can make one and its own budget is set
+// where no real delivery reaches it. With no pull request there is no
+// description, and the honest answer is the run's own records.
+func outcomeRestPlace(pullRequestURL string, descriptionHoldsAll bool) string {
+	if pullRequestURL != "" && descriptionHoldsAll {
+		return "全文は Pull Request の説明にあります: " + pullRequestURL
+	}
+	return "全文は、運用担当者が保管しているこの実行の記録にあります。"
 }
 
 // composeDeliveryPreamble is the same answer, for the pull request the
@@ -361,22 +555,38 @@ func composeAssumptionsText(runDir string) string {
 // deployed at the moment this is written, and a description that named a
 // screen would be naming one the change has not reached.
 func composeDeliveryPreamble(runDir string) string {
+	notes := &outcomeNotes{}
 	var builder strings.Builder
-	if request := outcomeRequest(runDir); request != "" {
+	if request := outcomeRequest(runDir, notes); request != "" {
 		builder.WriteString("## この変更でできるようになること\n")
 		builder.WriteString(request + "\n")
 	}
-	if decided := composeAssumptionsText(runDir); decided != "" {
+	// The whole list, not the comment's share of it. This is the one place
+	// every decision can be read, so its own overflow sends a reader to the
+	// run's records rather than to the page they are already reading.
+	const rest = "全文は、運用担当者が保管しているこの実行の記録にあります。"
+	if decided, _ := composeDecisions(runDir, deliveryListItems, deliveryAssumptionBytes, rest, notes); decided != "" {
 		if builder.Len() > 0 {
 			builder.WriteString("\n")
 		}
 		builder.WriteString(decided + "\n")
 	}
+	if unreadable := notes.line(); unreadable != "" {
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(unreadable)
+	}
 	if builder.Len() == 0 {
 		return ""
 	}
-	return boundOutcomeText(builder.String(), hook.MaxOutcomeTextBytes+hook.MaxAssumptionsTextBytes) + "\n\n"
+	preamble, _ := boundOutcomeText(builder.String(), deliveryPreambleBytes, rest)
+	return preamble + "\n\n"
 }
+
+// deliveryPreambleBytes bounds the whole opening. It leaves the run record
+// most of the pull request body, which the record still gives way inside.
+const deliveryPreambleBytes = deliveryAssumptionBytes + hook.MaxOutcomeTextBytes
 
 // receptionAssumptions splits what the reception sealed into the points it
 // would have asked about and answered itself, and the points it settled from
@@ -384,14 +594,15 @@ func composeDeliveryPreamble(runDir string) string {
 // because they are worth different amounts: the first is a decision that was
 // the requester's to make, and with nothing asking them anything afterwards
 // this comment is the only place they meet it.
-func receptionAssumptions(runDir string) ([]string, []string) {
+func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []string) {
 	var decided, assumed []string
 	for attempt := readinessAssessmentAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []runAssumption `json:"assumptions"`
 		}
 		path := filepath.Join(runDir, "history", "readiness", fmt.Sprintf("assessment-%d.json", attempt))
-		if readOutcomeArtifact(path, &assessment) != nil {
+		if err := readOutcomeArtifact(path, &assessment); err != nil {
+			notes.failed(recordReception, err)
 			continue
 		}
 		for _, assumption := range assessment.Assumptions {
@@ -408,7 +619,7 @@ func receptionAssumptions(runDir string) ([]string, []string) {
 	// Whatever decided something after the reception appends to one stream,
 	// because a seat that moves or a round that is ruled on happens while
 	// the delivery runs and has no round of its own to be filed under.
-	for _, decision := range LoadRecordedDecisions(runDir) {
+	for _, decision := range loadRecordedDecisions(runDir, notes) {
 		line := assumptionLine(runAssumption{Statement: decision.Statement, Evidence: decision.Evidence})
 		if line == "" {
 			continue
@@ -444,7 +655,11 @@ type RecordedDecision struct {
 // added, and the same decision then has to be shown in one place and may be
 // left out of the other.
 func LoadRecordedDecisions(runDir string) []RecordedDecision {
-	appended := appendedAssumptions(runDir)
+	return loadRecordedDecisions(runDir, nil)
+}
+
+func loadRecordedDecisions(runDir string, notes *outcomeNotes) []RecordedDecision {
+	appended := appendedAssumptions(runDir, notes)
 	decisions := make([]RecordedDecision, 0, len(appended))
 	for _, assumption := range appended {
 		if strings.TrimSpace(assumption.Statement) == "" {
@@ -478,9 +693,10 @@ const readinessAssessmentAttempts = 3
 // because the decisions it will carry are made while the delivery runs, and
 // a report composed from per-round records alone would have to be changed
 // again for each new producer of one.
-func appendedAssumptions(runDir string) []runAssumption {
+func appendedAssumptions(runDir string, notes *outcomeNotes) []runAssumption {
 	encoded, err := readWorkspaceFile(filepath.Join(runDir, "history", "assumptions.jsonl"), maxOutcomeArtifactBytes)
 	if err != nil {
+		notes.failed(recordDecisions, err)
 		return nil
 	}
 	var appended []runAssumption
@@ -506,33 +722,31 @@ func appendedAssumptions(runDir string) []runAssumption {
 // or tells the implementing role what it has to satisfy; both are decisions
 // nobody was asked about, and both belong on the ticket.
 //
-// The record's shape is the one the arbitrating role seals. It is read
-// structurally rather than through that package's type because the package
-// is not merged here yet: a run without rulings finds no files and lists
-// nothing, and a run with them lists them the day they appear.
-func ruledAssumptions(runDir string) []string {
+// The record is read through the arbitrating role's own type and its own
+// reader, so a field renamed there stops compiling here rather than quietly
+// reporting nothing. A round nobody had to rule on — nearly all of them —
+// reads as no ruling; one that is there and will not read is named.
+func ruledAssumptions(runDir string, notes *outcomeNotes) []string {
 	var lines []string
 	for round := 1; round <= maxOutcomeRounds; round++ {
-		var ruling struct {
-			Ruling      string            `json:"ruling"`
-			Instruction string            `json:"instruction"`
-			Overruled   []json.RawMessage `json:"overruled"`
-			Assumption  runAssumption     `json:"assumption"`
-		}
-		path := filepath.Join(runDir, "history", "stage-"+strconv.Itoa(round), "ruling.json")
-		if readOutcomeArtifact(path, &ruling) != nil {
+		ruling, err := ReadRuling(runDir, round)
+		if err != nil {
+			notes.failed(recordRuling, err)
 			continue
 		}
-		if line := assumptionLine(ruling.Assumption); line != "" {
+		if ruling == nil {
+			continue
+		}
+		if line := assumptionLine(runAssumption(ruling.Assumption)); line != "" {
 			lines = append(lines, fmt.Sprintf("%d 周目のレビューの行き詰まりについて: %s", round, line))
 			continue
 		}
 		switch ruling.Ruling {
-		case "overrule_reviewer":
+		case worker.RulingOverruleReviewer:
 			lines = append(lines, fmt.Sprintf(
 				"%d 周目: 依頼が求めている範囲を越えたレビューの指摘 %d 件を退け、変更を通しました。",
 				round, len(ruling.Overruled)))
-		case "instruct_implementer":
+		case worker.RulingInstructImplementer:
 			if instruction := clipRunes(ruling.Instruction, outcomeItemRunes); instruction != "" {
 				lines = append(lines, fmt.Sprintf("%d 周目: 次の点を満たすよう指示し直しました。%s", round, instruction))
 			}
@@ -549,7 +763,7 @@ func ruledAssumptions(runDir string) []string {
 // cannot be left without.
 //
 // Read structurally, for the same reason as the rulings above.
-func returnedAssumptions(runDir string) []string {
+func returnedAssumptions(runDir string, notes *outcomeNotes) []string {
 	var lines []string
 	for round := 1; round <= maxOutcomeRounds; round++ {
 		var returned struct {
@@ -559,7 +773,8 @@ func returnedAssumptions(runDir string) []string {
 			} `json:"returns"`
 		}
 		path := filepath.Join(runDir, "history", "stage-"+strconv.Itoa(round), "returns.json")
-		if readOutcomeArtifact(path, &returned) != nil {
+		if err := readOutcomeArtifact(path, &returned); err != nil {
+			notes.failed(recordReturned, err)
 			continue
 		}
 		for _, entry := range returned.Returns {
@@ -581,7 +796,7 @@ func returnedAssumptions(runDir string) []string {
 // work was finished by a third is a thing the requester is owed in the
 // morning: it says the answer they are reading came from a model they did
 // not choose.
-func seatMoveLines(runDir string) []string {
+func seatMoveLines(runDir string, notes *outcomeNotes) []string {
 	var records []SeatRecord
 	for _, pattern := range []string{"stage-*", "design-*"} {
 		matches, err := filepath.Glob(filepath.Join(runDir, "history", pattern, "*-seat.json"))
@@ -590,7 +805,11 @@ func seatMoveLines(runDir string) []string {
 		}
 		for _, path := range matches {
 			var record SeatRecord
-			if readOutcomeArtifact(path, &record) != nil || record.Seat == "" {
+			if err := readOutcomeArtifact(path, &record); err != nil {
+				notes.failed(recordSeatMove, err)
+				continue
+			}
+			if record.Seat == "" {
 				continue
 			}
 			records = append(records, record)
@@ -638,15 +857,23 @@ func occupantWords(occupant SeatOccupantNote) string {
 //
 // Read structurally: the card that writes this record is not merged here
 // yet, and a run without one lists nothing.
-func createdResourceLines(runDir string) []string {
+func createdResourceLines(runDir string, notes *outcomeNotes) []string {
 	encoded, err := readWorkspaceFile(filepath.Join(runDir, "history", "resources.jsonl"), maxOutcomeArtifactBytes)
 	if err != nil {
+		notes.failed(recordResources, err)
 		return nil
 	}
 	type createdResource struct {
 		Kind       string `json:"kind"`
 		Identifier string `json:"identifier"`
 		Provider   string `json:"provider"`
+		// Refused marks a kind the destination did not allow. The card that
+		// writes this file records the declaration anyway, because an agent
+		// that said it made something may have made it — but it was not
+		// created on this delivery's account, and listing it under what the
+		// delivery created would tell a requester the engine did a thing it
+		// was configured not to do.
+		Refused bool `json:"refused"`
 	}
 	var created []createdResource
 	for _, line := range strings.Split(string(encoded), "\n") {
@@ -656,6 +883,9 @@ func createdResourceLines(runDir string) []string {
 		}
 		var record createdResource
 		if json.Unmarshal([]byte(line), &record) != nil || record.Kind == "" || record.Identifier == "" {
+			continue
+		}
+		if record.Refused {
 			continue
 		}
 		created = append(created, record)
@@ -693,36 +923,37 @@ func assumptionLine(assumption runAssumption) string {
 // writeOutcomeList adds one headed list, counting what it could not fit
 // rather than dropping it in silence. An empty list writes nothing at all:
 // a heading over nothing tells the reader something is missing.
-func writeOutcomeList(builder *strings.Builder, heading string, items []string) {
+func writeOutcomeList(builder *strings.Builder, heading string, items []string, limit int, rest string) bool {
 	if len(items) == 0 {
-		return
+		return true
 	}
 	if builder.Len() > 0 {
 		builder.WriteString("\n")
 	}
 	builder.WriteString(heading + "\n")
 	for index, item := range items {
-		if index >= outcomeListItems {
-			fmt.Fprintf(builder, "- ほか %d 件（全文は Pull Request の説明と実行履歴にあります）\n", len(items)-index)
-			break
+		if index >= limit {
+			fmt.Fprintf(builder, "- ほか %d 件（%s）\n", len(items)-index, rest)
+			return false
 		}
 		builder.WriteString("- " + item + "\n")
 	}
+	return true
 }
 
 // boundOutcomeText holds a composed section to its budget. The cut lands on
 // a character so the text stays valid UTF-8, and says it was cut: a section
 // that ends mid-sentence with no note reads as though that was all there was
 // to say.
-func boundOutcomeText(text string, limit int) string {
+func boundOutcomeText(text string, limit int, rest string) (string, bool) {
 	text = strings.TrimRight(text, "\n")
 	if text == "" || len(text) <= limit {
-		return text
+		return text, true
 	}
-	const note = "\n…（このコメントに収まらないため、ここまでを掲示しています。全文は Pull Request の説明と実行履歴にあります）"
+	note := "\n…（ここに収まらないため、ここまでを掲示しています。" + rest + "）"
 	budget := limit - len(note)
 	if budget <= 0 {
-		return ""
+		return "", false
 	}
 	clipped := text[:budget]
 	for len(clipped) > 0 && !utf8RuneStart(clipped[len(clipped)-1]) {
@@ -733,7 +964,7 @@ func boundOutcomeText(text string, limit int) string {
 	if len(clipped) > 0 && clipped[len(clipped)-1]&0x80 != 0 {
 		clipped = clipped[:len(clipped)-1]
 	}
-	return clipped + note
+	return clipped + note, false
 }
 
 // utf8RuneStart reports whether a byte begins a rune (a continuation byte is
@@ -752,6 +983,10 @@ func clipRunes(value string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
+// readOutcomeArtifact decodes one sealed record. The error is returned as it
+// came: a caller tells a record that is simply not there from one that is
+// there and will not read by asking the error, and the two are worth very
+// different things on the ticket.
 func readOutcomeArtifact(path string, out any) error {
 	encoded, err := readWorkspaceFile(path, maxOutcomeArtifactBytes)
 	if err != nil {
@@ -764,17 +999,25 @@ func readOutcomeArtifact(path string, out any) error {
 // round or stage it was. The newest record wins because the ladder keeps
 // climbing after each one: the earlier records say what the engine already
 // tried, and the last says where it was when it stopped.
-func latestStageFailure(runDir string) (StageFailure, bool) {
+func latestStageFailure(runDir string, notes *outcomeNotes) (StageFailure, bool) {
 	var latest StageFailure
 	found := false
-	for _, pattern := range []string{"stage-*", "design-*", "readiness"} {
+	// The delivery cards keep their accounts in a directory of their own —
+	// they belong to no round of the implementation — so a run that died
+	// merging, waiting for a workflow or looking at a screen has its cause
+	// written down here and nowhere else.
+	for _, pattern := range []string{"stage-*", "design-*", "deliver-*", "readiness"} {
 		matches, err := filepath.Glob(filepath.Join(runDir, "history", pattern, "*-failure.json"))
 		if err != nil {
 			continue
 		}
 		for _, path := range matches {
 			var failure StageFailure
-			if readOutcomeArtifact(path, &failure) != nil || failure.Stage == "" || failure.FailedAt.IsZero() {
+			if err := readOutcomeArtifact(path, &failure); err != nil {
+				notes.failed(recordFailure, err)
+				continue
+			}
+			if failure.Stage == "" || failure.FailedAt.IsZero() {
 				continue
 			}
 			if !found || failure.FailedAt.After(latest.FailedAt) {
@@ -796,13 +1039,17 @@ type ladderAttempts struct {
 	Tried    []string `json:"tried"`
 }
 
-func readLadderAttempts(runDir, stage string, round int) (ladderAttempts, bool) {
+func readLadderAttempts(runDir, stage string, round int, notes *outcomeNotes) (ladderAttempts, bool) {
 	if stage == "" || round < 1 {
 		return ladderAttempts{}, false
 	}
 	var record ladderAttempts
 	path := filepath.Join(runDir, "retry", fmt.Sprintf("%s-r%d.json", stage, round))
-	if readOutcomeArtifact(path, &record) != nil || record.Stage != stage || record.Round != round {
+	if err := readOutcomeArtifact(path, &record); err != nil {
+		notes.failed(recordLadder, err)
+		return ladderAttempts{}, false
+	}
+	if record.Stage != stage || record.Round != round {
 		return ladderAttempts{}, false
 	}
 	return record, true
