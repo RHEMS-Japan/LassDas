@@ -129,6 +129,31 @@ func NewTerminalReportService(config ReportRouteConfig, store TerminalReportStor
 }
 
 func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, report TerminalReportRequest) Result {
+	return s.processTerminalReport(ctx, report, "")
+}
+
+// ProcessPersistedTerminalReport records and posts a closing comment that
+// was composed when the ending was decided and kept in the run directory.
+//
+// The difference from the ordinary submission is only where the words come
+// from. The ledger still decides whether this report may be recorded at
+// all — the digest of the record below has to be the one the row was begun
+// with, or the store refuses it — and the tracker is still asked for the
+// marker before anything is posted, so a comment that went out before the
+// process died is found rather than repeated.
+//
+// The words are not composed again because by now they may not be
+// composable: this path exists for the run whose cards were swept and
+// whose artifacts are gone. What is posted is what the run said it would
+// post, held to the tracker's limit as every comment here is.
+func (s *TerminalReportService) ProcessPersistedTerminalReport(ctx context.Context, report TerminalReportRequest, body string) Result {
+	if body == "" || len(body) > MaxTrackerCommentBytes {
+		return s.reportResult(DecisionInvalid, "terminal_comment_invalid", report.DeliveryID)
+	}
+	return s.processTerminalReport(ctx, report, body)
+}
+
+func (s *TerminalReportService) processTerminalReport(ctx context.Context, report TerminalReportRequest, kept string) Result {
 	// The run is named by the ticket, so the route works on the run this report
 	// is about rather than on one value configured for the deployment. The
 	// store still refuses a report whose sealed envelope, delivery and claim
@@ -170,8 +195,21 @@ func (s *TerminalReportService) ProcessTerminalReport(ctx context.Context, repor
 		return s.reportResult(DecisionInternal, "terminal_report_state_invalid", report.DeliveryID)
 	}
 
-	deliveryContinues := s.deliveryContinues(report, binding)
-	comment := terminalCommentContent(report, reportDigest, deliveryContinues)
+	// A kept comment is the closing one by construction: it was rendered
+	// when the ending was decided, which is past anything this report
+	// could still be followed by, so nothing here is a continuation. It
+	// also carries the prose — the run record, the cost line — that the
+	// sealed record never held and this path could not rebuild.
+	deliveryContinues := kept == "" && s.deliveryContinues(report, binding)
+	comment := kept
+	if kept == "" {
+		comment = terminalCommentContent(report, reportDigest, deliveryContinues)
+	} else if ExtractCommentMarker(comment) != terminalCommentFacts(report, reportDigest).Marker {
+		// The marker is how this comment is recognised on every later
+		// attempt. One that is not this report's would be posted again
+		// every tick, so it is refused rather than sent once.
+		return s.reportResult(DecisionInvalid, "terminal_comment_marker_mismatch", report.DeliveryID)
+	}
 	// Backlog's comment API has no idempotency key. The lease serializes live
 	// writers, and this lookup repairs the ambiguous case where a previous
 	// POST succeeded but the terminal store update did not: the posted
