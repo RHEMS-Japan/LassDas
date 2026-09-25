@@ -15,16 +15,25 @@ import (
 // it runs after the pass that put either the plan notice or the question on
 // the ticket — and the two decisions leave the requester opposite jobs:
 // nothing at all, or one answer. It has to be told which, because the
-// reception asks everything it needs in a single round and nothing after the
-// reception asks anything: the line used to promise a question "if one is
-// found", which no code path can keep, and which reads as a reason to wait
-// on a run that is never going to ask.
+// reception asks everything it needs in one set of questions and nothing
+// after the reception asks anything: the line used to promise a question "if
+// one is found", which no code path can keep, and which reads as a reason to
+// wait on a run that is never going to ask.
+//
+// How many sets of questions one reception may put is the destination's
+// setting (worker's question_max_rounds, one by default), and this package
+// cannot read it: the worker imports this one, so the import cannot go the
+// other way, and neither the route nor the tick carries the destination's
+// configuration or a path to it. Naming a number here would mean either
+// inventing one or threading a new input the whole way down for a single
+// sentence, so the sentence names the rule instead of the count and is true
+// of every destination.
 func AckCommentContent(snapshot TicketSnapshot, questionOpen bool) string {
 	var builder strings.Builder
 	builder.WriteString("【受付】このチケットの自動処理を受け付けました。\n\n")
 	builder.WriteString("処理の所有者: 自動処理（結果はこのチケットのコメントでお知らせします）\n")
 	if questionOpen {
-		builder.WriteString("ご対応のお願い: 上の質問への回答だけです。この一度きりで、以後は質問しません。\n")
+		builder.WriteString("ご対応のお願い: 上の質問への回答だけです。受付の質問は設定で許された回数（既定は 1 回）までで、それ以降は質問しません。\n")
 	} else {
 		builder.WriteString("ご対応のお願い: ありません。受付時の確認は完了しており、以後この依頼について質問することはありません。方針が違う場合は停止の方法をご利用ください。\n")
 	}

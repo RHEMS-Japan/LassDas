@@ -74,12 +74,14 @@ func TestAcceptanceNoticeAsksForNothingWhenTheReceptionProceeded(t *testing.T) {
 	}
 }
 
-// When the reception asked its one question, the notice names the single
-// answer the requester owes and closes the door behind it, and its footer
-// points at the same answer instead of saying no action is needed.
+// When the reception asked, the notice names the answer the requester owes
+// and says the asking ends with the reception, and its footer points at the
+// same answer instead of saying no action is needed. The sentence names the
+// rule rather than a count, because how many sets of questions one reception
+// may put is the destination's setting and this package cannot read it.
 func TestAcceptanceNoticeAsksOnlyForTheOneAnswerWhenTheReceptionAsked(t *testing.T) {
 	content := AckCommentContent(TicketSnapshot{RunID: "run-42", IssueKey: "TICKET-501"}, true)
-	const request = "ご対応のお願い: 上の質問への回答だけです。この一度きりで、以後は質問しません。"
+	const request = "ご対応のお願い: 上の質問への回答だけです。受付の質問は設定で許された回数（既定は 1 回）までで、それ以降は質問しません。"
 	if !strings.Contains(content, "\n"+request+"\n") {
 		t.Fatalf("the open question is not named:\n%s", content)
 	}
