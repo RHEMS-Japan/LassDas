@@ -224,10 +224,13 @@ var forwardedParam = map[string]string{}
 // routed through it drop out of the call graph without any of them being
 // named, which reads as "the walk is not working" rather than as a wrapper
 // nobody listed. runVerb and runController keep the cause of a failed step,
-// and they are steps like any other.
+// and they are steps like any other; deliverVerb does the same for the
+// delivery cards, whose verbs read a killed process as a result and needed
+// the cause put back before the seal could tell a card that ran out of its
+// time from a destination that refused.
 var scannedWrappers = map[string]bool{
 	"worker": true, "step": true, "controller": true,
-	"runVerb": true, "runController": true,
+	"runVerb": true, "runController": true, "deliverVerb": true,
 }
 
 // scannedWrapperPattern is the same set as an alternation, built from the map

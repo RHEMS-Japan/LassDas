@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -376,5 +377,127 @@ func TestADeliveryPhaseHoldsItselfToItsCardsWall(t *testing.T) {
 	_ = pipeline.RunDeliver(context.Background(), DeliverUntilChecks)
 	if !said.saw("the card holds itself to its own wall") {
 		t.Fatalf("the phase ran with no bound but the supervisor's signal: %v", said.lines)
+	}
+}
+
+// deliverAtItsWall is a delivery card whose verb never answers, with the
+// one wall an operator configures rather than the engine fixing.
+func deliverAtItsWall(t *testing.T, wallSeconds int) *Pipeline {
+	t.Helper()
+	pipeline := deliverPipeline(t)
+	sealRounds(t, pipeline, 1)
+	if err := os.WriteFile(pipeline.path("feature-pr.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "waiting.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.ControllerBin = script
+	pipeline.Config.Chain.Deliver = runtime.DeliverConfig{
+		ChecksProfile: "c", IntegrateProfile: "i", PromoteProfile: "p",
+		EnabledAfter: "2026-09-01T00:00:00Z", ChecksMaxRuntimeSeconds: wallSeconds,
+	}
+	return pipeline
+}
+
+// A delivery verb cut off by the card's own wall is the phase running out
+// of its time, not the destination refusing.
+//
+// Every verb on this path reads a killed child as a result — exit code -1
+// with no error beside it, the same shape as a verb that ran and refused —
+// so the phase sealed "the CI never went green" and the ticket carried a
+// red gate the requester never had. The ladder then replayed it for free,
+// because a cancelled context is also what a pod being replaced looks like.
+func TestADeliveryVerbCutOffAtItsWallSealsAsATimeout(t *testing.T) {
+	pipeline := deliverAtItsWall(t, 1)
+
+	err := pipeline.RunDeliver(context.Background(), DeliverUntilChecks)
+	if err == nil {
+		t.Fatal("a verb held past the card's wall returned no failure")
+	}
+	if _, sealed, _ := ReadDeliverReport(pipeline.Workspace, DeliverStagingReportFile); sealed {
+		t.Fatal("a card that ran out of time sealed a verdict about the destination")
+	}
+	pipeline.SealStageFailure(DeliverStageOf(DeliverUntilChecks), err)
+	record, ok := ReadStageFailure(pipeline.Workspace, DeliverStageOf(DeliverUntilChecks), runtime.DeliverRound)
+	if !ok {
+		t.Fatalf("nothing was sealed for a phase that used up its wall (error %v)", err)
+	}
+	if record.Class != FailureClassTimeout {
+		t.Fatalf("class = %q, want the phase's own time running out (error %q)", record.Class, record.Error)
+	}
+	if record.Interrupted {
+		t.Fatalf("a phase that used up its wall was sealed as a replacement from outside: %q", record.Error)
+	}
+	// The verb is named, because which step ran out is the first thing an
+	// operator reading this record wants.
+	if !strings.Contains(record.Error, "wait-feature") {
+		t.Fatalf("the record does not name the verb that ran out: %q", record.Error)
+	}
+}
+
+// A pod replaced mid-phase is still a replacement: nothing was learnt, and
+// the ladder dispatches the card again without spending anything on it.
+func TestADeliveryVerbStoppedByAReplacementStaysAnInterruption(t *testing.T) {
+	pipeline := deliverAtItsWall(t, 600)
+	ctx, replace := context.WithCancel(context.Background())
+	defer replace()
+	time.AfterFunc(100*time.Millisecond, replace)
+
+	err := pipeline.RunDeliver(ctx, DeliverUntilChecks)
+	if err == nil {
+		t.Fatal("a verb stopped by the signal returned no failure")
+	}
+	pipeline.SealStageFailure(DeliverStageOf(DeliverUntilChecks), err)
+	record, ok := ReadStageFailure(pipeline.Workspace, DeliverStageOf(DeliverUntilChecks), runtime.DeliverRound)
+	if !ok {
+		t.Fatalf("nothing was sealed for a phase whose pod was replaced (error %v)", err)
+	}
+	if !record.Interrupted {
+		t.Fatalf("a pod being replaced was not sealed as a replacement (class %q, error %q)", record.Class, record.Error)
+	}
+	if record.Class == FailureClassTimeout {
+		t.Fatal("a pod being replaced was sealed as the phase running out of its own time")
+	}
+}
+
+// And under a live context every outcome is exactly what it was. A verb
+// that ran and refused is the destination's answer about the change, and
+// this wrapper has nothing to say about it.
+func TestADeliveryVerbThatRefusedUnderALiveContextIsUnchanged(t *testing.T) {
+	pipeline := deliverPipeline(t)
+	sealRounds(t, pipeline, 1)
+	if err := os.WriteFile(pipeline.path("feature-pr.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	standInController(t, pipeline, "1")
+	pipeline.Config.Chain.Deliver = runtime.DeliverConfig{
+		ChecksProfile: "c", IntegrateProfile: "i", PromoteProfile: "p",
+		EnabledAfter: "2026-09-01T00:00:00Z", ChecksMaxRuntimeSeconds: 600,
+	}
+
+	if err := pipeline.RunDeliver(context.Background(), DeliverUntilStaging); err != nil {
+		t.Fatalf("RunDeliver() error = %v", err)
+	}
+
+	// The sealed report, to the byte.
+	sealed, err := os.ReadFile(pipeline.path(DeliverStagingReportFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report DeliverReport
+	if err := json.Unmarshal(sealed, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Phase != "staging" || report.Verdict != "checks_failed" {
+		t.Fatalf("report = %s, want the red gate it always sealed", sealed)
+	}
+	if report.Detail != "納品 PR の自動検査 (CI) が期限内に全部緑になりませんでした。ステージングへの反映は行っていません。" {
+		t.Fatalf("the red gate's sentence moved: %q", report.Detail)
+	}
+	// And no failure record: a refusal is a result, not a card that broke.
+	if _, ok := ReadStageFailure(pipeline.Workspace, DeliverStageOf(DeliverUntilStaging), runtime.DeliverRound); ok {
+		t.Fatal("a red gate was sealed as the card failing")
 	}
 }
