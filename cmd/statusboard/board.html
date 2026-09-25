@@ -337,9 +337,56 @@ function adoptStages(stages) {
   STEPS = next;
   STEP_INDEX = Object.fromEntries(STEPS.map(([id], i) => [id, i]));
 }
-const RESTING = new Set(["done", "stopped", "failed"]);
 const ACTIONABLE = new Set(["confirm", "question"]);
 const TONE = { confirm: "tone-act", question: "tone-act", attention: "tone-warn", failed: "tone-bad", stopped: "", done: "" };
+
+/* ---- the two lanes ---- */
+// A finished card leaves the running lane when a PERSON says so, never by
+// itself. It used to drop into 完了・終了 the moment the engine called the
+// run finished, and the card said only what it had ended as: a reader
+// coming back to the board could not tell a run that ended minutes ago
+// from one that ended the day before, and nobody had looked at either.
+// So a finished run waits here, showing when it got here, until somebody
+// presses 確認して片付ける.
+const FINISHED = new Set(["done", "stopped", "failed"]);
+// What this browser has cleared away but has not seen come back in a
+// payload yet, so the card moves under the pointer instead of a second
+// later.
+const localAcknowledged = new Map(); // delivery_id -> ISO
+const isFinished = run => FINISHED.has(run.step);
+const acknowledgedAt = run => run.acknowledged_at || localAcknowledged.get(run.delivery_id) || "";
+const isCleared = run => isFinished(run) && !!acknowledgedAt(run);
+
+// The board reads one clock: the engine stamps its own messages in Asia/Tokyo,
+// and a card whose two times came from two zones would argue with itself.
+function fmtStamp(iso) {
+  const at = Date.parse(iso || "");
+  if (!Number.isFinite(at) || at <= 0) return "";
+  return new Date(at).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) + " JST";
+}
+
+// splitLanes and countsOf are the one place the lanes are decided. The
+// counts line is built from the very same split, so the number at the top
+// and the cards below it cannot disagree.
+function splitLanes(rows) {
+  const active = [], cleared = [];
+  for (const run of rows) (isCleared(run) ? cleared : active).push(run);
+  // Whoever has to do something comes first: a card asking for a decision,
+  // then one waiting to be cleared away, then the ones still running.
+  const rank = run => ACTIONABLE.has(run.step) ? 0 : isFinished(run) ? 1 : 2;
+  active.sort((a, b) => rank(a) - rank(b) || (b.claimed_at_ms || 0) - (a.claimed_at_ms || 0));
+  return { active, cleared, running: active.filter(run => !isFinished(run)), awaiting: active.filter(isFinished) };
+}
+
+function countsOf(lanes) {
+  return {
+    running: lanes.running.length,
+    attention: lanes.running.filter(run => ACTIONABLE.has(run.step) || run.step === "attention").length,
+    awaiting: lanes.awaiting.length,
+    cleared: lanes.cleared.length,
+  };
+}
 
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
@@ -356,8 +403,10 @@ let snapshotAgeAtReceive = null;
 let feedConnected = false;
 let trackerBase = "";
 let actionsEnabled = false;
+let acknowledgeEnabled = false;
 let sentActions = new Map(); // "action:issue" -> at
 const localPending = new Map(); // same key -> "sending" | "error:<msg>"
+const acknowledgePending = new Map(); // delivery_id -> "sending" | "error:<msg>"
 const knownEvents = new Set();
 const cardStates = new Map(); // delivery_id -> {armed, armTimer, countdown}
 const expandedRuns = new Set();
@@ -817,6 +866,61 @@ async function postAction(action, issueID, text, onDone, deliveryID) {
   renderBoard();
 }
 
+// postAcknowledge takes one finished card off the running lane. It reaches
+// no tracker and carries nobody's authority but the board user's own, so it
+// works on a board with no requester credential.
+async function postAcknowledge(deliveryID) {
+  acknowledgePending.set(deliveryID, "sending");
+  renderBoard();
+  try {
+    const response = await fetch("/api/acknowledge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delivery_id: deliveryID }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      acknowledgePending.set(deliveryID, "error:" + (body || response.status).toString().slice(0, 120));
+    } else {
+      // Move the card now rather than on the next payload: the server has
+      // written it down, and a card that sits still under the pointer
+      // invites a second press.
+      let at = "";
+      try { at = (await response.json()).acknowledged_at || ""; } catch (_) { at = ""; }
+      localAcknowledged.set(deliveryID, at || new Date().toISOString());
+      acknowledgePending.delete(deliveryID);
+    }
+  } catch (error) {
+    acknowledgePending.set(deliveryID, "error:通信に失敗しました。再試行してください");
+  }
+  renderBoard();
+}
+
+function acknowledgeState(deliveryID) {
+  const value = acknowledgePending.get(deliveryID);
+  if (value === "sending") return { kind: "sending" };
+  if (value) return { kind: "error", message: value.slice(6) };
+  return { kind: "idle" };
+}
+
+function buildAcknowledgeRow(run) {
+  const row = el("div");
+  row.setAttribute("aria-live", "polite");
+  const state = acknowledgeState(run.delivery_id);
+  const press = el("button", "btn", state.kind === "sending" ? "片付けています…" : "確認して片付ける");
+  press.disabled = state.kind === "sending";
+  press.addEventListener("click", () => postAcknowledge(run.delivery_id));
+  row.appendChild(press);
+  row.appendChild(el("p", "via", "この依頼を下の「完了・終了」へ移し、片付けた時刻を記録します。チケットへの投稿はありません。"));
+  if (state.kind === "error") {
+    const failed = el("div", "qrow state-error");
+    failed.appendChild(el("div", "qtitle", "片付けられませんでした: " + state.message));
+    failed.appendChild(el("div", "via", "画面を更新して現在の状態を確認してから、もう一度お試しください"));
+    row.appendChild(failed);
+  }
+  return row;
+}
+
 function decisionState(action, issueID, deliveryID) {
   const key = actKey(action, issueID, deliveryID);
   if (localPending.has(key)) {
@@ -946,9 +1050,15 @@ function buildGuidance(run) {
     for (const file of run.changed_files) list.appendChild(el("li", null, file));
     files.appendChild(list); box.appendChild(files);
   }
-  const reportAt = Date.parse(run.report_at || "");
-  if (Number.isFinite(reportAt) && reportAt > 0) {
-    paragraph("判定した時刻", new Date(reportAt).toLocaleString("ja-JP") + "（現在の実環境を再確認した結果ではありません）");
+  const reportAt = fmtStamp(run.report_at);
+  if (reportAt) paragraph("判定した時刻", reportAt + "（現在の実環境を再確認した結果ではありません）");
+  // When this run reached the state the card is showing, and when somebody
+  // cleared it away. Without the first one a finished card said what it had
+  // ended as and never when.
+  if (isFinished(run)) {
+    paragraph("この状態になった時刻", fmtStamp(run.finished_at) || "記録が残っていません");
+    const cleared = fmtStamp(acknowledgedAt(run));
+    if (cleared) paragraph("片付けた時刻", cleared);
   }
   paragraph("次にすること", run.next_action);
   paragraph("操作すると", run.action_effect);
@@ -958,6 +1068,10 @@ function buildGuidance(run) {
   if (run.can_resolve) {
     if (actionsEnabled && run.issue_id) box.appendChild(buildResolveRow(run));
     else paragraph("確認の記録", "この画面は閲覧専用です。確認と必要な対応を終えたら、依頼者または登録された運用担当者が、チケットの先頭行に「確認済み」と書いてコメントしてください。");
+  }
+  if (isFinished(run) && !acknowledgedAt(run)) {
+    if (acknowledgeEnabled) box.appendChild(buildAcknowledgeRow(run));
+    else paragraph("片付け", "この画面は閲覧専用で起動しているため、ここからは片付けられません。この依頼は終了していますが、一覧には残ります。");
   }
   return box;
 }
@@ -1037,7 +1151,9 @@ function buildCard(run) {
   card.appendChild(track);
   card.appendChild(pane);
 
-  if (run.next_action || run.can_resolve || run.can_go) card.appendChild(buildGuidance(run));
+  // A finished card always carries the guidance block now: it is where the
+  // time it finished, and the control that clears it away, are written.
+  if (run.next_action || run.can_resolve || run.can_go || isFinished(run)) card.appendChild(buildGuidance(run));
 
   if (run.step === "question") card.appendChild(buildQuestionRow(run));
   // The Go/stop controls appear ONLY when the server says a Go would be
@@ -1087,14 +1203,8 @@ function renderBoard() {
   const focusDraft = focused && focused.dataset ? focused.dataset.draftFor : null;
   const caret = focusDraft ? [focused.selectionStart, focused.selectionEnd] : null;
   const runs = (latestBoard.runs || []).slice();
-  const active = runs.filter(run => !RESTING.has(run.step));
-  const resting = runs.filter(run => RESTING.has(run.step));
-  active.sort((a, b) => {
-    const aAct = ACTIONABLE.has(a.step) ? 0 : 1;
-    const bAct = ACTIONABLE.has(b.step) ? 0 : 1;
-    if (aAct !== bAct) return aAct - bAct;
-    return (b.claimed_at_ms || 0) - (a.claimed_at_ms || 0);
-  });
+  const lanes = splitLanes(runs);
+  const active = lanes.active, cleared = lanes.cleared;
 
   const runsBox = document.getElementById("runs");
   // Every card is rebuilt on each payload; a live pane still following a
@@ -1111,10 +1221,10 @@ function renderBoard() {
   }
   const chips = document.getElementById("chips");
   chips.replaceChildren();
-  if (resting.length === 0) {
+  if (cleared.length === 0) {
     chips.appendChild(el("span", "chip", "まだありません"));
   } else {
-    for (const run of resting) chips.appendChild(buildChip(run));
+    for (const run of cleared) chips.appendChild(buildChip(run));
   }
   // Finished cards have the same live panes. Restore only after BOTH
   // containers exist, including a followed card that just finished.
@@ -1138,19 +1248,24 @@ function renderBoard() {
   const banner = document.getElementById("notice-banner");
   banner.textContent = latestBoard.notice || "";
   banner.hidden = !latestBoard.notice;
-  const needAttention = active.filter(run => ACTIONABLE.has(run.step) || run.step === "attention").length;
   const counts = document.getElementById("counts");
   counts.replaceChildren();
   if (snapshotProblem()) {
     counts.appendChild(document.createTextNode("最新件数は未確認 — 表示があれば最後に確認できた状態です"));
     return;
   }
+  // The same split the cards were drawn from: 処理中 and 確認待ち together are
+  // the upper lane, 完了・終了 is the lower one. 確認待ち is its own number
+  // because it is the one a person has to act on to make go away.
+  const tally = countsOf(lanes);
   counts.appendChild(document.createTextNode("処理中 "));
-  counts.appendChild(el("b", null, String(active.length)));
+  counts.appendChild(el("b", null, String(tally.running)));
   counts.appendChild(document.createTextNode(" ／ 要対応 "));
-  counts.appendChild(el("b", needAttention > 0 ? "warn" : null, String(needAttention)));
+  counts.appendChild(el("b", tally.attention > 0 ? "warn" : null, String(tally.attention)));
+  counts.appendChild(document.createTextNode(" ／ 確認待ち "));
+  counts.appendChild(el("b", tally.awaiting > 0 ? "warn" : null, String(tally.awaiting)));
   counts.appendChild(document.createTextNode(" ／ 完了・終了 "));
-  counts.appendChild(el("b", null, String(resting.length)));
+  counts.appendChild(el("b", null, String(tally.cleared)));
 }
 
 /* ---- event log (idempotent inserts, day separators) ---- */
@@ -1186,6 +1301,7 @@ function applyPayload(payload, firstLoad) {
   lastServerSentAt = payload.sent_at || null;
   trackerBase = payload.tracker_base || "";
   actionsEnabled = !!payload.actions_enabled;
+  acknowledgeEnabled = !!payload.acknowledge_enabled;
   sentActions = new Map();
   for (const raw of payload.actions || []) {
     try {

@@ -12,16 +12,33 @@ const snapshotMaxAge = 3 * time.Minute
 // writes a routing field onto a row any more, but board.json outlives the
 // process that wrote it: a file left by an older engine must not reach a
 // reader either.
-func publicBoardRow(raw json.RawMessage) (json.RawMessage, error) {
+//
+// The acknowledgement is added here rather than in the snapshot: the
+// attendant writes what the engine did, and whether a person has cleared a
+// finished card away is the board's own fact, in the board's own file.
+func publicBoardRow(raw json.RawMessage, acknowledged map[string]acknowledgement) (json.RawMessage, error) {
 	var row map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &row); err != nil || row == nil {
 		return nil, errors.New("invalid board row")
 	}
 	delete(row, "workspace_path")
+	delete(row, "acknowledged_at")
+	var identity struct {
+		DeliveryID string `json:"delivery_id"`
+	}
+	if json.Unmarshal(raw, &identity) == nil && identity.DeliveryID != "" {
+		if entry, cleared := acknowledged[identity.DeliveryID]; cleared {
+			stamp, err := json.Marshal(entry.At)
+			if err != nil {
+				return nil, err
+			}
+			row["acknowledged_at"] = stamp
+		}
+	}
 	return json.Marshal(row)
 }
 
-func publicSnapshot(raw []byte) (json.RawMessage, time.Time, error) {
+func publicSnapshot(raw []byte, acknowledged map[string]acknowledgement) (json.RawMessage, time.Time, error) {
 	var shape struct {
 		SchemaVersion int               `json:"schema_version"`
 		GeneratedAt   time.Time         `json:"generated_at"`
@@ -36,7 +53,7 @@ func publicSnapshot(raw []byte) (json.RawMessage, time.Time, error) {
 	}
 	rows := make([]json.RawMessage, 0, len(shape.Runs))
 	for _, row := range shape.Runs {
-		public, err := publicBoardRow(row)
+		public, err := publicBoardRow(row, acknowledged)
 		if err != nil {
 			return nil, time.Time{}, err
 		}

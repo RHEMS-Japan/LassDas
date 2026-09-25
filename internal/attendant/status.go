@@ -71,6 +71,13 @@ type RunStatus struct {
 	PRURL        string    `json:"pr_url,omitempty"`
 	ChangedFiles []string  `json:"changed_files,omitempty"`
 	ReportAt     time.Time `json:"report_at,omitempty"`
+	// FinishedAt is when the run reached the state it now shows, for a run
+	// that has stopped for good. The board used to move a finished card to
+	// the lower lane by itself and say only what it ended as, so a reader
+	// who came back to it could not tell whether it had ended a minute ago
+	// or the day before. Empty when the run is still going, and when a run
+	// ended before anything wrote its ending down.
+	FinishedAt time.Time `json:"finished_at,omitempty"`
 	// Stage names the pipeline step an out-of-line state (attention)
 	// belongs to, so the board lights the node where the run stopped
 	// instead of an empty rail. Empty for every in-line step.
@@ -209,6 +216,18 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		status.NextAction = "現在の処理状態をこの画面では判定できません。運用担当者がチケットの報告と実行履歴を確認してください。"
 		status.ActionEffect = "状態を確認するまで、この画面からの操作はありません。"
 	}
+	if FinishedStep(status.Step) && status.FinishedAt.IsZero() {
+		// When it got where it now is: the delivery's own report time where
+		// there is one — that is later than the run's ending, and it is the
+		// report that put the card in this state — else the moment the
+		// ledger recorded the run as finished.
+		switch {
+		case !status.ReportAt.IsZero():
+			status.FinishedAt = status.ReportAt
+		case run.CompletedAt > 0:
+			status.FinishedAt = time.UnixMilli(run.CompletedAt).UTC()
+		}
+	}
 	if status.NextAction == "" {
 		switch status.Step {
 		case "failed":
@@ -225,6 +244,14 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		}
 	}
 	return status
+}
+
+// FinishedStep says a run in this step has stopped for good. Such a card
+// stays in the running lane, showing when it got there, until a person
+// clears it away: cards that archived themselves left nobody able to say
+// when any of them had finished (requester's decision, 2026-09-25).
+func FinishedStep(step string) bool {
+	return step == "done" || step == "stopped" || step == "failed"
 }
 
 func (s *RunStatus) place(step, title, detail string) {
@@ -468,7 +495,19 @@ func classifyAfterTerminalInDirectory(status *RunStatus, config runtime.Config, 
 	// to two words, so a requester read "delivered" over an unmerged pull
 	// request and had no reason to look further (live 2026-09-18, measured
 	// against a pull request that was still open).
-	if merge, merged := readFeatureMerge(runDir); merged {
+	// Both endings of the delivered pull request rest here. A closed one
+	// used to have no ending at all: nothing about a finished run with a
+	// published pull request changes when a person closes it, so the card
+	// kept asking to be merged for as long as it was kept.
+	if merge, ended := readFeatureMerge(runDir); ended {
+		status.FinishedAt = merge.ReadAt
+		if !merge.Merged {
+			status.place("stopped", "PR は取り込まれずに閉じられました",
+				"取り込み用の Pull Request は、マージされないまま閉じられました。依頼の変更はリポジトリに入っていません")
+			status.NextAction = "閉じた理由をチケットと Pull Request で確認してください。同じ変更が必要な場合は、改めて依頼を起票してください。"
+			status.ActionEffect = "この試行は終了しています。Pull Request を開き直しても、この画面からは自動では再開しません。"
+			return
+		}
 		status.place("done", "マージ済み", "取り込み用の Pull Request はマージされ、依頼の変更がリポジトリに入りました")
 		if merge.MergeCommitSHA != "" {
 			status.Detail += " (" + merge.MergeCommitSHA[:min(7, len(merge.MergeCommitSHA))] + ")"

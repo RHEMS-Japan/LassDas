@@ -639,10 +639,18 @@ if (renderStart < 0 || renderEnd < renderStart) throw new Error("renderBoard mis
 const expandedRuns = new Set();
 registry["notice-banner"] = new Node("div");
 registry.counts = new Node("div");
-const render = new Function("document", "el", "RESTING", "ACTIONABLE", "snapshotProblem", "buildCard", "buildChip", "liveDetach", "liveRestore", "expandedRuns", "CSS", "live",
+// The lanes are the page's own code as well, not a stand-in: renderBoard
+// asks it which lane each card belongs to, and a finished card reaches the
+// lower one only once a person has cleared it away.
+const laneFrom = script.indexOf("const FINISHED");
+const laneTo = script.indexOf("const el = (tag");
+if (laneFrom < 0 || laneTo < laneFrom) throw new Error("lane code missing");
+const lanes = new Function("ACTIONABLE",
+  script.slice(laneFrom, laneTo) + "; return { splitLanes, countsOf };")(new Set(["confirm", "question"]));
+const render = new Function("document", "el", "splitLanes", "countsOf", "snapshotProblem", "buildCard", "buildChip", "liveDetach", "liveRestore", "expandedRuns", "CSS", "live",
   "let latestBoard; " + script.slice(renderStart, renderEnd).replaceAll("liveFollow", "live.follow") +
   "; return runs => { latestBoard = {runs}; renderBoard(); };")(
-  documentStub, el, new Set(["done", "failed"]), new Set(), () => false,
+  documentStub, el, lanes.splitLanes, lanes.countsOf, () => false,
   run => card(run.delivery_id, run.issue_key),
   run => { const d = el("details", "finished-run"); d.open = expandedRuns.has(run.delivery_id); d.appendChild(card(run.delivery_id, run.issue_key)); return d; },
   live.liveDetach, live.liveRestore, expandedRuns, {escape: s => s}, live);
@@ -650,7 +658,10 @@ const render = new Function("document", "el", "RESTING", "ACTIONABLE", "snapshot
 for (const initiallyFinished of [false, true]) {
   startScenario();
   expandedRuns.clear();
-  const run = {delivery_id: "finished-delivery", issue_key: "TICKET-9", step: initiallyFinished ? "failed" : "implement"};
+  // A card is in the lower lane because somebody cleared it away, so the
+  // run that gets there carries the acknowledgement that put it there.
+  const run = {delivery_id: "finished-delivery", issue_key: "TICKET-9", step: initiallyFinished ? "failed" : "implement",
+    acknowledged_at: initiallyFinished ? "2026-09-25T05:00:00Z" : undefined};
   answer = url => {
     const from = Number(url.match(/from=(\d+)/)?.[1] || 0);
     return Promise.resolve({ok: true, json: () => Promise.resolve(url.includes("?from=")
@@ -664,6 +675,7 @@ for (const initiallyFinished of [false, true]) {
   const oldPane = pane(c);
   const text = oldPane.querySelector("pre").textContent;
   run.step = "failed";
+  run.acknowledged_at = "2026-09-25T05:00:00Z";
   for (let i = 0; i < 3; i++) { render([run]); await settle(); }
   c = chipsBox.querySelector('.card[data-delivery="finished-delivery"]');
   const label = initiallyFinished ? "finished card" : "active-to-finished card";
@@ -680,7 +692,27 @@ for (const initiallyFinished of [false, true]) {
   check(label + " no longer polls after changing cards", pane(c).state.timer, null);
 }
 
-if (checks < 63) {
+// A finished run nobody has cleared away is drawn in the running lane, not
+// the finished one, and the press is what moves it. Driven through the real
+// renderBoard, because the lane a card is drawn into is the whole point.
+startScenario();
+expandedRuns.clear();
+{
+  const waiting = {delivery_id: "waiting-delivery", issue_key: "TICKET-11", step: "done"};
+  render([waiting]);
+  check("a finished card nobody cleared is in the running lane",
+    !!runsBox.querySelector('.card[data-delivery="waiting-delivery"]'), true);
+  check("and is not in the finished lane",
+    !!chipsBox.querySelector('.card[data-delivery="waiting-delivery"]'), false);
+  waiting.acknowledged_at = "2026-09-25T05:00:00Z";
+  render([waiting]);
+  check("clearing it away moves it to the finished lane",
+    !!chipsBox.querySelector('.card[data-delivery="waiting-delivery"]'), true);
+  check("and it leaves the running lane",
+    !!runsBox.querySelector('.card[data-delivery="waiting-delivery"]'), false);
+}
+
+if (checks < 67) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }

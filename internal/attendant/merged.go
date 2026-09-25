@@ -17,10 +17,12 @@ import (
 	"automation.internal/ticket-ingress/internal/state"
 )
 
-// featureMergeFile records that the delivered pull request was merged. Once
-// written it is never read again from GitHub: a merge does not come undone,
+// featureMergeFile records how the delivered pull request ended: merged, or
+// closed without merging. Once written it is never read again from GitHub,
 // and a delivery that rests on it should not depend on the network to keep
-// resting there.
+// resting there. A reopening is not watched for — the wait this reading
+// stands in for already ends at a closed pull request, and the two readers
+// must not disagree about what "closed" means.
 const featureMergeFile = "feature-merged.json"
 
 // mergeReadTimeout bounds one reading. The attendant wakes every minute; a
@@ -66,18 +68,28 @@ type featureMerge struct {
 	ReadAt         time.Time `json:"read_at"`
 }
 
-// readFeatureMerge reports whether this delivery's pull request is known to
-// have been merged.
+// readFeatureMerge reports how this delivery's pull request ended, when that
+// is settled. "Still open" is no ending: it is never written down, and the
+// next wake-up asks again.
 func readFeatureMerge(runDir string) (featureMerge, bool) {
 	raw, err := os.ReadFile(filepath.Join(runDir, featureMergeFile))
 	if err != nil || len(raw) > 1<<16 {
 		return featureMerge{}, false
 	}
 	var merge featureMerge
-	if json.Unmarshal(raw, &merge) != nil || !merge.Merged {
+	if json.Unmarshal(raw, &merge) != nil {
+		return featureMerge{}, false
+	}
+	if !merge.Merged && !closedUnmerged(merge) {
 		return featureMerge{}, false
 	}
 	return merge, true
+}
+
+// closedUnmerged says the delivered pull request ended the other way: a
+// person closed it, and the change never entered the repository.
+func closedUnmerged(merge featureMerge) bool {
+	return !merge.Merged && merge.State == "closed"
 }
 
 // recordFeatureMerge asks whether the delivered pull request has been merged
@@ -159,17 +171,32 @@ func recordFeatureMerge(ctx context.Context, config runtime.Config, run state.Ru
 		State          string `json:"state"`
 		MergeCommitSHA string `json:"merge_commit_sha"`
 	}
-	if json.Unmarshal(raw, &reading) != nil || !reading.Merged {
+	if json.Unmarshal(raw, &reading) != nil {
 		return
 	}
-	encoded, err := json.Marshal(featureMerge{
-		Merged: true, State: reading.State, MergeCommitSHA: reading.MergeCommitSHA, ReadAt: time.Now().UTC(),
-	})
+	// A pull request closed without merging is an ending of its own, and the
+	// board could not see it: the conditions for 「マージ待ち」 are a finished
+	// run and a published pull request, neither of which changes when a
+	// person closes one, so the card went on asking for a merge that was
+	// never going to come. Both endings are written down; only "still open"
+	// is no ending, and is asked about again next wake-up.
+	if !reading.Merged && reading.State != "closed" {
+		return
+	}
+	record := featureMerge{
+		Merged: reading.Merged, State: reading.State,
+		MergeCommitSHA: reading.MergeCommitSHA, ReadAt: time.Now().UTC(),
+	}
+	encoded, err := json.Marshal(record)
 	if err != nil {
 		return
 	}
 	if err := os.WriteFile(filepath.Join(runDir, featureMergeFile), encoded, 0o600); err != nil {
-		logger.Error("the merge could not be written down", "run", run.RunID, "error", err.Error())
+		logger.Error("the end of the delivered pull request could not be written down", "run", run.RunID, "error", err.Error())
+		return
+	}
+	if !record.Merged {
+		logger.Info("the delivered pull request was closed without merging", "run", run.RunID)
 		return
 	}
 	logger.Info("the delivered pull request was merged", "run", run.RunID, "merge_commit", reading.MergeCommitSHA)
