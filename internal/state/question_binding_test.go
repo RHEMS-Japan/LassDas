@@ -429,6 +429,22 @@ func TestATicketTooLongToReadWholeIsStillAnsweredAndStillExpires(t *testing.T) {
 			harness.backlog.listedFrom, questionCommentID-1)
 	}
 
+	// Nothing claims the history was read. Only a read that reached the
+	// start of the thread may move the position, so a wait that gave the
+	// history up tries again next time rather than recording a stop it
+	// never looked for as absent.
+	_, runKey := itemKeys(envelope)
+	if through, recorded := attributeInt64(api.items[runKey], "question_scan_through"); recorded && through >= questionCommentID {
+		t.Fatalf("the read position moved to %d on a read that never saw the start of the thread", through)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("second tick on a very long ticket = %+v", result)
+	}
+	if harness.backlog.listedFrom[2] != 0 {
+		t.Fatalf("the next wake-up read from %d; the history it gave up is never tried again", harness.backlog.listedFrom[2])
+	}
+
 	// The answer still arrives and is still taken.
 	harness.clock = harness.clock.Add(time.Minute)
 	harness.backlog.post(harness.route.AllowedCreatorID, "回答 C1 Q1:a")
