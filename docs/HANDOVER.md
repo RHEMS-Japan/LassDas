@@ -84,9 +84,11 @@ GOMAXPROCS=2 go test -p 1 -count=1 ./...
 ### ② 実行環境が動いているか
 
 ```sh
-lassdas run status --project <name>
-lassdas setup check --project <name>
+cd <消費側リポジトリの root> && lassdas run status --project <name>
+cd <消費側リポジトリの root> && lassdas setup check --project <name>
 ```
+
+（`cd` を省くと、別のディレクトリで実行したときに違う repo として扱われる。利用者に渡すコマンドは常にこの形にする。）
 
 `run status` は本体が起きているか、`setup check` は設定と鍵の不足を示す。**check は鍵の値を表示しないし、聞きもしない。**どこで動かしているかは、導入した人が `.lassdas/progress.md` にそのまま打てるコマンドで書き残している。
 
@@ -97,7 +99,7 @@ lassdas setup check --project <name>
 ### ④ 依頼が通るか
 
 ```sh
-lassdas setup smoke --project <name>
+cd <消費側リポジトリの root> && lassdas setup smoke --project <name>
 ```
 
 1 ファイルに 1 行足すだけの小さな依頼を起票し、Pull Request ができるまで見届ける。**ここまで通って初めて「動いている」と言える。**組み立ちと試験は作る側の証拠であって、依頼が通る証拠ではない。
