@@ -22,6 +22,7 @@ func runImplementInstruction(args []string) error {
 	clarificationPath := flags.String("clarification", "", "")
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
+	validationFailurePath := flags.String("validation-failure", "", "")
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	if !parseFlags(flags, args) ||
@@ -53,7 +54,11 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, *repoRoot)
+	validationFailure, err := readValidationFailure(*validationFailurePath)
+	if err != nil {
+		return err
+	}
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, *repoRoot)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}
@@ -61,4 +66,24 @@ func runImplementInstruction(args []string) error {
 		return errors.New("implement instruction could not be written")
 	}
 	return nil
+}
+
+// readValidationFailure loads what the previous round's deterministic
+// validation refused, or nil when the flag was not given — which is the
+// ordinary case, because most rounds are repeated over an objection and never
+// reached the validation.
+//
+// A path that was given and cannot be read is a failure rather than an
+// absence. The round is being run for what is in that file, and rendering
+// without it would produce a plausible instruction that has lost the point of
+// the round.
+func readValidationFailure(path string) (*worker.ValidationFailure, error) {
+	if path == "" {
+		return nil, nil
+	}
+	record, err := worker.ReadValidationFailureFile(path)
+	if err != nil {
+		return nil, errors.New("the previous round's validation failure could not be read")
+	}
+	return &record, nil
 }

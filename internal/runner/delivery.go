@@ -20,38 +20,58 @@ func reviewFileArgs(stageDir string, names []string) []string {
 	return arguments
 }
 
+// validationRefusal is the deterministic validation saying no: which step
+// refused, and the end of what that step printed.
+//
+// It travels as a value rather than as one more error because the machinery
+// did not break — it worked, and its answer was no. That answer is now the
+// material the next round is given, and an error would have had to be turned
+// back into it somewhere. Nil means the round passed.
+type validationRefusal struct {
+	step   string
+	output string
+}
+
+// refusedValidation names the step that just refused and takes what it wrote.
+// lastStepStderr belongs to the step that has this moment returned, so the
+// output is bound to the named step rather than to whatever ran most
+// recently.
+func (p *Pipeline) refusedValidation(step string) *validationRefusal {
+	return &validationRefusal{step: step, output: p.lastStepStderr}
+}
+
 // validationStage mirrors the workflow's validation job: apply the adopted
 // candidate to a fresh copy, run the consumer's own checks, verify the
 // applied tree and the publish gate. The GitHub job dropped privileges to
 // `nobody` inside a throwaway sandbox; in the pod the runner executes the
 // same steps in the task workspace — the pod itself is the sandbox (its own
 // namespace, its own filesystem, egress-limited; see the runtime design's
-// network section). Returns validationFailed=true for a gate refusal.
-func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles []string) (bool, error) {
+// network section). A non-nil refusal is a gate refusal.
+func (p *Pipeline) validationStage(ctx context.Context, stage int, reviewFiles []string) (*validationRefusal, error) {
 	return p.validationStageAt(ctx, stage, reviewFiles, "")
 }
 
 // validationStageAt pins the validation checkout to baseSHA when given: the
 // publish retry validates the same candidate on a freshly advanced
 // integration base. An empty baseSHA reads the run's recorded baseline.
-func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles []string, baseSHA string) (bool, error) {
+func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles []string, baseSHA string) (*validationRefusal, error) {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), stage)
 	sandbox := p.path("validation-target")
 	if err := os.RemoveAll(sandbox); err != nil {
-		return false, err
+		return nil, err
 	}
 	if err := p.cloneTargetTo(ctx, sandbox); err != nil {
-		return false, err
+		return nil, err
 	}
 	if baseSHA == "" {
 		recorded, err := p.readJSONField("baseline.json", "baseline", "Integration", "SHA")
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		baseSHA = recorded
 	}
 	if code, err := p.gitIn(ctx, sandbox, "checkout", "--detach", baseSHA); err != nil || code != 0 {
-		return false, fmt.Errorf("validation checkout failed (%v)", err)
+		return nil, fmt.Errorf("validation checkout failed (%v)", err)
 	}
 	common := []string{
 		"--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
@@ -59,30 +79,38 @@ func (p *Pipeline) validationStageAt(ctx context.Context, stage int, reviewFiles
 		"--candidate", stageDir + "/candidate.json",
 	}
 	if code, err := p.worker(ctx, "apply", append([]string{"apply"}, append(common, "--repo-root", sandbox)...)); err != nil || code != 0 {
-		return true, err
+		return p.refusedValidation("apply"), err
 	}
 	if code, err := p.worker(ctx, "run-validation", append([]string{"run-validation"},
 		append(common, "--repo-root", sandbox, "--checkout-sha", baseSHA,
 			"--out", p.path("validation.json"))...)); err != nil || code != 0 {
-		return true, err
+		// The step that fails when the change itself is wrong, and the one
+		// whose output is worth carrying: the destination's own commands ran
+		// here, and the command line and the tail of what it said are on this
+		// step's stderr and in no artifact. run-validation writes its --out
+		// only on success, so there is nothing else left behind to read.
+		return p.refusedValidation("run-validation"), err
 	}
 	if code, err := p.worker(ctx, "verify-applied", append([]string{"verify-applied"},
 		append(common, "--repo-root", sandbox)...)); err != nil || code != 0 {
-		return true, err
+		return p.refusedValidation("verify-applied"), err
 	}
 	gateArgs := append(common, reviewFileArgs(stageDir, reviewFiles)...)
 	gateArgs = append(gateArgs, "--decision", stageDir+"/decision.json", "--validation", p.path("validation.json"))
 	design, _, err := p.requiredDesign()
 	if err != nil {
-		return true, err
+		// Not a refusal: no deterministic step said no, a record could not be
+		// read. Both callers read the error before the refusal, so this
+		// answers exactly as it did when it answered "failed" here.
+		return nil, err
 	}
 	if design != "" {
 		gateArgs = append(gateArgs, "--design", design, "--design-decision", filepath.Join(filepath.Dir(design), "decision.json"))
 	}
 	if code, err := p.worker(ctx, "verify-publish-gate", append([]string{"verify-publish-gate"}, gateArgs...)); err != nil || code != 0 {
-		return true, err
+		return p.refusedValidation("verify-publish-gate"), err
 	}
-	return false, nil
+	return nil, nil
 }
 
 // EnsureTrail leaves the trail file the terminal report attaches, composing
@@ -257,7 +285,7 @@ func (p *Pipeline) publishWithBaseAdvance(ctx context.Context, stage int, review
 		if err := os.Remove(p.path("validation.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return Outcome{Code: hook.TerminalReleaseFailed}, err
 		}
-		if failed, err := p.validationStageAt(ctx, stage, reviewFiles, advancedSHA); err != nil || failed {
+		if refusal, err := p.validationStageAt(ctx, stage, reviewFiles, advancedSHA); err != nil || refusal != nil {
 			p.writeStopReason("公開の中断理由: 実行中に統合先ブランチが進み、新しい統合先の上での検証が通らなかったため公開を中止しました。")
 			if err != nil {
 				return Outcome{Code: hook.TerminalReleaseFailed}, fmt.Errorf("revalidation on the advanced base failed: %w", err)

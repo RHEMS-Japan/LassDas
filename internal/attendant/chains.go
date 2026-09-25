@@ -797,6 +797,18 @@ func handleChainFailure(
 			// finished, no next round is created, and the run ends honestly.
 			code = hook.TerminalCancelled
 		case view.round < limit:
+			// Why the round advanced, when it advanced over a refused
+			// validation rather than over an objection. Both arrive here as
+			// one action, and only the sealed record tells them apart: the
+			// line above says a round was regenerated and says nothing about
+			// a validation that had already been found to fail. The digest is
+			// the field worth logging — two rounds carrying the same one are
+			// a run repeating itself, and that is readable from the log
+			// without opening the run directory.
+			if failure, sealed := runner.ReadValidationFailure(runDir, view.round); sealed {
+				logger.Info("the deterministic validation refused the round; the next round is told what it printed",
+					"run", run.RunID, "round", view.round, "step", failure.Step, "output_sha256", failure.OutputSHA256)
+			}
 			plan, planErr := chainPlanFor(config, runDir, run, logger)
 			if planErr != nil || plan.Shape != runtime.ShapeDesign {
 				return regenerateRound(ctx, hermes, config, run, view, logger)
@@ -824,9 +836,19 @@ func handleChainFailure(
 				return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
 			}
 		default:
-			// The decide verb converts a final-round revise into nonconverged;
-			// a revise at the limit means the artifacts and the configuration
-			// disagree, and the run ends honestly instead of looping.
+			// The round ceiling, and the one thing left that still ends a run
+			// the ladder would otherwise keep climbing. Two failures reach it.
+			// A revise at the limit: the decide verb converts a final-round
+			// revise into nonconverged, so a revise here means the artifacts
+			// and the configuration disagree. And a validation that refused
+			// the last round the configuration allows: the next round would
+			// have carried what it printed, and there is no next round to
+			// carry it.
+			//
+			// Both end under the model failure code. The code that used to
+			// name the second is no longer produced by anything, and every
+			// other code that could be read as "the ceiling stopped it" would
+			// be a different wrong answer.
 			code = hook.TerminalModelFailed
 		}
 	case actionAskQuestion:
@@ -928,7 +950,19 @@ func classifyChainFailure(stageName string, decision, question func() (string, e
 			}
 			return actionReport, hook.TerminalNonconverged
 		case "converged":
-			return actionReport, hook.TerminalValidationFailed
+			// The judges passed the round and the deterministic validation
+			// refused it. That used to end the delivery: the run reported
+			// that validation had failed and stopped, leaving the build
+			// output in the pod's log for a person to find and carry back.
+			// The validate card now seals what was printed, and the next
+			// round's instruction carries it, so the round is repeated with
+			// the one thing it was missing instead of being abandoned.
+			//
+			// The code beside the action is the placeholder a regenerate
+			// always carries, as the revise arm above does: nothing reports
+			// it. validation_failed stays in the vocabulary — ledger rows and
+			// posted comments still name it — and nothing produces it now.
+			return actionRegenerate, hook.TerminalModelFailed
 		default:
 			return actionReport, hook.TerminalModelFailed
 		}
