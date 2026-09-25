@@ -112,10 +112,31 @@ type ChainConfig struct {
 	// Profiles names the five stage profiles. Their worker.command (or, for
 	// the implementer, the native agent) is host-side Hermes configuration.
 	Profiles ChainProfiles `json:"profiles,omitempty"`
-	// FailureStreakLimit stops intake once this many deliveries in a row
-	// ended with the same failure; the operator's 「確認済み」 on the newest
-	// of them resumes it. Omitted means 3; 0 turns the hold off.
+	// FailureStreakLimit stopped intake once this many deliveries in a row
+	// ended with the same failure. Nothing counts any more: a card that
+	// fails is climbed away from rather than reported, so the run of
+	// identical endings it watched for cannot form. The field is still
+	// decoded for one reason only: a configuration that still carries it is
+	// refused with a sentence that says what to delete, instead of the
+	// decoder's unknown-field message.
 	FailureStreakLimit *int `json:"failure_streak_limit,omitempty"`
+	// RetryBackoffBaseSeconds and RetryBackoffMaxSeconds are the first and
+	// the longest wait between attempts once the ladder has nothing left to
+	// change and only waiting is left. Each wait doubles the one before it
+	// up to the longest. Omitted means 60 seconds and 30 minutes.
+	RetryBackoffBaseSeconds int `json:"retry_backoff_base_seconds,omitempty"`
+	RetryBackoffMaxSeconds  int `json:"retry_backoff_max_seconds,omitempty"`
+	// RetryMaxAttempts bounds how many times one stage of one round is
+	// dispatched again before the delivery ends with the failure it would
+	// have ended with before the ladder existed. Omitted, and 0, mean no
+	// bound at all, which is the intended shape: the limit that stops a
+	// delivery for ever belongs on the provider's key, not here.
+	RetryMaxAttempts int `json:"retry_max_attempts,omitempty"`
+	// RetryNoticeAttempts is how many attempts one stage may spend before
+	// the ticket is told, once, that the delivery is still going and what
+	// it is waiting on. Sharing only: nothing waits for a reply, and the
+	// run does not stop. Omitted means 3.
+	RetryNoticeAttempts int `json:"retry_notice_attempts,omitempty"`
 	// IntakePausedSince, when set (RFC 3339), stops the attendant from
 	// starting queued deliveries: the operator's explicit pause (J03). Runs
 	// already claimed continue to their end; a queued ticket is told once
@@ -340,9 +361,6 @@ func Load(path string) (Config, error) {
 			return Config{}, errors.New("runtime config: operator_user_ids must be positive tracker user ids")
 		}
 	}
-	if config.Chain.FailureStreakLimit != nil && *config.Chain.FailureStreakLimit < 0 {
-		return Config{}, errors.New("runtime config: chain.failure_streak_limit must be 0 (off) or positive")
-	}
 	if config.Chain.IntakePausedSince != "" {
 		if _, err := time.Parse(time.RFC3339, config.Chain.IntakePausedSince); err != nil {
 			return Config{}, errors.New("runtime config: chain.intake_paused_since must be an RFC 3339 time or absent")
@@ -417,9 +435,16 @@ func (c Config) ValidateDestinations() error {
 //
 // hermesProfileSentence: without it the decoder refuses the whole file for
 // an unknown field, and the operator has to guess which line to delete.
+//
+// failureStreakSentence: the hold it configured counted deliveries that
+// ended the same way in a row. A stage that fails is now climbed away from
+// instead of ending the delivery, so that run of identical endings cannot
+// form and the number would hold nothing back. Left in place it would read
+// as a live safeguard.
 const (
 	orchestrationSentence = `orchestration は "cards" だけを受け付けます（"runner" は廃止しました）。設定の orchestration を "cards" にしてください`
 	hermesProfileSentence = `hermes_profile は廃止しました。設定から hermes_profile の行を削除してください`
+	failureStreakSentence = `failure_streak_limit は廃止しました。設定から chain.failure_streak_limit の行を削除してください`
 )
 
 // OrchestrationRefusal is the whole refusal of a configuration whose only
@@ -438,6 +463,9 @@ func (c Config) validateOrchestration() error {
 	}
 	if c.HermesProfile != "" {
 		retired = append(retired, hermesProfileSentence)
+	}
+	if c.Chain.FailureStreakLimit != nil {
+		retired = append(retired, failureStreakSentence)
 	}
 	if len(retired) > 0 {
 		return errors.New(refusalPrefix + strings.Join(retired, "。また、"))
@@ -470,6 +498,24 @@ func (c Config) validateOrchestration() error {
 	}
 	if c.Chain.TargetTokenPath == "" {
 		return errors.New("runtime config: chain.target_token_path is required")
+	}
+	// A negative wait is a wait that has already passed, which turns the
+	// last rung of the ladder into a loop with no pause in it; a first wait
+	// longer than the longest one would be clamped down to it on the very
+	// first attempt, which is not what anyone writing those two numbers
+	// meant. Both are refused at load rather than repaired quietly.
+	for name, seconds := range map[string]int{
+		"retry_backoff_base_seconds": c.Chain.RetryBackoffBaseSeconds,
+		"retry_backoff_max_seconds":  c.Chain.RetryBackoffMaxSeconds,
+		"retry_max_attempts":         c.Chain.RetryMaxAttempts,
+		"retry_notice_attempts":      c.Chain.RetryNoticeAttempts,
+	} {
+		if seconds < 0 {
+			return errors.New("runtime config: chain." + name + " must be 0 (the default) or positive")
+		}
+	}
+	if c.Chain.RetryBackoffBase() > c.Chain.RetryBackoffMax() {
+		return errors.New("runtime config: chain.retry_backoff_base_seconds must not exceed chain.retry_backoff_max_seconds")
 	}
 	if c.Chain.E2EProfile != "" {
 		if _, taken := seen[c.Chain.E2EProfile]; taken {
@@ -567,15 +613,36 @@ func (c ChainConfig) IntakePaused() (time.Time, bool) {
 	return since, true
 }
 
-// defaultFailureStreakLimit is how many identical failures in a row hold
-// intake when the configuration says nothing.
-const defaultFailureStreakLimit = 3
+// The waits between attempts when the ladder has run out of things to
+// change and only waiting is left, and how long one stage goes on before
+// the ticket is told it is still going.
+const (
+	defaultRetryBackoffBase    = time.Minute
+	defaultRetryBackoffMax     = 30 * time.Minute
+	defaultRetryNoticeAttempts = 3
+)
 
-// FailureStreakLimitValue resolves the configured streak limit: the
-// default when omitted, 0 when the hold is switched off.
-func (c ChainConfig) FailureStreakLimitValue() int {
-	if c.FailureStreakLimit == nil {
-		return defaultFailureStreakLimit
+// RetryBackoffBase is the first wait between attempts.
+func (c ChainConfig) RetryBackoffBase() time.Duration {
+	if c.RetryBackoffBaseSeconds <= 0 {
+		return defaultRetryBackoffBase
 	}
-	return *c.FailureStreakLimit
+	return time.Duration(c.RetryBackoffBaseSeconds) * time.Second
+}
+
+// RetryBackoffMax is the longest the waits grow to.
+func (c ChainConfig) RetryBackoffMax() time.Duration {
+	if c.RetryBackoffMaxSeconds <= 0 {
+		return defaultRetryBackoffMax
+	}
+	return time.Duration(c.RetryBackoffMaxSeconds) * time.Second
+}
+
+// RetryNoticeAttemptsValue is how many attempts one stage spends before the
+// ticket is told once that the delivery is still going.
+func (c ChainConfig) RetryNoticeAttemptsValue() int {
+	if c.RetryNoticeAttempts <= 0 {
+		return defaultRetryNoticeAttempts
+	}
+	return c.RetryNoticeAttempts
 }

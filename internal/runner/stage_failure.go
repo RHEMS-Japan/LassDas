@@ -108,6 +108,21 @@ type StageFailure struct {
 	// stage returns one exit code for both.
 	TerminalCode string `json:"terminal_code,omitempty"`
 	Error        string `json:"error"`
+	// Interrupted marks a card that was stopped rather than one that
+	// failed. A pod being replaced sends every card a signal, and the
+	// context that carries it cancels whatever verb was running; for a verb
+	// that spends a model turn the class above reads that as a model
+	// failure, because from inside the process it is one — the turn did not
+	// finish.
+	//
+	// It is a separate field rather than a class of its own so that the
+	// class keeps saying what kind of thing went wrong, which is still
+	// worth knowing about an interrupted card. What this adds is whether
+	// anything went wrong at all. A reader counting model failures to
+	// decide the model will not answer must not count these: the answer
+	// was never asked for, and treating a rolling restart as a provider
+	// that gave up walks a whole delivery down the remedies for one.
+	Interrupted bool `json:"interrupted,omitempty"`
 	// CardRunID is the dispatch this card ran as, when the dispatcher said.
 	// Each re-dispatch gets a fresh one, so two failures of the same round can
 	// be told apart.
@@ -370,6 +385,18 @@ func modelTurnGaveUp(detail worker.ModelFailureDetail) bool {
 		detail.Objection != "" || detail.Phrase != ""
 }
 
+// interrupted reports whether the card was stopped from outside rather than
+// having failed. Both cancellations are read: the signal handler's, and the
+// deadline a card's own wall clock imposes — a card cut off at its wall did
+// not find out anything about the model it was talking to either.
+//
+// The chain is walked rather than the text searched. Every verb failure
+// keeps its cause, so the sentinel arrives here whole; a sentence that
+// merely contains the word would also match a model that quoted it.
+func interrupted(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func containsAny(text string, markers []string) bool {
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {
@@ -419,6 +446,7 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 		Round:         round,
 		Class:         classifyStageFailure(failure),
 		Error:         boundedFailureText(failure.Error()),
+		Interrupted:   interrupted(failure),
 		CardRunID:     cardRunID(),
 		FailedAt:      time.Now().UTC(),
 	}
@@ -433,34 +461,49 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 	record.DeliveryID, _ = p.readJSONField("ticket-draft.json", "delivery_id")
 	record.InputSHA256, _ = p.readJSONField("ticket-draft.json", "input_sha256")
 	record.ConfigSHA256, _ = p.readJSONField("ticket-draft.json", "config_sha256")
+	_ = SealStageFailureRecord(p.Workspace, record)
+}
+
+// SealStageFailureRecord writes one account of a failure to the round it
+// names. It is the half of the seal above that does not depend on the
+// pipeline: deciding what the record says needs the run in progress, and
+// writing it needs only the directory. Split so that a caller with a record
+// already in hand — a reader's test, a record rebuilt from elsewhere — puts
+// it where a card would have, rather than re-deriving the digest and the
+// modes beside it and drifting from them.
+func SealStageFailureRecord(workspace string, record StageFailure) error {
+	record.SchemaVersion = StageFailureSchemaVersion
+	if record.Round < 1 || !slices.Contains(runtime.AllStages(), record.Stage) {
+		return errors.New("a failure record names a stage and a round this chain does not have")
+	}
 	digest, err := stageFailureDigest(record)
 	if err != nil {
-		return
+		return err
 	}
 	record.FailureSHA256 = digest
 	encoded, err := json.Marshal(record)
 	if err != nil {
-		return
+		return err
 	}
-	path := StageFailureFile(p.Workspace, stage, round)
+	path := StageFailureFile(workspace, record.Stage, record.Round)
 	// The mode the round's own card would have given it. A seal that gets
 	// there first must not leave a wider directory behind than the card it
 	// is standing in for: the design rounds are made 0o700, the
 	// implementation rounds 0o755.
 	mode := os.FileMode(0o755)
-	if runtime.IsDesignStage(stage) {
+	if runtime.IsDesignStage(record.Stage) {
 		mode = 0o700
 	}
 	if err := os.MkdirAll(filepath.Dir(path), mode); err != nil {
-		return
+		return err
 	}
 	// Removed before the write for the reason every other record here is: a
 	// link left at the path must not carry the write somewhere else. A second
 	// attempt at the same round overwrites, so the newest account wins.
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return
+		return err
 	}
-	_ = writeRecordAtomically(path, encoded)
+	return writeRecordAtomically(path, encoded)
 }
 
 // failureRound is the round a stage's failure belongs to — the same round the

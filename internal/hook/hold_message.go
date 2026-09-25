@@ -2,15 +2,23 @@ package hook
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// The attendant's two operator holds. Neither is a failure of the delivery:
-// one waits for money, the other for a person to look at a pattern. Both
-// are announced once, in requester terms, with the seven-item footer.
+// The notices the attendant puts on a ticket when nobody is at fault and
+// nothing has gone wrong with the request: a delivery that cannot start
+// because a key is out of money or a sign-in has lapsed, one that is queued
+// behind an operator's pause, and one that is still going but is waiting on
+// something outside it. Each is said once, in requester terms, with the
+// seven-item footer, and each resumes by itself.
+//
+// The hold that stopped intake after several deliveries ended the same way
+// was said here too. It counted endings, and a card that fails is climbed
+// away from rather than reported now, so the run of identical endings it
+// watched for cannot form. Its two comment kinds stay in the vocabulary:
+// tickets carry them.
 
 // DescribeTerminalCode renders a failure ending the way a requester would
 // read it, with the machine code kept in parentheses for the operator.
@@ -95,8 +103,56 @@ func SessionHoldContent(runID string, destinations []string) string {
 	}.render()
 }
 
-// FailureStreakContent announces that intake is held because the same
-// failure ended the last N deliveries in a row.
+// LadderWaitRung names the one rung that tells the ticket anything. It is a
+// word rather than the rung's number so that the notice already on a ticket
+// keeps its meaning if the rungs above it are ever renumbered.
+const LadderWaitRung = "wait"
+
+// LadderNoticeMarker names one rung of one stage of one run, so the notice
+// below is posted exactly once however many ticks the wait lasts, and a
+// later stage waiting for its own reason is still told.
+func LadderNoticeMarker(runID, stage, rung string) string {
+	return CommentMarker(string(RunCommentLadder), runID, stage, rung)
+}
+
+// LadderWaitContent says the delivery is still going and is waiting on
+// something outside it. It asks for nothing: the work resumes by itself,
+// and this exists so that a delivery which has been inside one stage for
+// half an hour does not read as a delivery that stopped.
+func LadderWaitContent(runID, stage string) string {
+	body := "【処理は続いています】外部のサービスからの応答が得られないため、この工程をしばらく間隔を空けて試し続けています。" +
+		"依頼は止まっていません。応答が戻り次第、人の操作なしで続きから進みます。\n\n"
+	return body + CommentFacts{
+		State:      "外部サービスの回復待ち（処理は継続中）",
+		NextActor:  "なし（自動で再試行します）",
+		Operation:  "対応不要（起票者・運用担当者のどちらの操作も不要です）",
+		NextEvent:  "間隔を空けて再試行し、成功した時点で続きの工程へ進みます",
+		Production: "未変更",
+		AutoRetry:  "あり（間隔を空けて継続）",
+		Marker:     LadderNoticeMarker(runID, stage, LadderWaitRung),
+	}.render()
+}
+
+// KeyLimitReachedContent says the provider refused because the key has
+// reached its spending limit. It is the one thing on this rung that will
+// not clear by itself: every model the engine could move to is reached
+// through the same key, so the only remedy is the limit being raised or
+// resetting. The delivery is kept, not ended, and resumes from where it
+// stopped.
+func KeyLimitReachedContent(runID, stage string) string {
+	body := "【AI の利用枠の上限に達しました】自動処理に使う AI の利用枠が上限に達したため、この工程を間隔を空けて試し続けています。" +
+		"依頼は止まっていません。運用担当者が上限を上げるか、利用枠がリセットされると、人の操作なしで続きから進みます。\n\n"
+	return body + CommentFacts{
+		State:      "利用枠の上限に達して待機中（処理は継続中）",
+		NextActor:  "運用担当者",
+		Operation:  "利用枠の上限を上げる、またはリセットを待つ（起票者の操作は不要です）",
+		NextEvent:  "間隔を空けて再試行し、利用できるようになった時点で続きの工程へ進みます",
+		Production: "未変更",
+		AutoRetry:  "あり（間隔を空けて継続）",
+		Marker:     LadderNoticeMarker(runID, stage, LadderWaitRung),
+	}.render()
+}
+
 // IntakePausedContent is the one notice a queued ticket gets while the
 // operator's pause is in force: the request was received, nothing is
 // wrong with it, and it starts when intake resumes.
@@ -122,95 +178,4 @@ func IntakePausedContent(runID string, since time.Time) string {
 // same pause is told once.
 func IntakePausedMarker(runID string, since time.Time) string {
 	return CommentMarker(string(RunCommentIntakePaused), runID, strconv.FormatInt(since.Unix(), 10))
-}
-
-func FailureStreakContent(runID, code string, count int) string {
-	body := fmt.Sprintf(
-		"【同じ失敗が %d 回連続】直近の自動処理が %d 回続けて同じ結果 — %s — になりました。仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",
-		count, count, DescribeTerminalCode(code))
-	return body + streakFacts(runID)
-}
-
-// FailureStreakFamilyContent is the same hold for a run of failures that are
-// one problem with more than one ending. Naming the newest one would send an
-// operator to look for a disagreement two of the three runs never had
-// (review of #201).
-func FailureStreakFamilyContent(runID, family string, count int, breakdown map[string]int) string {
-	body := fmt.Sprintf(
-		"【同じところで %d 回連続】直近の自動処理が %d 回続けて同じところで止まりました — %s。"+
-			"終わり方の内訳は %s です。原因は同じ工程にあります。"+
-			"仕組みの側に原因がある可能性が高いため、運用担当者が原因を確認するまで、新しい依頼の受付を止めます。\n\n"+
-			"確認が済んだら、このチケットに「確認済み」とだけ書いたコメントを投稿してください。受付を再開します。\n",
-		count, count, DescribeStreakFamily(family), describeBreakdown(breakdown))
-	return body + streakFactsFor(runID, "受付停止（同じところでの失敗の連続）")
-}
-
-// describeBreakdown lists how many runs ended each way, with the machine
-// code, because that is what an operator types into the ledger next. The
-// family sentence says where the runs stopped; without this it said the
-// endings differed and then did not say how (review of #201).
-func describeBreakdown(breakdown map[string]int) string {
-	codes := make([]string, 0, len(breakdown))
-	for code := range breakdown {
-		codes = append(codes, code)
-	}
-	sort.Slice(codes, func(a, b int) bool {
-		if breakdown[codes[a]] != breakdown[codes[b]] {
-			return breakdown[codes[a]] > breakdown[codes[b]]
-		}
-		return codes[a] < codes[b]
-	})
-	parts := make([]string, 0, len(codes))
-	for _, code := range codes {
-		parts = append(parts, fmt.Sprintf("%s %d 件", code, breakdown[code]))
-	}
-	if len(parts) == 0 {
-		return "読み取れませんでした"
-	}
-	return strings.Join(parts, " / ")
-}
-
-// DescribeStreakFamily names what a run of mixed endings has in common.
-func DescribeStreakFamily(family string) string {
-	switch family {
-	case StreakFamilyDesign:
-		return "設計の段が、決められた回数のうちに通る計画を出せませんでした"
-	default:
-		return "同じ工程で止まりました"
-	}
-}
-
-// StreakFamilyDesign groups the two design endings: the design reviews never
-// agreed, and an agreed design called wrong from downstream with no round
-// left. Either way the design stage could not produce a plan that passed.
-const StreakFamilyDesign = "design"
-
-func streakFacts(runID string) string {
-	return streakFactsFor(runID, "受付停止（同じ失敗の連続）")
-}
-
-func streakFactsFor(runID, state string) string {
-	return CommentFacts{
-		State:      state,
-		NextActor:  "運用担当者",
-		Operation:  "原因を確認し、このチケットに「確認済み」とコメント",
-		NextEvent:  "「確認済み」を検知した時点で受付を再開（以後の自動通知はありません）",
-		Production: "未変更",
-		AutoRetry:  "なし（人の確認待ち）",
-		Marker:     CommentMarker(string(RunCommentStreakHold), runID),
-	}.render()
-}
-
-// StreakResolvedContent acknowledges the operator's 「確認済み」 on a streak
-// hold: intake resumes.
-func StreakResolvedContent(runID string) string {
-	return "【運用担当者の確認を記録】受付停止を解除し、新しい依頼の受付を再開します。\n" + CommentFacts{
-		State:      "受付再開",
-		NextActor:  "なし（記録です）",
-		Operation:  "対応不要",
-		NextEvent:  "以後の自動通知はありません",
-		Production: "未変更",
-		AutoRetry:  "なし",
-		Marker:     CommentMarker(string(RunCommentStreakResolved), runID),
-	}.render()
 }

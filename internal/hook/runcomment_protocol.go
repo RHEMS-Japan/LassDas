@@ -45,9 +45,17 @@ const (
 	// observation browser cannot sign in to a destination's staging; it
 	// resumes by itself once the session jar is renewed.
 	RunCommentSessionHold RunCommentKind = "session-hold"
-	// RunCommentStreakHold says intake is stopped because the same failure
-	// ended the last N deliveries; RunCommentStreakResolved acknowledges
-	// the operator's 「確認済み」 that lifts it.
+	// RunCommentLadder says a delivery is still going and is waiting on
+	// something outside it — a service that is not answering, or a key that
+	// has reached its limit. For sharing only: nothing waits for a reply
+	// and the delivery is not held. One per run, stage and rung.
+	RunCommentLadder RunCommentKind = "ladder"
+	// RunCommentStreakHold said intake was stopped because the same failure
+	// ended the last N deliveries; RunCommentStreakResolved acknowledged
+	// the operator's 「確認済み」 that lifted it. Nothing posts either any
+	// more — a failed card is climbed away from rather than reported, so
+	// the run of identical endings cannot form — and both stay because
+	// tickets carry comments that name them.
 	RunCommentStreakHold RunCommentKind = "streak-hold"
 	// RunCommentIntakePaused tells a queued ticket that the operator paused
 	// intake and the run will start once intake resumes.

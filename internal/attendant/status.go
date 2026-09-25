@@ -104,9 +104,6 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
-	// The streak is read on the untrimmed list: trimming below reuses the
-	// slice's backing array.
-	streak := detectFailureStreak(runs, config.Chain.FailureStreakLimitValue(), streakResolvedIn(config))
 	// Trim BEFORE classifying: classification does per-run file I/O, and
 	// the ledger only grows. Terminal runs beyond twice the display limit
 	// (newest first) cannot appear on the board — resting ones are capped
@@ -139,16 +136,14 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 		kept = append(kept, run)
 	}
 	snapshot.Runs = kept
-	snapshot.Notice = intakeNotice(config, streak)
+	snapshot.Notice = intakeNotice(config)
 	return snapshot, nil
 }
 
-// intakeNotice is the board's banner while intake is held: the failure
-// streak first (its confirmation lifts it), else the operator's pause.
-func intakeNotice(config runtime.Config, streak failureStreak) string {
-	if streak.Active {
-		return streakNotice(streak)
-	}
+// intakeNotice is the board's banner while intake is held, which now has
+// one cause: the operator's pause. The banner that said several deliveries
+// had ended the same way is gone with the hold it described.
+func intakeNotice(config runtime.Config) string {
 	if since, paused := config.Chain.IntakePaused(); paused {
 		return intakePausedNotice(since)
 	}

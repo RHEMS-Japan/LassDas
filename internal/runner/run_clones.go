@@ -23,6 +23,20 @@ import (
 // business rather than this one's.
 var CloneDirectories = []string{"target-base", "target-repo", "validation-target"}
 
+// ReclaimableCloneDirectories are the copies a run can be made to give back
+// while it is still running, when the volume has filled under it and there
+// is nothing else left to clear.
+//
+// Only the validation sandbox is here, and the other two are deliberately
+// absent. The validation stage removes and re-clones its sandbox at the
+// top of every attempt, so taking it costs the next attempt one clone and
+// nothing else. The tree the model stages read and the working copy they
+// change are made once, by the preparation, before any card exists: no
+// stage rebuilds them, and a stage that found either missing would fail on
+// every remaining round of the delivery. Freeing a gigabyte by ending the
+// delivery is not freeing anything.
+var ReclaimableCloneDirectories = []string{"validation-target"}
+
 // CloneRefusal is one clone directory that would not go, and the reason
 // it gave.
 type CloneRefusal struct {
@@ -72,7 +86,7 @@ func RunClonesPresent(workspace string) bool {
 // The ending waits as long as a reclaim takes. Nothing else is happening
 // in that process, and a tree left lent is a tree nobody can clear later.
 func PruneRunClones(workspace string) CloneSweep {
-	return pruneClones(workspace, worker.ReclaimWorkspace)
+	return pruneClones(workspace, CloneDirectories, worker.ReclaimWorkspace)
 }
 
 // SweepRunClones is PruneRunClones for a caller on a clock: a reclaim it
@@ -83,16 +97,23 @@ func PruneRunClones(workspace string) CloneSweep {
 // them. A reclaim cut short leaves the directory exactly as it was, and
 // the next tick asks again.
 func SweepRunClones(ctx context.Context, workspace string) CloneSweep {
-	return pruneClones(workspace, func(root string) { worker.ReclaimWorkspaceWithin(ctx, root) })
+	return pruneClones(workspace, CloneDirectories, func(root string) { worker.ReclaimWorkspaceWithin(ctx, root) })
 }
 
-func pruneClones(workspace string, reclaim func(string)) CloneSweep {
+// SweepReclaimableClones takes back only what a live run can lose, for the
+// caller that is trying to make room for that run's next attempt rather
+// than clearing up after a finished one.
+func SweepReclaimableClones(ctx context.Context, workspace string) CloneSweep {
+	return pruneClones(workspace, ReclaimableCloneDirectories, func(root string) { worker.ReclaimWorkspaceWithin(ctx, root) })
+}
+
+func pruneClones(workspace string, names []string, reclaim func(string)) CloneSweep {
 	sweep := CloneSweep{}
 	if workspace == "" {
 		return sweep
 	}
 	reclaimed := false
-	for _, name := range CloneDirectories {
+	for _, name := range names {
 		path := filepath.Join(workspace, name)
 		if _, err := os.Lstat(path); err != nil {
 			continue

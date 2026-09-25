@@ -120,14 +120,74 @@ func TestLoadRefusesEverythingButTheCardChain(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "hermes_profile") || !strings.Contains(err.Error(), "削除") {
 		t.Fatalf("hermes_profile: Load() error = %v", err)
 	}
-	// A file carrying both names both. Found one at a time, the second
-	// would only appear after the first was fixed and the pod restarted.
+	// The hold that stopped intake after several deliveries ended the same
+	// way. A failed card is climbed away from rather than reported now, so
+	// that run of identical endings cannot form and the number would hold
+	// nothing back. Left in place it would read as a live safeguard, so the
+	// file is refused by name — not read and ignored, and not refused with
+	// the decoder's unknown-field message either.
+	for _, value := range []any{3, 0} {
+		streak := validRuntimeConfigMap()
+		chain := cardsChainMap()
+		chain["failure_streak_limit"] = value
+		streak["chain"] = chain
+		_, err := Load(writeRuntimeConfig(t, streak))
+		if err == nil || !strings.Contains(err.Error(), "failure_streak_limit") || !strings.Contains(err.Error(), "削除") {
+			t.Fatalf("failure_streak_limit %v: Load() error = %v", value, err)
+		}
+	}
+	// A file carrying all of them names all of them. Found one at a time,
+	// the next would only appear after the first was fixed and the pod
+	// restarted.
 	both := validRuntimeConfigMap()
 	both["orchestration"] = "runner"
 	both["hermes_profile"] = "an-assignee-profile"
+	bothChain := cardsChainMap()
+	bothChain["failure_streak_limit"] = 3
+	both["chain"] = bothChain
 	_, err = Load(writeRuntimeConfig(t, both))
-	if err == nil || !strings.Contains(err.Error(), "orchestration") || !strings.Contains(err.Error(), "hermes_profile") {
-		t.Fatalf("both retired settings: Load() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "orchestration") ||
+		!strings.Contains(err.Error(), "hermes_profile") || !strings.Contains(err.Error(), "failure_streak_limit") {
+		t.Fatalf("every retired setting: Load() error = %v", err)
+	}
+}
+
+// The waits between attempts are refused rather than repaired when they
+// make no sense: a negative wait has already passed, which turns the last
+// rung of the ladder into a loop with no pause in it, and a first wait
+// longer than the longest would be clamped down to it on the very first
+// attempt.
+func TestLoadRefusesRetrySettingsThatMakeNoSense(t *testing.T) {
+	for name, settings := range map[string]map[string]any{
+		"a negative first wait": {"retry_backoff_base_seconds": -1},
+		"a negative longest":    {"retry_backoff_max_seconds": -30},
+		"a negative limit":      {"retry_max_attempts": -1},
+		"a negative notice":     {"retry_notice_attempts": -1},
+		"a first wait too long": {"retry_backoff_base_seconds": 3600, "retry_backoff_max_seconds": 60},
+	} {
+		raw := validRuntimeConfigMap()
+		chain := cardsChainMap()
+		for key, value := range settings {
+			chain[key] = value
+		}
+		raw["chain"] = chain
+		if _, err := Load(writeRuntimeConfig(t, raw)); err == nil || !strings.Contains(err.Error(), "retry_") {
+			t.Fatalf("%s: Load() error = %v", name, err)
+		}
+	}
+	// And the settings that do make sense load.
+	raw := validRuntimeConfigMap()
+	chain := cardsChainMap()
+	chain["retry_backoff_base_seconds"] = 30
+	chain["retry_backoff_max_seconds"] = 600
+	chain["retry_notice_attempts"] = 2
+	raw["chain"] = chain
+	config, err := Load(writeRuntimeConfig(t, raw))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.Chain.RetryBackoffBase() != 30*time.Second || config.Chain.RetryNoticeAttemptsValue() != 2 {
+		t.Fatalf("the configured waits did not come back: %+v", config.Chain)
 	}
 }
 

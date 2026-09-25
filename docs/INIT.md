@@ -155,7 +155,7 @@ statusboard はコンテナ内 :9200。init は `LASSDAS_BOARD_AUTH=local` を�
 | worker_bin / controller_bin / browsercheck_bin | /usr/local/bin/worker、/usr/local/bin/controller、browsercheck は空 |
 | worker_sha256 / controller_sha256 | image の /etc/lassdas/tool-pins.txt から取得し実バイナリと照合。3 本目も存在検査するが観測を有効にしない |
 | hermes_bin / hermes_board | /usr/local/bin/hermes、project ごとの内部名 |
-| orchestration / chain | cards、runs_root=/data/runs、target_token_path=/data/secrets/target-token、failure_streak_limit=3、profile 10 本を entrypoint と一致させる |
+| orchestration / chain | cards、runs_root=/data/runs、target_token_path=/data/secrets/target-token、profile 10 本を entrypoint と一致させる |
 | chain.profiles の実装系 5 本 | implementer、review_a、review_b、validate、publish → lassdas-implementer、lassdas-review-a、lassdas-review-b、lassdas-validate、lassdas-publish |
 | chain.profiles の設計系 5 本 | investigate、design_review_a、design_review_b、design_decide、applier → lassdas-investigate、lassdas-design-review-a、lassdas-design-review-b、lassdas-design-decide、lassdas-applier |
 | 観測・配送 | chain.e2e_profile と chain.deliver は空。consumer と矛盾する組合せは起動前に拒否 |

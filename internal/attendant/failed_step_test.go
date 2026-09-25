@@ -144,7 +144,9 @@ func TestTheSealAndTheReviewAreNotToldAsTheSameStep(t *testing.T) {
 }
 
 // The behaviour, end to end: a run that ends model_failed says which step it
-// failed at, in the comment the requester actually reads.
+// failed at, in the comment the requester actually reads. A failed card is
+// climbed rather than reported now, so the ending being measured is the one
+// an operator asked for by capping the attempts.
 func TestAModelFailureTellsTheRequesterWhichStepFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -171,6 +173,7 @@ func TestAModelFailureTellsTheRequesterWhichStepFailed(t *testing.T) {
 			}
 			fixture.store.expected = digest
 			hermes, _ := fakeBoard(t)
+			exhaustTheLadder(t, &fixture.config, runDir, tc.stage, 1)
 			card := runtime.BoardTask{ID: "t_m1", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, tc.stage, 1)}
 			view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
 			run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
@@ -220,6 +223,7 @@ func TestAModelFailureOnTheImplementationSideAlsoNamesItsStep(t *testing.T) {
 	}
 	fixture.store.expected = digest
 	hermes, _ := fakeBoard(t)
+	exhaustTheLadder(t, &fixture.config, runDir, runtime.StageReviewA, 1)
 	card := runtime.BoardTask{ID: "t_r1", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, runtime.StageReviewA, 1)}
 	view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
 	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
@@ -387,6 +391,7 @@ func TestBudgetRefusalReachesReportBoardAndReportRetryForTheFailedRound(t *testi
 				t.Fatal(err)
 			}
 			hermes, _ := fakeBoard(t)
+			exhaustTheLadder(t, &fixture.config, dir, stage, 2)
 			card := runtime.BoardTask{ID: "t_failure", Status: "failed", IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, stage, 2)}
 			view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
 			var err error

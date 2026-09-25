@@ -189,6 +189,22 @@ func handleDesignChainFailure(
 	default:
 		return false, nil
 	}
+	// The same three endings the implementation side hands to the ladder:
+	// a model that would not answer, and the machinery's own breakdown
+	// after an approved design. Neither was a decision about the request.
+	// The endings this keeps are the ones that are — a design its judges
+	// could not agree on, a report the investigator could not complete.
+	if ladderOwns(code) {
+		verdict, err := climbLadder(ctx, newClimb(config, services, hermes, envelope, run, view, plan, stageName, logger))
+		switch {
+		case err != nil:
+			return true, err
+		case verdict == ladderHandled:
+			return true, nil
+		case verdict == ladderStopped:
+			code, evidence = hook.TerminalCancelled, nil
+		}
+	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {

@@ -226,6 +226,64 @@ func TestSealStageFailureWritesBesideTheRoundsOtherRecords(t *testing.T) {
 	}
 }
 
+// A pod being replaced cancels whatever every card was doing, and for a
+// verb that spends a model turn the class reads that as a model failure —
+// from inside the process it is one, because the turn did not finish. The
+// record says which it was, so a reader deciding the model will not answer
+// does not count a rolling restart towards it.
+func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T) {
+	pipeline := stageFailurePipeline(t)
+	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		stage       string
+		failure     error
+		interrupted bool
+	}{
+		{"the pod was replaced mid-turn", runtime.StageReviewA,
+			&verbFailure{verb: "agent-review", err: context.Canceled}, true},
+		{"the card met its own wall", runtime.StageReviewB,
+			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, true},
+		{"the provider gave up", runtime.StageValidate,
+			&verbFailure{verb: "agent-review", code: 1}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipeline.SealStageFailure(tc.stage, tc.failure)
+			record, ok := ReadStageFailure(pipeline.Workspace, tc.stage, 1)
+			if !ok {
+				t.Fatal("nothing was sealed")
+			}
+			if record.Interrupted != tc.interrupted {
+				t.Fatalf("interrupted = %v, want %v (class %q)", record.Interrupted, tc.interrupted, record.Class)
+			}
+			// The class still says what kind of thing it was, which is what
+			// makes this a second fact rather than a replacement for one.
+			if record.Class != FailureClassModel {
+				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			}
+		})
+	}
+	// And the flag is inside the digest: an account altered after the fact
+	// is refused, not read.
+	path := StageFailureFile(pipeline.Workspace, runtime.StageValidate, 1)
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := strings.Replace(string(encoded), `"error":`, `"interrupted":true,"error":`, 1)
+	if forged == string(encoded) {
+		t.Fatal("the record could not be altered; the test measures nothing")
+	}
+	if err := os.WriteFile(path, []byte(forged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStageFailure(pipeline.Workspace, runtime.StageValidate, 1); ok {
+		t.Fatal("an account given the flag after it was sealed was read as sealed")
+	}
+}
+
 // A run directory outlives its cards. A record that does not name the stage
 // and round it was asked for, or that was cut short, explains nothing and is
 // refused rather than read.

@@ -243,17 +243,29 @@ fabricated workflow link.
   cannot see is logged, never silently skipped.
   Before this a run on an exhausted key spent its allowance on refusals
   and died as an unexplained model failure (live, 2026-09-02).
-- **Failure streak hold**: when the same failure ended the last N
-  deliveries (`chain.failure_streak_limit`, default 3; a success, a stop,
-  an expired or required clarification and a refused or unresolved
-  readiness end a streak — they say nothing about the automation), the
-  attendant stops taking new
-  deliveries, says so once on the newest failed ticket (marker
-  `streak-hold`) and shows the reason as the board's banner. The
-  operator's 「確認済み」 on that ticket lifts it (acknowledged once,
-  `failure-streak-resolution.json` recorded in that run's directory).
-  In-flight runs are not touched; the held ticket is read at most every
-  two minutes.
+- **The resolution ladder**: a card that fails is no longer the end of the
+  delivery. The card seals what kind of thing went wrong
+  (`history/<round>/<stage>-failure.json`), and the attendant plays a hand
+  it has not played for that kind and dispatches the stage again — the
+  failed stage and the ones after it are archived and rebuilt, the ones
+  before it keep their records. A full volume sweeps the finished
+  deliveries' copies of the destination, then gives back this delivery's
+  own verification sandbox. When nothing is left to change, the waits
+  between attempts double from `chain.retry_backoff_base_seconds`
+  (default 60) up to `chain.retry_backoff_max_seconds` (default 1800),
+  for as long as it takes; `chain.retry_max_attempts` (default 0, meaning
+  no bound) is there for an operator who wants one. After
+  `chain.retry_notice_attempts` (default 3) the ticket is told once that
+  the delivery is still going (marker `ladder`), and a key that has
+  reached its spending limit is told at once, because no model the engine
+  could move to is reached any other way. The record of the climb is
+  `retry/<stage>-r<N>.json` in the run directory, so a pod replaced
+  mid-climb resumes where it was. A 「停止」 from the requester is read
+  before each dispatch and ends the delivery as cancelled.
+- **The failure streak hold is retired**: it stopped intake when the same
+  failure ended the last N deliveries. Nothing counts now — a failed card
+  is climbed away from rather than reported — so `chain.failure_streak_limit`
+  is refused by name at load, the way `hermes_profile` is.
 - **Intake pause**: `chain.intake_paused_since`
   (an RFC 3339 time) is the operator's explicit pause. The attendant and the
   console re-read it from the mounted config before every tick, so editing
