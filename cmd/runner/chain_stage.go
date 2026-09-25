@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 )
@@ -77,17 +78,37 @@ func runChainStage(ctx context.Context, arguments []string) error {
 // provision fails the card rather than running it without: a delivery that
 // was told it may reach a service, and silently could not, spends a whole
 // round finding out in the worst possible way.
+//
+// The contents are registered as this process's secrets whichever way the
+// variable is handed over. A credential given as a path exports a file name
+// that is not itself secret, but the tool that reads the file prints what is
+// in it when it fails, and that output travels into records and onto a
+// screen.
 func stageCredentials(config runtime.Config, stage string) ([]string, error) {
-	var assignments []string
+	var assignments, variables, secrets []string
 	for _, credential := range config.Chain.CredentialsFor(stage) {
-		value, err := credentialValue(credential)
+		contents, err := credentialValue(credential)
 		if err != nil {
 			return nil, err
 		}
-		for _, variable := range credential.Env {
-			assignments = append(assignments, variable+"="+value)
+		exported := contents
+		if credential.HandsOverPath() {
+			exported = credential.Path
 		}
+		for _, variable := range credential.Env {
+			assignments = append(assignments, variable+"="+exported)
+			variables = append(variables, variable)
+		}
+		secrets = append(secrets, contents)
 	}
+	if len(variables) == 0 {
+		return nil, nil
+	}
+	cardsecret.Register(variables, secrets)
+	// The names travel to every process this card starts, so a worker — and
+	// the agent it launches — knows which of the variables it inherited are
+	// secret. The values travel as the variables themselves.
+	assignments = append(assignments, cardsecret.NamesEnv+"="+strings.Join(variables, ":"))
 	return assignments, nil
 }
 

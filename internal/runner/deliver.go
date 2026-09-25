@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/visiblecheck"
 )
 
@@ -123,6 +124,10 @@ const maxDeliverReportBytes = 1 << 20
 // RunDeliver advances the delivery to the requested milestone, resuming
 // past every step whose artifact already exists.
 func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
+	// A delivery card reaches the destination's environments with whatever
+	// credential it was named in, so it is a card that can bring something
+	// into existence; what it made is collected the way a chain card's is.
+	defer func() { _ = p.RecordCreatedResources(deliverCardStage(until), p.path("target-repo")) }()
 	if until != DeliverUntilChecks && until != DeliverUntilStaging && until != DeliverUntilProduction {
 		return errors.New("deliver milestone is invalid")
 	}
@@ -159,6 +164,20 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 		return nil
 	}
 	return p.deliverStaging(ctx, stageDir, reviews)
+}
+
+// deliverCardStage is the card name behind one milestone, for the records
+// a delivery card writes under its own name.
+func deliverCardStage(until string) string {
+	switch until {
+	case DeliverUntilChecks:
+		return runtime.DeliverStageChecks
+	case DeliverUntilStaging:
+		return runtime.DeliverStageIntegrate
+	case DeliverUntilProduction:
+		return runtime.DeliverStagePromote
+	}
+	return ""
 }
 
 // deliverChecks waits for the feature CI. A red gate is a sealed result

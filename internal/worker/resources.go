@@ -33,7 +33,21 @@ type CreatedResource struct {
 	// stamped by the card, never taken from what an agent wrote.
 	Stage     string    `json:"stage"`
 	CreatedAt time.Time `json:"created_at"`
+	// Refused marks a kind the destination did not allow. The declaration
+	// is kept rather than dropped: an agent that said it made something is
+	// the only evidence anyone has that it may exist, and a record that
+	// silently discarded it would leave a resource nobody knows to look
+	// for. It is never reported as created.
+	Refused bool `json:"refused,omitempty"`
 }
+
+// AgentResourcesFile is what an agent declares its creations in, at the
+// root of its working copy — the one place it can write. The card collects
+// the file, stamps each line and removes it, so it never reaches the sealed
+// candidate as a change to the destination's repository. Named here because
+// the instruction that asks for it and the collector that reads it must
+// name the same file.
+const AgentResourcesFile = "lassdas-resources.jsonl"
 
 // MaxCreatedResourcesBytes bounds the record file a trail reads back.
 const MaxCreatedResourcesBytes = 256 * 1024
@@ -86,6 +100,25 @@ func readFileWithin(path string, limit int64) ([]byte, error) {
 // is looking for one thing, and two runs of the same request should read
 // the same way.
 func composeCreatedResources(created []CreatedResource) string {
+	allowed, refused := splitRefusedResources(created)
+	return composeResourceList("\n### この依頼で作った資源 (repo の外・削除されません)\n", allowed) +
+		composeResourceList("\n### 許可されていない種類として退けた宣言 (作られている可能性があります)\n", refused)
+}
+
+// splitRefusedResources keeps a declaration the destination did not allow
+// out of what the run reports as created.
+func splitRefusedResources(created []CreatedResource) (allowed, refused []CreatedResource) {
+	for _, record := range created {
+		if record.Refused {
+			refused = append(refused, record)
+			continue
+		}
+		allowed = append(allowed, record)
+	}
+	return allowed, refused
+}
+
+func composeResourceList(heading string, created []CreatedResource) string {
 	if len(created) == 0 {
 		return ""
 	}
@@ -97,7 +130,7 @@ func composeCreatedResources(created []CreatedResource) string {
 		return sorted[i].Identifier < sorted[j].Identifier
 	})
 	var builder strings.Builder
-	builder.WriteString("\n### この依頼で作った資源 (repo の外・削除されません)\n")
+	builder.WriteString(heading)
 	for _, record := range sorted {
 		builder.WriteString("- " + trailClip(record.Kind, 64) + ": " + trailClip(record.Identifier, 256))
 		if record.Provider != "" {

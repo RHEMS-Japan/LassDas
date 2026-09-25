@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/probe"
 	"bytes"
@@ -861,11 +862,37 @@ func agentEnvironment(config AgentConfig, home string) ([]string, error) {
 		}
 		environment = append(environment, name+"="+value)
 	}
+	// What this card was handed. The environment an agent runs in is built
+	// here from nothing, so a credential in this process's own environment
+	// would otherwise stop at the process that read it — and the agent is
+	// the one thing in a card that has to reach a service to write a change
+	// against it. SecretEnv is not the way in: it is the launch's own fixed
+	// binding of a model key, four names at most, and a credential is the
+	// destination's, named per card and possibly multi-line.
+	for _, name := range cardsecret.Names() {
+		value := os.Getenv(name)
+		if value == "" {
+			// The card's entry refuses an unreadable credential before any
+			// step runs, so an empty one here is a variable the launch
+			// itself dropped; the agent runs without it rather than not at
+			// all, and the service it cannot reach is what says so.
+			continue
+		}
+		environment = append(environment, name+"="+value)
+	}
 	sort.Strings(environment)
 	return environment, nil
 }
 
+// boundedTranscript is the agent's own output as the run keeps it. The
+// card's credentials go first and the bound is applied after, so the count
+// is of what will be written rather than of text that still holds a secret.
+//
+// Replaced rather than refused: the transcript is the agent's account of
+// what it did, and for a run that stopped it is the whole of what the
+// ticket gets. A sentence with [secret] in it still says what happened.
 func boundedTranscript(value string) string {
+	value = cardsecret.Redact(value)
 	if len(value) <= MaxAgentTranscriptBytes {
 		return value
 	}

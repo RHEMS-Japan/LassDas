@@ -31,11 +31,9 @@ import (
 // object per line, under the run directory.
 const ResourcesFile = "history/resources.jsonl"
 
-// AgentResourcesFile is what an agent writes its claims in, at the root of
-// its working copy — the one place it can write. The card collects the
-// file, stamps each line and removes it, so it never reaches the sealed
-// candidate as a change to the destination's repository.
-const AgentResourcesFile = "lassdas-resources.jsonl"
+// AgentResourcesFile is what an agent declares its creations in; the
+// instruction that asks for it names the same constant.
+const AgentResourcesFile = worker.AgentResourcesFile
 
 // maxResourceRecords bounds one run's list, and maxResourceFileBytes one
 // agent's claim file. A run that reports creating hundreds of resources has
@@ -80,6 +78,13 @@ func (p *Pipeline) RecordCreatedResources(stage, workingCopy string) error {
 	}
 	created := make([]worker.CreatedResource, 0, 8)
 	at := time.Now().UTC()
+	// What this destination allows. A kind it did not name is kept as a
+	// refused declaration rather than as something the run created: the
+	// engine may create what it was allowed to create, and a report that
+	// listed the rest as created would tell a reader the destination agreed
+	// to it. A configuration that cannot be read allows nothing — the
+	// permission has to be established, not assumed.
+	permitted := p.permittedResourceKinds()
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -96,6 +101,7 @@ func (p *Pipeline) RecordCreatedResources(stage, workingCopy string) error {
 			Stage:      stage,
 			CreatedAt:  at,
 		}
+		record.Refused = !permitted(record.Kind)
 		if record.Kind == "" || record.Identifier == "" {
 			// A line naming neither what was made nor where to find it
 			// records nothing; keeping it would put an empty bullet on the
@@ -108,6 +114,56 @@ func (p *Pipeline) RecordCreatedResources(stage, workingCopy string) error {
 		}
 	}
 	return p.appendResources(created)
+}
+
+// permittedResourceKinds answers whether this run's destination allows a
+// kind of resource to exist because of it.
+//
+// The configuration is read the lenient way the chain reads it elsewhere —
+// the file's other sections are the worker's business and validated there,
+// and what is needed here is a list of words. It is read at collection time
+// rather than carried on the pipeline because the collection runs at the
+// end of every card, including ones that never resolved a consumer.
+//
+// A file that cannot be read allows nothing. The permission has to be
+// established: reporting a resource as one the destination agreed to,
+// because nothing could say otherwise, is the failure this answers.
+func (p *Pipeline) permittedResourceKinds() func(kind string) bool {
+	deny := func(string) bool { return false }
+	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
+	if err != nil {
+		return deny
+	}
+	var parsed struct {
+		Consumers []struct {
+			Repository     string `json:"repository"`
+			Infrastructure *struct {
+				Resources []string `json:"resources"`
+			} `json:"infrastructure"`
+		} `json:"consumers"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil {
+		return deny
+	}
+	repository := p.consumerRepository
+	if repository == "" {
+		repository, _ = p.readJSONField("ticket-draft.json", "repository")
+	}
+	for _, consumer := range parsed.Consumers {
+		if consumer.Repository != repository || consumer.Infrastructure == nil {
+			continue
+		}
+		allowed := append([]string(nil), consumer.Infrastructure.Resources...)
+		return func(kind string) bool {
+			for _, permitted := range allowed {
+				if permitted == kind {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return deny
 }
 
 // appendResources adds lines to the run's record, creating it on the first

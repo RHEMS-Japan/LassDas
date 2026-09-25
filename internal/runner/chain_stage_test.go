@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"automation.internal/ticket-ingress/internal/runtime"
 )
 
 func writeChainConsumerConfig(t *testing.T, reviewerIDs []string) string {
@@ -166,18 +164,18 @@ func TestChainImplementRunsTheInstructionThroughTheWorker(t *testing.T) {
 	pipeline.Config.Identity.EngineSHA = strings.Repeat("a", 40)
 	repoRoot := pipeline.path("target-repo")
 	baseSHA := strings.Repeat("b", 40)
-	err := pipeline.chainRunInstruction(context.Background(), runtime.StageImplement, "implementer", repoRoot, baseSHA)
+	err := pipeline.chainRunInstruction(context.Background(), "implementer", repoRoot, baseSHA)
 	if err == nil || !strings.Contains(err.Error(), "no instruction") {
 		t.Fatalf("without an instruction: %v", err)
 	}
 	if err := os.WriteFile(pipeline.path("INSTRUCTION.md"), []byte("do this\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := pipeline.chainRunInstruction(context.Background(), runtime.StageImplement, "implementer", repoRoot, baseSHA); err != nil {
+	if err := pipeline.chainRunInstruction(context.Background(), "implementer", repoRoot, baseSHA); err != nil {
 		t.Fatalf("chainRunInstruction: %v", err)
 	}
 	sealStageFiles(t, pipeline, 1, "revise")
-	if err := pipeline.chainRunInstruction(context.Background(), runtime.StageApply, "applier", repoRoot, baseSHA); err != nil {
+	if err := pipeline.chainRunInstruction(context.Background(), "applier", repoRoot, baseSHA); err != nil {
 		t.Fatalf("chainRunInstruction round 2: %v", err)
 	}
 	logged, err := os.ReadFile(record)
@@ -256,7 +254,7 @@ func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) 
 	}
 	repoRoot := pipeline.path("target-repo")
 	baseSHA := strings.Repeat("b", 40)
-	if err := pipeline.chainRunInstruction(context.Background(), runtime.StageApply, "applier", repoRoot, baseSHA); err != nil {
+	if err := pipeline.chainRunInstruction(context.Background(), "applier", repoRoot, baseSHA); err != nil {
 		t.Fatalf("applier card: %v", err)
 	}
 	logged, _ := os.ReadFile(record)
@@ -285,7 +283,7 @@ func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) 
 	if err := os.Remove(record); err != nil {
 		t.Fatal(err)
 	}
-	if err := pipeline.chainRunInstruction(context.Background(), runtime.StageImplement, "implementer", repoRoot, baseSHA); err != nil {
+	if err := pipeline.chainRunInstruction(context.Background(), "implementer", repoRoot, baseSHA); err != nil {
 		t.Fatalf("implementer card: %v", err)
 	}
 	logged, _ = os.ReadFile(record)
@@ -297,7 +295,7 @@ func TestChainApplyCardCarriesTheDesignAndTheObjectionDestination(t *testing.T) 
 	if err := os.Remove(filepath.Join(pipeline.designRoundDir(1), "design.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := pipeline.chainRunInstruction(context.Background(), runtime.StageApply, "applier", repoRoot, baseSHA); err == nil || !errors.Is(err, ErrNoApprovedDesign) {
+	if err := pipeline.chainRunInstruction(context.Background(), "applier", repoRoot, baseSHA); err == nil || !errors.Is(err, ErrNoApprovedDesign) {
 		t.Fatalf("applier without its design: %v", err)
 	}
 }

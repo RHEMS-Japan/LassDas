@@ -26,6 +26,8 @@ func runImplementInstruction(args []string) error {
 	rulingPath := flags.String("ruling", "", "")
 	returnedPath := flags.String("returned", "", "")
 	rebuild := flags.String("rebuild-prompt", "", "")
+	var credentialEnv stringList
+	flags.Var(&credentialEnv, "credential-env", "")
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	if !parseFlags(flags, args) ||
@@ -77,7 +79,7 @@ func runImplementInstruction(args []string) error {
 		// stays: it is the reason this round exists, not commentary on it.
 		findings = nil
 	}
-	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, returned, *repoRoot)
+	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, ruling, returned, *repoRoot, credentialEnv)
 	if err != nil {
 		return errors.New("implement instruction could not be built")
 	}

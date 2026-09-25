@@ -268,6 +268,7 @@ lassdas run spec --project NAME
 | `credential-<名前>-path` | 鍵のファイルの絶対パス (本体が動く場所から見たパス。手元の docker なら `/data/secrets/…`) |
 | `credential-<名前>-env` | 渡す環境変数名。1 つなら文字列、複数なら JSON 配列 |
 | `credential-<名前>-stages` | 渡す工程の JSON 配列。`implement` / `review-a` / `review-b` / `validate` / `publish` / `investigate` / `design-review-a` / `design-review-b` / `design-decide` / `apply` / `checks` / `integrate` / `promote` |
+| `credential-<名前>-mode` | `contents` (既定。ファイルの中身を変数に入れる) か `path` (ファイルのパスを変数に入れる)。`AWS_SHARED_CREDENTIALS_FILE` や `KUBECONFIG` のように、値ではなくファイル名を読む道具には `path` |
 
 ```json
 "credential-warehouse-path":   "/data/secrets/warehouse",
@@ -278,8 +279,9 @@ lassdas run spec --project NAME
 - `<名前>` は英小文字・数字・ハイフン。課題のコメントや記録に出るのはこの名前で、**値は出ない** (失敗したコマンドが値を表示しても、記録に残る前に伏せられる)
 - **ファイルは実行ユーザー以外から読めない権限 (0600 / Secret なら `defaultMode: 0440`) で置く。**挙げていないカードの AI が直接ファイルを開けたら、工程を絞った意味が無い。本体は起動時にこれを検査し、読めてしまうファイルがあれば**起動しない**
 - 同じ環境変数名を 2 つの鍵に付けると設定が読み込まれない。片方がもう片方を黙って上書きするので、名前を分ける
-- 本体が自分で使う変数名 (`TARGET_GITHUB_TOKEN` など) は使えない
-- 実装役のカードに挙げれば、**実装役にも本当に渡る**。外部サービスに繋いで作る必要がある依頼は、そうしないと果たせない
+- 本体が自分で使う変数名は使えない。`LASSDAS_` と `HERMES_` で始まるもの全部、`PATH` `HOME` `LANG` `TMPDIR`、納品先と課題管理の鍵。とくに `LASSDAS_GATEWAY_BASE_URL` は、上書きできるとモデルの呼び先が黙って変わる
+- 実装役のカードに挙げれば、**実装役が起動する AI にも本当に渡る**。外部サービスに繋いで作る必要がある依頼は、そうしないと果たせない。`validate` に挙げれば、納品先の検証コマンド (テスト等) にも渡る
+- 値が記録や画面に出ることはない。失敗したコマンドが値を表示しても、記録に残る前に伏せられ、盤面の実況もその行を表示しない。複数行のファイルは 1 行ずつ伏せる
 
 ### 作ってよい資源 (`infrastructure-*`)
 
@@ -293,7 +295,11 @@ lassdas run spec --project NAME
 | `infrastructure-resources` | 作ってよい種類の JSON 配列 (例 `["sqs", "s3"]`)。挙げていない種類は作らない |
 | `infrastructure-naming-prefix` | 本体が付ける名前の接頭辞。後から見分けるための印 |
 
+実装役への指示には、この節の内容が「使ってよい基盤」として載る。提供元・地域・読む環境変数・作ってよい種類・名前の接頭辞と、作ったものを申告する方法が渡るので、`infrastructure-provider` を書かない限り AI は資源を作らない。
+
 **作った資源は消えない。**何を作ったかは、種類・識別子・どの工程で・いつ、の 4 点が記録され、PR の説明と課題の最終コメントに出る。課金は導入したプロジェクトの側に続くので、要らなくなったら人が消す。
+
+`infrastructure-resources` に挙げていない種類を AI が申告したときは、**成果としては報告されず**「許可されていない種類として退けた宣言」として別に出る。申告そのものは捨てない。作られている可能性がある以上、誰も知らないまま残るほうが悪いため。
 
 ## この版でできること・できないこと
 

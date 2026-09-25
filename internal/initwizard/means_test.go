@@ -31,6 +31,7 @@ func TestTheMeansAreReadFromTheAnswersFile(t *testing.T) {
 		"credential-warehouse-path":   "/data/secrets/warehouse",
 		"credential-warehouse-env":    []string{"DATABASE_URL", "PGURL"},
 		"credential-warehouse-stages": []string{"validate"},
+		"credential-cloud-mode":       "path",
 		"infrastructure-provider":     "aws",
 		"infrastructure-region":       "ap-northeast-1",
 		"infrastructure-credential":   "cloud",
@@ -50,6 +51,9 @@ func TestTheMeansAreReadFromTheAnswersFile(t *testing.T) {
 	}
 	if got := means.Credentials[1].Env; len(got) != 2 || got[0] != "DATABASE_URL" {
 		t.Fatalf("the variable names read as %v", got)
+	}
+	if !means.Credentials[0].HandsOverPath() || means.Credentials[1].HandsOverPath() {
+		t.Fatalf("the modes read as %q / %q", means.Credentials[0].Mode, means.Credentials[1].Mode)
 	}
 	if means.Infrastructure == nil || means.Infrastructure.Provider != "aws" || means.Infrastructure.Region != "ap-northeast-1" {
 		t.Fatalf("the infrastructure read as %+v", means.Infrastructure)

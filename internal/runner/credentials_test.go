@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/runtime"
 )
 
@@ -100,5 +101,105 @@ func TestACredentialEchoedByAFailingStepIsNotKept(t *testing.T) {
 	}
 	if strings.Contains(string(sealed), secret) {
 		t.Fatalf("the credential reached the round's record:\n%s", sealed)
+	}
+}
+
+// Anything a step prints goes to the live log, which is what the board's
+// live pane serves. A credential printed there is published to everyone who
+// can open the board, and nothing about it has a shape the general masker
+// would recognise.
+func TestACredentialPrintedByAStepDoesNotReachTheLiveLog(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	secret := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
+	cardsecret.Register([]string{"DATABASE_URL"}, []string{secret})
+
+	script := filepath.Join(t.TempDir(), "worker")
+	// Once on each stream: the board serves both.
+	body := "#!/bin/sh\necho \"connecting to $DATABASE_URL\"\necho \"psql: $DATABASE_URL refused\" >&2\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := chainStagePipeline(t)
+	pipeline.Config.WorkerBin = script
+	pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"review-a", "review-b"})
+	pipeline.StageCredentials = []string{"DATABASE_URL=" + secret}
+	sealStageFiles(t, pipeline, 1, "")
+	if err := pipeline.chainReview(context.Background(), []string{"review-a", "review-b"}, 0, pipeline.path("target-repo"), strings.Repeat("ab", 20)); err != nil {
+		t.Fatalf("chainReview: %v", err)
+	}
+	// The step names its own live file; the board serves what is in it.
+	shown, err := os.ReadFile(LiveLogPath(pipeline.Workspace, "agent-review"))
+	if err != nil {
+		t.Fatalf("the live log was not written: %v", err)
+	}
+	if strings.Contains(string(shown), "hunter2hunter2") {
+		t.Fatalf("the board would show the credential:\n%s", shown)
+	}
+	if !strings.Contains(string(shown), "秘密") {
+		t.Fatalf("the line was dropped without saying why:\n%s", shown)
+	}
+}
+
+// The tail the engine keeps is the last so many bytes of what a step said.
+// A value straddling the cut would survive as its own last characters,
+// which no whole-value replacement finds: one byte off the front of a token
+// is still the token.
+func TestACredentialIsNeverSplitByTheTailTheEngineKeeps(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	secret := strings.Repeat("s3cr3t", 10)
+	cardsecret.Register([]string{"API_TOKEN"}, []string{secret})
+
+	// The bound is small enough that the cut falls inside the value's own
+	// line, which is the case a byte offset cannot survive.
+	buffer := &tailBuffer{limit: 40}
+	_, _ = buffer.Write([]byte("a\ntoken " + secret + "\n"))
+	_, _ = buffer.Write([]byte("later output line\n"))
+	// Read raw, before any replacement: what is asserted here is that the
+	// tail never holds a part of the value in the first place. A fragment
+	// is not the value, so no whole-value replacement would find it.
+	kept := buffer.String()
+	if strings.Contains(kept, "s3cr3t") {
+		t.Fatalf("part of the value survived the tail: %q", kept)
+	}
+	if !strings.Contains(kept, "later output line") {
+		t.Fatalf("the tail lost what a reader needs: %q", kept)
+	}
+	// And the whole value, when it fits, is still replaced on the way out.
+	whole := &tailBuffer{limit: 4096}
+	_, _ = whole.Write([]byte("token " + secret + "\n"))
+	if got := cardsecret.Redact(whole.String()); strings.Contains(got, "s3cr3t") {
+		t.Fatalf("a value that fits was kept: %q", got)
+	}
+}
+
+// Every line of a credentials file is a secret in its own right: a tool
+// prints the profile line it could not use, and the record keeps it.
+func TestOneLineOfAMultiLineCredentialDoesNotSurviveAStep(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	file := "[dev]\naws_access_key_id = AKIAEXAMPLEEXAMPLE\naws_secret_access_key = wJalrXUtnFEMIexampleKEY\n"
+	cardsecret.Register([]string{"AWS_SHARED_CREDENTIALS_FILE"}, []string{file})
+
+	script := filepath.Join(t.TempDir(), "worker")
+	body := "#!/bin/sh\necho 'profile load failed: aws_secret_access_key = wJalrXUtnFEMIexampleKEY' >&2\nexit 5\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := chainStagePipeline(t)
+	pipeline.Config.WorkerBin = script
+	pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"review-a", "review-b"})
+	pipeline.StageCredentials = []string{"AWS_SHARED_CREDENTIALS_FILE=" + file}
+	sealStageFiles(t, pipeline, 1, "")
+	err := pipeline.chainReview(context.Background(), []string{"review-a", "review-b"}, 0, pipeline.path("target-repo"), strings.Repeat("ab", 20))
+	if err == nil {
+		t.Fatal("the failing step was reported as a success")
+	}
+	if strings.Contains(pipeline.lastStepStderr, "wJalrXUtnFEMIexampleKEY") {
+		t.Fatalf("a line of the credentials file survived: %q", pipeline.lastStepStderr)
+	}
+	if !strings.Contains(pipeline.lastStepStderr, "profile load failed") {
+		t.Fatalf("the reason the card failed was lost with it: %q", pipeline.lastStepStderr)
 	}
 }

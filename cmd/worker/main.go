@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/worker"
 	"automation.internal/ticket-ingress/internal/worker/investigate"
@@ -21,6 +22,11 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Which of the inherited variables are the card's credentials. Every
+	// verb this binary runs writes text somebody reads — a live log, a
+	// transcript, a record — and the name list is the one thing a started
+	// process cannot work out from its own environment.
+	cardsecret.FromEnvironment()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "worker:", err)
 		os.Exit(commandExitCode(err))

@@ -54,12 +54,30 @@ type Credential struct {
 	// is one: the kanban dispatcher spawns every card from one environment,
 	// so a value there would reach every card rather than the named ones.
 	Path string `json:"path"`
-	// Env is what the card's processes see the file's content as.
+	// Env is what the card's processes see the credential as.
 	Env EnvNames `json:"env"`
+	// Mode decides what the variable holds. Omitted, and "contents", is the
+	// file read into the variable, which is what a token or a connection
+	// string wants. "path" exports the file's own name instead, for the
+	// tools that take a file rather than a value — a cloud SDK's shared
+	// credentials file, a cluster configuration, a service-account key. The
+	// contents are still held as secret, because the tool that reads the
+	// file prints it when it fails.
+	Mode string `json:"mode,omitempty"`
 	// Stages are the cards that receive it, by the names the engine
 	// dispatches them under.
 	Stages []string `json:"stages"`
 }
+
+// The two answers mode takes. Omitted reads as CredentialContents.
+const (
+	CredentialContents = "contents"
+	CredentialPath     = "path"
+)
+
+// HandsOverPath reports whether the variable holds the file's name rather
+// than what is in it.
+func (c Credential) HandsOverPath() bool { return c.Mode == CredentialPath }
 
 // maxCredentials bounds the list. It is an operator's own enumeration of
 // what a destination needs, not a directory of everything they have.
@@ -81,18 +99,42 @@ var (
 	credentialEnvPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 )
 
-// reservedCredentialEnv are the variables the engine already sets for a
-// card. A credential taking one of them would not sit beside the engine's
-// value but after it, and the last assignment wins: the destination token,
-// or a model key, would silently become this file's content, and the card
-// that needs it would fail for a reason nothing states.
+// reservedCredentialEnv are the variables a credential may not take,
+// besides everything under the two prefixes below. A credential taking one
+// of them would not sit beside the engine's value but after it, and the
+// last assignment wins: the destination token, or a model key, would
+// silently become this file's content, and the card that needs it would
+// fail for a reason nothing states. Worse than failing is not failing —
+// a credential named LASSDAS_GATEWAY_BASE_URL would quietly send the
+// card's model calls somewhere else, which nothing downstream would
+// notice.
 var reservedCredentialEnv = map[string]bool{
 	"TARGET_GITHUB_TOKEN":       true,
 	"MODEL_API_KEY_IMPLEMENTER": true,
 	"MODEL_API_KEY_REVIEWER":    true,
-	"LASSDAS_CLONE_TOKEN":       true,
-	"HERMES_KANBAN_WORKSPACE":   true,
-	"LASSDAS_RUNTIME_CONFIG":    true,
+	"BACKLOG_API_KEY":           true,
+	"PATH":                      true,
+	"HOME":                      true,
+	"LANG":                      true,
+	"TMPDIR":                    true,
+}
+
+// reservedCredentialPrefixes are the engine's own two namespaces: every
+// variable it sets for itself or for the board it runs on begins with one
+// of them, so the whole namespace is refused rather than the handful of
+// names that exist today.
+var reservedCredentialPrefixes = []string{"LASSDAS_", "HERMES_"}
+
+func reservedVariable(name string) bool {
+	if reservedCredentialEnv[name] {
+		return true
+	}
+	for _, prefix := range reservedCredentialPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateCredentials is the same check the setup runs before it writes a
@@ -129,13 +171,16 @@ func validateCredentials(credentials []Credential) error {
 			if !credentialEnvPattern.MatchString(variable) {
 				return errors.New("runtime config: chain.credentials[" + credential.Name + "].env must be uppercase variable names")
 			}
-			if reservedCredentialEnv[variable] {
-				return errors.New("runtime config: chain.credentials[" + credential.Name + "] takes " + variable + ", which the engine already sets for its cards")
+			if reservedVariable(variable) {
+				return errors.New("runtime config: chain.credentials[" + credential.Name + "] takes " + variable + ", which the engine sets for its cards itself (LASSDAS_* and HERMES_* are the engine's own, as are PATH, HOME, LANG, TMPDIR and the destination and tracker keys)")
 			}
 			if owner, taken := envs[variable]; taken {
 				return errors.New("runtime config: chain.credentials[" + credential.Name + "] and chain.credentials[" + owner + "] both export " + variable + "; one would silently replace the other")
 			}
 			envs[variable] = credential.Name
+		}
+		if credential.Mode != "" && credential.Mode != CredentialContents && credential.Mode != CredentialPath {
+			return errors.New(`runtime config: chain.credentials[` + credential.Name + `].mode accepts "contents" (the default) or "path"`)
 		}
 		if len(credential.Stages) == 0 {
 			return errors.New("runtime config: chain.credentials[" + credential.Name + "].stages is required (a credential no card receives is not provisioned at all)")

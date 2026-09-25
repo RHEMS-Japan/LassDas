@@ -32,7 +32,7 @@ type Means struct {
 // credentialAnswer matches the per-credential answer ids. The name is the
 // middle of the id, so one credential is three adjacent lines in the file
 // rather than a nested object nobody can diff.
-var credentialAnswer = regexp.MustCompile(`^credential-([a-z0-9][a-z0-9-]*)-(path|env|stages)$`)
+var credentialAnswer = regexp.MustCompile(`^credential-([a-z0-9][a-z0-9-]*)-(path|env|stages|mode)$`)
 
 // MeansFromAnswers reads the optional blocks. An answers file that names
 // none returns the zero value, which is what every project delivering only
@@ -102,8 +102,9 @@ func credentialsFromAnswers(answers Answers) ([]runtimeconfig.Credential, error)
 		if err != nil || len(stages) == 0 {
 			return nil, fmt.Errorf("credential-%s-stages に渡す工程を JSON 配列で書いてください (%s)", name, strings.Join(runtimeconfig.DispatchedStages(), " / "))
 		}
+		mode, _ := answers.Value("credential-" + name + "-mode")
 		credentials = append(credentials, runtimeconfig.Credential{
-			Name: name, Path: path, Env: variables, Stages: stages,
+			Name: name, Path: path, Env: variables, Stages: stages, Mode: mode,
 		})
 	}
 	if len(credentials) == 0 {

@@ -259,7 +259,7 @@ func OptionalAnswers() []Requirement {
 // keyed by a name the project chooses, so they cannot be listed one by one
 // the way the fixed questions are — but the check still has to tell one
 // from a misspelling of a question the engine does ask.
-var meansAnswer = regexp.MustCompile(`^credential-[a-z0-9][a-z0-9-]*-(path|env|stages)$`)
+var meansAnswer = regexp.MustCompile(`^credential-[a-z0-9][a-z0-9-]*-(path|env|stages|mode)$`)
 
 // HostNotice says, while the answer can still be changed, which way the
 // answer file sends apply. A value in host is not a mistake - it is how an

@@ -11,6 +11,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,11 +22,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/cardsecret"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/livelog"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -136,6 +137,13 @@ func readWorkspaceFile(path string, limit int64) ([]byte, error) {
 // killed the job's process tree; the pod must do that itself.
 func (p *Pipeline) step(ctx context.Context, name string, argv []string, extraEnv ...string) (int, error) {
 	p.Logger.Info("step", "name", name, "argv0", argv[0])
+	// One source of truth for what this card carries. The assignments are
+	// what the child process gets and the same values are what must never
+	// appear in a log or a record; registering them here, rather than
+	// leaving the caller to do both, is what keeps the two from drifting
+	// apart. Registration is idempotent, so every step after the first
+	// registers nothing.
+	p.registerCredentials()
 	p.recordCurrentStep(name)
 	// Every step is told where to append what it is producing, so a reader
 	// can watch the work instead of waiting for the record that lands when
@@ -211,52 +219,52 @@ type tailBuffer struct {
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.data = append(b.data, p...)
-	if len(b.data) > b.limit {
-		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
+	if len(b.data) <= b.limit {
+		return len(p), nil
 	}
+	cut := len(b.data) - b.limit
+	// Cut on a line boundary. A value that straddles the cut would
+	// otherwise survive as its own last few characters, which no
+	// whole-value replacement finds: one byte off the front of a token is
+	// still the token. Dropping the part-line loses nothing a reader could
+	// have used, because it begins in the middle of a sentence.
+	if boundary := bytes.IndexByte(b.data[cut:], '\n'); boundary >= 0 {
+		cut += boundary + 1
+	}
+	b.data = append([]byte(nil), b.data[cut:]...)
 	return len(p), nil
 }
 
 func (b *tailBuffer) String() string { return string(b.data) }
 
-// redactedCredential is what a credential's value reads as once it is out
-// of the card. The name of the variable is not printed with it: what is
-// worth knowing downstream is that something was taken out, and naming the
-// variable in a record that travels to the ticket would say which secret a
-// destination holds.
-const redactedCredential = "[secret]"
-
-// redactCredentials removes this card's credential values from text the
-// engine is about to keep. A value long enough to matter is replaced
-// wherever it appears; the assignments are sorted longest first so a value
-// that contains a shorter one is taken out whole rather than in pieces.
-//
-// Short values are left alone deliberately. Anything under the bound would
-// match ordinary words in build output, and a record where every third word
-// reads [secret] tells a reader nothing about why the card failed — which
-// is the only reason the record exists.
-func (p *Pipeline) redactCredentials(text string) string {
-	if text == "" || len(p.StageCredentials) == 0 {
-		return text
+// registerCredentials makes this card's credential values known to
+// everything in this process that writes text a person may read: the live
+// log's masker, the records this pipeline keeps, and the agent transcript
+// captured in another package again.
+func (p *Pipeline) registerCredentials() {
+	if len(p.StageCredentials) == 0 {
+		return
 	}
+	names := make([]string, 0, len(p.StageCredentials))
 	values := make([]string, 0, len(p.StageCredentials))
 	for _, assignment := range p.StageCredentials {
-		_, value, found := strings.Cut(assignment, "=")
-		if found && len(value) >= minRedactedCredentialBytes {
-			values = append(values, value)
+		name, value, found := strings.Cut(assignment, "=")
+		if !found {
+			continue
 		}
+		names = append(names, name)
+		values = append(values, value)
 	}
-	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
-	for _, value := range values {
-		text = strings.ReplaceAll(text, value, redactedCredential)
-	}
-	return text
+	cardsecret.Register(names, values)
 }
 
-// minRedactedCredentialBytes is the shortest value worth taking out of a
-// record. Every credential this engine is given — a token, a connection
-// string, a key file — is far longer.
-const minRedactedCredentialBytes = 8
+// redactCredentials removes this card's credentials from text the engine is
+// about to keep. The card registered them when it read the files, whole and
+// line by line: a credentials file reaches a log one line at a time, and a
+// record holding one of those lines has published it.
+func (p *Pipeline) redactCredentials(text string) string {
+	return cardsecret.Redact(text)
+}
 
 func (p *Pipeline) worker(ctx context.Context, name string, arguments []string, extraEnv ...string) (int, error) {
 	argv := append([]string{p.Config.WorkerBin}, arguments...)

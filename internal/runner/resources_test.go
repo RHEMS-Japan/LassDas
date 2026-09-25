@@ -12,6 +12,37 @@ import (
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
+// allowConsumerInfrastructure points the pipeline at a destination that
+// allows the kinds given, and gives the run the draft the collector reads
+// the destination's name from.
+func allowConsumerInfrastructure(t *testing.T, pipeline *Pipeline, kinds ...string) {
+	t.Helper()
+	consumer := map[string]any{
+		"repository": "example/app",
+		"delivery":   "pull_request",
+		"mode":       map[string]any{"toolchain": []any{}},
+	}
+	if kinds != nil {
+		consumer["infrastructure"] = map[string]any{"provider": "aws", "resources": kinds}
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"max_stages": 3,
+		"models":     map[string]any{"reviewers": []any{map[string]any{"id": "review-a"}, map[string]any{"id": "review-b"}}},
+		"consumers":  []any{consumer},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "consumer.json")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Config.ConsumerConfigPath = path
+	if err := os.WriteFile(pipeline.path("ticket-draft.json"), []byte(`{"repository":"example/app"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readRecordedResources(t *testing.T, pipeline *Pipeline) []worker.CreatedResource {
 	t.Helper()
 	raw, err := os.ReadFile(pipeline.path(ResourcesFile))
@@ -35,6 +66,7 @@ func readRecordedResources(t *testing.T, pipeline *Pipeline) []worker.CreatedRes
 // costs money until somebody knows it is there.
 func TestACreatedResourceIsRecordedWithTheCardAndTheTime(t *testing.T) {
 	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs", "s3", "rds")
 	workingCopy := pipeline.path("target-repo")
 	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
 		t.Fatal(err)
@@ -71,6 +103,7 @@ func TestACreatedResourceIsRecordedWithTheCardAndTheTime(t *testing.T) {
 // a stage that never ran.
 func TestTheCardStampsTheStageAndTheTimeItself(t *testing.T) {
 	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs", "s3", "rds")
 	workingCopy := pipeline.path("target-repo")
 	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
 		t.Fatal(err)
@@ -95,6 +128,7 @@ func TestTheCardStampsTheStageAndTheTimeItself(t *testing.T) {
 // neither what was made nor where to find it records nothing.
 func TestTheRecordAccumulatesAndSkipsEmptyClaims(t *testing.T) {
 	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs", "s3", "rds")
 	workingCopy := pipeline.path("target-repo")
 	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
 		t.Fatal(err)
@@ -123,6 +157,7 @@ func TestTheRecordAccumulatesAndSkipsEmptyClaims(t *testing.T) {
 // delivers only a change to a repository.
 func TestARunThatCreatedNothingWritesNoRecord(t *testing.T) {
 	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs", "s3", "rds")
 	workingCopy := pipeline.path("target-repo")
 	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
 		t.Fatal(err)
@@ -147,7 +182,7 @@ func TestTheRunsRecordReachesTheTrailComposer(t *testing.T) {
 	}
 	pipeline := chainStagePipeline(t)
 	pipeline.Config.WorkerBin = fake
-	pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"review-a", "review-b"})
+	allowConsumerInfrastructure(t, pipeline, "sqs")
 	workingCopy := pipeline.path("target-repo")
 	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
 		t.Fatal(err)
@@ -182,9 +217,14 @@ func TestTheImplementCardCollectsWhatItsAgentMade(t *testing.T) {
 	}{{"a card that finished", "exit 0"}, {"a card that failed", "exit 4"}} {
 		t.Run(exit.name, func(t *testing.T) {
 			pipeline := chainStagePipeline(t)
-			pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"review-a", "review-b"})
+			allowConsumerInfrastructure(t, pipeline, "sqs")
 			workingCopy := pipeline.path("target-repo")
 			if err := os.MkdirAll(workingCopy, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// RunChainStage resolves the consumer and reads the baseline
+			// before it dispatches anything, exactly as a live card does.
+			if err := os.WriteFile(pipeline.path("baseline.json"), []byte(`{"baseline":{"Integration":{"SHA":"`+strings.Repeat("ab", 20)+`"}}}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			claim := filepath.Join(workingCopy, AgentResourcesFile)
@@ -197,9 +237,9 @@ func TestTheImplementCardCollectsWhatItsAgentMade(t *testing.T) {
 			if err := os.WriteFile(pipeline.path("INSTRUCTION.md"), []byte("do the thing"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := pipeline.chainRunInstruction(context.Background(), runtime.StageImplement, "implementer", workingCopy, strings.Repeat("ab", 20))
+			err := pipeline.RunChainStage(context.Background(), runtime.StageImplement)
 			if (err != nil) != (exit.code != "exit 0") {
-				t.Fatalf("chainRunInstruction: %v", err)
+				t.Fatalf("RunChainStage: %v", err)
 			}
 			created := readRecordedResources(t, pipeline)
 			if len(created) != 1 || created[0].Identifier != "lassdas-orders-intake" {
@@ -210,6 +250,116 @@ func TestTheImplementCardCollectsWhatItsAgentMade(t *testing.T) {
 			}
 			if _, statErr := os.Stat(claim); !os.IsNotExist(statErr) {
 				t.Fatalf("the claim file stayed where the next card seals: %v", statErr)
+			}
+		})
+	}
+}
+
+// A kind the destination never allowed is not something it agreed to. The
+// declaration is kept — an agent that said it made something is the only
+// evidence anyone has that it may exist — but it is recorded as refused and
+// never reported as created.
+func TestAKindTheDestinationDoesNotAllowIsRecordedAsRefused(t *testing.T) {
+	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs")
+	workingCopy := pipeline.path("target-repo")
+	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claims := `{"kind":"sqs","identifier":"lassdas-orders-intake"}` + "\n" +
+		`{"kind":"rds","identifier":"orders-db"}` + "\n"
+	if err := os.WriteFile(filepath.Join(workingCopy, AgentResourcesFile), []byte(claims), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.RecordCreatedResources(runtime.StageImplement, workingCopy); err != nil {
+		t.Fatal(err)
+	}
+	created := readRecordedResources(t, pipeline)
+	if len(created) != 2 {
+		t.Fatalf("recorded %+v", created)
+	}
+	if created[0].Refused {
+		t.Fatalf("an allowed kind was refused: %+v", created[0])
+	}
+	if !created[1].Refused {
+		t.Fatalf("a kind the destination never allowed was accepted: %+v", created[1])
+	}
+	// And the report keeps the two apart.
+	trail := worker.ComposeUnsealedTrailWithResources(worker.UnsealedRound{Round: 1, Report: "済み"}, "", created)
+	outcome := strings.Index(trail, "この依頼で作った資源")
+	refused := strings.Index(trail, "許可されていない種類として退けた宣言")
+	if outcome < 0 || refused < 0 || refused < outcome {
+		t.Fatalf("the report does not keep created and refused apart:\n%s", trail)
+	}
+	if strings.Index(trail, "orders-db") < refused {
+		t.Fatalf("a refused declaration is reported as created:\n%s", trail)
+	}
+}
+
+// A destination that declared no infrastructure allows nothing, and so does
+// a configuration that cannot be read: the permission has to be
+// established, never assumed from silence.
+func TestNothingIsAllowedWithoutAStandingPermission(t *testing.T) {
+	for name, configure := range map[string]func(*testing.T, *Pipeline){
+		"no infrastructure block": func(t *testing.T, pipeline *Pipeline) {
+			allowConsumerInfrastructure(t, pipeline)
+		},
+		"an unreadable configuration": func(t *testing.T, pipeline *Pipeline) {
+			allowConsumerInfrastructure(t, pipeline, "sqs")
+			pipeline.Config.ConsumerConfigPath = filepath.Join(t.TempDir(), "absent.json")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pipeline := chainStagePipeline(t)
+			configure(t, pipeline)
+			workingCopy := pipeline.path("target-repo")
+			if err := os.MkdirAll(workingCopy, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workingCopy, AgentResourcesFile), []byte(`{"kind":"sqs","identifier":"one"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := pipeline.RecordCreatedResources(runtime.StageImplement, workingCopy); err != nil {
+				t.Fatal(err)
+			}
+			created := readRecordedResources(t, pipeline)
+			if len(created) != 1 || !created[0].Refused {
+				t.Fatalf("recorded %+v", created)
+			}
+		})
+	}
+}
+
+// Not only the two cards that launch a writing agent. A review agent, the
+// destination's own verification commands and a delivery step all run with
+// the credentials their card was named in, so any of them can bring
+// something into existence, and a resource left out of the record is one
+// nobody knows to remove.
+func TestEveryCardCollectsWhatItMade(t *testing.T) {
+	for _, stage := range []string{runtime.StageReviewA, runtime.StageValidate, runtime.StagePublish, runtime.StageApply} {
+		t.Run(stage, func(t *testing.T) {
+			pipeline := chainStagePipeline(t)
+			allowConsumerInfrastructure(t, pipeline, "sqs")
+			pipeline.Config.WorkerBin = "false"
+			workingCopy := pipeline.path("target-repo")
+			if err := os.MkdirAll(workingCopy, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(pipeline.path("baseline.json"), []byte(`{"baseline":{"Integration":{"SHA":"`+strings.Repeat("ab", 20)+`"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workingCopy, AgentResourcesFile), []byte(`{"kind":"sqs","identifier":"made-by-`+stage+`"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The card itself fails — there is nothing sealed for it to work
+			// on — and what it made is collected all the same.
+			_ = pipeline.RunChainStage(context.Background(), stage)
+			created := readRecordedResources(t, pipeline)
+			if len(created) != 1 || created[0].Stage != stage {
+				t.Fatalf("%s recorded %+v", stage, created)
+			}
+			if _, err := os.Stat(filepath.Join(workingCopy, AgentResourcesFile)); !os.IsNotExist(err) {
+				t.Fatalf("%s left the declaration in the working copy: %v", stage, err)
 			}
 		})
 	}

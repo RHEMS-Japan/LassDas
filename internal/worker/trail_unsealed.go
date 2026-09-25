@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/cardsecret"
 )
 
 // A round that produced no candidate has no sealed chain to render, so the
@@ -124,6 +126,10 @@ func ComposeUnsealedTrailWithResources(round UnsealedRound, blocked string, crea
 		builder.WriteString("- 止まった段階: " + trailClip(step, 120) + "\n")
 	}
 	builder.WriteString(composeCreatedResources(created))
-	builder.WriteString("\n### 実装役の報告\n" + round.Report + "\n")
+	// The report is the agent's own words, and it is redacted where it is
+	// captured, so this finds nothing in a record this build wrote. It is
+	// here for one that an older build wrote and this run is reporting on:
+	// the ticket comment is the least private place the engine writes.
+	builder.WriteString("\n### 実装役の報告\n" + cardsecret.Redact(round.Report) + "\n")
 	return trailTruncate(builder.String())
 }
