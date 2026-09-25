@@ -604,6 +604,26 @@ const deliveryPreambleBytes = deliveryAssumptionBytes + hook.MaxOutcomeTextBytes
 // this comment is the only place they meet it.
 func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []string) {
 	var decided, assumed []string
+	// The gate's own settled points first, when it settled any. They are
+	// the points it had written down to ask about and answered itself
+	// instead, so they belong at the head of the list the requester reads
+	// for exactly that.
+	var decision struct {
+		Assumptions []runAssumption `json:"assumptions"`
+	}
+	//
+	// Read without a note of its own. A decision carries these only when
+	// something settled questions, so most runs have none and a run whose
+	// decision cannot be read here has the same nothing to show - while the
+	// assessment read just below already tells the requester when the
+	// reception's record could not be read at all.
+	if readOutcomeArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &decision) == nil {
+		for _, assumption := range decision.Assumptions {
+			if line := assumptionLine(assumption); line != "" && assumption.Kind == assumptionDefensibleDefault {
+				decided = append(decided, line)
+			}
+		}
+	}
 	for attempt := readinessAssessmentAttempts; attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []runAssumption `json:"assumptions"`

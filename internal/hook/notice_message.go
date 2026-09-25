@@ -116,6 +116,16 @@ type PlanFacts struct {
 	// RequestKind is the reception's sealed request_kind (change |
 	// investigation); empty for a decision sealed before the field existed.
 	RequestKind string
+	// SettledConfidence is how sure the reception's second reading was when
+	// it decided this run would put none of its questions to the requester
+	// and settle them itself. Zero in every run where that did not happen,
+	// which is every run of a destination that has not asked for it.
+	//
+	// It earns its line because of what it changes for the requester: the
+	// points under 「確認せずにこちらで決めた点」 are then points they were
+	// about to be asked about, and stopping the run is the only way they
+	// get to answer one.
+	SettledConfidence float64
 }
 
 // designReasonPhrases are the requester-facing sentences for the machine
@@ -211,6 +221,9 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	// requester a scope nothing holds the implementer to.
 	var lists strings.Builder
 	writePlanList(&lists, "確認せずにこちらで決めた点（違う場合は停止してください）", facts.Decided)
+	if line := settledWithoutAskingLine(facts); line != "" {
+		lists.WriteString(line)
+	}
 	writePlanList(&lists, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
 	stop := planStopSentence
 	if facts.RequestKind == "investigation" {
@@ -225,6 +238,21 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 		AutoRetry:  "なし（この掲示の投稿に失敗しても再送されず、処理はそのまま継続します）",
 		Marker:     CommentMarker("plan", runID),
 	}.render()
+}
+
+// settledWithoutAskingLine says why the requester is not being asked about
+// the points just listed. Without it they read as points nobody thought
+// worth asking about, and they are the opposite: they are the points this
+// run had written down to ask, and stopping is the only way back to them.
+//
+// It is written next to that list rather than in the opening, so that the
+// two are cut together if the body ever overflows: a sentence about a list
+// that is no longer there sends a reader looking for something to check.
+func settledWithoutAskingLine(facts PlanFacts) string {
+	if facts.SettledConfidence <= 0 || len(facts.Decided) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n上の点には、本来この依頼でお伺いする予定だったものが含まれます。受付とは別の判定にかけ、確信度 %.2f で「このまま進めてよい」と出たため、お伺いせずに上の内容で進めます。1 つでも違うものがあれば、下の停止方法でこの実行を止めてください。\n", facts.SettledConfidence)
 }
 
 func truncatePlanText(text string) string {

@@ -780,3 +780,58 @@ func TestTheReceptionsOwnDecisionsReachTheReport(t *testing.T) {
 		t.Errorf("a seat that moved is counted as a decision the requester may want back")
 	}
 }
+
+// The points the gate settled in place of its own questions reach the
+// closing comment, under the heading a requester reads for exactly that.
+// They are written when the questions are dropped, which is after the
+// assessment was sealed, so the assessment does not carry them and a reader
+// of that record alone would find them nowhere.
+func TestTheClosingCommentCarriesThePointsTheGateSettledInsteadOfAsking(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "history/readiness/assessment-1.json", map[string]any{
+		"assumptions": []runAssumption{
+			{Kind: "repository_convention", Statement: "日付の書式は既存の一覧に合わせる", Evidence: "同じ画面の既存表示"},
+		},
+	})
+	writeOutcomeRecord(t, runDir, "history/readiness/decision.json", map[string]any{
+		"outcome": "ready",
+		"assumptions": []runAssumption{
+			{Kind: assumptionDefensibleDefault, Statement: "ラベルは両方の言語画面で差し替える", Evidence: "どちらの画面も新しい表記になります"},
+			{Kind: "repository_convention", Statement: "読まれない種類はここには出さない"},
+		},
+		"reception_judgment": map[string]any{
+			"model": "typesafe/jev-1.13", "answer": "yes", "confidence": 0.93, "threshold": 0.85,
+		},
+	})
+	decided := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	for name, want := range map[string]string{
+		"the point the gate settled": "ラベルは両方の言語画面で差し替える",
+		"what it means":              "どちらの画面も新しい表記になります",
+		"the heading it goes under":  "## 確認せずに本体が決めたこと",
+		"the point from the repo":    "日付の書式は既存の一覧に合わせる",
+	} {
+		if !strings.Contains(decided, want) {
+			t.Errorf("%s is missing:\n%s", name, decided)
+		}
+	}
+	if strings.Contains(decided, "読まれない種類はここには出さない") {
+		t.Errorf("a kind this list does not read was printed anyway:\n%s", decided)
+	}
+
+	// A decision that settled nothing leaves the comment as it was, and a
+	// run whose decision cannot be read at all is the same nothing rather
+	// than a complaint about a record most runs have nothing in.
+	writeOutcomeRecord(t, runDir, "history/readiness/decision.json", map[string]any{"outcome": "ready"})
+	quiet := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	if strings.Contains(quiet, "確認せずに本体が決めたこと") {
+		t.Errorf("a decision that settled nothing still wrote a heading:\n%s", quiet)
+	}
+	notes := &outcomeNotes{}
+	bare := t.TempDir()
+	writeOutcomeRecord(t, bare, "history/readiness/assessment-1.json", map[string]any{
+		"assumptions": []runAssumption{{Kind: "repository_convention", Statement: "既存に合わせる"}},
+	})
+	if composeAssumptionsText(bare, "", notes); strings.Contains(notes.line(), "受付") {
+		t.Errorf("a run with no sealed decision was reported as an unreadable record: %q", notes.line())
+	}
+}

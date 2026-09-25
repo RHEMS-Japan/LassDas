@@ -77,7 +77,7 @@ func run(ctx context.Context, args []string) error {
 	case "check-readiness":
 		return runCheckReadiness(ctx, args[1:])
 	case "decide-readiness":
-		return runDecideReadiness(args[1:])
+		return runDecideReadiness(ctx, args[1:])
 	case "generate":
 		return runGenerate(ctx, args[1:])
 	case "implement":
@@ -825,7 +825,7 @@ func runCheckReadiness(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runDecideReadiness(args []string) error {
+func runDecideReadiness(ctx context.Context, args []string) error {
 	flags := commandFlags("decide-readiness")
 	configPath := flags.String("config", "", "")
 	toolSHA := flags.String("tool-sha", "", "")
@@ -860,7 +860,20 @@ func runDecideReadiness(args []string) error {
 		}
 		checks = append(checks, check)
 	}
-	decision, err := worker.DecideReadiness(assessments, checks, source, request, config)
+	// The reception's own judge, when this destination named one. Building
+	// it can fail on a role that cannot be called at all, and that is a
+	// configuration error rather than a model with no opinion: reported
+	// here, where it names the setting, instead of looking from inside the
+	// gate like a judge that is never sure enough.
+	judge, configured, err := worker.NewReceptionJudge(config, &http.Client{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "the reception judge cannot be called", err)
+		return errors.New("reception judge is not configured correctly")
+	}
+	if !configured {
+		judge = nil
+	}
+	decision, err := worker.DecideReadiness(ctx, assessments, checks, source, request, config, judge)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness decision was rejected", err)
 		return errors.New("readiness decision was rejected")

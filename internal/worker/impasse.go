@@ -48,6 +48,16 @@ func validateClarificationQuestions(questions []ReadinessQuestion) error {
 				return fmt.Errorf("question %s choice %s effect %s", question.ID, choice.ID, problem)
 			}
 		}
+		// A proposed default is optional, and when it is there it names one
+		// of this question's own choices. A default naming a choice that is
+		// not on offer would be settled later as a decision the requester
+		// could not have been shown, which is the one thing the field exists
+		// to make impossible.
+		if question.ProposedDefault != "" {
+			if _, offered := choiceByID(question.Choices, question.ProposedDefault); !offered {
+				return fmt.Errorf("question %s proposes default %q, which it does not offer", question.ID, boundedHead(question.ProposedDefault, 32))
+			}
+		}
 	}
 	return nil
 }

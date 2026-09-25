@@ -152,3 +152,25 @@ func TestAcceptanceNoticeAsksOnlyForTheOneAnswerWhenTheReceptionAsked(t *testing
 	}
 	assertAcceptanceNoticeFrame(t, content, "run-42")
 }
+
+// The line is about the list above it, so it is written only when there is
+// one, and only when something really settled it.
+func TestTheSettledWithoutAskingLineNeedsBothAJudgmentAndAList(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		facts PlanFacts
+		want  bool
+	}{
+		{"a judgment and the points it settled", PlanFacts{SettledConfidence: 0.9, Decided: []string{"新着順にする"}}, true},
+		{"points nothing judged", PlanFacts{Decided: []string{"新着順にする"}}, false},
+		{"a judgment that settled nothing visible", PlanFacts{SettledConfidence: 0.9}, false},
+		{"neither", PlanFacts{}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := PlanCommentContent("run-1", testCase.facts)
+			if got := strings.Contains(body, "確信度"); got != testCase.want {
+				t.Fatalf("the notice explains the judgment = %v, want %v:\n%s", got, testCase.want, body)
+			}
+		})
+	}
+}

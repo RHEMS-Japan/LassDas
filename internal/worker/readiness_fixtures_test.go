@@ -177,7 +177,7 @@ func TestReadinessFixturesAreExecutableAndGateCorrectly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckReadiness() error = %v", err)
 			}
-			decision, err := DecideReadiness([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config)
+			decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
 			if err != nil {
 				t.Fatalf("DecideReadiness() error = %v", err)
 			}

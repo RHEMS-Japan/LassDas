@@ -57,13 +57,35 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	// The design decision comes from the sealed readiness decision. A run
 	// whose decision predates the design stage carries no reason, and the
 	// notice then says nothing about it rather than guessing.
+	//
+	// The decision also holds the points the gate settled itself rather
+	// than ask about, when it settled any: those are written when the
+	// questions are dropped, which is after the assessment below was
+	// sealed, so the assessment knows nothing about them.
 	var decision struct {
 		NeedsDesign  bool   `json:"needs_design"`
 		DesignReason string `json:"design_reason"`
 		RequestKind  string `json:"request_kind"`
+		Assumptions  []struct {
+			Kind      string `json:"kind"`
+			Statement string `json:"statement"`
+		} `json:"assumptions"`
+		ReceptionJudgment *struct {
+			Confidence float64 `json:"confidence"`
+		} `json:"reception_judgment"`
 	}
 	if readPlanArtifact(filepath.Join(runDir, "history", "readiness", "decision.json"), &decision) == nil {
 		facts.NeedsDesign, facts.DesignReason, facts.RequestKind = decision.NeedsDesign, decision.DesignReason, decision.RequestKind
+		for _, assumption := range decision.Assumptions {
+			statement := strings.TrimSpace(assumption.Statement)
+			if statement == "" || assumption.Kind != assumptionDecidedKind {
+				continue
+			}
+			facts.Decided = append(facts.Decided, statement)
+		}
+		if decision.ReceptionJudgment != nil {
+			facts.SettledConfidence = decision.ReceptionJudgment.Confidence
+		}
 	}
 	// A reception that had to be run twice says so where the reception's
 	// other assumptions are shown. It is one: what the delivery is built on

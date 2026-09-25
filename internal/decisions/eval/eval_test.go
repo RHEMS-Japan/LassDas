@@ -17,15 +17,33 @@
 // answer is known, and agreement is reported over those alone. The corpus
 // lives outside this repository - it is made of other people's requests -
 // and nothing here prints a request's text, only its id.
+//
+// A directory is read instead as finished runs: every readiness-ticket.json
+// under it is one request, and the decision.json the reception sealed beside
+// it says what the reception itself did with that request. That is the only
+// label worth having for proceedable, because it is not an opinion about the
+// request - it is the verdict this engine actually reached on it. A run the
+// reception proceeded on is labelled yes and a run it asked about is
+// labelled no; a rejected or unresolved run is labelled nothing, because
+// neither answer to this question is what stopped it.
+//
+// Cases there are numbered, never named. A run directory is named after the
+// destination and the ticket it belongs to, and a measurement that printed
+// those would copy somebody's tracker into whatever holds its output.
 package eval
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,6 +129,9 @@ func TestTheReceptionJudgeAgreesWithTheReception(t *testing.T) {
 
 func readCorpus(t *testing.T, path string) []corpusCase {
 	t.Helper()
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return readRunCorpus(t, path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("reading the corpus: %v", err)
@@ -283,6 +304,7 @@ func report(t *testing.T, cases []corpusCase, results []judged, questions decisi
 	if judgedCount == 0 {
 		t.Fatal("no judgment was obtained for any case")
 	}
+	thresholdTable(t, cases, results)
 }
 
 func distribution(counts map[string]int) string {
@@ -352,4 +374,263 @@ func quantile(values []float64, at float64) float64 {
 		index = len(sorted) - 1
 	}
 	return sorted[index]
+}
+
+// The run corpus: one request per finished run, labelled with what the
+// reception sealed for it.
+//
+// Two runs of the same request are one case. A request the reception asked
+// about is answered and run again, and that second run reaches ready on the
+// strength of the answers - so counting it as a request the reception
+// proceeded on would credit the judge for a verdict the requester supplied.
+// When a request was ever asked about, asked is its label.
+const (
+	runTicketFile   = "readiness-ticket.json"
+	runDecisionFile = "decision.json"
+	// maxRunArtifactBytes bounds one artifact read. These are sealed JSON
+	// documents of a few kilobytes; anything larger is a wrong file.
+	maxRunArtifactBytes = 1 << 20
+)
+
+func readRunCorpus(t *testing.T, root string) []corpusCase {
+	t.Helper()
+	type collected struct {
+		text  string
+		runs  int
+		asked bool
+		ready bool
+	}
+	byRequest := map[string]*collected{}
+	var order []string
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() != runTicketFile {
+			return nil
+		}
+		var ticket struct {
+			Request string `json:"request"`
+		}
+		if readRunArtifact(path, &ticket) != nil || strings.TrimSpace(ticket.Request) == "" {
+			return nil
+		}
+		var decision struct {
+			Outcome string `json:"outcome"`
+		}
+		sealed := filepath.Join(filepath.Dir(path), "history", "readiness", runDecisionFile)
+		if readRunArtifact(sealed, &decision) != nil {
+			return nil
+		}
+		one, seen := byRequest[ticket.Request]
+		if !seen {
+			one = &collected{text: ticket.Request}
+			byRequest[ticket.Request] = one
+			order = append(order, ticket.Request)
+		}
+		one.runs++
+		switch decision.Outcome {
+		case "clarification_required":
+			one.asked = true
+		case "ready":
+			one.ready = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("reading the corpus: %v", walkErr)
+	}
+	// Ordered by the request itself, so the same corpus numbers its cases
+	// the same way twice running whatever order the filesystem hands them
+	// back in - and by a digest, so the order says nothing about the text.
+	sort.Slice(order, func(i, j int) bool { return requestKey(order[i]) < requestKey(order[j]) })
+	cases := make([]corpusCase, 0, len(order))
+	var runs, asked, proceeded int
+	for index, request := range order {
+		one := byRequest[request]
+		runs += one.runs
+		labels := map[string]string{}
+		switch {
+		case one.asked:
+			labels[decisions.QuestionProceedable] = decisions.AnswerNo
+			asked++
+		case one.ready:
+			labels[decisions.QuestionProceedable] = decisions.AnswerYes
+			proceeded++
+		}
+		cases = append(cases, corpusCase{ID: fmt.Sprintf("run-%02d", index+1), Text: one.text, Labels: labels})
+	}
+	if len(cases) == 0 {
+		t.Fatal("the corpus holds no run with both a request and a sealed decision")
+	}
+	t.Logf("run corpus: %d runs, %d distinct requests; the reception proceeded on %d and asked about %d, and neither on %d",
+		runs, len(cases), proceeded, asked, len(cases)-proceeded-asked)
+	return cases
+}
+
+// requestKey orders the cases without ordering them by anything a reader of
+// the output could turn back into a request.
+func requestKey(request string) string {
+	sum := sha256.Sum256([]byte(request))
+	return hex.EncodeToString(sum[:])
+}
+
+func readRunArtifact(path string, out any) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxRunArtifactBytes {
+		return errors.New("run artifact unreadable")
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("run artifact unreadable")
+	}
+	return json.Unmarshal(encoded, out)
+}
+
+// thresholdTable is the measurement the wiring needs and the per-question
+// summary cannot give: at each confidence a threshold could be set to, how
+// many of the requests the reception proceeded on the judge would agree to
+// proceed on, and how many of the ones it asked about the judge would
+// overrule. The first number is what the feature buys; the second is what
+// it costs, and a threshold is only worth setting where the second is zero.
+func thresholdTable(t *testing.T, cases []corpusCase, results []judged) {
+	t.Helper()
+	labels := make(map[string]string, len(cases))
+	for _, one := range cases {
+		labels[one.ID] = one.Labels[decisions.QuestionProceedable]
+	}
+	type answered struct {
+		label, option string
+		confidence    float64
+	}
+	var rows []answered
+	for _, result := range results {
+		if result.failure != nil {
+			continue
+		}
+		option, confidence, ok := result.answers.Choice(decisions.QuestionProceedable)
+		if !ok {
+			continue
+		}
+		rows = append(rows, answered{label: labels[result.id], option: option, confidence: confidence})
+	}
+	var proceeded, asked int
+	for _, row := range rows {
+		switch row.label {
+		case decisions.AnswerYes:
+			proceeded++
+		case decisions.AnswerNo:
+			asked++
+		}
+	}
+	t.Log("threshold: of the requests the reception proceeded on / asked about, how many the judge answers yes at or above each confidence")
+	t.Logf("  %-11s %-22s %s", "threshold", "proceeded, judge yes", "asked, judge yes (the cost)")
+	for _, cut := range []float64{0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99, 1.00} {
+		var agreed, overruled int
+		for _, row := range rows {
+			if row.option != decisions.AnswerYes || row.confidence < cut {
+				continue
+			}
+			switch row.label {
+			case decisions.AnswerYes:
+				agreed++
+			case decisions.AnswerNo:
+				overruled++
+			}
+		}
+		t.Logf("  %-11.2f %3d / %-18d %d / %d", cut, agreed, proceeded, overruled, asked)
+	}
+	// The lowest confidence at which every request the reception proceeded
+	// on is answered yes. Below it the judge would be overruling the
+	// reception on requests it was right about; at or above it the judge
+	// agrees with every one of them. It is a floor, not the answer: what to
+	// set is decided with the cost column beside it.
+	lowest := math.Inf(1)
+	var missed int
+	for _, row := range rows {
+		if row.label != decisions.AnswerYes {
+			continue
+		}
+		if row.option != decisions.AnswerYes {
+			missed++
+			continue
+		}
+		lowest = math.Min(lowest, row.confidence)
+	}
+	switch {
+	case missed > 0:
+		t.Logf("no threshold covers every request the reception proceeded on: the judge answers no on %d of %d", missed, proceeded)
+	case math.IsInf(lowest, 1):
+		t.Log("no request in this corpus is labelled as one the reception proceeded on")
+	default:
+		t.Logf("every request the reception proceeded on is answered yes at confidence %.2f and above", lowest)
+	}
+}
+
+// The labelling is the measurement. A run corpus read with the labels the
+// wrong way round would report agreement with the reception while measuring
+// disagreement, and nothing downstream would say so.
+func TestTheRunCorpusIsLabelledByWhatTheReceptionDid(t *testing.T) {
+	root := t.TempDir()
+	write := func(destination, run, request, outcome string) {
+		t.Helper()
+		dir := filepath.Join(root, destination, "runs", run)
+		sealed := filepath.Join(dir, "history", "readiness")
+		if err := os.MkdirAll(sealed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ticket := fmt.Sprintf(`{"request":%q}`, request)
+		if err := os.WriteFile(filepath.Join(dir, runTicketFile), []byte(ticket), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		decision := fmt.Sprintf(`{"outcome":%q}`, outcome)
+		if err := os.WriteFile(filepath.Join(sealed, runDecisionFile), []byte(decision), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("one", "r1", "proceeded on", "ready")
+	write("one", "r2", "asked about", "clarification_required")
+	// The same request twice: asked first, then run again once the answers
+	// were in. The second run's ready is the requester's doing, not the
+	// reception's, so the request is still one the reception asked about.
+	write("two", "r3", "asked then answered", "clarification_required")
+	write("two", "r4", "asked then answered", "ready")
+	write("two", "r5", "refused", "reject")
+	// A run with no sealed decision is not a case: nothing says what the
+	// reception did with it.
+	if err := os.MkdirAll(filepath.Join(root, "two", "runs", "r6"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "two", "runs", "r6", runTicketFile), []byte(`{"request":"undecided"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := readCorpus(t, root)
+	if len(cases) != 4 {
+		t.Fatalf("read %d cases, want 4", len(cases))
+	}
+	want := map[string]string{
+		"proceeded on":        decisions.AnswerYes,
+		"asked about":         decisions.AnswerNo,
+		"asked then answered": decisions.AnswerNo,
+		"refused":             "",
+	}
+	for _, one := range cases {
+		label, known := want[one.Text]
+		if !known {
+			t.Errorf("%s: a request nobody wrote was read: %q", one.ID, one.Text)
+			continue
+		}
+		if got := one.Labels[decisions.QuestionProceedable]; got != label {
+			t.Errorf("%s: labelled %q, want %q", one.ID, got, label)
+		}
+		delete(want, one.Text)
+	}
+	for text := range want {
+		t.Errorf("the request labelled %q was not read at all", text)
+	}
+	// Numbered, never named: a case id that carried the run directory would
+	// carry the destination and the ticket with it.
+	for index, one := range cases {
+		if one.ID != fmt.Sprintf("run-%02d", index+1) {
+			t.Errorf("case %d is called %q, want a number", index+1, one.ID)
+		}
+	}
 }
