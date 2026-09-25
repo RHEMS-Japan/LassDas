@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,6 +206,40 @@ func (p *Pipeline) seatArguments(stage, seat string, round int) []string {
 		args = append(args, "--rebuild-prompt", record.PromptRebuilt)
 	}
 	return args
+}
+
+// seatRebuilt reports whether the ladder has asked for this stage's
+// instruction to be rebuilt in the round it is about to run again.
+func (p *Pipeline) seatRebuilt(stage, seat string, round int) bool {
+	record, found := ReadSeatRecord(p.Workspace, stage, seat, round)
+	return found && record.PromptRebuilt != ""
+}
+
+// RerenderInstruction writes the implementing card's instruction again for
+// the round it is already in.
+//
+// The reviews build their own instruction on every dispatch, so a rebuild
+// reaches them as an argument on the card. The implementer and the applier
+// read a file, written once when the round began, and a card dispatched
+// again reads exactly what it read the first time — so a rebuild that only
+// wrote down its intention would be a hand spent on nothing. This is the
+// hand actually being played: the same round's instruction, shorter,
+// before the card is dispatched again.
+func (p *Pipeline) RerenderInstruction(ctx context.Context, stage string) error {
+	switch stage {
+	case runtime.StageImplement:
+		return p.RenderImplementInstruction(ctx, p.currentRound())
+	case runtime.StageApply:
+		design, round := p.ApprovedDesign()
+		if design == "" || round < 1 {
+			return errors.New("the applier's instruction has no approved design to render from")
+		}
+		return p.RenderApplyInstruction(ctx, round)
+	default:
+		// Every other card builds its own instruction when it runs, and
+		// reads the rebuild off its own command line.
+		return nil
+	}
 }
 
 // SeatOccupantFor is the occupant a stage runs from now: the place the

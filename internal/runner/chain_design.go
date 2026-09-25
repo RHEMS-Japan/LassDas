@@ -315,8 +315,17 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 		// ones, which is the failure this exists to remove.
 		return errors.New("the working copy has no absolute path to give the applier")
 	}
+	// A rebuilt instruction is the same job asked shorter: what the earlier
+	// rounds objected to comes out, and the design, the working copy and the
+	// rules the applier is held to all stay. The refused validation stays
+	// too — it is the reason this round exists, not commentary on it.
+	previous := p.previousApplyFindings()
+	if implementer, err := chainImplementer(p.Config.ConsumerConfigPath); err == nil &&
+		p.seatRebuilt(runtime.StageApply, implementer, p.currentRound()) {
+		previous = ""
+	}
 	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) +
-		applyInstructionRules + p.previousApplyFindings() + p.previousValidationFailure()
+		applyInstructionRules + previous + p.previousValidationFailure()
 	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
 }
 

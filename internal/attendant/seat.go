@@ -139,12 +139,22 @@ func (s seatClimb) moveTo(place int, occupant worker.ModelEndpoint) func(context
 // including a seat that never had anywhere to move, which is every
 // configuration written before candidates existed.
 func (s seatClimb) rebuildPrompt() func(context.Context, ladderClimb) error {
-	return func(_ context.Context, climb ladderClimb) error {
+	return func(ctx context.Context, climb ladderClimb) error {
 		record := s.record
 		record.Seat, record.Stage, record.Round = s.seat.ID, s.stage, s.round
 		record.PromptRebuilt = worker.PromptRebuildShorten
 		record.At = time.Now().UTC()
 		if err := runner.WriteSeatRecord(s.runDir, record); err != nil {
+			return err
+		}
+		// The reviews read the rebuild off the card they are dispatched
+		// with; the implementing cards read a file that was written when
+		// the round began, so for those the instruction is written again
+		// here, after the record and before the dispatch. Without it the
+		// card would read exactly what it read the first time and the hand
+		// would have changed nothing.
+		pipeline := &runner.Pipeline{Config: climb.config, Workspace: s.runDir, Logger: climb.logger}
+		if err := pipeline.RerenderInstruction(ctx, s.stage); err != nil {
 			return err
 		}
 		climb.logger.Info("the seat stays and the instruction is rebuilt shorter",
