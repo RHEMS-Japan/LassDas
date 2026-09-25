@@ -137,8 +137,15 @@ func outcomeRequest(runDir string) string {
 // which places those are: a delivery that stopped at its proposal has no
 // screen to point at, and says so rather than pointing at one it never
 // touched.
+//
+// A stop is asked the same question, because a stop is no longer the same
+// as nothing having happened. A requester can stop a delivery whose change
+// is already merged, deployed and looked at, and sending them away without
+// naming the environment they now have to go and see would be the worst
+// version of this comment. A stop that reached nowhere carries no evidence
+// and this writes nothing, which the stop's own sentence already covers.
 func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[string]string) string {
-	if code != hook.TerminalSuccess {
+	if code != hook.TerminalSuccess && code != hook.TerminalCancelled {
 		return ""
 	}
 	var lines []string
@@ -157,10 +164,15 @@ func outcomeWhereToSee(runDir string, code hook.TerminalCode, evidence map[strin
 	if len(lines) == 0 {
 		// The merge-and-look card of the older delivery path leaves its own
 		// verdict, and a delivery that only proposed a change has neither.
-		if seen := e2eObservedLine(runDir); seen != "" {
-			lines = append(lines, seen)
-		} else {
+		switch {
+		case e2eObservedLine(runDir) != "":
+			lines = append(lines, e2eObservedLine(runDir))
+		case code == hook.TerminalSuccess:
 			lines = append(lines, "まだ動いている場所はありません。提案した変更は、下の Pull Request でご確認ください。")
+		default:
+			// A stop with nothing behind it. Saying where to look would be
+			// inventing a place; the stop's own sentence says what it left.
+			return ""
 		}
 	}
 	return "## どこで見られるか\n" + strings.Join(lines, "\n") + "\n"

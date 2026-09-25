@@ -364,3 +364,43 @@ exit 1
 		t.Errorf("the description does not lead with what the change is for:\n%s", written)
 	}
 }
+
+// A stop is no longer the same as nothing having happened: a requester can
+// stop a delivery whose change is already merged, deployed and looked at.
+// The outcome then names the environment they have to go and see, and what
+// was seen on it, rather than sending them away.
+func TestAStopThatLandedSomewhereStillSaysWhereToLook(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "readiness-ticket.json", map[string]string{
+		"request": "注文履歴を月ごとに絞り込めるようにする",
+	})
+	writeOutcomeRecord(t, runDir, DeliverProductionReportFile, DeliverReport{
+		SchemaVersion: 1, Phase: "production", Verdict: "pass",
+		TargetURL: "https://www.example.com/orders", ExpectedText: "月で絞り込む",
+		ScreenChecked: true, ObservedAt: time.Now().UTC(),
+	})
+	landed := composeOutcomeText(runDir, hook.TerminalCancelled, map[string]string{
+		"reached_delivery":        "production",
+		"production_evidence_url": "https://www.example.com/orders",
+	})
+	for name, want := range map[string]string{
+		"the heading":         "## どこで見られるか",
+		"the screen":          "https://www.example.com/orders",
+		"what was seen on it": "「月で絞り込む」が表示されているのを確認しました",
+	} {
+		if !strings.Contains(landed, want) {
+			t.Errorf("%s is missing from a stop that landed:\n%s", name, landed)
+		}
+	}
+	// A stop is not a failure, so it carries no account of one.
+	if strings.Contains(landed, "何が起きたか") {
+		t.Errorf("a stop reads as a failure:\n%s", landed)
+	}
+
+	// A stop that reached nowhere invents no place to look: the stop's own
+	// sentence already says what it left behind, which is nothing.
+	nowhere := composeOutcomeText(t.TempDir(), hook.TerminalCancelled, map[string]string{})
+	if strings.Contains(nowhere, "どこで見られるか") || strings.Contains(nowhere, "Pull Request") {
+		t.Errorf("a stop that reached nowhere points somewhere:\n%s", nowhere)
+	}
+}
