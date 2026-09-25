@@ -240,19 +240,40 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	}.render()
 }
 
-// settledWithoutAskingLine says why the requester is not being asked about
-// the points just listed. Without it they read as points nobody thought
-// worth asking about, and they are the opposite: they are the points this
-// run had written down to ask, and stopping is the only way back to them.
+// SettledWithoutAskingSentence says why the requester was not asked about
+// the points listed above it. Without it they read as points nobody thought
+// worth asking about, and they are the opposite: they are the points the
+// reception had written down to ask.
 //
-// It is written next to that list rather than in the opening, so that the
+// It lives here, exported, because two comments show the same points - the
+// plan notice while the run can still be stopped, and the closing comment
+// and pull request afterwards - and a reader who met the sentence in one
+// and not the other would have to work out whether they were being told
+// about the same thing. The remedy differs and is the caller's to add: a
+// run that has finished cannot be stopped, and offering it would be the
+// only false line in the comment.
+//
+// Empty for every run where nothing settled its questions, which is every
+// run of a destination that has not asked for it.
+func SettledWithoutAskingSentence(confidence float64) string {
+	if confidence <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("上の点には、本来この依頼でお伺いする予定だったものが含まれます。受付とは別の判定にかけ、確信度 %.2f で「このまま進めてよい」と出たため、お伺いせずに受付が決めました。", confidence)
+}
+
+// settledWithoutAskingLine is that sentence as the plan notice carries it,
+// with the one thing its reader can still do about it.
+//
+// It is written next to the list rather than in the opening, so that the
 // two are cut together if the body ever overflows: a sentence about a list
 // that is no longer there sends a reader looking for something to check.
 func settledWithoutAskingLine(facts PlanFacts) string {
-	if facts.SettledConfidence <= 0 || len(facts.Decided) == 0 {
+	sentence := SettledWithoutAskingSentence(facts.SettledConfidence)
+	if sentence == "" || len(facts.Decided) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n上の点には、本来この依頼でお伺いする予定だったものが含まれます。受付とは別の判定にかけ、確信度 %.2f で「このまま進めてよい」と出たため、お伺いせずに上の内容で進めます。1 つでも違うものがあれば、下の停止方法でこの実行を止めてください。\n", facts.SettledConfidence)
+	return "\n" + sentence + "1 つでも違うものがあれば、下の停止方法でこの実行を止めてください。\n"
 }
 
 func truncatePlanText(text string) string {

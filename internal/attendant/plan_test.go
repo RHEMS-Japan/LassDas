@@ -331,7 +331,7 @@ func TestThePlanNoticeSaysWhenTheReceptionSettledItsOwnQuestions(t *testing.T) {
 		"確認せずにこちらで決めた点（違う場合は停止してください）",
 		"- 両方の言語画面を直す",
 		"確信度 0.93",
-		"お伺いせずに上の内容で進めます",
+		"お伺いせずに受付が決めました",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("the plan notice lacks %q:\n%s", want, content)

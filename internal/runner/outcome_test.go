@@ -835,3 +835,64 @@ func TestTheClosingCommentCarriesThePointsTheGateSettledInsteadOfAsking(t *testi
 		t.Errorf("a run with no sealed decision was reported as an unreadable record: %q", notes.line())
 	}
 }
+
+// The closing comment says why the points above it were never put to the
+// requester, in the plan notice's own words. Without the sentence they read
+// as points nobody thought worth asking about, when they are the opposite:
+// the points the reception had written down to ask. What the notice adds —
+// how to stop the run — is absent here, because by now there is nothing
+// left to stop.
+func TestTheClosingCommentSaysThePointsWereSettledOnAJudgment(t *testing.T) {
+	runDir := t.TempDir()
+	writeOutcomeRecord(t, runDir, "history/readiness/decision.json", map[string]any{
+		"outcome": "ready",
+		"assumptions": []runAssumption{
+			{Kind: assumptionDefensibleDefault, Statement: "ラベルは両方の言語画面で差し替える", Evidence: "どちらの画面も新しい表記になります"},
+		},
+		"reception_judgment": map[string]any{
+			"model": "typesafe/jev-1.13", "answer": "yes", "confidence": 0.93, "threshold": 0.90,
+		},
+	})
+	decided := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	// The same sentence the plan notice writes, from the same place, so a
+	// requester meeting it twice meets the same words.
+	want := hook.SettledWithoutAskingSentence(0.93)
+	if want == "" {
+		t.Fatal("the shared sentence is empty for a judgment that settled something")
+	}
+	if !strings.Contains(decided, want) {
+		t.Errorf("the closing comment does not say the points were settled on a judgment:\n%s", decided)
+	}
+	if !strings.Contains(decided, "確信度 0.93") {
+		t.Errorf("the closing comment does not show the certainty:\n%s", decided)
+	}
+	if strings.Contains(decided, "停止") {
+		t.Errorf("the closing comment offers a stop for a run that has finished:\n%s", decided)
+	}
+	// It belongs to the list above it, so it comes after that heading and
+	// before the next one.
+	heading := strings.Index(decided, "## 確認せずに本体が決めたこと")
+	sentence := strings.Index(decided, want)
+	next := strings.Index(decided, "## 前提とした解釈")
+	if heading < 0 || sentence < heading {
+		t.Errorf("the sentence is printed before the points it explains:\n%s", decided)
+	}
+	if next >= 0 && sentence > next {
+		t.Errorf("the sentence drifted under another heading:\n%s", decided)
+	}
+
+	// A run nothing judged says nothing about a judgment.
+	writeOutcomeRecord(t, runDir, "history/readiness/decision.json", map[string]any{
+		"outcome": "ready",
+		"assumptions": []runAssumption{
+			{Kind: assumptionDefensibleDefault, Statement: "並び順は新着順にする"},
+		},
+	})
+	quiet := composeAssumptionsText(runDir, "", &outcomeNotes{})
+	if !strings.Contains(quiet, "並び順は新着順にする") {
+		t.Errorf("the points themselves went missing:\n%s", quiet)
+	}
+	if strings.Contains(quiet, "確信度") {
+		t.Errorf("the closing comment explains a judgment nobody made:\n%s", quiet)
+	}
+}

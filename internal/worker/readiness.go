@@ -999,9 +999,16 @@ func DecideReadiness(ctx context.Context, assessments []ReadinessAssessment, che
 	// ask it earlier and it would be answering about questions the checker
 	// was about to throw away.
 	if role, configured := config.Models.ReceptionJudgeRole(); configured {
-		decision.ReceptionJudgment = consultReceptionJudge(ctx, judge, decision.Outcome, decision.Questions, request, role)
-		decision.Outcome, decision.Questions, decision.Assumptions =
-			applyReceptionJudgment(decision.Outcome, decision.Questions, decision.ReceptionJudgment)
+		judgment := consultReceptionJudge(ctx, judge, decision.Outcome, decision.Questions, request, role)
+		outcome, questions, settled := applyReceptionJudgment(decision.Outcome, decision.Questions, judgment)
+		// Recorded only where it settled something. A judgment that changed
+		// nothing still changes the bytes of the artifact it is sealed into,
+		// and the claim this role is turned on under is that a run it does
+		// not settle is the run this engine would have had without it.
+		if len(settled) > 0 {
+			decision.ReceptionJudgment = judgment
+			decision.Outcome, decision.Questions, decision.Assumptions = outcome, questions, settled
+		}
 	}
 	digest, err := readinessDecisionDigest(decision)
 	if err != nil {
@@ -1505,6 +1512,14 @@ func (d ReadinessDecision) validateReceptionJudgment(config Config) error {
 	}
 	if !isConfidence(judgment.Confidence) || !judgment.Settled() {
 		return errors.New("readiness decision reception judgment settles nothing")
+	}
+	// A judgment is sealed only where it settled a whole set of questions,
+	// so it comes with the points it settled and with nothing left to ask.
+	// A record beside a run that still asks something is the half-settled
+	// state this engine does not produce: the requester would be shown
+	// fewer questions than the reception wrote and never told why.
+	if d.Outcome != ReadinessOutcomeReady || len(d.Assumptions) == 0 {
+		return errors.New("readiness decision reception judgment settled only part of what was asked")
 	}
 	return nil
 }

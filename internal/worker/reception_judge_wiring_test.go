@@ -85,39 +85,72 @@ func decideWithJudge(t *testing.T, ctx context.Context, output ModelReadinessOut
 	return DecideReadiness(ctx, []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, judge)
 }
 
-// A confident yes settles the questions the reception named a default for,
-// and only those. The points it settled become the assumptions the requester
-// reads; a question it would not name a default for goes on being asked,
-// because the alternative is to invent one and show them a decision nobody
-// made.
-func TestAConfidentJudgeSettlesOnlyTheQuestionsTheReceptionProposedDefaultsFor(t *testing.T) {
+// A set the reception named a default for every question of is settled
+// whole. A set with one question it would not name a default for is not
+// settled at all.
+//
+// Settling part of a set was the careful-looking reading and is the one
+// outcome nobody can see. A run that still has a question left posts the
+// question comment and stops there, and the plan notice - the only place
+// the settled points and the certainty behind them appear - is never
+// reached. The requester would be asked fewer questions than the reception
+// wrote, with nothing anywhere saying what was decided in place of the
+// rest.
+func TestAQuestionWithNoProposedDefaultLeavesTheWholeSetUnsettled(t *testing.T) {
 	config, request, source := judgedFixture(t, 0.80)
-	judge := &countingJudge{opinion: ReceptionOpinion{Model: testJudgeModel, Answer: "yes", Confidence: 0.91}}
-	decision, err := decideWithJudge(t, t.Context(), testProposedDefaultOutput("b"), judge, config, request, source)
+	output := testProposedDefaultOutput("b")
+	untouched, err := decideWithJudge(t, t.Context(), output, nil, config, request, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(untouched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judge := &countingJudge{opinion: ReceptionOpinion{Model: testJudgeModel, Answer: "yes", Confidence: 0.99}}
+	decision, err := decideWithJudge(t, t.Context(), output, judge, config, request, source)
 	if err != nil {
 		t.Fatalf("deciding with a judge: %v", err)
 	}
 	if judge.calls != 1 {
 		t.Fatalf("the judge was consulted %d times, want once", judge.calls)
 	}
-	if decision.Outcome != ReadinessOutcomeClarification {
-		t.Fatalf("outcome = %q, want %q while a question is still unanswerable", decision.Outcome, ReadinessOutcomeClarification)
+	// The request as the requester wrote it is what was judged, not a
+	// summary of it.
+	if !strings.Contains(judge.asked, request.Request) {
+		t.Error("the judge was asked about something other than the request")
 	}
-	if len(decision.Questions) != 1 || decision.Questions[0].ID != "Q1" {
-		t.Fatalf("questions = %+v, want the one with no proposed default, renumbered Q1", decision.Questions)
+	got, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(decision.Questions[0].Question, "empty input") {
-		t.Fatalf("the wrong question survived: %q", decision.Questions[0].Question)
+	if string(got) != string(want) {
+		t.Errorf("one question with no proposed default still moved the decision:\n got %s\nwant %s", got, want)
 	}
-	if len(decision.Assumptions) != 1 {
-		t.Fatalf("settled %d points, want 1: %+v", len(decision.Assumptions), decision.Assumptions)
+	if decision.ReceptionJudgment != nil {
+		t.Errorf("a judgment that settled nothing was recorded: %+v", *decision.ReceptionJudgment)
+	}
+	if len(decision.Questions) != 2 {
+		t.Errorf("the requester is asked %d of the 2 questions the reception wrote", len(decision.Questions))
+	}
+}
+
+// The settled points are the reception's own words on both sides: the point
+// it was going to ask about, and the answer it said it would defend.
+func TestASettledPointSaysWhatWasDecidedAndWhatItMeans(t *testing.T) {
+	config, request, source := judgedFixture(t, 0.80)
+	judge := &countingJudge{opinion: ReceptionOpinion{Model: testJudgeModel, Answer: "yes", Confidence: 0.91}}
+	decision, err := decideWithJudge(t, t.Context(), testProposedDefaultOutput("b", "a"), judge, config, request, source)
+	if err != nil {
+		t.Fatalf("deciding with a judge: %v", err)
+	}
+	if len(decision.Assumptions) != 2 {
+		t.Fatalf("settled %d points, want 2: %+v", len(decision.Assumptions), decision.Assumptions)
 	}
 	settled := decision.Assumptions[0]
 	if settled.Kind != AssumptionDefensibleDefault {
 		t.Errorf("settled point kind = %q, want %q", settled.Kind, AssumptionDefensibleDefault)
 	}
-	// The reception's own words on both sides: the point it was going to
-	// ask about, and the answer it said it would defend.
 	if !strings.Contains(settled.Statement, "both language screens") || !strings.Contains(settled.Statement, "Both languages") {
 		t.Errorf("settled point does not say what was decided: %q", settled.Statement)
 	}
@@ -130,14 +163,6 @@ func TestAConfidentJudgeSettlesOnlyTheQuestionsTheReceptionProposedDefaultsFor(t
 	}
 	if judgment.Answer != "yes" || judgment.Confidence != 0.91 || judgment.Threshold != 0.80 || judgment.Model != testJudgeModel {
 		t.Errorf("recorded judgment = %+v", *judgment)
-	}
-	// The request as the requester wrote it is what was judged, not a
-	// summary of it.
-	if !strings.Contains(judge.asked, request.Request) {
-		t.Error("the judge was asked about something other than the request")
-	}
-	if err := decision.Validate([]ReadinessAssessment{}, nil, source, request, config); err == nil {
-		t.Error("a decision validated against no chain at all was accepted")
 	}
 }
 
@@ -177,6 +202,8 @@ func TestTheQuestionsThatOutliveAFailedCheckAreJudgedToo(t *testing.T) {
 	blamesFirst := ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
 		{Code: "false-block", Message: "The first question is answerable from the repository.", QuestionID: "Q1"},
 	}}
+	// Only the second question survives the check, and the reception named
+	// a default for it, so the surviving set is settled whole.
 	output := testProposedDefaultOutput("b", "a")
 	first, firstCheck := testAssessmentPair(t, 1, output, "fail", source, request, config)
 	second, secondCheck := testAssessmentPair(t, 2, output, "fail", source, request, config)
@@ -329,6 +356,15 @@ func TestASealedJudgmentIsHeldToTheRoleThatCouldHaveGivenIt(t *testing.T) {
 		{"asked for another certainty", func(d *ReadinessDecision) { d.ReceptionJudgment.Threshold = 0.5 }},
 		{"names another model", func(d *ReadinessDecision) { d.ReceptionJudgment.Model = "someone/else" }},
 		{"settled points with nothing that settled them", func(d *ReadinessDecision) { d.ReceptionJudgment = nil }},
+		// The half-settled state this engine does not produce: a run that
+		// still asks something, with a record saying part of it was
+		// decided. The question comment goes out and the plan notice - the
+		// only place those points appear - never does.
+		{"settled part of what was asked", func(d *ReadinessDecision) {
+			d.Outcome = ReadinessOutcomeClarification
+			d.Questions = testProposedDefaultOutput("b").Questions[:1]
+		}},
+		{"settled everything and kept the points to nothing", func(d *ReadinessDecision) { d.Assumptions = nil }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			broken := sealed

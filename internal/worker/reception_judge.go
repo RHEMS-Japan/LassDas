@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"automation.internal/ticket-ingress/internal/decisions"
@@ -154,27 +153,28 @@ func consultReceptionJudge(ctx context.Context, judge ReceptionJudge, outcome st
 // under another.
 //
 // A question is settled only by the default the reception itself proposed
-// for it. One the reception proposed no default for is not settled by
-// anything here - it keeps being asked, and the run keeps asking - because
-// the alternative would be to invent a decision and show the requester a
-// choice nobody made.
+// for it, and the set is settled only if every question in it carries one.
+// Settling part of a set looked like the careful reading and is the one
+// outcome nobody can see: a run that still has a question to ask posts the
+// question comment and stops, and the plan notice - the only place the
+// settled points and the certainty behind them appear - is never reached.
+// The requester would be asked fewer questions than the reception wrote,
+// with nothing anywhere saying what was decided in place of the rest.
+//
+// So a judged run is one of two things. Either nothing is left to ask and
+// the whole set becomes points the requester reads in the notice and can
+// stop the run over, or the run is exactly what it would have been with no
+// judge configured at all.
 func applyReceptionJudgment(outcome string, questions []ReadinessQuestion, judgment *ReceptionJudgment) (string, []ReadinessQuestion, []ReadinessAssumption) {
 	if judgment == nil || !judgment.Settled() ||
 		outcome != ReadinessOutcomeClarification || len(questions) == 0 {
 		return outcome, questions, nil
 	}
-	kept := make([]ReadinessQuestion, 0, len(questions))
-	var settled []ReadinessAssumption
+	settled := make([]ReadinessAssumption, 0, len(questions))
 	for _, question := range questions {
 		choice, offered := choiceByID(question.Choices, question.ProposedDefault)
 		if question.ProposedDefault == "" || !offered {
-			// Renumbered as it is kept, the way a question that outlives a
-			// blamed one is: the ids an answer names have to be the ids the
-			// requester is shown, counting from one.
-			carried := question
-			carried.ID = questionID(len(kept) + 1)
-			kept = append(kept, carried)
-			continue
+			return outcome, questions, nil
 		}
 		settled = append(settled, ReadinessAssumption{
 			Kind: AssumptionDefensibleDefault,
@@ -186,13 +186,5 @@ func applyReceptionJudgment(outcome string, questions []ReadinessQuestion, judgm
 			Evidence:  boundedHead(choice.Effect, 1900),
 		})
 	}
-	if len(kept) == 0 {
-		return ReadinessOutcomeReady, []ReadinessQuestion{}, settled
-	}
-	return outcome, kept, settled
-}
-
-// questionID is the id a question is asked under, counting from one.
-func questionID(position int) string {
-	return fmt.Sprintf("Q%d", position)
+	return ReadinessOutcomeReady, []ReadinessQuestion{}, settled
 }
