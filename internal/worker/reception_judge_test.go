@@ -9,11 +9,6 @@ import (
 	"automation.internal/ticket-ingress/internal/decisions"
 )
 
-// The reception judge is optional, and a destination that says nothing about
-// it must be the destination it was before the role existed - byte for byte,
-// because the digest is folded from the encoded configuration and every
-// sealed record of a delivery in flight is bound to it. A field that encoded
-// even as a null would invalidate every flying delivery at once.
 // The address is stated twice, here and in the client, so that a
 // configuration can be checked without the client being built. Two
 // spellings of one address is exactly how they drift apart, so they are
@@ -24,6 +19,11 @@ func TestTheTwoSpellingsOfTheAddressAgree(t *testing.T) {
 	}
 }
 
+// The reception judge is optional, and a destination that says nothing about
+// it must be the destination it was before the role existed - byte for byte,
+// because the digest is folded from the encoded configuration and every
+// sealed record of a delivery in flight is bound to it. A field that encoded
+// even as a null would invalidate every flying delivery at once.
 func TestTheReceptionJudgeRoleIsOptional(t *testing.T) {
 	const shipped = "../../config/m1-consumer.json"
 	config, err := LoadConfig(shipped)
