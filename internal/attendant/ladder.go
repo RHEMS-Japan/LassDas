@@ -474,9 +474,21 @@ func stageRound(view chainView, stageName string) int {
 // the ladder now takes instead.
 //
 // These three said the same thing in three ways: something broke and the
-// delivery is over. None of them was ever a decision about the request. The
-// codes stay in the vocabulary — ledger rows and comments already posted
-// name them — and nothing on a failed card's path produces them now.
+// delivery is over. None of them was ever a decision about the request, so
+// no failed card is reported under them any more.
+//
+// That is the reporting path only, and two regenerating ones still end a
+// delivery under two of these codes. A revise that meets the round ceiling
+// reports the model failure its classification carried (chains.go, the
+// revise arm of classifyChainFailure). A design-backed round whose sealed
+// reviews cannot be read reports the internal failure
+// (chains_design.go, unreadableReviewsOutcome) — no model was asked
+// anything there, and no amount of dispatching the stage again repairs a
+// record. Both reach the report through actionRegenerate, which is why
+// neither passes this gate.
+//
+// The codes stay in the vocabulary either way: ledger rows and comments
+// already posted name all three.
 func ladderOwns(code hook.TerminalCode) bool {
 	switch code {
 	case hook.TerminalModelFailed, hook.TerminalInternalFailed, hook.TerminalReleaseFailed:

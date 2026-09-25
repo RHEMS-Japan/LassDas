@@ -504,14 +504,20 @@ func (c Config) validateOrchestration() error {
 	// longer than the longest one would be clamped down to it on the very
 	// first attempt, which is not what anyone writing those two numbers
 	// meant. Both are refused at load rather than repaired quietly.
-	for name, seconds := range map[string]int{
-		"retry_backoff_base_seconds": c.Chain.RetryBackoffBaseSeconds,
-		"retry_backoff_max_seconds":  c.Chain.RetryBackoffMaxSeconds,
-		"retry_max_attempts":         c.Chain.RetryMaxAttempts,
-		"retry_notice_attempts":      c.Chain.RetryNoticeAttempts,
+	// A slice and not a map: a file with two of these wrong would otherwise
+	// be refused by whichever one the map handed over first, so the operator
+	// fixes a different line each time they restart the pod.
+	for _, setting := range []struct {
+		name  string
+		value int
+	}{
+		{"retry_backoff_base_seconds", c.Chain.RetryBackoffBaseSeconds},
+		{"retry_backoff_max_seconds", c.Chain.RetryBackoffMaxSeconds},
+		{"retry_max_attempts", c.Chain.RetryMaxAttempts},
+		{"retry_notice_attempts", c.Chain.RetryNoticeAttempts},
 	} {
-		if seconds < 0 {
-			return errors.New("runtime config: chain." + name + " must be 0 (the default) or positive")
+		if setting.value < 0 {
+			return errors.New("runtime config: chain." + setting.name + " must be 0 (the default) or positive")
 		}
 	}
 	if c.Chain.RetryBackoffBase() > c.Chain.RetryBackoffMax() {

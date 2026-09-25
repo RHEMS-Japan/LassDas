@@ -180,7 +180,7 @@ TARGET_SHAPE.md は「実行も Hermes 純正 (ハーネス 1 本)」と定め�
 ### 4.4 頼んだ人に見えるもの
 
 - **調査報告コメント** (marker `investigation`、1 回だけ): findings の要点 (measured / inferred を明示)、unknowns、次の一手。`measurements.jsonl` は添付する (§3.3 の走査を通ったものだけ。添付前に関所がもう一度走査する)
-- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**・失敗連続保留の streak を切る) を `report_protocol` に足す。コメント本文は 16 KiB 内に収める (分かったこと・分からなかったことは全件・全文を載せ、それで収まらないときだけ全文を添付にして、コメントに何件をどこに回したかを書く)。`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (添付は `measurements.jsonl` 自身を 1 件と数えて最大 10 件。報告が 1 コメントに収まらないときは全文が `investigation-report.txt` として 1 件を占めるので、生出力はその分 1 件減る。1 件 256 KiB・合計 2.5 MiB。橋は 1 コメントに 10 件まで・1 件 8 MiB まで (`internal/backlog/client.go`)。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として数える (streak を切らない)
+- **調査だけの依頼の終端**: 終端コード `investigated` (PR なし・**成功扱い**) を `report_protocol` に足す。コメント本文は 16 KiB 内に収める (分かったこと・分からなかったことは全件・全文を載せ、それで収まらないときだけ全文を添付にして、コメントに何件をどこに回したかを書く)。`measurements.jsonl` と生出力は添付 API で `measurement-<id>.txt` として付ける (添付は `measurements.jsonl` 自身を 1 件と数えて最大 10 件。報告が 1 コメントに収まらないときは全文が `investigation-report.txt` として 1 件を占めるので、生出力はその分 1 件減る。1 件 256 KiB・合計 2.5 MiB。橋は 1 コメントに 10 件まで・1 件 8 MiB まで (`internal/backlog/client.go`)。超える分は本文に「添付を省略」と明記し、指紋つきで run dir に残す)。手数・壁時間の上限で最終回答が無い `investigation_incomplete` は失敗として残る
 - **実装方針コメント** (既存 marker `plan`) の中身を、設計書の要約 (cause / approach / files / verification) に置き換える。**頼んだ人は、コードが書かれる前に方針を読める**。証跡 (trail、60 KiB 上限。PR 本文は全文を運び、チケットのコメントは 1 コメントに収まる分だけを運んで残りの在り処を書く) と PR 本文にも「設計の要約」節を足す
 - 板 (状態ボード) の段階: `investigating` (調査中) / `designing` (設計中) / `design-review` (設計のレビュー中) を足す。レールの節点「調査」「設計」は受付と実装の間に置く
 
@@ -250,7 +250,7 @@ TICKET_AUTHORING.md には「どう直すかを本文に書けば設計を省略
 | `cmd/worker/agent.go` | 設計レビューのプロンプト (`design_lens`)、写し役のプロンプト |
 | `internal/attendant` | 新カードの生成・退役、冪等キーの `:d<N>` (設計の巡。`investigate` カードも `<delivery>:investigate:d<N>` で、2 巡目が完了済みの 1 巡目のカードと衝突しない) を `ParseChainCardKey` / `chainViewFor` が実装の巡と区別して読むこと、`history/design-<N>/objection.json` の有無による分類と設計巡の再開、終端 `investigated` / `design_nonconverged` / `design_rounds_spent` / `investigation_nonconverged` / `investigation_incomplete` の扱い、板の段階 |
 | `internal/runner/deliver.go` | 計測形の確認 (§4.3): 反映後に関所が同じ probe を実行して閾値と比べ、写真係の判定と同じ場所 (`deliverVerification`) に載せる |
-| `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` / `design_rounds_spent` (`report_protocol.go`) と streak の扱い (`investigated` だけが streak を切る) |
+| `internal/hook` | 調査報告コメント (marker `investigation`)、実装方針コメントの設計書要約、終端コード `investigated` / `investigation_incomplete` / `investigation_nonconverged` / `design_nonconverged` / `design_rounds_spent` (`report_protocol.go`) |
 | `internal/worker/artifact.go`, `impasse.go` | 確定記録 `DesignReview` / `DesignDecision` と検算、`design-impasse-question` |
 | 消費側設定 (`config/m1-consumer.json` 例) | `probes[]`, `design.default`, `design.trigger_words`, `design.review_investigation`, `design.staging_has_no_customer_content`, `design_max_rounds`, `models.designer`, `agents.applier`, `models.reviewers[].design_lens`, `models.design_reviewers[]` と `agents.design_reviewer_agents[]` (設計レビュー役を別建てにするとき、対で) |
 | 上限の置き場 (規則) | **巡数と役の定義** (`design.*`, `agents.*`, `models.*`) は消費側設定。**手数と壁時間** (`chain.investigate.max_probes` / `max_runtime_seconds`, `apply` の `MaxRuntimeSeconds`) は runtime.json の `chain` (既存のカードの壁と同じ場所)。Hermes エージェントの手数 (`agent.max_turns`) はプロファイルが持つ (既存のレビュー役と同じ)。同じ値を 2 か所に置かない |

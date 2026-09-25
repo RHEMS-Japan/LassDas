@@ -28,6 +28,15 @@ func TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester(t *testing.T) {
 			t.Fatalf("the waiting notice lacks %q:\n%s", needle, waiting)
 		}
 	}
+	// It names no cause. Everything out of remedies ends on this rung — a
+	// model that would not answer, a destination that refuses the change
+	// every time, a failure nobody could name — so a sentence blaming an
+	// outside service would be wrong for most of them.
+	for _, blame := range []string{"外部のサービス", "外部サービス", "AI", "ネットワーク"} {
+		if strings.Contains(waiting, blame) {
+			t.Fatalf("the waiting notice blames %q, and this rung takes every kind of failure:\n%s", blame, waiting)
+		}
+	}
 
 	limit := KeyLimitReachedContent("RUN-2", "implement")
 	if ExtractCommentMarker(limit) != CommentMarker("ladder", "RUN-2", "implement", "wait") {

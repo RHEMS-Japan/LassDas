@@ -175,14 +175,30 @@ func TestLoadRefusesRetrySettingsThatMakeNoSense(t *testing.T) {
 			t.Fatalf("%s: Load() error = %v", name, err)
 		}
 	}
-	// And the settings that do make sense load.
+	// Two wrong at once names the first of them, every time. Refused by
+	// whichever one a map handed over first, an operator would fix a
+	// different line on each restart.
 	raw := validRuntimeConfigMap()
 	chain := cardsChainMap()
-	chain["retry_backoff_base_seconds"] = 30
-	chain["retry_backoff_max_seconds"] = 600
-	chain["retry_notice_attempts"] = 2
+	chain["retry_backoff_base_seconds"] = -1
+	chain["retry_notice_attempts"] = -1
 	raw["chain"] = chain
-	config, err := Load(writeRuntimeConfig(t, raw))
+	path := writeRuntimeConfig(t, raw)
+	for attempt := 0; attempt < 8; attempt++ {
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "retry_backoff_base_seconds") {
+			t.Fatalf("attempt %d named a different setting: %v", attempt, err)
+		}
+	}
+
+	// And the settings that do make sense load.
+	sane := validRuntimeConfigMap()
+	saneChain := cardsChainMap()
+	saneChain["retry_backoff_base_seconds"] = 30
+	saneChain["retry_backoff_max_seconds"] = 600
+	saneChain["retry_notice_attempts"] = 2
+	sane["chain"] = saneChain
+	config, err := Load(writeRuntimeConfig(t, sane))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}

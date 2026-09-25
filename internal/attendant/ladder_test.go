@@ -1,6 +1,7 @@
 package attendant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -398,6 +399,75 @@ func TestTheClimbSurvivesAPodBeingReplaced(t *testing.T) {
 	}
 	if other := readLadderRecord(setup.runDir, runtime.StageReviewB, 1); other.Attempts != 0 {
 		t.Fatalf("another stage read this stage's climb: %+v", other)
+	}
+}
+
+// The record is read back off a volume that outlives the pod, so the reader
+// is held to the same terms as the round's own records: it refuses one that
+// is not this stage's and this round's, one too large to be ours, and one
+// that will not parse. Every refusal reads as a climb that has not started,
+// which costs at most one hand replayed and never leaves a delivery stuck.
+func TestReadLadderRecordRefusesWhatIsNotThisClimbs(t *testing.T) {
+	runDir := t.TempDir()
+	logger := &pendingTestLogger{}
+	spent := ladderRecord{Attempts: 2, Tried: []string{"reclaim:finished-runs", "reclaim:own-sandbox"}, LadderStep: rungWait}
+	writeLadderRecord(runDir, runtime.StageReviewA, 1, spent, logger)
+	if got := readLadderRecord(runDir, runtime.StageReviewA, 1); got.Attempts != 2 || len(got.Tried) != 2 {
+		t.Fatalf("this climb did not read back: %+v", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		stage string
+		round int
+	}{
+		{"another stage", runtime.StageReviewB, 1},
+		{"another round", runtime.StageReviewA, 2},
+	} {
+		if got := readLadderRecord(runDir, tc.stage, tc.round); got.Attempts != 0 || len(got.Tried) != 0 {
+			t.Fatalf("%s read this climb as its own: %+v", tc.name, got)
+		}
+	}
+	// A record whose contents name somewhere else, at the right path. The
+	// path proves nothing; the record has to say where it belongs.
+	misbound := ladderRecord{SchemaVersion: ladderSchemaVersion, Stage: runtime.StagePublish, Round: 9, Attempts: 5}
+	encoded, err := json.Marshal(misbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := ladderRecordFile(runDir, runtime.StageReviewA, 1)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLadderRecord(runDir, runtime.StageReviewA, 1); got.Attempts != 0 {
+		t.Fatalf("a record naming another stage and round was read as this one: %+v", got)
+	}
+	// Too large to be ours, and unparseable. Both read as a climb that has
+	// not started rather than stopping the delivery.
+	oversized := append([]byte(`{"schema_version":1,"stage":"review-a","round":1,"attempts":7,"last_reason":"`),
+		append(bytes.Repeat([]byte("x"), maxLadderRecordBytes), []byte(`"}`)...)...)
+	if err := os.WriteFile(path, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLadderRecord(runDir, runtime.StageReviewA, 1); got.Attempts != 0 {
+		t.Fatalf("a record past the bound was read: %+v", got)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"stage":"review-a","round":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLadderRecord(runDir, runtime.StageReviewA, 1); got.Attempts != 0 {
+		t.Fatalf("a record cut short was read: %+v", got)
+	}
+	// And a record from a shape this engine no longer writes.
+	stale := map[string]any{"schema_version": ladderSchemaVersion + 1, "stage": runtime.StageReviewA, "round": 1, "attempts": 4}
+	encoded, err = json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLadderRecord(runDir, runtime.StageReviewA, 1); got.Attempts != 0 {
+		t.Fatalf("a record of another shape was read: %+v", got)
 	}
 }
 

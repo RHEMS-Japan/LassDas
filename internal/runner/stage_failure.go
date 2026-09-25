@@ -151,19 +151,33 @@ type verbFailure struct {
 }
 
 func (f *verbFailure) Error() string {
-	if f.err != nil {
+	switch {
+	case interrupted(f.err):
+		// The step did run — it was stopped part-way. Saying it could not
+		// run would put a sentence in the record that a person reading it
+		// the next morning would act on, and the thing they would go
+		// looking for never happened.
+		return fmt.Sprintf("the %s step was stopped part-way: %v", f.verb, f.err)
+	case f.err != nil:
 		return fmt.Sprintf("the %s step could not run: %v", f.verb, f.err)
+	default:
+		return fmt.Sprintf("the %s step exited %d", f.verb, f.code)
 	}
-	return fmt.Sprintf("the %s step exited %d", f.verb, f.code)
 }
 
 func (f *verbFailure) Unwrap() error { return f.err }
 
-// couldNotStart reports whether the step never ran at all. A step that ran
-// and exited non-zero comes back as an exit code with no error, so an error
-// here means the command could not be started — which is what a binary that
-// is not on the image looks like from the inside.
-func (f *verbFailure) couldNotStart() bool { return f != nil && f.err != nil }
+// couldNotStart reports whether the step never ran at all — which is what a
+// binary that is not on the image looks like from the inside.
+//
+// A step that ran and exited non-zero comes back as an exit code with no
+// error, so an error here usually means the command could not be started.
+// The one exception is the cancellation the caller puts there for a step its
+// context killed: that step started, ran, and was stopped, so it is excluded
+// by name rather than left to the arm below to exclude by accident.
+func (f *verbFailure) couldNotStart() bool {
+	return f != nil && f.err != nil && !interrupted(f.err)
+}
 
 // deliveryRefusal carries the delivery's own terminal code out of the publish
 // card. The card can only exit non-zero, so the code has to ride the error to
@@ -192,7 +206,27 @@ func (p *Pipeline) runVerb(ctx context.Context, name string, arguments []string,
 	}
 	// p.lastStepStderr belongs to the step that just returned, so the tail is
 	// bound to this verb rather than to whatever ran most recently.
-	return &verbFailure{verb: name, code: code, err: err, stderr: p.lastStepStderr}
+	return &verbFailure{verb: name, code: code, err: stoppedBy(ctx, err), stderr: p.lastStepStderr}
+}
+
+// stoppedBy puts the context's cancellation where a reader can find it.
+//
+// A step killed by a signal is, to the exec package, a process that ended:
+// Wait prefers the child's own ending over the context's, so the step comes
+// back as an exit code with a nil beside it, exactly like a verb that ran and
+// refused. From there nothing downstream could tell a pod being replaced from
+// a provider that would not answer — and the two want opposite things. One is
+// dispatched again at once; the other is waited out for half an hour and then
+// said aloud on the ticket, which is what a rolling restart got.
+//
+// Measured: cancelling mid-run gives code -1 and err nil, and the same for a
+// deadline. Only a cancellation before the child starts arrives as an error
+// of its own.
+func stoppedBy(ctx context.Context, err error) error {
+	if err == nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // runController runs one destination command the same way, so a delivery that
@@ -212,7 +246,7 @@ func (p *Pipeline) runController(ctx context.Context, name string, arguments []s
 	if err == nil && code == 0 {
 		return nil
 	}
-	return &verbFailure{verb: name, code: code, err: err, stderr: p.lastStepStderr}
+	return &verbFailure{verb: name, code: code, err: stoppedBy(ctx, err), stderr: p.lastStepStderr}
 }
 
 // modelSpendingVerbs are the worker verbs that spend a model turn, whether

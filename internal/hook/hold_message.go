@@ -115,18 +115,26 @@ func LadderNoticeMarker(runID, stage, rung string) string {
 	return CommentMarker(string(RunCommentLadder), runID, stage, rung)
 }
 
-// LadderWaitContent says the delivery is still going and is waiting on
-// something outside it. It asks for nothing: the work resumes by itself,
+// LadderWaitContent says the delivery is still going and is taking longer
+// than usual at one step. It asks for nothing: the work resumes by itself,
 // and this exists so that a delivery which has been inside one stage for
 // half an hour does not read as a delivery that stopped.
+//
+// It names no cause on purpose. Everything that runs out of remedies ends
+// on this rung — a model that would not answer, a destination that refuses
+// the change every time, a failure nobody could name — and a sentence
+// blaming an outside service would be wrong for most of them and would send
+// an operator looking in the wrong place. What it can say truthfully is
+// what the delivery is doing and where the reason is written down.
 func LadderWaitContent(runID, stage string) string {
-	body := "【処理は続いています】外部のサービスからの応答が得られないため、この工程をしばらく間隔を空けて試し続けています。" +
-		"依頼は止まっていません。応答が戻り次第、人の操作なしで続きから進みます。\n\n"
+	body := "【処理は続いています】この工程が完了しないため、間隔を空けて試し続けています。" +
+		"依頼は止まっていません。完了した時点で、人の操作なしで続きの工程へ進みます。\n\n" +
+		"原因の記録は運用担当者が確認できます（この依頼の作業ディレクトリに、工程ごとの失敗の記録が残ります）。\n\n"
 	return body + CommentFacts{
-		State:      "外部サービスの回復待ち（処理は継続中）",
+		State:      "同じ工程を再試行中（処理は継続中）",
 		NextActor:  "なし（自動で再試行します）",
-		Operation:  "対応不要（起票者・運用担当者のどちらの操作も不要です）",
-		NextEvent:  "間隔を空けて再試行し、成功した時点で続きの工程へ進みます",
+		Operation:  "対応不要（起票者の操作は不要です。運用担当者は必要なら記録を確認してください）",
+		NextEvent:  "間隔を空けて再試行し、完了した時点で続きの工程へ進みます",
 		Production: "未変更",
 		AutoRetry:  "あり（間隔を空けて継続）",
 		Marker:     LadderNoticeMarker(runID, stage, LadderWaitRung),
