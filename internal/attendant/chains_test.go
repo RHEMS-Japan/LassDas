@@ -69,9 +69,13 @@ func TestClassifyChainFailure(t *testing.T) {
 	if action != actionReport || code != hook.TerminalReleaseFailed {
 		t.Fatalf("publish failure = %v %v", action, code)
 	}
-	action, _ = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
-	if action != actionRegenerate {
-		t.Fatalf("revise = %v", action)
+	// The code a revise carries is no longer inert. The round ceiling ends a
+	// run out of the regenerate arm under whatever the classification carried,
+	// and that arm stopped assigning one of its own, so this value is what a
+	// requester reads when a revise reaches the last configured round.
+	action, code = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
+	if action != actionRegenerate || code != hook.TerminalModelFailed {
+		t.Fatalf("revise = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), decided("clarification_required"), changed)
 	if action != actionAskQuestion || code != hook.TerminalNonconverged {
@@ -81,8 +85,11 @@ func TestClassifyChainFailure(t *testing.T) {
 	if action != actionReport || code != hook.TerminalNonconverged {
 		t.Fatalf("nonconverged without question = %v %v", action, code)
 	}
+	// A converged round the deterministic validation refused starts another
+	// round instead of ending the delivery. The code travels with it for the
+	// one path that still ends a run out of that arm, the round ceiling.
 	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), undecided, changed)
-	if action != actionReport || code != hook.TerminalValidationFailed {
+	if action != actionRegenerate || code != hook.TerminalValidationFailed {
 		t.Fatalf("converged but failed = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StageValidate, undecided, undecided, changed)

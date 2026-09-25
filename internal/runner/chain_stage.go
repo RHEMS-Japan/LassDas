@@ -111,6 +111,15 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 		for _, reviewer := range reviewers {
 			args = append(args, "--previous-findings", fmt.Sprintf("%s/%s.json", previous, reviewer))
 		}
+		// A round the judges passed and the deterministic validation refused
+		// left what was printed; this round exists to answer it. Passed only
+		// when the record is there and reads back whole: most rounds are
+		// repeated over an objection instead and sealed no such record, and
+		// the command refuses a path it cannot read rather than rendering an
+		// instruction that quietly lost the one thing it is being run for.
+		if _, sealed := ReadValidationFailure(p.Workspace, round-1); sealed {
+			args = append(args, "--validation-failure", ValidationFailureFile(p.Workspace, round-1))
+		}
 	}
 	args = append(args, p.clarificationArgs()...)
 	args = append(args, "--out", p.path("INSTRUCTION.md"))
@@ -393,9 +402,16 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 	if err := os.Remove(p.path("validation.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if failed, err := p.validationStage(ctx, round, chainReviewFiles(reviewers)); err != nil {
+	if refusal, err := p.validationStage(ctx, round, chainReviewFiles(reviewers)); err != nil {
 		return err
-	} else if failed {
+	} else if refusal != nil {
+		// The round is refused, not the delivery. What the validation printed
+		// is sealed into this round so the next round's instruction can carry
+		// it: the judges passed this change and the destination's own commands
+		// did not, and the only party that can close that gap is the agent
+		// that wrote it, told what was printed. Without this the output lived
+		// in the pod's log alone and the run ended on it.
+		p.SealValidationFailure(round, refusal.step, refusal.output)
 		// The sentinel, not a fresh sentence: this is the one failure the
 		// validate card owns, and the class turns on having taken this branch.
 		return ErrValidationRejected
