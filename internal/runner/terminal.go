@@ -88,6 +88,8 @@ func (t *Terminal) Report(ctx context.Context, code hook.TerminalCode, outcome O
 	// The run is closed; what the requester decided along the way is kept
 	// for the next one, whatever code this report carried.
 	t.preserveAnswers()
+	// Closed also means the destination clones have no reader left.
+	t.pruneRunClones()
 	return nil
 }
 
