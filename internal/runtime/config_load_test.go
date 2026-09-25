@@ -120,6 +120,15 @@ func TestLoadRefusesEverythingButTheCardChain(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "hermes_profile") || !strings.Contains(err.Error(), "削除") {
 		t.Fatalf("hermes_profile: Load() error = %v", err)
 	}
+	// A file carrying both names both. Found one at a time, the second
+	// would only appear after the first was fixed and the pod restarted.
+	both := validRuntimeConfigMap()
+	both["orchestration"] = "runner"
+	both["hermes_profile"] = "an-assignee-profile"
+	_, err = Load(writeRuntimeConfig(t, both))
+	if err == nil || !strings.Contains(err.Error(), "orchestration") || !strings.Contains(err.Error(), "hermes_profile") {
+		t.Fatalf("both retired settings: Load() error = %v", err)
+	}
 }
 
 // The chain has nowhere to work without a run directory root, and a card

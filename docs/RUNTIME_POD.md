@@ -22,8 +22,8 @@ dispatcher. Code comments across `internal/runtime`, `internal/runner`,
 
 | Process | Source | Role |
 | --- | --- | --- |
-| attendant | `cmd/attendant` | Resident. Every interval it runs one question tick (the whole reception protocol: tracker ingest, answer adoption, renotify, shortfall, expiry, half-posted recovery, board projection) and then aligns kanban cards with ledger states (`SyncCards`). It fully replaces the Lambda; no webhook endpoint exists — the attendant reads the tracker, the tracker never calls in. |
-| runner | `cmd/runner` | Per-card. The Hermes profile's `worker.command` points at it. It claims the queued run from the ledger, drives the stage pipeline by shelling out to the unchanged `cmd/worker` / `cmd/controller` binaries, and closes the run in process through the same report/question services the Lambda wired. |
+| attendant | `cmd/attendant` | Resident. Every interval it runs one question tick (the whole reception protocol: tracker ingest, answer adoption, renotify, shortfall, expiry, half-posted recovery, board projection) and then advances every delivery's chain of stage cards (`SyncChains`): it claims the queued run, prepares it, creates the round's missing cards, reads what a finished stage sealed, and owns the question and the terminal report the ticket receives. It fully replaces the Lambda; no webhook endpoint exists — the attendant reads the tracker, the tracker never calls in. |
+| runner | `cmd/runner` | Per-card. The Hermes stage profile's `worker.command` points at it, and the subcommand says which card it is running: `chain-stage` (one stage of a delivery's chain), `deliver` (the delivery continuation up to a named milestone), `e2e-check` (the post-merge staging observation). It works in the shared run directory the card names, shelling out to the unchanged `cmd/worker` / `cmd/controller` binaries, and ends with an exit code; it never touches the ledger. |
 
 Both read one `runtime.json` (`internal/runtime.Config`), which is what
 keeps them on the same ledger, routes and identities.

@@ -404,28 +404,43 @@ func (c Config) ValidateDestinations() error {
 	return nil
 }
 
-// OrchestrationRefusal is what an operator is told when the configuration
-// does not select the card chain. The older single-card mode is gone, and a
-// configuration that still asks for it — or says nothing, which used to mean
-// it — is refused rather than quietly read as the chain: the two ran a
-// delivery differently, and a pod that started the wrong one would leave the
-// board and the tracker describing a shape nobody configured.
-const OrchestrationRefusal = `runtime config: orchestration は "cards" だけを受け付けます（"runner" は廃止しました）。設定の orchestration を "cards" にしてください`
+// The instructions an operator is given for each setting the retired
+// single-card mode took with it. A file that carries both gets both in one
+// refusal: found one at a time, the second would only appear after the
+// first was fixed and the pod restarted.
+//
+// orchestrationSentence: the older mode is gone, and a configuration that
+// still asks for it — or says nothing, which used to mean it — is refused
+// rather than quietly read as the chain: the two ran a delivery
+// differently, and a pod that started the wrong one would leave the board
+// and the tracker describing a shape nobody configured.
+//
+// hermesProfileSentence: without it the decoder refuses the whole file for
+// an unknown field, and the operator has to guess which line to delete.
+const (
+	orchestrationSentence = `orchestration は "cards" だけを受け付けます（"runner" は廃止しました）。設定の orchestration を "cards" にしてください`
+	hermesProfileSentence = `hermes_profile は廃止しました。設定から hermes_profile の行を削除してください`
+)
 
-// hermesProfileRefusal names the setting the single-card mode took with it.
-// Without this the decoder refuses the whole file for an unknown field, and
-// the operator has to guess which line to delete.
-const hermesProfileRefusal = `runtime config: hermes_profile は廃止しました。設定から hermes_profile の行を削除してください`
+// OrchestrationRefusal is the whole refusal of a configuration whose only
+// retired setting is the mode selection.
+const OrchestrationRefusal = refusalPrefix + orchestrationSentence
+
+const refusalPrefix = "runtime config: "
 
 // validateOrchestration checks the chain configuration: it refuses to load
 // half-shaped (a missing profile would send a stage to a nonexistent
 // assignee and the chain would sit in dispatch forever).
 func (c Config) validateOrchestration() error {
+	retired := []string{}
 	if c.Orchestration != "cards" {
-		return errors.New(OrchestrationRefusal)
+		retired = append(retired, orchestrationSentence)
 	}
 	if c.HermesProfile != "" {
-		return errors.New(hermesProfileRefusal)
+		retired = append(retired, hermesProfileSentence)
+	}
+	if len(retired) > 0 {
+		return errors.New(refusalPrefix + strings.Join(retired, "。また、"))
 	}
 	p := c.Chain.Profiles
 	names := []string{p.Implementer, p.ReviewA, p.ReviewB, p.Validate, p.Publish}
