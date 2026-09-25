@@ -398,6 +398,15 @@ func startQueuedRun(
 	}
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
+		// A decision that cannot be read is not a decision that cannot be
+		// made, so the reception makes it again rather than the delivery
+		// ending on a corrupted file (reception_again.go). No card exists
+		// yet: returning leaves a claim with no chain, which the next tick
+		// puts back in the queue, and the tick after that runs the
+		// reception from the ticket.
+		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
+			return nil
+		}
 		// Fail closed: a request the decision routed to the investigating
 		// designer must not be handed to the implementer instead.
 		logger.Error("chain shape unavailable; ending honestly", "run", run.RunID, "error", err.Error())
@@ -582,6 +591,19 @@ func advanceClaimedRun(
 	}
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
+		// The same restart the two changes above make, for the same
+		// reason: what this delivery cannot read is a record it can have
+		// derived again, and ending it would end it on nothing anybody
+		// decided (reception_again.go). Once — a delivery already carrying
+		// the note ends below.
+		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
+			for _, task := range view.all {
+				if archiveErr := hermes.Archive(ctx, task.ID); archiveErr != nil {
+					return archiveErr
+				}
+			}
+			return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
+		}
 		logger.Error("chain shape unavailable for a claimed run; ending honestly", "run", run.RunID, "error", err.Error())
 		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 		repository, readErr := readField(runDir, "ticket-draft.json", "repository")

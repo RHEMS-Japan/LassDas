@@ -22,6 +22,19 @@ import (
 // ended without records leaves incomplete.json instead, which the attendant
 // reads as the honest ending it is.
 
+// ErrReadinessDecisionUnreadable is what a chain shape cannot be derived
+// from: the record the reception sealed is not on the volume, or is not
+// readable as a decision.
+//
+// It is told apart from every other reason the shape is unavailable
+// because it is the only one a delivery can come back from. A pod with no
+// design profiles will have none on the next tick either, and a
+// destination that configures no applier launch configures none a minute
+// later; both are an instance an operator has to change. This one is a
+// file, derived from the ticket by the reception, and the reception can
+// derive it again (internal/attendant/reception_again.go).
+var ErrReadinessDecisionUnreadable = errors.New("the readiness decision cannot be read")
+
 // ChainPlanFromDecision derives the chain's shape from the sealed readiness
 // decision and the consumer's switches. It is the one place the mode is
 // decided (§6: request_kind and needs_design, nothing else).
@@ -29,14 +42,14 @@ func ChainPlanFromDecision(runDir string, consumerConfigPath string) (runtime.Ch
 	decision := filepath.Join(runDir, "history", "readiness", "decision.json")
 	raw, err := os.ReadFile(decision)
 	if err != nil {
-		return runtime.ChainPlan{}, errors.New("readiness decision unreadable")
+		return runtime.ChainPlan{}, fmt.Errorf("%w: %s", ErrReadinessDecisionUnreadable, "not on the volume")
 	}
 	var parsed struct {
 		RequestKind string `json:"request_kind"`
 		NeedsDesign *bool  `json:"needs_design"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return runtime.ChainPlan{}, errors.New("readiness decision invalid")
+		return runtime.ChainPlan{}, fmt.Errorf("%w: %s", ErrReadinessDecisionUnreadable, "not readable as a decision")
 	}
 	reviewers := consumerReviewerCount(consumerConfigPath)
 	switch {

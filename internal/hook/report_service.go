@@ -245,13 +245,34 @@ func (s *TerminalReportService) reportResult(decision Decision, code, deliveryID
 // evidence shape is the truth here: a proposal-only delivery carries the pull
 // request alone and has touched no environment, and telling its requester
 // that production was verified would be a false completion report.
+//
+// A delivery that stopped short says so once and says it the same way
+// everywhere. Two sentences used to disagree about who takes it the rest of
+// the way -- this one promised the engine would, "automatically, once the
+// settings are complete", while the footer told the requester a person does
+// it -- and the promise was untrue whichever of them the reader believed:
+// the run is terminal, and nothing in it ever issues another promotion
+// card (deliver.go refuses to carry a delivery past its ending). It was
+// untrue in its reason as well. Every shortfall was described as settings
+// that had not been written, including the one that is nothing of the kind:
+// a production branch carrying changes staging does not have.
+//
+// So neither this sentence nor the footer names a cause any more. The
+// shortfall line the comment already carries -- 「ここまでで止まった理由: 」 --
+// is the one place the reason is stated, written by whatever actually held
+// the delivery, and what is said here is only what is true of every one of
+// them: this run is over, production was not reached, and reaching it takes
+// a later request or a person.
 func successMessage(report TerminalReportRequest) string {
 	if report.ProductionEvidenceURL != "" {
 		return "自動処理が完了し、本番環境への反映と確認が完了しました。"
 	}
 	if report.StagingEvidenceURL != "" {
 		if report.DeliveryShortfall != "" {
-			return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は、下に書いた設定が揃えば自動で行います。"
+			return "自動処理が完了し、staging への反映と確認まで完了しました。" +
+				"この実行はここで終わりで、本番へは届いていません（理由は下に書いています）。" +
+				"本番へ届くのは、その理由が解消したあとの新しい依頼か、人の操作によってです。" +
+				"この実行が後から自動で本番へ反映することはありません。"
 		}
 		return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は人が行います。"
 	}
@@ -262,7 +283,7 @@ func successMessage(report TerminalReportRequest) string {
 		// what the engine is waiting on, which the shortfall line below
 		// names.
 		return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。本番環境は変更していません。" +
-			"この納品先はもっと先まで届ける設定ですが、そこまで運ぶ設定がこの環境に揃っていないため、ここで止めています。"
+			"この納品先はもっと先まで届ける設定ですが、下に書いた理由でここまでとしています。"
 	}
 	return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。マージと以後の反映は人が行います。本番環境は変更していません。"
 }
@@ -297,6 +318,16 @@ func TerminalCommentContent(report TerminalReportRequest, reportDigest string) s
 	return terminalCommentContent(report, reportDigest, false)
 }
 
+// The endings that come from a round count say which count.
+//
+// Three of them used to say 「最大回数内」 and 「規定回数内」, from a contract
+// where a destination declared how many rounds it would pay for and the
+// third one ended the delivery. There is no such default any more: rounds
+// run while they make progress, a round that repeats itself is ruled on,
+// and a delivery that gets here has been round either fifty times — the
+// highest round number any record can carry — or as many times as an
+// operator asked for. A requester reading 「最大回数」 would look for a
+// setting that stopped their delivery and find none.
 func terminalCommentContent(report TerminalReportRequest, reportDigest string, deliveryContinues bool) string {
 	message := map[TerminalCode]string{
 		TerminalSuccess:                        successMessage(report),
@@ -307,7 +338,7 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalClarificationExpired:           "確認事項への回答が期限までに得られなかったため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。再度依頼する場合は、確認事項への回答内容を反映した新しいチケットとして起票してください。",
 		TerminalCancelled:                      cancelledMessage(report),
 		TerminalModelFailed:                    modelFailedMessage(report),
-		TerminalNonconverged:                   "自動レビューが最大回数内に収束しなかったため、本番環境には反映していません。",
+		TerminalNonconverged:                   "自動レビューが、記録の上限（50 巡）または運用担当者が設定した巡数に達しても収束しなかったため、本番環境には反映していません。",
 		TerminalValidationFailed:               "生成した変更が検証を通過しなかったため、本番環境には反映していません。",
 		TerminalReleaseFailed:                  "既存のリリース経路で処理を完了できなかったため、本番環境への反映は完了していません。",
 		TerminalProductionDeploymentUnverified: "prodブランチへの反映は完了しましたが、既存の本番デプロイが完了したことを確認できませんでした。自動的な追加変更やロールバックは行っていません。",
@@ -315,8 +346,8 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalInternalFailed:                 "自動処理中に内部エラーが発生し、依頼を完了できませんでした。",
 		TerminalInvestigated:                   "調査のみの依頼として、稼働環境とリポジトリを読み取りだけで計った報告をこのチケットに掲示しました。コードの変更と Pull Request はなく、対象リポジトリと本番環境は変更していません。このチケットでの自動処理は終了しています。",
 		TerminalInvestigationIncomplete:        incompleteMessage(report),
-		TerminalInvestigationNonconverged:      "調査報告が根拠のレビューを規定回数内に通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
-		TerminalDesignNonconverged:             "直し方の設計がレビューで規定回数内に合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
+		TerminalInvestigationNonconverged:      "調査報告が、記録の上限（50 巡）に達しても根拠のレビューを通らなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。",
+		TerminalDesignNonconverged:             "直し方の設計が、記録の上限（50 巡）に達してもレビューの合意に至らなかったため、コードは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 		TerminalDesignRoundsSpent:              "直し方の設計は合意できましたが、その設計で作業に入った後、「設計そのものを変えるべき」という判断になりました。設計をやり直せる回数を使い切っていたため、リポジトリは変更せず停止しました。争点は運用担当者が確認し、必要に応じてこのチケットでお知らせします。",
 		TerminalImplementationReturned:         "実装役が、変更を加えずに理由を報告して作業を返しました。対象リポジトリと本番環境は変更していません。報告の全文は下の実行の記録に載せています。どう進めるかは依頼者の判断です。内容を確認のうえ、必要な情報を書き足して起票し直してください。",
 	}[report.Code]
@@ -494,7 +525,15 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 			facts.Operation = "本番の表示をご確認ください（対応は不要です）"
 			facts.Production = "確認済み（利用者目線の表示確認まで完了）"
 		case report.StagingEvidenceURL != "":
+			// Two instructions for one delivery is one too many. A staging
+			// stop that was asked for ends with a person taking it on; a
+			// staging stop that was held ends with nobody taking it on from
+			// this run, and saying 「人が行います」 there sent the requester
+			// to ask someone to do what the held condition still forbids.
 			facts.Operation = "staging の表示をご確認ください（本番への反映は人が行います）"
+			if report.DeliveryShortfall != "" {
+				facts.Operation = "staging の表示をご確認ください（この実行は本番へ届いておらず、ここで終了しています）"
+			}
 			facts.Production = "未変更（staging まで反映済み）"
 		default:
 			facts.Operation = "Pull Request の内容をご確認のうえ、マージをご判断ください"
