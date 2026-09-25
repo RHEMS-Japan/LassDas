@@ -2,6 +2,7 @@ package attendant
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -40,6 +41,34 @@ import (
 // notice, that the reception was run twice and that what the second one
 // decided is what the delivery is built on: an assumption the engine made
 // on their behalf, in the one place assumptions are shown.
+
+// receptionAgainFor answers whether a chain shape that could not be derived
+// should be derived again, and seals the regeneration when it should.
+//
+// Both places that derive the shape consult it: the one that runs right
+// after the reception, and the one that reads the decision again on every
+// tick of a claimed delivery. What each does next differs — the first has
+// no cards to archive and no claim of its own to hand back — but whether
+// the delivery ends at all is one decision, and it lives here so that a
+// condition added to it is added to both.
+//
+// A note that cannot be written is a bound that does not exist, and a
+// regeneration with no bound is the unbounded retry this engine is meant
+// not to have. So a failed seal answers no, and the delivery ends the
+// honest way rather than coming back here for ever.
+func receptionAgainFor(err error, runDir string, now time.Time, runID string, logger Logger) bool {
+	if !errors.Is(err, runner.ErrReadinessDecisionUnreadable) || receptionRunAgain(runDir) {
+		return false
+	}
+	if sealErr := sealReceptionAgain(runDir, err.Error(), now); sealErr != nil {
+		logger.Error("the regeneration could not be recorded; the delivery ends instead",
+			"run", runID, "error", sealErr.Error())
+		return false
+	}
+	logger.Info("the readiness decision cannot be read; running the reception again",
+		"run", runID, "error", err.Error())
+	return true
+}
 
 // receptionAgainSchemaVersion is this record's shape.
 const receptionAgainSchemaVersion = 1

@@ -2,6 +2,8 @@ package attendant
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,5 +115,119 @@ func TestTheRegeneratedReceptionIsShownAsAnAssumption(t *testing.T) {
 	assumptions := loadPlanFacts(runDir).Assumptions
 	if len(assumptions) != 1 || !strings.Contains(assumptions[0], "受付をもう一度実行し") {
 		t.Fatalf("assumptions = %v", assumptions)
+	}
+}
+
+// The queued side of the regeneration — the derivation that runs in the
+// same tick as the reception that sealed the decision — cannot be reached
+// from a test: getting there means running the whole reception, which wants
+// the destination's clone, the worker and controller binaries and the
+// model turns, and the fixture that does all of that lives in the runner.
+// So the decision both sides make is one function, tested here, and the
+// fact that both sides consult it is pinned out of the source below.
+func TestTheRegenerationIsDecidedOnceForBothDerivations(t *testing.T) {
+	logger := &recordingLogger{}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	unreadable := fmt.Errorf("readiness decision gives no chain shape: %w",
+		runner.ErrReadinessDecisionUnreadable)
+
+	t.Run("an unreadable decision is made again, and the note says so", func(t *testing.T) {
+		runDir := receptionRunDir(t)
+		if !receptionAgainFor(unreadable, runDir, now, "TICKET-1", logger) {
+			t.Fatal("the delivery was not sent back to its reception")
+		}
+		if _, err := os.Stat(filepath.Join(runDir, "history", "readiness", "decision.json")); !os.IsNotExist(err) {
+			t.Fatalf("the unreadable decision is still on the volume: %v", err)
+		}
+		if !receptionRunAgain(runDir) {
+			t.Fatal("nothing recorded the regeneration")
+		}
+	})
+
+	t.Run("a second one is not", func(t *testing.T) {
+		runDir := receptionRunDir(t)
+		if !receptionAgainFor(unreadable, runDir, now, "TICKET-1", logger) {
+			t.Fatal("the first regeneration was refused")
+		}
+		if receptionAgainFor(unreadable, runDir, now, "TICKET-1", logger) {
+			t.Fatal("the reception was asked a third time")
+		}
+	})
+
+	t.Run("a shape the instance cannot run is not", func(t *testing.T) {
+		runDir := receptionRunDir(t)
+		if receptionAgainFor(errors.New("the pod has no profiles for the investigating designer's cards"),
+			runDir, now, "TICKET-1", logger) {
+			t.Fatal("a configuration gap asked the reception to run again")
+		}
+		if receptionRunAgain(runDir) {
+			t.Fatal("a configuration gap left a regeneration note")
+		}
+	})
+
+	t.Run("a note that cannot be written ends the delivery instead", func(t *testing.T) {
+		runDir := receptionRunDir(t)
+		// The note is the bound. Somewhere it cannot be written, a
+		// regeneration would come back every tick for ever, so the answer
+		// is no and the delivery ends the honest way.
+		if err := os.Chmod(runDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(runDir, 0o700) })
+		if receptionAgainFor(unreadable, runDir, now, "TICKET-1", logger) {
+			t.Fatal("the delivery was sent back with no bound on coming back")
+		}
+	})
+}
+
+// receptionRunDir is a run directory carrying the unreadable decision.
+func receptionRunDir(t *testing.T) string {
+	t.Helper()
+	runDir := t.TempDir()
+	readiness := filepath.Join(runDir, "history", "readiness")
+	if err := os.MkdirAll(readiness, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(readiness, "decision.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return runDir
+}
+
+// Both derivations ask before they end a delivery.
+//
+// Read out of the source because that is where the mistake lives: the
+// derivation that runs in the same tick as the reception cannot be reached
+// from a test, so dropping its one line compiles, leaves every test green,
+// and quietly restores the ending this change exists to remove — a
+// delivery killed by a file that can be written again.
+func TestEveryChainShapeDerivationAsksBeforeItEnds(t *testing.T) {
+	source, err := os.ReadFile("chains.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	derivations := 0
+	for rest := string(source); ; {
+		at := strings.Index(rest, "chainPlanFor(")
+		if at < 0 {
+			break
+		}
+		rest = rest[at+len("chainPlanFor("):]
+		block := rest
+		if len(block) > 1500 {
+			block = block[:1500]
+		}
+		ends := strings.Index(block, "hook.TerminalInternalFailed")
+		if ends < 0 {
+			continue // a derivation that does not end the delivery
+		}
+		derivations++
+		asks := strings.Index(block, "receptionAgainFor(")
+		if asks < 0 || asks > ends {
+			t.Errorf("a chain shape derivation ends the delivery without asking whether the reception can run again:\n%s", block[:ends])
+		}
+	}
+	if derivations != 2 {
+		t.Fatalf("found %d derivations that end a delivery, want the two this file has", derivations)
 	}
 }

@@ -404,10 +404,8 @@ func startQueuedRun(
 		// yet: returning leaves a claim with no chain, which the next tick
 		// puts back in the queue, and the tick after that runs the
 		// reception from the ticket.
-		if errors.Is(err, runner.ErrReadinessDecisionUnreadable) && !receptionRunAgain(runDir) {
-			logger.Info("the readiness decision cannot be read; running the reception again",
-				"run", run.RunID, "error", err.Error())
-			return sealReceptionAgain(runDir, err.Error(), time.Now().UTC())
+		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
+			return nil
 		}
 		// Fail closed: a request the decision routed to the investigating
 		// designer must not be handed to the implementer instead.
@@ -598,12 +596,7 @@ func advanceClaimedRun(
 		// derived again, and ending it would end it on nothing anybody
 		// decided (reception_again.go). Once — a delivery already carrying
 		// the note ends below.
-		if errors.Is(err, runner.ErrReadinessDecisionUnreadable) && !receptionRunAgain(runDir) {
-			logger.Info("the readiness decision cannot be read; running the reception again",
-				"run", run.RunID, "error", err.Error())
-			if sealErr := sealReceptionAgain(runDir, err.Error(), time.Now().UTC()); sealErr != nil {
-				return sealErr
-			}
+		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
 			for _, task := range view.all {
 				if archiveErr := hermes.Archive(ctx, task.ID); archiveErr != nil {
 					return archiveErr
