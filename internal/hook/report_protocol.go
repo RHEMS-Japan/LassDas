@@ -622,6 +622,19 @@ func validateTerminalEvidenceShape(r TerminalReportRequest, destination ReportDe
 		if r.PullRequestURL != "" || r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
 			return errors.New("pre-generation stop cannot claim repository evidence")
 		}
+	case TerminalDeadlineReached:
+		// A delivery cut short by its deadline says how far it got and
+		// carries that depth's evidence, production included: nothing here
+		// rolls back, so a footer calling production untouched would be
+		// false about the environment the requester has to look at. What
+		// it cannot claim is a depth without the ones beneath it. Refusing
+		// production outright, as the failed endings below do, would not
+		// make the report false — it would make it never post: the gate
+		// runs before the report is kept, so there would be nothing to
+		// resend and the run would stay open forever.
+		if r.ProductionEvidenceURL != "" && (r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "") {
+			return errors.New("a deadline report cannot claim production without the depths beneath it")
+		}
 	default:
 		if r.ProductionEvidenceURL != "" {
 			return errors.New("failed terminal report cannot claim production evidence")

@@ -83,11 +83,11 @@ func TestARunOutOfTimeInTheLadderEndsWithAnAccountOfWhereItGotTo(t *testing.T) {
 	}
 	for _, want := range []string{
 		"deadline_reached",
-		"処理時間",              // it says the time ran out
-		"8 時間",              // and how much it was given
-		"AI の利用枠",           // and what it kept meeting
+		"処理時間",               // it says the time ran out
+		"8 時間",               // and how much it was given
+		"AI の利用枠",            // and what it kept meeting
 		"Pull Request は作成済み", // and what landed
-		"## 続けるために必要なこと",    // and what a person would have to change
+		"## 続けるために必要なこと",     // and what a person would have to change
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("the report does not say %q:\n%s", want, report)
@@ -160,6 +160,11 @@ func TestARunOutOfTimeAfterStagingNamesTheScreen(t *testing.T) {
 	}
 	if !strings.Contains(report, "staging への反映と確認までは完了しています") {
 		t.Fatalf("the report does not say how far the delivery got:\n%s", report)
+	}
+	// The one thing the footer asks for — re-filing — is the requester's
+	// to do, so the footer must not send them away from it.
+	if !strings.Contains(report, "次に行動する人: 起票者") {
+		t.Fatalf("the report names someone other than the requester as the next actor:\n%s", report)
 	}
 }
 

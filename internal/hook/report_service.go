@@ -645,9 +645,11 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 	case TerminalDeadlineReached:
 		// The delivery ran out of night on a failure it could not get past,
 		// so what it owes the ticket is where it got to and what somebody
-		// would have to change. The default line — an operator will look —
-		// is right about who moves next; what it gets wrong is production,
-		// which a delivery cut short may well have reached.
+		// would have to change. The default line — an operator will look
+		// and the requester need do nothing — is wrong twice here: the
+		// operation it names is the requester's own (re-filing the ticket),
+		// and production, which a delivery cut short may well have reached.
+		facts.NextActor = "起票者"
 		facts.Operation = "下に書いた「続けるために必要なこと」をご確認ください（同じ内容で起票し直すと、最初からやり直します）"
 		facts.State = "処理時間の上限に達して終了（deadline_reached）"
 		switch {
