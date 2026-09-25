@@ -247,10 +247,111 @@ func unreadableReviewsStopReason(round int) string {
 // unreadableReviewsOutcome is how a run ends when its sealed reviews could
 // not be read: the code and the sentence together, because the code decides
 // which comment the requester reads and whether the failure counts toward
-// the hold on new work. It is internal rather than a model failure — no
-// model was asked anything here.
+// the hold on new work.
+//
+// Only one thing still reaches it: a delivery with no reviewer configured
+// at all, or one whose configuration cannot be read. There is no seat to
+// ask again there, and nothing to change. A record that names its seat
+// goes to climbUnreadableReview instead.
 func unreadableReviewsOutcome(round int) (hook.TerminalCode, string) {
 	return hook.TerminalInternalFailed, unreadableReviewsStopReason(round)
+}
+
+// unreadableReview names the seat whose sealed review could not be read.
+//
+// The seat is the whole point of carrying it: without a name this was one
+// undifferentiated breakdown and the delivery ended on it. With a name it
+// is one seat that did not leave a usable answer, which is a thing the
+// ladder knows what to do about.
+type unreadableReview struct {
+	reviewer string
+	err      error
+}
+
+func (u *unreadableReview) Error() string {
+	return fmt.Sprintf("sealed review %s could not be read: %v", u.reviewer, u.err)
+}
+
+func (u *unreadableReview) Unwrap() error { return u.err }
+
+// climbUnreadableReview turns a review that cannot be read into the failure
+// it is — that seat's — and climbs the ladder for it.
+//
+// A sealed review missing or unparseable is the seat having left no usable
+// answer. The decide verb read every one of them before it sealed the
+// round's decision, so a record that will not read now went after that; the
+// decision is therefore no longer derivable from its own evidence, and the
+// round has, in the only sense that matters, not been decided. So the
+// unreadable record and the decision built on it are dropped, the seat is
+// moved to its next candidate, and the review is asked again for the same
+// round. Nothing about the request has been decided by any of this, which
+// is why it used to be the wrong thing for the delivery to end on.
+//
+// The hands are the ordinary ones for a model that would not answer: the
+// seat's candidates in order, then the instruction rebuilt shorter, then
+// the wait. A configured limit on attempts still ends the delivery, and the
+// caller reports it exactly as it did before the ladder existed.
+func climbUnreadableReview(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	hermes *runtime.Hermes,
+	envelope hook.DispatchEnvelope,
+	run state.RunOverview,
+	view chainView,
+	plan runtime.ChainPlan,
+	reviewer string,
+	logger Logger,
+) (ladderVerdict, error) {
+	stage, known := reviewStageOf(config.ConsumerConfigPath, reviewer)
+	if !known {
+		return ladderSpent, nil
+	}
+	runDir := runDirectory(config, run.DeliveryID)
+	round := view.round
+	// The card's own account of its failure, written here rather than by
+	// the card: the card exited zero and sealed a review, and what is wrong
+	// with that review was only discovered afterwards, by a reader of it.
+	// The class is what the ladder acts on, and this is a model that left
+	// nothing usable behind — the same class the card would have sealed had
+	// the answer been unusable while it still held it.
+	failure := runner.StageFailure{
+		DeliveryID: run.DeliveryID, ToolSHA: config.Identity.EngineSHA,
+		Stage: stage, Round: round, Class: runner.FailureClassModel,
+		Error: "the sealed review of " + reviewer + " could not be read", FailedAt: time.Now().UTC(),
+	}
+	if err := runner.SealStageFailureRecord(runDir, failure); err != nil {
+		logger.Error("the unreadable review could not be recorded as the seat's failure",
+			"run", run.RunID, "stage", stage, "round", round, "error", err.Error())
+		return ladderSpent, nil
+	}
+	if err := runner.DropReviewAndDecision(runDir, reviewer, round); err != nil {
+		logger.Error("the unreadable review could not be cleared for another attempt",
+			"run", run.RunID, "stage", stage, "round", round, "error", err.Error())
+		return ladderSpent, nil
+	}
+	logger.Info("a review that could not be read is the seat's own failure; the seat is asked again",
+		"run", run.RunID, "stage", stage, "round", round, "seat", reviewer)
+	return climbLadder(ctx, newClimb(config, services, hermes, envelope, run, view, plan, stage, logger))
+}
+
+// reviewStageOf is the card one configured reviewer runs as. The chain runs
+// exactly two review cards, in the order the reviewers are configured.
+func reviewStageOf(consumerConfigPath, reviewer string) (string, bool) {
+	reviewers, err := consumerReviewerIDs(consumerConfigPath)
+	if err != nil {
+		return "", false
+	}
+	for index, configured := range reviewers {
+		if configured != reviewer {
+			continue
+		}
+		if index == 1 {
+			return runtime.StageReviewB, true
+		}
+		return runtime.StageReviewA, true
+	}
+	return "", false
 }
 
 // designWrongForRound answers, for one implementation round, whether the
@@ -294,7 +395,7 @@ func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []strin
 		path := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", implementRound), reviewer+".json")
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return false, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
+			return false, &unreadableReview{reviewer: reviewer, err: err}
 		}
 		var review struct {
 			Findings []struct {
@@ -302,7 +403,7 @@ func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []strin
 			} `json:"findings"`
 		}
 		if err := json.Unmarshal(raw, &review); err != nil {
-			return false, fmt.Errorf("sealed review %s could not be read: %w", reviewer, err)
+			return false, &unreadableReview{reviewer: reviewer, err: err}
 		}
 		for _, finding := range review.Findings {
 			if finding.Code == "design-wrong" {

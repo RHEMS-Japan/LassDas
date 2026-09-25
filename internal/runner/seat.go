@@ -131,6 +131,35 @@ func WriteSeatRecord(runDir string, record SeatRecord) error {
 	return writeRecordAtomically(path, encoded)
 }
 
+// DropReviewAndDecision clears one round for another attempt at one
+// review: the unreadable record itself, and the decision that was derived
+// from it.
+//
+// The decision goes because it can no longer be re-derived. The decide
+// verb reads every configured reviewer's record and refuses to seal unless
+// all of them are there; a record that will not read now leaves the sealed
+// decision standing on evidence that is gone, and every reader of it holds
+// it to that evidence. Dropping it is also what puts the round back where
+// the cards can work on it — the round a review card runs is the first one
+// without a decision, so a round still carrying one would send the card
+// forward to a round that has no change in it yet.
+//
+// Nothing else in the round is touched. The candidate, the other seat's
+// review and the earlier rounds stand: they are still exactly what they
+// were, and the round is being completed again rather than done again.
+func DropReviewAndDecision(runDir, reviewer string, round int) error {
+	if round < 1 || reviewer == "" {
+		return errors.New("a review to drop names a seat and a round this chain does not have")
+	}
+	stageDir := filepath.Join(runDir, "history", fmt.Sprintf("stage-%d", round))
+	for _, name := range []string{reviewer + ".json", reviewer + "-run.json", "decision.json"} {
+		if err := os.Remove(filepath.Join(stageDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // SeatFor is the seat one stage's role sits in, read out of the consumer's
 // model configuration.
 //
