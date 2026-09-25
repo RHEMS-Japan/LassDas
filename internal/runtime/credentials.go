@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"automation.internal/ticket-ingress/internal/cardsecret"
 )
 
 // A credential is a secret the operator provisions as a file and the engine
@@ -83,12 +85,11 @@ func (c Credential) HandsOverPath() bool { return c.Mode == CredentialPath }
 // what a destination needs, not a directory of everything they have.
 const maxCredentials = 16
 
-// MaxCredentialBytes bounds one credential file's content. A provisioned
-// secret is a token, a connection string or a small credentials file; a
-// larger file is a mistaken path, and reading it whole into every named
-// card's environment is how a delivery fails with the process table as its
-// error message.
-const MaxCredentialBytes = 64 * 1024
+// MaxCredentialBytes bounds one credential file's content. The number
+// lives with the reader every process shares, so that the card handing a
+// credential out, the launch lending a copy of it and the seal comparing
+// against it cannot disagree about what is in the file.
+const MaxCredentialBytes = cardsecret.MaxCredentialFileBytes
 
 var (
 	// The name appears in refusals and in the run's own record, so it is

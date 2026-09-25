@@ -17,7 +17,9 @@ func TestTheAgentsEnvironmentCarriesTheCardsCredentials(t *testing.T) {
 	cardsecret.Forget()
 	t.Setenv("DATABASE_URL", "postgres://warehouse.invalid/orders")
 	t.Setenv(cardsecret.NamesEnv, "DATABASE_URL")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(cardsecret.Forget)
 
 	environment, err := agentEnvironment(AgentConfig{ID: "implementer", Command: "agent"}, t.TempDir(), "")
@@ -53,7 +55,9 @@ func TestTheValidationSandboxCarriesTheCardsCredentials(t *testing.T) {
 	cardsecret.Forget()
 	t.Setenv("DATABASE_URL", "postgres://warehouse.invalid/orders")
 	t.Setenv(cardsecret.NamesEnv, "DATABASE_URL")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(cardsecret.Forget)
 
 	environment, cleanup, err := createValidationEnvironment(os.Environ())
@@ -95,7 +99,9 @@ func TestTheAgentsTranscriptKeepsNoCredential(t *testing.T) {
 	cardsecret.Forget()
 	t.Setenv("DATABASE_URL", "postgres://warehouse.invalid/orders?password=hunter2hunter2")
 	t.Setenv(cardsecret.NamesEnv, "DATABASE_URL")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(cardsecret.Forget)
 
 	said := "接続できませんでした: postgres://warehouse.invalid/orders?password=hunter2hunter2 を確認してください。"
@@ -138,7 +144,9 @@ func TestAPathCredentialIsLentToTheAgentAsACopyItCanOpen(t *testing.T) {
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", configured)
 	t.Setenv(cardsecret.NamesEnv, "AWS_SHARED_CREDENTIALS_FILE")
 	t.Setenv(cardsecret.PathNamesEnv, "AWS_SHARED_CREDENTIALS_FILE")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 
 	workingCopy := t.TempDir()
 	lentHome := t.TempDir()
@@ -170,6 +178,11 @@ func TestAPathCredentialIsLentToTheAgentAsACopyItCanOpen(t *testing.T) {
 	if err != nil || string(read) != contents {
 		t.Fatalf("the copy does not hold the credential: %q %v", read, err)
 	}
+	// Lending it is only safe because what is in it is known here: this is
+	// the process that captures what the AI prints.
+	if got := cardsecret.Redact("profile load failed: aws_secret_access_key = wJalrXUtnFEMIexampleKEY"); strings.Contains(got, "wJalrXUtnFEMIexampleKEY") {
+		t.Fatalf("the lent copy's contents are not masked: %q", got)
+	}
 	// The configured file is still the one the boot guards; nothing moved.
 	if _, err := os.Stat(configured); err != nil {
 		t.Fatalf("the configured file was disturbed: %v", err)
@@ -188,7 +201,9 @@ func TestTheLentCopyGoesWithTheLaunchHome(t *testing.T) {
 	t.Setenv("KUBECONFIG", configured)
 	t.Setenv(cardsecret.NamesEnv, "KUBECONFIG")
 	t.Setenv(cardsecret.PathNamesEnv, "KUBECONFIG")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 
 	lentHome := t.TempDir()
 	environment, err := agentEnvironment(AgentConfig{ID: "implementer", Command: "agent"}, lentHome, lentHome)
@@ -220,7 +235,9 @@ func TestACardWithoutALentHomeKeepsTheConfiguredPath(t *testing.T) {
 	t.Setenv("AWS_CONFIG_FILE", configured)
 	t.Setenv(cardsecret.NamesEnv, "AWS_CONFIG_FILE")
 	t.Setenv(cardsecret.PathNamesEnv, "AWS_CONFIG_FILE")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 
 	environment, err := agentEnvironment(AgentConfig{ID: "implementer", Command: "agent"}, t.TempDir(), "")
 	if err != nil {
@@ -238,7 +255,9 @@ func TestAContentsCredentialIsNotCopiedAnywhere(t *testing.T) {
 	t.Cleanup(cardsecret.Forget)
 	t.Setenv("DATABASE_URL", "postgres://warehouse.invalid/orders")
 	t.Setenv(cardsecret.NamesEnv, "DATABASE_URL")
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 
 	lentHome := t.TempDir()
 	environment, err := agentEnvironment(AgentConfig{ID: "implementer", Command: "agent"}, lentHome, lentHome)
@@ -401,5 +420,127 @@ func TestAStaleLaunchHomeIsSweptBeforeTheNextLaunch(t *testing.T) {
 	// The parent stays: the next launch makes its own directory under it.
 	if _, err := os.Stat(filepath.Join(run, "agent-home")); err != nil {
 		t.Fatalf("the launch homes' parent was removed: %v", err)
+	}
+}
+
+// pathCredentialCard points this process at a credential handed over as a
+// file name, the way a card's entry point points a worker at one.
+func pathCredentialCard(t *testing.T, variable, contents string) string {
+	t.Helper()
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	configured := filepath.Join(t.TempDir(), "provisioned")
+	if err := os.WriteFile(configured, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(variable, configured)
+	t.Setenv(cardsecret.NamesEnv, variable)
+	t.Setenv(cardsecret.PathNamesEnv, variable)
+	if err := cardsecret.FromEnvironment(); err != nil {
+		t.Fatalf("FromEnvironment: %v", err)
+	}
+	return configured
+}
+
+// The worker is the process that captures what the AI prints, and B5 hands
+// that AI a readable copy of the file. Knowing only the file's name, it
+// knew nothing to keep out of the transcript, the live pane or the ticket:
+// one echoed line published the key.
+func TestAPathCredentialsContentsAreKeptOutOfWhatTheAIPrints(t *testing.T) {
+	secret := "wJalrXUtnFEMIexampleKEY99"
+	configured := pathCredentialCard(t, "AWS_SHARED_CREDENTIALS_FILE", "[dev]\naws_secret_access_key = "+secret+"\n")
+
+	said := "profile load failed: aws_secret_access_key = " + secret
+	if kept := boundedTranscript(said); strings.Contains(kept, secret) {
+		t.Fatalf("the transcript kept the key: %q", kept)
+	}
+	if got := cardsecret.Redact(said); strings.Contains(got, secret) {
+		t.Fatalf("the live log would show the key: %q", got)
+	}
+	// The value on its own is what an agent copies, not the line it sat on.
+	if got := cardsecret.Redact("const key = \"" + secret + "\""); strings.Contains(got, secret) {
+		t.Fatalf("the value alone survived: %q", got)
+	}
+	// The trail that carries a stopped run's report to the ticket.
+	trail := ComposeUnsealedTrailWithResources(UnsealedRound{Round: 1, Report: said}, "実装", nil)
+	if strings.Contains(trail, secret) {
+		t.Fatalf("the ticket comment would carry the key:\n%s", trail)
+	}
+	// And the file's own name stays readable: a path is not a secret.
+	if got := cardsecret.Redact("aws: reading " + configured); !strings.Contains(got, configured) {
+		t.Fatalf("the file name was masked: %q", got)
+	}
+}
+
+// A card that cannot read the credential it is about to lend to an AI
+// cannot keep the promise made about it, so it says so at the start rather
+// than running with nothing to keep out of its records.
+func TestACardRefusesToStartWithAnUnreadablePathCredential(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv(cardsecret.NamesEnv, "KUBECONFIG")
+	t.Setenv(cardsecret.PathNamesEnv, "KUBECONFIG")
+	err := cardsecret.FromEnvironment()
+	if err == nil {
+		t.Fatal("the card started with nothing to keep out of its records")
+	}
+	if !strings.Contains(err.Error(), "KUBECONFIG") {
+		t.Fatalf("the refusal does not name the variable: %v", err)
+	}
+}
+
+// The seal is the last gate before a change leaves, and what an agent
+// copies out of a credentials file is the key rather than the line it sat
+// on: a change carrying only the value went through.
+func TestTheSealRefusesAChangeCarryingOnlyTheValue(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	cardsecret.RegisterForScan([]cardsecret.Entry{{
+		Name:   "AWS_SHARED_CREDENTIALS_FILE",
+		Secret: "[dev]\naws_secret_access_key = wJalrXUtnFEMIexampleKEY99\n",
+	}})
+	config, request, source, candidate := validCandidate(t)
+	carried := candidate
+	carried.Files = append([]CandidateFile(nil), candidate.Files...)
+	carried.Files[0].Content += "\nconst key = \"wJalrXUtnFEMIexampleKEY99\";\n"
+	err := carried.Validate(source, request, config)
+	if err == nil {
+		t.Fatal("a change carrying only the value was sealed")
+	}
+	if !strings.Contains(err.Error(), "AWS_SHARED_CREDENTIALS_FILE") {
+		t.Fatalf("the refusal does not name the variable: %v", err)
+	}
+	if strings.Contains(err.Error(), "wJalrXUtnFEMIexampleKEY99") {
+		t.Fatalf("the refusal published the value: %v", err)
+	}
+}
+
+// Every process opens a provisioned file under one set of rules, so that
+// two of them cannot disagree about what is in it.
+func TestALentCopyIsReadUnderTheSameRulesAsEverythingElse(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	directory := t.TempDir()
+	// A directory where a file was configured: the bounded, regular-file
+	// read refuses it, and a bare read would have failed later and
+	// elsewhere.
+	notAFile := filepath.Join(directory, "credentials")
+	if err := os.Mkdir(notAFile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lendCredentialFile(t.TempDir(), "AWS_SHARED_CREDENTIALS_FILE", notAFile); err == nil {
+		t.Fatal("a directory was lent to the launch as a credential")
+	}
+	oversize := filepath.Join(directory, "huge")
+	if err := os.WriteFile(oversize, make([]byte, cardsecret.MaxCredentialFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := lendCredentialFile(t.TempDir(), "AWS_SHARED_CREDENTIALS_FILE", oversize)
+	if err == nil {
+		t.Fatal("a file past the bound was lent to the launch")
+	}
+	if !strings.Contains(err.Error(), "AWS_SHARED_CREDENTIALS_FILE") {
+		t.Fatalf("the refusal does not name the variable: %v", err)
 	}
 }

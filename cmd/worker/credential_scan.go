@@ -62,13 +62,9 @@ func registerCredentialsForScan() error {
 // error and the contents never are: a refusal travels into the round's
 // record and onto the ticket.
 func readCredentialForScan(credential runtimecfg.Credential) (string, error) {
-	info, err := os.Lstat(credential.Path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > runtimecfg.MaxCredentialBytes {
-		return "", errors.New("the credential in " + credentialVariable(credential) + " is not a readable file within 64 KiB, so this change cannot be checked against it")
-	}
-	raw, err := os.ReadFile(credential.Path)
+	raw, err := cardsecret.ReadCredentialFile(credential.Path)
 	if err != nil {
-		return "", errors.New("the credential in " + credentialVariable(credential) + " is unreadable, so this change cannot be checked against it")
+		return "", errors.New("the credential in " + credentialVariable(credential) + " is " + err.Error() + ", so this change cannot be checked against it")
 	}
 	return strings.TrimRight(string(raw), " \t\r\n"), nil
 }

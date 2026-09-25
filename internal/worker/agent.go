@@ -960,9 +960,12 @@ func lendCredentialFile(lentHome, variable, configuredPath string) (string, erro
 	if !credentialVariablePattern.MatchString(variable) {
 		return "", errors.New("credential variable name is invalid")
 	}
-	contents, err := os.ReadFile(configuredPath)
+	// The same bounded, regular-file read the card's entry point and the
+	// seal use. Two processes open the same file separately, and a read
+	// under looser rules here would accept a file the others refuse.
+	contents, err := cardsecret.ReadCredentialFile(configuredPath)
 	if err != nil {
-		return "", errors.New("credential file could not be read for the launch")
+		return "", errors.New("the credential in " + variable + " is " + err.Error() + ", so it cannot be lent to the launch")
 	}
 	directory := filepath.Join(lentHome, credentialLendDir)
 	// Traversable, not listable: the agent opens the file it was told

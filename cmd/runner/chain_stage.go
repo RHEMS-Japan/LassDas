@@ -126,13 +126,9 @@ func stageCredentials(config runtime.Config, stage string) ([]string, error) {
 // the content never is — a refusal travels into the round's record and onto
 // the ticket.
 func credentialValue(credential runtime.Credential) (string, error) {
-	info, err := os.Lstat(credential.Path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > runtime.MaxCredentialBytes {
-		return "", errors.New("credential " + credential.Name + " is not a readable file within 64 KiB")
-	}
-	raw, err := os.ReadFile(credential.Path)
+	raw, err := cardsecret.ReadCredentialFile(credential.Path)
 	if err != nil {
-		return "", errors.New("credential " + credential.Name + " is unreadable")
+		return "", errors.New("credential " + credential.Name + " is " + err.Error())
 	}
 	// Trailing whitespace only: a credentials file has its own interior
 	// newlines, and a token written by an editor has one at the end.

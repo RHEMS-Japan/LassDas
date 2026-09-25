@@ -15,6 +15,7 @@
 package cardsecret
 
 import (
+	"errors"
 	"os"
 	"sort"
 	"strings"
@@ -47,6 +48,37 @@ const Redacted = "[secret]"
 // the only reason the record exists. Every credential this engine is handed
 // — a token, a connection string, a key file — is far longer.
 const MinLiteralBytes = 8
+
+// MaxCredentialFileBytes bounds one provisioned credential file. A secret
+// is a token, a connection string or a small credentials file; a larger
+// file is a mistaken path, and reading it whole into a process's memory —
+// or into every named card's environment — is how a delivery fails with
+// the process table as its error message.
+//
+// It lives here because every process that reads one of these files reads
+// it through ReadCredentialFile, and a bound written down twice is a bound
+// that stops meaning anything.
+const MaxCredentialFileBytes = 64 * 1024
+
+// ReadCredentialFile reads one provisioned credential file. A regular file
+// within the bound and nothing else: a symbolic link is not one, and
+// neither is a directory or a device.
+//
+// Every process that opens a credential comes through here — the card's
+// entry point handing it out, the launch lending a copy to an AI, the
+// sealing worker reading it for the comparison — so that they cannot read
+// it under different rules and disagree about what is in it.
+func ReadCredentialFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxCredentialFileBytes {
+		return nil, errors.New("not a readable file within 64 KiB")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("unreadable")
+	}
+	return raw, nil
+}
 
 // Entry is one variable a card carries.
 type Entry struct {
@@ -137,34 +169,65 @@ func RegisterForScan(entries []Entry) {
 }
 
 // expand is one secret as every form of it that can appear on its own: the
-// whole text, and each of its lines. A credentials file is printed a line
-// at a time by the tools that read it, and a record holding one of those
-// lines has published that line.
+// whole text, each of its lines, and the value on the right of each line's
+// first separator.
+//
+// A credentials file is printed a line at a time by the tools that read it,
+// and a record holding one of those lines has published that line. The
+// value on its own is the form that matters most and was the one missing:
+// what an agent copies into a change is the key, not the line it sat on,
+// and a gate comparing whole lines would not see it.
 func expand(text string) []string {
 	var forms []string
 	if len(text) >= MinLiteralBytes {
 		forms = append(forms, text)
 	}
-	if !strings.ContainsAny(text, "\r\n") {
-		return forms
+	lines := []string{text}
+	if strings.ContainsAny(text, "\r\n") {
+		lines = strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' })
 	}
-	for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' }) {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if len(line) >= MinLiteralBytes && !containsText(forms, line) {
 			forms = append(forms, line)
 		}
+		if value := assignedValue(line); len(value) >= MinLiteralBytes && !containsText(forms, value) {
+			forms = append(forms, value)
+		}
 	}
 	return forms
+}
+
+// assignedValue is what stands to the right of a line's first separator,
+// without the quotes and spacing that dress it: the shapes a credentials
+// file writes a value in are "key = value", "key: value" and the same
+// without spaces, and the value is what is copied out of them.
+//
+// Empty where the line has no separator, which is a section heading or a
+// bare token — already registered whole.
+func assignedValue(line string) string {
+	cut := strings.IndexAny(line, "=:")
+	if cut < 0 || cut+1 >= len(line) {
+		return ""
+	}
+	value := strings.TrimSpace(line[cut+1:])
+	for _, quote := range []string{`"`, "'", "`"} {
+		if len(value) >= 2 && strings.HasPrefix(value, quote) && strings.HasSuffix(value, quote) {
+			value = value[1 : len(value)-1]
+			break
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 // FromEnvironment registers what the process that started this one handed
 // over. A worker started by a card reads its own environment: the variables
 // are already in it, and the name lists say which of them are secret and
 // which hold a file name.
-func FromEnvironment() {
+func FromEnvironment() error {
 	raw := os.Getenv(NamesEnv)
 	if raw == "" {
-		return
+		return nil
 	}
 	paths := map[string]bool{}
 	for _, name := range strings.Split(os.Getenv(PathNamesEnv), ":") {
@@ -181,10 +244,30 @@ func FromEnvironment() {
 		entry := Entry{Name: name, Path: paths[name]}
 		if !entry.Path {
 			entry.Secret = os.Getenv(name)
+			entries = append(entries, entry)
+			continue
+		}
+		// The variable holds a file's name, so what must never be published
+		// is in the file and not in the environment. This process runs as
+		// the engine's user and can open it — the same assumption every
+		// other reader of these files makes — and it is the process that
+		// captures what the AI prints, so without reading it a single line
+		// the AI echoed would reach the live pane, the round's record and
+		// the ticket.
+		if path := os.Getenv(name); path != "" {
+			contents, err := ReadCredentialFile(path)
+			if err != nil {
+				// Said at the start of the card rather than passed over:
+				// a card that cannot read the credential it is about to
+				// lend to an AI cannot keep the promise made about it.
+				return errors.New("the credential in " + name + " is " + err.Error())
+			}
+			entry.Secret = strings.TrimRight(string(contents), " \t\r\n")
 		}
 		entries = append(entries, entry)
 	}
 	Register(entries)
+	return nil
 }
 
 // Names are the variable names this card carries, in the order they were

@@ -26,7 +26,13 @@ func main() {
 	// verb this binary runs writes text somebody reads — a live log, a
 	// transcript, a record — and the name list is the one thing a started
 	// process cannot work out from its own environment.
-	cardsecret.FromEnvironment()
+	if err := cardsecret.FromEnvironment(); err != nil {
+		// Before any verb runs: this process captures what an AI prints
+		// and writes the records a person reads, and it cannot do either
+		// safely without knowing what it must keep out of them.
+		_, _ = fmt.Fprintln(os.Stderr, "worker:", err)
+		os.Exit(1)
+	}
 	if err := run(ctx, os.Args[1:]); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "worker:", err)
 		os.Exit(commandExitCode(err))

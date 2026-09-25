@@ -93,3 +93,52 @@ func TestTheLongestValueIsTakenOutFirst(t *testing.T) {
 		t.Fatalf("the shorter value was taken out first: %q", got)
 	}
 }
+
+// What an agent copies into a change is the key, not the line it sat on. A
+// gate comparing whole lines never saw it.
+func TestTheValueOnTheRightOfALineIsASecretOfItsOwn(t *testing.T) {
+	Forget()
+	t.Cleanup(Forget)
+	Register([]Entry{{
+		Name:   "AWS_SHARED_CREDENTIALS_FILE",
+		Secret: "[dev]\naws_secret_access_key = wJalrXUtnFEMIexampleKEY99\nregion=ap-northeast-1\n",
+	}})
+
+	for _, carried := range []string{
+		`config = "wJalrXUtnFEMIexampleKEY99"`,
+		"const key = 'wJalrXUtnFEMIexampleKEY99'",
+		"wJalrXUtnFEMIexampleKEY99",
+	} {
+		if got := Redact(carried); strings.Contains(got, "wJalrXUtnFEMIexampleKEY99") {
+			t.Fatalf("the value alone survived in %q: %q", carried, got)
+		}
+		if VariableIn(carried) != "AWS_SHARED_CREDENTIALS_FILE" {
+			t.Fatalf("a change carrying the value alone was not recognised: %q", carried)
+		}
+	}
+	// A line with no separator is registered whole, as before.
+	if VariableIn("[dev]") != "" {
+		t.Fatal("a heading too short to be a secret was registered")
+	}
+}
+
+// The first separator and no further: a connection string is full of them,
+// and taking every fragment would mask ordinary words — the scheme, the
+// host, a query key — wherever they appear. The whole value is registered,
+// and so is what follows its first separator.
+func TestOnlyTheFirstSeparatorOfALineIsUsed(t *testing.T) {
+	Forget()
+	t.Cleanup(Forget)
+	dsn := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
+	Register([]Entry{{Name: "DATABASE_URL", Secret: dsn}})
+	if got := Redact("dsn: " + dsn); strings.Contains(got, "hunter2") {
+		t.Fatalf("the value survived: %q", got)
+	}
+	if VariableIn("//warehouse.invalid/orders?password=hunter2hunter2") == "" {
+		t.Fatal("what follows the first separator was not registered")
+	}
+	// The scheme on its own is a word a log is full of.
+	if got := Redact("dialect postgres selected"); !strings.Contains(got, "postgres") {
+		t.Fatalf("an ordinary word was masked: %q", got)
+	}
+}
