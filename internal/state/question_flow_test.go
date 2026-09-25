@@ -22,6 +22,9 @@ type fakeBacklog struct {
 	botID      int64
 	comments   []hook.BacklogComment
 	activities []hook.WebhookHint
+	// listedFrom records the id each listing started after, so a test can
+	// see how much of the thread a caller asked the tracker for.
+	listedFrom []int64
 }
 
 func (f *fakeBacklog) FindExactComment(_ context.Context, _ int64, content string) (int64, bool, error) {
@@ -55,6 +58,7 @@ func (f *fakeBacklog) AddComment(ctx context.Context, issueID int64, content str
 }
 
 func (f *fakeBacklog) ListComments(_ context.Context, _ int64, minCommentID int64) ([]hook.BacklogComment, error) {
+	f.listedFrom = append(f.listedFrom, minCommentID)
 	result := []hook.BacklogComment{}
 	for _, comment := range f.comments {
 		if comment.CommentID > minCommentID {

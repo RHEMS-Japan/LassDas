@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -241,6 +242,56 @@ type QuestionTickService struct {
 	board    BoardProjector
 	now      func() time.Time
 	token    func() (string, error)
+	// scanned is what each waiting run's thread has already told this
+	// process about the part of it that cannot change any more. See
+	// waitScan.
+	scannedMu sync.Mutex
+	scanned   map[string]waitScan
+}
+
+// waitScan is what one wait has learned from the comments written before its
+// question: that none of them was a stop, and when the question itself was
+// posted. That half of the thread is closed the moment the question goes
+// out, so it is read once and not again; the half after the question is
+// live and is re-read on every wake-up. Holding it in memory is deliberate:
+// losing it - a restart, a new process - costs one more full read and can
+// never cost a missed stop.
+type waitScan struct {
+	questionCommentID int64
+	questionPostedAt  int64
+}
+
+// maxRememberedScans bounds what this map can grow to if a run ever leaves
+// the wait without passing through one of the endings below. Forgetting is
+// only ever a re-read.
+const maxRememberedScans = 1024
+
+// historyScanned reports what this process already knows about the thread
+// before the given question, and hands back the instant that question was
+// posted.
+func (s *QuestionTickService) historyScanned(runID string, questionCommentID int64) (int64, bool) {
+	s.scannedMu.Lock()
+	defer s.scannedMu.Unlock()
+	scan, known := s.scanned[runID]
+	if !known || scan.questionCommentID != questionCommentID {
+		return 0, false
+	}
+	return scan.questionPostedAt, true
+}
+
+func (s *QuestionTickService) rememberHistoryScan(runID string, questionCommentID, questionPostedAt int64) {
+	s.scannedMu.Lock()
+	defer s.scannedMu.Unlock()
+	if s.scanned == nil || len(s.scanned) >= maxRememberedScans {
+		s.scanned = map[string]waitScan{}
+	}
+	s.scanned[runID] = waitScan{questionCommentID: questionCommentID, questionPostedAt: questionPostedAt}
+}
+
+func (s *QuestionTickService) forgetHistoryScan(runID string) {
+	s.scannedMu.Lock()
+	defer s.scannedMu.Unlock()
+	delete(s.scanned, runID)
 }
 
 // UseBoard mirrors a recovered posting and an adopted answer onto the board
@@ -326,23 +377,35 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if snapshot.Posting {
 		return s.recoverPosting(ctx, snapshot, deliveryID)
 	}
-	// The whole thread, not only what came after the question: a stop
-	// written moments before the question was posted is still a stop, and
-	// listing from the question hid it for as long as the run waited (live
-	// 2026-09-25: 「停止」 eight seconds before the question, unread while
-	// the ticket sat in the answer wait). One listing either way.
-	comments, err := s.backlog.ListComments(ctx, snapshot.IssueID, 0)
+	// A stop written moments before the question was posted is still a stop,
+	// and listing from the question hid it for as long as the run waited
+	// (live 2026-09-25: 「停止」 eight seconds before the question, unread
+	// while the ticket sat in the answer wait). So the thread is read whole
+	// - once. Nothing can be added before the question any more, so what
+	// that read found holds for the rest of the wait, and every wake-up
+	// after it reads only the tail: one request a minute on a long ticket
+	// instead of one for every hundred comments on it.
+	runID := snapshot.Record.AutomationRunID
+	questionPostedAt, scanned := s.historyScanned(runID, snapshot.QuestionCommentID)
+	from := int64(0)
+	if scanned {
+		from = snapshot.QuestionCommentID
+	}
+	comments, err := s.backlog.ListComments(ctx, snapshot.IssueID, from)
 	if err != nil {
 		return s.failure("question_tick_comments", err, deliveryID)
 	}
-	questionPostedAt := int64(0)
 	for _, comment := range comments {
 		if comment.CommentID == snapshot.QuestionCommentID {
 			questionPostedAt = comment.PostedAt
 		}
 		if comment.UserID == s.config.AllowedCreatorID && IsStopComment(comment.Body) {
+			s.forgetHistoryScan(runID)
 			return s.terminate(ctx, snapshot.Record, TerminalCancelled, now, deliveryID, "question_tick_stopped")
 		}
+	}
+	if !scanned {
+		s.rememberHistoryScan(runID, snapshot.QuestionCommentID, questionPostedAt)
 	}
 	// Every comment in scope is read by a model, against the questions as
 	// they were sealed. A reading that cannot be taken leaves the comment
@@ -390,14 +453,20 @@ func (s *QuestionTickService) ProcessQuestionTick(ctx context.Context, request Q
 	if err != nil {
 		return s.result(DecisionInvalid, "question_tick_intake_invalid", deliveryID)
 	}
+	// Every way out of the wait forgets what the wait had read: the next
+	// question this run asks, if it asks one, has a thread of its own to
+	// read once.
 	if decision.Cancel != nil {
+		s.forgetHistoryScan(runID)
 		return s.terminate(ctx, snapshot.Record, TerminalCancelled, now, deliveryID, "question_tick_cancelled")
 	}
 	if decision.Adopted != nil {
+		s.forgetHistoryScan(runID)
 		return s.resume(ctx, snapshot, *decision.Adopted, now, deliveryID)
 	}
 	action := DecideQuestionTick(snapshot.Record, now.UnixMilli())
 	if action.Kind == QuestionTickExpire {
+		s.forgetHistoryScan(runID)
 		return s.terminate(ctx, snapshot.Record, TerminalClarificationExpired, now, deliveryID, "question_tick_expired")
 	}
 	if action.Kind == QuestionTickNotify {

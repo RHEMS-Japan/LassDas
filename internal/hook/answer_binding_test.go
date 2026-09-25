@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -144,5 +145,43 @@ func TestAStopIsTheWholeFirstLineAndNothingElse(t *testing.T) {
 		if got := IsStopComment(body); got != want {
 			t.Fatalf("IsStopComment(%q) = %v, want %v", body, got, want)
 		}
+	}
+}
+
+// What a wait has read of a thread is remembered against the question it
+// read it for. A second question on the same run has a thread of its own to
+// read once - including the comments written while the first round was
+// being answered, which the first read never saw.
+func TestARememberedScanBelongsToOneQuestion(t *testing.T) {
+	service := &QuestionTickService{}
+	service.rememberHistoryScan("run-42", 100, 5000)
+
+	if postedAt, scanned := service.historyScanned("run-42", 100); !scanned || postedAt != 5000 {
+		t.Fatalf("the scan for the question it was taken for reads back as (%d, %v)", postedAt, scanned)
+	}
+	if _, scanned := service.historyScanned("run-42", 200); scanned {
+		t.Fatal("a second question inherited what was read for the first")
+	}
+	if _, scanned := service.historyScanned("run-43", 100); scanned {
+		t.Fatal("another run inherited what this one read")
+	}
+	service.forgetHistoryScan("run-42")
+	if _, scanned := service.historyScanned("run-42", 100); scanned {
+		t.Fatal("a wait that ended is still remembered")
+	}
+}
+
+// Forgetting is only ever a re-read, so the map is allowed to give up
+// everything rather than grow without a bound.
+func TestRememberedScansAreBounded(t *testing.T) {
+	service := &QuestionTickService{}
+	for index := 0; index <= maxRememberedScans; index++ {
+		service.rememberHistoryScan("run-"+strconv.Itoa(index), 100, 5000)
+	}
+	if len(service.scanned) > maxRememberedScans {
+		t.Fatalf("remembered scans = %d, over the bound %d", len(service.scanned), maxRememberedScans)
+	}
+	if _, scanned := service.historyScanned("run-"+strconv.Itoa(maxRememberedScans), 100); !scanned {
+		t.Fatal("the newest scan was the one dropped")
 	}
 }

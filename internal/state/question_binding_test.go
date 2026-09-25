@@ -34,7 +34,7 @@ func (c *countingReading) ReadAnswer(ctx context.Context, questions, body string
 // sequence a run really goes through, and the one that put a closed
 // ticket's old answer in front of a requester who had just asked to stop
 // (live 2026-09-25).
-func askSecondRound(t *testing.T, harness *flowHarness, envelope hook.DispatchEnvelope) (hook.QuestionRecord, int64) {
+func askSecondRound(t *testing.T, harness *flowHarness, envelope hook.DispatchEnvelope) (hook.QuestionRecord, hook.BacklogComment) {
 	t.Helper()
 	harness.clock = harness.clock.Add(time.Minute)
 	harness.backlog.post(harness.route.AllowedCreatorID, "回答 C1 Q1:a")
@@ -56,7 +56,7 @@ func askSecondRound(t *testing.T, harness *flowHarness, envelope hook.DispatchEn
 	if result := harness.questioner.ProcessQuestionReport(context.Background(), report); result.Code != "question_report_recorded" {
 		t.Fatalf("the second question was not posted: %+v", result)
 	}
-	return second, harness.backlog.comments[len(harness.backlog.comments)-1].CommentID
+	return second, harness.backlog.comments[len(harness.backlog.comments)-1]
 }
 
 // An answer belongs to the question it was written for. The run that is
@@ -74,7 +74,8 @@ func TestAnAnswerForAnEarlierRoundNeverAnswersTheOpenQuestion(t *testing.T) {
 		hook.QuestionReportRequest{Record: first, IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
 		t.Fatalf("ProcessQuestionReport() = %+v", result)
 	}
-	_, questionCommentID := askSecondRound(t, harness, envelope)
+	firstQuestion := harness.backlog.comments[len(harness.backlog.comments)-1]
+	_, secondQuestion := askSecondRound(t, harness, envelope)
 	reader.bodies = nil
 
 	// Written now, but for the round that is already over.
@@ -84,15 +85,21 @@ func TestAnAnswerForAnEarlierRoundNeverAnswersTheOpenQuestion(t *testing.T) {
 		t.Fatalf("an answer for C1 was taken while C2 was open: %+v", result)
 	}
 
-	// Written before the open question existed, and only numbered after it.
-	// Ids say it is newer; the clock says it cannot be an answer to a
-	// question nobody had seen.
+	// Written after the first question and before the second, and only
+	// numbered after both. Ids say it is newer than the open question; the
+	// clock says it was written when nobody had seen that question yet, so
+	// it cannot be its answer - and the instant it is held to has to be the
+	// open question's, not the one before it.
 	posted := harness.clock
-	harness.clock = harness.clock.Add(-10 * time.Minute)
+	between := time.UnixMilli((firstQuestion.PostedAt + secondQuestion.PostedAt) / 2)
+	if !between.After(time.UnixMilli(firstQuestion.PostedAt)) || !between.Before(time.UnixMilli(secondQuestion.PostedAt)) {
+		t.Fatal("the two questions are not far enough apart for the test to say anything")
+	}
+	harness.clock = between
 	staleID := harness.backlog.post(harness.route.AllowedCreatorID, "Q1: b")
 	harness.clock = posted
-	if staleID <= questionCommentID {
-		t.Fatalf("the stale comment id %d is not after the question's %d; the test proves nothing", staleID, questionCommentID)
+	if staleID <= secondQuestion.CommentID {
+		t.Fatalf("the stale comment id %d is not after the question's %d; the test proves nothing", staleID, secondQuestion.CommentID)
 	}
 	if result := harness.tick(t); result.Code != "question_tick_waiting" {
 		t.Fatalf("a comment older than the question was taken as its answer: %+v", result)
@@ -309,4 +316,76 @@ func rewriteClarificationRunID(t *testing.T, item map[string]types.AttributeValu
 	}
 	item["clarification_json"] = &types.AttributeValueMemberS{Value: string(resealed)}
 	item["clarification_sha256"] = &types.AttributeValueMemberS{Value: hook.TerminalReportDigest(resealed)}
+}
+
+// Reading the thread whole is what lets a stop written before the question
+// be heard, and nothing can be added before the question once it is out. So
+// the wait reads that half once and then only the tail: a ticket with
+// hundreds of comments costs one request a minute instead of one for every
+// hundred comments on it, for as many days as the requester takes to answer.
+func TestTheWaitReadsTheHistoryOnceAndThenOnlyTheTail(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarnessReading(t, api, silentReading{})
+	envelope := claimForTerminal(t, harness.store)
+	for index := 0; index < 250; index++ {
+		harness.backlog.post(harness.route.AllowedCreatorID, "これまでのやり取り")
+	}
+	harness.clock = harness.clock.Add(time.Second)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: testQuestionRecord(t, envelope), IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	questionCommentID := harness.backlog.comments[len(harness.backlog.comments)-1].CommentID
+	harness.backlog.listedFrom = nil
+
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("first tick = %+v", result)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_waiting" {
+		t.Fatalf("second tick = %+v", result)
+	}
+	if len(harness.backlog.listedFrom) != 2 {
+		t.Fatalf("two ticks made %d listings: %v", len(harness.backlog.listedFrom), harness.backlog.listedFrom)
+	}
+	if harness.backlog.listedFrom[0] != 0 {
+		t.Fatalf("the first tick read from %d, not the start of the thread", harness.backlog.listedFrom[0])
+	}
+	if harness.backlog.listedFrom[1] != questionCommentID {
+		t.Fatalf("the second tick read from %d, want the question at %d - it is re-reading %d comments of settled history every minute",
+			harness.backlog.listedFrom[1], questionCommentID, questionCommentID-harness.backlog.listedFrom[1])
+	}
+
+	// Reading only the tail loses nothing: a stop written now is in the
+	// tail, and the run ends on the next wake-up.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.backlog.post(harness.route.AllowedCreatorID, "停止")
+	if result := harness.tick(t); result.Code != "question_tick_stopped" {
+		t.Fatalf("a stop written after the question was missed: %+v", result)
+	}
+}
+
+// The one read of the history is what carries the stop written before the
+// question, however deep in the thread it is.
+func TestAStopDeepInTheHistoryIsFoundByTheOneFullRead(t *testing.T) {
+	api := newMemoryDynamo()
+	harness := newFlowHarnessReading(t, api, silentReading{})
+	envelope := claimForTerminal(t, harness.store)
+	for index := 0; index < 120; index++ {
+		harness.backlog.post(harness.route.AllowedCreatorID, "これまでのやり取り")
+	}
+	harness.backlog.post(harness.route.AllowedCreatorID, "停止")
+	for index := 0; index < 120; index++ {
+		harness.backlog.post(harness.route.AllowedCreatorID, "これまでのやり取り")
+	}
+	harness.clock = harness.clock.Add(time.Second)
+	if result := harness.questioner.ProcessQuestionReport(context.Background(),
+		hook.QuestionReportRequest{Record: testQuestionRecord(t, envelope), IssuedAt: harness.clock.UTC()}); result.Code != "question_report_recorded" {
+		t.Fatalf("ProcessQuestionReport() = %+v", result)
+	}
+	harness.clock = harness.clock.Add(time.Minute)
+	if result := harness.tick(t); result.Code != "question_tick_stopped" {
+		t.Fatalf("a stop 120 comments back was never read: %+v", result)
+	}
 }
