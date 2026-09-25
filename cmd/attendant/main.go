@@ -131,7 +131,7 @@ func runContext(ctx context.Context) error {
 		observeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		refreshPause()
-		if snapshot, err := attendant.SnapshotStatus(observeCtx, currentConfig(), services, hermes); err != nil {
+		if snapshot, err := attendant.SnapshotStatus(observeCtx, currentConfig(), services, hermes, statusDir()); err != nil {
 			logger.Error("status snapshot failed", "error", err.Error())
 		} else if err := attendant.WriteBoardStatus(statusDir(), snapshot); err != nil {
 			logger.Error("status write failed", "error", err.Error())

@@ -98,10 +98,18 @@ cp "$MERGE_TEST_RESPONSE" "$1"
 			t.Fatalf("step = %s / %s / %s, want %s", got.Step, got.StepTitle, got.Detail, want)
 		}
 	}
-	// Failed reads, malformed responses and an unmerged close do not claim
-	// success. The next tick must still be able to retry.
+	// Failed reads and malformed responses do not claim success. The next
+	// tick must still be able to retry.
+	//
+	// A close without a merge used to be in this list, and it no longer is:
+	// it is not an unconfirmed merge, it is the other ending, and resting at
+	// 「マージ待ち」 on top of it asked a person to merge something nobody
+	// was ever going to merge. It cannot be checked here as well, because
+	// writing it down is what stops the reading, and this run goes on to be
+	// merged; it is checked where the routing lives, in
+	// internal/attendant (TestAPullRequestClosedWithoutMergingIsItsOwnEnding).
 	poll("confirm")
-	for _, value := range []string{`broken`, `{"merged":false,"state":"open"}`, `{"merged":false,"state":"closed"}`} {
+	for _, value := range []string{`broken`, `{"merged":false,"state":"open"}`} {
 		write(response, value, 0600)
 		poll("confirm")
 		if _, err := os.Stat(filepath.Join(dir, "feature-merged.json")); !os.IsNotExist(err) {
@@ -111,7 +119,7 @@ cp "$MERGE_TEST_RESPONSE" "$1"
 	write(response, `{"merged":true,"state":"closed","merge_commit_sha":"abcdef1234567890"}`, 0600)
 	poll("done")
 	before, err := os.ReadFile(calls)
-	if err != nil || strings.Count(string(before), "\n") != 5 {
+	if err != nil || strings.Count(string(before), "\n") != 4 {
 		t.Fatalf("wrong number of controller reads: %q, %v", before, err)
 	}
 	// Restart with the network unavailable: sealed success stays visible,

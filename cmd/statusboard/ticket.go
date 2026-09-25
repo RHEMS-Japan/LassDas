@@ -81,6 +81,7 @@ func (s *boardServer) boardRowFor(key string) (boardRow, bool) {
 	if json.Unmarshal(raw, &board) != nil {
 		return boardRow{}, false
 	}
+	acknowledged := readAcknowledgements(s.statusDir)
 	var found boardRow
 	var haveRow bool
 	for _, entry := range board.Runs {
@@ -88,7 +89,7 @@ func (s *boardServer) boardRowFor(key string) (boardRow, bool) {
 		if json.Unmarshal(entry, &row) != nil || row.IssueKey != key || row.DeliveryID == "" {
 			continue
 		}
-		public, err := publicBoardRow(entry)
+		public, err := publicBoardRow(entry, acknowledged)
 		if err != nil {
 			continue
 		}
@@ -156,7 +157,8 @@ func (s *boardServer) serveTicketAPI(w http.ResponseWriter, r *http.Request) {
 		View        ticketview.View `json:"view"`
 		TrackerBase string          `json:"tracker_base,omitempty"`
 		Actions     bool            `json:"actions_enabled"`
-	}{Board: row.Raw, View: view, TrackerBase: s.trackerBase, Actions: s.poster != nil})
+		Acknowledge bool            `json:"acknowledge_enabled"`
+	}{Board: row.Raw, View: view, TrackerBase: s.trackerBase, Actions: s.poster != nil, Acknowledge: !s.readOnly})
 }
 
 // serveTicketRecord serves one raw record by its page name, masked. The

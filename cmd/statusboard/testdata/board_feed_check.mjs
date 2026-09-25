@@ -23,7 +23,7 @@ const context=vm.createContext({
  adoptStages(){},renderEvents(){},actKey(){},fmtElapsed(){},
  renderBoard(){rendered=vm.runInContext("latestBoard",context);},
 });
-vm.runInContext("let lastPayloadAt=0,lastServerSentAt=null,trackerBase='',actionsEnabled=false,sentActions=new Map(),latestBoard={runs:[]},snapshotState='missing',snapshotAgeAtReceive=null,feedConnected=false;\n"+html.slice(start,end),context);
+vm.runInContext("let lastPayloadAt=0,lastServerSentAt=null,trackerBase='',actionsEnabled=false,acknowledgeEnabled=false,sentActions=new Map(),latestBoard={runs:[]},snapshotState='missing',snapshotAgeAtReceive=null,feedConnected=false;\n"+html.slice(start,end),context);
 function send(state,board,sent=now) {
  stream.handlers.board({data:JSON.stringify({snapshot_state:state,board,sent_at:new Date(sent).toISOString(),actions:[],events:[]})});
  timer();

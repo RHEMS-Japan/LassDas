@@ -219,6 +219,22 @@ fabricated workflow link.
   対応待ちを閉じる。再デプロイや本番反映は起動しない。送信済みと
   終了処理の完了は区別し、投稿失敗時は再送できる。
   ローカルの閲覧専用モードでは投稿せず、チケットでの確認方法を案内する。
+- **終わった依頼は人が片付ける**: 終了した依頼 (done / stopped / failed) は
+  自動では下の「完了・終了」へ移らない。カードは上の一覧に残り、その状態に
+  なった時刻 (`finished_at`) を表示したまま、人が「確認して片付ける」を押す
+  まで待つ。押すと下の一覧へ移り、片付けた時刻も一緒に表示する。件数表示は
+  同じ区分で「処理中／要対応／確認待ち／完了・終了」を出す。
+  この片付けはボード自身の記録 (`/data/status/acknowledged.json`、
+  `POST /api/acknowledge`) で、チケットには何も投稿しないため、依頼者の
+  資格情報が無いボードでも使える。書き込みを一切受け付けない
+  ローカルの閲覧専用モードだけは押せず、その旨をカードに表示する。
+  盤面に載せる件数の上限 (30 件) は**片付け済みの行だけ**に掛かる。
+  未片付けの終了行は何件でも必ず載せる — 上限で古い順に落とすと、
+  一番放置されているカードから消えて「確認待ち」の件数も 30 で頭打ちに
+  なり、「押すまで残る」という約束が破れるため。未片付けが増えるほど
+  巡回ごとに読む実行ディレクトリの数も増える点は承知の上の代償。
+  以前はカードが自動で下へ移り、終了時刻も残らなかったため、いつ終わった
+  依頼なのか、誰かが見たのかが分からなかった (依頼者の判断, 2026-09-25)。
 - **Model roles**: the three agent roles read their model and credential
   from the pod environment — `LASSDAS_IMPLEMENTER_MODEL` /
   `LASSDAS_IMPLEMENTER_KEY`, `LASSDAS_REVIEW_A_MODEL` / `LASSDAS_REVIEW_A_KEY`,
@@ -698,6 +714,7 @@ means adding a row here and the test it names.
 
 | Scenario the live pod died on | Pinned by | Live case |
 | --- | --- | --- |
+| Finished cards that archived themselves, so nobody could say when any of them had finished or whether anyone had looked; a snapshot cap that then dropped the oldest uncleared cards silently; and a pull request closed without merging with no ending of its own, resting at マージ待ち and asking a person to merge what nobody was going to merge | `internal/attendant` `TestAFinishedCardSaysWhenItGotThere`, `TestTheDeliverysOwnReportTimeIsWhenTheCardGotThere`, `TestNoUnclearedCardIsEverLeftOffTheBoard`, `TestClearedCardsAreCappedOldestFirst`, `TestARunningRowCarriesNoZeroTimes`, `TestAPullRequestClosedWithoutMergingIsItsOwnEnding`, `TestAnOpenPullRequestIsNotAnEnding`; `internal/boardack` `TestAnUnreadableRecordClearsNothing`, `TestAnEntryWithoutATimeIsNotAnAcknowledgement`, `TestWritingBoundsTheRecordAndLeavesNoRemnant`; `cmd/statusboard` `TestClearingAFinishedRunIsRememberedAcrossARestart`, `TestClearingAFinishedRunNeedsNoRequesterCredential`, `TestTheBoardRefusesToClearWhatItIsNotShowingAsFinished`, `TestClearingIsClosedToCrossSiteAndReadOnlyBoards`, `TestTheTicketPageSeesTheSameAcknowledgement`, `TestAnAcknowledgementInTheSnapshotIsNotBelieved`, `TestFinishedCardsWaitInTheRunningLaneUntilCleared`, `TestTheFinishedStatesAreOneList`, `TestTheBoardAddsNoTimesOfItsOwnToARunningRow` | requester's decision, 2026-09-25 |
 | A design judge configured with a model the record does not name; a designer or judge key outside the spend report | `internal/worker` `TestDesignReviewRecordsTheJudgeThatRan`, `TestSpendListsTheDesignerAndTheDesignJudges`; `internal/attendant` `TestRoleProbesNameTheDesignerAndTheDesignJudges`, `TestRoleProbesNameTheDesignJudgesPodIdentities` | found by review, 2026-09-05 |
 | An agent that could read the operator's session jar or seed, or the identities the probes use (same user as the engine; the jar paths in every card's environment; run records written world-readable; the implement and apply cards run natively by the kanban under the engine's user; a profile directory the agent user could not write; a launcher check that ran a probe the agent user could not execute; a closed directory lent before its contents; an agent the engine could not stop, a signal from one user not reaching another's; two agents of one user reading each other's keys; a boot reclaim whose find could end the boot) | `internal/worker` `TestRunAgentProcessGoesThroughTheLauncher`, `TestAgentEnvironmentNeverCarriesTheSessionJar`; `cmd/worker` `TestRunInstructionRunsTheAgentOnTheRenderedInstruction`; `internal/runner` `TestChainImplementRunsTheInstructionThroughTheWorker`; `cmd/agentexec` `TestParseInsistsOnOneModeAndASeparateUser`, `TestRunWithoutCapabilitiesFailsClosed`, `TestLendingOrdersADirectoryAfterItsContents`, `TestParseKeepsToTheTreeRoot`; `internal/worker` `TestAgentUsersAreDistinctWhileHeld`; `internal/attendant` `TestRunRecordsStayClosedToOtherUsers`; the entrypoint's boot check and the container verification in the release script | review of the sign-in change, 2026-09-03; reviews of the launcher and a container run, 2026-09-07 |
 | A gateway answer of 502/503/504 — or a 429 that names its Retry-After — on one of an investigation's dozens of calls ending the run outright (the call is now posted again after a pause, up to three times, within the turn's own deadline; a 429 without Retry-After and every other status fail closed at once) | `internal/worker` `TestGatewayClientAsksAgainAfterAGatewayTimeout`, `TestGatewayClientRetriesA429OnlyWithRetryAfter` | live, 2026-09-08 |

@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/backlog"
+	"automation.internal/ticket-ingress/internal/boardack"
 )
 
 //go:embed board.html
@@ -122,6 +123,10 @@ func run() error {
 	board := &boardServer{
 		statusDir: statusDir, trackerBase: trackerBase,
 		poster: poster, logger: logger,
+		// The local board takes no writes at all, so it must not offer the
+		// page a control it would refuse: a button that does nothing is the
+		// one thing this board must never show.
+		readOnly: mode == "local",
 	}
 
 	mux := http.NewServeMux()
@@ -194,6 +199,7 @@ func registerRoutes(mux *http.ServeMux, protect func(http.HandlerFunc) http.Hand
 	mux.Handle("/api/tickets/", protect(board.serveTicketAPI))
 	mux.Handle("/api/board", protect(board.serveBoard))
 	mux.Handle("/api/act", protect(board.serveAct))
+	mux.Handle("/api/acknowledge", protect(board.serveAcknowledge))
 	mux.Handle("/stream", protect(board.serveStream))
 }
 
@@ -473,9 +479,15 @@ type boardServer struct {
 	trackerBase string
 	poster      *backlog.Client
 	logger      *slog.Logger
+	// readOnly is the local board, which accepts no write of any kind.
+	readOnly bool
 
 	actMu   sync.Mutex
 	lastAct map[string]time.Time
+
+	// ackMu serializes this process's read-modify-write of the
+	// acknowledgement record; it is the record's only writer.
+	ackMu sync.Mutex
 }
 
 type streamPayload struct {
@@ -485,22 +497,27 @@ type streamPayload struct {
 	Actions        []json.RawMessage `json:"actions"`
 	TrackerBase    string            `json:"tracker_base,omitempty"`
 	ActionsEnabled bool              `json:"actions_enabled"`
-	SentAt         time.Time         `json:"sent_at"`
+	// AcknowledgeEnabled says the page may offer 確認して片付ける. It does not
+	// follow ActionsEnabled: clearing a card away posts nothing and needs no
+	// requester credential, so it stands on a board that cannot post.
+	AcknowledgeEnabled bool      `json:"acknowledge_enabled"`
+	SentAt             time.Time `json:"sent_at"`
 }
 
 func (s *boardServer) payload() streamPayload {
 	payload := streamPayload{
-		SnapshotState:  "missing",
-		Board:          json.RawMessage(`{"schema_version":1,"runs":[]}`),
-		Events:         tailJSONL(filepath.Join(s.statusDir, "events.jsonl"), 80),
-		Actions:        tailJSONL(filepath.Join(s.statusDir, "actions.jsonl"), 50),
-		TrackerBase:    s.trackerBase,
-		ActionsEnabled: s.poster != nil,
-		SentAt:         time.Now().UTC(),
+		SnapshotState:      "missing",
+		Board:              json.RawMessage(`{"schema_version":1,"runs":[]}`),
+		Events:             tailJSONL(filepath.Join(s.statusDir, "events.jsonl"), 80),
+		Actions:            tailJSONL(filepath.Join(s.statusDir, "actions.jsonl"), 50),
+		TrackerBase:        s.trackerBase,
+		ActionsEnabled:     s.poster != nil,
+		AcknowledgeEnabled: !s.readOnly,
+		SentAt:             time.Now().UTC(),
 	}
 	if raw, err := os.ReadFile(filepath.Join(s.statusDir, "board.json")); err == nil {
 		payload.SnapshotState = "invalid"
-		if public, generatedAt, err := publicSnapshot(raw); err == nil {
+		if public, generatedAt, err := publicSnapshot(raw, readAcknowledgements(s.statusDir)); err == nil {
 			payload.Board = public
 			payload.SnapshotState = "ready"
 			if age := payload.SentAt.Sub(generatedAt); age > snapshotMaxAge || age < -time.Minute {
@@ -747,7 +764,14 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	watched := []string{filepath.Join(s.statusDir, "board.json"), filepath.Join(s.statusDir, "actions.jsonl")}
+	// The acknowledgement record is watched with the rest: a card cleared
+	// away in one browser leaves the running lane in every other one,
+	// without anybody reloading.
+	watched := []string{
+		filepath.Join(s.statusDir, "board.json"),
+		filepath.Join(s.statusDir, "actions.jsonl"),
+		filepath.Join(s.statusDir, boardack.FileName),
+	}
 	last := make(map[string]os.FileInfo, len(watched))
 	changed := func() bool {
 		dirty := false

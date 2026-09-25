@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/boardack"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -65,12 +66,21 @@ type RunStatus struct {
 	CanGo bool `json:"can_go,omitempty"`
 	// CanResolve exposes the existing posted-report acknowledgement window.
 	// It never authorizes a deployment or a direct run-state change.
-	CanResolve   bool      `json:"can_resolve,omitempty"`
-	NextAction   string    `json:"next_action,omitempty"`
-	ActionEffect string    `json:"action_effect,omitempty"`
-	PRURL        string    `json:"pr_url,omitempty"`
-	ChangedFiles []string  `json:"changed_files,omitempty"`
-	ReportAt     time.Time `json:"report_at,omitempty"`
+	CanResolve   bool     `json:"can_resolve,omitempty"`
+	NextAction   string   `json:"next_action,omitempty"`
+	ActionEffect string   `json:"action_effect,omitempty"`
+	PRURL        string   `json:"pr_url,omitempty"`
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// omitzero, not omitempty: omitempty never drops a time.Time, so a row
+	// with no report carried a report_at of 0001-01-01 all the same.
+	ReportAt time.Time `json:"report_at,omitzero"`
+	// FinishedAt is when the run reached the state it now shows, for a run
+	// that has stopped for good. The board used to move a finished card to
+	// the lower lane by itself and say only what it ended as, so a reader
+	// who came back to it could not tell whether it had ended a minute ago
+	// or the day before. Empty when the run is still going, and when a run
+	// ended before anything wrote its ending down.
+	FinishedAt time.Time `json:"finished_at,omitzero"`
 	// Stage names the pipeline step an out-of-line state (attention)
 	// belongs to, so the board lights the node where the run stopped
 	// instead of an empty rail. Empty for every in-line step.
@@ -88,14 +98,17 @@ type StepEvent struct {
 }
 
 // terminalSnapshotLimit keeps the snapshot from growing without bound: the
-// resting runs (done/stopped/failed) beyond the most recent N stay in the
-// ledger and in events.jsonl, just not in the live board.
+// CLEARED runs beyond the most recent N stay in the ledger and in
+// events.jsonl, just not in the live board. A finished run nobody has
+// cleared away is never left out, however many there are — it is the whole
+// promise of the running lane — so the bound now grows with the cards a
+// person has not got to yet.
 const terminalSnapshotLimit = 30
 
 // SnapshotStatus assembles the board from what the attendant already reads
 // every tick. Read-only everywhere: ledger scan, board listing, artifact
 // stat/reads.
-func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes) (BoardSnapshot, error) {
+func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, statusDir string) (BoardSnapshot, error) {
 	runs, err := services.Store.ScanRuns(ctx)
 	if err != nil {
 		return BoardSnapshot{}, err
@@ -104,40 +117,79 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
+	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
+	snapshot.Runs = boardRows(config, statusDir, runs, tasks)
+	snapshot.Notice = intakeNotice(config)
+	return snapshot, nil
+}
+
+// boardRows turns the ledger's runs into the rows the board shows: which
+// ones are worth reading, what each of them says, and which of them the
+// snapshot may leave out.
+//
+// The board's own record of what a person has cleared away is read HERE
+// rather than by the caller, so that everything the record decides can be
+// exercised without a ledger or a card wall behind it. Read outside, the
+// wiring was the one part with no test: the record could stop being read
+// at all and every test still passed, while the snapshot quietly grew
+// without bound — the same silent failure this change exists to end.
+func boardRows(config runtime.Config, statusDir string, runs []state.RunOverview, tasks []runtime.BoardTask) []RunStatus {
+	cleared := boardack.Read(statusDir)
 	// Trim BEFORE classifying: classification does per-run file I/O, and
-	// the ledger only grows. Terminal runs beyond twice the display limit
-	// (newest first) cannot appear on the board — resting ones are capped
-	// at the limit, and a terminal run still moving (delivery continuation)
-	// is claimed recently. Non-terminal runs always classify.
+	// the ledger only grows. Only runs a person has already CLEARED AWAY
+	// may be left out: the board promises a finished card stays until
+	// somebody presses it, and a cap that dropped the oldest would break
+	// that promise exactly when the board is furthest behind — the cards
+	// nobody had got to would be the ones to vanish. Non-terminal runs
+	// always classify.
 	sort.SliceStable(runs, func(a, b int) bool { return runs[a].ClaimedAt > runs[b].ClaimedAt })
-	terminalSeen := 0
+	var rows []RunStatus
+	for _, run := range worthClassifying(runs, cleared) {
+		rows = append(rows, classifyRun(config, run, tasks))
+	}
+	return trimClearedRows(rows, cleared)
+}
+
+// worthClassifying drops the runs that cannot appear on the board, before
+// the per-run file reads that classify them. Newest first on entry.
+//
+// Only runs a person has already CLEARED AWAY may be dropped. The board
+// promises that a finished card stays until somebody presses it, and a cap
+// that took the oldest would break that promise exactly when the board is
+// furthest behind: the cards nobody had got to would be the ones to vanish,
+// and the 確認待ち count would stop at the cap and stay there. Cleared runs
+// past twice the display limit cannot be shown — the limit below cuts them
+// — so reading their records would be work for nothing.
+func worthClassifying(runs []state.RunOverview, cleared map[string]boardack.Entry) []state.RunOverview {
+	seen := 0
 	candidates := runs[:0]
 	for _, run := range runs {
-		if run.State == "terminal" {
-			if terminalSeen++; terminalSeen > 2*terminalSnapshotLimit {
+		if _, gone := cleared[run.DeliveryID]; gone && run.State == "terminal" {
+			if seen++; seen > 2*terminalSnapshotLimit {
 				continue
 			}
 		}
 		candidates = append(candidates, run)
 	}
-	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
-	for _, run := range candidates {
-		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
-	}
-	kept := snapshot.Runs[:0]
-	resting := 0
-	for _, run := range snapshot.Runs {
-		if run.Step == "done" || run.Step == "stopped" || run.Step == "failed" {
-			resting++
-			if resting > terminalSnapshotLimit {
+	return candidates
+}
+
+// trimClearedRows keeps the snapshot bounded at the one place it may be
+// bounded: the cards a person has already dealt with. Newest first on
+// entry, so what goes is the oldest of them.
+func trimClearedRows(rows []RunStatus, cleared map[string]boardack.Entry) []RunStatus {
+	kept := rows[:0]
+	archived := 0
+	for _, row := range rows {
+		if _, gone := cleared[row.DeliveryID]; gone && ticketview.IsFinished(row.Step) {
+			archived++
+			if archived > terminalSnapshotLimit {
 				continue
 			}
 		}
-		kept = append(kept, run)
+		kept = append(kept, row)
 	}
-	snapshot.Runs = kept
-	snapshot.Notice = intakeNotice(config)
-	return snapshot, nil
+	return kept
 }
 
 // intakeNotice is the board's banner while intake is held, which now has
@@ -208,6 +260,18 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		status.place("intake", "処理中", "")
 		status.NextAction = "現在の処理状態をこの画面では判定できません。運用担当者がチケットの報告と実行履歴を確認してください。"
 		status.ActionEffect = "状態を確認するまで、この画面からの操作はありません。"
+	}
+	if ticketview.IsFinished(status.Step) && status.FinishedAt.IsZero() {
+		// When it got where it now is: the delivery's own report time where
+		// there is one — that is later than the run's ending, and it is the
+		// report that put the card in this state — else the moment the
+		// ledger recorded the run as finished.
+		switch {
+		case !status.ReportAt.IsZero():
+			status.FinishedAt = status.ReportAt
+		case run.CompletedAt > 0:
+			status.FinishedAt = time.UnixMilli(run.CompletedAt).UTC()
+		}
 	}
 	if status.NextAction == "" {
 		switch status.Step {
@@ -468,7 +532,19 @@ func classifyAfterTerminalInDirectory(status *RunStatus, config runtime.Config, 
 	// to two words, so a requester read "delivered" over an unmerged pull
 	// request and had no reason to look further (live 2026-09-18, measured
 	// against a pull request that was still open).
-	if merge, merged := readFeatureMerge(runDir); merged {
+	// Both endings of the delivered pull request rest here. A closed one
+	// used to have no ending at all: nothing about a finished run with a
+	// published pull request changes when a person closes it, so the card
+	// kept asking to be merged for as long as it was kept.
+	if merge, ended := readFeatureMerge(runDir); ended {
+		status.FinishedAt = merge.ReadAt
+		if !merge.Merged {
+			status.place("stopped", "PR は取り込まれずに閉じられました",
+				"取り込み用の Pull Request は、マージされないまま閉じられました。依頼の変更はリポジトリに入っていません")
+			status.NextAction = "閉じた理由をチケットと Pull Request で確認してください。同じ変更が必要な場合は、改めて依頼を起票してください。"
+			status.ActionEffect = "この試行は終了しています。Pull Request を開き直しても、この画面からは自動では再開しません。"
+			return
+		}
 		status.place("done", "マージ済み", "取り込み用の Pull Request はマージされ、依頼の変更がリポジトリに入りました")
 		if merge.MergeCommitSHA != "" {
 			status.Detail += " (" + merge.MergeCommitSHA[:min(7, len(merge.MergeCommitSHA))] + ")"

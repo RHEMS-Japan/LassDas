@@ -54,6 +54,13 @@
     @media (prefers-reduced-motion: reduce) { .live b::before { animation: none; } }
   pre.trail { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); margin: 6px 0 0; }
   .err { color: var(--red); }
+  .ack { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--panel-edge); }
+  .ack p { margin: 6px 0 0; }
+  .ack .hint { color: var(--muted); font-size: 12px; }
+  .ackbtn { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; padding: 7px 14px; border-radius: 6px;
+    background: transparent; color: var(--lime); border: 1px solid var(--lime); cursor: pointer; }
+  .ackbtn:hover:not(:disabled) { background: var(--lime-dim); }
+  .ackbtn:disabled { opacity: .45; cursor: default; }
 </style>
 </head>
 <body>
@@ -82,7 +89,22 @@
   function fmt(iso) { if (!iso) return ""; const d = new Date(iso); if (isNaN(d) || d.getFullYear() < 2000) return ""; return d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
   function usd(v) { return "$" + v.toFixed(2); }
   function trackerURL(base, key) { return base && key ? base.replace(/\/$/, "") + "/view/" + encodeURIComponent(key) : ""; }
-  function renderHead(board, view, trackerBase) {
+  // A run rests in one of these for good; the card it came from stays on the
+  // list until a person clears it away, and so does the line here. The
+  // definition is internal/ticketview/finished.go; this copy is pinned equal
+  // to it by cmd/statusboard TestTheFinishedStatesAreOneList.
+  const FINISHED_STEPS = ["done", "stopped", "failed"];
+  const isFinished = board => FINISHED_STEPS.includes(board.step);
+  // The two times below read on the engine's own clock, with the year, the
+  // way the list does: a card and its page must not date the same run
+  // differently. The timeline above keeps its shorter form.
+  function fmtStamp(iso) {
+    const at = Date.parse(iso || "");
+    if (!Number.isFinite(at) || at <= 0) return "";
+    return new Date(at).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) + " JST";
+  }
+  function renderHead(board, view, trackerBase, acknowledgeEnabled) {
     const head = document.getElementById("head"); head.textContent = "";
     document.getElementById("sum").textContent = board.summary || view.summary || "";
     const state = document.getElementById("state"); state.textContent = ""; 
@@ -91,6 +113,13 @@
     const dl = el("dl", "kv");
     function row(label, node) { dl.appendChild(el("dt", null, label)); const dd = el("dd"); if (typeof node === "string") dd.textContent = node; else dd.appendChild(node); dl.appendChild(dd); }
     if (board.detail) row("いま", board.detail);
+    // When this run reached the state shown above, and when somebody cleared
+    // the card away. The board used to archive a finished card by itself and
+    // record neither, so nobody could tell when any of it had happened.
+    if (isFinished(board)) {
+      row("この状態になった時刻", fmtStamp(board.finished_at) || "記録が残っていません");
+      if (board.acknowledged_at) row("片付けた時刻", fmtStamp(board.acknowledged_at));
+    }
     if (board.next_action) row("次に動く人", board.next_action);
     if (board.action_effect) row("操作の効果", board.action_effect);
     const pr = view.pr_url || board.pr_url;
@@ -101,6 +130,7 @@
     if (view.repository) row("納品先", view.repository);
     head.appendChild(dl);
     if (view.request) { const d = el("details"); d.appendChild(el("summary", null, "依頼の本文")); d.appendChild(el("pre", "trail", view.request)); head.appendChild(d); }
+    if (isFinished(board) && !board.acknowledged_at && board.delivery_id) head.appendChild(acknowledgeBox(board, acknowledgeEnabled));
     // The record that says which step is running is cleared when a card
     // ends, but a card killed from outside leaves one behind. A run the
     // board calls finished or waiting is not running whatever the record
@@ -121,6 +151,34 @@
       live.appendChild(since);
       head.appendChild(live);
     }
+  }
+  // Clearing the card away from here, the same press the list offers. It
+  // reaches no tracker and carries no requester credential, so it stands on
+  // a board that cannot post; a board started read-only takes no write at
+  // all, and says so rather than offering a control it would refuse.
+  function acknowledgeBox(board, acknowledgeEnabled) {
+    const box = el("div", "ack");
+    if (!acknowledgeEnabled) {
+      box.appendChild(el("p", null, "この画面は閲覧専用で起動しているため、ここからは片付けられません。この依頼は終了していますが、一覧には残ります。"));
+      return box;
+    }
+    const button = el("button", "ackbtn", "確認して片付ける");
+    const said = el("p", null, "");
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      said.textContent = "片付けています…";
+      fetch("/api/acknowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delivery_id: board.delivery_id }),
+      }).then(r => r.ok ? r.json() : r.text().then(text => { throw new Error(text || r.status); }))
+        .then(() => { lastBody = ""; return load(false); })
+        .catch(err => { button.disabled = false; said.textContent = "片付けられませんでした: " + String(err.message).slice(0, 120); });
+    });
+    box.appendChild(button);
+    box.appendChild(el("p", "hint", "一覧の「完了・終了」へ移し、片付けた時刻を記録します。チケットへの投稿はありません。"));
+    box.appendChild(said);
+    return box;
   }
   function elapsed(startedAt) {
     const started = Date.parse(startedAt);
@@ -223,7 +281,7 @@
         failures = 0;
         if (stable !== lastBody) {
           lastBody = stable;
-          renderHead(data.board || {}, view, data.tracker_base || "");
+          renderHead(data.board || {}, view, data.tracker_base || "", !!data.acknowledge_enabled);
           renderTimeline(view);
           renderSide(view);
         } else if (view.running) {
