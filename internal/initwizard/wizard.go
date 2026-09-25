@@ -754,7 +754,7 @@ func (w *Wizard) modelKeys(s *State, secrets Secrets, replace bool) error {
 		}
 		return nil
 	}
-	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の "+ProviderName(s.BaseURL)+" API キー", replace); err != nil {
+	if err := w.secret(s, secrets, "LASSDAS_INTAKE_TARGET_KEY", "実装役の身元用の "+ProviderName(s.BaseURL)+" API キー (直接の呼出しは無い)", replace); err != nil {
 		return err
 	}
 	for _, role := range allRoles(s) {

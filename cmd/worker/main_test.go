@@ -333,3 +333,66 @@ func TestRunLocatesTheTargetOfATicketThatNamedNoFile(t *testing.T) {
 		t.Fatalf("err = %v, exit = %d, want a ticket rejection", err, commandExitCode(err))
 	}
 }
+
+// The reception contract of a ticket with no wording to search for: it is
+// completed without naming a file, because which files a change touches is
+// decided by making the change. The readiness stages are bound to this
+// contract, so it must still be a complete, valid ticket.
+func TestRunCompletesTheContractOfATicketThatNamesNoFile(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.json")
+	envelopePath := filepath.Join(directory, "envelope.json")
+	draftPath := filepath.Join(directory, "draft.json")
+	ticketPath := filepath.Join(directory, "ticket.json")
+	writeTestJSON(t, configPath, cliTestConfig())
+	writeTestJSON(t, envelopePath, cliTestEnvelopeWithDescription(t, strings.Join([]string{
+		"Automation-Run-ID: run_20260802_alpha",
+		"Automation-Mode: client-visible-change",
+		"Verification-Path: /settings",
+		"Expected-Text: Updated label",
+		"Absent-Text: Old label",
+		"---",
+		"Please reword the visible label.",
+	}, "\n")))
+	if err := run(context.Background(), []string{
+		"parse-ticket", "--config", configPath, "--tool-sha", cliToolSHA, "--envelope", envelopePath,
+		"--draft-out", draftPath, "--out", ticketPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run(context.Background(), []string{
+		"reception-ticket", "--config", configPath, "--tool-sha", cliToolSHA,
+		"--draft", draftPath, "--out", ticketPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var request worker.TicketRequest
+	if err := worker.ReadJSONFile(ticketPath, worker.MaxTicketJSONBytes, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.TargetFiles) != 0 {
+		t.Fatalf("the reception named files nobody asked for: %v", request.TargetFiles)
+	}
+	if err := request.Validate(cliTestConfig()); err != nil {
+		t.Fatalf("the reception contract is not a valid ticket: %v", err)
+	}
+	if request.Request == "" || request.IssueKey == "" {
+		t.Fatalf("the contract lost the request it was completed from: %+v", request)
+	}
+
+	// A draft from another run is not this run's contract to complete.
+	var draft worker.TicketDraft
+	if err := worker.ReadJSONFile(draftPath, worker.MaxTicketJSONBytes, &draft); err != nil {
+		t.Fatal(err)
+	}
+	draft.ConfigSHA256 = strings.Repeat("f", 64)
+	otherPath := filepath.Join(directory, "other-draft.json")
+	writeTestJSON(t, otherPath, draft)
+	if err := run(context.Background(), []string{
+		"reception-ticket", "--config", configPath, "--tool-sha", cliToolSHA,
+		"--draft", otherPath, "--out", filepath.Join(directory, "unused.json"),
+	}); err == nil {
+		t.Fatal("a draft bound to another configuration was completed")
+	}
+}

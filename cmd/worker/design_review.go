@@ -358,9 +358,8 @@ func withMeasurements(prompt string, inputs designSubjectInputs, path string) (s
 
 // reviewTicket is the requester's text the reviewer judges the design
 // against: what must appear, what must be gone, where, and the request.
-// It carries no target_files: those are the machine's pre-investigation
-// guess, not the requester's words, and the seal holds the design's files
-// on its own.
+// It carries no target_files: which files a change touches is not the
+// requester's words, and the seal holds the design's files on its own.
 type reviewTicket struct {
 	IssueKey         string `json:"issue_key,omitempty"`
 	Summary          string `json:"summary"`

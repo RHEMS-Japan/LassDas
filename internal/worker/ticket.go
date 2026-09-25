@@ -20,16 +20,19 @@ const (
 )
 
 type TicketRequest struct {
-	SchemaVersion    int      `json:"schema_version"`
-	DeliveryID       string   `json:"delivery_id"`
-	InputSHA256      string   `json:"input_sha256"`
-	ConfigSHA256     string   `json:"config_sha256"`
-	ToolSHA          string   `json:"tool_sha"`
-	IssueKey         string   `json:"issue_key"`
-	RunID            string   `json:"run_id"`
-	Repository       string   `json:"repository"`
-	Mode             string   `json:"mode"`
-	Summary          string   `json:"summary"`
+	SchemaVersion int    `json:"schema_version"`
+	DeliveryID    string `json:"delivery_id"`
+	InputSHA256   string `json:"input_sha256"`
+	ConfigSHA256  string `json:"config_sha256"`
+	ToolSHA       string `json:"tool_sha"`
+	IssueKey      string `json:"issue_key"`
+	RunID         string `json:"run_id"`
+	Repository    string `json:"repository"`
+	Mode          string `json:"mode"`
+	Summary       string `json:"summary"`
+	// TargetFiles is what the change touched, sealed after the fact. It is
+	// empty on a reception contract, which is made before anything is
+	// changed, and it is never a list the implementer is held to.
 	TargetFiles      []string `json:"target_files"`
 	VerificationPath string   `json:"verification_path"`
 	ExpectedText     string   `json:"expected_text"`
@@ -42,10 +45,10 @@ func (r TicketRequest) Consumer(config Config) (ConsumerConfig, error) {
 	return config.ConsumerFor(r.Repository)
 }
 
-// TicketDraft is a ticket whose target files are not yet determined. The
-// requester stated what should change, what it should become and where to see
-// it — everything they can know without reading the repository. Which file
-// implements it is the automation's job to work out, so a draft carries every
+// TicketDraft is a ticket before any file is known. The requester stated what
+// should change, what it should become and where to see it — everything they
+// can know without reading the repository. Which files implement it is worked
+// out by the agent that makes the change, so a draft carries every
 // TicketRequest field except TargetFiles.
 type TicketDraft struct {
 	SchemaVersion    int    `json:"schema_version"`
@@ -86,8 +89,9 @@ func ParseTicketWithToolSHA(envelope hook.DispatchEnvelope, config Config, toolS
 }
 
 // ParseTicketDraft converts an immutable envelope into a draft plus whatever
-// target files the requester chose to name. Naming none is allowed: the files
-// are then derived before the contract is completed.
+// target files the requester chose to name. Naming none is the normal case:
+// the contract is completed without them and the files the change touches are
+// whatever it turns out to touch.
 func ParseTicketDraft(envelope hook.DispatchEnvelope, config Config, toolSHA string) (TicketDraft, []string, error) {
 	if err := config.Validate(); err != nil {
 		return TicketDraft{}, nil, errors.New("worker configuration is invalid")
@@ -247,7 +251,10 @@ func (r TicketRequest) Validate(config Config) error {
 	if err := validatePlainText(r.Summary, maxTicketSummaryBytes, false); err != nil {
 		return errors.New("ticket summary is invalid")
 	}
-	if len(r.TargetFiles) == 0 || len(r.TargetFiles) > consumer.Mode.MaxFiles || !sort.StringsAreSorted(r.TargetFiles) {
+	// A reception contract names no files: which files a change touches is
+	// discovered by making it, and the set is sealed afterwards from what was
+	// observed. The bound still holds wherever files are named.
+	if len(r.TargetFiles) > consumer.Mode.MaxFiles || !sort.StringsAreSorted(r.TargetFiles) {
 		return errors.New("ticket target files are invalid")
 	}
 	seen := make(map[string]struct{}, len(r.TargetFiles))

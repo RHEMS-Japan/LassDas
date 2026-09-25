@@ -287,7 +287,7 @@ func secretPlan(answers initwizard.Answers) []secretEntry {
 	if mode == initwizard.ModelKeysShared {
 		return append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", initwizard.ProviderName(modelBaseURL(answers)) + " の API キー (既定では全役で共用)"})
 	}
-	names = append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "受付・対象導出専用の " + initwizard.ProviderName(modelBaseURL(answers)) + " API キー"})
+	names = append(names, secretEntry{"LASSDAS_INTAKE_TARGET_KEY", "実装役の身元用の " + initwizard.ProviderName(modelBaseURL(answers)) + " API キー (直接の呼出しは無い)"})
 	roles := initwizard.ModelRoles()
 	if separateDesign {
 		roles = append(roles, "design-review-a", "design-review-b")

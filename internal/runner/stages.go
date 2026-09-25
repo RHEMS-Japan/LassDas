@@ -125,7 +125,7 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
 	}
 
-	// ---- source (build-draft, locate/derive, baseline, snapshot) ----
+	// ---- source (build-draft, the reception contract, baseline, snapshot) ----
 	code, err := p.worker(ctx, "build-draft", []string{
 		"build-draft", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
 		"--raw", p.path("raw-ticket.json"), "--intake", p.path("intake.json"),
@@ -176,23 +176,13 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	} else {
-		if code, err := p.worker(ctx, "list-candidates", []string{
-			"list-candidates", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--draft", p.path("ticket-draft.json"), "--repo-root", repoRoot, "--base-sha", baseSHA,
-			"--out", p.path("candidate-listing.json"),
-		}); err != nil || code != 0 {
-			return pretripResult{}, Outcome{Code: "internal_failed"}, err
-		}
-		// A derive rejection ended as internal_failed under the workflow
-		// (only build-draft fed the parse outcome its report read); the
-		// same requester-facing code is kept here.
-		if code, err := p.worker(ctx, "derive-contract", []string{
-			"derive-contract", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--draft", p.path("ticket-draft.json"), "--listing", p.path("candidate-listing.json"),
-			"--derivation-out", p.path("derivation.json"),
+		// Nothing to search for, so nothing to name: the contract is completed
+		// without files and the change decides its own. No model runs here.
+		if code, err := p.worker(ctx, "reception-ticket", []string{
+			"reception-ticket", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
+			"--draft", p.path("ticket-draft.json"),
 			"--out", p.path("readiness-ticket.json"),
-		}, p.modelKeyEnv()...); err != nil || code != 0 {
-			p.noteReceptionCutoff(deriveStage)
+		}); err != nil || code != 0 {
 			return pretripResult{}, Outcome{Code: "internal_failed"}, err
 		}
 	}
@@ -486,18 +476,6 @@ func (p *Pipeline) modelKeyEnv() []string {
 	}
 }
 
-// targetArgs appends --targets when the reception has sealed which files
-// this ticket changes. Both receptions write that ticket: the one that
-// derives the files from the request, and the one that locates them from
-// the wording promise. A run without one (the chat orchestrations) passes
-// nothing, and the instruction then names no files.
-func (p *Pipeline) targetArgs() []string {
-	if p.exists("readiness-ticket.json") {
-		return []string{"--targets", p.path("readiness-ticket.json")}
-	}
-	return nil
-}
-
 // clarificationArgs appends --clarification when the claimed envelope
 // carried adopted answers.
 func (p *Pipeline) clarificationArgs() []string {
@@ -640,7 +618,6 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 			}
 		}
 		implementArgs = append(implementArgs, p.clarificationArgs()...)
-		implementArgs = append(implementArgs, p.targetArgs()...)
 		implementArgs = append(implementArgs,
 			"--run-out", stageDir+"/implement-run.json",
 			"--ticket-out", stageDir+"/ticket.json",

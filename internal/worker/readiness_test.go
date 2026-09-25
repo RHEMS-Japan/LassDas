@@ -758,3 +758,67 @@ func TestReceptionLicensesAPreservedAnswersRecordNumber(t *testing.T) {
 		t.Fatalf("the reception refused a preserved answer's record number: %v", err)
 	}
 }
+
+// The reception judges an ordinary change request with no file in front of
+// it: nothing is chosen before the change is made, so the snapshot it is
+// bound to is empty. Both contracts have to say so. Telling the assessor
+// that "the provided source files" were read for it, while sending none,
+// turns the asking policy inside out - every implementation detail becomes
+// something "not derivable from the provided source files" and therefore
+// askable, and the requester is asked to read the repository after all.
+func TestTheReceptionContractDoesNotClaimSourceFilesItNeverGot(t *testing.T) {
+	config, draft := unnamedFilesDraft(t)
+	request, err := draft.WithTargetFiles(nil, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := ReadSourceSnapshot(t.TempDir(), strings.Repeat("a", 40), request, config)
+	if err != nil {
+		t.Fatalf("ReadSourceSnapshot() error = %v", err)
+	}
+	if len(source.Files) != 0 {
+		t.Fatalf("source files = %+v, want none", source.Files)
+	}
+	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, `"files":[]`) {
+		t.Fatalf("the assessor's data does not carry an empty file set:\n%s", prompt)
+	}
+
+	system := readinessSystemPrompt()
+	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"})
+	for _, contract := range []struct{ name, text string }{{"assessor", system}, {"checker", checker}} {
+		if strings.Contains(contract.text, "provided source") {
+			t.Errorf("the %s contract still claims source files were provided", contract.name)
+		}
+	}
+	for _, want := range []string{
+		"USER_DATA_JSON.source.files is empty for an ordinary change request",
+		"the implementer reads the repository itself",
+		"by reading the repository the change is made in",
+		"anything that can be found by reading the repository",
+		"anything that can be found there is not a requester's decision and is not a question",
+		"Ask only what the requester alone can decide: user-visible behavior, acceptance criteria, pre-approved scope, safety or data behavior",
+		"never reject a ticket because no file is shown to you",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("the assessor contract lacks %q", want)
+		}
+	}
+	for _, want := range []string{
+		"is answerable from the ticket, by reading the repository the change is made in",
+		"USER_DATA_JSON.source.files is empty for an ordinary change request and is never the boundary",
+	} {
+		if !strings.Contains(checker, want) {
+			t.Errorf("the checker contract lacks %q", want)
+		}
+	}
+
+	// A ticket promising a visible wording change still gets the files that
+	// hold the wording, and the contract still describes that case.
+	if !strings.Contains(system, "It carries files only when the ticket promises a visible wording change") {
+		t.Error("the assessor contract no longer describes the wording ticket's files")
+	}
+}

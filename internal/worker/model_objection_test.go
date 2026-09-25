@@ -2,29 +2,9 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 )
-
-// A failure whose objection opens with a phrase a caller dispatches on keeps
-// that opening: the runner answers "name the file to change", which is
-// fixable, instead of "ask an operator" (review of #184).
-func TestConverseJSONKeepsADispatchPhraseAtTheHead(t *testing.T) {
-	config, _, _ := validArtifactFixture(t)
-	captureFailureDetail(t)
-	api := &sequenceChatAPI{outputs: []*ChatResponse{chatOutput("{}")}}
-	invoker, _ := NewModelInvoker(api)
-	_, err := invoker.converseJSON(context.Background(), config.Models.Readiness.Assessor, "system", "user", `{"type":"object"}`, 4096, func([]byte, InvocationUsage) error {
-		return errors.New(NoTargetFileChosen)
-	})
-	if err == nil || !strings.HasPrefix(err.Error(), NoTargetFileChosen) {
-		t.Fatalf("the caller's own phrase lost its place at the head: %v", err)
-	}
-	if !errors.Is(err, errModelResponseContent) {
-		t.Fatalf("the class no longer travels with the failure: %v", err)
-	}
-}
 
 // The answer's head is masked before it is cut, so a key cannot be split in
 // half by the cut and survive as something no scan recognises. The detail's

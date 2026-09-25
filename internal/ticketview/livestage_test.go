@@ -25,7 +25,7 @@ var stepCall = regexp.MustCompile(`(?s)p\.(?:worker|step|controller)\(\s*ctx\s*,
 // (review of #200).
 var pinnedStages = map[string]string{
 	"read-ticket": "intake", "read-contract": "intake", "build-draft": "intake",
-	"derive-contract": "intake", "list-candidates": "intake", "locate-target": "intake",
+	"reception-ticket": "intake", "locate-target": "intake",
 	"baseline": "intake", "snapshot": "intake", "assess-readiness": "intake",
 	"check-readiness": "intake", "decide-readiness": "intake", "git-checkout": "intake",
 
@@ -66,7 +66,7 @@ func TestEveryRunnerStepHasAStage(t *testing.T) {
 	// Runner and cards now share agent-review's call site. That removes a
 	// duplicate, not a step; the bidirectional pinned-set check below still
 	// requires every distinct step.
-	if len(names) < 44 {
+	if len(names) < 43 {
 		t.Fatalf("only %d step names were found; the scan is looking in the wrong place", len(names))
 	}
 	for _, name := range names {
@@ -355,8 +355,7 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 // nobody noticed.
 var receptionSteps = []string{
 	"assess-readiness", "baseline", "build-draft", "check-readiness", "decide-readiness",
-	"derive-contract", "list-candidates", "locate-target",
-	"read-contract", "read-ticket", "snapshot",
+	"locate-target", "read-contract", "read-ticket", "reception-ticket", "snapshot",
 }
 
 var derivedSteps = []string{

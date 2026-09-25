@@ -24,8 +24,8 @@ const receptionCutoffMarker = "finish_reason=" + worker.ChatFinishLength
 // (review of #122). Making that line follow the note is its own change.
 //
 // noteReceptionCutoff leaves the requester a reason when a reception stage
-// (the readiness pair, the contract derivation) failed because the model's
-// answer was cut off at the output allowance. Without this the terminal
+// (the intake, the readiness pair) failed because the model's answer was cut
+// off at the output allowance. Without this the terminal
 // comment says only that the model stage failed, and the operator finds
 // the cause in the pod log (live 2026-09-05, three tickets in a row). The
 // note becomes the run's trail: the reception runs no agent, so nothing
@@ -42,11 +42,6 @@ func (p *Pipeline) noteReceptionCutoff(stage string) {
 	// kept as a record for the ticket page.
 	p.recordModelFailureDetail(stage)
 }
-
-// deriveStage is the reception stage whose failure the no-file note explains.
-// The note names what to do about a derivation, so it must not appear under
-// the readiness stages even if their models write the same words.
-const deriveStage = "契約の導出"
 
 // intakeStage is the reception stage that reads the ticket into the
 // contract (read-contract), the first model turn of a run.
@@ -213,9 +208,6 @@ func receptionNote(stage, stderr string) string {
 	// whether its phrase appears anywhere let a cutoff the run recovered
 	// from overrule the line that actually ended the stage (review of #122).
 	cause := lastReceptionCause(stderr)
-	if stage == deriveStage && strings.HasPrefix(cause, worker.NoTargetFileChosen) {
-		return noFileChosenNote(stage)
-	}
 	if note := receptionCutoffNote(stage, cause); note != "" {
 		return note
 	}
@@ -285,14 +277,6 @@ func receptionCutoffNote(stage, cause string) string {
 // what the requester needs to know. What they need is that there is no
 // room left.
 const cutoffWidenedToCeilingNote = "出力の上限いっぱいまで広げて聞き直しましたが、それでも途切れました。"
-
-// noFileChosenNote is what a requester is told when the derivation had no
-// file to change: the one reception failure whose remedy is in the ticket.
-func noFileChosenNote(stage string) string {
-	return "この依頼で変更するファイルを決められなかったため、自動処理を止めました (" + stage + ")。" +
-		"依頼に書かれたファイルがリポジトリに見つからず、依頼文からも新しく作るファイルの名前を読み取れなかった場合に起きます。" +
-		"依頼文に、変更するファイルの位置 (例: docs/ の下に新しく作るなら、その相対パス) を書き足せば通る見込みです。\n"
-}
 
 // unreadableRecordNote is what a requester is told when a reception stage
 // ended over a record rather than over an answer. It is the note five of

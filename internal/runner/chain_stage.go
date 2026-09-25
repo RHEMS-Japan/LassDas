@@ -113,7 +113,6 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 		}
 	}
 	args = append(args, p.clarificationArgs()...)
-	args = append(args, p.targetArgs()...)
 	args = append(args, "--out", p.path("INSTRUCTION.md"))
 	if code, err := p.worker(ctx, "implement-instruction", args); err != nil || code != 0 {
 		return errors.New("implement instruction could not be rendered")
