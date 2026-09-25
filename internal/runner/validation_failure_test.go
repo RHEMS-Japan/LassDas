@@ -11,41 +11,52 @@ import (
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 )
 
 // validationRefusalWorker answers every verb the validate card runs. The
-// named verb writes the two lines a refused validation actually leaves —
-// which command it was, and the tail of what that command printed — on
+// named verb writes the lines a refused validation actually leaves on
 // stderr, which is the only place they exist: run-validation writes its
 // artifact on success alone.
-func validationRefusalWorker(t *testing.T, log, refusing string) string {
+//
+// The order is the real one, and it is load-bearing. What the command
+// printed comes first and the line naming the command comes after it,
+// because everything here is read back from a tail — an output that fills
+// the window pushes out whatever was written before it. fillerLines makes an
+// output that does exactly that.
+func validationRefusalWorker(t *testing.T, log, refusing string, fillerLines int) string {
 	t.Helper()
 	return fmt.Sprintf(`#!/bin/sh
 verb="$1"; shift
 printf '%%s %%s\n' "$verb" "$*" >> %q
 if [ "$verb" = %q ]; then
-  echo "worker: validation command failed: go test ./..." >&2
   echo "worker: validation output tail (63 bytes):" >&2
+  i=0
+  while [ $i -lt %d ]; do
+    echo "    filler line $i ......................................................" >&2
+    i=$((i+1))
+  done
   echo "--- FAIL: TestLabel (0.00s)" >&2
   echo "    label_test.go:21: want 'new', got 'old'" >&2
+  echo "worker: validation command failed: go test ./..." >&2
   echo "worker: candidate validation failed: validation command failed" >&2
   exit 1
 fi
 exit 0
-`, log, refusing)
+`, log, refusing, fillerLines)
 }
 
 // validationPipeline is a validate card standing on a real destination
 // checkout with one converged round sealed: the state a run is in when the
 // judges have passed a change and the deterministic validation is about to
 // run on it.
-func validationPipeline(t *testing.T, refusing string) (*Pipeline, string) {
+func validationPipeline(t *testing.T, refusing string, fillerLines int) (*Pipeline, string) {
 	t.Helper()
 	repository, baseSHA := gitBaseRepo(t)
 	binaries := t.TempDir()
 	log := filepath.Join(binaries, "worker.log")
 	workerBin := filepath.Join(binaries, "worker")
-	writeExecutable(t, workerBin, validationRefusalWorker(t, log, refusing))
+	writeExecutable(t, workerBin, validationRefusalWorker(t, log, refusing, fillerLines))
 	config := runtime.Config{WorkerBin: workerBin, ConsumerConfigPath: writeChainConsumerConfig(t, []string{"review-a", "review-b"})}
 	config.Identity.EngineSHA = strings.Repeat("ab", 20)
 	pipeline := &Pipeline{Config: config, Workspace: t.TempDir(), Logger: trailTestLogger{}}
@@ -69,7 +80,7 @@ func validationPipeline(t *testing.T, refusing string) (*Pipeline, string) {
 // output in the pod's log alone. The card seals which step refused and what
 // it printed, and the next round's instruction is rendered with that record.
 func TestARefusedValidationReachesTheNextRoundsInstruction(t *testing.T) {
-	pipeline, log := validationPipeline(t, "run-validation")
+	pipeline, log := validationPipeline(t, "run-validation", 0)
 	err := pipeline.chainValidate(context.Background(), []string{"review-a", "review-b"})
 	if !errors.Is(err, ErrValidationRejected) {
 		t.Fatalf("chainValidate() = %v, want the validation sentinel", err)
@@ -108,7 +119,7 @@ func TestARefusedValidationReachesTheNextRoundsInstruction(t *testing.T) {
 // such record, and the round after it is rendered exactly as it was before
 // this record existed.
 func TestAValidationThatPassesSealsNothing(t *testing.T) {
-	pipeline, log := validationPipeline(t, "nothing-refuses")
+	pipeline, log := validationPipeline(t, "nothing-refuses", 0)
 	if err := pipeline.chainValidate(context.Background(), []string{"review-a", "review-b"}); err != nil {
 		t.Fatalf("chainValidate() = %v", err)
 	}
@@ -160,6 +171,31 @@ func TestTwoRoundsThatPrintTheSameFailureLeaveComparableRecords(t *testing.T) {
 	// nothing cannot borrow an earlier round's account.
 	if _, sealed := ReadValidationFailure(pipeline.Workspace, 4); sealed {
 		t.Fatal("a round that sealed nothing read a record")
+	}
+}
+
+// An output big enough to fill the record on its own must not push out the
+// line naming the command that failed. That line is what tells an install
+// failure from a test failure: one deterministic step runs the install
+// command and the verify commands, and a dependency that would not install
+// and a test that would not pass print alike. One is the environment and one
+// is the change, and the round after this one answers them differently.
+func TestAnOversizedValidationOutputStillNamesTheCommand(t *testing.T) {
+	pipeline, _ := validationPipeline(t, "run-validation", 400)
+	if err := pipeline.chainValidate(context.Background(), []string{"review-a", "review-b"}); !errors.Is(err, ErrValidationRejected) {
+		t.Fatalf("chainValidate() = %v, want the validation sentinel", err)
+	}
+	failure, sealed := ReadValidationFailure(pipeline.Workspace, 1)
+	if !sealed {
+		t.Fatal("the refused round sealed no record")
+	}
+	// The fixture has to print more than the record keeps, or the cut this
+	// test is about never happens.
+	if len(failure.Output) < worker.MaxValidationOutputBytes-64 {
+		t.Fatalf("the record holds %d bytes, so nothing was cut", len(failure.Output))
+	}
+	if !strings.Contains(failure.Output, "validation command failed: go test ./...") {
+		t.Fatalf("the cut dropped the name of the command that failed:\n%s", failure.Output[:200])
 	}
 }
 

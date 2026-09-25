@@ -94,7 +94,7 @@ exit 0
 // what the validation printed.
 func TestARefusedValidationStartsTheNextRoundInsteadOfEndingTheRun(t *testing.T) {
 	fixture, config, envelope, view, _ := refusedValidationFixture(t)
-	hermes, _ := fakeBoard(t)
+	hermes, boardCalls := fakeBoard(t)
 	logger := &recordingLogger{}
 	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
 	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
@@ -136,13 +136,25 @@ func TestARefusedValidationStartsTheNextRoundInsteadOfEndingTheRun(t *testing.T)
 	if !strings.Contains(string(calls), "--validation-failure") {
 		t.Fatalf("the next round was rendered without what the validation printed:\n%s", calls)
 	}
+	// A rendered instruction with no card to run it is a delivery that has
+	// quietly stopped, which reads from the outside exactly like the ending
+	// this replaces.
+	board, err := os.ReadFile(boardCalls)
+	if err != nil {
+		t.Fatalf("the board was not called: %v", err)
+	}
+	if !strings.Contains(string(board), "|create|") {
+		t.Fatalf("no card was created for the next round:\n%s", board)
+	}
 }
 
 // The round ceiling is the one thing left that still ends a run from here,
-// and it does not end it under the retired code. The ledger and the posted
-// comments that already name validation_failed keep it in the vocabulary;
-// nothing produces it.
-func TestTheRoundCeilingEndsARefusedValidationUnderNoRetiredCode(t *testing.T) {
+// and it is the one place a refused validation still names itself. The
+// requester reads that sentence: on this path the AI answered and both judges
+// passed the change, and the repository's own commands are what refused, so
+// saying the AI failed would be false. The exception lasts exactly as long as
+// the ceiling does.
+func TestTheRoundCeilingEndsARefusedValidationAsAValidationFailure(t *testing.T) {
 	fixture, config, envelope, _, _ := refusedValidationFixture(t)
 	if err := os.WriteFile(config.ConsumerConfigPath,
 		[]byte(`{"max_stages":1,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`), 0o600); err != nil {
@@ -170,7 +182,7 @@ func TestTheRoundCeilingEndsARefusedValidationUnderNoRetiredCode(t *testing.T) {
 		}
 		return digest
 	}
-	retired, expected := digestFor(hook.TerminalValidationFailed), digestFor(hook.TerminalModelFailed)
+	expected, wrong := digestFor(hook.TerminalValidationFailed), digestFor(hook.TerminalModelFailed)
 	fixture.store.expected = expected
 
 	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
@@ -180,10 +192,15 @@ func TestTheRoundCeilingEndsARefusedValidationUnderNoRetiredCode(t *testing.T) {
 	if len(fixture.store.digests) != 1 {
 		t.Fatalf("terminal reports begun = %d", len(fixture.store.digests))
 	}
-	if fixture.store.digests[0] == retired {
-		t.Fatal("a run ended under the retired validation code")
+	if fixture.store.digests[0] == wrong {
+		t.Fatal("the requester was told the AI did not answer; it answered and the validation refused it")
 	}
 	if fixture.store.digests[0] != expected {
 		t.Fatalf("the ceiling ended the run under an unexpected code: %q", fixture.store.digests[0])
+	}
+	// The sentence that reaches the requester is the one this code carries.
+	if len(fixture.comments.posted) != 1 ||
+		!strings.Contains(fixture.comments.posted[0], "生成した変更が検証を通過しなかった") {
+		t.Fatalf("the requester was not told the validation refused the change: %q", fixture.comments.posted)
 	}
 }

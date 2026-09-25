@@ -48,7 +48,9 @@ func TestTheInstructionCarriesThePreviousRoundsRefusedValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"### 前回の検証の失敗",
+		// The round is named, not just "the previous one": an agent handed a
+		// nameless previous attempt cannot tell which one it was.
+		"### 前の巡 (1 巡目) で検証が通らなかった",
 		// Which step refused, because the four that can refuse want different
 		// fixes.
 		"通らなかった工程: run-validation",
@@ -82,7 +84,7 @@ func TestAnInstructionWithoutARefusedValidationIsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(instruction), "前回の検証の失敗") {
+	if strings.Contains(string(instruction), "検証が通らなかった") {
 		t.Fatalf("a failure nothing sealed reached the instruction:\n%s", instruction)
 	}
 }

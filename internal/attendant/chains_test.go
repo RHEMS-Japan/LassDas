@@ -82,10 +82,10 @@ func TestClassifyChainFailure(t *testing.T) {
 		t.Fatalf("nonconverged without question = %v %v", action, code)
 	}
 	// A converged round the deterministic validation refused starts another
-	// round instead of ending the delivery. It reports nothing, so it carries
-	// the same placeholder code a revise does.
+	// round instead of ending the delivery. The code travels with it for the
+	// one path that still ends a run out of that arm, the round ceiling.
 	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), undecided, changed)
-	if action != actionRegenerate || code == hook.TerminalValidationFailed {
+	if action != actionRegenerate || code != hook.TerminalValidationFailed {
 		t.Fatalf("converged but failed = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StageValidate, undecided, undecided, changed)

@@ -609,7 +609,11 @@ func implementPrompt(
 	if validationFailure != nil {
 		sections = append(sections,
 			"",
-			"### 前回の検証の失敗",
+			// The round is named, the way the applier's instruction names it.
+			// An agent that is handed "the previous round" cannot tell which
+			// attempt that was, and a run repeating itself is exactly where
+			// knowing the number changes what it does.
+			fmt.Sprintf("### 前の巡 (%d 巡目) で検証が通らなかった", validationFailure.Round),
 			"- 前回の変更はレビューを通りましたが、このリポジトリで決められた検証が通らなかったため公開できませんでした。今回はこれを解消してください。",
 			"- 通らなかった工程: "+validationFailure.Step,
 			"- 検証の出力 (末尾のみ):",

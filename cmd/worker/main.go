@@ -150,12 +150,24 @@ func runValidation(ctx context.Context, args []string) error {
 	if err != nil {
 		// The command line comes from the fixed consumer configuration; the
 		// tail is untrusted build output and stays in the job log only.
+		//
+		// The output goes first and the command name after it, because what
+		// this writes is read back from a tail. The step keeps the last few
+		// kibibytes of this stream, and an output that fills that window on
+		// its own pushes whatever was written before it out. Naming the
+		// command first meant the name was the part that got dropped, exactly
+		// when there was most output to explain.
+		//
+		// The name is what tells an install failure from a test failure: this
+		// verb runs the install command and the verify commands in one step,
+		// and their output can read alike. One is the environment and one is
+		// the change, and they want different answers.
 		var commandFailure *worker.ValidationCommandError
 		if errors.As(err, &commandFailure) {
-			fmt.Fprintf(os.Stderr, "worker: validation command failed: %s\n", strings.Join(commandFailure.Arguments, " "))
 			if len(commandFailure.Tail) > 0 {
 				fmt.Fprintf(os.Stderr, "worker: validation output tail (%d bytes):\n%s\n", len(commandFailure.Tail), commandFailure.Tail)
 			}
+			fmt.Fprintf(os.Stderr, "worker: validation command failed: %s\n", strings.Join(commandFailure.Arguments, " "))
 		}
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "candidate validation failed", err)
 		return errors.New("candidate validation failed")

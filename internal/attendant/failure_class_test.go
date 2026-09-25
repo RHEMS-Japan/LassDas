@@ -83,7 +83,7 @@ func TestClassifyChainFailureIgnoresTheCardsOwnAccount(t *testing.T) {
 	expectations := []expectation{
 		{runtime.StageImplement, undecided, actionReport, hook.TerminalModelFailed},
 		{runtime.StagePublish, undecided, actionReport, hook.TerminalReleaseFailed},
-		{runtime.StageValidate, converged, actionRegenerate, hook.TerminalModelFailed},
+		{runtime.StageValidate, converged, actionRegenerate, hook.TerminalValidationFailed},
 		{runtime.StageReviewA, undecided, actionReport, hook.TerminalModelFailed},
 	}
 	for _, sealed := range []bool{false, true} {

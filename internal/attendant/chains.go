@@ -845,11 +845,16 @@ func handleChainFailure(
 			// have carried what it printed, and there is no next round to
 			// carry it.
 			//
-			// Both end under the model failure code. The code that used to
-			// name the second is no longer produced by anything, and every
-			// other code that could be read as "the ceiling stopped it" would
-			// be a different wrong answer.
-			code = hook.TerminalModelFailed
+			// The code the classification carried stands, which is the one
+			// place a refused validation still ends a run as validation_failed.
+			// Calling it a model failure said the AI had not answered, and on
+			// this path the AI answered and both judges passed it — the
+			// repository's own commands are what refused. The requester reads
+			// that sentence, so it has to be the true one.
+			//
+			// The exception exists only because the ceiling does. When the
+			// round count stops being a ceiling, this arm goes with it and
+			// the code stops being produced anywhere.
 		}
 	case actionAskQuestion:
 		if err := terminal.AskQuestion(ctx, filepath.Join(runDir, "history/question/decision.json")); err != nil {
@@ -958,11 +963,13 @@ func classifyChainFailure(stageName string, decision, question func() (string, e
 			// round's instruction carries it, so the round is repeated with
 			// the one thing it was missing instead of being abandoned.
 			//
-			// The code beside the action is the placeholder a regenerate
-			// always carries, as the revise arm above does: nothing reports
-			// it. validation_failed stays in the vocabulary — ledger rows and
-			// posted comments still name it — and nothing produces it now.
-			return actionRegenerate, hook.TerminalModelFailed
+			// The code travels with the action rather than being a
+			// placeholder like the revise arm's. A regenerate reports nothing
+			// on the ordinary path, but the round ceiling ends the run out of
+			// this same arm, and there the code is what the requester is told:
+			// this failure is the validation refusing the change, not the AI
+			// failing to answer.
+			return actionRegenerate, hook.TerminalValidationFailed
 		default:
 			return actionReport, hook.TerminalModelFailed
 		}
