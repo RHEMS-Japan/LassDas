@@ -582,3 +582,72 @@ func TestARoundRefusedTwiceByTheSameOutputIsRuledOn(t *testing.T) {
 		t.Fatalf("no card was created for the next round:\n%s", board)
 	}
 }
+
+// The same boundary on the other shape. A design-backed delivery whose
+// change is written again under the design it has goes through its own
+// regenerating path, and a requester who writes 「停止」 while the engine is
+// ruling on the deadlock is answered there too.
+func TestAStopDuringArbitrationStopsTheNextDesignBackedRound(t *testing.T) {
+	fixture, config, envelope, view, runDir, _ := stagnantFixture(t,
+		`{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"agents":{"applier":{"command":"true"}}}`)
+	// A delivery built from an approved design: the shape decides which
+	// regenerating path the round takes.
+	if err := os.WriteFile(filepath.Join(runDir, "history", "readiness", "decision.json"),
+		[]byte(`{"request_kind":"change","needs_design":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	designDir := filepath.Join(runDir, "history", "design-1")
+	if err := os.MkdirAll(designDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"investigation.json": `{}`,
+		"decision.json":      `{"outcome":"approved"}`,
+		"design.json":        `{}`,
+		"DESIGN.md":          "# 設計\n\nREADME.md のみを変更する。\n",
+	} {
+		if err := os.WriteFile(filepath.Join(designDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reads := 0
+	talkative, err := backlog.NewClient(backlog.Config{
+		SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com",
+		Timeout: time.Second, MaxResponseBytes: 1 << 20,
+	}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		reads++
+		body := "[]"
+		if reads > 1 {
+			body = `[{"id":1,"issueId":4242,"content":"停止","created":"2026-09-25T00:00:00Z","createdUser":{"id":7}}]`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.services.Backlog = talkative
+	terminal := runner.NewTerminal(config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &recordingLogger{})
+	digest, err := terminal.ReportDigest(context.Background(), hook.TerminalCancelled,
+		runner.Outcome{Code: hook.TerminalCancelled}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.expected = digest
+
+	hermes, boardLog := fakeBoard(t)
+	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, &recordingLogger{}); err != nil {
+		t.Fatalf("the failure was not handled: %v", err)
+	}
+	if reads < 2 {
+		t.Fatalf("the stop was read %d time(s); the second read is the one this is about", reads)
+	}
+	if len(fixture.store.digests) != 1 {
+		t.Fatalf("terminal reports begun = %d, want the cancelled one", len(fixture.store.digests))
+	}
+	board, err := os.ReadFile(boardLog)
+	if err == nil && strings.Contains(string(board), fixture.deliveryID+":apply:r3") {
+		t.Fatalf("the next design-backed round started after the requester asked to stop:\n%s", board)
+	}
+}
