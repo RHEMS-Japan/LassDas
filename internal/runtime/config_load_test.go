@@ -524,3 +524,49 @@ func TestBootRechecksConsumerBeforeCreatingState(t *testing.T) {
 		}
 	}
 }
+
+// A run has a wall, and the wall has to exist. A delivery with no deadline
+// is one whose ladder has no ending: every rung is a remedy and the last is
+// a wait that grows, so a failure nobody clears would climb for as long as
+// the pod lived. Zero is therefore refused rather than read as "no bound",
+// which is what the other retry settings mean by it.
+func TestLoadRefusesARunDeadlineThatIsNotPositive(t *testing.T) {
+	for name, hours := range map[string]any{"no deadline at all": 0, "a deadline already past": -1} {
+		t.Run(name, func(t *testing.T) {
+			raw := validRuntimeConfigMap()
+			chain := cardsChainMap()
+			chain["run_deadline_hours"] = hours
+			raw["chain"] = chain
+			_, err := Load(writeRuntimeConfig(t, raw))
+			if err == nil || !strings.Contains(err.Error(), "run_deadline_hours") {
+				t.Fatalf("Load() error = %v, want a refusal naming the setting", err)
+			}
+		})
+	}
+}
+
+// Omitted is a night, which is the shape a ticket thrown at eleven at night
+// is meant to fit in. An operator who wants longer writes longer.
+func TestTheRunDeadlineDefaultsToANightAndIsTheOperatorsToSet(t *testing.T) {
+	config, err := Load(writeRuntimeConfig(t, validRuntimeConfigMap()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.Chain.RunDeadlineHours != nil {
+		t.Fatalf("run_deadline_hours = %v, want nothing written where nothing was configured", *config.Chain.RunDeadlineHours)
+	}
+	if got := config.Chain.RunDeadline(); got != 8*time.Hour {
+		t.Fatalf("RunDeadline() = %v, want eight hours", got)
+	}
+	raw := validRuntimeConfigMap()
+	chain := cardsChainMap()
+	chain["run_deadline_hours"] = 20
+	raw["chain"] = chain
+	config, err = Load(writeRuntimeConfig(t, raw))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := config.Chain.RunDeadline(); got != 20*time.Hour {
+		t.Fatalf("RunDeadline() = %v, want the twenty hours configured", got)
+	}
+}

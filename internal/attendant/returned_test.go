@@ -34,6 +34,11 @@ type returnedSetup struct {
 	board    string
 	tracker  *returnTracker
 	logger   *recordingLogger
+	// claimedAt is when the ledger says this delivery was claimed, which
+	// is what its deadline is measured from. A minute ago by default, so a
+	// test about the answering is not also a test about the clock; a test
+	// about the clock moves it.
+	claimedAt time.Time
 }
 
 // returningConsumer is a destination with the three seats an
@@ -137,7 +142,8 @@ exit 0
 	}, fixture.deliveryID)
 	hermes, board := fakeBoard(t)
 	return &returnedSetup{fixture: fixture, config: config, envelope: envelope, view: view,
-		runDir: runDir, hermes: hermes, board: board, tracker: tracker, logger: &recordingLogger{}}
+		runDir: runDir, hermes: hermes, board: board, tracker: tracker, logger: &recordingLogger{},
+		claimedAt: time.Now().UTC().Add(-time.Minute)}
 }
 
 // writeChainShape leaves the reception's decision about which cards this
@@ -175,6 +181,9 @@ func (s *returnedSetup) boardCreations(t *testing.T) int {
 func (s *returnedSetup) tick(t *testing.T) error {
 	t.Helper()
 	run := state.RunOverview{DeliveryID: s.fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	if !s.claimedAt.IsZero() {
+		run.ClaimedAt = s.claimedAt.UnixMilli()
+	}
 	return handleChainFailure(context.Background(), s.config, s.fixture.services, s.hermes, s.envelope, run, s.view,
 		runtime.StageImplement, s.logger)
 }

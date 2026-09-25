@@ -232,6 +232,13 @@ func TestSealStageFailureWritesBesideTheRoundsOtherRecords(t *testing.T) {
 // from inside the process it is one, because the turn did not finish. The
 // record says which it was, so a reader deciding the model will not answer
 // does not count a rolling restart towards it.
+//
+// A card cut off by its own wall clock is the other half of that, and it is
+// not an interruption. Both arrive as a cancelled context and they mean
+// opposite things: nothing is learnt from a pod being replaced, whereas a
+// step that will not fit in the time the delivery allows it has told the
+// delivery something it has to act on. Filed as an interruption it was
+// replayed for free, for ever, past whatever limit an operator had set.
 func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T) {
 	pipeline := stageFailurePipeline(t)
 	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-1"), 0o755); err != nil {
@@ -242,13 +249,14 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 		stage       string
 		failure     error
 		interrupted bool
+		class       FailureClass
 	}{
 		{"the pod was replaced mid-turn", runtime.StageReviewA,
-			&verbFailure{verb: "agent-review", err: context.Canceled}, true},
+			&verbFailure{verb: "agent-review", err: context.Canceled}, true, FailureClassModel},
 		{"the card met its own wall", runtime.StageReviewB,
-			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, true},
+			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, false, FailureClassTimeout},
 		{"the provider gave up", runtime.StageValidate,
-			&verbFailure{verb: "agent-review", code: 1}, false},
+			&verbFailure{verb: "agent-review", code: 1}, false, FailureClassModel},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pipeline.SealStageFailure(tc.stage, tc.failure)
@@ -261,8 +269,8 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 			}
 			// The class still says what kind of thing it was, which is what
 			// makes this a second fact rather than a replacement for one.
-			if record.Class != FailureClassModel {
-				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			if record.Class != tc.class {
+				t.Fatalf("class = %q, want %q", record.Class, tc.class)
 			}
 		})
 	}
@@ -296,18 +304,20 @@ func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T)
 // that would not answer.
 func TestAStepKilledByItsContextIsSealedAsInterrupted(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		stage   string
-		context func() (context.Context, context.CancelFunc)
+		name        string
+		stage       string
+		context     func() (context.Context, context.CancelFunc)
+		interrupted bool
+		class       FailureClass
 	}{
 		{"the pod was replaced mid-step", runtime.StageReviewA, func() (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(context.Background())
 			time.AfterFunc(75*time.Millisecond, cancel)
 			return ctx, cancel
-		}},
+		}, true, FailureClassModel},
 		{"the step met its own wall", runtime.StageReviewB, func() (context.Context, context.CancelFunc) {
 			return context.WithTimeout(context.Background(), 75*time.Millisecond)
-		}},
+		}, false, FailureClassTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pipeline := stageFailurePipeline(t)
@@ -323,13 +333,18 @@ func TestAStepKilledByItsContextIsSealedAsInterrupted(t *testing.T) {
 			if !ok {
 				t.Fatal("nothing was sealed")
 			}
-			if !record.Interrupted {
-				t.Fatalf("interrupted = false for a step its context killed (class %q, error %q)", record.Class, record.Error)
+			if record.Interrupted != tc.interrupted {
+				t.Fatalf("interrupted = %v, want %v (class %q, error %q)",
+					record.Interrupted, tc.interrupted, record.Class, record.Error)
 			}
-			// The class is untouched: what kind of thing it was is still
-			// worth knowing about a card that was stopped.
-			if record.Class != FailureClassModel {
-				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			if record.Class != tc.class {
+				t.Fatalf("class = %q, want %q (error %q)", record.Class, tc.class, record.Error)
+			}
+			// The sentence still says the step ran and was cut off, which
+			// is true of both and is what stops a reader going to look for
+			// a binary that was never missing.
+			if !strings.Contains(record.Error, "stopped part-way") {
+				t.Fatalf("error = %q, want the sentence for a step that ran and was cut off", record.Error)
 			}
 		})
 	}
@@ -910,4 +925,117 @@ func TestClassifyStageFailureWillNotLetAnAnswerNameItsOwnClass(t *testing.T) {
 	if class := classifyStageFailure(body); class != FailureClassCredit {
 		t.Fatalf("classifyStageFailure(a provider body) = %q", class)
 	}
+}
+
+// The wall the card is actually given, measured through a real child
+// process.
+//
+// This is the mechanism the class above exists for, and for a while it was
+// not reached at all. The bound the attendant hands the kanban is enforced
+// by the supervisor, which sends SIGTERM; from inside the process that is a
+// cancelled context, identical to the pod being replaced. So every live
+// card that ran out of its wall — both tickets whose reviews died at
+// exactly seventy minutes — sealed as an interruption and was replayed for
+// free, past whatever bound an operator had set.
+//
+// The runner now reaches its own deadline first. A step that exhausts the
+// wall is its own failure class; a signal that arrives while the wall is
+// still far away is still the replacement it always was.
+func TestTheCardsOwnWallSealsAsATimeoutAndASignalStaysAnInterruption(t *testing.T) {
+	t.Run("the step exhausted the wall", func(t *testing.T) {
+		pipeline := stageFailurePipeline(t)
+		pipeline.Config.WorkerBin = sleepingBinary(t)
+		// Through the card's own helper, on the one wall an operator sets
+		// rather than the engine fixing: one second, of which the margin
+		// leaves half.
+		pipeline.Config.Chain.Deliver = runtime.DeliverConfig{
+			ChecksProfile: "c", IntegrateProfile: "i", PromoteProfile: "p",
+			EnabledAfter: "2026-09-01T00:00:00Z", ChecksMaxRuntimeSeconds: 1,
+		}
+		ctx, wall := pipeline.holdToTheCardsWall(context.Background(), runtime.DeliverStageChecks)
+		defer wall()
+		err := pipeline.runVerb(ctx, "agent-review", []string{"agent-review"})
+		if err == nil {
+			t.Fatal("a step held past its wall returned no failure")
+		}
+		pipeline.SealStageFailure(runtime.StageReviewA, err)
+		record, ok := ReadStageFailure(pipeline.Workspace, runtime.StageReviewA, 1)
+		if !ok {
+			t.Fatal("nothing was sealed")
+		}
+		if record.Interrupted {
+			t.Fatalf("a step that used up its wall was sealed as a replacement from outside (error %q)", record.Error)
+		}
+		if record.Class != FailureClassTimeout {
+			t.Fatalf("class = %q, want the step's own time running out", record.Class)
+		}
+	})
+
+	t.Run("the pod was replaced with the wall far away", func(t *testing.T) {
+		pipeline := stageFailurePipeline(t)
+		pipeline.Config.WorkerBin = sleepingBinary(t)
+		signalled, replace := context.WithCancel(context.Background())
+		defer replace()
+		ctx, wall := pipeline.holdToTheCardsWall(signalled, runtime.StageReviewA)
+		defer wall()
+		time.AfterFunc(75*time.Millisecond, replace)
+		err := pipeline.runVerb(ctx, "agent-review", []string{"agent-review"})
+		if err == nil {
+			t.Fatal("a step killed by the signal returned no failure")
+		}
+		pipeline.SealStageFailure(runtime.StageReviewB, err)
+		record, ok := ReadStageFailure(pipeline.Workspace, runtime.StageReviewB, 1)
+		if !ok {
+			t.Fatal("nothing was sealed")
+		}
+		if !record.Interrupted {
+			t.Fatalf("a pod being replaced was not sealed as a replacement (class %q, error %q)", record.Class, record.Error)
+		}
+		if record.Class == FailureClassTimeout {
+			t.Fatal("a pod being replaced was sealed as the step running out of its own time")
+		}
+	})
+}
+
+// And the chain stage holds itself to its card's wall the same way. The
+// bound is said from the context it installed, so a card running with no
+// bound but the supervisor's says nothing — which is what a card that
+// forgot to install one would do.
+func TestAChainStageSaysTheWallItHoldsItselfTo(t *testing.T) {
+	pipeline := stageFailurePipeline(t)
+	said := &wallLogger{}
+	pipeline.Logger = said
+	// It fails at once for want of a baseline; what is measured is the
+	// bound installed before any of that.
+	_ = pipeline.RunChainStage(context.Background(), runtime.StageReviewA)
+	if !said.saw("the card holds itself to its own wall") {
+		t.Fatalf("the stage ran with no bound but the supervisor's signal: %v", said.lines)
+	}
+	// A card whose name carries no wall is bounded by nothing here, and
+	// says so by saying nothing.
+	quiet := stageFailurePipeline(t)
+	other := &wallLogger{}
+	quiet.Logger = other
+	ctx, wall := quiet.holdToTheCardsWall(context.Background(), "not-a-card")
+	defer wall()
+	if _, bounded := ctx.Deadline(); bounded {
+		t.Fatal("a name no card carries was given a deadline")
+	}
+	if other.saw("the card holds itself to its own wall") {
+		t.Fatalf("a card with no wall claimed one: %v", other.lines)
+	}
+}
+
+type wallLogger struct{ lines []string }
+
+func (l *wallLogger) Info(message string, _ ...any)  { l.lines = append(l.lines, message) }
+func (l *wallLogger) Error(message string, _ ...any) { l.lines = append(l.lines, message) }
+
+func (l *wallLogger) saw(message string) bool {
+	for _, line := range l.lines {
+		if line == message {
+			return true
+		}
+	}
+	return false
 }

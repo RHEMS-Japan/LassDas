@@ -80,6 +80,19 @@ const (
 	// explanation was the only thing missing from the ticket (live
 	// 2026-09-25).
 	TerminalImplementationReturned TerminalCode = "implementation_returned"
+	// TerminalDeadlineReached is a delivery that ran out of the time it was
+	// given while it was still trying to get past a failure. It is the
+	// ending the ladder never had: every rung of it is a remedy and the
+	// last one is a wait that grows, so a failure nobody clears — a key
+	// nobody raises, a provider that stays down, an agent that keeps
+	// handing the work back — leaves a run climbing with nothing to show
+	// for it and no ending in sight.
+	//
+	// It is never internal_failed. Nothing broke inside the engine: the
+	// engine did the work, said what it tried, and ran out of night. The
+	// report says where the delivery got to, what kind of failure it kept
+	// meeting, and what a person would have to supply or fix.
+	TerminalDeadlineReached TerminalCode = "deadline_reached"
 )
 
 // Valid reports whether c is one of the terminal codes the automation ends
@@ -100,6 +113,7 @@ func AllTerminalCodes() []TerminalCode {
 		TerminalProductionVerificationFailed, TerminalInternalFailed,
 		TerminalInvestigated, TerminalInvestigationIncomplete, TerminalInvestigationNonconverged,
 		TerminalDesignNonconverged, TerminalDesignRoundsSpent, TerminalImplementationReturned,
+		TerminalDeadlineReached,
 	}
 }
 
@@ -607,6 +621,19 @@ func validateTerminalEvidenceShape(r TerminalReportRequest, destination ReportDe
 		TerminalClarificationExpired:
 		if r.PullRequestURL != "" || r.CommitSHA != "" || r.StagingEvidenceURL != "" || r.ProductionEvidenceURL != "" {
 			return errors.New("pre-generation stop cannot claim repository evidence")
+		}
+	case TerminalDeadlineReached:
+		// A delivery cut short by its deadline says how far it got and
+		// carries that depth's evidence, production included: nothing here
+		// rolls back, so a footer calling production untouched would be
+		// false about the environment the requester has to look at. What
+		// it cannot claim is a depth without the ones beneath it. Refusing
+		// production outright, as the failed endings below do, would not
+		// make the report false — it would make it never post: the gate
+		// runs before the report is kept, so there would be nothing to
+		// resend and the run would stay open forever.
+		if r.ProductionEvidenceURL != "" && (r.PullRequestURL == "" || r.CommitSHA == "" || r.StagingEvidenceURL == "") {
+			return errors.New("a deadline report cannot claim production without the depths beneath it")
 		}
 	default:
 		if r.ProductionEvidenceURL != "" {

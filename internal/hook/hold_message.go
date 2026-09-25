@@ -54,6 +54,8 @@ func DescribeTerminalCode(code string) string {
 		return "納品に失敗して終了 (release_failed)"
 	case TerminalInternalFailed:
 		return "内部エラーで終了 (internal_failed)"
+	case TerminalDeadlineReached:
+		return "処理時間の上限に達して終了 (deadline_reached)"
 	case TerminalProductionDeploymentUnverified, TerminalProductionVerificationFailed:
 		return "本番反映の確認ができず終了 (" + code + ")"
 	default:

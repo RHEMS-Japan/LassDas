@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,6 +138,28 @@ type ChainConfig struct {
 	// it is waiting on. Sharing only: nothing waits for a reply, and the
 	// run does not stop. Omitted means 3.
 	RetryNoticeAttempts int `json:"retry_notice_attempts,omitempty"`
+	// RunDeadlineHours is how long one delivery may go on before it is
+	// finished off with an honest report of where it got to.
+	//
+	// It exists because the ladder above has no ending of its own. Every
+	// rung is a remedy and the last rung is a wait that grows, so a
+	// failure that never clears — a key nobody raises, a provider that
+	// stays down — leaves a delivery climbing all weekend with one notice
+	// on the ticket and no result, which is the night this engine is
+	// supposed to end (measured 2026-09-26: twenty passes over the same
+	// refusal, seventy-six cards rebuilt, no report).
+	//
+	// A pointer because omitted and zero have to differ. Omitted is the
+	// default below; a zero written on purpose is refused, since "no
+	// deadline" is the shape that has no ending, and an operator who wants
+	// a long one writes a long one.
+	//
+	// The clock runs from the claim and only ever ends a run that is in
+	// the ladder or answering a returned round (attendant's deadline.go);
+	// time spent waiting for an answer to a reception question is outside
+	// it, because a question hands the row back to the queue and the next
+	// claim starts the clock again.
+	RunDeadlineHours *int `json:"run_deadline_hours,omitempty"`
 	// Credentials are the secrets the operator provisioned for this
 	// destination and the cards that receive them (see credentials.go).
 	// Omitted, and empty, means the engine runs with nothing but the
@@ -553,6 +576,14 @@ func (c Config) validateOrchestration() error {
 			return errors.New("runtime config: chain." + setting.name + " must be 0 (the default) or positive")
 		}
 	}
+	// Written down and not positive. Zero would be a delivery with no end
+	// at all and a negative one an end that has already passed, and the
+	// sentence says which of the two the operator wrote rather than making
+	// them guess from a range.
+	if hours := c.Chain.RunDeadlineHours; hours != nil && *hours <= 0 {
+		return errors.New("runtime config: chain.run_deadline_hours must be positive — omit it for the " +
+			strconv.Itoa(defaultRunDeadlineHours) + "-hour default; a run with no deadline can never report that it ran out of time")
+	}
 	if c.Chain.RetryBackoffBase() > c.Chain.RetryBackoffMax() {
 		return errors.New("runtime config: chain.retry_backoff_base_seconds must not exceed chain.retry_backoff_max_seconds")
 	}
@@ -668,7 +699,22 @@ const (
 	defaultRetryBackoffBase    = time.Minute
 	defaultRetryBackoffMax     = 30 * time.Minute
 	defaultRetryNoticeAttempts = 3
+	// defaultRunDeadlineHours is a night. A ticket thrown at eleven is
+	// meant to be finished by the morning, so a delivery still climbing
+	// after eight hours has stopped being a delivery in progress and
+	// become one that owes its requester an account of where it got to.
+	defaultRunDeadlineHours = 8
 )
+
+// RunDeadline is how long one delivery may go on before it is finished off
+// with an account of where it reached.
+func (c ChainConfig) RunDeadline() time.Duration {
+	hours := defaultRunDeadlineHours
+	if c.RunDeadlineHours != nil && *c.RunDeadlineHours > 0 {
+		hours = *c.RunDeadlineHours
+	}
+	return time.Duration(hours) * time.Hour
+}
 
 // RetryBackoffBase is the first wait between attempts.
 func (c ChainConfig) RetryBackoffBase() time.Duration {

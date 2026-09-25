@@ -79,6 +79,19 @@ const (
 // carry it.
 func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate string) *depthHarness {
 	t.Helper()
+	// Claimed a minute ago rather than on a fixed date in the past. A run
+	// has a wall now (attendant's deadline.go), and a fixture whose claim
+	// recedes further into the past with every day that passes would end
+	// every one of these deliveries as out of time — measuring the clock
+	// in tests that are about everything else. Tests that are about the
+	// clock say how long ago they were claimed.
+	return newDepthHarnessClaimedAt(t, delivery, deliverOn, goGate, time.Now().UTC().Add(-time.Minute))
+}
+
+// newDepthHarnessClaimedAt is the same delivery, claimed when the caller
+// says. The claim is what the run's deadline is measured from.
+func newDepthHarnessClaimedAt(t *testing.T, delivery string, deliverOn bool, goGate string, claimedAt time.Time) *depthHarness {
+	t.Helper()
 	root := t.TempDir()
 	consumerConfig := filepath.Join(root, "consumer.json")
 	body := fmt.Sprintf(`{"max_stages":3,"consumers":[{"repository":%q,"delivery":%q%s}]}`,
@@ -127,7 +140,6 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 	// Claimed through the store, not by hand: the claim is what writes the
 	// engine identity into the run row, and every report and run comment
 	// this delivery posts is refused unless the row carries it.
-	claimedAt := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
 	if _, disposition, err := store.Pull(context.Background(), hook.PullClaimRequest{
 		SpaceKey: "example", ProjectID: 42, ProjectKey: "TICKET",
 		AllowedCreatorID: depthRequester, AllowedActivityType: 1, RunID: depthRunID,

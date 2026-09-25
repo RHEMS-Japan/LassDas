@@ -131,6 +131,9 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 	if until != DeliverUntilChecks && until != DeliverUntilStaging && until != DeliverUntilProduction {
 		return errors.New("deliver milestone is invalid")
 	}
+	// The same wall, for the same reason a chain stage holds itself to one.
+	ctx, wall := p.holdToTheCardsWall(ctx, DeliverStageOf(until))
+	defer wall()
 	if err := p.verifyToolPins(); err != nil {
 		return err
 	}
@@ -166,6 +169,31 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 	return p.deliverStaging(ctx, stageDir, reviews)
 }
 
+// deliverVerb runs one delivery verb and, when the card's own wall has
+// expired underneath it, says so.
+//
+// Every verb on this path reads a process that did not finish as a result:
+// a killed child comes back as exit code -1 with no error beside it, which
+// is indistinguishable from the verb running and refusing. So a phase cut
+// off at its wall sealed "the CI never went green" — a red gate the
+// requester never had — and the ladder replayed it for free. The closing
+// comment was untrue about the one thing it existed to report.
+//
+// Only a context that has already ended changes anything here. A verb that
+// ran and refused under a live context returns exactly what it returned
+// before, byte for byte, because that refusal is the destination's answer
+// and this has nothing to say about it. What the wrapper adds is the cause,
+// carried whole, so the seal can tell the two cancellations apart: a wall
+// that expired is the phase's own failure and is counted, and a pod being
+// replaced is not.
+func (p *Pipeline) deliverVerb(ctx context.Context, name string, arguments []string) (int, error) {
+	code, err := p.controller(ctx, name, arguments)
+	if err != nil || ctx.Err() == nil {
+		return code, err
+	}
+	return code, &verbFailure{verb: name, code: code, err: ctx.Err(), stderr: p.lastStepStderr}
+}
+
 // DeliverStageOf is the card name behind one milestone. The kanban
 // dispatches three cards by name and each asks for its own milestone, so
 // this is the one place the two vocabularies meet: the card's entry point
@@ -189,7 +217,7 @@ func (p *Pipeline) deliverChecks(ctx context.Context, stageDir string) (bool, er
 	if p.exists(DeliverChecksFile) {
 		return false, nil
 	}
-	code, err := p.controller(ctx, "wait-feature", append([]string{"wait-feature"},
+	code, err := p.deliverVerb(ctx, "wait-feature", append([]string{"wait-feature"},
 		p.deliverCommon(stageDir, "--feature-pr", p.path("feature-pr.json"), "--out", p.path(DeliverChecksFile))...))
 	if err != nil {
 		return false, err
@@ -208,7 +236,7 @@ func (p *Pipeline) deliverChecks(ctx context.Context, stageDir string) (bool, er
 // writes the staging report.
 func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews []string) error {
 	if !p.exists(DeliverMergeFile) {
-		code, err := p.controller(ctx, "merge-feature", append([]string{"merge-feature"},
+		code, err := p.deliverVerb(ctx, "merge-feature", append([]string{"merge-feature"},
 			p.deliverCommon(stageDir,
 				"--feature-pr", p.path("feature-pr.json"),
 				"--checks", p.path(DeliverChecksFile),
@@ -253,7 +281,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 			}
 			return p.sealDeliverReport(report)
 		}
-		code, err := p.controller(ctx, "await-staging", append([]string{"await-staging"},
+		code, err := p.deliverVerb(ctx, "await-staging", append([]string{"await-staging"},
 			p.deliverGate(stageDir, reviews,
 				"--feature-merge", p.path(DeliverMergeFile),
 				"--out", p.path(DeliverStagingProofFile))...))
@@ -329,7 +357,7 @@ func (p *Pipeline) deliverStaging(ctx context.Context, stageDir string, reviews 
 		return p.sealMeasurementFailure(stageDir, "staging", detail)
 	}
 	if !p.exists(DeliverDeltaFile) {
-		if code, err := p.controller(ctx, "promotion-delta", append([]string{"promotion-delta"},
+		if code, err := p.deliverVerb(ctx, "promotion-delta", append([]string{"promotion-delta"},
 			p.deliverCommon(stageDir, "--out", p.path(DeliverDeltaFile))...)); err != nil {
 			return err
 		} else if code != 0 {
@@ -445,7 +473,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 		return errors.New("deliver production needs the sealed staging observation")
 	}
 	if !p.exists(DeliverPromotionFile) {
-		code, err := p.controller(ctx, "create-promotion-pr", append([]string{"create-promotion-pr"},
+		code, err := p.deliverVerb(ctx, "create-promotion-pr", append([]string{"create-promotion-pr"},
 			p.deliverGate(stageDir, reviews,
 				"--staging", p.path(DeliverStagingProofFile),
 				"--visible", p.path(DeliverStagingVisibleFile),
@@ -462,7 +490,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 		}
 	}
 	if !p.exists(DeliverPromotionMergeFile) {
-		code, err := p.controller(ctx, "merge-promotion", append([]string{"merge-promotion"},
+		code, err := p.deliverVerb(ctx, "merge-promotion", append([]string{"merge-promotion"},
 			p.deliverGate(stageDir, reviews,
 				"--promotion", p.path(DeliverPromotionFile),
 				"--reflection-out", p.path(DeliverReflectionFile),
@@ -511,7 +539,7 @@ func (p *Pipeline) deliverProduction(ctx context.Context, stageDir string, revie
 			}
 			return p.sealDeliverReport(report)
 		}
-		code, err := p.controller(ctx, "await-production", append([]string{"await-production"},
+		code, err := p.deliverVerb(ctx, "await-production", append([]string{"await-production"},
 			p.deliverGate(stageDir, reviews,
 				"--promotion-merge", p.path(DeliverPromotionMergeFile),
 				"--out", p.path(DeliverProductionFile))...))
@@ -586,7 +614,7 @@ func (p *Pipeline) probeMerged(ctx context.Context, step, stageDir, artifact str
 	if err := os.Remove(p.path("merge-probe.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "unknown"
 	}
-	code, err := p.controller(ctx, step, append([]string{"read-merged"},
+	code, err := p.deliverVerb(ctx, step, append([]string{"read-merged"},
 		p.deliverCommon(stageDir, "--number", number, "--out", p.path("merge-probe.json"))...))
 	if err != nil || code != 0 {
 		return "unknown"
@@ -732,7 +760,7 @@ func (p *Pipeline) browsercheck(ctx context.Context, stageDir string, reviews []
 // pass evidence this path cannot honestly produce.
 func (p *Pipeline) sealReferenceStagingReport(ctx context.Context, stageDir string) error {
 	if !p.exists(DeliverDeltaFile) {
-		if code, err := p.controller(ctx, "promotion-delta", append([]string{"promotion-delta"},
+		if code, err := p.deliverVerb(ctx, "promotion-delta", append([]string{"promotion-delta"},
 			p.deliverCommon(stageDir, "--out", p.path(DeliverDeltaFile))...)); err != nil {
 			return err
 		} else if code != 0 {

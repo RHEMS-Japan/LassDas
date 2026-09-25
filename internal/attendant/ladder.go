@@ -103,12 +103,6 @@ type ladderRecord struct {
 	// so a wait that lasts hours reads the ticket once rather than once a
 	// tick.
 	NoticedSteps []int `json:"noticed_steps,omitempty"`
-	// LastStopReadAt is when the ticket was last read for a 「停止」 while
-	// this stage was only waiting. The chain loop passes every few seconds,
-	// and a stage can wait half an hour; without this the tracker would be
-	// listed six times a minute per waiting card, all night, for every
-	// delivery at once.
-	LastStopReadAt time.Time `json:"last_stop_read_at"`
 	// LoggedNoTracker records that this stage has already said, once, that
 	// the delivery has no tracker to speak to. Without it a silent climb
 	// would repeat the line every tick for as long as it lasted, which is
@@ -167,6 +161,15 @@ func ladderHands(class runner.FailureClass, climb ladderClimb) []ladderHand {
 	switch class {
 	case runner.FailureClassModel:
 		return modelHands(climb)
+	case runner.FailureClassTimeout:
+		// A step that did not fit in its wall gets the model's hands. The
+		// remedy for a role that cannot answer in the time it is given is
+		// another occupant of that seat and, after that, a shorter ask —
+		// exactly the two things this rung does. What it must not get is
+		// the interruption's free replay: the same seat on the same prompt
+		// meets the same wall, and the delivery would spend the night
+		// re-dispatching a step that never finishes.
+		return modelHands(climb)
 	case runner.FailureClassDisk:
 		return []ladderHand{
 			// Other deliveries' leavings before this delivery's own. The
@@ -220,6 +223,10 @@ const (
 	// has been reached. The caller ends the run the way it would have
 	// before the ladder existed.
 	ladderSpent
+	// ladderDeadlineReached: the delivery used up the time it was given
+	// while it was still climbing. The caller ends the run with an account
+	// of where it got to (deadline.go).
+	ladderDeadlineReached
 )
 
 // newClimb gathers one failed card's context. The tracker comes out of the
@@ -268,6 +275,21 @@ func climbLadder(ctx context.Context, climb ladderClimb) (ladderVerdict, error) 
 	}
 	record := readLadderRecord(runDir, stageName, round)
 	now := time.Now().UTC()
+
+	// Before any remedy, whether there is still time to play one.
+	//
+	// Asked here rather than beside the waiting rung because every rung is
+	// the same delivery going on: a run that spends its night moving seats
+	// and rebuilding cards has used the night just as surely as one that
+	// spent it waiting, and a card that keeps being replaced mid-turn is a
+	// delivery going nowhere for as long as it lasts.
+	if spent, passed := runDeadlinePassed(config, run, now); passed {
+		logger.Info("the delivery used up the time it was given while it was still climbing; it ends with an account of where it got to",
+			"run", run.RunID, "stage", stageName, "round", round, "class", string(class),
+			"spent_minutes", int(spent.Minutes()), "deadline_minutes", int(config.Chain.RunDeadline().Minutes()),
+			"attempts", record.Attempts)
+		return ladderDeadlineReached, nil
+	}
 
 	// A delivery whose ticket cannot be reached at all. The ladder can
 	// neither say that it is still going nor hear a stop, so it would climb
@@ -350,7 +372,7 @@ func waitRung(ctx context.Context, climb ladderClimb, class runner.FailureClass,
 		// waiting rung on the first tick after its card failed — a key at
 		// its limit does — would otherwise not be asked again until the
 		// first dispatch, which the longest waits put half an hour away.
-		stopped, _ := stopAskedWhileWaiting(ctx, climb, &record, now)
+		stopped := stopAsked(ctx, climb)
 		writeLadderRecord(climb.runDir, stageName, round, record, logger)
 		if stopped {
 			return ladderStopped, nil
@@ -367,14 +389,19 @@ func waitRung(ctx context.Context, climb ladderClimb, class runner.FailureClass,
 		writeLadderRecord(climb.runDir, stageName, round, record, logger)
 	}
 	if now.Before(record.LastAt.Add(ladderWait(config.Chain, record))) {
-		// Still waiting. This is the only thing the tick does for this
-		// card, and it is throttled: the loop passes every few seconds and
-		// the wait can be half an hour.
-		if stopped, read := stopAskedWhileWaiting(ctx, climb, &record, now); read {
-			writeLadderRecord(climb.runDir, stageName, round, record, logger)
-			if stopped {
-				return ladderStopped, nil
-			}
+		// Still waiting, and the stop is read anyway.
+		//
+		// The wait belongs to the failure — how long before this stage is
+		// worth another attempt — and the requester's 「停止」 has nothing to
+		// do with it. Reading the ticket on the wait's clock tied the two
+		// together and made the promise "a stop is honoured on the next
+		// tick" false for the whole of every wait: measured 2026-09-26, six
+		// consecutive passes over a waiting card never looked at the ticket
+		// at all. So the backoff governs the dispatch and this read happens
+		// every pass, which costs one comment listing per waiting card per
+		// tick — the price of the promise.
+		if stopAsked(ctx, climb) {
+			return ladderStopped, nil
 		}
 		return ladderHandled, nil
 	}
@@ -406,32 +433,6 @@ func stopAsked(ctx context.Context, climb ladderClimb) bool {
 			"run", climb.run.RunID, "stage", climb.stage)
 	}
 	return stopped
-}
-
-// stopReadInterval is how often a stage that is only waiting reads its
-// ticket for a 「停止」.
-//
-// The chain loop passes every ten seconds, and the waits it passes over
-// reach half an hour, so an unthrottled read would list the tracker six
-// times a minute for every waiting card at once — a night of deliveries
-// held behind one spent key would spend it on nothing else. A minute is
-// the longest a requester should wait to be obeyed and the shortest that
-// costs the tracker nothing to speak of.
-const stopReadInterval = time.Minute
-
-// stopAskedWhileWaiting reads the stop for a stage that is only waiting,
-// at most once per stopReadInterval, and says whether it read at all so
-// the caller knows whether the record is worth writing.
-//
-// The tick that actually dispatches does not come through here: it reads
-// without a throttle, because that read is the last thing between a
-// requester who asked to stop and a card that spends money.
-func stopAskedWhileWaiting(ctx context.Context, climb ladderClimb, record *ladderRecord, now time.Time) (stopped, read bool) {
-	if !record.LastStopReadAt.IsZero() && now.Before(record.LastStopReadAt.Add(stopReadInterval)) {
-		return false, false
-	}
-	record.LastStopReadAt = now
-	return stopAsked(ctx, climb), true
 }
 
 // ladderWait is how long before the next attempt: the first wait doubled
@@ -488,11 +489,9 @@ func nextHand(class runner.FailureClass, climb ladderClimb, tried []string) (lad
 // card is archived.
 func dispatchAgain(ctx context.Context, climb ladderClimb) (ladderVerdict, error) {
 	config, run, stageName, logger := climb.config, climb.run, climb.stage, climb.logger
-	// 「停止」 is read here without a throttle. This is the last thing between
-	// a requester who has asked the delivery to stop and a card that starts
-	// spending again, and a dispatch is rare enough — once per hand, then
-	// once per wait — that reading it every time costs nothing. A stage that
-	// is only waiting reads it on its own slower clock.
+	// 「停止」 is read here too. This is the last thing between a requester
+	// who has asked the delivery to stop and a card that starts spending
+	// again, so it is read whatever the waiting rung above already read.
 	if stopAsked(ctx, climb) {
 		return ladderStopped, nil
 	}
