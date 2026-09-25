@@ -79,7 +79,7 @@ func TestLoadPlanFactsReadsTheSealedArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("readiness-ticket.json", `{"request":"再試行の導線を出す","target_files":["client/a.tsx","client/b.json"]}`)
+	write("readiness-ticket.json", `{"request":"再試行の導線を出す"}`)
 	write("intake.json", `{"rationale":"失敗表示の隣に再試行ボタンを置く。"}`)
 	write("history/readiness/assessment-1.json", `{"assumptions":[{"statement":"古い前提"}]}`)
 	write("history/readiness/assessment-2.json", `{"assumptions":[{"statement":"一覧のみ取り直す"},{"statement":"  "}]}`)
@@ -91,9 +91,6 @@ func TestLoadPlanFactsReadsTheSealedArtifacts(t *testing.T) {
 	}
 	if facts.Rationale != "失敗表示の隣に再試行ボタンを置く。" {
 		t.Fatalf("Rationale = %q", facts.Rationale)
-	}
-	if len(facts.TargetFiles) != 2 || facts.TargetFiles[0] != "client/a.tsx" {
-		t.Fatalf("TargetFiles = %v", facts.TargetFiles)
 	}
 	// The newest assessment wins and blank statements are dropped.
 	if len(facts.Assumptions) != 1 || facts.Assumptions[0] != "一覧のみ取り直す" {
@@ -113,7 +110,7 @@ func TestLoadPlanFactsReadsTheSealedArtifacts(t *testing.T) {
 func TestLoadPlanFactsFallsBackAndToleratesAbsence(t *testing.T) {
 	runDir := t.TempDir()
 	// No artifacts at all: the notice renders with empty facts, never fails.
-	if facts := loadPlanFacts(runDir); facts.Request != "" || len(facts.TargetFiles) != 0 {
+	if facts := loadPlanFacts(runDir); facts.Request != "" {
 		t.Fatalf("empty run dir produced %+v", facts)
 	}
 	// Without the readiness ticket the draft's request still fills in.
@@ -136,18 +133,22 @@ func TestPlanCommentContentRendersTheFacts(t *testing.T) {
 	content := hook.PlanCommentContent("run-42", hook.PlanFacts{
 		Request:      "再試行の導線を出す",
 		Rationale:    strings.Repeat("あ", 700),
-		TargetFiles:  []string{"client/a.tsx"},
 		Assumptions:  []string{"一覧のみ取り直す"},
 		DesignReason: "approach_in_ticket",
 	})
 	for _, want := range []string{
-		"【実装方針】", "依頼の解釈: 再試行の導線を出す", "client/a.tsx", "一覧のみ取り直す",
+		"【実装方針】", "依頼の解釈: 再試行の導線を出す", "一覧のみ取り直す",
 		"設計なし: 方針が本文にあるため設計を省略",
 		"「停止」とだけ書いたコメント", "…（以下略）",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("plan comment lacks %q:\n%s", want, content)
 		}
+	}
+	// The notice never promises which files the run will touch: nothing
+	// decides that until the change is made.
+	if strings.Contains(content, "触る予定の範囲") || strings.Contains(content, "見当をつけた範囲") {
+		t.Fatalf("the plan comment still promises a file scope:\n%s", content)
 	}
 	if err := hook.ValidateCommentContract(content, hook.CommentMarker("plan", "run-42")); err != nil {
 		t.Fatalf("plan comment violates the contract: %v", err)
@@ -167,14 +168,9 @@ func TestPlanCommentContentStaysWithinTheTrackerLimit(t *testing.T) {
 	for index := range assumptions {
 		assumptions[index] = strings.Repeat("前", 600)
 	}
-	files := make([]string, 40)
-	for index := range files {
-		files[index] = strings.Repeat("p", 300)
-	}
 	content := hook.PlanCommentContent("run-42", hook.PlanFacts{
 		Request:     strings.Repeat("あ", 8000),
 		Rationale:   strings.Repeat("い", 8000),
-		TargetFiles: files,
 		Assumptions: assumptions,
 	})
 	if len(content) > hook.MaxTrackerCommentBytes {

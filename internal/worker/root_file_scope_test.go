@@ -11,16 +11,16 @@ import (
 func TestRootFileScopeListsExactRegularFiles(t *testing.T) {
 	config := validTestConfig()
 	config.Consumers[0].Mode.AllowedFilePrefixes = []string{"README.md", "main.go", "server/", "missing.go"}
-	root := deriveTestTree(t)
+	root := scopeTestTree(t)
 	if err := os.Symlink("server/main.go", filepath.Join(root, "main.go")); err != nil {
 		t.Fatal(err)
 	}
-	listing, err := ReadCandidateListing(root, strings.Repeat("a", 40), config.Consumers[0], config)
+	paths, err := writableScopePaths(root, config.Consumers[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"README.md", "server/main.go"}; !reflect.DeepEqual(listing.Paths, want) {
-		t.Fatalf("got %v, want %v", listing.Paths, want)
+	if want := []string{"README.md", "server/main.go"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("got %v, want %v", paths, want)
 	}
 	for _, entry := range []string{"", ".", "..", "/main.go", "../main.go", ".env", ".github", "main*", "cmd/main.go"} {
 		config.Consumers[0].Mode.AllowedFilePrefixes = []string{entry}

@@ -464,7 +464,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Locate or derive the target of a ticket that did not name files
+      - name: Complete the contract of a ticket that did not name files
         id: located
         shell: bash
         env:
@@ -472,9 +472,6 @@ jobs:
           SOURCE_OUTPUT: ${{ runner.temp }}/m1-source
           TARGET_ROOT: ${{ github.workspace }}/target-source
           TOOL_SHA: ${{ job.workflow_sha }}
-          BASE_SHA: ${{ steps.baseline.outputs.sha }}
-          MODEL_API_KEY_IMPLEMENTER: ${{ secrets.MODEL_API_KEY_IMPLEMENTER }}
-          MODEL_API_KEY_REVIEWER: ${{ secrets.MODEL_API_KEY_REVIEWER }}
         run: |
           set -euo pipefail
           if [[ -f "$SOURCE_OUTPUT/readiness-ticket.json" ]]; then
@@ -495,22 +492,13 @@ jobs:
               --out "$SOURCE_OUTPUT/readiness-ticket.json"
             locate_status=$?
           else
-            # A ticket without a wording promise has no text to search for;
-            # the target files are chosen from a deterministic listing of the
-            # writable scope, and only listed paths can be chosen.
-            "$TOOLS/worker" list-candidates \
+            # A ticket without a wording promise has no text to search for,
+            # and no file is named in advance: the contract is completed
+            # without one, and the change decides which files it touches.
+            "$TOOLS/worker" reception-ticket \
               --config "$TOOLS/m1-consumer.json" \
               --tool-sha "$TOOL_SHA" \
               --draft "$SOURCE_OUTPUT/ticket-draft.json" \
-              --repo-root "$TARGET_ROOT" \
-              --base-sha "$BASE_SHA" \
-              --out "$SOURCE_OUTPUT/candidate-listing.json" &&
-            "$TOOLS/worker" derive-contract \
-              --config "$TOOLS/m1-consumer.json" \
-              --tool-sha "$TOOL_SHA" \
-              --draft "$SOURCE_OUTPUT/ticket-draft.json" \
-              --listing "$SOURCE_OUTPUT/candidate-listing.json" \
-              --derivation-out "$SOURCE_OUTPUT/derivation.json" \
               --out "$SOURCE_OUTPUT/readiness-ticket.json"
             locate_status=$?
           fi

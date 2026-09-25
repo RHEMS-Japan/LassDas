@@ -896,14 +896,6 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 	// told only that the stage "could not be completed" (live 2026-09-17,
 	// three answers refused for a reason nobody recorded).
 	err := fmt.Errorf("%w: %v", errModelResponseContent, last)
-	if dispatchPhrase(last.Error()) {
-		// A caller dispatches on the head of this message. Putting the
-		// class in front of it replaced a fixable instruction to the
-		// requester ("name the file to change") with "ask an operator"
-		// (review of #184), so the objection keeps the front and the class
-		// travels behind it.
-		err = fmt.Errorf("%s (%w)", last.Error(), errModelResponseContent)
-	}
 	writeFailureDetail(ModelFailureDetail{
 		// The phrase names the class only: the objection carries the head
 		// of a model answer, and a ticket's own words reach that answer -
@@ -1401,18 +1393,4 @@ func reviewPrompt(candidate Candidate, source SourceSnapshot, request TicketRequ
 		return "", errors.New("review prompt is too large")
 	}
 	return string(encoded), nil
-}
-
-// dispatchPhrases are the worker's own openings that a caller reads the head
-// of a failure for. A failure that already opens with one keeps that
-// opening: the caller's answer to it is more specific than the class.
-var dispatchPhrases = []string{NoTargetFileChosen}
-
-func dispatchPhrase(message string) bool {
-	for _, phrase := range dispatchPhrases {
-		if strings.HasPrefix(message, phrase) {
-			return true
-		}
-	}
-	return false
 }

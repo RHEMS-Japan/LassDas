@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -562,109 +561,47 @@ func TestAgentReviewDoesNotRetryAnExplicitBudgetRefusal(t *testing.T) {
 	}
 }
 
-// The reception decides, from the ticket, which files the ticket changes.
-// The implementer is told, and told what to do instead of widening the
-// change itself: a documentation ticket grew into a new tar extractor over
-// two rounds because only the project's writable scope reached the agent
-// (live 2026-09-17).
-func TestImplementPromptCarriesTheDerivedTargetFiles(t *testing.T) {
+// The instruction hands the agent the boundaries and nothing else: which
+// files a request needs is decided by reading the repository, which is what
+// the agent does and the requester cannot. A per-request list guessed from
+// the ticket before anyone opened the code ended a live run instead
+// (2026-09-25): the request named the files it wanted created, the guess
+// picked two unrelated existing ones, and the implementer - forbidden to
+// touch anything else - correctly refused to do the work.
+func TestImplementPromptNamesNoPerRequestFileList(t *testing.T) {
 	draft := worker.TicketDraft{IssueKey: "TEST-1", Summary: "件名", Request: "本文", Repository: "example/target"}
-	consumer := worker.ConsumerConfig{Repository: "example/target", Mode: worker.ModeConfig{AllowedFilePrefixes: []string{"README.md", "docs/"}, MaxFiles: 5}}
+	consumer := worker.ConsumerConfig{Repository: "example/target", Mode: worker.ModeConfig{
+		AllowedFilePrefixes: []string{"README.md", "docs/"},
+		MaxFiles:            5, MaxChangedLines: 400, MaxChangedBytes: 32768, MaxFileBytes: 65536,
+	}}
 	agent := worker.AgentConfig{ID: "implementer", Command: "agent"}
-	with, err := implementPrompt(draft, consumer, agent, nil, nil, "/work/repo", []string{"README.md", "docs/USAGE.md"})
+	prompt, err := implementPrompt(draft, consumer, agent, nil, nil, "/work/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"## この依頼が変えるファイル", "- README.md", "- docs/USAGE.md", "これ以外のファイルは変更しないでください", "変えずに", "依頼者に返します"} {
-		if !strings.Contains(with, want) {
-			t.Fatalf("prompt lacks %q:\n%s", want, with)
+	// The writable scope, the budget of one run, and the freedom to create a
+	// file inside the scope are all stated.
+	for _, want := range []string{
+		"変更してよいのは README.md / docs/ の下だけです",
+		"依頼を果たすのに必要なファイルを自分で決めて変更してください",
+		"新しいファイルを作ってもかまいません",
+		"最大 5 ファイル・400 行・32768 バイトまで",
+		"1 ファイルの大きさは 65536 バイトまで",
+		"依頼を満たす最小の変更にしてください",
+		"依頼に書かれていない改善・整理はしないでください",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt lacks %q:\n%s", want, prompt)
 		}
 	}
-	without, err := implementPrompt(draft, consumer, agent, nil, nil, "/work/repo", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(without, "この依頼が変えるファイル") {
-		t.Fatalf("a run with no derivation invented a bound:\n%s", without)
-	}
-}
-
-func TestReadDerivedTargetsTakesOnlyThisRunsSealedTicket(t *testing.T) {
-	dir := t.TempDir()
-	config := cliTestConfig()
-	configSHA, err := config.SHA256()
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer := config.Consumers[0]
-	draft := worker.TicketDraft{
-		SchemaVersion: 1, DeliveryID: "delivery_" + strings.Repeat("a", 32),
-		InputSHA256: strings.Repeat("b", 64), ConfigSHA256: configSHA, ToolSHA: strings.Repeat("c", 40),
-		IssueKey: "TICKET-501", RunID: "TICKET-501", Repository: consumer.Repository, Mode: consumer.Mode.ID,
-		Summary: "件名", Request: "本文",
-	}
-	ticket, err := draft.WithTargetFiles([]string{"client/src/label.ts"}, config)
-	if err != nil {
-		t.Fatalf("WithTargetFiles() error = %v", err)
-	}
-	write := func(name string, value any) string {
-		path := filepath.Join(dir, name)
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
+	// Nothing names a per-request set of files, and nothing tells the agent
+	// to stop and report when the request needs another file.
+	for _, gone := range []string{
+		"この依頼が変えるファイル", "これ以外のファイルは変更しないでください",
+		"上に挙げたファイル", "依頼者に返します",
+	} {
+		if strings.Contains(prompt, gone) {
+			t.Fatalf("prompt still carries the per-request file list (%q):\n%s", gone, prompt)
 		}
-		if err := os.WriteFile(path, encoded, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-
-	targets, err := readDerivedTargets(write("good.json", ticket), draft, config)
-	if err != nil || len(targets) != 1 || targets[0] != "client/src/label.ts" {
-		t.Fatalf("targets = %v, err = %v", targets, err)
-	}
-	if targets, err := readDerivedTargets("", draft, config); err != nil || targets != nil {
-		t.Fatalf("an unset path must yield no targets: %v %v", targets, err)
-	}
-	if _, err := readDerivedTargets(filepath.Join(dir, "absent.json"), draft, config); err == nil {
-		t.Fatal("a named but missing reception ticket was accepted")
-	}
-
-	// A model agent can write in the run directory. A ticket that is not
-	// this run's, or whose files are not ones this consumer allows, is not
-	// what the reception sealed.
-	otherRun := ticket
-	otherRun.DeliveryID = "delivery_" + strings.Repeat("d", 32)
-	if _, err := readDerivedTargets(write("other-run.json", otherRun), draft, config); err == nil {
-		t.Fatal("another run's ticket was accepted")
-	}
-	forged := ticket
-	forged.TargetFiles = []string{"../../etc/passwd"}
-	if _, err := readDerivedTargets(write("escape.json", forged), draft, config); err == nil {
-		t.Fatal("a path outside the repository was accepted")
-	}
-	unsorted := ticket
-	unsorted.TargetFiles = []string{"client/src/a.ts", "client/src/a.ts"}
-	if _, err := readDerivedTargets(write("duplicate.json", unsorted), draft, config); err == nil {
-		t.Fatal("duplicated target files were accepted")
-	}
-	empty := ticket
-	empty.TargetFiles = []string{""}
-	if _, err := readDerivedTargets(write("empty.json", empty), draft, config); err == nil {
-		t.Fatal("an empty file name was accepted")
-	}
-}
-
-func TestFilesOutsideTargets(t *testing.T) {
-	targets := []string{"client/src/a.ts", "client/src/b.ts"}
-	if outside := filesOutsideTargets([]string{"client/src/a.ts"}, targets); outside != nil {
-		t.Fatalf("a change inside the ticket's files was called outside: %v", outside)
-	}
-	outside := filesOutsideTargets([]string{"client/src/a.ts", "main.go", "compress/extract.go"}, targets)
-	if len(outside) != 2 || outside[0] != "main.go" || outside[1] != "compress/extract.go" {
-		t.Fatalf("outside = %v", outside)
-	}
-	if outside := filesOutsideTargets([]string{"main.go"}, nil); outside != nil {
-		t.Fatalf("a run with no targets has nothing outside them: %v", outside)
 	}
 }

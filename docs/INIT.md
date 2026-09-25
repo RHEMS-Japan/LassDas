@@ -112,7 +112,7 @@ mode.validation_command は新設しない。既存の mode.toolchain (最大 4)
 
 root の main.go や README.md がある普通の CLI を扱うため、A で既存リストに **root のファイル名の完全一致**を加える。末尾 / は従来の prefix、末尾 / が無い root 名はその 1 ファイルだけ。空・.・絶対パス・..・隠れた名前・symlink は許さず、wildcard や除外式は増やさない。初期値は Git 管理下の実在ファイルから提案し、利用者が確認した一覧だけを採用。未指定の新しい root ファイルまで自動で許可しない。
 
-候補列挙 (derive.go)、依頼/候補の検算 (ticket.go/artifact.go/agent_candidate.go)、役の変更検査 (agent.go)、設計の範囲 (investigate/records.go) で同じ完全一致を適用する。既存 prefix の意味を維持し、main.go.bak・隣のディレクトリ・.github/・symlink の拒否を回帰で固定する。既存の明示リストで root ファイルを表す変更に限り、新しい権限管理機構にはしない。
+書き込み範囲の走査 (locate.go)、依頼/候補の検算 (ticket.go/artifact.go/agent_candidate.go)、役の変更検査 (agent.go)、設計の範囲 (investigate/records.go) で同じ完全一致を適用する。既存 prefix の意味を維持し、main.go.bak・隣のディレクトリ・.github/・symlink の拒否を回帰で固定する。既存の明示リストで root ファイルを表す変更に限り、新しい権限管理機構にはしない。
 
 ### 4.3 受付と影響調査
 
@@ -206,7 +206,7 @@ agentexec は役を uid 2001〜2063 のプールで動かす。関所と別 uid�
 
 | 身元 | 関所の直接呼出し | Hermes / env |
 |---|---|---|
-| 受付・対象導出 | models.implementer.api_key_env=LASSDAS_INTAKE_TARGET_KEY | 直接のみ。モデルは実装役と同じ |
+| 実装役の身元 | models.implementer.api_key_env=LASSDAS_INTAKE_TARGET_KEY | 直接の呼出しは無い。モデルは実装役と同じ |
 | 実装役 | implementer のモデル情報と一致 | lassdas-implementer / LASSDAS_IMPLEMENTER_KEY・MODEL |
 | レビュー A | reviewers[a].api_key_env=LASSDAS_REVIEW_A_KEY | lassdas-review-a / LASSDAS_REVIEW_A_KEY・MODEL |
 | レビュー B | reviewers[b].api_key_env=LASSDAS_REVIEW_B_KEY | lassdas-review-b / LASSDAS_REVIEW_B_KEY・MODEL |
@@ -215,7 +215,7 @@ agentexec は役を uid 2001〜2063 のプールで動かす。関所と別 uid�
 | 調査・設計 | designer.api_key_env=LASSDAS_DESIGNER_KEY | 直接のみ。LASSDAS_DESIGNER_MODEL も一致 |
 | 写し役 | agents.applier の起動定義 | lassdas-applier / LASSDAS_APPLIER_KEY・MODEL |
 
-受付は対象導出 + 起案 + 確認の **3 呼出し**。対象導出は models.implementer.api_key_env、実装役は profile を読むため、モデルを追加せず鍵を分けられる。共通キーを選んだ場合は、既存の各役の変数名に同じ値を設定する。役別を選んだ場合は別の値を要求する。
+受付は起案 + 確認の **2 呼出し**。models.implementer は候補に封緘する実装役の身元で、そこから呼出しは行わない。実装役は profile を読むため、モデルを追加せず鍵を分けられる。共通キーを選んだ場合は、既存の各役の変数名に同じ値を設定する。役別を選んだ場合は別の値を要求する。
 
 既定ではレビュー A/B が設計と候補を両方担当し、design_reviewers と design_reviewer_agents は省略。同じ役の工程間の鍵再利用は許す。共通キーでは全役が同じ値を使い、役別キーでは別身元同士の同値を拒否する。設計レビューを別モデルにする場合は 2 名とも指定し、役別キーの場合だけ新しい鍵 2 本を入力。LASSDAS_DESIGN_REVIEW_A/B_KEY_VAR は LASSDAS_DESIGN_REVIEW_A/B_KEY を指す。既定では LASSDAS_REVIEW_A/B_KEY を指す。直接 API と profile の両経路を表の対応で検査する。
 

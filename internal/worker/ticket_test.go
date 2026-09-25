@@ -320,7 +320,6 @@ func TestDraftCompletionEnforcesTheWriteScope(t *testing.T) {
 		name  string
 		files []string
 	}{
-		{name: "no files", files: nil},
 		{name: "outside the allowed prefix", files: []string{"server/src/main.go"}},
 		{name: "escaping the tree", files: []string{"client/src/../../etc/passwd"}},
 		{name: "beyond the file budget", files: []string{"client/src/a.tsx", "client/src/b.tsx", "client/src/c.tsx", "client/src/d.tsx"}},
@@ -332,6 +331,20 @@ func TestDraftCompletionEnforcesTheWriteScope(t *testing.T) {
 			}
 		})
 	}
+	// A reception contract names no files at all: it is completed before
+	// anything has been changed, and which files a change touches is decided
+	// by making it.
+	reception, err := draft.WithTargetFiles(nil, config)
+	if err != nil {
+		t.Fatalf("WithTargetFiles(nil) error = %v", err)
+	}
+	if len(reception.TargetFiles) != 0 {
+		t.Fatalf("target files = %v, want none", reception.TargetFiles)
+	}
+	if err := reception.Validate(config); err != nil {
+		t.Fatalf("a contract with no files is invalid: %v", err)
+	}
+
 	// The caller may hand the files in any order; the contract is sorted.
 	completed, err := draft.WithTargetFiles([]string{"client/src/b.tsx", "client/src/a.tsx"}, config)
 	if err != nil {

@@ -65,7 +65,7 @@ func TestInvestigatedIsATerminalCode(t *testing.T) {
 }
 
 func TestPlanHeadlineFollowsTheRequestKind(t *testing.T) {
-	investigation := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "investigation", TargetFiles: []string{"web/a"}})
+	investigation := PlanCommentContent("run-1", PlanFacts{Request: "r", RequestKind: "investigation"})
 	if !strings.Contains(investigation, "【調査方針】") || strings.Contains(investigation, "実装を開始します") {
 		t.Errorf("investigation headline: %s", investigation)
 	}

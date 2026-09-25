@@ -60,10 +60,8 @@ func run(ctx context.Context, args []string) error {
 		return runCheckTicket(args[1:])
 	case "locate-target":
 		return runLocateTarget(args[1:])
-	case "list-candidates":
-		return runListCandidates(args[1:])
-	case "derive-contract":
-		return runDeriveContract(ctx, args[1:])
+	case "reception-ticket":
+		return runReceptionTicket(args[1:])
 	case "check-readiness":
 		return runCheckReadiness(ctx, args[1:])
 	case "decide-readiness":
@@ -412,7 +410,7 @@ func runParseTicket(args []string) error {
 	if len(targetFiles) == 0 {
 		// The requester did not name the files, which is the normal case for
 		// anyone who has not already read the repository. The contract is
-		// completed by derive-contract before the pipeline continues.
+		// completed without them before the pipeline continues.
 		if *draftOutPath == "" {
 			return errors.New("ticket draft destination is missing")
 		}
@@ -473,7 +471,7 @@ func runCheckTicket(args []string) error {
 	}
 	fmt.Println("この本文は受け付けられます。読み取った内容:")
 	if len(files) == 0 {
-		fmt.Println("  対象ファイル: 指定なし（変更前の文言を含むファイルを自動で探します）")
+		fmt.Println("  対象ファイル: 指定なし（変更するファイルは実装時に決まります）")
 	} else {
 		fmt.Println("  対象ファイル:", strings.Join(files, ", "))
 	}
@@ -529,16 +527,19 @@ func runLocateTarget(args []string) error {
 	return nil
 }
 
-func runListCandidates(args []string) error {
-	flags := commandFlags("list-candidates")
+// runReceptionTicket completes a draft into the contract the reception
+// stages are bound to, without naming any file. A ticket that promises a
+// visible wording change goes through locate-target instead, which proves the
+// wording is really there; every other ticket has nothing to search for, and
+// which files it changes is decided by making the change, not before it.
+func runReceptionTicket(args []string) error {
+	flags := commandFlags("reception-ticket")
 	configPath := flags.String("config", "", "")
 	toolSHA := flags.String("tool-sha", "", "")
-	repoRoot := flags.String("repo-root", "", "")
-	baseSHA := flags.String("base-sha", "", "")
 	draftPath := flags.String("draft", "", "")
 	outputPath := flags.String("out", "", "")
-	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *repoRoot, *baseSHA, *draftPath, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
-		return errors.New("list-candidates arguments are invalid")
+	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *draftPath, *outputPath) || !worker.ValidToolSHA(*toolSHA) {
+		return errors.New("reception-ticket arguments are invalid")
 	}
 	config, err := readConfig(*configPath)
 	if err != nil {
@@ -548,65 +549,13 @@ func runListCandidates(args []string) error {
 	if err := worker.ReadJSONFile(*draftPath, worker.MaxTicketJSONBytes, &draft); err != nil {
 		return errors.New("ticket draft could not be read")
 	}
-	consumer, err := config.ConsumerFor(draft.Repository)
+	configSHA, err := config.SHA256()
+	if err != nil || draft.ConfigSHA256 != configSHA || draft.ToolSHA != *toolSHA {
+		return errors.New("ticket draft is not bound to this run")
+	}
+	request, err := draft.WithTargetFiles(nil, config)
 	if err != nil {
-		return errors.New("ticket draft repository is not a configured consumer")
-	}
-	listing, err := worker.ReadCandidateListing(*repoRoot, *baseSHA, consumer, config)
-	if err != nil {
-		return errors.New("candidate listing could not be created")
-	}
-	if err := worker.WriteJSONFileExclusive(*outputPath, listing, worker.MaxArtifactJSONBytes); err != nil {
-		return errors.New("candidate listing artifact could not be written")
-	}
-	return nil
-}
-
-func runDeriveContract(ctx context.Context, args []string) error {
-	flags := commandFlags("derive-contract")
-	configPath := flags.String("config", "", "")
-	toolSHA := flags.String("tool-sha", "", "")
-	draftPath := flags.String("draft", "", "")
-	listingPath := flags.String("listing", "", "")
-	derivationOutPath := flags.String("derivation-out", "", "")
-	outputPath := flags.String("out", "", "")
-	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *draftPath, *listingPath, *derivationOutPath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) {
-		return errors.New("derive-contract arguments are invalid")
-	}
-	config, err := readConfig(*configPath)
-	if err != nil {
-		return err
-	}
-	var draft worker.TicketDraft
-	if err := worker.ReadJSONFile(*draftPath, worker.MaxTicketJSONBytes, &draft); err != nil {
-		return errors.New("ticket draft could not be read")
-	}
-	var listing worker.CandidateListing
-	if err := worker.ReadJSONFile(*listingPath, worker.MaxArtifactJSONBytes, &listing); err != nil {
-		return errors.New("candidate listing could not be read")
-	}
-	invoker, err := newModelInvoker(ctx, config.Models.Readiness.Assessor)
-	if err != nil {
-		return err
-	}
-	// A malformed answer is asked again inside the call itself (the
-	// invoker's converseJSON, three answers at most, each retry carrying the
-	// decoder's objection); a second whole derivation on top of that would
-	// double the budget for nothing (a live run died on one bad roll on
-	// 2026-08-14, which is what the retry inside now covers).
-	derivation, _, err := invoker.DeriveTargetFiles(ctx, draft, listing, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "contract derivation failed", err)
-		return errors.New("contract derivation failed")
-	}
-	request, err := draft.WithTargetFiles(derivation.TargetFiles, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "derived contract is invalid", err)
-		return errors.New("derived contract is invalid")
-	}
-	if err := worker.WriteJSONFileExclusive(*derivationOutPath, derivation, worker.MaxArtifactJSONBytes); err != nil {
-		return errors.New("contract derivation artifact could not be written")
+		return ticketInputRejection{}
 	}
 	if err := worker.WriteJSONFileExclusive(*outputPath, request, worker.MaxTicketJSONBytes); err != nil {
 		return errors.New("ticket artifact could not be written")

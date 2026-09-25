@@ -34,12 +34,10 @@ const readinessAttempts = 3
 func loadPlanFacts(runDir string) hook.PlanFacts {
 	facts := hook.PlanFacts{}
 	var ticket struct {
-		Request     string   `json:"request"`
-		TargetFiles []string `json:"target_files"`
+		Request string `json:"request"`
 	}
 	if readPlanArtifact(filepath.Join(runDir, "readiness-ticket.json"), &ticket) == nil {
 		facts.Request = ticket.Request
-		facts.TargetFiles = ticket.TargetFiles
 	}
 	if facts.Request == "" {
 		var draft struct {

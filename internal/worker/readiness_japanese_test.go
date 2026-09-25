@@ -27,10 +27,12 @@ func TestReadinessOutputValidationHoldsJapaneseProse(t *testing.T) {
 	}
 }
 
-// The readiness gate judges the writable scope, not the provisional file
-// anchor. The first two live verdicts rejected legitimate tickets because the
-// fix lived in other files inside the same scope (measured 2026-08-07 on two
-// live tickets); this pins the reframing that ended that.
+// The readiness gate judges the writable scope, not whatever files happen to
+// be in front of it. The first two live verdicts rejected legitimate tickets
+// because the fix lived in other files inside the same scope (measured
+// 2026-08-07 on two live tickets); this pins the reframing that ended that.
+// An ordinary change request is now shown no file at all, so the same
+// rejection would be the default state rather than an edge case.
 func TestReadinessPromptCarriesTheWholeWritableScope(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	prompt, err := readinessPrompt(source, request, config, nil, nil, nil, nil)
@@ -43,8 +45,16 @@ func TestReadinessPromptCarriesTheWholeWritableScope(t *testing.T) {
 	system := readinessSystemPrompt()
 	for _, must := range []string{
 		"writable_scope",
-		"preliminary reading anchor",
-		"never reject a ticket merely because the provided files alone could not satisfy it",
+		// An ordinary change request is shown no file, and the contract says
+		// so rather than describing a set the assessor never received.
+		"USER_DATA_JSON.source.files is empty for an ordinary change request",
+		// That emptiness is not a boundary, and not a reason to refuse.
+		"it is not the implementation boundary",
+		"Judge readiness against that whole scope",
+		"never reject a ticket because no file is shown to you",
+		// What the repository answers is not the requester's to answer, so
+		// an empty file set must not turn every detail into a question.
+		"anything that can be found there is not a requester's decision and is not a question",
 	} {
 		if !strings.Contains(system, must) {
 			t.Fatalf("the assessor instruction lost %q", must)

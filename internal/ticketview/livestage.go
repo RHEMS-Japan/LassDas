@@ -42,12 +42,11 @@ func LiveStage(step string) string {
 // that runs it. The comment on each group names that card.
 var liveStages = map[string]string{
 	// 受付 — the reception (pretrip, readinessGate): reading the ticket,
-	// deriving the contract, binding the source, judging readiness.
+	// completing the contract, binding the source, judging readiness.
 	"read-ticket":      "intake",
 	"read-contract":    "intake",
 	"build-draft":      "intake",
-	"derive-contract":  "intake",
-	"list-candidates":  "intake",
+	"reception-ticket": "intake",
 	"locate-target":    "intake",
 	"baseline":         "intake",
 	"snapshot":         "intake",

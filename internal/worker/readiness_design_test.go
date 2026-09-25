@@ -415,7 +415,7 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 	if !strings.Contains(readinessCheckJSONSchema(), `"required":["verdict","reasons","request_kind","needs_design"]`) {
 		t.Fatal("the checker schema does not require the design fields")
 	}
-	for _, want := range []string{"request_kind", "approach_in_ticket", "approach_excerpt", "needs_design", "design_trigger_words", "at most two of the target_files"} {
+	for _, want := range []string{"request_kind", "approach_in_ticket", "approach_excerpt", "needs_design", "design_trigger_words"} {
 		if !strings.Contains(readinessSystemPrompt(), want) {
 			t.Fatalf("the assessor prompt lacks %q", want)
 		}
@@ -426,8 +426,13 @@ func TestReadinessPromptsCarryTheDesignContract(t *testing.T) {
 			t.Fatalf("the checker prompt lacks %q", want)
 		}
 	}
-	if readinessPromptVersion != 12 {
-		t.Fatalf("prompt version = %d, want 12 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary)", readinessPromptVersion)
+	// The condition that counted a ticket's target files is gone from the
+	// contract, because a ticket no longer names any.
+	if strings.Contains(readinessSystemPrompt(), "target_files") {
+		t.Error("the assessor prompt still judges a ticket by its target files")
+	}
+	if readinessPromptVersion != 13 {
+		t.Fatalf("prompt version = %d, want 13 (the design contract was 9; 10 for the fabricated-evidence rule; 11 forbids invented measurements; 12 describes the default vocabulary; 13 drops the target-file count)", readinessPromptVersion)
 	}
 	if strings.Contains(readinessSystemPrompt(), "no skip is possible") || strings.Contains(checker, "no skip is possible") {
 		t.Fatal("the prompts still say an absent vocabulary forbids the skip")

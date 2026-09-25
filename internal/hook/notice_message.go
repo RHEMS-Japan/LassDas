@@ -34,7 +34,6 @@ func AckCommentContent(snapshot TicketSnapshot) string {
 type PlanFacts struct {
 	Request     string
 	Rationale   string
-	TargetFiles []string
 	Assumptions []string
 	// NeedsDesign and DesignReason are the reception's sealed design
 	// decision (readiness decision.json: needs_design, design_reason). An
@@ -130,14 +129,9 @@ func PlanCommentContent(runID string, facts PlanFacts) string {
 	if reason := strings.TrimSpace(facts.DesignReason); reason != "" {
 		builder.WriteString("\n" + truncatePlanRunes(DesignDecisionLine(facts.NeedsDesign, reason), planItemMaxRunes) + "\n")
 	}
-	if facts.RequestKind != "investigation" {
-		// An investigation changes nothing; a design decides the files later.
-		if facts.NeedsDesign {
-			writePlanList(&builder, "受付が見当をつけた範囲（実際に変えるファイルは設計書で決めます）", facts.TargetFiles)
-		} else {
-			writePlanList(&builder, "触る予定の範囲", facts.TargetFiles)
-		}
-	}
+	// Which files the change touches is not known here: it is decided by
+	// making the change. Naming a guess under "触る予定の範囲" told the
+	// requester a scope nothing holds the implementer to.
 	writePlanList(&builder, "前提とした解釈（曖昧だった点はこう進めます）", facts.Assumptions)
 	if facts.RequestKind == "investigation" {
 		builder.WriteString("\n調査を止めたい場合: このチケットに「停止」とだけ書いたコメントを投稿してください。実行中の調査は最後まで走り切りますが、停止が読み取られた時点で調査報告の掲示と計り直し（次の巡）は行わず、停止として終了します。\n")

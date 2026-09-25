@@ -63,8 +63,8 @@ func (p *Pipeline) RunE2ECheck(ctx context.Context) error {
 		return errors.New("e2e-check needs the delivered pull request artifact")
 	}
 	// The feature-PR artifact chains to the SEALED round's ticket — whose
-	// target files are what actually changed — not to the pre-implementation
-	// readiness derivation, which the implementer is not bound to.
+	// target files are what actually changed — not to the reception
+	// contract, which is made before anything changes and names no files.
 	round := p.latestCandidateRound()
 	if round < 1 {
 		return errors.New("e2e-check needs a sealed candidate round")

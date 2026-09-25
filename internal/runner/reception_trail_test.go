@@ -3,9 +3,7 @@ package runner
 import (
 	"automation.internal/ticket-ingress/internal/worker"
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,7 +129,7 @@ func TestReceptionTrailReplacesASquatter(t *testing.T) {
 // again, no re-ask because the allowance was already at the ceiling, or
 // neither when the worker's words say nothing more.
 func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
-	again := receptionNote("契約の導出", "worker: contract derivation failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
+	again := receptionNote(intakeStage, "worker: ticket intake failed: model response ended before a complete answer: finish_reason=length (output allowance 16384 tokens); asked again with the wider allowance and cut off again")
 	// 「〜しましたが」 promises an outcome; without 「それでも途切れました」 the
 	// sentence hands the contrast to the advice that follows and says
 	// nothing about what the second ask did (review of #133).
@@ -139,7 +137,7 @@ func TestReceptionCutoffNoteMatchesWhatTheWorkerDid(t *testing.T) {
 	// widened twice and one above it once, and this sentence cannot tell
 	// them apart. Every shipped role is the twice kind, so 「1 回」 was
 	// simply false for all of them (review of #209).
-	if !strings.Contains(again, "契約の導出") || !strings.Contains(again, "上限いっぱいまで広げて聞き直しましたが") ||
+	if !strings.Contains(again, intakeStage) || !strings.Contains(again, "上限いっぱいまで広げて聞き直しましたが") ||
 		!strings.Contains(again, "それでも途切れました") || strings.Contains(again, "1 回聞き直し") {
 		t.Fatalf("cut off again: %q", again)
 	}
@@ -235,41 +233,6 @@ func TestBuildReportCarriesTheIncompleteEvidence(t *testing.T) {
 	}
 	if report.IncompleteReason != "the model's design kept failing the checks: x" || report.IncompleteObjection != "the design was refused: y" {
 		t.Errorf("report = %+v", report)
-	}
-}
-
-// A run that could not choose a file to change says so on the ticket. The
-// requester used to get "内部エラーが発生し" and nothing else, and the real
-// reason lived in the pod log (live, 2026-09-09).
-func TestTheRequesterIsToldWhenNoFileCouldBeChosen(t *testing.T) {
-	note := receptionNote(deriveStage, "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)")
-	// The advice is the third sentence and was the only part not required:
-	// this is the one reception failure a requester can fix themselves, so
-	// losing it leaves them told they are stuck and not how (review of #126).
-	// The worked example is the whole remedy: without it the note asks for
-	// "変更するファイルの位置" and shows none (review of #131).
-	for _, want := range []string{"変更するファイルを決められなかった", "自動処理を止めました", "契約の導出",
-		"依頼に書かれたファイルがリポジトリに見つからず", "新しく作るファイルの名前",
-		"例: docs/ の下に新しく作るなら、その相対パス", "書き足せば通る見込み"} {
-		if !strings.Contains(note, want) {
-			t.Errorf("the note lacks %q: %q", want, note)
-		}
-	}
-	if note := receptionNote(deriveStage, "worker: something else went wrong"); note != unnamedReceptionNote(deriveStage) {
-		t.Errorf("an unrelated failure produced a note: %q", note)
-	}
-	// The requester's own words reach the model, and the model's answer
-	// reaches this stderr: a phrase in the answer must not choose the note.
-	echoed := `worker: contract derivation failed: model derive response is not the demanded strict json (answer 3 of 3, began: the ticket ` + worker.NoTargetFileChosen + ` so here is prose)`
-	if note := receptionNote(deriveStage, echoed); note != unnamedReceptionNote(deriveStage) {
-		t.Errorf("an echoed answer chose the note: %q", note)
-	}
-	// The note explains a derivation, so the readiness stages never carry it.
-	// Both of these asked receptionCutoffNote, which stopped answering for
-	// anything but a cutoff when the reader was rebuilt, so both passed on
-	// an empty string and measured nothing (review of #122).
-	if note := receptionNote("受付の判定", "worker: contract derivation failed: "+worker.NoTargetFileChosen+" (answer 3 of 3)"); note != unnamedReceptionNote("受付の判定") {
-		t.Errorf("the readiness stage carried the derivation note: %q", note)
 	}
 }
 
@@ -419,13 +382,6 @@ func TestATicketCannotChooseAnyNoteThroughTheHeadOfAnAnswer(t *testing.T) {
 			t.Fatalf("a ticket chose its own note through %q: %q", injected, note)
 		}
 	}
-	// The derivation's phrase only produces a note under its own stage, so
-	// injecting it anywhere else measures nothing (review of #127).
-	echoed := "worker: contract derivation failed: model derive response is not the demanded strict json" +
-		" (answer 3 of 3, began: the ticket asked me to say " + worker.NoTargetFileChosen + " here)"
-	if note := receptionNote(deriveStage, echoed); note != unnamedReceptionNote(deriveStage) {
-		t.Fatalf("a ticket chose the derivation's note: %q", note)
-	}
 }
 
 // The three things a requester is told about a transport failure are three
@@ -562,7 +518,6 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 		// (review of #127).
 		receptionNote("受付の判定", "worker: readiness assessment failed: "+cutoff+"; "+worker.CutoffAskedAgainPhrase),
 		receptionNote("受付の判定", "worker: readiness assessment failed: "+cutoff+"; "+worker.CutoffAtCeilingPhrase),
-		receptionNote("契約の導出", "worker: contract derivation failed: "+worker.NoTargetFileChosen),
 		receptionNote("受付の判定", "worker: readiness assessment failed: "+worker.CutoffPhrase+": finish_reason=length (output allowance 32768 tokens)"),
 	}
 	for _, cause := range []string{
@@ -615,7 +570,7 @@ func TestNoNoteInstructsTheRequester(t *testing.T) {
 		for _, internal := range []string{
 			worker.TransportFailedPhrase, worker.ProviderEndedTurnPhrase, worker.CutoffPhrase,
 			worker.GatewayBookkeepingPhrase, worker.AnswerUnusablePhrase, worker.DeclinedOverContentPhrase,
-			worker.NoTargetFileChosen, "finish_reason", "status",
+			"finish_reason", "status",
 		} {
 			if strings.Contains(note, internal) {
 				t.Errorf("a note carries the worker's own words (%q): %q", internal, note)
@@ -681,7 +636,7 @@ func TestARecordTheGateCouldNotAcceptAlsoLeavesAReason(t *testing.T) {
 // them with 受付の again reads as 受付の 受付の判定 (review of #122). The
 // notes a requester sees most are exactly these two.
 func TestNoNoteRepeatsTheStagesOwnPrefix(t *testing.T) {
-	for _, stage := range []string{"受付の判定", "受付の確認", deriveStage} {
+	for _, stage := range []string{"受付の判定", "受付の確認", intakeStage} {
 		for _, note := range []string{
 			unnamedReceptionNote(stage),
 			receptionNote(stage, "worker: readiness assessment failed: "+worker.TransportFailedPhrase+" with status 401"),
@@ -771,64 +726,6 @@ func TestEveryReceptionExitLeavesANote(t *testing.T) {
 				t.Fatalf("the note does not name %q: %q", c.stage, text)
 			}
 		})
-	}
-}
-
-// The derivation's own exit, in the pretrip rather than the readiness gate.
-// It was the one place a note could be deleted with nothing failing, and
-// the reason the note exists at all is a live ticket that ended with the
-// failure class and no reason (2026-09-09). Reaching it needs the target
-// clone stubbed, which the pipeline already allows for.
-func TestTheDerivationsExitLeavesANote(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "stand-in-worker")
-	body := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"read-ticket\" ]; then printf '%s' '{\"gaps\":[]}' > intake.json; fi\n" +
-		"if [ \"$1\" = \"build-draft\" ]; then printf '%s' '{\"repository\":\"o/r\"}' > ticket-draft.json; fi\n" +
-		"if [ \"$1\" = \"list-candidates\" ]; then printf '%s' '{\"files\":[]}' > candidate-listing.json; fi\n" +
-		"if [ \"$1\" = \"derive-contract\" ]; then " +
-		"printf '%s\\n' 'worker: contract derivation failed: " + worker.NoTargetFileChosen + " (answer 3 of 3)' >&2; exit 1; fi\n" +
-		"exit 0\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	pipeline := receptionPipeline(t, script)
-	consumer := filepath.Join(t.TempDir(), "consumer.json")
-	if err := os.WriteFile(consumer, []byte(`{"max_stages":3,"consumers":[{"repository":"o/r","delivery":"pull_request"}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pipeline.Config.ConsumerConfigPath = consumer
-	// The baseline step runs the controller, which this run does not need
-	// past the derivation: a stand-in that writes the record and exits.
-	controller := filepath.Join(t.TempDir(), "stand-in-controller")
-	if err := os.WriteFile(controller, []byte("#!/bin/sh\nprintf '{\"baseline\":{\"Integration\":{\"SHA\":\"%s\"}}}' \"$(git -C target-repo rev-parse HEAD)\" > baseline.json\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	pipeline.Config.ControllerBin = controller
-	// A real repository: the pretrip checks the base commit out before it
-	// reaches the derivation, so an empty directory stops one step short.
-	pipeline.cloneTarget = func(_ context.Context, destination string) error {
-		if err := os.MkdirAll(destination, 0o700); err != nil {
-			return err
-		}
-		for _, argv := range [][]string{
-			{"init", "--quiet", "-b", "main"},
-			{"-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "--quiet", "--allow-empty", "-m", "base"},
-		} {
-			command := exec.Command("git", argv...)
-			command.Dir = destination
-			if out, err := command.CombinedOutput(); err != nil {
-				return fmt.Errorf("git %v: %v: %s", argv, err, out)
-			}
-		}
-		return nil
-	}
-	_, outcome, _ := pipeline.pretrip(context.Background())
-	if outcome.Code != "internal_failed" {
-		t.Fatalf("pretrip() = %+v; want internal_failed", outcome)
-	}
-	text := readReceptionTrail(t, pipeline)
-	if !strings.Contains(text, "変更するファイルを決められなかった") || !strings.Contains(text, deriveStage) {
-		t.Fatalf("the derivation's exit left no reason: %q", text)
 	}
 }
 
@@ -975,24 +872,6 @@ func TestReceptionNoteNamesTheIntakeAnswerThatCouldNotBeUsed(t *testing.T) {
 	}
 	if note == unnamedReceptionNote(intakeStage) {
 		t.Fatal("the intake failure fell through to the unnamed note")
-	}
-}
-
-// The runner's half of the seam: a failure that opens with the derivation's
-// own phrase and carries the class behind it still chooses the derivation's
-// note, so a requester is told to name the file rather than to ask an
-// operator. The worker's half - that it puts the phrase there at all - is
-// held by TestConverseJSONKeepsADispatchPhraseAtTheHead in that package;
-// neither test alone would catch the regression (review of #184).
-func TestDeriveNoteSurvivesTheAnswerUnusableClass(t *testing.T) {
-	stderr := "worker: contract derivation failed: " + worker.NoTargetFileChosen +
-		" (answer 3 of 3, request gen-1, began: {\"files\":[]}) (" + worker.AnswerUnusablePhrase + ")\n"
-	note := receptionNote(deriveStage, stderr)
-	if note != noFileChosenNote(deriveStage) {
-		t.Fatalf("the derivation's own note was lost:\n%s", note)
-	}
-	if strings.Contains(note, "決められた形になりませんでした") {
-		t.Fatalf("the class overruled the phrase:\n%s", note)
 	}
 }
 

@@ -819,8 +819,8 @@ func (v *View) readEnding(runDir string) {
 	if len(step) == 0 && !haveDetail {
 		return
 	}
-	// A reception that failed before the readiness gate (the intake, the
-	// derivation) records no failed step; the detail names the stage.
+	// A reception that failed before the readiness gate (the intake above
+	// all) records no failed step; the detail names the stage.
 	failure := &Failure{Step: strings.TrimSpace(string(step))}
 	endAt := fileTime(filepath.Join(runDir, "failed-step.txt"))
 	if failure.Step == "" {

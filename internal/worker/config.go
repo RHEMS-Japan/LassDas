@@ -19,13 +19,13 @@ import (
 const ConfigSchemaVersion = 4
 
 var (
-	identifierPattern       = regexp.MustCompile(`^[a-z][a-z0-9-]{1,63}$`)
-	repositoryPattern       = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
-	branchPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
-	versionPattern          = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){0,2}$`)
-	sha256Pattern           = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	commitPattern           = regexp.MustCompile(`^[a-f0-9]{40}$`)
-	deliveryPattern         = regexp.MustCompile(`^delivery_[a-f0-9]{32}$`)
+	identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,63}$`)
+	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	branchPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+	versionPattern    = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){0,2}$`)
+	sha256Pattern     = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	commitPattern     = regexp.MustCompile(`^[a-f0-9]{40}$`)
+	deliveryPattern   = regexp.MustCompile(`^delivery_[a-f0-9]{32}$`)
 	// The run id's shape is the reception's to define (hook.ValidRunID); a
 	// second copy here drifted once — the reception admitted a short ticket
 	// key that this package then refused as an invalid ticket identity.
@@ -1436,6 +1436,18 @@ func validRelativeDirectory(value string) bool {
 func validRelativePath(value string) bool {
 	return relativePathPattern.MatchString(value) && value == path.Clean(value) && value != "." && !strings.HasPrefix(value, "/") &&
 		!strings.HasPrefix(value, "../") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00")
+}
+
+// hasHiddenComponent reports whether any path element is dotted, which keeps
+// repository machinery and secret files out of the writable scope wherever a
+// path is checked against it.
+func hasHiddenComponent(candidate string) bool {
+	for _, element := range strings.Split(candidate, "/") {
+		if strings.HasPrefix(element, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // validateModelBaseURL accepts an https URL with an optional path prefix (for
