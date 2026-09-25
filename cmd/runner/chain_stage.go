@@ -85,7 +85,8 @@ func runChainStage(ctx context.Context, arguments []string) error {
 // in it when it fails, and that output travels into records and onto a
 // screen.
 func stageCredentials(config runtime.Config, stage string) ([]string, error) {
-	var assignments, variables, secrets []string
+	var assignments, variables, paths []string
+	var entries []cardsecret.Entry
 	for _, credential := range config.Chain.CredentialsFor(stage) {
 		contents, err := credentialValue(credential)
 		if err != nil {
@@ -98,17 +99,26 @@ func stageCredentials(config runtime.Config, stage string) ([]string, error) {
 		for _, variable := range credential.Env {
 			assignments = append(assignments, variable+"="+exported)
 			variables = append(variables, variable)
+			if credential.HandsOverPath() {
+				paths = append(paths, variable)
+			}
+			entries = append(entries, cardsecret.Entry{
+				Name: variable, Secret: contents, Path: credential.HandsOverPath(),
+			})
 		}
-		secrets = append(secrets, contents)
 	}
 	if len(variables) == 0 {
 		return nil, nil
 	}
-	cardsecret.Register(variables, secrets)
+	cardsecret.Register(entries)
 	// The names travel to every process this card starts, so a worker — and
 	// the agent it launches — knows which of the variables it inherited are
-	// secret. The values travel as the variables themselves.
+	// secret and which name a file. The values travel as the variables
+	// themselves.
 	assignments = append(assignments, cardsecret.NamesEnv+"="+strings.Join(variables, ":"))
+	if len(paths) > 0 {
+		assignments = append(assignments, cardsecret.PathNamesEnv+"="+strings.Join(paths, ":"))
+	}
 	return assignments, nil
 }
 

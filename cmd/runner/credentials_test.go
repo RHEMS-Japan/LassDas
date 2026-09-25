@@ -69,7 +69,7 @@ func TestEachDeliveryMilestoneIsOneNamedCard(t *testing.T) {
 		"production-observed": runtime.DeliverStagePromote,
 		"nonsense":            "",
 	} {
-		if got := deliverStage(milestone); got != stage {
+		if got := deliverStageOf(milestone); got != stage {
 			t.Fatalf("%s is card %q, want %q", milestone, got, stage)
 		}
 	}
@@ -193,5 +193,34 @@ func TestTheCardTellsItsChildrenWhichVariablesAreSecret(t *testing.T) {
 	none, err := stageCredentials(config, runtime.StageReviewA)
 	if err != nil || len(none) != 0 {
 		t.Fatalf("stageCredentials() = %v, %v", none, err)
+	}
+}
+
+// A file name is not a secret. Registering it as one would take every
+// build line that mentions the file out of the live log, and a path-mode
+// credential exists precisely so a tool can be told which file to read.
+func TestAFileNameIsNotMaskedOutOfTheLogs(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	config := credentialConfig(t,
+		runtime.Credential{Name: "cloud", Mode: runtime.CredentialPath, Env: runtime.EnvNames{"AWS_SHARED_CREDENTIALS_FILE"}, Stages: []string{runtime.StageImplement}},
+	)
+	assignments, err := stageCredentials(config, runtime.StageImplement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := config.Chain.Credentials[0].Path
+	if !contains(assignments, cardsecret.PathNamesEnv+"=AWS_SHARED_CREDENTIALS_FILE") {
+		t.Fatalf("the children were not told which variable names a file: %v", assignments)
+	}
+	if !cardsecret.HandedAsPath("AWS_SHARED_CREDENTIALS_FILE") {
+		t.Fatal("the mode was not recorded")
+	}
+	if got := cardsecret.Redact("aws: reading " + path); !strings.Contains(got, path) {
+		t.Fatalf("the file name was masked out of a log line: %q", got)
+	}
+	// What is in it is still secret.
+	if got := cardsecret.Redact("profile load failed: value-of-cloud"); strings.Contains(got, "value-of-cloud") {
+		t.Fatalf("the contents behind the path were not held as secret: %q", got)
 	}
 }

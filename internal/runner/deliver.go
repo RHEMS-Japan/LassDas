@@ -127,7 +127,7 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 	// A delivery card reaches the destination's environments with whatever
 	// credential it was named in, so it is a card that can bring something
 	// into existence; what it made is collected the way a chain card's is.
-	defer func() { _ = p.RecordCreatedResources(deliverCardStage(until), p.path("target-repo")) }()
+	defer func() { _ = p.RecordCreatedResources(DeliverStageOf(until), p.path("target-repo")) }()
 	if until != DeliverUntilChecks && until != DeliverUntilStaging && until != DeliverUntilProduction {
 		return errors.New("deliver milestone is invalid")
 	}
@@ -166,9 +166,12 @@ func (p *Pipeline) RunDeliver(ctx context.Context, until string) error {
 	return p.deliverStaging(ctx, stageDir, reviews)
 }
 
-// deliverCardStage is the card name behind one milestone, for the records
-// a delivery card writes under its own name.
-func deliverCardStage(until string) string {
+// DeliverStageOf is the card name behind one milestone. The kanban
+// dispatches three cards by name and each asks for its own milestone, so
+// this is the one place the two vocabularies meet: the card's entry point
+// reads the credentials configured against the name, the verb seals its
+// failure record under it, and the tick reads that record by it.
+func DeliverStageOf(until string) string {
 	switch until {
 	case DeliverUntilChecks:
 		return runtime.DeliverStageChecks

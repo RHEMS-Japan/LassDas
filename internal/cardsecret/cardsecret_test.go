@@ -13,7 +13,7 @@ func TestEveryLineOfAMultiLineCredentialIsASecret(t *testing.T) {
 	Forget()
 	t.Cleanup(Forget)
 	file := "[dev]\naws_access_key_id = AKIAEXAMPLEEXAMPLE\naws_secret_access_key = wJalrXUtnFEMIexampleKEY\n"
-	Register([]string{"AWS_SHARED_CREDENTIALS_FILE"}, []string{file})
+	Register([]Entry{{Name: "AWS_SHARED_CREDENTIALS_FILE", Secret: file}})
 
 	said := "profile load failed: aws_secret_access_key = wJalrXUtnFEMIexampleKEY"
 	if got := Redact(said); strings.Contains(got, "wJalrXUtnFEMIexampleKEY") {
@@ -38,7 +38,7 @@ func TestAValueTheTextBeginsInTheMiddleOfIsTakenOut(t *testing.T) {
 	Forget()
 	t.Cleanup(Forget)
 	value := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
-	Register([]string{"DATABASE_URL"}, []string{value})
+	Register([]Entry{{Name: "DATABASE_URL", Secret: value}})
 
 	partial := value[7:] + " could not be reached"
 	got := Redact(partial)
@@ -87,7 +87,7 @@ func TestTheNameListIsWhatAStartedProcessCannotWorkOutForItself(t *testing.T) {
 func TestTheLongestValueIsTakenOutFirst(t *testing.T) {
 	Forget()
 	t.Cleanup(Forget)
-	Register([]string{"SHORT", "LONG"}, []string{"orders-intake", "orders-intake-queue-name"})
+	Register([]Entry{{Name: "SHORT", Secret: "orders-intake"}, {Name: "LONG", Secret: "orders-intake-queue-name"}})
 	got := Redact("created orders-intake-queue-name")
 	if got != "created "+Redacted {
 		t.Fatalf("the shorter value was taken out first: %q", got)

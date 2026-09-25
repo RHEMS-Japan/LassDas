@@ -215,6 +215,8 @@ const stepStderrTailBytes = 2 * worker.MaxFailureDetailLineBytes
 type tailBuffer struct {
 	limit int
 	data  []byte
+	// partial is set while the kept text begins in the middle of a line.
+	partial bool
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
@@ -228,14 +230,33 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	// whole-value replacement finds: one byte off the front of a token is
 	// still the token. Dropping the part-line loses nothing a reader could
 	// have used, because it begins in the middle of a sentence.
-	if boundary := bytes.IndexByte(b.data[cut:], '\n'); boundary >= 0 {
+	//
+	// Unless the boundary is the end of everything kept. A step that
+	// printed one line longer than this buffer has exactly one break in the
+	// window, at the very end, and cutting there leaves nothing at all —
+	// the reason the card failed disappears from the record, which is the
+	// one thing the tail exists to carry. The byte cut stands in that case
+	// and the text says its first line starts part-way through; a value
+	// beginning mid-line is taken out by the redaction, which looks at
+	// every line's start.
+	boundary := bytes.IndexByte(b.data[cut:], '\n')
+	if b.partial = boundary < 0 || cut+boundary+1 >= len(b.data); !b.partial {
 		cut += boundary + 1
 	}
 	b.data = append([]byte(nil), b.data[cut:]...)
 	return len(p), nil
 }
 
-func (b *tailBuffer) String() string { return string(b.data) }
+func (b *tailBuffer) String() string {
+	if b.partial {
+		return partialLineNotice + string(b.data)
+	}
+	return string(b.data)
+}
+
+// partialLineNotice heads a tail whose first line begins part-way through,
+// so a reader does not take the first words for the start of a sentence.
+const partialLineNotice = "[この行は途中から始まります]\n"
 
 // registerCredentials makes this card's credential values known to
 // everything in this process that writes text a person may read: the live
@@ -245,17 +266,26 @@ func (p *Pipeline) registerCredentials() {
 	if len(p.StageCredentials) == 0 {
 		return
 	}
-	names := make([]string, 0, len(p.StageCredentials))
-	values := make([]string, 0, len(p.StageCredentials))
+	entries := make([]cardsecret.Entry, 0, len(p.StageCredentials))
 	for _, assignment := range p.StageCredentials {
 		name, value, found := strings.Cut(assignment, "=")
 		if !found {
 			continue
 		}
-		names = append(names, name)
-		values = append(values, value)
+		entry := cardsecret.Entry{Name: name}
+		// A variable holding a file's name is not a secret, and registering
+		// it as one would take every build line that mentions the file out
+		// of the live log. The card's entry point registered what is in the
+		// file when it read it; this is the backstop for a value handed
+		// over directly.
+		if cardsecret.HandedAsPath(name) {
+			entry.Path = true
+		} else {
+			entry.Secret = value
+		}
+		entries = append(entries, entry)
 	}
-	cardsecret.Register(names, values)
+	cardsecret.Register(entries)
 }
 
 // redactCredentials removes this card's credentials from text the engine is

@@ -112,7 +112,7 @@ func TestACredentialPrintedByAStepDoesNotReachTheLiveLog(t *testing.T) {
 	cardsecret.Forget()
 	t.Cleanup(cardsecret.Forget)
 	secret := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
-	cardsecret.Register([]string{"DATABASE_URL"}, []string{secret})
+	cardsecret.Register([]cardsecret.Entry{{Name: "DATABASE_URL", Secret: secret}})
 
 	script := filepath.Join(t.TempDir(), "worker")
 	// Once on each stream: the board serves both.
@@ -149,7 +149,7 @@ func TestACredentialIsNeverSplitByTheTailTheEngineKeeps(t *testing.T) {
 	cardsecret.Forget()
 	t.Cleanup(cardsecret.Forget)
 	secret := strings.Repeat("s3cr3t", 10)
-	cardsecret.Register([]string{"API_TOKEN"}, []string{secret})
+	cardsecret.Register([]cardsecret.Entry{{Name: "API_TOKEN", Secret: secret}})
 
 	// The bound is small enough that the cut falls inside the value's own
 	// line, which is the case a byte offset cannot survive.
@@ -180,7 +180,7 @@ func TestOneLineOfAMultiLineCredentialDoesNotSurviveAStep(t *testing.T) {
 	cardsecret.Forget()
 	t.Cleanup(cardsecret.Forget)
 	file := "[dev]\naws_access_key_id = AKIAEXAMPLEEXAMPLE\naws_secret_access_key = wJalrXUtnFEMIexampleKEY\n"
-	cardsecret.Register([]string{"AWS_SHARED_CREDENTIALS_FILE"}, []string{file})
+	cardsecret.Register([]cardsecret.Entry{{Name: "AWS_SHARED_CREDENTIALS_FILE", Secret: file}})
 
 	script := filepath.Join(t.TempDir(), "worker")
 	body := "#!/bin/sh\necho 'profile load failed: aws_secret_access_key = wJalrXUtnFEMIexampleKEY' >&2\nexit 5\n"
@@ -201,5 +201,38 @@ func TestOneLineOfAMultiLineCredentialDoesNotSurviveAStep(t *testing.T) {
 	}
 	if !strings.Contains(pipeline.lastStepStderr, "profile load failed") {
 		t.Fatalf("the reason the card failed was lost with it: %q", pipeline.lastStepStderr)
+	}
+}
+
+// The pipeline registers what it hands over, as a backstop for the card's
+// own registration. A variable holding a file's name must not be registered
+// as a secret there either: every build line that mentions the file would
+// disappear from the live log, and a path-mode credential exists precisely
+// so a tool can be told which file to read.
+func TestThePipelineDoesNotRegisterAFileNameAsASecret(t *testing.T) {
+	cardsecret.Forget()
+	t.Cleanup(cardsecret.Forget)
+	// The card's entry registered the mode and the contents when it read
+	// the file; the pipeline sees only the assignment.
+	path := filepath.Join(t.TempDir(), "cloud-credentials")
+	cardsecret.Register([]cardsecret.Entry{{
+		Name: "AWS_SHARED_CREDENTIALS_FILE", Path: true,
+		Secret: "[dev]\naws_secret_access_key = wJalrXUtnFEMIexampleKEY\n",
+	}})
+
+	pipeline := chainStagePipeline(t)
+	pipeline.Config.WorkerBin = "true"
+	pipeline.Config.ConsumerConfigPath = writeChainConsumerConfig(t, []string{"review-a", "review-b"})
+	pipeline.StageCredentials = []string{"AWS_SHARED_CREDENTIALS_FILE=" + path}
+	sealStageFiles(t, pipeline, 1, "")
+	if err := pipeline.chainReview(context.Background(), []string{"review-a", "review-b"}, 0, pipeline.path("target-repo"), strings.Repeat("ab", 20)); err != nil {
+		t.Fatalf("chainReview: %v", err)
+	}
+	if got := cardsecret.Redact("aws: reading " + path); !strings.Contains(got, path) {
+		t.Fatalf("the file name was masked out of the logs: %q", got)
+	}
+	// And what is in the file is still secret.
+	if got := cardsecret.Redact("profile load failed: aws_secret_access_key = wJalrXUtnFEMIexampleKEY"); strings.Contains(got, "wJalrXUtnFEMIexampleKEY") {
+		t.Fatalf("the contents behind the path stopped being secret: %q", got)
 	}
 }

@@ -161,10 +161,8 @@ func (p *Pipeline) permittedResourceKinds() func(kind string) bool {
 	}
 	var parsed struct {
 		Consumers []struct {
-			Repository     string `json:"repository"`
-			Infrastructure *struct {
-				Resources []string `json:"resources"`
-			} `json:"infrastructure"`
+			Repository     string                       `json:"repository"`
+			Infrastructure *worker.InfrastructureConfig `json:"infrastructure"`
 		} `json:"consumers"`
 	}
 	if json.Unmarshal(raw, &parsed) != nil {
@@ -175,18 +173,13 @@ func (p *Pipeline) permittedResourceKinds() func(kind string) bool {
 		repository, _ = p.readJSONField("ticket-draft.json", "repository")
 	}
 	for _, consumer := range parsed.Consumers {
-		if consumer.Repository != repository || consumer.Infrastructure == nil {
+		if consumer.Repository != repository {
 			continue
 		}
-		allowed := append([]string(nil), consumer.Infrastructure.Resources...)
-		return func(kind string) bool {
-			for _, permitted := range allowed {
-				if permitted == kind {
-					return true
-				}
-			}
-			return false
-		}
+		// The destination's own answer, not a second copy of the rule: the
+		// standing permission is a field of the configuration and reading
+		// it is that type's business.
+		return worker.ConsumerConfig{Infrastructure: consumer.Infrastructure}.MayCreate
 	}
 	return deny
 }

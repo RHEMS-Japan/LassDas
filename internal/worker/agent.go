@@ -305,8 +305,19 @@ func runAgentProcess(ctx context.Context, config AgentConfig, workspace, prompt 
 		}
 		prompt = strings.ReplaceAll(prompt, homeToken, agentHome)
 	}
-	environment, err := agentEnvironment(config, agentHome)
+	// lentHome is the home this launch made and lends to another user; it
+	// is "" where the agent runs as this process's own user, which is what
+	// decides whether a credential handed over as a file name needs a copy
+	// the agent can open.
+	lentHome := ""
+	if launcher != "" {
+		lentHome = agentHome
+	}
+	environment, err := agentEnvironment(config, agentHome, lentHome)
 	if err != nil {
+		if launcher != "" {
+			_ = os.RemoveAll(agentHome)
+		}
 		return AgentOutcome{}, "", err
 	}
 	if launcher != "" {
@@ -846,7 +857,7 @@ func copyHomeSeed(engineHome, agentHome, relative string) error {
 	return nil
 }
 
-func agentEnvironment(config AgentConfig, home string) ([]string, error) {
+func agentEnvironment(config AgentConfig, home, lentHome string) ([]string, error) {
 	environment := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + home,
@@ -878,11 +889,63 @@ func agentEnvironment(config AgentConfig, home string) ([]string, error) {
 			// all, and the service it cannot reach is what says so.
 			continue
 		}
+		if cardsecret.HandedAsPath(name) && lentHome != "" {
+			// The configured file is closed to the agent user — the boot
+			// refuses to start otherwise — so handing the agent that name
+			// would hand it a file it is guaranteed not to be able to open.
+			// A copy it can open is placed in the home this launch made,
+			// which is outside the working copy (so it can never be
+			// committed) and is taken back and removed when the launch
+			// ends, whether the card finished, failed or was interrupted.
+			copied, err := lendCredentialFile(lentHome, name, value)
+			if err != nil {
+				return nil, err
+			}
+			value = copied
+		}
 		environment = append(environment, name+"="+value)
 	}
 	sort.Strings(environment)
 	return environment, nil
 }
+
+// credentialLendDir is where a launch keeps the copies it lends. Under the
+// launch's own home, so the one cleanup that already exists removes them.
+const credentialLendDir = "credentials"
+
+// lendCredentialFile places a copy of a configured credential file where
+// the agent user can read it, and answers with the copy's path.
+//
+// Read-only, and named for the variable rather than for the configured
+// file: what the agent is told is a variable and a file to read, and the
+// configured path is the operator's business. The copy never goes in the
+// working copy — a secret in there would be sealed into the candidate and
+// published with it.
+func lendCredentialFile(lentHome, variable, configuredPath string) (string, error) {
+	if !credentialVariablePattern.MatchString(variable) {
+		return "", errors.New("credential variable name is invalid")
+	}
+	contents, err := os.ReadFile(configuredPath)
+	if err != nil {
+		return "", errors.New("credential file could not be read for the launch")
+	}
+	directory := filepath.Join(lentHome, credentialLendDir)
+	// Traversable, not listable: the agent opens the file it was told
+	// about and cannot enumerate the others.
+	if err := os.MkdirAll(directory, 0o711); err != nil {
+		return "", errors.New("credential could not be placed for the launch")
+	}
+	copied := filepath.Join(directory, variable)
+	if err := os.WriteFile(copied, contents, 0o444); err != nil {
+		return "", errors.New("credential could not be placed for the launch")
+	}
+	return copied, nil
+}
+
+// credentialVariablePattern is the shape the runtime configuration already
+// held the name to; it is checked again here because the name becomes a
+// file name.
+var credentialVariablePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
 // boundedTranscript is the agent's own output as the run keeps it. The
 // card's credentials go first and the bound is applied after, so the count

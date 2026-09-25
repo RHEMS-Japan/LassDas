@@ -270,6 +270,8 @@ lassdas run spec --project NAME
 | `credential-<名前>-stages` | 渡す工程の JSON 配列。`implement` / `review-a` / `review-b` / `validate` / `publish` / `investigate` / `design-review-a` / `design-review-b` / `design-decide` / `apply` / `checks` / `integrate` / `promote` |
 | `credential-<名前>-mode` | `contents` (既定。ファイルの中身を変数に入れる) か `path` (ファイルのパスを変数に入れる)。`AWS_SHARED_CREDENTIALS_FILE` や `KUBECONFIG` のように、値ではなくファイル名を読む道具には `path` |
 
+**`path` のとき、AI には元のファイルではなく複製のパスが渡る。**元のファイルは AI の実行ユーザーから開けない権限で置かれており (下記)、そのパスを渡しても開けないためです。複製は、そのカードが動いているあいだだけ、AI 専用の作業ホーム (納品先の作業コピーの外) に読み取り専用で置かれ、カードが終わった時点で消えます。カードが失敗しても中断されても同じ後始末を通ります。検証コマンドと納品カードには元のパスがそのまま渡ります。
+
 ```json
 "credential-warehouse-path":   "/data/secrets/warehouse",
 "credential-warehouse-env":    "DATABASE_URL",
@@ -282,6 +284,8 @@ lassdas run spec --project NAME
 - 本体が自分で使う変数名は使えない。`LASSDAS_` と `HERMES_` で始まるもの全部、`PATH` `HOME` `LANG` `TMPDIR`、納品先と課題管理の鍵。とくに `LASSDAS_GATEWAY_BASE_URL` は、上書きできるとモデルの呼び先が黙って変わる
 - 実装役のカードに挙げれば、**実装役が起動する AI にも本当に渡る**。外部サービスに繋いで作る必要がある依頼は、そうしないと果たせない。`validate` に挙げれば、納品先の検証コマンド (テスト等) にも渡る
 - 値が記録や画面に出ることはない。失敗したコマンドが値を表示しても、記録に残る前に伏せられ、盤面の実況もその行を表示しない。複数行のファイルは 1 行ずつ伏せる
+- **AI が書いた変更の中に値が入っていたら、レビューに回る前に差し戻される。**理由には変数名だけが出て、値は出ない。ただしこの検査ができるのは、その鍵を渡されたカードだけ。**差分まで見てほしい鍵は、実装役のカード (`implement`) に加えて封じるカード (`review-a`) にも挙げる**
+- `path` の複製は作業コピーの外に置かれるので、PR に混ざることはない
 
 ### 作ってよい資源 (`infrastructure-*`)
 
