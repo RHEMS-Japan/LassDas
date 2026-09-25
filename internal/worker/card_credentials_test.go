@@ -544,3 +544,30 @@ func TestALentCopyIsReadUnderTheSameRulesAsEverythingElse(t *testing.T) {
 		t.Fatalf("the refusal does not name the variable: %v", err)
 	}
 }
+
+// The reason a card failed has to reach the board, the failure record and
+// the next round's instruction. A credentials file's settings sit beside
+// its keys, and taking every line's value took the settings with them.
+func TestASettingFromACredentialsFileStaysInTheRecord(t *testing.T) {
+	pathCredentialCard(t, "AWS_SHARED_CREDENTIALS_FILE",
+		"[dev]\naws_secret_access_key = wJalrXUtnFEMIexampleKEY99\nregion = ap-northeast-1\n")
+
+	said := "error: the queue lassdas-orders-intake already exists in ap-northeast-1"
+	if kept := boundedTranscript(said); kept != said {
+		t.Fatalf("the reason the card failed was masked out of the transcript: %q", kept)
+	}
+	if got := cardsecret.Redact(said); got != said {
+		t.Fatalf("the board would hide the reason the card failed: %q", got)
+	}
+	// The key beside it is still covered, on its own and in its line.
+	if got := cardsecret.Redact("const key = \"wJalrXUtnFEMIexampleKEY99\""); strings.Contains(got, "wJalrXUtnFEMIexampleKEY99") {
+		t.Fatalf("the key survived: %q", got)
+	}
+	// And the seal still refuses a change carrying that value alone.
+	if cardsecret.VariableIn("const key = \"wJalrXUtnFEMIexampleKEY99\"") != "AWS_SHARED_CREDENTIALS_FILE" {
+		t.Fatal("a change carrying the key alone would be sealed")
+	}
+	if cardsecret.VariableIn("deploying to ap-northeast-1") != "" {
+		t.Fatal("a change naming the region would be refused")
+	}
+}

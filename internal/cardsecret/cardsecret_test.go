@@ -122,11 +122,11 @@ func TestTheValueOnTheRightOfALineIsASecretOfItsOwn(t *testing.T) {
 	}
 }
 
-// The first separator and no further: a connection string is full of them,
-// and taking every fragment would mask ordinary words — the scheme, the
-// host, a query key — wherever they appear. The whole value is registered,
-// and so is what follows its first separator.
-func TestOnlyTheFirstSeparatorOfALineIsUsed(t *testing.T) {
+// A connection string is full of separators and none of them stands beside
+// a key that says "secret", so the value is covered whole and no fragment
+// of it becomes a literal of its own. Masking the scheme or the host would
+// take ordinary words out of every log.
+func TestAValueWithNoKeyBesideItIsCoveredWhole(t *testing.T) {
 	Forget()
 	t.Cleanup(Forget)
 	dsn := "postgres://warehouse.invalid/orders?password=hunter2hunter2"
@@ -134,11 +134,57 @@ func TestOnlyTheFirstSeparatorOfALineIsUsed(t *testing.T) {
 	if got := Redact("dsn: " + dsn); strings.Contains(got, "hunter2") {
 		t.Fatalf("the value survived: %q", got)
 	}
-	if VariableIn("//warehouse.invalid/orders?password=hunter2hunter2") == "" {
-		t.Fatal("what follows the first separator was not registered")
+	for _, ordinary := range []string{"dialect postgres selected", "resolving warehouse.invalid"} {
+		if got := Redact(ordinary); got != ordinary {
+			t.Fatalf("an ordinary line was masked: %q", got)
+		}
 	}
-	// The scheme on its own is a word a log is full of.
-	if got := Redact("dialect postgres selected"); !strings.Contains(got, "postgres") {
-		t.Fatalf("an ordinary word was masked: %q", got)
+}
+
+// A credentials file holds its settings beside its keys. Taking every
+// line's value made the settings secret too, and the reason a card failed
+// disappeared from the board, from the failure record and from the next
+// round's instruction — the three places that exist to carry it.
+func TestASettingBesideASecretIsNotMasked(t *testing.T) {
+	Forget()
+	t.Cleanup(Forget)
+	Register([]Entry{{
+		Name:   "AWS_SHARED_CREDENTIALS_FILE",
+		Secret: "[dev]\naws_secret_access_key = wJalrXUtnFEMIexampleKEY99\nregion = ap-northeast-1\noutput=json-lines-here\n",
+	}})
+	for _, said := range []string{
+		"creating queue in ap-northeast-1",
+		"error: the queue lassdas-orders-intake already exists in ap-northeast-1",
+		"writing json-lines-here",
+	} {
+		if got := Redact(said); got != said {
+			t.Fatalf("the reason a card failed was masked: %q", got)
+		}
 	}
+	// And the key beside them is still covered, value alone included.
+	if got := Redact("const key = \"wJalrXUtnFEMIexampleKEY99\""); strings.Contains(got, "wJalrXUtnFEMIexampleKEY99") {
+		t.Fatalf("the key survived: %q", got)
+	}
+	// The whole line of a setting is still the file's own text.
+	if got := Redact("region = ap-northeast-1"); !strings.Contains(got, Redacted) {
+		t.Fatalf("a whole line of the file was not masked: %q", got)
+	}
+}
+
+// The words a key is called when the value beside it is the secret.
+func TestEveryShapeOfASecretKeyIsRecognised(t *testing.T) {
+	for _, line := range []string{
+		"aws_secret_access_key = wJalrXUtnFEMIexampleKEY99",
+		`password: "wJalrXUtnFEMIexampleKEY99"`,
+		"API_TOKEN=wJalrXUtnFEMIexampleKEY99",
+		"Passphrase = wJalrXUtnFEMIexampleKEY99",
+		"client_credential: wJalrXUtnFEMIexampleKEY99",
+	} {
+		Forget()
+		Register([]Entry{{Name: "A_CREDENTIAL", Secret: line}})
+		if got := Redact("copied wJalrXUtnFEMIexampleKEY99 here"); strings.Contains(got, "wJalrXUtnFEMIexampleKEY99") {
+			t.Fatalf("%q: the value alone survived: %q", line, got)
+		}
+	}
+	Forget()
 }

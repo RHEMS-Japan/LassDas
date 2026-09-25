@@ -203,11 +203,25 @@ func expand(text string) []string {
 // file writes a value in are "key = value", "key: value" and the same
 // without spaces, and the value is what is copied out of them.
 //
+// Only where the key says the value is a secret. A credentials file holds
+// its settings beside its keys, and taking every line's value made those
+// settings secret too: a file with "region = ap-northeast-1" in it hid
+// "creating queue in ap-northeast-1" from the board, and hid "already
+// exists in ap-northeast-1" from the failure record and from the next
+// round's instruction — the reason the card failed, gone from the three
+// places that exist to carry it.
+//
+// The whole line stays registered either way, so nothing that was covered
+// before is uncovered now: what narrows is only the value taken on its own.
+//
 // Empty where the line has no separator, which is a section heading or a
 // bare token — already registered whole.
 func assignedValue(line string) string {
 	cut := strings.IndexAny(line, "=:")
 	if cut < 0 || cut+1 >= len(line) {
+		return ""
+	}
+	if !secretKey(line[:cut]) {
 		return ""
 	}
 	value := strings.TrimSpace(line[cut+1:])
@@ -218,6 +232,25 @@ func assignedValue(line string) string {
 		}
 	}
 	return strings.TrimSpace(value)
+}
+
+// secretWords are what a key is called when the value beside it is the
+// secret rather than a setting. Matched as substrings and without case, so
+// aws_secret_access_key, API_TOKEN and "Password" all say so.
+//
+// A list of words is a guess, and it is the safe kind: a key this misses
+// keeps its value covered by the whole line it sits on, while a key it
+// matches by accident costs one setting out of a log.
+var secretWords = []string{"key", "secret", "token", "password", "pass", "credential"}
+
+func secretKey(key string) bool {
+	folded := strings.ToLower(key)
+	for _, word := range secretWords {
+		if strings.Contains(folded, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // FromEnvironment registers what the process that started this one handed
