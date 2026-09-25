@@ -201,7 +201,16 @@ type ReturnedWork struct {
 	// makes, and what happens to it instead is the ladder's business. The
 	// assumption and the instruction are empty for such a return — nothing
 	// was decided and nothing was said to anyone.
-	Answered     bool                `json:"answered"`
+	Answered bool `json:"answered"`
+	// RunSHA256 identifies the launch this return was read from, which is
+	// what tells one return from the next when the words are the same. Two
+	// launches never share it: the digest covers when the agent ran.
+	//
+	// It exists because a card the ladder is waiting on stays blocked, and
+	// the tick looks at a blocked card every few seconds. Without a way to
+	// recognise the launch, every one of those ticks would read the same
+	// record as a fresh return and write the round's history again.
+	RunSHA256    string              `json:"run_sha256,omitempty"`
 	ReportSHA256 string              `json:"report_sha256"`
 	Report       string              `json:"report"`
 	Supply       []string            `json:"supply,omitempty"`
@@ -224,6 +233,21 @@ func (r *ReturnedRound) Latest() *ReturnedWork {
 		return nil
 	}
 	return &r.Returns[len(r.Returns)-1]
+}
+
+// AlreadyLeftToTheLadder reports whether this round's newest return is one
+// the engine has already declined to answer, read from the same launch.
+//
+// The card it failed on stays blocked while the ladder works on it, and the
+// tick looks at a blocked card every few seconds. Each of those ticks reads
+// the round's records again and finds exactly what the tick before it
+// found: no agent has run, so there is no new return. Recording it again
+// would rewrite the round's history every few seconds for as long as the
+// ladder's longest wait, and would count ticks as attempts — which is the
+// number that decides how many times the engine answers.
+func (r *ReturnedRound) AlreadyLeftToTheLadder(run AgentRun) bool {
+	last := r.Latest()
+	return last != nil && !last.Answered && last.RunSHA256 == run.RunSHA256
 }
 
 // Assumptions is what the engine decided across this round's returns, in
@@ -262,11 +286,12 @@ func (r *ReturnedRound) Assumptions() []ReadinessAssumption {
 // maxAnsweredReturns, because by then the same is true however the wording
 // varied. Both are the seat's model declining the work, and the ladder is
 // what this engine does about a model that will not answer.
-func AnswerReturn(report string, previous *ReturnedRound, answeredAt time.Time) ReturnedWork {
-	report = boundedReport(ReportText(report))
+func AnswerReturn(run AgentRun, previous *ReturnedRound, answeredAt time.Time) ReturnedWork {
+	report := boundedReport(ReportText(run.Transcript))
 	digest := sha256.Sum256([]byte(report))
 	returned := ReturnedWork{
 		Attempt:      1,
+		RunSHA256:    run.RunSHA256,
 		ReportSHA256: hex.EncodeToString(digest[:]),
 		Report:       report,
 		Supply:       returnSupplies(report),

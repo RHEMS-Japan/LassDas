@@ -16,7 +16,7 @@ import (
 func sealReturnedRound(t *testing.T, path, report string) {
 	t.Helper()
 	record := &worker.ReturnedRound{}
-	record.Append(1, worker.AnswerReturn(report, nil, time.Now().UTC()))
+	record.Append(1, worker.AnswerReturn(worker.AgentRun{Transcript: report, RunSHA256: strings.Repeat("a", 64)}, nil, time.Now().UTC()))
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestAnOversizeInstructionShedsTheEarlierObjections(t *testing.T) {
 			Code: "stale-caller", Path: "README.md", Message: strings.Repeat("指摘の本文。", 200),
 		})
 	}
-	answer := worker.AnswerReturn("鍵が渡されていません。", nil, time.Now().UTC())
+	answer := worker.AnswerReturn(worker.AgentRun{Transcript: "鍵が渡されていません。", RunSHA256: strings.Repeat("b", 64)}, nil, time.Now().UTC())
 	agent := worker.AgentConfig{ID: "implementer", Command: "agent"}
 
 	// The control: the same objections on a request that leaves room for

@@ -94,7 +94,16 @@ func answerReturnedWork(
 			"run", run.RunID, "round", view.round, "error", err.Error())
 		return refuseReturn(config, runDir, run, view, stageName, "the record of this round's earlier returns could not be read", logger)
 	}
-	answer := worker.AnswerReturn(agentRun.Transcript, previous, time.Now().UTC())
+	// The same return the ladder is already working on, seen again by a
+	// later tick. The card it failed on stays blocked until the ladder
+	// rebuilds it, and the tick reads a blocked card every few seconds; the
+	// round's history is written for what an agent did, not for what a tick
+	// saw. Nothing to record, nothing to seal again, and the ladder below
+	// still gets its turn.
+	if previous.AlreadyLeftToTheLadder(agentRun) {
+		return returnToLadder, nil
+	}
+	answer := worker.AnswerReturn(agentRun, previous, time.Now().UTC())
 	// Recorded whether or not it is answered. The count has to survive the
 	// ladder's own relaunches: a round the ladder dispatches again and that
 	// comes back returned is attempt N+1, goes straight past the answering

@@ -12,13 +12,33 @@ import (
 
 func answeredAt() time.Time { return time.Date(2026, 9, 25, 3, 0, 0, 0, time.UTC) }
 
+// launches counts the stand-in launches a test has made, so that two of
+// them never share an identity however alike their reports are — which is
+// exactly what the real records do, because the digest covers when the
+// agent ran.
+var launches int
+
+// launch is one implementing run that reported and changed nothing.
+func launch(t *testing.T, transcript string) AgentRun {
+	t.Helper()
+	launches++
+	run, err := SealAgentRun(AgentRun{
+		SchemaVersion: ArtifactSchemaVersion, Stage: 1, AgentID: "implementer",
+		Transcript: transcript, DurationMs: int64(launches), RanAt: answeredAt(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
 // A report that says the ticket left something open is answered by the
 // engine, not by the requester: the reading that is easiest to defend is
 // stated, recorded as an assumption, and put into the instruction the same
 // round runs under next.
 func TestAReportThatLacksInformationIsAnsweredWithADefensibleDefault(t *testing.T) {
 	const report = "依頼に、並び順を新しい順にするか古い順にするかが書かれていません。\nどちらにするかの判断は依頼者に返します。"
-	answer := AnswerReturn(report, nil, answeredAt())
+	answer := AnswerReturn(launch(t, report), nil, answeredAt())
 
 	if answer.Attempt != 1 || answer.Repeated {
 		t.Fatalf("attempt = %d, repeated = %v, want the first return", answer.Attempt, answer.Repeated)
@@ -55,7 +75,7 @@ func TestAReportThatAsksForAKeyGetsAStandInAndTheSupplyIsRecorded(t *testing.T) 
 	const report = "外部の天気サービスを呼ぶ必要がありますが、API キーが渡されていません。\n" +
 		"取得先の URL は決まっています。\n" +
 		"アクセストークンを用意してもらえれば実装できます。"
-	answer := AnswerReturn(report, nil, answeredAt())
+	answer := AnswerReturn(launch(t, report), nil, answeredAt())
 
 	if answer.Assumption.Kind != AssumptionCredentialSubstituted {
 		t.Fatalf("assumption kind = %q, want the stand-in", answer.Assumption.Kind)
@@ -86,9 +106,9 @@ func TestAReportThatAsksForAKeyGetsAStandInAndTheSupplyIsRecorded(t *testing.T) 
 func TestARepeatedReportIsNotAnsweredAgain(t *testing.T) {
 	const report = "この依頼は、いまのままでは実現できません。"
 	record := &ReturnedRound{}
-	first := AnswerReturn(report, record, answeredAt())
+	first := AnswerReturn(launch(t, report), record, answeredAt())
 	record.Append(1, first)
-	second := AnswerReturn(report, record, answeredAt().Add(time.Minute))
+	second := AnswerReturn(launch(t, report), record, answeredAt().Add(time.Minute))
 	record.Append(1, second)
 
 	if !first.Answered || first.Attempt != 1 || first.Repeated {
@@ -110,7 +130,7 @@ func TestARepeatedReportIsNotAnsweredAgain(t *testing.T) {
 
 	// A different report is a different position, and it is answered — the
 	// bound is on answers that changed nothing, not on rounds.
-	third := AnswerReturn(report+"\n別の理由も見つかりました。", record, answeredAt().Add(2*time.Minute))
+	third := AnswerReturn(launch(t, report+"\n別の理由も見つかりました。"), record, answeredAt().Add(2*time.Minute))
 	if third.Attempt != 3 || third.Repeated || !third.Answered {
 		t.Fatalf("third answer = %+v", third)
 	}
@@ -127,13 +147,13 @@ func TestARepeatedReportIsNotAnsweredAgain(t *testing.T) {
 func TestTheEngineStopsAnsweringOneRoundAfterThreeAnswers(t *testing.T) {
 	record := &ReturnedRound{}
 	for attempt := 1; attempt <= maxAnsweredReturns; attempt++ {
-		answer := AnswerReturn(fmt.Sprintf("理由 %d を見つけました。", attempt), record, answeredAt())
+		answer := AnswerReturn(launch(t, fmt.Sprintf("理由 %d を見つけました。", attempt)), record, answeredAt())
 		if !answer.Answered || answer.Attempt != attempt {
 			t.Fatalf("attempt %d = %+v, want it answered", attempt, answer)
 		}
 		record.Append(1, answer)
 	}
-	beyond := AnswerReturn("さらに別の理由です。", record, answeredAt())
+	beyond := AnswerReturn(launch(t, "さらに別の理由です。"), record, answeredAt())
 	if beyond.Attempt != maxAnsweredReturns+1 || beyond.Repeated || beyond.Answered {
 		t.Fatalf("the return past the bound = %+v, want it left to the ladder", beyond)
 	}
@@ -151,7 +171,7 @@ func TestTheEngineStopsAnsweringOneRoundAfterThreeAnswers(t *testing.T) {
 func TestTheRoundsRecordStaysBounded(t *testing.T) {
 	record := &ReturnedRound{}
 	for attempt := 1; attempt <= maxReturnAttempts+3; attempt++ {
-		record.Append(1, AnswerReturn(strings.Repeat("x", attempt), record, answeredAt()))
+		record.Append(1, AnswerReturn(launch(t, strings.Repeat("x", attempt)), record, answeredAt()))
 	}
 	if len(record.Returns) != maxReturnAttempts {
 		t.Fatalf("the record holds %d returns, want it bounded at %d", len(record.Returns), maxReturnAttempts)
@@ -168,7 +188,7 @@ func TestTheRoundsRecordStaysBounded(t *testing.T) {
 // says it was cut. The whole report still reaches the requester through the
 // trail; this bound is on what the next attempt is shown of itself.
 func TestALongReportIsCutWhereARuneEnds(t *testing.T) {
-	answer := AnswerReturn(strings.Repeat("報", maxReturnedReportBytes), nil, answeredAt())
+	answer := AnswerReturn(launch(t, strings.Repeat("報", maxReturnedReportBytes)), nil, answeredAt())
 	if len(answer.Report) > maxReturnedReportBytes {
 		t.Fatalf("the record holds %d bytes, over its budget", len(answer.Report))
 	}
@@ -208,7 +228,7 @@ func TestTheRecordSaysTheEngineAnsweredTheReturn(t *testing.T) {
 	const report = "外部の決済サービスの API キーが渡されていません。"
 	writeRoundRun(t, history, 1, "implementer-run.json", returnedRun(report))
 	record := &ReturnedRound{}
-	record.Append(1, AnswerReturn(report, record, answeredAt()))
+	record.Append(1, AnswerReturn(launch(t, report), record, answeredAt()))
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)

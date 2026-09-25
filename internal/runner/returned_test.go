@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,16 @@ import (
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/worker"
 )
+
+// returnedLaunch is one implementing run that reported and changed nothing.
+// The identity is the test's own, because what matters here is only that
+// two launches do not share one.
+func returnedLaunch(transcript string, launch int) worker.AgentRun {
+	return worker.AgentRun{
+		Transcript: transcript,
+		RunSHA256:  strings.Repeat(strconv.Itoa(launch%10), 64),
+	}
+}
 
 // returnedPipeline is a run directory with a stand-in worker that records
 // the arguments each verb was rendered with.
@@ -37,7 +48,7 @@ func returnedPipeline(t *testing.T) (*Pipeline, string) {
 // previous one at all, has to carry it too.
 func TestAReturnedRoundsInstructionCarriesTheAnswerToThisRound(t *testing.T) {
 	pipeline, record := returnedPipeline(t)
-	answer := worker.AnswerReturn("鍵が渡されていません。", nil, time.Now().UTC())
+	answer := worker.AnswerReturn(returnedLaunch("鍵が渡されていません。", 1), nil, time.Now().UTC())
 	if err := RecordReturn(pipeline.Workspace, 1, answer); err != nil {
 		t.Fatalf("RecordReturn: %v", err)
 	}
@@ -80,7 +91,7 @@ func TestEachAnswerIsAddedToTheRoundsRecord(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadReturns: %v", err)
 		}
-		if err := RecordReturn(pipeline.Workspace, 1, worker.AnswerReturn(report, previous, time.Now().UTC())); err != nil {
+		if err := RecordReturn(pipeline.Workspace, 1, worker.AnswerReturn(returnedLaunch(report, attempt), previous, time.Now().UTC())); err != nil {
 			t.Fatalf("RecordReturn: %v", err)
 		}
 	}

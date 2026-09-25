@@ -3,6 +3,7 @@ package attendant
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -640,4 +641,119 @@ func newDesignedReturnedSetup(t *testing.T, report string) *returnedSetup {
 		card("t_p", runtime.StagePublish, "todo"),
 	}, setup.fixture.deliveryID)
 	return setup
+}
+
+// While the ladder works on a card, that card stays blocked, and the tick
+// looks at a blocked card every few seconds. Each of those ticks reads the
+// same records and finds the same return, because no agent has run. A probe
+// measured what that cost: two hundred ticks over two real launches, the
+// round's history rewritten every ten seconds and the attempt count reading
+// two hundred. The round's history is written for what an agent did.
+func TestAWaitingLadderDoesNotRecordTheSameReturnEveryTick(t *testing.T) {
+	const report = "この依頼は、いまのままでは実現できません。"
+	setup := newReturnedSetup(t, report)
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	// One answered return, then the same report again, which the engine
+	// declines and leaves to the ladder.
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	setup.returnAgain(t, report)
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	returns := filepath.Join(setup.runDir, "history", "stage-1", worker.ReturnRecordFileName)
+	failure := filepath.Join(setup.runDir, "history", "stage-1", "implement-failure.json")
+	settled, err := os.ReadFile(returns)
+	if err != nil {
+		t.Fatalf("the round's record: %v", err)
+	}
+	sealed, err := os.ReadFile(failure)
+	if err != nil {
+		t.Fatalf("the round's failure was not sealed: %v", err)
+	}
+
+	// And now the ticks the ladder's wait is made of, with no agent running
+	// between them.
+	for tick := 0; tick < 200; tick++ {
+		if err := setup.tick(t); err != nil {
+			t.Fatalf("waiting tick %d: %v", tick, err)
+		}
+	}
+	after, err := os.ReadFile(returns)
+	if err != nil {
+		t.Fatalf("the round's record: %v", err)
+	}
+	if string(after) != string(settled) {
+		t.Fatalf("two hundred waiting ticks rewrote the round's history:\n%s", after)
+	}
+	if resealed, err := os.ReadFile(failure); err != nil || string(resealed) != string(sealed) {
+		t.Fatalf("two hundred waiting ticks sealed the failure again: %v", err)
+	}
+	record, err := runner.ReadReturns(setup.runDir, 1)
+	if err != nil || record == nil {
+		t.Fatalf("the round's record = %+v %v", record, err)
+	}
+	if len(record.Returns) != 2 {
+		t.Fatalf("returns recorded = %d, want the two the agent made", len(record.Returns))
+	}
+	if latest := record.Latest(); latest == nil || latest.Attempt != 2 {
+		t.Fatalf("the newest return = %+v, want the second launch rather than the last tick", record.Latest())
+	}
+	if len(setup.fixture.comments.posted) != 0 || len(setup.fixture.store.digests) != 0 {
+		t.Fatalf("the delivery ended: %q %v", setup.fixture.comments.posted, setup.fixture.store.digests)
+	}
+
+	// And a launch the ladder itself made is counted, word for word the
+	// same report or not. What the skip above recognises is the tick that
+	// saw no agent run, not a round that has stopped being written down.
+	setup.returnAgain(t, report)
+	if err := setup.tick(t); err != nil {
+		t.Fatalf("the tick after the ladder ran the card again: %v", err)
+	}
+	record, err = runner.ReadReturns(setup.runDir, 1)
+	if err != nil || record == nil || len(record.Returns) != 3 {
+		t.Fatalf("a launch the ladder made was not counted: %+v %v", record, err)
+	}
+	if latest := record.Latest(); latest == nil || latest.Attempt != 3 || latest.Answered {
+		t.Fatalf("the newest return = %+v, want the third launch and no answer", record.Latest())
+	}
+}
+
+// The bound on the answering holds however the report is worded. A model
+// that finds a new reason every time is still a model that will not do the
+// work, and the third answer is where the engine stops paying to say the
+// same three rules again.
+func TestAFourthReturnGoesToTheLadderHoweverItIsWorded(t *testing.T) {
+	setup := newReturnedSetup(t, "理由 1 を見つけました。")
+	setup.config.Chain.RetryBackoffBaseSeconds = 3600
+	for tick := 1; tick <= 8; tick++ {
+		if err := setup.tick(t); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		setup.returnAgain(t, fmt.Sprintf("理由 %d を見つけました。", tick+1))
+	}
+	// Three answers, and no fourth: the engine's answer is the same every
+	// time and a model that has heard it three times is not being
+	// persuaded.
+	record, err := runner.ReadReturns(setup.runDir, 1)
+	if err != nil || record == nil {
+		t.Fatalf("the round's record = %+v %v", record, err)
+	}
+	if answers := len(record.Assumptions()); answers != 3 {
+		t.Fatalf("answers the engine made = %d, want it to stop at three", answers)
+	}
+	// Counted in launches, which is what the bound is really about: three
+	// rounds started again by the engine, then one by the ladder's single
+	// hand on an implementing seat, and then the wait.
+	stages := len(runtime.ChainStagesFor(setup.config.Chain, runtime.ChainPlan{Shape: runtime.ShapeImplement}))
+	if built := setup.boardCreations(t); built != 4*stages {
+		t.Fatalf("cards built across eight ticks = %d, want the four launches of %d", built, 4*stages)
+	}
+	if _, err := os.Stat(filepath.Join(setup.runDir, "retry", "implement-r1.json")); err != nil {
+		t.Fatalf("the fourth return never reached the ladder: %v", err)
+	}
+	if len(setup.fixture.comments.posted) != 0 || len(setup.fixture.store.digests) != 0 {
+		t.Fatalf("the delivery ended: %q %v", setup.fixture.comments.posted, setup.fixture.store.digests)
+	}
 }
