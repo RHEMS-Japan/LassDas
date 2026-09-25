@@ -683,19 +683,36 @@ func TestAFailedRoundGoesWhereTheReviewsSay(t *testing.T) {
 	const otherFindings = `{"verdict":"revise","findings":[{"code":"style","message":"a smaller thing"}]}`
 	for name, c := range map[string]struct {
 		reviewA, reviewB  string
+		noSeats           bool
 		wantNewDesign     bool
 		wantNextImplement bool
 		wantStopped       bool
+		// wantSeatAsked is the review card the round is given again when
+		// one seat's sealed review cannot be read. The seat follows the
+		// record that will not read, not a fixed position.
+		wantSeatAsked string
 	}{
 		"a reviewer found the design wrong": {reviewA: otherFindings, reviewB: designWrong, wantNewDesign: true},
 		// The re-apply route needs a sealed design this fixture does not
 		// build, and says so — which is itself the proof it took that route
 		// rather than stopping or opening a new design round.
-		"the reviews found other things": {reviewA: otherFindings, reviewB: otherFindings, wantNextImplement: true},
-		"a review will not parse":        {reviewA: `{"findings":[`, reviewB: otherFindings, wantStopped: true},
-		"a review was removed":           {reviewB: otherFindings, wantStopped: true},
+		"the reviews found other things":         {reviewA: otherFindings, reviewB: otherFindings, wantNextImplement: true},
+		"a review will not parse":                {reviewA: `{"findings":[`, reviewB: otherFindings, wantSeatAsked: runtime.StageReviewA},
+		"a review was removed":                   {reviewB: otherFindings, wantSeatAsked: runtime.StageReviewA},
+		"the other seat's review will not parse": {reviewA: otherFindings, reviewB: `{"findings":[`, wantSeatAsked: runtime.StageReviewB},
+		// Nothing to ask again: no seat is configured at all, so there is
+		// nothing to move and nothing to re-run. This is the one thing that
+		// still ends the delivery here.
+		"no seat is configured at all": {reviewA: otherFindings, reviewB: otherFindings, noSeats: true, wantStopped: true},
 	} {
 		config, runDir := designRunConfigWithReviewers(t)
+		if c.noSeats {
+			if err := os.WriteFile(config.ConsumerConfigPath,
+				[]byte(`{"max_stages":3,"design_max_rounds":3,"models":{"reviewers":[]},`+
+					`"agents":{"applier":{"command":"true","timeout_seconds":60}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
 		stage1 := filepath.Join(runDir, "history", "stage-1")
 		if err := os.MkdirAll(stage1, 0o755); err != nil {
 			t.Fatal(err)
@@ -723,8 +740,32 @@ func TestAFailedRoundGoesWhereTheReviewsSay(t *testing.T) {
 			(err != nil && strings.Contains(err.Error(), "no approved design to re-apply"))
 		reason, _ := os.ReadFile(filepath.Join(runDir, "delivery-stop-reason.txt"))
 		stopped := len(reason) > 0
-		if newDesign != c.wantNewDesign || nextImplement != c.wantNextImplement || stopped != c.wantStopped {
-			t.Errorf("%s: new design=%v next implement=%v stopped=%v (err=%v)", name, newDesign, nextImplement, stopped, err)
+		// Which seat was held responsible, read off the record the tick
+		// sealed for it: an unreadable review is that seat's own failure to
+		// leave a usable answer, and nothing else on these routes writes one.
+		seatAsked := ""
+		for _, stage := range []string{runtime.StageReviewA, runtime.StageReviewB} {
+			if failure, sealed := runner.ReadStageFailure(runDir, stage, 1); sealed && failure.Class == runner.FailureClassModel {
+				seatAsked = stage
+			}
+		}
+		if newDesign != c.wantNewDesign || nextImplement != c.wantNextImplement || stopped != c.wantStopped || seatAsked != c.wantSeatAsked {
+			t.Errorf("%s: new design=%v next implement=%v stopped=%v seat asked=%q (err=%v)", name, newDesign, nextImplement, stopped, seatAsked, err)
+		}
+		if c.wantSeatAsked != "" {
+			if err != nil {
+				t.Errorf("%s: the tick failed instead of asking the seat again: %v", name, err)
+			}
+			// The review is asked again for this round, not the next one:
+			// the decision that stood on the unreadable review is gone, so
+			// the card the tick rebuilt works on the round whose change is
+			// already sealed.
+			if !containsID(created, runtime.ChainCardKey("delivery-1", c.wantSeatAsked, 1)) {
+				t.Errorf("%s: the review was not asked again: created=%v", name, created)
+			}
+			if _, statErr := os.Stat(filepath.Join(stage1, "decision.json")); !os.IsNotExist(statErr) {
+				t.Errorf("%s: the decision derived from the unreadable review still stands: %v", name, statErr)
+			}
 		}
 		if c.wantStopped {
 			if !strings.Contains(string(reason), "レビュー結果を読めなかった") {

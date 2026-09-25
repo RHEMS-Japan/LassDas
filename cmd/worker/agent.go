@@ -144,12 +144,14 @@ func runAgentReview(ctx context.Context, args []string) error {
 	designPath := flags.String("design", "", "")
 	investigationPath := flags.String("investigation", "", "")
 	measurementsPath := flags.String("measurements", "", "")
+	seatCandidate := flags.Int("seat-candidate", 0, "")
+	rebuild := flags.String("rebuild-prompt", "", "")
 	runOutPath := flags.String("run-out", "", "")
 	outputPath := flags.String("out", "", "")
 	if !parseFlags(flags, args) ||
 		(*designPath == "") != (*investigationPath == "") || (*designPath == "") != (*measurementsPath == "") ||
 		!allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *reviewerID, *repoRoot, *baseSHA, *runOutPath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) {
+		!worker.ValidToolSHA(*toolSHA) || *seatCandidate < 0 || !validRebuild(*rebuild) {
 		return errors.New("agent-review arguments are invalid")
 	}
 	designMD, err := readDesignMarkdown(*designMDPath)
@@ -167,14 +169,28 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err := candidate.Validate(source, request, config); err != nil {
 		return errors.New("candidate artifact was rejected")
 	}
-	endpoint, ok := configuredEndpoint(config, *reviewerID, true)
+	seat, ok := configuredEndpoint(config, *reviewerID, true)
 	if !ok {
 		return errors.New("reviewer is not configured")
+	}
+	// Which occupant of the seat is judging. Zero — every delivery that has
+	// not had to move a seat — is the configured endpoint, so this is the
+	// same endpoint as before; a ladder that moved the seat asked for a
+	// later one, and a place the configuration does not have is refused
+	// rather than quietly answered by the endpoint at the top of the seat.
+	endpoint, seated := seat.SeatOccupant(*seatCandidate)
+	if !seated {
+		return errors.New("reviewer seat has no such candidate")
 	}
 	// The launch definition is the reviewer's own when the configuration
 	// binds one; the sealed run then names it, and agent id plus config
 	// digest pin down which profile and credential source judged the change.
-	agent := config.Agents.ReviewerAgentFor(endpoint.ID)
+	// It moves with the occupant: another vendor is another profile and
+	// another credential source, or the seat has not really moved.
+	agent, launched := config.Agents.ReviewerAgentSeat(endpoint.ID, *seatCandidate)
+	if !launched {
+		return errors.New("reviewer seat candidate has no launch")
+	}
 	clarification, err := readClarificationContext(*clarificationPath)
 	if err != nil {
 		return err
@@ -183,7 +199,14 @@ func runAgentReview(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings, designMD, *repoRoot)
+	if *rebuild != "" {
+		// Asked again, differently. A judge that answered nothing is not
+		// asked the same question a second time: the earlier rounds'
+		// objections come out and the change travels as a map of where to
+		// look rather than as its own patches (§5.3 "shorten").
+		findings = nil
+	}
+	prompt, err := reviewAgentPrompt(candidate, source, request, endpoint, clarification, findings, designMD, *repoRoot, *rebuild != "")
 	if err != nil {
 		// The builder's failures are static prose ("instruction is too
 		// large") - naming them is what made the third live ticket's death
@@ -330,6 +353,7 @@ func reviewAgentPrompt(
 	findings []worker.ModelFinding,
 	designMD string,
 	repoRoot string,
+	brief bool,
 ) (string, error) {
 	absoluteRoot, err := filepath.Abs(repoRoot)
 	if err != nil {
@@ -469,6 +493,26 @@ func reviewAgentPrompt(
 		parts = append(parts, tail...)
 		return strings.Join(parts, "\n")
 	}
+	outline := append([]string{
+		"",
+		"### 変更内容 (変更位置の一覧)",
+		"- 変更が大きく、この指示文に差分の中身は収まりませんでした。下に挙がる行範囲が変更された箇所の全てです。",
+		"- 各ファイルは作業ディレクトリに変更適用済みです。「変更後」の行番号で該当範囲とその周辺だけを開いて確認してください (全文読み込みは接続を溢れさせます)。",
+		"- 範囲がファイル全体に及ぶものは、依頼に関係する箇所を探して部分的に読んでください。",
+	}, worker.ChangedRegionOutlines(candidate, source)...)
+	if brief {
+		// The rebuilt instruction. The same question, in the shape the
+		// oversize path has always used: the change as a map the judge
+		// opens itself rather than as its own patches. Nothing about what
+		// to judge changes — the head and the tail of the instruction are
+		// the same — which is what makes this a different ask rather than
+		// a different job.
+		prompt := assemble(outline)
+		if len(prompt) > worker.MaxAgentPromptBytes {
+			return "", errors.New("instruction is too large")
+		}
+		return prompt, nil
+	}
 	prompt := assemble(append([]string{
 		"",
 		"### 変更内容 (機械抽出の差分)",
@@ -478,13 +522,7 @@ func reviewAgentPrompt(
 		// The full patches outgrew the instruction. Fall back to naming the
 		// changed line ranges and let the reviewer open exactly those spans
 		// in the working tree; a review with a map beats no review at all.
-		prompt = assemble(append([]string{
-			"",
-			"### 変更内容 (変更位置の一覧)",
-			"- 変更が大きく、この指示文に差分の中身は収まりませんでした。下に挙がる行範囲が変更された箇所の全てです。",
-			"- 各ファイルは作業ディレクトリに変更適用済みです。「変更後」の行番号で該当範囲とその周辺だけを開いて確認してください (全文読み込みは接続を溢れさせます)。",
-			"- 範囲がファイル全体に及ぶものは、依頼に関係する箇所を探して部分的に読んでください。",
-		}, worker.ChangedRegionOutlines(candidate, source)...))
+		prompt = assemble(outline)
 	}
 	if len(prompt) > worker.MaxAgentPromptBytes {
 		return "", errors.New("instruction is too large")

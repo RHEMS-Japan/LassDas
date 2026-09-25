@@ -23,11 +23,12 @@ func runImplementInstruction(args []string) error {
 	var findingsPaths stringList
 	flags.Var(&findingsPaths, "previous-findings", "")
 	validationFailurePath := flags.String("validation-failure", "", "")
+	rebuild := flags.String("rebuild-prompt", "", "")
 	outputPath := flags.String("out", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	if !parseFlags(flags, args) ||
 		!allPresent(*configPath, *toolSHA, *draftPath, *outputPath, *repoRoot) || !filepath.IsAbs(*repoRoot) ||
-		!worker.ValidToolSHA(*toolSHA) {
+		!worker.ValidToolSHA(*toolSHA) || !validRebuild(*rebuild) {
 		return errors.New("implement-instruction arguments are invalid")
 	}
 	config, err := readConfig(*configPath)
@@ -57,6 +58,13 @@ func runImplementInstruction(args []string) error {
 	validationFailure, err := readValidationFailure(*validationFailurePath)
 	if err != nil {
 		return err
+	}
+	if *rebuild != "" {
+		// The ladder has been here before and the implementer answered
+		// nothing. The request and the boundaries stay; what the earlier
+		// rounds objected to goes, because an instruction a model would not
+		// answer is asked again shorter rather than asked again.
+		findings = nil
 	}
 	prompt, err := implementPrompt(draft, consumer, config.Agents.Implementer, clarification, findings, validationFailure, *repoRoot)
 	if err != nil {

@@ -843,13 +843,34 @@ func handleChainFailure(
 			designWrong, readErr := designWrongForRound(runDir, config.ConsumerConfigPath, view.round)
 			switch {
 			case readErr != nil:
-				// Not an answer about the design: the reviews could not be
-				// read, and no amount of redesigning repairs a record. The
-				// run ends here with the reason, rather than spending the
-				// delivery's remaining design rounds re-reading it.
+				// Not an answer about the design: one of the round's sealed
+				// reviews could not be read, so nothing here knows whether
+				// the design was called wrong.
+				//
+				// A record that names its seat is that seat's own failure to
+				// leave a usable answer, and the ladder asks it again from
+				// somewhere else. Only a delivery with no seat to ask — none
+				// configured, or a configuration that will not read — still
+				// ends here, because there is nothing left to change.
 				logger.Error("the sealed reviews could not be read",
 					"delivery_id", run.DeliveryID, "round", view.round, "error", readErr.Error())
-				code, stopReason = unreadableReviewsOutcome(view.round)
+				var unreadable *unreadableReview
+				verdict := ladderSpent
+				if errors.As(readErr, &unreadable) {
+					climbed, climbErr := climbUnreadableReview(ctx, config, services, hermes, envelope, run, view, plan, unreadable.reviewer, logger)
+					if climbErr != nil {
+						return climbErr
+					}
+					if climbed == ladderHandled {
+						return nil
+					}
+					verdict = climbed
+				}
+				if verdict == ladderStopped {
+					code = hook.TerminalCancelled
+				} else {
+					code, stopReason = unreadableReviewsOutcome(view.round)
+				}
 			case designWrong:
 				logger.Info("a review found the design itself wrong; the delivery goes back to the designer",
 					"run", run.RunID, "round", view.round, "design_round", view.designRound)

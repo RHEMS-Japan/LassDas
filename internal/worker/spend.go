@@ -247,15 +247,22 @@ func spendBaseURL(config Config) string {
 }
 
 func spendEndpoints(config Config) []ModelEndpoint {
-	endpoints := []ModelEndpoint{config.Models.Implementer}
-	endpoints = append(endpoints, config.Models.Reviewers...)
-	endpoints = append(endpoints, config.Models.Readiness.Assessor, config.Models.Readiness.Checker)
+	seats := []ModelEndpoint{config.Models.Implementer}
+	seats = append(seats, config.Models.Reviewers...)
+	seats = append(seats, config.Models.Readiness.Assessor, config.Models.Readiness.Checker)
 	// The investigating designer's roles bill their own keys (#45): the
 	// designer and the design judges, when configured.
 	if config.Models.Designer != nil {
-		endpoints = append(endpoints, *config.Models.Designer)
+		seats = append(seats, *config.Models.Designer)
 	}
-	endpoints = append(endpoints, config.Models.DesignReviewers...)
+	seats = append(seats, config.Models.DesignReviewers...)
+	// Every occupant of every seat. A candidate holds its own key, and a
+	// delivery that spent the night moving seats would otherwise report
+	// only what the seats it started in were billed.
+	endpoints := make([]ModelEndpoint, 0, len(seats))
+	for _, seat := range seats {
+		endpoints = append(endpoints, seat.Seat()...)
+	}
 	return endpoints
 }
 

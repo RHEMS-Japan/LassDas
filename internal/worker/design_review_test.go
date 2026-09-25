@@ -259,7 +259,7 @@ func TestDesignReviewRecordsTheJudgeThatRan(t *testing.T) {
 	}
 	// Without judges, the candidate reviewers judge as before.
 	plain := validTestConfig()
-	if endpoint, _ := plain.Models.DesignReviewerFor("review-b"); endpoint != plain.Models.Reviewers[1] || plain.Agents.DesignReviewerAgentFor("review-b").ID != plain.Agents.Reviewer.ID {
+	if endpoint, _ := plain.Models.DesignReviewerFor("review-b"); !endpoint.sameOccupant(plain.Models.Reviewers[1]) || plain.Agents.DesignReviewerAgentFor("review-b").ID != plain.Agents.Reviewer.ID {
 		t.Fatal("without design judges the candidate reviewer must apply")
 	}
 }

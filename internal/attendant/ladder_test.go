@@ -55,7 +55,11 @@ func newLadderSetup(t *testing.T, failure runner.StageFailure) *ladderSetup {
 	fixture := newPendingFixture(t, "")
 	fixture.writeRunDir(t, "example/consumer")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
+	// The apply card exists only in a design-backed chain, so a delivery
+	// whose apply card failed is one of those — even though the card's own
+	// records belong to an implementation round, like every card after it.
 	design := runtime.IsDesignStage(failure.Stage)
+	designBacked := design || failure.Stage == runtime.StageApply
 	history := filepath.Join(runDir, "history", "stage-1")
 	if design {
 		history = filepath.Join(runDir, "history", "design-1")
@@ -71,7 +75,7 @@ func newLadderSetup(t *testing.T, failure runner.StageFailure) *ladderSetup {
 		t.Fatal(err)
 	}
 	shape := `{"request_kind":"change","needs_design":false}`
-	if design {
+	if designBacked {
 		shape = `{"request_kind":"change","needs_design":true}`
 	}
 	if err := os.WriteFile(filepath.Join(runDir, "history", "readiness", "decision.json"), []byte(shape), 0o600); err != nil {
@@ -102,12 +106,13 @@ func newLadderSetup(t *testing.T, failure runner.StageFailure) *ladderSetup {
 		card("t_v", runtime.StageValidate, "todo"),
 		card("t_p", runtime.StagePublish, "todo"),
 	}
-	if design {
+	if designBacked {
 		tasks = append([]runtime.BoardTask{
 			card("t_inv", runtime.StageInvestigate, "done"),
 			card("t_dra", runtime.StageDesignReviewA, "todo"),
 			card("t_drb", runtime.StageDesignReviewB, "todo"),
 			card("t_dd", runtime.StageDesignDecide, "todo"),
+			card("t_apply", runtime.StageApply, "todo"),
 		}, tasks...)
 	}
 	for index := range tasks {
@@ -133,7 +138,10 @@ func (s *ladderSetup) run() state.RunOverview {
 func (s *ladderSetup) climb(t *testing.T) (ladderVerdict, error) {
 	t.Helper()
 	shape := runtime.ShapeImplement
-	if runtime.IsDesignStage(s.stage) {
+	// The apply card exists only in a design-backed chain, so a delivery
+	// whose apply card failed is one of those whatever the stage name's
+	// own classification says about which round it belongs to.
+	if runtime.IsDesignStage(s.stage) || s.stage == runtime.StageApply {
 		shape = runtime.ShapeDesign
 	}
 	climb := newClimb(s.config, s.fixture.services, s.hermes, s.envelope, s.run(), s.view,
@@ -521,16 +529,18 @@ func TestAnInterruptedCardIsNotCountedAsAModelFailure(t *testing.T) {
 	if len(setup.tracker.added) != 0 {
 		t.Fatalf("the ticket was told about a restart: %q", setup.tracker.added)
 	}
-	// The same card failing for real does reach the waiting rung, so what
-	// makes the difference is the flag and not the class.
+	// The same card failing for real does spend a hand — this fixture's
+	// seats have nobody else in them, so the hand is the rebuilt
+	// instruction — which is what makes the difference the flag and not
+	// the class.
 	sealCardFailure(t, setup.runDir, runner.StageFailure{
 		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassModel, Error: "the provider gave up",
 	})
 	if _, err := setup.climb(t); err != nil {
 		t.Fatal(err)
 	}
-	if got := setup.record(); got.LadderStep != rungWait {
-		t.Fatalf("a real model failure did not reach the waiting rung: %+v", got)
+	if got := setup.record(); got.Attempts != 1 || !slices.Contains(got.Tried, "prompt:shorten") {
+		t.Fatalf("a real model failure spent nothing: %+v", got)
 	}
 }
 

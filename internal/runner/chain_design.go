@@ -229,6 +229,9 @@ func (p *Pipeline) chainDesignReview(ctx context.Context, reviewers []string, in
 	if _, err := os.Stat(p.path("readiness-ticket.json")); err == nil {
 		args = append(args, "--ticket", p.path("readiness-ticket.json"))
 	}
+	// The same two decisions the candidate reviews carry: where this judge's
+	// seat is sitting, and whether its instruction has been rebuilt.
+	args = append(args, p.seatArguments(designReviewStage(index), reviewer, round)...)
 	args = append(args, "--run-out", filepath.Join(roundDir, reviewer+"-design-review-run.json"), "--out", out)
 	if err := p.runVerb(ctx, "agent-design-review", args, p.modelKeyEnv()...); err != nil {
 		return fmt.Errorf("design review by %s did not finish: %w", reviewer, err)
@@ -312,9 +315,21 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 		// ones, which is the failure this exists to remove.
 		return errors.New("the working copy has no absolute path to give the applier")
 	}
+	// A rebuilt instruction is the same job asked shorter: what the earlier
+	// rounds objected to comes out, and the design, the working copy and the
+	// rules the applier is held to all stay. The refused validation stays
+	// too — it is the reason this round exists, not commentary on it.
+	previous := p.previousApplyFindings()
+	if implementer, err := chainImplementer(p.Config.ConsumerConfigPath); err == nil &&
+		p.seatRebuilt(runtime.StageApply, implementer, p.currentRound()) {
+		previous = ""
+	}
 	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) +
-		applyInstructionRules + p.previousApplyFindings() + p.previousValidationFailure()
-	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
+		applyInstructionRules + previous + p.previousValidationFailure()
+	// Written whole through a temporary file: the card that reads it runs
+	// in another process, and a rebuild caught half-written would hand the
+	// agent an instruction that stops mid-sentence.
+	return writeRecordAtomically(p.path("INSTRUCTION.md"), []byte(instruction))
 }
 
 // previousValidationFailure renders what the deterministic validation refused

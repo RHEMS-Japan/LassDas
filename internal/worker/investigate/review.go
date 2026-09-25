@@ -485,6 +485,7 @@ func deriveDesignOutcome(identity Identity, subject ReviewSubject, reviews []Des
 	ordered := append([]DesignReview(nil), reviews...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ReviewerID < ordered[j].ReviewerID })
 	reviewers := make(map[string]struct{}, len(ordered))
+	vendors := make(map[string]string, len(ordered))
 	requestIDs := make(map[string]struct{}, len(ordered))
 	digests := make([]string, 0, len(ordered))
 	outcome := OutcomeApproved
@@ -496,6 +497,22 @@ func deriveDesignOutcome(identity Identity, subject ReviewSubject, reviews []Des
 			return nil, "", errors.New("design reviews contain duplicates")
 		}
 		reviewers[review.ReviewerID] = struct{}{}
+		// Two judges on one provider are one provider's blind spot counted
+		// twice, which is the whole reason a design is judged twice. The
+		// configuration refuses two judges seated on one vendor, and the
+		// candidate seats reopen the question at run time: a seat that
+		// moves can land on the vendor the other one is already on. So it
+		// is settled here as well, on the records, where the fact is no
+		// longer a matter of anyone's intent.
+		//
+		// The vendor each review names is the one that answered — the
+		// record carries it and is bound to an occupant of its own seat
+		// before it reaches here. A single judge has nobody to differ
+		// from, and this has nothing to say about it.
+		if seated, taken := vendors[strings.ToLower(review.Vendor)]; taken && seated != review.ReviewerID {
+			return nil, "", errors.New("two design review seats answered from one vendor")
+		}
+		vendors[strings.ToLower(review.Vendor)] = review.ReviewerID
 		if _, duplicate := requestIDs[review.Invocation.RequestID]; duplicate {
 			return nil, "", errors.New("design review request ids contain duplicates")
 		}

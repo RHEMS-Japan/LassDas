@@ -266,7 +266,10 @@ func NewCandidate(stage int, output ModelCandidateOutput, source SourceSnapshot,
 		SchemaVersion: ArtifactSchemaVersion, Stage: stage, DeliveryID: request.DeliveryID,
 		InputSHA256: request.InputSHA256, ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA,
 		SourceSHA256: source.SourceSHA256, BaseSHA: source.BaseSHA,
-		Implementer: config.Models.Implementer, Invocation: invocation, GeneratedAt: generatedAt,
+		// The occupant, not the seat: a sealed record is about one answer,
+		// and carrying the seat's other candidates into it would put a
+		// list of models that did not run inside the candidate's digest.
+		Implementer: implementerOccupant(config), Invocation: invocation, GeneratedAt: generatedAt,
 		Files: files, Rationale: output.Rationale,
 	}
 	digest, err := candidateDigest(candidate)
@@ -291,7 +294,7 @@ func (c Candidate) Validate(source SourceSnapshot, request TicketRequest, config
 	if c.SchemaVersion != ArtifactSchemaVersion || c.Stage < 1 || c.Stage > config.MaxStages ||
 		c.DeliveryID != request.DeliveryID || c.InputSHA256 != request.InputSHA256 ||
 		c.ConfigSHA256 != request.ConfigSHA256 || c.ToolSHA != request.ToolSHA ||
-		c.SourceSHA256 != source.SourceSHA256 || c.BaseSHA != source.BaseSHA || c.Implementer != config.Models.Implementer ||
+		c.SourceSHA256 != source.SourceSHA256 || c.BaseSHA != source.BaseSHA || !implementerSeated(c.Implementer, config) ||
 		c.Invocation.Validate(c.Implementer) != nil || c.GeneratedAt.IsZero() || c.GeneratedAt.Location() != time.UTC ||
 		!sha256Pattern.MatchString(c.CandidateSHA256) {
 		return errors.New("candidate identity is invalid")
@@ -399,12 +402,23 @@ func NewReview(stage int, endpoint ModelEndpoint, output ModelReviewOutput, cand
 	return review, nil
 }
 
-func (r Review) Validate(endpoint ModelEndpoint, candidate Candidate, request TicketRequest) error {
+// Validate holds a sealed review to the seat that produced it.
+//
+// The seat id is exact: a review naming another reviewer is another seat's
+// judgment however valid it reads, and that refusal is unchanged. What the
+// seat admits is who answered — the record has to match one of the seat's
+// occupants, which is the configured endpoint for a seat that never moved
+// and the candidate that took over for one that did. Before seats a
+// candidate's review was refused by the same rule that refuses a forged
+// one, and a delivery whose provider went quiet had nowhere to go.
+func (r Review) Validate(seat ModelEndpoint, candidate Candidate, request TicketRequest) error {
+	endpoint, seated := r.seatedIn(seat)
+	if !seated {
+		return errors.New("review identity is invalid")
+	}
 	if r.SchemaVersion != ArtifactSchemaVersion || r.Stage != candidate.Stage || r.DeliveryID != request.DeliveryID ||
 		r.ConfigSHA256 != request.ConfigSHA256 || r.ToolSHA != request.ToolSHA ||
-		r.CandidateSHA256 != candidate.CandidateSHA256 || r.ReviewerID != endpoint.ID || r.Vendor != endpoint.Vendor ||
-		r.Model != endpoint.Model || r.BaseURL != endpoint.BaseURL || r.Lens != endpoint.Lens || r.Effort != endpoint.Effort ||
-		r.StructuredOutput != endpoint.StructuredOutput || r.MaxOutputTokens != endpoint.MaxOutputTokens || r.Invocation.Validate(endpoint) != nil ||
+		r.CandidateSHA256 != candidate.CandidateSHA256 || r.Invocation.Validate(endpoint) != nil ||
 		r.ReviewedAt.IsZero() || r.ReviewedAt.Location() != time.UTC || r.ReviewedAt.Add(allowedArtifactClockSkew).Before(candidate.GeneratedAt) ||
 		!sha256Pattern.MatchString(r.ReviewSHA256) {
 		return errors.New("review identity is invalid")
@@ -417,6 +431,24 @@ func (r Review) Validate(endpoint ModelEndpoint, candidate Candidate, request Ti
 		return errors.New("review digest is invalid")
 	}
 	return nil
+}
+
+// seatedIn finds the occupant a sealed review says answered. The reviewer
+// id must be the seat's own; the rest of the identity must be one of the
+// occupants, whole — a record mixing one candidate's vendor with another's
+// model is nobody the configuration ever had.
+func (r Review) seatedIn(seat ModelEndpoint) (ModelEndpoint, bool) {
+	if r.ReviewerID != seat.ID {
+		return ModelEndpoint{}, false
+	}
+	for _, occupant := range seat.Seat() {
+		if r.Vendor == occupant.Vendor && r.Model == occupant.Model && r.BaseURL == occupant.BaseURL &&
+			r.Lens == occupant.Lens && r.Effort == occupant.Effort &&
+			r.StructuredOutput == occupant.StructuredOutput && r.MaxOutputTokens == occupant.MaxOutputTokens {
+			return occupant, true
+		}
+	}
+	return ModelEndpoint{}, false
 }
 
 func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, request TicketRequest, config Config) (StageDecision, error) {
@@ -437,15 +469,18 @@ func DecideStage(candidate Candidate, reviews []Review, source SourceSnapshot, r
 	}
 	outcome := "converged"
 	digests := make([]string, 0, len(reviews))
-	for _, endpoint := range config.Models.Reviewers {
-		review, exists := byID[endpoint.ID]
-		if !exists || review.Validate(endpoint, candidate, request) != nil {
+	for _, seat := range config.Models.Reviewers {
+		review, exists := byID[seat.ID]
+		if !exists || review.Validate(seat, candidate, request) != nil {
 			return StageDecision{}, errors.New("stage review set is invalid")
 		}
 		digests = append(digests, review.ReviewSHA256)
 		if review.Verdict == "revise" {
 			outcome = "revise"
 		}
+	}
+	if err := seatsStayDiverse(reviews, config); err != nil {
+		return StageDecision{}, err
 	}
 	if outcome == "revise" && candidate.Stage == config.MaxStages {
 		outcome = "nonconverged"
@@ -487,14 +522,17 @@ func (d StageDecision) Validate(candidate Candidate, reviews []Review, source So
 		requestIDs[review.Invocation.RequestID] = struct{}{}
 	}
 	expectedOutcome := "converged"
-	for index, endpoint := range config.Models.Reviewers {
-		review, exists := byID[endpoint.ID]
-		if !exists || review.Validate(endpoint, candidate, request) != nil || d.ReviewSHA256s[index] != review.ReviewSHA256 {
+	for index, seat := range config.Models.Reviewers {
+		review, exists := byID[seat.ID]
+		if !exists || review.Validate(seat, candidate, request) != nil || d.ReviewSHA256s[index] != review.ReviewSHA256 {
 			return errors.New("stage decision review set is invalid")
 		}
 		if review.Verdict == "revise" {
 			expectedOutcome = "revise"
 		}
+	}
+	if err := seatsStayDiverse(reviews, config); err != nil {
+		return err
 	}
 	if expectedOutcome == "revise" && candidate.Stage == config.MaxStages {
 		expectedOutcome = "nonconverged"

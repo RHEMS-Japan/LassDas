@@ -46,10 +46,10 @@ import (
 const (
 	// rungReclaim makes room on the volume.
 	rungReclaim = 0
-	// rungSeat moves a role to another model and another provider. The
-	// candidate seats it needs do not exist yet; a model failure therefore
-	// descends past this rung today. When they arrive, their hands belong
-	// in ladderHands under FailureClassModel and nothing else here changes.
+	// rungSeat moves a role to another model and another provider, and,
+	// when the seat has nowhere left to move, asks the same occupant a
+	// shorter way. Both are seat.go's; both are this rung, because they
+	// are the two answers to one thing — the model will not answer.
 	rungSeat = 1
 	// rungRoute reaches the same thing by another route.
 	rungRoute = 2
@@ -149,13 +149,18 @@ type ladderClimb struct {
 // played. An empty list descends straight to the waiting rung.
 //
 // Each hand has to be a different hand. Dispatching the same stage against
-// the same model with the same prompt is the loop this replaces, which is
-// why a model failure has no hand here yet: moving the role to another seat
-// is the remedy, and the seats are not configurable yet. Until they are, a
-// model that will not answer is waited out rather than asked again at once,
-// which is both cheaper and likelier to work.
-func ladderHands(class runner.FailureClass) []ladderHand {
+// the same model with the same prompt is the loop this replaces, so a model
+// that will not answer is moved to another seat, and when the seat has run
+// out of occupants the instruction is rebuilt before anybody waits.
+//
+// The model hands depend on the delivery, not only on the class: which
+// seats a role has is the consumer's to configure, and whether a candidate
+// may be taken depends on where the other review seat is sitting at this
+// moment. The rest are the same hands for every delivery.
+func ladderHands(class runner.FailureClass, climb ladderClimb) []ladderHand {
 	switch class {
+	case runner.FailureClassModel:
+		return modelHands(climb)
 	case runner.FailureClassDisk:
 		return []ladderHand{
 			// Other deliveries' leavings before this delivery's own. The
@@ -181,10 +186,9 @@ func ladderHands(class runner.FailureClass) []ladderHand {
 		// hands for this rung.
 		return []ladderHand{{step: rungTool, name: "tool:fresh-card"}}
 	default:
-		// A model that will not answer (the seats are not here yet), a key
-		// that has reached its limit (no seat could help — every one of them
-		// is reached through that key), and a failure nobody could name.
-		// All three wait.
+		// A key that has reached its limit — no seat could help, every one
+		// of them is reached through that key — and a failure nobody could
+		// name. Both wait.
 		//
 		// A refused verification is here too, and never arrives: it is the
 		// validate card's own answer about the change, and the round it
@@ -292,7 +296,7 @@ func climbLadder(ctx context.Context, climb ladderClimb) (ladderVerdict, error) 
 		return ladderSpent, nil
 	}
 
-	hand, found := nextHand(class, record.Tried)
+	hand, found := nextHand(class, climb, record.Tried)
 	if !found {
 		return waitRung(ctx, climb, class, record, now)
 	}
@@ -452,8 +456,8 @@ func ladderWait(chain runtime.ChainConfig, record ladderRecord) time.Duration {
 
 // nextHand is the first hand for this kind of failure that has not been
 // played. No hand left means the waiting rung.
-func nextHand(class runner.FailureClass, tried []string) (ladderHand, bool) {
-	for _, hand := range ladderHands(class) {
+func nextHand(class runner.FailureClass, climb ladderClimb, tried []string) (ladderHand, bool) {
+	for _, hand := range ladderHands(class, climb) {
 		if !slices.Contains(tried, hand.name) {
 			return hand, true
 		}
@@ -556,11 +560,13 @@ func stageRound(view chainView, stageName string) int {
 // That is the reporting path only, and two regenerating ones still end a
 // delivery under two of these codes. A revise that meets the round ceiling
 // reports the model failure its classification carried (chains.go, the
-// revise arm of classifyChainFailure). A design-backed round whose sealed
-// reviews cannot be read reports the internal failure
-// (chains_design.go, unreadableReviewsOutcome) — no model was asked
-// anything there, and no amount of dispatching the stage again repairs a
-// record. Both reach the report through actionRegenerate, which is why
+// revise arm of classifyChainFailure). And a design-backed round whose
+// sealed review cannot be read reports the internal failure
+// (chains_design.go, unreadableReviewsOutcome) in the one case left to it:
+// a delivery with no seat to ask again — none configured, or a
+// configuration that will not read. A record that names its seat is that
+// seat's own failure to leave a usable answer and climbs this ladder like
+// any other. Both reach the report through actionRegenerate, which is why
 // neither passes this gate.
 //
 // The codes stay in the vocabulary either way: ledger rows and comments

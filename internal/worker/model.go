@@ -883,7 +883,7 @@ func (i *ModelInvoker) converseJSON(ctx context.Context, endpoint ModelEndpoint,
 		if objection == nil {
 			return total, nil
 		}
-		last = fmt.Errorf("%w (answer %d of %d, request %s, began: %s)", objection, attempt, modelAnswerAttempts, usage.RequestID, answerHead(response))
+		last = fmt.Errorf("%w (answer %d of %d, request %s"+AnswerHeadMarker+"%s)", objection, attempt, modelAnswerAttempts, usage.RequestID, answerHead(response))
 		messages = append(messages,
 			ChatMessage{Role: "assistant", Content: response},
 			ChatMessage{Role: "user", Content: "前の答えは受け付けられませんでした: " + objection.Error() +
@@ -1323,10 +1323,15 @@ func validatePreviousStage(stage int, previous *Candidate, reviews []Review, sou
 	return nil
 }
 
+// configuredReviewer reports whether this endpoint is somebody the
+// configuration seats among these reviewers — the endpoint one of them
+// declares, or one of its candidates (seat.go).
 func configuredReviewer(endpoint ModelEndpoint, reviewers []ModelEndpoint) bool {
-	for _, configured := range reviewers {
-		if configured == endpoint {
-			return true
+	for _, seat := range reviewers {
+		for _, occupant := range seat.Seat() {
+			if occupant.sameOccupant(endpoint) {
+				return true
+			}
 		}
 	}
 	return false

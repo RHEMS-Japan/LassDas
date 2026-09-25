@@ -63,6 +63,27 @@ func chainReviewers(consumerConfigPath string) ([]string, error) {
 	return identifiers, nil
 }
 
+// chainImplementer reads the implementer seat's id, the same lenient way
+// the reviewer ids are read: the file's other sections are the worker's
+// business and validated there, and what is needed here is a name.
+func chainImplementer(consumerConfigPath string) (string, error) {
+	raw, err := os.ReadFile(consumerConfigPath)
+	if err != nil {
+		return "", errors.New("consumer config unreadable")
+	}
+	var parsed struct {
+		Models struct {
+			Implementer struct {
+				ID string `json:"id"`
+			} `json:"implementer"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.Models.Implementer.ID == "" {
+		return "", errors.New("consumer config implementer id missing")
+	}
+	return parsed.Models.Implementer.ID, nil
+}
+
 // currentRound is the first round whose decision has not been sealed yet.
 // Rounds are complete exactly when their decision.json exists; the count of
 // decided rounds plus one is where the seal and the reviews work.
@@ -122,6 +143,12 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 		}
 	}
 	args = append(args, p.clarificationArgs()...)
+	// The implementer's seat has one launch, so the ladder's remedy for an
+	// implementer that will not answer is the instruction rather than the
+	// occupant: rebuilt shorter, once, before the delivery starts waiting.
+	if implementer, err := chainImplementer(p.Config.ConsumerConfigPath); err == nil {
+		args = append(args, p.seatArguments(runtime.StageImplement, implementer, round)...)
+	}
 	args = append(args, "--out", p.path("INSTRUCTION.md"))
 	if err := p.runVerb(ctx, "implement-instruction", args); err != nil {
 		return fmt.Errorf("implement instruction could not be rendered: %w", err)
@@ -330,6 +357,10 @@ func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, in
 		reviewArgs = append(reviewArgs, "--design-md", filepath.Join(filepath.Dir(design), "DESIGN.md"))
 		reviewArgs = append(reviewArgs, "--design", design, "--investigation", filepath.Join(filepath.Dir(design), "investigation.json"), "--measurements", p.path("measurements.jsonl"))
 	}
+	// Where this seat is sitting now, and whether its instruction has been
+	// rebuilt. Both are the ladder's decisions about an earlier attempt at
+	// this same round, and both are empty for a card nothing has failed at.
+	reviewArgs = append(reviewArgs, p.seatArguments(reviewStage(index), reviewer, round)...)
 	reviewArgs = append(reviewArgs, "--reviewer", reviewer,
 		"--run-out", fmt.Sprintf("%s/%s-run.json", stageDir, reviewer),
 		"--out", fmt.Sprintf("%s/%s.json", stageDir, reviewer))
