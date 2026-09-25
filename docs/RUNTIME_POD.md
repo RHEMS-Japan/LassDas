@@ -243,17 +243,33 @@ fabricated workflow link.
   cannot see is logged, never silently skipped.
   Before this a run on an exhausted key spent its allowance on refusals
   and died as an unexplained model failure (live, 2026-09-02).
-- **Failure streak hold**: when the same failure ended the last N
-  deliveries (`chain.failure_streak_limit`, default 3; a success, a stop,
-  an expired or required clarification and a refused or unresolved
-  readiness end a streak — they say nothing about the automation), the
-  attendant stops taking new
-  deliveries, says so once on the newest failed ticket (marker
-  `streak-hold`) and shows the reason as the board's banner. The
-  operator's 「確認済み」 on that ticket lifts it (acknowledged once,
-  `failure-streak-resolution.json` recorded in that run's directory).
-  In-flight runs are not touched; the held ticket is read at most every
-  two minutes.
+- **The resolution ladder**: a card that fails is no longer the end of the
+  delivery. The card seals what kind of thing went wrong
+  (`history/<round>/<stage>-failure.json`), and the attendant plays a hand
+  it has not played for that kind and dispatches the stage again — the
+  failed stage and the ones after it are archived and rebuilt, the ones
+  before it keep their records. A full volume sweeps the finished
+  deliveries' copies of the destination, then gives back this delivery's
+  own verification sandbox. When nothing is left to change, the waits
+  between attempts double from `chain.retry_backoff_base_seconds`
+  (default 60) up to `chain.retry_backoff_max_seconds` (default 1800),
+  for as long as it takes; `chain.retry_max_attempts` (default 0, meaning
+  no bound) is there for an operator who wants one. After
+  `chain.retry_notice_attempts` (default 3) the ticket is told once that
+  the delivery is still going (marker `ladder`), and a key that has
+  reached its spending limit is told at once, because no model the engine
+  could move to is reached any other way. The record of the climb is
+  `retry/<stage>-r<N>.json` in the run directory, so a pod replaced
+  mid-climb resumes where it was. A 「停止」 from the requester ends the
+  delivery as cancelled: it is read without a throttle on the tick that
+  dispatches, and at most once a minute while a stage only waits — not
+  only when the next attempt is due, or a stop written a minute into a
+  half-hour wait would wait it out. A delivery with no tracker configured
+  can be neither told nor stopped, and the log says so once per stage.
+- **The failure streak hold is retired**: it stopped intake when the same
+  failure ended the last N deliveries. Nothing counts now — a failed card
+  is climbed away from rather than reported — so `chain.failure_streak_limit`
+  is refused by name at load, the way `hermes_profile` is.
 - **Intake pause**: `chain.intake_paused_since`
   (an RFC 3339 time) is the operator's explicit pause. The attendant and the
   console re-read it from the mounted config before every tick, so editing
@@ -679,7 +695,9 @@ means adding a row here and the test it names.
 | A sealed observation refused for its own screenshot: the capture was taken at quality 90 (a JPEG) and the evidence rules decode PNG only | `internal/visiblecheck` `TestScreenshotsAreTakenAsPNG` | live, 2026-09-03 (five refusals in a row on a page that showed the promised wording; found by re-running the tool on the run's artifacts with the reason unmasked) |
 | A green staging deploy whose new build was not yet served at the edge (the old pod still answered 30 seconds later), so the sealed observation judged the previous build and a correct change read as a failed check | `internal/runner` `TestObserveUntilSettledRepeatsARefusedObservation`, `TestObserveUntilSettledGivesUpAfterTheBudget`, `TestObserveUntilSettledReturnsEveryOtherOutcomeAtOnce`, `TestObserveUntilSettledStopsWhenCancelled`; `cmd/browsercheck` `TestExitCodesTellTheRefusalsApart` | live, 2026-09-03 (the first unattended delivery after the observer was fixed: the screenshot was byte-identical to one taken before the deploy) |
 | A screen check the browser could not make (an expired session jar sent it to the portal) reported as a failed check of a correct change, and a jar nobody renewed | `internal/visiblecheck` `TestLoadSessionCookiesFollowsTheSeedDigestNotFileTimes`, `TestInstallableCookiesDropOnlyTheExpired`, `TestLandedAcceptsTheOriginAndItsPathsOnly`, `TestStillSigningInKeepsTheLoginPageAndErrorsOffTheLanding`, `TestJarRejectedReadsWhereTheBrowserCameToRest`, `TestSameDocumentAndSameOrigin`, `TestSafeURLDropsQueryAndFragment`, `TestRelevantDomainsAndKeepCookie`, `TestWriteSessionFileRoundTripsOwnerOnly`; `internal/runner` `TestCourtesyVerdictNamesTheBlock`, `TestConsumerObservationCarriesTheLoginEntry`, `TestLoadE2ESessionCookies`; `internal/hook` `TestObserveBlockedReportsNameWhoActs`, `TestSessionHoldContentCarriesTheMarkerAndNamesTheDestination`; `internal/attendant` `TestCheckSessionsHoldsOnRefusalOnlyThrottlesAndClears`, `TestCheckSessionsClearsAStaleHoldWhenTheConfigIsUnreadable`, `TestSessionHoldShowsAtIntakeAsAttention`, `TestObserveBlockedIsAnAttentionState`; `internal/worker` `TestValidLoginURL`, `TestConsumerLoginURLsAreValidatedAndResolvedPerEnvironment`; `cmd/browsercheck` `TestSignInForPicksTheEnvironmentEntry` | live, 2026-09-03 (the first delivery to run every stage unattended reached staging and was refused at the screen check by a session 28 hours dead) |
-| The same failure ending three deliveries in a row with nobody told | `internal/attendant` `TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures`, `TestHoldForStreakPostsOnceAndLiftsOnConfirmation`; `internal/hook` `TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester`; `cmd/statusboard` `TestBoardPageRendersTheIntakeHoldNotice` | live, 2026-09-02 (three tickets died identically on one implementer setting) |
+| The same failure ending three deliveries in a row with nobody told | — the hold that counted them is retired: a failed card is climbed away from rather than reported, so the run of identical endings cannot form (`internal/attendant` `TestTheThreeBrokenEndingsAreNoLongerProduced`) | live, 2026-09-02 (three tickets died identically on one implementer setting) |
+| A card that failed ending the delivery, so a night's work reached the morning as a ticket saying nothing was done | `internal/attendant` `TestOnlyTheFailedStageAndTheOnesAfterItAreRebuilt`, `TestTheSameHandIsNeverPlayedTwice`, `TestADiskFailureSweepsTheFinishedRunsBeforeItsOwnSandbox`, `TestTheClimbSurvivesAPodBeingReplaced`, `TestAKeyAtItsLimitWaitsIsToldOnceAndResumes`, `TestAStopAskedForDuringTheClimbEndsTheDelivery` | live, 2026-09-25 (a review card went twenty-six minutes without an answer and the delivery ended) |
+| A pod replaced mid-turn recorded as a model that would not answer, sending the delivery down half an hour of waits over a rolling restart | `internal/runner` `TestAStepKilledByItsContextIsSealedAsInterrupted`, `TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed`; `internal/attendant` `TestAnInterruptedCardIsNotCountedAsAModelFailure` | review, 2026-09-25 (a step killed by a signal comes back from Cmd.Run as an exit code with no error beside it) |
 | A stop comment competing with a deadline and a Go | `internal/attendant` `TestStopRequestedFailsClosed`, `TestContainsStopComment` | — |
 | The proposer says "no design" and the checker disagrees, and the design is skipped anyway | `internal/worker` `TestNeedsDesignFallsToSafeSide` | — (design #18 §6, issue #30) |
 | A destination with no trigger vocabulary configured being judged by anything other than the framework's default vocabulary | `internal/worker` `TestUnsetTriggerWordsUseTheDefaultVocabulary` | — (design #18 §6, issue #30) |
@@ -709,7 +727,7 @@ means adding a row here and the test it names.
 | A sound review discarded over its label — one non-ASCII word in a finding code failed the whole card and ended the delivery as a model failure; on the candidate review the same label also carries design-wrong, the signal that sends the delivery back to its design | `internal/worker/investigate` `TestAFindingLabelIsMadeToFitInsteadOfEndingTheReview`; `internal/worker` `TestTheAgentsFindingLabelIsNormalisedAsItIsRead`, `TestTheCandidateReviewersLabelIsNormalisedAsItIsRead` | live, 2026-09-09 |
 | A design that claims something does not exist from a listing of names, leaves a measurement it took out of the design, or promises measured values with no record id — each spent a review round in both live runs | `internal/worker` `TestTheDesignContractStatesWhatTheReviewersKeepRejecting` | live, 2026-09-09 (two consecutive runs) |
 | An applier's objection written where its instruction says (the root of its working copy) ending the run as a change outside the writable scope instead of reopening the design; an objection beside other edits, or with an empty or overlong reason, accepted or left in the tree; an objection left behind by a run that died, read by the card's second attempt as this round's | `cmd/worker` `TestRunInstructionSealsTheAppliersObjectionWrittenInTheWorkingDirectory`, `TestAFailedApplierLeavesNoObjectionForTheNextAttempt`, `TestTheApplierCardClearsALeftoverObjectionBeforeItRuns`, `TestAnApplierHaltThatIsNotARegularFileIsRefused`; `internal/attendant` `TestApplyCardObjectionReopensDesignRound`; `internal/runner` `TestChainApplyCardCarriesTheDesignAndTheObjectionDestination`, `TestApplyInstructionCarriesThePreviousRoundsFindings` (rule pins) | live, 2026-09-09 (#103) |
-| An investigation-only delivery with no ending, or its ending counted as a failure | `internal/hook` `TestInvestigatedIsATerminalCode`; `internal/attendant` streak exemption | design review, 2026-09-04 |
+| An investigation-only delivery with no ending | `internal/hook` `TestInvestigatedIsATerminalCode` | design review, 2026-09-04 |
 | A read-only identity that is read-only in name only (a `get` that returns a Secret, a `SELECT` that calls a writer function, a session that switches `transaction_read_only` off) | not a test: the eleven stage-0 refusals in `deploy/examples/investigating-designer/README.md`, recorded per consumer before the role is enabled; rows 7, 8 and 11 become `internal/probe` tests with the probe package | design review, 2026-09-04 |
 | Tool pins that do not match the image's binaries | not a test: `release.sh` reads the pins from the image | live, 2026-09-01 |
 | A run claimed under one engine revision is ended by the next: the terminal report is refused as `terminal_report_conflict` for ever when the owner comes from the running engine | `internal/state` `TestClaimOwnerIsTheIdentityTheRunWasClaimedUnder`; `Terminal.owner` reads the claim owner from the run row | live, 2026-09-05 (an investigation-only run claimed under 55ed29c, reported under 896efa8) |

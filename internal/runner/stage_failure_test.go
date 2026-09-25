@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -224,6 +225,150 @@ func TestSealStageFailureWritesBesideTheRoundsOtherRecords(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(pipeline.Workspace, "history", "design-1", "investigate-failure.json")); err != nil {
 		t.Fatalf("design account not beside its round: %v", err)
 	}
+}
+
+// A pod being replaced cancels whatever every card was doing, and for a
+// verb that spends a model turn the class reads that as a model failure —
+// from inside the process it is one, because the turn did not finish. The
+// record says which it was, so a reader deciding the model will not answer
+// does not count a rolling restart towards it.
+func TestSealStageFailureSaysWhenTheCardWasStoppedRatherThanFailed(t *testing.T) {
+	pipeline := stageFailurePipeline(t)
+	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		stage       string
+		failure     error
+		interrupted bool
+	}{
+		{"the pod was replaced mid-turn", runtime.StageReviewA,
+			&verbFailure{verb: "agent-review", err: context.Canceled}, true},
+		{"the card met its own wall", runtime.StageReviewB,
+			&verbFailure{verb: "agent-review", err: context.DeadlineExceeded}, true},
+		{"the provider gave up", runtime.StageValidate,
+			&verbFailure{verb: "agent-review", code: 1}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipeline.SealStageFailure(tc.stage, tc.failure)
+			record, ok := ReadStageFailure(pipeline.Workspace, tc.stage, 1)
+			if !ok {
+				t.Fatal("nothing was sealed")
+			}
+			if record.Interrupted != tc.interrupted {
+				t.Fatalf("interrupted = %v, want %v (class %q)", record.Interrupted, tc.interrupted, record.Class)
+			}
+			// The class still says what kind of thing it was, which is what
+			// makes this a second fact rather than a replacement for one.
+			if record.Class != FailureClassModel {
+				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			}
+		})
+	}
+	// And the flag is inside the digest: an account altered after the fact
+	// is refused, not read.
+	path := StageFailureFile(pipeline.Workspace, runtime.StageValidate, 1)
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := strings.Replace(string(encoded), `"error":`, `"interrupted":true,"error":`, 1)
+	if forged == string(encoded) {
+		t.Fatal("the record could not be altered; the test measures nothing")
+	}
+	if err := os.WriteFile(path, []byte(forged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStageFailure(pipeline.Workspace, runtime.StageValidate, 1); ok {
+		t.Fatal("an account given the flag after it was sealed was read as sealed")
+	}
+}
+
+// The same thing, measured through a real child process rather than a
+// hand-built failure.
+//
+// It is worth its own test because the two disagreed. A step killed by a
+// signal comes back from Cmd.Run as an exit error — Wait prefers the
+// process's own ending over the context's — so the step returns an exit code
+// with no error beside it, and every hand-built check above passed while the
+// only thing that actually runs recorded a rolling restart as a provider
+// that would not answer.
+func TestAStepKilledByItsContextIsSealedAsInterrupted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stage   string
+		context func() (context.Context, context.CancelFunc)
+	}{
+		{"the pod was replaced mid-step", runtime.StageReviewA, func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(75*time.Millisecond, cancel)
+			return ctx, cancel
+		}},
+		{"the step met its own wall", runtime.StageReviewB, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 75*time.Millisecond)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipeline := stageFailurePipeline(t)
+			pipeline.Config.WorkerBin = sleepingBinary(t)
+			ctx, cancel := tc.context()
+			defer cancel()
+			err := pipeline.runVerb(ctx, "agent-review", []string{"agent-review"})
+			if err == nil {
+				t.Fatal("a step killed mid-run returned no failure")
+			}
+			pipeline.SealStageFailure(tc.stage, err)
+			record, ok := ReadStageFailure(pipeline.Workspace, tc.stage, 1)
+			if !ok {
+				t.Fatal("nothing was sealed")
+			}
+			if !record.Interrupted {
+				t.Fatalf("interrupted = false for a step its context killed (class %q, error %q)", record.Class, record.Error)
+			}
+			// The class is untouched: what kind of thing it was is still
+			// worth knowing about a card that was stopped.
+			if record.Class != FailureClassModel {
+				t.Fatalf("class = %q, want the model verb still read as a model failure", record.Class)
+			}
+		})
+	}
+	// A step that ran to a non-zero ending of its own, under a context that
+	// is still good, is not interrupted. Without this the fix could be "say
+	// interrupted whenever the exit code is negative" and pass.
+	pipeline := stageFailurePipeline(t)
+	pipeline.Config.WorkerBin = refusingBinary(t)
+	err := pipeline.runVerb(context.Background(), "agent-review", []string{"agent-review"})
+	if err == nil {
+		t.Fatal("a step that exited non-zero returned no failure")
+	}
+	pipeline.SealStageFailure(runtime.StageValidate, err)
+	record, ok := ReadStageFailure(pipeline.Workspace, runtime.StageValidate, 1)
+	if !ok || record.Interrupted {
+		t.Fatalf("an ordinary non-zero exit was sealed as interrupted: %+v", record)
+	}
+}
+
+// sleepingBinary outlives any wait this test has patience for, so the only
+// thing that ends it is its context.
+func sleepingBinary(t *testing.T) string {
+	t.Helper()
+	return executableScript(t, "sleeping", "#!/bin/sh\nsleep 30\n")
+}
+
+// refusingBinary ends by itself, promptly, non-zero.
+func refusingBinary(t *testing.T) string {
+	t.Helper()
+	return executableScript(t, "refusing", "#!/bin/sh\nexit 3\n")
+}
+
+func executableScript(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // A run directory outlives its cards. A record that does not name the stage

@@ -16,19 +16,39 @@ func TestHoldMessagesCarryTheirMarkersAndSpeakToTheRequester(t *testing.T) {
 		}
 	}
 
-	streak := FailureStreakContent("RUN-2", "model_failed", 3)
-	if ExtractCommentMarker(streak) != CommentMarker("streak-hold", "RUN-2") {
-		t.Fatalf("streak marker = %q", ExtractCommentMarker(streak))
+	// The waiting rung's two notices. Neither asks the requester for
+	// anything and neither says the delivery ended, because it has not:
+	// both say the work continues by itself.
+	waiting := LadderWaitContent("RUN-2", "review-a")
+	if ExtractCommentMarker(waiting) != CommentMarker("ladder", "RUN-2", "review-a", "wait") {
+		t.Fatalf("ladder marker = %q", ExtractCommentMarker(waiting))
 	}
-	for _, needle := range []string{"3 回連続", "AI の応答が得られず終了 (model_failed)", "「確認済み」", "受付停止"} {
-		if !strings.Contains(streak, needle) {
-			t.Fatalf("streak hold lacks %q:\n%s", needle, streak)
+	for _, needle := range []string{"処理は続いています", "依頼は止まっていません", "対応不要", "自動再試行: あり"} {
+		if !strings.Contains(waiting, needle) {
+			t.Fatalf("the waiting notice lacks %q:\n%s", needle, waiting)
+		}
+	}
+	// It names no cause. Everything out of remedies ends on this rung — a
+	// model that would not answer, a destination that refuses the change
+	// every time, a failure nobody could name — so a sentence blaming an
+	// outside service would be wrong for most of them.
+	for _, blame := range []string{"外部のサービス", "外部サービス", "AI", "ネットワーク"} {
+		if strings.Contains(waiting, blame) {
+			t.Fatalf("the waiting notice blames %q, and this rung takes every kind of failure:\n%s", blame, waiting)
 		}
 	}
 
-	resolved := StreakResolvedContent("RUN-2")
-	if ExtractCommentMarker(resolved) != CommentMarker("streak-resolved", "RUN-2") || !strings.Contains(resolved, "受付を再開") {
-		t.Fatalf("streak resolved:\n%s", resolved)
+	limit := KeyLimitReachedContent("RUN-2", "implement")
+	if ExtractCommentMarker(limit) != CommentMarker("ladder", "RUN-2", "implement", "wait") {
+		t.Fatalf("key limit marker = %q", ExtractCommentMarker(limit))
+	}
+	for _, needle := range []string{"利用枠の上限", "依頼は止まっていません", "運用担当者", "自動再試行: あり"} {
+		if !strings.Contains(limit, needle) {
+			t.Fatalf("the key limit notice lacks %q:\n%s", needle, limit)
+		}
+	}
+	if strings.Contains(waiting, "終了") || strings.Contains(limit, "終了") {
+		t.Fatal("a waiting notice must not read as an ending")
 	}
 	if DescribeTerminalCode("somewhere_new") != "somewhere_new" {
 		t.Fatal("an unknown code must pass through unchanged")

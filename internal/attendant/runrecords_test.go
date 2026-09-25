@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // The agents run as another user with the run directory as their working
@@ -13,7 +12,7 @@ import (
 // let it pass without letting it list.
 func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 	runDir := filepath.Join(t.TempDir(), "delivery_test")
-	recordStreakCheck(runDir, time.Now())
+	writeLadderRecord(runDir, "validate", 1, ladderRecord{Attempts: 1}, &pendingTestLogger{})
 	sealBoardOutcome(runDir, "checks", "pass", "note")
 	writeBoardPhase(runDir, "delivered", &pendingTestLogger{}, "TKT-1")
 
@@ -24,7 +23,16 @@ func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o711 {
 		t.Fatalf("run directory mode = %o, want 711 (enter, not list)", got)
 	}
-	for _, name := range []string{streakCheckFile, boardOutcomeFile, boardPhaseFile} {
+	// The ladder's own record sits one directory down, and that directory
+	// is held to the same terms: the agent user may pass through it and
+	// must not be able to list it or read what is inside.
+	if got := modeOf(t, filepath.Dir(ladderRecordFile(runDir, "validate", 1))); got != 0o711 {
+		t.Fatalf("ladder record directory mode = %o, want 711 (enter, not list)", got)
+	}
+	if got := modeOf(t, ladderRecordFile(runDir, "validate", 1)); got != 0o600 {
+		t.Fatalf("ladder record mode = %o, want 600", got)
+	}
+	for _, name := range []string{boardOutcomeFile, boardPhaseFile} {
 		info, err := os.Stat(filepath.Join(runDir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -33,6 +41,15 @@ func TestRunRecordsStayClosedToOtherUsers(t *testing.T) {
 			t.Fatalf("%s mode = %o, want 600", name, got)
 		}
 	}
+}
+
+func modeOf(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
 }
 
 // A design-shape run needs the applier's launch; the attendant sees the

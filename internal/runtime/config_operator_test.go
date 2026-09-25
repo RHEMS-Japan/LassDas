@@ -1,6 +1,9 @@
 package runtime
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestOperatorAllowedIsTheRequesterOrAListedOperator(t *testing.T) {
 	tracker := TrackerConfig{AllowedCreatorID: 7001, OperatorUserIDs: []int64{7002, 7003}}
@@ -14,16 +17,27 @@ func TestOperatorAllowedIsTheRequesterOrAListedOperator(t *testing.T) {
 	}
 }
 
-func TestFailureStreakLimitDefaultsToThreeAndCanBeSwitchedOff(t *testing.T) {
-	if got := (ChainConfig{}).FailureStreakLimitValue(); got != 3 {
-		t.Fatalf("default limit = %d, want 3", got)
+// The waits between attempts, and how long one stage goes on before the
+// ticket is told once that it is still going. A configuration that says
+// nothing gets the intended shape: a minute, growing to half an hour, and
+// no limit at all on how many attempts a stage may make.
+func TestTheRetrySettingsHaveWorkingDefaults(t *testing.T) {
+	var unset ChainConfig
+	if got := unset.RetryBackoffBase(); got != time.Minute {
+		t.Fatalf("default first wait = %v, want a minute", got)
 	}
-	off := 0
-	if got := (ChainConfig{FailureStreakLimit: &off}).FailureStreakLimitValue(); got != 0 {
-		t.Fatalf("explicit 0 = %d, want 0", got)
+	if got := unset.RetryBackoffMax(); got != 30*time.Minute {
+		t.Fatalf("default longest wait = %v, want half an hour", got)
 	}
-	five := 5
-	if got := (ChainConfig{FailureStreakLimit: &five}).FailureStreakLimitValue(); got != 5 {
-		t.Fatalf("explicit 5 = %d, want 5", got)
+	if got := unset.RetryNoticeAttemptsValue(); got != 3 {
+		t.Fatalf("default attempts before the ticket is told = %d, want 3", got)
+	}
+	if unset.RetryMaxAttempts != 0 {
+		t.Fatalf("default limit on attempts = %d, want none", unset.RetryMaxAttempts)
+	}
+	set := ChainConfig{RetryBackoffBaseSeconds: 5, RetryBackoffMaxSeconds: 90, RetryNoticeAttempts: 1}
+	if set.RetryBackoffBase() != 5*time.Second || set.RetryBackoffMax() != 90*time.Second || set.RetryNoticeAttemptsValue() != 1 {
+		t.Fatalf("configured values did not come back: %v %v %d",
+			set.RetryBackoffBase(), set.RetryBackoffMax(), set.RetryNoticeAttemptsValue())
 	}
 }

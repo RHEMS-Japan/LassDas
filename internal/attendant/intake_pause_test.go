@@ -22,21 +22,18 @@ func pausedConfig(t *testing.T, since string) runtime.Config {
 	return config
 }
 
-// A queued run stays queued under the streak (silently) and under the
-// pause (told once on its ticket), and starts when neither holds.
-func TestAQueuedRunIsHeldByTheStreakOrThePause(t *testing.T) {
+// A queued run stays queued under the operator's pause, told once on its
+// ticket, and starts when the pause is not in force.
+func TestAQueuedRunIsHeldByThePause(t *testing.T) {
 	run := state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", IssueID: 30, State: "queued"}
 	source := &fakeConfirmationSource{}
 	config := pausedConfig(t, "")
 	runDir := filepath.Join(config.Chain.RunsRoot, "d3")
-	if holdQueuedRun(context.Background(), config, source, run, failureStreak{}, runDir, resolutionTestLogger{}) {
+	if holdQueuedRun(context.Background(), config, source, run, runDir, resolutionTestLogger{}) {
 		t.Fatal("nothing holds the run, yet it stayed queued")
 	}
-	if !holdQueuedRun(context.Background(), config, source, run, failureStreak{Active: true, Code: "model_failed", Count: 3}, runDir, resolutionTestLogger{}) || len(source.added) != 0 {
-		t.Fatalf("the streak must hold silently; notices = %d", len(source.added))
-	}
 	config.Chain.IntakePausedSince = "2026-09-14T08:30:00+09:00"
-	if !holdQueuedRun(context.Background(), config, source, run, failureStreak{}, runDir, resolutionTestLogger{}) || len(source.added) != 1 {
+	if !holdQueuedRun(context.Background(), config, source, run, runDir, resolutionTestLogger{}) || len(source.added) != 1 {
 		t.Fatalf("the pause must hold and tell the ticket once; notices = %d", len(source.added))
 	}
 	since, _ := config.Chain.IntakePaused()
@@ -91,25 +88,20 @@ func TestAQueuedTicketIsToldAboutEachPauseOnce(t *testing.T) {
 }
 
 // While intake is paused the board says so — on the queued run, ahead of a
-// stale budget or login hold, and as the banner (the streak's banner wins
-// while a streak is active) — with the instant in the display zone that the
-// ticket uses, whatever the pod's local zone is. A claimed run is
-// classified exactly as before.
+// stale budget or login hold, and as the banner — with the instant in the
+// display zone that the ticket uses, whatever the pod's local zone is. A
+// claimed run is classified exactly as before.
 func TestTheBoardShowsTheIntakePause(t *testing.T) {
 	config := pausedConfig(t, "2026-09-14T08:30:00+09:00")
 	queued := classifyRun(config, state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", State: "queued"}, nil)
 	if queued.Step != "intake" || queued.StepTitle != "受付停止中" || !strings.Contains(queued.Detail, "2026-09-14 08:30") {
 		t.Fatalf("queued run under the pause = step %q title %q detail %q", queued.Step, queued.StepTitle, queued.Detail)
 	}
-	if notice := intakeNotice(config, failureStreak{}); !strings.Contains(notice, "受付停止中") || !strings.Contains(notice, "2026-09-14 08:30") || !strings.Contains(notice, "実行中の依頼はそのまま進みます") {
+	if notice := intakeNotice(config); !strings.Contains(notice, "受付停止中") || !strings.Contains(notice, "2026-09-14 08:30") || !strings.Contains(notice, "実行中の依頼はそのまま進みます") {
 		t.Fatalf("banner = %q", notice)
 	}
-	streak := failureStreak{Active: true, Code: "model_failed", Count: 3, Newest: state.RunOverview{RunID: "TKT-9"}}
-	if notice := intakeNotice(config, streak); strings.Contains(notice, "受付停止中: 運用者") {
-		t.Fatalf("the streak banner must win while a streak is active: %q", notice)
-	}
 	config.Chain.IntakePausedSince = ""
-	if notice := intakeNotice(config, failureStreak{}); notice != "" {
+	if notice := intakeNotice(config); notice != "" {
 		t.Fatalf("banner without a hold = %q", notice)
 	}
 	resumed := classifyRun(config, state.RunOverview{RunID: "TKT-3", DeliveryID: "d3", State: "queued"}, nil)

@@ -18,14 +18,13 @@ import (
 const intakePausedNoticeFile = "intake-paused-notice.json"
 
 // holdQueuedRun decides whether a queued run stays queued this tick: the
-// failure streak holds it silently (the streak's own notice is on the newest
-// failed ticket), and the operator's pause holds it with one notice on its
-// ticket. False means the run may start.
-func holdQueuedRun(ctx context.Context, config runtime.Config, backlog operatorConfirmationSource, run state.RunOverview, streak failureStreak, runDir string, logger Logger) bool {
-	if streak.Active {
-		logger.Info("intake held by failure streak", "run", run.RunID, "code", streak.Code, "count", streak.Count)
-		return true
-	}
+// operator's pause holds it, with one notice on its ticket. False means the
+// run may start.
+//
+// The hold that counted deliveries ending the same way was read here too.
+// A card that fails is climbed away from rather than reported now, so the
+// run of identical endings it watched for cannot form.
+func holdQueuedRun(ctx context.Context, config runtime.Config, backlog operatorConfirmationSource, run state.RunOverview, runDir string, logger Logger) bool {
 	if since, paused := config.Chain.IntakePaused(); paused {
 		noticeIntakePaused(ctx, backlog, run, since, runDir, logger)
 		return true

@@ -77,19 +77,13 @@ func SyncChains(ctx context.Context, config runtime.Config, services *runtime.Se
 	if err != nil {
 		return err
 	}
-	// The same failure ending the last N deliveries holds intake until an
-	// operator has looked; in-flight runs keep going.
-	streak := detectFailureStreak(runs, config.Chain.FailureStreakLimitValue(), streakResolvedIn(config))
-	if streak.Active {
-		streak.Active = holdForStreak(ctx, config.Tracker, services.Backlog, streak, runDirectory(config, streak.Newest.DeliveryID), logger)
-	}
 	for _, run := range runs {
 		view := chainViewFor(tasks, run.DeliveryID)
 		switch run.State {
 		case "queued":
-			// The failure streak and the operator's pause both keep a
-			// queued run queued; claimed runs below keep going either way.
-			if holdQueuedRun(ctx, config, services.Backlog, run, streak, runDirectory(config, run.DeliveryID), logger) {
+			// The operator's pause keeps a queued run queued; claimed runs
+			// below keep going either way.
+			if holdQueuedRun(ctx, config, services.Backlog, run, runDirectory(config, run.DeliveryID), logger) {
 				continue
 			}
 			if err := startQueuedRun(ctx, config, services, hermes, run, view, logger); err != nil {
@@ -781,6 +775,36 @@ func handleChainFailure(
 	// "chain terminalized" line, which is written after the report is
 	// accepted rather than before it (review of #201).
 	logger.Info("chain failure classified", "run", run.RunID, "stage", stageName, "action", action.String())
+	// Three of the endings this could choose were never decisions about the
+	// request: something broke, and the delivery was over. The ladder takes
+	// those instead — it reads what the card said went wrong, changes
+	// something, and dispatches the stage again — and this is the only way
+	// out of it that reports anything: the requester's own stop, or a limit
+	// on the attempts that an operator deliberately configured.
+	if action == actionReport && ladderOwns(code) {
+		// The shape says which cards the chain has, so the ladder cannot
+		// rebuild anything without it. A delivery that reaches this tick has
+		// one — the tick refuses to advance a claimed run whose shape it
+		// cannot read, well before here — so this arm is the honest answer
+		// to something that should not happen rather than a path with a
+		// remedy: report as the classification decided, and say why the
+		// ladder did not get its turn.
+		plan, planErr := chainPlanFor(config, runDir, run, logger)
+		if planErr != nil {
+			logger.Error("the chain shape could not be read; the failed card is reported rather than climbed",
+				"run", run.RunID, "stage", stageName, "error", planErr.Error())
+		} else {
+			verdict, err := climbLadder(ctx, newClimb(config, services, hermes, envelope, run, view, plan, stageName, logger))
+			switch {
+			case err != nil:
+				return err
+			case verdict == ladderHandled:
+				return nil
+			case verdict == ladderStopped:
+				code = hook.TerminalCancelled
+			}
+		}
+	}
 	switch action {
 	case actionRegenerate:
 		limit, limitErr := consumerMaxStages(config.ConsumerConfigPath)

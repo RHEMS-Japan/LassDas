@@ -93,6 +93,7 @@ func TestAReturnedImplementationEndsOnItsOwnCodeWithTheReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	hermes, _ := fakeBoard(t)
+	exhaustTheLadder(t, &fixture.config, runDir, runtime.StageImplement, 1)
 	card := runtime.BoardTask{ID: "t_r1_impl", Status: "blocked",
 		IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, runtime.StageImplement, 1)}
 	view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
@@ -125,10 +126,12 @@ func TestAReturnedImplementationEndsOnItsOwnCodeWithTheReport(t *testing.T) {
 	}
 }
 
-// A card that blocked for any other reason is unchanged: the round's agent
-// did change files, so there is no report to hand back and the ending is
-// the model failure it always was.
-func TestAnImplementCardThatFailedOtherwiseStillEndsAsAModelFailure(t *testing.T) {
+// A card that blocked for any other reason still takes the other branch:
+// the round's agent did change files, so there is no report to hand back.
+// What that branch does is no longer to end the delivery — the ladder
+// climbs it — so the ending is measured where an operator asked for one by
+// capping the attempts.
+func TestAnImplementCardThatFailedOtherwiseIsNotReadAsAnAnswer(t *testing.T) {
 	fixture := newPendingFixture(t, "")
 	runDir := runDirectory(fixture.config, fixture.deliveryID)
 	fixture.writeRunDir(t, "")
@@ -152,6 +155,7 @@ func TestAnImplementCardThatFailedOtherwiseStillEndsAsAModelFailure(t *testing.T
 		t.Fatal(err)
 	}
 	hermes, _ := fakeBoard(t)
+	exhaustTheLadder(t, &fixture.config, runDir, runtime.StageImplement, 1)
 	card := runtime.BoardTask{ID: "t_r1_impl", Status: "blocked",
 		IdempotencyKey: runtime.ChainCardKey(fixture.deliveryID, runtime.StageImplement, 1)}
 	view := chainViewFor([]runtime.BoardTask{card}, fixture.deliveryID)
