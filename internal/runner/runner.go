@@ -317,12 +317,15 @@ func (p *Pipeline) verifyToolPins() error {
 }
 
 // resolveConsumer reads the delivery mode for the single consumer the draft
-// located — the workflow's source-job jq over m1-consumer.json. The pod
-// runtime ships the pull_request stopping point first; a consumer that
-// stops at integration or production is refused here, before any work,
-// because its success report needs browser evidence steps this runtime
-// does not carry yet (an honest early stop instead of an unsealable
-// terminal after a real merge).
+// located — the workflow's source-job jq over m1-consumer.json.
+//
+// Every depth is accepted. A destination that asks for integration or
+// production used to be refused here, before any work, because the pod
+// runtime could only propose; the cards that merge, wait for the
+// deployment and observe the screen now run inside the delivery, so the
+// depth is something this run carries out rather than something it turns
+// away. What this stage does is the same either way: publish the change and
+// open the pull request. Everything past it belongs to the delivery cards.
 func (p *Pipeline) resolveConsumer() error {
 	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
 	if err != nil {
@@ -351,9 +354,13 @@ func (p *Pipeline) resolveConsumer() error {
 			continue
 		}
 		switch consumer.Delivery {
-		case "pull_request":
-		case "integration", "production":
-			return fmt.Errorf("consumer %s stops at %s; the pod runtime ships pull_request delivery only", repository, consumer.Delivery)
+		case "pull_request", "integration", "production":
+		case "":
+			// The same default the destination configuration applies when
+			// the file says nothing, read here from the raw JSON: this
+			// stage decodes the few fields it needs rather than the whole
+			// typed configuration, so it has to agree with it by hand.
+			consumer.Delivery = "production"
 		default:
 			return fmt.Errorf("consumer %s has unknown delivery %q", repository, consumer.Delivery)
 		}

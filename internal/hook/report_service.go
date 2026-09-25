@@ -95,7 +95,13 @@ func (s *TerminalReportService) UseAutomaticDeliveryAfter(after time.Time) {
 }
 
 func (s *TerminalReportService) deliveryContinues(report TerminalReportRequest, binding TerminalBinding) bool {
-	return !s.automaticDeliveryAfter.IsZero() && binding.ClaimedAtMillis > 0 &&
+	// A report that names the depth it reached was written by a run that
+	// carried the depth itself: whatever was going to happen has happened,
+	// and there is nothing after the report to promise. Only a report from
+	// before the depth moved inside the run — which is what an empty value
+	// means — can still be followed by a continuation.
+	return report.ReachedDelivery == "" &&
+		!s.automaticDeliveryAfter.IsZero() && binding.ClaimedAtMillis > 0 &&
 		binding.ClaimedAtMillis >= s.automaticDeliveryAfter.UnixMilli() &&
 		report.Code == TerminalSuccess && report.PullRequestURL != "" &&
 		report.StagingEvidenceURL == "" && report.ProductionEvidenceURL == ""
@@ -309,6 +315,13 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 	}
 	if report.ProductionEvidenceURL != "" {
 		lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
+	}
+	// What a deeper delivery would have needed, on the ticket rather than in
+	// a log. A destination asked for production and the change stopped at
+	// its pull request: the requester is owed the reason on the same comment
+	// that tells them where it stopped.
+	if report.DeliveryShortfall != "" {
+		lines = append(lines, "ここまでで止まった理由: "+report.DeliveryShortfall)
 	}
 	footer := facts.render()
 	head := strings.Join(lines, "\n")

@@ -26,23 +26,36 @@ func deliverCardKey(deliveryID, stage string) string {
 	return deliveryID + ":deliver:" + stage
 }
 
-// deliverObservable is the v2 gate: fully configured, a successful run,
-// claimed after the operator's cut-off. Fails closed on anything
-// unparsable — enabling the feature must never reach back through the
-// ledger's past successes.
-func deliverObservable(chain runtime.ChainConfig, run state.RunOverview) bool {
-	if !chain.Deliver.Enabled() || run.TerminalCode != string(hook.TerminalSuccess) {
-		return false
+// deliverCardKeyAt names the card of one attempt at a phase. The first
+// attempt keeps the original key, so a delivery already in flight when this
+// engine started still finds its cards; later attempts carry their number,
+// because the board keeps archived cards in its listing and a key the
+// ladder reused would find the retired card first.
+func deliverCardKeyAt(deliveryID, stage string, attempt int) string {
+	if attempt <= 1 {
+		return deliverCardKey(deliveryID, stage)
 	}
-	enabledAfter, err := chain.Deliver.EnabledAfterTime()
-	if err != nil || run.ClaimedAt <= 0 || run.ClaimedAt < enabledAfter.UnixMilli() {
-		return false
-	}
-	return true
+	return fmt.Sprintf("%s:deliver:%s:a%d", deliveryID, stage, attempt)
 }
 
-// syncDeliver advances one terminal run's delivery by exactly one step per
-// tick.
+// deliverObservable is the tail gate: a delivery that ended in success,
+// fully configured, claimed after the operator's cut-off. Fails closed on
+// anything unparsable — enabling the feature must never reach back through
+// the ledger's past successes.
+func deliverObservable(chain runtime.ChainConfig, run state.RunOverview) bool {
+	return run.TerminalCode == string(hook.TerminalSuccess) && deliverConfigured(chain, run)
+}
+
+// syncDeliver is what is left to do for a delivery that has already been
+// reported.
+//
+// Everything that moves the change — the CI wait, the merge, the staging
+// observation, the promotion — happens while the run is still claimed now
+// (deliver_depth.go), because a delivery cannot be called a success before
+// it has been carried out. What remains after the report is what only a
+// person's later answer can settle: an outcome that asked an operator to
+// look waits for their 「確認済み」, a Go that arrived after the wait had
+// expired is answered, and the cards are retired.
 func syncDeliver(
 	ctx context.Context,
 	config runtime.Config,
@@ -59,16 +72,7 @@ func syncDeliver(
 	if !deliverFileExists(runDir, "feature-pr.json") {
 		return nil
 	}
-	cards := map[string]*runtime.BoardTask{}
-	for _, stage := range []string{"checks", "integrate", "promote"} {
-		key := deliverCardKey(run.DeliveryID, stage)
-		for index := range tasks {
-			if tasks[index].IdempotencyKey == key {
-				cards[stage] = &tasks[index]
-				break
-			}
-		}
-	}
+	cards := deliverCards(runDir, run.DeliveryID, tasks)
 	// The ticket's board phase follows the run's end, whichever tick
 	// posted it (board_phase.go).
 	projectDeliveryEnd(ctx, config, services, run, tasks, logger)
@@ -85,52 +89,11 @@ func syncDeliver(
 		}
 		// A Go after the wait expired is answered, not acted on.
 		noticeLateGo(ctx, config, services.Backlog, run, runDir, logger)
-		return sweepDeliverCards(ctx, hermes, cards)
 	}
-	if deliverFileExists(runDir, runner.DeliverProductionReportFile) {
-		return reportDeliverRelease(ctx, services, hermes, run, runDir, cards, logger)
+	if report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile); err == nil && attentionVerdict(report.Verdict) {
+		resolveAttention(ctx, config.Tracker, services.Backlog, run, runDir, "staging", report.Verdict, report.ObservedAt, logger)
 	}
-	if card := cards["promote"]; card != nil {
-		if deliverCardStopped(card) {
-			return reportDeadPromote(ctx, services, hermes, run, runDir, cards, logger)
-		}
-		return nil
-	}
-
-	stagingPosted, err := services.Tick.StagingReportPosted(ctx, run.RunID)
-	if err != nil {
-		return err
-	}
-	if stagingPosted {
-		return advanceTowardsPromotion(ctx, config, services, hermes, run, runDir, logger)
-	}
-	if deliverFileExists(runDir, runner.DeliverStagingReportFile) {
-		return reportDeliverStaging(ctx, config, services, hermes, run, runDir, cards, logger)
-	}
-	if card := cards["integrate"]; card != nil {
-		if deliverCardStopped(card) {
-			return reportDeadIntegrate(ctx, services, hermes, run, runDir, cards, logger)
-		}
-		return nil
-	}
-	if deliverFileExists(runDir, runner.DeliverChecksFile) {
-		return issueIntegrateCard(ctx, config, services, hermes, run, runDir, cards, logger)
-	}
-	if card := cards["checks"]; card != nil {
-		if deliverCardStopped(card) {
-			content := hook.DeliverStagingContent(run.RunID, hook.DeliverStagingReport{
-				Verdict: "card_failed",
-				Detail:  "自動検査 (CI) の完了待ちが結果を残さず終了しました。",
-			})
-			if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
-				return nil
-			}
-			sealBoardOutcome(runDir, "staging", "card_failed", "")
-			return sweepDeliverCards(ctx, hermes, cards)
-		}
-		return nil
-	}
-	return issueChecksCard(ctx, config, services, hermes, run, runDir, logger)
+	return sweepDeliverCards(ctx, hermes, cards)
 }
 
 func deliverCardStopped(card *runtime.BoardTask) bool {
@@ -155,23 +118,23 @@ func sweepDeliverCards(ctx context.Context, hermes *runtime.Hermes, cards map[st
 
 // issueChecksCard starts the delivery — after one stop recheck, because
 // everything from here on moves without a human.
-func issueChecksCard(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) error {
+func issueChecksCard(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) (deliverProgress, error) {
 	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, run.IssueID)
 	if err != nil {
-		return nil // fail closed: try again next tick
+		return deliverWorking, nil // fail closed: try again next tick
 	}
 	if stopped {
 		content := hook.DeliverStagingContent(run.RunID, hook.DeliverStagingReport{Verdict: "stopped"})
 		if services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 			sealBoardOutcome(runDir, "staging", "stopped", "")
 		}
-		return nil
+		return deliverStopped, nil
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{
 		Title:             fmt.Sprintf("%s deliver: CI 完了待ち", run.RunID),
 		Body:              fmt.Sprintf("納品 PR の自動検査 (CI) の完了を待ちます。\nDelivery: %s\nTicket: %s", run.DeliveryID, run.RunID),
 		Assignee:          config.Chain.Deliver.ChecksProfile,
-		IdempotencyKey:    deliverCardKey(run.DeliveryID, "checks"),
+		IdempotencyKey:    deliverCardKeyAt(run.DeliveryID, "checks", deliverAttempt(runDir, "checks")),
 		Workspace:         "dir:" + runDir,
 		MaxRuntimeSeconds: config.Chain.Deliver.ChecksWallSeconds(),
 		CreatedBy:         "lassdas-attendant",
@@ -179,29 +142,29 @@ func issueChecksCard(ctx context.Context, config runtime.Config, services *runti
 	if err == nil {
 		logger.Info("deliver checks card created", "run", run.RunID)
 	}
-	return err
+	return deliverWorking, err
 }
 
 // issueIntegrateCard is the merge decision point: the LAST stop recheck
 // before the change reaches staging.
-func issueIntegrateCard(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, cards map[string]*runtime.BoardTask, logger Logger) error {
+func issueIntegrateCard(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, cards map[string]*runtime.BoardTask, logger Logger) (deliverProgress, error) {
 	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, run.IssueID)
 	if err != nil {
-		return nil // fail closed: the merge waits for a readable answer
+		return deliverWorking, nil // fail closed: the merge waits for a readable answer
 	}
 	if stopped {
 		content := hook.DeliverStagingContent(run.RunID, hook.DeliverStagingReport{Verdict: "stopped"})
 		if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
-			return nil
+			return deliverWorking, nil
 		}
 		sealBoardOutcome(runDir, "staging", "stopped", "")
-		return sweepDeliverCards(ctx, hermes, cards)
+		return deliverStopped, sweepDeliverCards(ctx, hermes, cards)
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{
 		Title:             fmt.Sprintf("%s deliver: ステージング反映+確認", run.RunID),
 		Body:              fmt.Sprintf("ステージングへの自動マージ → デプロイ完了待ち → 画面の封印付き確認、の順で進めます。\nDelivery: %s\nTicket: %s", run.DeliveryID, run.RunID),
 		Assignee:          config.Chain.Deliver.IntegrateProfile,
-		IdempotencyKey:    deliverCardKey(run.DeliveryID, "integrate"),
+		IdempotencyKey:    deliverCardKeyAt(run.DeliveryID, "integrate", deliverAttempt(runDir, "integrate")),
 		Workspace:         "dir:" + runDir,
 		MaxRuntimeSeconds: config.Chain.Deliver.IntegrateWallSeconds(),
 		CreatedBy:         "lassdas-attendant",
@@ -209,7 +172,7 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 	if err == nil {
 		logger.Info("deliver integrate card created", "run", run.RunID)
 	}
-	return err
+	return deliverWorking, err
 }
 
 // promotableStagingVerdict is the one staging outcome a promotion may rest
@@ -219,23 +182,26 @@ func issueIntegrateCard(ctx context.Context, config runtime.Config, services *ru
 // be judged — means nothing verified the change.
 func promotableStagingVerdict(verdict string) bool { return verdict == "pass" }
 
-// advanceTowardsPromotion runs while the staging report is on the ticket
-// and no promote card exists: enforce the Go deadline, detect the Go, and
-// issue the promote card.
-func advanceTowardsPromotion(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) error {
+// advanceTowardsPromotion runs while the staging observation has passed and
+// no promote card exists: read the stop, apply the Go gate when the
+// operator asked for one, and issue the promote card.
+//
+// The gate is off by default. A delivery thrown at eleven at night is meant
+// to be finished by the morning, and a wait for someone to read a comment
+// is the one thing that cannot be; a staging observation that passed is the
+// evidence the promotion was ever going to rest on. An operator who wants
+// to look before production moves sets go_gate: required, and gets back
+// exactly what this did before — the deadline, the reminders, the Go.
+func advanceTowardsPromotion(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, logger Logger) (deliverProgress, error) {
 	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
 	if err != nil || !promotableStagingVerdict(report.Verdict) || report.PromotionHold != "" {
-		// Failed or promotion-held staging reports are terminal for the
-		// automation; the ones that asked an operator to look wait for the
-		// operator's 「確認済み」 so the board can stop calling them open.
-		if err == nil && attentionVerdict(report.Verdict) {
-			resolveAttention(ctx, config.Tracker, services.Backlog, run, runDir, "staging", report.Verdict, report.ObservedAt, logger)
-		}
-		return nil
+		// Nothing here can promote: the caller has already decided this is
+		// as deep as the delivery goes.
+		return deliverReached, nil
 	}
 	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
 	if err != nil {
-		return nil
+		return deliverWorking, nil // fail closed: the promotion waits for a readable answer
 	}
 	// A stop outranks BOTH the Go and the deadline: the requester holds
 	// the veto until the very moment the promote card exists, and a stop
@@ -248,39 +214,41 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 		if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
 			sealBoardOutcome(runDir, "release", "stopped", "")
 		}
-		return nil
+		return deliverStopped, nil
 	}
-	if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
-		content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
-		if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
-			sealBoardOutcome(runDir, "release", "expired", "")
+	if config.Chain.Deliver.GoGateRequired() {
+		if time.Now().After(report.ObservedAt.Add(config.Chain.Deliver.GoWait())) {
+			content := hook.DeliverReleaseContent(run.RunID, hook.DeliverReleaseReport{Verdict: "expired"})
+			if services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
+				sealBoardOutcome(runDir, "release", "expired", "")
+			}
+			return deliverReached, nil
 		}
-		return nil
-	}
-	marker := hook.CommentMarker(string(hook.RunCommentStagingReport), run.RunID)
-	reportCommentID, found := commentIDWithMarker(comments, marker)
-	if !found {
-		return nil // the report is not visible yet; fail closed
-	}
-	if !containsGoComment(comments, config.Tracker.AllowedCreatorID, reportCommentID) {
-		// Still waiting: remind on the questions' weekday rhythm, cut at
-		// the deadline the expiry above enforces.
-		remindGo(ctx, services.Backlog, run, report.ObservedAt, report.ObservedAt.Add(config.Chain.Deliver.GoWait()), comments, logger)
-		return nil
+		marker := hook.CommentMarker(string(hook.RunCommentStagingReport), run.RunID)
+		reportCommentID, found := commentIDWithMarker(comments, marker)
+		if !found {
+			return deliverWorking, nil // the report is not visible yet; fail closed
+		}
+		if !containsGoComment(comments, config.Tracker.AllowedCreatorID, reportCommentID) {
+			// Still waiting: remind on the questions' weekday rhythm, cut at
+			// the deadline the expiry above enforces.
+			remindGo(ctx, services.Backlog, run, report.ObservedAt, report.ObservedAt.Add(config.Chain.Deliver.GoWait()), comments, logger)
+			return deliverWorking, nil
+		}
 	}
 	_, err = hermes.CreateTask(ctx, runtime.CardSpec{
 		Title:             fmt.Sprintf("%s deliver: 本番反映", run.RunID),
 		Body:              fmt.Sprintf("Go を受けて本番反映します: 昇格 PR 作成 → マージ → 本番デプロイ完了待ち → 本番画面の封印付き確認。\nDelivery: %s\nTicket: %s", run.DeliveryID, run.RunID),
 		Assignee:          config.Chain.Deliver.PromoteProfile,
-		IdempotencyKey:    deliverCardKey(run.DeliveryID, "promote"),
+		IdempotencyKey:    deliverCardKeyAt(run.DeliveryID, "promote", deliverAttempt(runDir, "promote")),
 		Workspace:         "dir:" + runDir,
 		MaxRuntimeSeconds: config.Chain.Deliver.PromoteWallSeconds(),
 		CreatedBy:         "lassdas-attendant",
 	})
 	if err == nil {
-		logger.Info("deliver promote card created (Go observed)", "run", run.RunID)
+		logger.Info("deliver promote card created", "run", run.RunID, "go_gate", config.Chain.Deliver.GoGate)
 	}
-	return err
+	return deliverWorking, err
 }
 
 // commentIDWithMarker finds the NEWEST comment carrying exactly the given
@@ -381,54 +349,15 @@ func reportDeliverRelease(ctx context.Context, services *runtime.Services, herme
 	return sweepDeliverCards(ctx, hermes, cards)
 }
 
-// reportDeadIntegrate handles an integrate card that stopped without a
-// report: re-stat first (the card can finish between checks), then report
-// honestly — merge state included, because "nothing happened" would be a
-// lie once the branch moved.
-func reportDeadIntegrate(ctx context.Context, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, cards map[string]*runtime.BoardTask, logger Logger) error {
-	if deliverFileExists(runDir, runner.DeliverStagingReportFile) {
-		return nil // picked up next tick via the normal path
-	}
-	detail := "ステージング反映の工程カードが結果を残さず終了しました。"
-	if deliverFileExists(runDir, runner.DeliverMergeFile) {
-		detail = "ステージングへのマージは完了していますが、その後の工程カードが結果を残さず終了しました。"
-	}
-	content := hook.DeliverStagingContent(run.RunID, hook.DeliverStagingReport{Verdict: "card_failed", Detail: detail})
-	if !services.Tick.PostStagingReport(ctx, run.RunID, run.DeliveryID, content, nil) {
-		return nil
-	}
-	sealBoardOutcome(runDir, "staging", "card_failed", detail)
-	return sweepDeliverCards(ctx, hermes, cards)
-}
-
-// reportDeadPromote handles a promote card that stopped without a report.
-// The surviving artifacts decide what the ticket is told, in three honest
-// states: the merge landed (reflection or merge artifact exists), the
-// promotion PR never got made ("unchanged" is provable), or in between —
-// where only "unknown" is true.
-func reportDeadPromote(ctx context.Context, services *runtime.Services, hermes *runtime.Hermes, run state.RunOverview, runDir string, cards map[string]*runtime.BoardTask, logger Logger) error {
-	if deliverFileExists(runDir, runner.DeliverProductionReportFile) {
-		return nil
-	}
-	var report hook.DeliverReleaseReport
-	switch {
-	case deliverFileExists(runDir, runner.DeliverReflectionFile) || deliverFileExists(runDir, runner.DeliverPromotionMergeFile):
-		report = hook.DeliverReleaseReport{Verdict: "deploy_failed",
-			Detail: "本番ブランチへの反映後、工程カードが結果を残さず終了しました。デプロイと画面の状態は手動確認が必要です。"}
-	case deliverFileExists(runDir, runner.DeliverPromotionFile):
-		report = hook.DeliverReleaseReport{Verdict: "merge_unverified",
-			Detail: "本番反映の途中で工程カードが結果を残さず終了しました。本番に反映されたかどうかは確認できていません。"}
-	default:
-		report = hook.DeliverReleaseReport{Verdict: "card_failed",
-			Detail: "本番反映の工程カードが、反映を開始する前に結果を残さず終了しました。本番ブランチは未変更です。"}
-	}
-	content := hook.DeliverReleaseContent(run.RunID, report)
-	if !services.Tick.PostReleaseReport(ctx, run.RunID, run.DeliveryID, content, nil) {
-		return nil
-	}
-	sealBoardOutcome(runDir, "release", report.Verdict, report.Detail)
-	return sweepDeliverCards(ctx, hermes, cards)
-}
+// A delivery card that stops without sealing anything is not reported any
+// more. It used to be: the integrate card's death was told to the ticket as
+// "the staging step left no result", and the promote card's as one of three
+// honest guesses about whether production had moved. Both were the end of
+// the delivery, and neither was a decision about the request — a pod was
+// replaced, or a card ran out of wall clock. The ladder takes them instead,
+// and the card is dispatched again; the verb resumes past every step whose
+// record already exists, so a promotion whose merge landed is observed
+// rather than attempted a second time (deliver_depth.go).
 
 // deliverScreenshotAttachment uploads the phase screenshot (best-effort).
 func deliverScreenshotAttachment(ctx context.Context, services *runtime.Services, run state.RunOverview, runDir, shotFile, uploadName string, attached *bool, logger Logger) []int64 {

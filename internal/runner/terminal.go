@@ -143,7 +143,12 @@ func (t *Terminal) buildReport(ctx context.Context, code hook.TerminalCode, outc
 		IncompleteObjection:   evidence["incomplete_objection"],
 		FailedStep:            evidence["failed_step"],
 		ModelFailureReason:    evidence["model_failure_reason"],
-		TrailText:             trail,
+		// How far this delivery actually went, and what a deeper one would
+		// have needed. Both travel in the evidence map like every other
+		// report field the chain assembles.
+		ReachedDelivery:   evidence["reached_delivery"],
+		DeliveryShortfall: evidence["delivery_shortfall"],
+		TrailText:         trail,
 	}
 	if withSpend {
 		report.SpendText = t.loadRunSpendText(ctx)

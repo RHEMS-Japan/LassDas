@@ -142,10 +142,15 @@ type chainView struct {
 	designRound int
 	designCards map[string]runtime.BoardTask
 	all         []runtime.BoardTask
+	// board is the whole listing this tick read. The delivery's cards — the
+	// ones that merge, wait for the workflow and observe a screen — are
+	// keyed outside the chain's namespace, so they are not in any field
+	// above and the delivery hand-off needs the listing itself.
+	board []runtime.BoardTask
 }
 
 func chainViewFor(tasks []runtime.BoardTask, deliveryID string) chainView {
-	view := chainView{cards: map[string]runtime.BoardTask{}, designCards: map[string]runtime.BoardTask{}}
+	view := chainView{cards: map[string]runtime.BoardTask{}, designCards: map[string]runtime.BoardTask{}, board: tasks}
 	rounds := map[int]map[string]runtime.BoardTask{}
 	designRounds := map[int]map[string]runtime.BoardTask{}
 	for _, task := range tasks {
@@ -541,7 +546,10 @@ func advanceClaimedRun(
 		if plan.Shape == runtime.ShapeInvestigation {
 			return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 		}
-		return reportChainSuccess(ctx, config, services, envelope, run, logger)
+		// The change is published. How much further it travels is the
+		// destination's own setting, and the delivery carries it there
+		// before anything calls it a success (deliver_depth.go).
+		return completeDelivery(ctx, config, services, hermes, envelope, run, view, plan, logger)
 	}
 	for _, stage := range stages {
 		task, ok := view.card(stage.Name)
@@ -730,11 +738,21 @@ func reportChainSuccess(
 	if err != nil {
 		return errors.New("run repository unreadable")
 	}
+	evidence := outcome.Evidence
+	reached := ""
+	// What the delivery actually reached, read back from the records its
+	// cards sealed (deliver_depth.go). Only a delivery whose depth this
+	// engine decided has one: a report begun by an engine from before the
+	// depth moved into the run carries the evidence it carried then, which
+	// is what its re-submission has to reproduce byte for byte.
+	if depth, sealed := readDepthRecord(runDir); sealed {
+		reached, evidence, _ = deliveryOutcome(runDir, repository, depth, evidence)
+	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	if err := terminal.Report(ctx, hook.TerminalSuccess, runner.Outcome{Stage: outcome.Stage, Evidence: outcome.Evidence}, repository); err != nil {
+	if err := terminal.Report(ctx, hook.TerminalSuccess, runner.Outcome{Stage: outcome.Stage, Evidence: evidence}, repository); err != nil {
 		return err
 	}
-	logger.Info("chain delivered", "run", run.RunID, "round", outcome.Stage)
+	logger.Info("chain delivered", "run", run.RunID, "round", outcome.Stage, "reached", reached)
 	return nil
 }
 
