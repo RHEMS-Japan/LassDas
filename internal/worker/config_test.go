@@ -3,6 +3,7 @@ package worker
 import (
 	"automation.internal/ticket-ingress/internal/worker/investigate"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -716,5 +717,55 @@ func TestOneReviewerIsALegalConfiguration(t *testing.T) {
 	config.Models.Reviewers = nil
 	if err := config.Validate(); err == nil {
 		t.Fatal("a configuration with no judge at all was accepted")
+	}
+}
+
+// The arbiter is a seat, so the table that pins a vendor name to the hosts
+// it may be reached through covers it. Without that the one role added by
+// this change would be a way round the table.
+func TestConfigHoldsTheArbiterToTheVendorHostTable(t *testing.T) {
+	config := validTestConfig()
+	arbiter := config.Models.Readiness.Assessor
+	arbiter.ID = "arbiter"
+	config.Models.Arbiter = &arbiter
+	if err := config.Validate(); err != nil {
+		t.Fatalf("a sound arbiter was refused: %v", err)
+	}
+	host := func(raw string) string {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed.Host
+	}
+	config.Models.VendorHosts = map[string][]string{
+		strings.ToLower(config.Models.Implementer.Vendor):        {host(config.Models.Implementer.BaseURL)},
+		strings.ToLower(config.Models.Reviewers[0].Vendor):       {host(config.Models.Reviewers[0].BaseURL)},
+		strings.ToLower(config.Models.Reviewers[1].Vendor):       {host(config.Models.Reviewers[1].BaseURL)},
+		strings.ToLower(config.Models.Readiness.Assessor.Vendor): {host(config.Models.Readiness.Assessor.BaseURL)},
+		strings.ToLower(config.Models.Readiness.Checker.Vendor):  {host(config.Models.Readiness.Checker.BaseURL)},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("an arbiter on a registered host was refused: %v", err)
+	}
+	// The same vendor name, reached somewhere the table does not list.
+	moved := arbiter
+	moved.BaseURL = "https://elsewhere.example.com/v1"
+	config.Models.Arbiter = &moved
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("an arbiter on a host outside the table was accepted")
+	}
+	if !strings.Contains(err.Error(), "arbiter") {
+		t.Fatalf("the refusal does not name the seat: %v", err)
+	}
+	// And an arbiter wearing another seat's name cannot be told apart from
+	// it in the records.
+	clash := arbiter
+	clash.ID = config.Models.Reviewers[0].ID
+	config.Models.Arbiter = &clash
+	config.Models.VendorHosts = nil
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "arbiter model id") {
+		t.Fatalf("an arbiter sharing a reviewer's id was accepted: %v", err)
 	}
 }

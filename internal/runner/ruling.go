@@ -72,6 +72,12 @@ func (p *Pipeline) Arbitrate(ctx context.Context, round int) (*worker.Ruling, er
 		args = append(args, "--review", review)
 	}
 	args = append(args, p.clarificationArgs()...)
+	// A round both seats passed and the destination's own commands refused
+	// leaves no objection to rule on. What the commands printed is what the
+	// ruling is made from there, so it goes with the round's other records.
+	if _, sealed := ReadValidationFailure(p.Workspace, round); sealed {
+		args = append(args, "--validation-failure", ValidationFailureFile(p.Workspace, round))
+	}
 	args = append(args, "--out", RulingFile(p.Workspace, round))
 	if err := p.runVerb(ctx, "arbitrate", args, p.modelKeyEnv()...); err != nil {
 		return nil, fmt.Errorf("the deadlock could not be ruled on: %w", err)

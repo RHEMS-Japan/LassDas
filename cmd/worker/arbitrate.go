@@ -26,6 +26,7 @@ func runArbitrate(ctx context.Context, args []string) error {
 	sourcePath := flags.String("source", "", "")
 	candidatePath := flags.String("candidate", "", "")
 	clarificationPath := flags.String("clarification", "", "")
+	validationFailurePath := flags.String("validation-failure", "", "")
 	outputPath := flags.String("out", "", "")
 	var reviewPaths stringList
 	flags.Var(&reviewPaths, "review", "")
@@ -49,11 +50,18 @@ func runArbitrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Given for the deadlock that has no objections in it: the seats passed
+	// the change and the destination's own commands refused it, and what
+	// those commands printed is the whole of what the arbiter has to read.
+	refused, err := readValidationFailure(*validationFailurePath)
+	if err != nil {
+		return err
+	}
 	invoker, err := newModelInvoker(ctx, config.Models.ArbiterEndpoint())
 	if err != nil {
 		return err
 	}
-	ruling, err := invoker.Arbitrate(ctx, candidate, reviews, clarification, source, request, config, time.Now().UTC())
+	ruling, err := invoker.Arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "arbitration failed", err)
 		return errors.New("arbitration failed")

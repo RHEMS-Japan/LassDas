@@ -594,7 +594,7 @@ func (d StageDecision) Validate(candidate Candidate, reviews []Review, source So
 	// objections nobody raised, or another round's change — fails here, so
 	// a decision cannot talk itself into converging.
 	if d.Ruling != nil {
-		if err := d.Ruling.Validate(candidate, reviews, request); err != nil {
+		if err := d.Ruling.Validate(candidate, reviews, request, config); err != nil {
 			return err
 		}
 	}

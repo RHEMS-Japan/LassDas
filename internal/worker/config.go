@@ -868,6 +868,14 @@ type ModelConfig struct {
 	// reception assessor rules, which is the role already trusted to read a
 	// ticket and say what it asks for. Optional, and omitted when empty, so
 	// an existing configuration's canonical form is untouched.
+	//
+	// Candidates declared on this seat load and are held to the same rules
+	// as any other seat's, and nothing moves the arbiter onto one yet: a
+	// ruling is made in the attendant's own tick rather than on a card, so
+	// there is no failed card for the ladder to climb from. An arbiter that
+	// will not answer leaves the round to go on to the next one, which is
+	// the delivery carrying itself rather than stopping. Moving the seat is
+	// work for whoever gives the ruling a card of its own.
 	Arbiter *ModelEndpoint `json:"arbiter,omitempty"`
 	// VendorHosts, when present, pins every declared vendor name to the hosts
 	// its endpoints may be reached through. The different-vendor rules below
@@ -1445,6 +1453,18 @@ func (c ModelConfig) validate() error {
 		}
 		ids[id] = struct{}{}
 	}
+	// The arbiter is a seat like the others: it spends a model turn, its id
+	// names it in the records, and a delivery with two seats under one name
+	// cannot say which of them answered.
+	if c.Arbiter != nil {
+		if err := c.Arbiter.validate(false); err != nil {
+			return fmt.Errorf("arbiter: %w", err)
+		}
+		if _, exists := ids[c.Arbiter.ID]; exists {
+			return errors.New("arbiter model id duplicates another seat")
+		}
+		ids[c.Arbiter.ID] = struct{}{}
+	}
 	if strings.EqualFold(c.Readiness.Assessor.Vendor, c.Readiness.Checker.Vendor) {
 		return errors.New("readiness assessor and checker must use different vendors")
 	}
@@ -1454,6 +1474,9 @@ func (c ModelConfig) validate() error {
 		}
 		seats := append([]ModelEndpoint{c.Implementer, c.Readiness.Assessor, c.Readiness.Checker}, c.Reviewers...)
 		seats = append(seats, c.DesignReviewers...)
+		if c.Arbiter != nil {
+			seats = append(seats, *c.Arbiter)
+		}
 		// Every occupant, not only the configured one. The table is what
 		// stops a vendor name from pointing anywhere it likes, and a seat
 		// that could be moved onto an unregistered host would be a way

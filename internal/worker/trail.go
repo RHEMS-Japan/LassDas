@@ -132,20 +132,26 @@ func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailS
 			}
 			reviews = append(reviews, review)
 		}
-		// A round the arbiter ruled on was counted under that ruling, so
-		// re-deriving it without one would find objections the verdict did
-		// not count and refuse the whole trail.
-		ruling, err := ReadRulingFile(filepath.Join(stageDir, RulingFileName))
-		if err != nil {
-			return nil, errors.New("trail stage ruling could not be read")
-		}
-		decision, err := DecideStage(candidate, reviews, source, request, config, ruling)
-		if err != nil {
-			return nil, errors.New("trail stage did not rederive")
-		}
 		var sealed StageDecision
 		if err := ReadJSONFile(filepath.Join(stageDir, "decision.json"), MaxReviewJSONBytes, &sealed); err != nil {
 			return nil, errors.New("trail stage decision could not be read")
+		}
+		// Under the ruling the round was actually counted under, which the
+		// sealed decision carries and the round's own directory does not.
+		//
+		// Only one of the two rulings is in a decision. An overruling is
+		// made before the round is decided and the verdict is counted
+		// without the objections it set aside, so the decision has it. The
+		// other ruling is made after a round was decided and sent back: it
+		// tells the next round what to satisfy and changes nothing about
+		// this one, so this decision was sealed without it and must be
+		// re-derived without it. Reading the round's ruling file here
+		// handed the second kind to the tally, which changed the digest,
+		// and the mismatch took the whole record of the run out of the
+		// requester's final comment and the pull request.
+		decision, err := DecideStage(candidate, reviews, source, request, config, sealed.Ruling)
+		if err != nil {
+			return nil, errors.New("trail stage did not rederive")
 		}
 		if sealed.DecisionSHA256 != decision.DecisionSHA256 {
 			return nil, errors.New("trail stage decision does not match")

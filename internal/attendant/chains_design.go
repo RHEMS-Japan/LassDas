@@ -422,30 +422,46 @@ func reviewsFlagDesignWrong(runDir string, implementRound int, reviewers []strin
 // design-backed delivery: the applier gets the approved design's instruction
 // again (with the reviewers' findings riding in the run directory), never the
 // original implementer's.
-func regenerateDesignBackedRound(ctx context.Context, hermes *runtime.Hermes, config runtime.Config, run state.RunOverview, view chainView, plan runtime.ChainPlan, logger Logger) error {
+func regenerateDesignBackedRound(
+	ctx context.Context,
+	services *runtime.Services,
+	hermes *runtime.Hermes,
+	config runtime.Config,
+	envelope hook.DispatchEnvelope,
+	run state.RunOverview,
+	view chainView,
+	plan runtime.ChainPlan,
+	logger Logger,
+) (bool, error) {
+	// The same boundary the original chain's round has, for the same
+	// reason: the engine may have spent minutes ruling on a deadlock since
+	// the stop was last read.
+	if stopped, err := roundBoundaryStop(ctx, services, config, envelope); err != nil || stopped {
+		return stopped, err
+	}
 	for _, task := range view.all {
 		if task.Status == "done" {
 			continue
 		}
 		if err := hermes.Archive(ctx, task.ID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	pipeline := &runner.Pipeline{Config: config, Workspace: runDirectory(config, run.DeliveryID), Logger: logger}
 	_, round := pipeline.ApprovedDesign()
 	if round < 1 {
-		return errors.New("design-backed round has no approved design to re-apply")
+		return false, errors.New("design-backed round has no approved design to re-apply")
 	}
 	if err := pipeline.RenderApplyInstruction(ctx, round); err != nil {
-		return err
+		return false, err
 	}
 	rounds := runtime.ChainRounds{Design: view.designRound, Implement: view.round + 1}
 	terminalCard, err := runtime.EnsureChainFor(ctx, hermes, config.Chain, plan, nil, run.DeliveryID, run.RunID, run.Summary, rounds)
 	if err != nil {
-		return err
+		return false, err
 	}
 	logger.Info("design-backed round regenerated", "run", run.RunID, "implement_round", rounds.Implement, "terminal_card", terminalCard)
-	return nil
+	return false, nil
 }
 
 // incompleteEvidence reads why the investigation round sealed nothing and
@@ -555,7 +571,26 @@ func nextDesignRoundOrEnd(
 		if limit, limitErr := consumerRoundLimit(config.ConsumerConfigPath); limitErr == nil && (limit == 0 || view.round < limit) {
 			logger.Info("design rounds spent; the change is written again under the design it has",
 				"run", run.RunID, "round", view.round+1, "of", limit, "why", why)
-			return regenerateDesignBackedRound(ctx, hermes, config, run, view, plan, logger)
+			stopped, err := regenerateDesignBackedRound(ctx, services, hermes, config, envelope, run, view, plan, logger)
+			if err != nil {
+				return err
+			}
+			if !stopped {
+				return nil
+			}
+			// The stop read at the top of this function was before the
+			// board work; the run ends here rather than starting a round
+			// the requester has asked not to happen.
+			code := hook.TerminalCancelled
+			repository, readErr := readField(runDir, "ticket-draft.json", "repository")
+			if readErr != nil {
+				repository = ""
+			}
+			terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
+			if err := terminal.Report(ctx, code, runner.Outcome{Code: code}, repository); err != nil {
+				return err
+			}
+			return archiveChain(ctx, hermes, view.all)
 		}
 	}
 	code := cause.terminalCode(plan.Shape)
