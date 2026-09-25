@@ -15,7 +15,7 @@ func releasePathPlanFixture(t *testing.T) worker.ReleasePathPlan {
 	t.Helper()
 	plan := worker.ReleasePathPlan{
 		SchemaVersion: worker.ReleasePathSchemaVersion,
-		Repository:    "example/target", Configured: "production",
+		Repository:    "example/consumer", Configured: "production",
 		Items: []worker.ReleasePathItem{
 			{Name: "デプロイ工程のうちリポジトリの中で動く部分", Kind: worker.ReleasePathWorkflow,
 				Detail: "反映に使うマニフェストを用意してください。"},
@@ -141,5 +141,71 @@ func TestTheRenderedInstructionFileCarriesThePathBuildingWork(t *testing.T) {
 	}
 	if strings.Contains(string(instruction), ".github/workflows/deploy-production.yml") {
 		t.Fatalf("an unapplied part reached the rendered instruction:\n%s", instruction)
+	}
+}
+
+// The plan restates the destination it was decided for, and that
+// restatement is checked against the draft this round is bound to. A run
+// directory outlives its cards, so a plan left by another destination would
+// otherwise tell this round to build a release path for somewhere else.
+func TestAReleasePathPlanForAnotherDestinationIsRefused(t *testing.T) {
+	fixture := newAgentFixture(t, "true", "true")
+	planPath := fixture.path("release-path.json")
+	plan := releasePathPlanFixture(t)
+	plan.Repository = "example/elsewhere"
+	if err := plan.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = run(context.Background(), []string{
+		"implement-instruction", "--config", fixture.configPath, "--tool-sha", cliToolSHA,
+		"--draft", fixture.draftPath, "--repo-root", fixture.repoRoot,
+		"--release-path", planPath, "--out", fixture.path("INSTRUCTION.md"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not bound to this run") {
+		t.Fatalf("a plan for another destination was accepted: %v", err)
+	}
+	if _, statErr := os.Stat(fixture.path("INSTRUCTION.md")); statErr == nil {
+		t.Fatal("an instruction was written from a plan that is not this run's")
+	}
+}
+
+// An instruction too large to render drops the earlier rounds' objections
+// and renders again, because the request and the boundaries are the job.
+// The path the destination is missing is part of the job too: dropped with
+// the objections, a delivery whose findings had filled the budget would
+// build the change and quietly leave the destination with no way to deploy
+// it, and nothing would say so.
+func TestAReleasePathSurvivesTheOverflowRebuild(t *testing.T) {
+	draft, consumer, agent := releasePathConsumer()
+	// Sized so the objections are what tips it over: the request alone
+	// renders, and the 16 KiB the objections are bounded to does not.
+	draft.Request = strings.Repeat("本文。", 5600)
+	plan := releasePathPlanFixture(t)
+	findings := make([]worker.ModelFinding, 0, 16)
+	for i := range 16 {
+		findings = append(findings, worker.ModelFinding{
+			Code: "finding-code", Path: "docs/EXAMPLE.md", Line: i,
+			Message: strings.Repeat("指摘の本文。", 200),
+		})
+	}
+	withFindings, err := implementPrompt(draft, consumer, agent, nil, findings, nil, nil, nil, &plan, "/work/repo", nil)
+	if err != nil {
+		t.Fatalf("the oversized instruction did not render: %v", err)
+	}
+	if len(withFindings) > worker.MaxAgentPromptBytes {
+		t.Fatalf("prompt = %d bytes, bound is %d", len(withFindings), worker.MaxAgentPromptBytes)
+	}
+	if strings.Contains(withFindings, "### 前回の指摘") {
+		t.Fatal("the fixture did not overflow, so nothing was rebuilt")
+	}
+	if !strings.Contains(withFindings, plan.Instruction) {
+		t.Fatalf("the release path was dropped with the objections:\n%s", withFindings)
 	}
 }

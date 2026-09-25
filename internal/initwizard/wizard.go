@@ -639,7 +639,7 @@ func (w *Wizard) deliveryDepth(s *State) error {
 		{"production-login-url", "本番の画面にサインインする入口 (不要なら空)", &s.ProductionLoginURL},
 		{"observation-language", "確認の browser が画面に求める言語 (ja など)", &s.ObservationLanguage},
 	} {
-		answer, err := w.ask(s, field.id, field.label, *field.value, false)
+		answer, err := w.optional(s, field.id, field.label, *field.value)
 		if err != nil {
 			return err
 		}
@@ -655,6 +655,45 @@ func (w *Wizard) deliveryDepth(s *State) error {
 		// and every production report then ends unjudged.
 		return errors.New("staging と本番のサインイン入口は別にしてください")
 	}
+	return nil
+}
+
+// optional asks a question whose blank answer is an answer.
+//
+// A file-driven run refuses a question it has no answer for and no proposal
+// to fall back on, which is right for everything the engine cannot invent.
+// These seven are different: a destination with no sign-in entry and no
+// language preference is an ordinary destination, and the engine builds or
+// names whatever the blanks leave open. Refusing them would mean a file
+// that answered only the depth could not finish a setup at all.
+func (w *Wizard) optional(s *State, id, label, current string) (string, error) {
+	answer, err := w.ask(s, id, label, current, false)
+	var missing *MissingAnswer
+	if errors.As(err, &missing) {
+		return "", nil
+	}
+	return answer, err
+}
+
+// SeedDeliveryDepth puts the file's depth answer into the state before the
+// interview runs.
+//
+// The depth is offered as a list, and a list answers with the wizard's own
+// proposal: nobody is at the keyboard to pick anything else. So the answer
+// has to be in the state for the wizard to propose it back, which is how
+// the two key questions already travel from the file to the interview. A
+// depth the engine does not know is refused here, where the file is read,
+// rather than falling through to the proposal and quietly delivering
+// something the file did not ask for.
+func SeedDeliveryDepth(s *State, answers Answers) error {
+	depth, ok := answers.Value("delivery-depth")
+	if !ok {
+		return nil
+	}
+	if err := CheckDeliveryDepth(depth); err != nil {
+		return err
+	}
+	s.Delivery = depth
 	return nil
 }
 

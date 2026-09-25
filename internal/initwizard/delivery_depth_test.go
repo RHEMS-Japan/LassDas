@@ -1,6 +1,7 @@
 package initwizard
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,3 +123,103 @@ func (u *depthUI) Ask(id, _, fallback string, _ bool) (string, error) {
 func (u *depthUI) Choose(_, _ string, _ []Option, _ int) (int, error) { return u.proposed, nil }
 func (u *depthUI) Confirm(string) (bool, error)                       { return true, nil }
 func (u *depthUI) Info(value string)                                  { *u.said = append(*u.said, value) }
+
+// depthAnswers is a setup file carrying the depth and everything that
+// follows it, as an agent writes one.
+func depthAnswers(t *testing.T, entries map[string]string) Answers {
+	t.Helper()
+	answers := Answers{Answers: map[string]json.RawMessage{}}
+	for id, value := range entries {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answers.Answers[id] = encoded
+	}
+	return answers
+}
+
+// A file carrying all eight is accepted. The reviewer's run got eight
+// refusals of the form 「本体が聞かない質問への回答です」, which do not
+// ignore one line: they make the whole setup file unusable.
+func TestASetupFileCarryingEveryDepthAnswerIsAccepted(t *testing.T) {
+	answers := depthAnswers(t, map[string]string{
+		"delivery-depth":            "production",
+		"deliver-checks-profile":    "lassdas-checks",
+		"deliver-integrate-profile": "lassdas-integrate",
+		"deliver-promote-profile":   "lassdas-promote",
+		"deliver-enabled-after":     "2026-09-25T00:00:00Z",
+		"staging-login-url":         "https://staging.example.test/login",
+		"production-login-url":      "https://www.example.test/login",
+		"observation-language":      "ja",
+	})
+	for _, problem := range answers.Check("") {
+		if strings.Contains(problem, "本体が聞かない質問への回答です") {
+			t.Fatalf("a question the interview asks was refused: %s", problem)
+		}
+	}
+}
+
+// The file decides the depth with nobody at the keyboard. The list answers
+// with the wizard's own proposal, so the answer has to reach the state
+// before the interview runs or the file is silently overruled by the
+// default.
+func TestAFileAnsweringProductionSetsTheDepthWithNoTerminal(t *testing.T) {
+	s, _ := wizardFixture(t)
+	answers := depthAnswers(t, map[string]string{
+		"delivery-depth":            "production",
+		"deliver-checks-profile":    "lassdas-checks",
+		"deliver-integrate-profile": "lassdas-integrate",
+		"deliver-promote-profile":   "lassdas-promote",
+		"deliver-enabled-after":     "2026-09-25T00:00:00Z",
+		"staging-login-url":         "https://staging.example.test/login",
+		"production-login-url":      "https://www.example.test/login",
+		"observation-language":      "ja",
+	})
+	if err := SeedDeliveryDepth(s, answers); err != nil {
+		t.Fatalf("SeedDeliveryDepth: %v", err)
+	}
+	wizard := &Wizard{UI: &AnswersUI{Answers: answers, Project: "sample-cli"}}
+	if err := wizard.deliveryDepth(s); err != nil {
+		t.Fatalf("deliveryDepth with no terminal: %v", err)
+	}
+	if s.Delivery != "production" {
+		t.Fatalf("delivery = %q, want production", s.Delivery)
+	}
+	if s.Deliver.ChecksProfile != "lassdas-checks" || s.Deliver.PromoteProfile != "lassdas-promote" ||
+		s.Deliver.EnabledAfter != "2026-09-25T00:00:00Z" {
+		t.Fatalf("the cards were not read from the file: %+v", s.Deliver)
+	}
+	if s.ProductionLoginURL != "https://www.example.test/login" || s.ObservationLanguage != "ja" {
+		t.Fatalf("the screens were not read from the file: %+v", s)
+	}
+}
+
+// A file that answers only the depth finishes. The seven that follow are
+// blanks the engine then builds or names, so refusing the run for want of
+// them would make the depth question unanswerable by a file at all.
+func TestAFileAnsweringOnlyTheDepthStillFinishes(t *testing.T) {
+	s, _ := wizardFixture(t)
+	answers := depthAnswers(t, map[string]string{"delivery-depth": "production"})
+	if err := SeedDeliveryDepth(s, answers); err != nil {
+		t.Fatalf("SeedDeliveryDepth: %v", err)
+	}
+	wizard := &Wizard{UI: &AnswersUI{Answers: answers, Project: "sample-cli"}}
+	if err := wizard.deliveryDepth(s); err != nil {
+		t.Fatalf("a file answering only the depth did not finish: %v", err)
+	}
+	if s.Delivery != "production" || s.Deliver.ChecksProfile != "" || s.ProductionLoginURL != "" {
+		t.Fatalf("blanks were not left blank: %q / %+v", s.Delivery, s.Deliver)
+	}
+}
+
+// A depth the engine does not know is refused where the file is read.
+func TestAFileWithAnUnknownDepthIsRefusedBeforeTheInterview(t *testing.T) {
+	s, _ := wizardFixture(t)
+	if err := SeedDeliveryDepth(s, depthAnswers(t, map[string]string{"delivery-depth": "prod"})); err == nil {
+		t.Fatal("an unknown depth was seeded into the state")
+	}
+	if s.Delivery != "" {
+		t.Fatalf("delivery = %q after a refusal", s.Delivery)
+	}
+}

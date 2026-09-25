@@ -339,7 +339,7 @@ lassdas run spec --project NAME
 ## この版でできること・できないこと
 
 - できる: 納品先が GitHub の repo、課題管理が Backlog、モデルの接続先が OpenRouter、本体は手元の Docker (Apple Silicon / linux-arm64 のイメージ)、納品は PR まで。CLI アプリや文書・スクリプトの repo に向く。
-- できない (未対応): デプロイと画面での確認まで含む納品 (Web アプリ) — `delivery-depth` の答えは記録され、納品を運ぶカードの設定にも入るが、この版のウィザードが作る納品先はコマンドラインのものなので、実際には Pull Request までで止まる。GitHub Issues からの受付、サーバやコンテナ基盤で共有する本体の起動、`.lassdas/agreement.md` の合意を本体が機械で守ること (上限・送ってはいけない path・マージの担当)。これらは `agreement.md` に「本体は未対応」と書き、未検証の範囲として扱う。
+- できない (未対応): デプロイと画面での確認まで含む納品 (Web アプリ)。`delivery-depth` に staging や本番を選んでも、この版のウィザードが作る納品先はコマンドラインのもので、届け先の画面がない。**答えは `.lassdas/setup.json` と導入の記録に残るだけで、この版ではどの設定にも入らず、納品は Pull Request までで止まる。**画面のある納品先を作れるようになった時点で、同じ答えがそのまま使われる。GitHub Issues からの受付、サーバやコンテナ基盤で共有する本体の起動、`.lassdas/agreement.md` の合意を本体が機械で守ること (上限・送ってはいけない path・マージの担当)。これらは `agreement.md` に「本体は未対応」と書き、未検証の範囲として扱う。
 - 共有する本体 (Pod) の運用は [RUNTIME_POD.md](RUNTIME_POD.md)。
 
 ## 記録するもの

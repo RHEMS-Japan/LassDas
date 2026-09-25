@@ -76,6 +76,13 @@ type consumerReleaseSettings struct {
 	} `json:"mode"`
 }
 
+// errDestinationGone is the destination not being in the configuration at
+// all, which is an operator's edit rather than a fault. It is told apart
+// from a configuration that cannot be read because the two want opposite
+// answers: an edit that removed a destination mid-delivery must stop the
+// promotion, and a file that could not be opened this second must not.
+var errDestinationGone = errors.New("repository is not a configured consumer")
+
 // readConsumerReleaseSettings finds one destination's release configuration.
 func readConsumerReleaseSettings(consumerConfigPath, repository string) (consumerReleaseSettings, error) {
 	raw, err := os.ReadFile(consumerConfigPath)
@@ -98,7 +105,7 @@ func readConsumerReleaseSettings(consumerConfigPath, repository string) (consume
 			return settings, nil
 		}
 	}
-	return consumerReleaseSettings{}, errors.New("repository is not a configured consumer")
+	return consumerReleaseSettings{}, errDestinationGone
 }
 
 // stagingWorkflowPath and productionWorkflowPath are where the workflow that
@@ -443,7 +450,30 @@ func releasePathPlanFile(runDir string) string {
 // rather than leaving the delivery looking like it simply stopped.
 func holdReleasePath(runDir, reason string, logger Logger) {
 	plan, ok := readReleasePathPlan(runDir)
-	if !ok || plan.Hold == reason {
+	if !ok {
+		// No plan, which is the ordinary state of a destination whose path
+		// was complete when the delivery was claimed. Something about it
+		// stopped being true before the promotion, and the reason still has
+		// to reach the requester — so the record starts here rather than
+		// being skipped. Skipped, the report fell through to the sentence
+		// about waiting for an operator to look, which is a different thing
+		// that did not happen: the requester was told to go and approve a
+		// promotion that nothing was waiting on.
+		repository, err := readField(runDir, "ticket-draft.json", "repository")
+		if err != nil || repository == "" {
+			logger.Error("the delivery stopped before production and the reason could not be recorded",
+				"reason", reason)
+			return
+		}
+		plan = worker.ReleasePathPlan{
+			SchemaVersion: worker.ReleasePathSchemaVersion,
+			Repository:    repository, DecidedAt: time.Now().UTC(),
+		}
+		if depth, sealed := readDepthRecord(runDir); sealed {
+			plan.Configured = depth.Configured
+		}
+	}
+	if plan.Hold == reason {
 		return
 	}
 	plan.Hold = reason

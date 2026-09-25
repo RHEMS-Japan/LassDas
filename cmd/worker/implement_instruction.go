@@ -76,6 +76,14 @@ func runImplementInstruction(args []string) error {
 	if err != nil {
 		return err
 	}
+	if releasePath != nil && releasePath.Repository != draft.Repository {
+		// The plan restates the destination it was decided for, and this is
+		// what that restatement is for. A plan found at a path proves
+		// nothing about the path: a run directory outlives its cards, and a
+		// plan left by another destination would tell this round to build a
+		// release path for somewhere else.
+		return errors.New("the release path plan is not bound to this run")
+	}
 	if *rebuild != "" {
 		// The ladder has been here before and the implementer answered
 		// nothing. The request and the boundaries stay; what the earlier

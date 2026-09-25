@@ -362,3 +362,85 @@ func TestTheBuiltPathIsCheckedBeforeProduction(t *testing.T) {
 		})
 	}
 }
+
+// The probe the reviewer ran: a destination whose path was complete when
+// the delivery was claimed gets no plan, and something about it stopped
+// being true before the promotion. The reason has to be the real one.
+//
+// Without a plan on the volume the hold was dropped and the report fell
+// through to its last sentence, which says the promotion is waiting for an
+// operator to look. Nothing was waiting: the requester was sent to approve
+// a promotion that would never have been attempted, while the engine's own
+// log said the workflow file was missing.
+func TestARefusedPromotionWithNoPlanStillSaysTheRealReason(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	// The staging half of the path is there and production's is not, and
+	// no plan is sealed: this destination looked complete at reception.
+	h.writeTree(t, ".github/workflows/deploy-staging.yml")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	if _, sealed := readReleasePathPlan(h.runDir); sealed {
+		t.Fatal("the fixture sealed a plan")
+	}
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	h.tick() // would promote
+
+	if strings.Contains(h.calls(), "deliver:promote") {
+		t.Fatalf("an incomplete path was promoted on: %s", h.calls())
+	}
+	_, _, shortfall := deliveryOutcome(h.runDir, depthRepository, depthPlanFor(t, h.runDir),
+		map[string]string{"pull_request_url": "https://github.com/example/consumer/pull/9"})
+	if !strings.Contains(shortfall, "deploy-production.yml") {
+		t.Fatalf("the requester was given a reason that is not the one: %q", shortfall)
+	}
+	if strings.Contains(shortfall, "運用担当者の確認") {
+		t.Fatalf("the requester was told to approve a promotion nothing was waiting on: %q", shortfall)
+	}
+}
+
+// A destination edited out of the configuration mid-delivery stops the
+// promotion. It is the one kind of not-knowing here that is somebody's
+// decision rather than a fault, and this delivery gets no other warning:
+// past its pull request it is exempt from the restart that a changed
+// configuration otherwise causes.
+func TestADestinationEditedOutOfTheConfigurationIsNotPromotedTo(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.writeTree(t, ".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	if err := os.WriteFile(h.config.ConsumerConfigPath,
+		[]byte(`{"max_stages":3,"consumers":[{"repository":"example/elsewhere","delivery":"production"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.tick() // would promote
+
+	if strings.Contains(h.calls(), "deliver:promote") {
+		t.Fatalf("a destination that is no longer configured was promoted to: %s", h.calls())
+	}
+	if reason := releasePathHold(h.runDir); !strings.Contains(reason, "設定から外れている") {
+		t.Fatalf("the reason does not say the destination is gone: %q", reason)
+	}
+}
+
+// A configuration that cannot be read at all is a fault rather than an
+// answer, and the promotion goes ahead: every card of the delivery reads
+// the same file and fails on its own terms if it is really broken.
+func TestAnUnreadableConfigurationDoesNotStopThePromotion(t *testing.T) {
+	h := newDepthHarness(t, "production", true, "")
+	h.writeTree(t, ".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml")
+	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
+	h.write(runner.DeliverChecksFile, `{"ok":true}`)
+	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
+	h.tick() // posts the staging report
+	if err := os.WriteFile(h.config.ConsumerConfigPath, []byte(`{"consumers":[`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.tick() // promotes
+
+	if !strings.Contains(h.calls(), "deliver:promote") {
+		t.Fatalf("an unlucky read stopped a healthy delivery: %s (log: %v)", h.calls(), h.logger.lines)
+	}
+}

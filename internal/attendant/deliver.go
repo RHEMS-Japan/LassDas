@@ -3,6 +3,7 @@ package attendant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -274,17 +275,35 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 // to, and why not when it cannot.
 //
 // Read from the settings and from the destination's own checked-out tree,
-// never from what the engine believes it built. A tree that is not there to
-// read is not an answer either way, so the file check is skipped and the
-// settings are judged alone: refusing a promotion because a working copy
-// was swept would stop a delivery that is perfectly healthy.
+// never from what the engine believes it built.
+//
+// It parts two kinds of not-knowing. A destination that is GONE from the
+// configuration is an operator's edit, and the promotion stops: nothing
+// past this point knows where production is, and the edit gets no other
+// warning, because a delivery this far along is exempt from the restart
+// that a changed configuration otherwise causes (chains.go). The three
+// reads that fail open below are faults rather than answers, and each says
+// at its own line why proceeding is the safer of the two.
 func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {
+		// Unreachable from here: the delivery only got this far because the
+		// depth was planned off this same field, and the volume holds the
+		// draft for the life of the run. Fails open rather than asserting,
+		// because the promotion is the caller's decision and a lost draft
+		// says nothing about whether production can be reached.
 		return "", true
 	}
 	settings, err := readConsumerReleaseSettings(config.ConsumerConfigPath, repository)
+	if errors.Is(err, errDestinationGone) {
+		return "この納品先が設定から外れているため、本番反映は行わず staging までで止めています。", false
+	}
 	if err != nil {
+		// The file itself could not be read or parsed this second. Every
+		// card of the delivery reads it too and fails on its own terms if it
+		// is really broken, so holding the promotion here would add a second
+		// verdict about the same fault, in the requester's words, for what
+		// is usually one unlucky read.
 		return "", true
 	}
 	workflow := settings.productionWorkflowPath()
@@ -296,6 +315,12 @@ func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
 	}
 	tree := filepath.Join(runDir, "target-repo")
 	if _, err := os.Stat(tree); err != nil {
+		// The working copy is not on the volume. It is re-fetchable by
+		// design and the ladder sweeps copies to make room, so its absence
+		// is a fact about disk rather than about the path: refusing here
+		// would stop a delivery that is perfectly healthy, and the workflow
+		// it would have looked for is the same one staging just deployed
+		// through.
 		return "", true
 	}
 	if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(workflow))); err != nil {
@@ -309,6 +334,10 @@ func verifyBuiltPath(config runtime.Config, runDir string) (string, bool) {
 	if !deliverFileExists(runDir, runner.DeliverStagingProofFile) {
 		return "staging へのデプロイが実際に動いた記録が無いため、本番反映は行わず staging までで止めています。", false
 	}
+	// Unreadable on this second read is a fault, not an answer: the caller
+	// read the same file a moment ago and found a pass, which is how the
+	// delivery arrived here at all. The screen check is skipped rather than
+	// refused, because what it would have told us is already known.
 	report, err := readDeliverReport(runDir, runner.DeliverStagingReportFile)
 	if err == nil && report.ScreenChecked && !deliverFileExists(runDir, runner.DeliverStagingVisibleFile) {
 		return "staging の画面を確かめた記録が無いため、本番反映は行わず staging までで止めています。", false
