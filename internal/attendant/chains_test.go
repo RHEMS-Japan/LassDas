@@ -69,9 +69,13 @@ func TestClassifyChainFailure(t *testing.T) {
 	if action != actionReport || code != hook.TerminalReleaseFailed {
 		t.Fatalf("publish failure = %v %v", action, code)
 	}
-	action, _ = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
-	if action != actionRegenerate {
-		t.Fatalf("revise = %v", action)
+	// The code a revise carries is no longer inert. The round ceiling ends a
+	// run out of the regenerate arm under whatever the classification carried,
+	// and that arm stopped assigning one of its own, so this value is what a
+	// requester reads when a revise reaches the last configured round.
+	action, code = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
+	if action != actionRegenerate || code != hook.TerminalModelFailed {
+		t.Fatalf("revise = %v %v", action, code)
 	}
 	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), decided("clarification_required"), changed)
 	if action != actionAskQuestion || code != hook.TerminalNonconverged {
