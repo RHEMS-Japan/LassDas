@@ -852,7 +852,7 @@ const modelAnswerAttempts = 3
 // does to accept the answer — decoding it, checking it against the contract,
 // sealing the artifact — with the retry every JSON-answering call needs. An
 // answer the accept function refuses (prose, a code fence, an unknown field,
-// a pass verdict that still lists reasons, a question id outside Q1–Q3) is
+// a pass verdict that still lists reasons, a question id outside Q1–Q19) is
 // answered in the same conversation with the model's own answer
 // and the objection appended, up to modelAnswerAttempts times. Two live
 // tickets died on their first unreadable readiness answer with nothing
