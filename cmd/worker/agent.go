@@ -344,7 +344,22 @@ func reviewAgentPrompt(
 		"あなたは自動実行の中にいます。人は見ていません。",
 		"- 作業規範に「着手前に承認を得る」「体制を宣言する」とあっても、この無人実行では承認できる人がいないため、それらは行わないでください。",
 		"- 宣言・確認・挨拶の文章を出力せず、直ちにレビューして判定の JSON を出力してください。返事を待って止まると、このレビューは失敗として扱われます。",
-		"- 依頼者に質問することはできません。判断に迷ったら、未確認の点と確かめられなかった理由を findings の message に書いて revise にしてください。未確認のことを事実として断定しないでください。",
+		"- 依頼者に質問することはできません。差分を読めば確かめられるはずのことが確かめられなかったときだけ、その点と確かめられなかった理由を findings の message に書いて revise にしてください。未確認のことを事実として断定しないでください。",
+		"",
+		// Scope, stated before the lens. Two live runs looped until the round
+		// ceiling because a reviewer judged what no reviewer can see. One
+		// returned revise saying its sandbox had no compiler, so it could not
+		// watch the build, the vet pass and the tests succeed - every one of
+		// which the validation stage actually runs, after this verdict and
+		// before anything is delivered. Another returned revise because the
+		// request asked for a configuration example and a check command in the
+		// pull request description, text that does not exist while the code is
+		// being judged. Both objections were true and neither was reviewable,
+		// and the implementer had nothing it could change in answer.
+		"## 評決の対象",
+		"- 評決の対象は差分そのものです。変更されたコードと、それが依存する既存コードとの整合を見てください。",
+		"- ビルド・vet・テストの成否は、この評決のあとの検証段が、隔離した環境で実際にコマンドを実行して確かめます。あなたがそれらを実行できなかったこと、実行結果を見ていないことを理由に revise にしないでください。この実行環境にコマンドが無くても同じです。",
+		"- 差分の外にあるもの (PR の説明文、課題への記載、納品後の環境の状態、人が行う作業) は評決の対象外です。依頼の完了条件がそれらを求めていても、差分を読んで判断できる部分だけを見てください。",
 		"",
 		"## 見る観点",
 		endpoint.Lens,
@@ -430,7 +445,7 @@ func reviewAgentPrompt(
 		"## 調査の予算 (超えると失敗扱い)",
 		"- ツール実行は合計 30 回以内です。差分と直接関係しないファイルの通読はしないでください。",
 		"- ツール実行が 25 回に達したら新しい調査をやめ、その時点の材料で評決を出してください。",
-		"- 最悪の結果は評決を出さないことです。確信が持てない点が残ったら、未確認の点と確かめられなかった理由を findings の message に書いて revise としてください。断定するための根拠を推測で補わず、予算内に評決を提出してください。",
+		"- 最悪の結果は評決を出さないことです。差分を読めば確かめられるはずのことが確かめられないまま残ったときだけ、その点と確かめられなかった理由を findings の message に書いて revise としてください。対象外のものを未確認として revise にしないでください。断定するための根拠を推測で補わず、予算内に評決を提出してください。",
 		"",
 		"## 答え方 (最後にこの形の JSON だけを出力する)",
 		`{"verdict":"pass","findings":[]}`,
