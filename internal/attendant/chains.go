@@ -557,14 +557,34 @@ func advanceClaimedRun(
 		// The cards mode never parks a card for a question, so a
 		// needs_input block is as terminal as any other — logged with its
 		// kind so an unexpected one is diagnosable from the record.
+		//
+		// The class is the card's own account of what kind of thing went
+		// wrong. It decides nothing here — the classification below is
+		// unchanged — but it is what tells a disk that filled from a model
+		// that would not answer, which the card's exit code never could.
 		logger.Info("chain card failed", "run", run.RunID, "stage", stage.Name,
-			"status", task.Status, "block_kind", task.BlockKind)
+			"status", task.Status, "block_kind", task.BlockKind,
+			"class", failedCardClass(runDir, stage.Name, view))
 		if handled, err := handleDesignChainFailure(ctx, config, services, hermes, envelope, run, view, plan, stage.Name, logger); handled {
 			return err
 		}
 		return handleChainFailure(ctx, config, services, hermes, envelope, run, view, stage.Name, logger)
 	}
 	return nil
+}
+
+// failedCardClass names what the failed card said went wrong, for the line
+// this tick logs. "none" means the card sealed nothing to read: one dispatched
+// by an older engine, or one that died before it could write.
+func failedCardClass(runDir, stageName string, view chainView) string {
+	round := view.round
+	if runtime.IsDesignStage(stageName) {
+		round = view.designRound
+	}
+	if failure, ok := runner.ReadStageFailure(runDir, stageName, round); ok {
+		return string(failure.Class)
+	}
+	return "none"
 }
 
 // pendingTerminalAction says what the tick does with a run whose terminal

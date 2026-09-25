@@ -114,8 +114,8 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 	}
 	args = append(args, p.clarificationArgs()...)
 	args = append(args, "--out", p.path("INSTRUCTION.md"))
-	if code, err := p.worker(ctx, "implement-instruction", args); err != nil || code != 0 {
-		return errors.New("implement instruction could not be rendered")
+	if err := p.runVerb(ctx, "implement-instruction", args); err != nil {
+		return fmt.Errorf("implement instruction could not be rendered: %w", err)
 	}
 	return nil
 }
@@ -124,7 +124,20 @@ func (p *Pipeline) RenderImplementInstruction(ctx context.Context, round int) er
 // run directory; the caller (cmd/runner in chain-stage mode) has already
 // stripped the destination credential from the environment and hands it in
 // explicitly for the publish stage alone.
+//
+// A card that fails seals what kind of failure it was before it returns. The
+// exit code is all that survives this process, and it says only that the
+// stage stopped — the difference between a model that would not answer, a
+// full volume and a missing binary lives in the record or nowhere.
 func (p *Pipeline) RunChainStage(ctx context.Context, stage string) error {
+	err := p.runChainStage(ctx, stage)
+	if err != nil {
+		p.SealStageFailure(stage, err)
+	}
+	return err
+}
+
+func (p *Pipeline) runChainStage(ctx context.Context, stage string) error {
 	if err := p.resolveConsumer(); err != nil {
 		return err
 	}
@@ -208,8 +221,8 @@ func (p *Pipeline) chainRunInstruction(ctx context.Context, role, repoRoot, base
 			args = append(args, "--investigation", filepath.Join(filepath.Dir(design), "investigation.json"), "--measurements", p.path("measurements.jsonl"))
 		}
 	}
-	if code, err := p.worker(ctx, "run-instruction", args); err != nil || code != 0 {
-		return fmt.Errorf("the %s did not finish", role)
+	if err := p.runVerb(ctx, "run-instruction", args); err != nil {
+		return fmt.Errorf("the %s did not finish: %w", role, err)
 	}
 	return nil
 }
@@ -256,8 +269,8 @@ func (p *Pipeline) chainSealAndReview(ctx context.Context, reviewers []string, i
 				"--objection", p.path("revise-design.json"), "--objection-out", p.designObjectionPath(designRound))
 		}
 		sealArgs = append(sealArgs, "--report-run", reportRun)
-		if code, err := p.worker(ctx, "seal-candidate", sealArgs); err != nil || code != 0 {
-			return errors.New("the implemented change could not be sealed")
+		if err := p.runVerb(ctx, "seal-candidate", sealArgs); err != nil {
+			return fmt.Errorf("the implemented change could not be sealed: %w", err)
 		}
 	}
 	return p.chainReviewSealed(ctx, reviewers, index, repoRoot, baseSHA, round)
@@ -311,8 +324,8 @@ func (p *Pipeline) chainReviewSealed(ctx context.Context, reviewers []string, in
 	reviewArgs = append(reviewArgs, "--reviewer", reviewer,
 		"--run-out", fmt.Sprintf("%s/%s-run.json", stageDir, reviewer),
 		"--out", fmt.Sprintf("%s/%s.json", stageDir, reviewer))
-	if code, err := p.worker(ctx, "agent-review", reviewArgs, p.modelKeyEnv()...); err != nil || code != 0 {
-		return fmt.Errorf("review by %s did not finish", reviewer)
+	if err := p.runVerb(ctx, "agent-review", reviewArgs, p.modelKeyEnv()...); err != nil {
+		return fmt.Errorf("review by %s did not finish: %w", reviewer, err)
 	}
 	return nil
 }
@@ -344,8 +357,8 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 			"--candidate", stageDir + "/candidate.json",
 		}, reviewFlags...)
 		decideArgs = append(decideArgs, "--out", stageDir+"/decision.json")
-		if code, err := p.worker(ctx, "decide", decideArgs); err != nil || code != 0 {
-			return errors.New("the round could not be decided")
+		if err := p.runVerb(ctx, "decide", decideArgs); err != nil {
+			return fmt.Errorf("the round could not be decided: %w", err)
 		}
 	}
 	outcome, err := p.readJSONField(fmt.Sprintf("history/stage-%d/decision.json", round), "outcome")
@@ -383,7 +396,9 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 	if failed, err := p.validationStage(ctx, round, chainReviewFiles(reviewers)); err != nil {
 		return err
 	} else if failed {
-		return errors.New("the deterministic validation rejected the round")
+		// The sentinel, not a fresh sentence: this is the one failure the
+		// validate card owns, and the class turns on having taken this branch.
+		return ErrValidationRejected
 	}
 	return nil
 }
@@ -420,11 +435,16 @@ func (p *Pipeline) chainPublish(ctx context.Context, reviewers []string) error {
 		return errors.New("the last decided round did not converge")
 	}
 	delivered, err := p.deliveryStage(ctx, round, chainReviewFiles(reviewers))
+	// The delivery's own code is read before the error, and it wins. A refusal
+	// by the destination and a breakdown of the machinery both arrive here as
+	// one non-zero exit; collapsing the code into a sentence — or dropping it
+	// entirely, as the error arm did — left the two indistinguishable from
+	// outside this process. It rides the error now, into the round's record.
+	if delivered.Code != "" {
+		return &deliveryRefusal{code: delivered.Code, err: err}
+	}
 	if err != nil {
 		return err
-	}
-	if delivered.Code != "" {
-		return fmt.Errorf("delivery ended %s", delivered.Code)
 	}
 	encoded, err := json.Marshal(ChainOutcome{Stage: round, Evidence: delivered.Evidence})
 	if err != nil {

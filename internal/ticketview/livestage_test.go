@@ -4,11 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	"automation.internal/ticket-ingress/internal/runner"
-	"sort"
 )
 
 // stepCall finds every step the runner starts, with the step name as it is
@@ -16,7 +16,7 @@ import (
 // a time: gofmt wraps a long call, and a scan that required the name on the
 // same physical line as the call let a wrapped one through unseen - the
 // drift this check exists to stop (review of #200).
-var stepCall = regexp.MustCompile(`(?s)p\.(?:worker|step|controller)\(\s*ctx\s*,\s*`)
+var stepCall = regexp.MustCompile(`(?s)p\.(?:` + scannedWrapperPattern + `)\(\s*ctx\s*,\s*`)
 
 // pinnedStages is what every step's stage is, written out a second time so
 // moving one in the table is a deliberate act with a failing test behind it.
@@ -211,11 +211,32 @@ func runnerStepNames(t *testing.T) (names []string, prefixes []string) {
 // by forwardedStepNames.
 var forwardedParam = map[string]string{}
 
-// scannedWrappers are the three the scan matches at their own call sites, so
+// scannedWrappers are the ones the scan matches at their own call sites, so
 // their callers' names are already collected once. Collecting them again as
 // forwarded names doubled every ordinary step and left the floor on how many
 // the scan expects unable to fire (review of #200).
-var scannedWrappers = map[string]bool{"worker": true, "step": true, "controller": true}
+//
+// A wrapper missing from here is invisible to the whole walk: the steps
+// routed through it drop out of the call graph without any of them being
+// named, which reads as "the walk is not working" rather than as a wrapper
+// nobody listed. runVerb and runController keep the cause of a failed step,
+// and they are steps like any other.
+var scannedWrappers = map[string]bool{
+	"worker": true, "step": true, "controller": true,
+	"runVerb": true, "runController": true,
+}
+
+// scannedWrapperPattern is the same set as an alternation, built from the map
+// so the two cannot disagree. Two hand-written copies of this list is how a
+// wrapper gets added to one and not the other.
+var scannedWrapperPattern = func() string {
+	names := make([]string, 0, len(scannedWrappers))
+	for name := range scannedWrappers {
+		names = append(names, regexp.QuoteMeta(name))
+	}
+	sort.Strings(names)
+	return strings.Join(names, "|")
+}()
 
 // cardRailStage is where the attendant puts the rail while one chain card
 // runs (internal/attendant/status.go). Nine lines, and the only thing this
@@ -463,7 +484,7 @@ func forwardedStepNames(t *testing.T) map[string][]string {
 			// The same shape the step scan uses, because gofmt wraps a
 			// long call and a pattern that needed "(ctx," on one line
 			// quietly stopped seeing it (review of #200).
-			starts := regexp.MustCompile(`(?s)p\.(?:worker|step|controller)\(\s*ctx\s*,\s*` + param + `\b`)
+			starts := regexp.MustCompile(`(?s)p\.(?:` + scannedWrapperPattern + `)\(\s*ctx\s*,\s*` + param + `\b`)
 			if starts.MatchString(source[at[1]:end]) {
 				byHelper[fn] = param
 				forwardedParam[fn] = param

@@ -170,8 +170,8 @@ func (p *Pipeline) chainInvestigate(ctx context.Context, repoRoot, baseSHA strin
 	if seed, state := observationSessionPaths(); seed != "" || state != "" {
 		args = append(args, "--session-seed", seed, "--session-state", state)
 	}
-	if code, err := p.worker(ctx, "investigate", args, p.modelKeyEnv()...); err != nil || code != 0 {
-		return errors.New("the investigation round did not seal its records")
+	if err := p.runVerb(ctx, "investigate", args, p.modelKeyEnv()...); err != nil {
+		return fmt.Errorf("the investigation round did not seal its records: %w", err)
 	}
 	return nil
 }
@@ -230,8 +230,8 @@ func (p *Pipeline) chainDesignReview(ctx context.Context, reviewers []string, in
 		args = append(args, "--ticket", p.path("readiness-ticket.json"))
 	}
 	args = append(args, "--run-out", filepath.Join(roundDir, reviewer+"-design-review-run.json"), "--out", out)
-	if code, err := p.worker(ctx, "agent-design-review", args, p.modelKeyEnv()...); err != nil || code != 0 {
-		return fmt.Errorf("design review by %s did not finish", reviewer)
+	if err := p.runVerb(ctx, "agent-design-review", args, p.modelKeyEnv()...); err != nil {
+		return fmt.Errorf("design review by %s did not finish: %w", reviewer, err)
 	}
 	return nil
 }
@@ -272,8 +272,8 @@ func (p *Pipeline) chainDesignDecide(ctx context.Context, reviewers []string) er
 	decision := filepath.Join(roundDir, "decision.json")
 	if _, err := os.Stat(decision); err != nil {
 		args = append(args, "--out", decision)
-		if code, err := p.worker(ctx, "decide-design", args); err != nil || code != 0 {
-			return errors.New("the design round could not be decided")
+		if err := p.runVerb(ctx, "decide-design", args); err != nil {
+			return fmt.Errorf("the design round could not be decided: %w", err)
 		}
 	}
 	outcome, err := p.readJSONField(fmt.Sprintf("history/design-%d/decision.json", round), "outcome")
