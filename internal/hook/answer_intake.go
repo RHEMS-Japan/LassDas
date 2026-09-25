@@ -211,9 +211,10 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 				return AnswerIntakeDecision{}, errors.New("adopted answer set could not be encoded")
 			}
 			// Ascending, so the last answer the requester wrote is the one
-			// adopted. Whether it covers every question is not asked here:
-			// the answers go to the role that asked them, and a role that
-			// still cannot proceed asks again.
+			// adopted. Whether it covers every question is not asked here,
+			// and not anywhere: the requester is asked once, so a question
+			// they left alone is decided by the reception and written into
+			// the plan notice, never put to them again.
 			adopted = &AdoptedAnswerDecision{
 				CommentID:   comment.CommentID,
 				PostedAt:    comment.PostedAt,

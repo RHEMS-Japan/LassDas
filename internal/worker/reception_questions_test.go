@@ -221,6 +221,21 @@ func TestTheReceptionAsksAtMostOnce(t *testing.T) {
 	if !strings.Contains(askingBudget(policy), "already spent") {
 		t.Fatalf("the contract does not say the round is spent: %s", askingBudget(policy))
 	}
+	// A destination that does ask must not be told it never asks: the
+	// sentence has to name the reason this particular run may not, or the
+	// model is being corrected for obeying a rule nobody gave it.
+	spent := askingConditions(policy)
+	if strings.Contains(spent, "does not put questions to the requester") {
+		t.Fatalf("a destination that asks was told it does not: %s", spent)
+	}
+	if !strings.Contains(spent, "already had its round of questions") {
+		t.Fatalf("the contract does not say why this run may not ask: %s", spent)
+	}
+	silent := validTestConfig()
+	silent.Questions = QuestionsNone
+	if !strings.Contains(askingConditions(askingPolicyFor(silent, nil)), "does not put questions to the requester") {
+		t.Fatal("a destination that asks nothing is no longer told so")
+	}
 
 	invocation := validTestInvocation(config.Models.Readiness.Assessor)
 	assessment, err := NewReadinessAssessment(1, testClarificationOutput(), clarification, nil, source, request, config, invocation, testInvocationTime)

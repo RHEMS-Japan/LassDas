@@ -1445,6 +1445,9 @@ const readinessMeasurementRule = `When USER_DATA_JSON.catalogue is present, an i
 // set it. The four conditions are the standing contract; a destination that
 // asks minimally adds the fifth, and one that asks nothing replaces them.
 func askingConditions(policy askingPolicy) string {
+	if policy.RoundsSpent >= policy.RoundsAllowed && policy.Mode != QuestionsNone {
+		return `Ask nothing further. This ticket has already had its round of questions and the requester has answered; there is no second round, so decision clarification_required is not available to you and the questions array must stay empty. Anything their answers left open, you decide yourself: take the most defensible default a careful engineer would take, and record it as an assumption of kind ` + AssumptionDefensibleDefault + ` whose statement says what you decided and whose evidence says why that default and not another. Deciding is the work here; leaving a point undecided is the defect.`
+	}
 	if !policy.MayAsk() {
 		return `Ask nothing. This destination does not put questions to the requester, so decision clarification_required is not available to you and the questions array must stay empty. Every point you cannot derive from the ticket, from the repository, or from a measurement, you decide yourself: take the most defensible default a careful engineer would take, and record it as an assumption of kind ` + AssumptionDefensibleDefault + ` whose statement says what you decided and whose evidence says why that default and not another. Deciding is the work here; leaving a point undecided is the defect.`
 	}

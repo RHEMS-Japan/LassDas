@@ -260,3 +260,36 @@ func TestTheStopInstructionSurvivesALongRecord(t *testing.T) {
 		t.Fatalf("the notice broke its contract: %v", err)
 	}
 }
+
+// Between finishing the reception and acting on what it produced, the stop
+// is read again. The reception takes minutes; a requester who writes 「停止」
+// while it runs has stopped the run, and a question posted after that is a
+// question they already said no to (live 2026-09-25: the stop was written
+// eight seconds before the question went out).
+func TestAStopWrittenWhileTheReceptionRanIsHeardBeforeItActs(t *testing.T) {
+	const requester = int64(7001)
+	logger := &recordingLogger{}
+	if !stoppedWhileWorking(context.Background(),
+		fakeCommentLister{comments: []hook.BacklogComment{{UserID: requester, Body: "停止"}}},
+		requester, 42, "run-42", "asking anyway", logger) {
+		t.Fatal("a stop on the ticket was not heard")
+	}
+	if stoppedWhileWorking(context.Background(),
+		fakeCommentLister{comments: []hook.BacklogComment{{UserID: requester, Body: "よろしくお願いします"}}},
+		requester, 42, "run-42", "asking anyway", logger) {
+		t.Fatal("an ordinary comment stopped the run")
+	}
+	if len(logger.lines) != 0 {
+		t.Fatalf("a readable listing logged something: %v", logger.lines)
+	}
+	// Unlike the fail-closed read before the claim, an unreadable listing
+	// here proceeds — and says what proceeding means, because the whole
+	// reception would otherwise be re-run on every retry.
+	if stoppedWhileWorking(context.Background(), fakeCommentLister{err: errors.New("tracker down")},
+		requester, 42, "run-42", "asking anyway", logger) {
+		t.Fatal("an unreadable listing was treated as a stop")
+	}
+	if len(logger.lines) != 1 || !strings.Contains(logger.lines[0], "asking anyway") {
+		t.Fatalf("the log does not say what proceeding means here: %v", logger.lines)
+	}
+}
