@@ -86,9 +86,10 @@ assert.equal(tally.cleared, lanes.cleared.length);
 assert.equal(tally.running + tally.awaiting + tally.cleared, rows.length);
 console.log("PASS the counts line adds up to the cards on the board");
 
-// 6. Whoever has to do something is at the top: a decision first, then a
-// card waiting to be cleared, then the ones still running.
-assert.deepEqual([...lanes.active].map(run => run.delivery_id), ["c", "a", "d", "e"]);
+// 6. Whoever has to do something is at the top: a decision or a run stopped
+// out of line first, then a card waiting to be cleared, then the ones still
+// running. Within a rank, the most recently claimed comes first.
+assert.deepEqual([...lanes.active].map(run => run.delivery_id), ["c", "e", "a", "d"]);
 console.log("PASS the lane is ordered by who has to act");
 
 // 7. Both times read on one clock, whatever the browser's own zone is.
@@ -99,7 +100,34 @@ assert.equal(call("fmtStamp", ""), "");
 assert.equal(call("fmtStamp", "not a time"), "");
 console.log("PASS a time is shown on the engine's clock");
 
-// 8-11. What a finished card actually says. The times are the whole reason
+// 8. However many finished cards are waiting, every one of them is on the
+// board and the count says so. The snapshot used to cap them at thirty, so
+// past that the oldest vanished unseen and the number stopped at the cap.
+{
+  const waiting = [];
+  for (let i = 0; i < 35; i++) waiting.push(finished("w" + i, "done", { finished_at: "2026-09-25T02:00:00Z" }));
+  const many = call("splitLanes", waiting);
+  assert.equal(many.active.length, 35);
+  assert.equal(many.cleared.length, 0);
+  assert.equal(call("countsOf", many).awaiting, 35);
+}
+console.log("PASS thirty-five cards waiting are thirty-five cards on the board");
+
+// 9. A card stopped out of line is counted as 要対応, so it cannot sit below
+// the cards that are merely waiting to be tidied away.
+{
+  const mixed = [
+    finished("tidy", "done", { finished_at: "2026-09-25T02:00:00Z" }),
+    running("stuck", "attention", 10),
+    running("busy", "implement", 20),
+  ];
+  const order = call("splitLanes", mixed);
+  assert.deepEqual([...order.active].map(run => run.delivery_id), ["stuck", "tidy", "busy"]);
+  assert.equal(call("countsOf", order).attention, 1);
+}
+console.log("PASS a card stopped out of line stays above the ones waiting to be tidied");
+
+// 10-14. What a finished card actually says. The times are the whole reason
 // the card waits here, so they are read off the card the page builds, not
 // inferred from the row.
 const guidanceFrom = script.indexOf("function buildGuidance(run) {");

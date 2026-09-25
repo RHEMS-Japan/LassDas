@@ -348,7 +348,11 @@ const TONE = { confirm: "tone-act", question: "tone-act", attention: "tone-warn"
 // from one that ended the day before, and nobody had looked at either.
 // So a finished run waits here, showing when it got here, until somebody
 // presses 確認して片付ける.
-const FINISHED = new Set(["done", "stopped", "failed"]);
+// The definition is internal/ticketview/finished.go; this copy is pinned
+// equal to it by cmd/statusboard TestTheFinishedStatesAreOneList, so the
+// page can never believe in a state the server refuses to clear.
+const FINISHED_STEPS = ["done", "stopped", "failed"];
+const FINISHED = new Set(FINISHED_STEPS);
 // What this browser has cleared away but has not seen come back in a
 // payload yet, so the card moves under the pointer instead of a second
 // later.
@@ -372,9 +376,11 @@ function fmtStamp(iso) {
 function splitLanes(rows) {
   const active = [], cleared = [];
   for (const run of rows) (isCleared(run) ? cleared : active).push(run);
-  // Whoever has to do something comes first: a card asking for a decision,
-  // then one waiting to be cleared away, then the ones still running.
-  const rank = run => ACTIONABLE.has(run.step) ? 0 : isFinished(run) ? 1 : 2;
+  // Whoever has to do something comes first: a card asking for a decision
+  // or stopped out of line, then one waiting to be cleared away, then the
+  // ones still running. An attention card is counted as 要対応, so it
+  // cannot sit below the cards that are merely waiting to be tidied.
+  const rank = run => ACTIONABLE.has(run.step) || run.step === "attention" ? 0 : isFinished(run) ? 1 : 2;
   active.sort((a, b) => rank(a) - rank(b) || (b.claimed_at_ms || 0) - (a.claimed_at_ms || 0));
   return { active, cleared, running: active.filter(run => !isFinished(run)), awaiting: active.filter(isFinished) };
 }

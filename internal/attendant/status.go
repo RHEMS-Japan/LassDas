@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"automation.internal/ticket-ingress/internal/boardack"
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -65,19 +66,21 @@ type RunStatus struct {
 	CanGo bool `json:"can_go,omitempty"`
 	// CanResolve exposes the existing posted-report acknowledgement window.
 	// It never authorizes a deployment or a direct run-state change.
-	CanResolve   bool      `json:"can_resolve,omitempty"`
-	NextAction   string    `json:"next_action,omitempty"`
-	ActionEffect string    `json:"action_effect,omitempty"`
-	PRURL        string    `json:"pr_url,omitempty"`
-	ChangedFiles []string  `json:"changed_files,omitempty"`
-	ReportAt     time.Time `json:"report_at,omitempty"`
+	CanResolve   bool     `json:"can_resolve,omitempty"`
+	NextAction   string   `json:"next_action,omitempty"`
+	ActionEffect string   `json:"action_effect,omitempty"`
+	PRURL        string   `json:"pr_url,omitempty"`
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	// omitzero, not omitempty: omitempty never drops a time.Time, so a row
+	// with no report carried a report_at of 0001-01-01 all the same.
+	ReportAt time.Time `json:"report_at,omitzero"`
 	// FinishedAt is when the run reached the state it now shows, for a run
 	// that has stopped for good. The board used to move a finished card to
 	// the lower lane by itself and say only what it ended as, so a reader
 	// who came back to it could not tell whether it had ended a minute ago
 	// or the day before. Empty when the run is still going, and when a run
 	// ended before anything wrote its ending down.
-	FinishedAt time.Time `json:"finished_at,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitzero"`
 	// Stage names the pipeline step an out-of-line state (attention)
 	// belongs to, so the board lights the node where the run stopped
 	// instead of an empty rail. Empty for every in-line step.
@@ -95,14 +98,17 @@ type StepEvent struct {
 }
 
 // terminalSnapshotLimit keeps the snapshot from growing without bound: the
-// resting runs (done/stopped/failed) beyond the most recent N stay in the
-// ledger and in events.jsonl, just not in the live board.
+// CLEARED runs beyond the most recent N stay in the ledger and in
+// events.jsonl, just not in the live board. A finished run nobody has
+// cleared away is never left out, however many there are — it is the whole
+// promise of the running lane — so the bound now grows with the cards a
+// person has not got to yet.
 const terminalSnapshotLimit = 30
 
 // SnapshotStatus assembles the board from what the attendant already reads
 // every tick. Read-only everywhere: ledger scan, board listing, artifact
 // stat/reads.
-func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes) (BoardSnapshot, error) {
+func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtime.Services, hermes *runtime.Hermes, statusDir string) (BoardSnapshot, error) {
 	runs, err := services.Store.ScanRuns(ctx)
 	if err != nil {
 		return BoardSnapshot{}, err
@@ -111,40 +117,68 @@ func SnapshotStatus(ctx context.Context, config runtime.Config, services *runtim
 	if err != nil {
 		return BoardSnapshot{}, err
 	}
+	// Which finished runs a person has already cleared away. It decides
+	// what may be left out below, so it is read once per snapshot.
+	cleared := boardack.Read(statusDir)
 	// Trim BEFORE classifying: classification does per-run file I/O, and
-	// the ledger only grows. Terminal runs beyond twice the display limit
-	// (newest first) cannot appear on the board — resting ones are capped
-	// at the limit, and a terminal run still moving (delivery continuation)
-	// is claimed recently. Non-terminal runs always classify.
+	// the ledger only grows. Only runs a person has already CLEARED AWAY
+	// may be left out: the board promises a finished card stays until
+	// somebody presses it, and a cap that dropped the oldest would break
+	// that promise exactly when the board is furthest behind — the cards
+	// nobody had got to would be the ones to vanish. Cleared runs beyond
+	// twice the display limit (newest first) cannot appear on the board:
+	// they are capped at the limit below. Non-terminal runs always
+	// classify.
 	sort.SliceStable(runs, func(a, b int) bool { return runs[a].ClaimedAt > runs[b].ClaimedAt })
-	terminalSeen := 0
+	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
+	for _, run := range worthClassifying(runs, cleared) {
+		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
+	}
+	snapshot.Runs = trimClearedRows(snapshot.Runs, cleared)
+	snapshot.Notice = intakeNotice(config)
+	return snapshot, nil
+}
+
+// worthClassifying drops the runs that cannot appear on the board, before
+// the per-run file reads that classify them. Newest first on entry.
+//
+// Only runs a person has already CLEARED AWAY may be dropped. The board
+// promises that a finished card stays until somebody presses it, and a cap
+// that took the oldest would break that promise exactly when the board is
+// furthest behind: the cards nobody had got to would be the ones to vanish,
+// and the 確認待ち count would stop at the cap and stay there. Cleared runs
+// past twice the display limit cannot be shown — the limit below cuts them
+// — so reading their records would be work for nothing.
+func worthClassifying(runs []state.RunOverview, cleared map[string]boardack.Entry) []state.RunOverview {
+	seen := 0
 	candidates := runs[:0]
 	for _, run := range runs {
-		if run.State == "terminal" {
-			if terminalSeen++; terminalSeen > 2*terminalSnapshotLimit {
+		if _, gone := cleared[run.DeliveryID]; gone && run.State == "terminal" {
+			if seen++; seen > 2*terminalSnapshotLimit {
 				continue
 			}
 		}
 		candidates = append(candidates, run)
 	}
-	snapshot := BoardSnapshot{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Stages: railStages(config)}
-	for _, run := range candidates {
-		snapshot.Runs = append(snapshot.Runs, classifyRun(config, run, tasks))
-	}
-	kept := snapshot.Runs[:0]
-	resting := 0
-	for _, run := range snapshot.Runs {
-		if run.Step == "done" || run.Step == "stopped" || run.Step == "failed" {
-			resting++
-			if resting > terminalSnapshotLimit {
+	return candidates
+}
+
+// trimClearedRows keeps the snapshot bounded at the one place it may be
+// bounded: the cards a person has already dealt with. Newest first on
+// entry, so what goes is the oldest of them.
+func trimClearedRows(rows []RunStatus, cleared map[string]boardack.Entry) []RunStatus {
+	kept := rows[:0]
+	archived := 0
+	for _, row := range rows {
+		if _, gone := cleared[row.DeliveryID]; gone && ticketview.IsFinished(row.Step) {
+			archived++
+			if archived > terminalSnapshotLimit {
 				continue
 			}
 		}
-		kept = append(kept, run)
+		kept = append(kept, row)
 	}
-	snapshot.Runs = kept
-	snapshot.Notice = intakeNotice(config)
-	return snapshot, nil
+	return kept
 }
 
 // intakeNotice is the board's banner while intake is held, which now has
@@ -216,7 +250,7 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		status.NextAction = "現在の処理状態をこの画面では判定できません。運用担当者がチケットの報告と実行履歴を確認してください。"
 		status.ActionEffect = "状態を確認するまで、この画面からの操作はありません。"
 	}
-	if FinishedStep(status.Step) && status.FinishedAt.IsZero() {
+	if ticketview.IsFinished(status.Step) && status.FinishedAt.IsZero() {
 		// When it got where it now is: the delivery's own report time where
 		// there is one — that is later than the run's ending, and it is the
 		// report that put the card in this state — else the moment the
@@ -244,14 +278,6 @@ func classifyRun(config runtime.Config, run state.RunOverview, tasks []runtime.B
 		}
 	}
 	return status
-}
-
-// FinishedStep says a run in this step has stopped for good. Such a card
-// stays in the running lane, showing when it got there, until a person
-// clears it away: cards that archived themselves left nobody able to say
-// when any of them had finished (requester's decision, 2026-09-25).
-func FinishedStep(step string) bool {
-	return step == "done" || step == "stopped" || step == "failed"
 }
 
 func (s *RunStatus) place(step, title, detail string) {

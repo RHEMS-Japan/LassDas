@@ -712,7 +712,25 @@ expandedRuns.clear();
     !!runsBox.querySelector('.card[data-delivery="waiting-delivery"]'), false);
 }
 
-if (checks < 67) {
+// However many finished cards nobody has cleared, every one is drawn, and a
+// card stopped out of line is drawn above them.
+startScenario();
+expandedRuns.clear();
+{
+  const waiting = [];
+  for (let i = 0; i < 35; i++) waiting.push({delivery_id: "w" + i, issue_key: "TICKET-W" + i, step: "done"});
+  render(waiting);
+  check("thirty-five uncleared cards are all drawn in the running lane",
+    runsBox.children.length, 35);
+  check("and none of them slipped into the finished lane",
+    chipsBox.querySelectorAll(".card").length, 0);
+  render([{delivery_id: "tidy", issue_key: "TICKET-12", step: "done"},
+          {delivery_id: "stuck", issue_key: "TICKET-13", step: "attention"}]);
+  check("a card stopped out of line is drawn above one waiting to be tidied",
+    runsBox.children.map(c => c.dataset.delivery).join(","), "stuck,tidy");
+}
+
+if (checks < 70) {
   console.log("FAIL harness: only " + checks + " checks ran; something stopped them early");
   failed++;
 }

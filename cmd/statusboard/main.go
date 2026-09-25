@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"automation.internal/ticket-ingress/internal/backlog"
+	"automation.internal/ticket-ingress/internal/boardack"
 )
 
 //go:embed board.html
@@ -769,7 +770,7 @@ func (s *boardServer) serveStream(w http.ResponseWriter, r *http.Request) {
 	watched := []string{
 		filepath.Join(s.statusDir, "board.json"),
 		filepath.Join(s.statusDir, "actions.jsonl"),
-		filepath.Join(s.statusDir, acknowledgeFileName),
+		filepath.Join(s.statusDir, boardack.FileName),
 	}
 	last := make(map[string]os.FileInfo, len(watched))
 	changed := func() bool {

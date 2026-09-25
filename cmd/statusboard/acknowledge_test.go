@@ -9,9 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/ticketview"
 )
 
 // The board used to move a finished card into 完了・終了 by itself, the moment
@@ -290,7 +294,55 @@ func TestFinishedCardsWaitInTheRunningLaneUntilCleared(t *testing.T) {
 	}
 	// A harness that stops checking leaves no FAIL line and says nothing,
 	// so the count is what says it ran.
-	if ran < 12 {
+	if ran < 14 {
 		t.Fatalf("only %d checks ran; the harness is not checking what it claims to\n%s", ran, output)
+	}
+}
+
+// The engine, this server and both pages have to agree on exactly which
+// steps a run rests in for good. Four copies of that list drifting apart is
+// how a page ends up showing a control the server refuses.
+func TestTheFinishedStatesAreOneList(t *testing.T) {
+	pattern := regexp.MustCompile(`const FINISHED_STEPS = \[([^\]]*)\]`)
+	for _, page := range []string{"board.html", "ticket.html"} {
+		body, err := os.ReadFile(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := pattern.FindSubmatch(body)
+		if found == nil {
+			t.Fatalf("%s declares no register of finished states", page)
+		}
+		var listed []string
+		if err := json.Unmarshal([]byte("["+string(found[1])+"]"), &listed); err != nil {
+			t.Fatalf("%s: the register is not a plain list: %v", page, err)
+		}
+		if !slices.Equal(listed, ticketview.FinishedSteps) {
+			t.Fatalf("%s says %v; the definition says %v", page, listed, ticketview.FinishedSteps)
+		}
+		// The server's own gate reads the same definition, so a state one
+		// side believes in and the other does not cannot exist.
+		for _, step := range listed {
+			if !ticketview.IsFinished(step) {
+				t.Fatalf("%s believes in %q, which the server would refuse to clear", page, step)
+			}
+		}
+	}
+}
+
+// The board adds no time of its own to a running row: the acknowledgement
+// it merges in belongs only to a card somebody cleared away. (Whether the
+// attendant writes a zero time into the row at all is pinned where the row
+// is built, in internal/attendant.)
+func TestTheBoardAddsNoTimesOfItsOwnToARunningRow(t *testing.T) {
+	server := acknowledgeFixture(t)
+	live := rowOf(t, server.payload(), "delivery_live")
+	for _, field := range []string{"finished_at", "acknowledged_at", "report_at"} {
+		if value, present := live[field]; present {
+			t.Fatalf("a running row carries %s = %v", field, value)
+		}
+	}
+	if got := rowOf(t, server.payload(), "delivery_done")["finished_at"]; got != "2026-09-25T02:00:00Z" {
+		t.Fatalf("finished_at = %v on a row that has one", got)
 	}
 }

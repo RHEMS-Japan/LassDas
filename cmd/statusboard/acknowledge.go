@@ -6,9 +6,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
+
+	"automation.internal/ticket-ingress/internal/boardack"
+	"automation.internal/ticket-ingress/internal/ticketview"
 )
 
 // Clearing a finished card away is a decision a person makes, and this file
@@ -27,53 +29,16 @@ import (
 // the board's action journal — never into the attendant's snapshot, which
 // has exactly one writer.
 
-// acknowledgeFileName is the board's record of which finished runs a person
-// has cleared away. Its own file, disjoint from the attendant's board.json
-// and events.jsonl, so the single-writer rule holds per file.
-const acknowledgeFileName = "acknowledged.json"
-
-// maxAcknowledgements bounds the record. The snapshot shows a few dozen runs
-// at a time and older ones leave it for good, so entries past this many are
-// for runs no board will ever show again; the oldest go first.
-const maxAcknowledgements = 500
-
-// maxAcknowledgeFileBytes bounds one reading of the record, the way every
-// other file this board reads is bounded.
-const maxAcknowledgeFileBytes = 1 << 20
-
-// acknowledgement is one person's "I have seen this one, take it off the
-// list", with when and who, because the whole point is being able to say
-// when.
-type acknowledgement struct {
-	At       time.Time `json:"at"`
-	User     string    `json:"user,omitempty"`
-	ClientIP string    `json:"client_ip,omitempty"`
-}
-
-type acknowledgeRecord struct {
-	SchemaVersion int                        `json:"schema_version"`
-	Runs          map[string]acknowledgement `json:"runs"`
-}
+// acknowledgement is one press, as the board's record keeps it. The record
+// itself lives in internal/boardack, because the attendant reads it too: it
+// is what tells the attendant which finished rows it may leave out of the
+// snapshot, and a second copy of the format would drift.
+type acknowledgement = boardack.Entry
 
 // readAcknowledgements returns what the board has cleared away, keyed by
-// delivery. An absent, oversized or unreadable record is no acknowledgement
-// at all: every card then stays in the running lane, which is the state that
-// asks a person to look rather than the one that hides things.
+// delivery.
 func readAcknowledgements(statusDir string) map[string]acknowledgement {
-	raw, err := os.ReadFile(filepath.Join(statusDir, acknowledgeFileName))
-	if err != nil || len(raw) > maxAcknowledgeFileBytes {
-		return map[string]acknowledgement{}
-	}
-	var record acknowledgeRecord
-	if json.Unmarshal(raw, &record) != nil || record.Runs == nil {
-		return map[string]acknowledgement{}
-	}
-	for id, entry := range record.Runs {
-		if id == "" || entry.At.IsZero() {
-			delete(record.Runs, id)
-		}
-	}
-	return record.Runs
+	return boardack.Read(statusDir)
 }
 
 // acknowledgeRun writes down that this delivery was cleared away, and
@@ -88,35 +53,7 @@ func (s *boardServer) acknowledgeRun(deliveryID string, entry acknowledgement) (
 		return existing, nil
 	}
 	runs[deliveryID] = entry
-	if len(runs) > maxAcknowledgements {
-		ids := make([]string, 0, len(runs))
-		for id := range runs {
-			ids = append(ids, id)
-		}
-		// Oldest first, and the id breaks a tie so two entries stamped in
-		// the same instant are dropped in a fixed order.
-		sort.Slice(ids, func(a, b int) bool {
-			if runs[ids[a]].At.Equal(runs[ids[b]].At) {
-				return ids[a] < ids[b]
-			}
-			return runs[ids[a]].At.Before(runs[ids[b]].At)
-		})
-		for _, id := range ids[:len(runs)-maxAcknowledgements] {
-			delete(runs, id)
-		}
-	}
-	encoded, err := json.Marshal(acknowledgeRecord{SchemaVersion: 1, Runs: runs})
-	if err != nil {
-		return acknowledgement{}, err
-	}
-	// Whole file at once, then renamed over the old one: a reader that
-	// arrives mid-write sees one complete record or the other, never half.
-	temp := filepath.Join(s.statusDir, acknowledgeFileName+".tmp")
-	if err := os.WriteFile(temp, encoded, 0o600); err != nil {
-		return acknowledgement{}, err
-	}
-	if err := os.Rename(temp, filepath.Join(s.statusDir, acknowledgeFileName)); err != nil {
-		_ = os.Remove(temp)
+	if err := boardack.Write(s.statusDir, runs); err != nil {
 		return acknowledgement{}, err
 	}
 	return entry, nil
@@ -144,20 +81,12 @@ func (s *boardServer) finishedBoardRun(deliveryID string) (boardRun, string) {
 		if run.DeliveryID != deliveryID {
 			continue
 		}
-		if !finishedStep(run.Step) {
+		if !ticketview.IsFinished(run.Step) {
 			return boardRun{}, "この依頼はまだ終わっていません。終了してから片付けてください"
 		}
 		return run, ""
 	}
 	return boardRun{}, "表示した実行を盤面で確認できません。画面を更新して現在の状態を確認してください"
-}
-
-// finishedStep is the board's copy of the attendant's register of states a
-// run rests in for good. The lane a card sits in is decided here and in the
-// page, never from the attendant's side: what is finished is the engine's
-// word, what has been cleared away is the board's.
-func finishedStep(step string) bool {
-	return step == "done" || step == "stopped" || step == "failed"
 }
 
 type acknowledgeRequest struct {
