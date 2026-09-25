@@ -213,6 +213,10 @@ func runPublishFeature(ctx context.Context, args []string, getenv func(string) s
 }
 
 func runCreateFeaturePR(ctx context.Context, args []string, getenv func(string) string, transport http.RoundTripper) error {
+	// The description's opening section is optional: a hand-run invocation,
+	// and a run that could read nothing worth saying, both pass without it
+	// and get the description this verb has always written.
+	args, outcomeFile := extractOption(args, "--outcome")
 	arguments, err := parseCommandArguments(args, []string{"--config", "--ticket", "--feature", "--trail", "--out"})
 	if err != nil {
 		return err
@@ -220,6 +224,18 @@ func runCreateFeaturePR(ctx context.Context, args []string, getenv func(string) 
 	trail, err := readTrailFile(arguments.one("--trail"))
 	if err != nil {
 		return fail("trail_invalid")
+	}
+	// What the change is for and what the engine decided on its own, above
+	// the round-by-round record. The reviewer wants the first two; the
+	// record answers a different question, and a description that opens
+	// with it makes them hunt for the answer to this one.
+	//
+	// The two share the record's budget, and the record is the half that
+	// gives way: it is the account of how the work went, and the opening is
+	// what the work was for.
+	outcome := readOutcomeFile(outcomeFile)
+	if outcome != "" {
+		trail = hook.ShortenTrailForComment(trail, hook.MaxTrailRecordBytes-len(outcome))
 	}
 	config, err := loadCommandConfig(arguments.one("--config"), arguments.one("--out"))
 	if err != nil {
@@ -237,7 +253,7 @@ func runCreateFeaturePR(ctx context.Context, args []string, getenv func(string) 
 	if err != nil || !validPublishedFeature(feature.Payload, feature.Binding) {
 		return fail("feature_artifact_invalid")
 	}
-	pull, err := runtime.controller.CreateFeaturePullRequest(ctx, feature.Payload, featurePullRequestSpec(feature.Binding, trail))
+	pull, err := runtime.controller.CreateFeaturePullRequest(ctx, feature.Payload, featurePullRequestSpec(feature.Binding, outcome+trail))
 	if err != nil {
 		return failFrom("feature_pr_create_failed", err)
 	}
@@ -947,6 +963,30 @@ func (binding deliveryBinding) matchesArtifacts(
 	return binding.SourceSHA256 == source.SourceSHA256 && binding.CandidateSHA256 == candidate.CandidateSHA256 &&
 		binding.ValidationSHA256 == validation.ValidationSHA256 && slices.Equal(binding.ProductPaths, paths)
 }
+
+// readOutcomeFile loads the description's opening section, or answers with
+// nothing. It is held to the same plain-text discipline as the record beside
+// it, and every way of failing to read one — absent, oversized, not text —
+// answers the same way, because a description missing its opening is worth
+// more than a delivery refused over it.
+func readOutcomeFile(filename string) string {
+	if filename == "" {
+		return ""
+	}
+	encoded, err := os.ReadFile(filename)
+	if err != nil || len(encoded) == 0 || len(encoded) > outcomePreambleMaxBytes {
+		return ""
+	}
+	if hook.ValidateTrailTextWithin(string(encoded), outcomePreambleMaxBytes) != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// outcomePreambleMaxBytes bounds that opening. It is the two composed
+// sections the closing comment carries, plus the blank line between them and
+// the record.
+const outcomePreambleMaxBytes = hook.MaxOutcomeTextBytes + hook.MaxAssumptionsTextBytes + 64
 
 // readTrailFile loads the requester-facing run record composed by the worker.
 // It is held to the same plain-text discipline as the terminal report's copy,

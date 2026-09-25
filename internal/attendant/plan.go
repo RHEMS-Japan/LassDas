@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"automation.internal/ticket-ingress/internal/hook"
+	"automation.internal/ticket-ingress/internal/runner"
 )
 
 // The plan notice and the stop request are the requester-facing half of the
@@ -92,6 +93,27 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 			facts.Assumptions = append(facts.Assumptions, statement)
 		}
 		break
+	}
+	// The assessment is sealed once, before anything is built, and holds
+	// only what the reception settled. Everything decided after it — a
+	// deadlock ruled on, a role moved to another provider, a stand-in put
+	// where a key was wanted — happens while the delivery runs and has
+	// nowhere in that sealed record to go. The run keeps those in a stream
+	// of their own, and the notice reads it so a requester coming back to
+	// this comment mid-run sees what has been decided since it was posted.
+	//
+	// Which of them they may want back is decided where the closing comment
+	// decides it, so the two cannot disagree about the same decision.
+	for _, decision := range runner.LoadRecordedDecisions(runDir) {
+		statement := strings.TrimSpace(decision.Statement)
+		if statement == "" {
+			continue
+		}
+		if decision.Decided {
+			facts.Decided = append(facts.Decided, statement)
+			continue
+		}
+		facts.Assumptions = append(facts.Assumptions, statement)
 	}
 	return facts
 }

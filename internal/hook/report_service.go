@@ -333,51 +333,77 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		facts.Operation = "いまは利用者の操作は不要です。自動処理の結果をお待ちください"
 		facts.NextEvent = "staging の確認結果、または処理を進められない理由と必要な操作を、このチケットでお知らせします"
 	}
-	lines := []string{
-		heading,
-		message,
-		"実行履歴: " + report.RunURL,
+	// The order is the requester's. What they can now do and where to look
+	// at it come first; what was decided on their behalf comes next,
+	// because with nothing asking them anything after the reception it is
+	// their only sight of those decisions; then the cost. The pull request
+	// and the record of how the work went follow, because they answer a
+	// different question -- how it was built -- and a comment that opens
+	// with the account of the building makes the reader hunt for the result.
+	head := heading + "\n" + message
+	if outcome := strings.TrimSpace(report.OutcomeText); outcome != "" {
+		head += "\n\n" + outcome
 	}
+	// What a deeper delivery would have needed, on the ticket rather than in
+	// a log. A destination asked for production and the change stopped at
+	// its pull request: the requester is owed the reason on the same comment
+	// that tells them where it stopped, which is why it sits with the
+	// outcome rather than down with the links.
+	if report.DeliveryShortfall != "" {
+		head += "\n\nここまでで止まった理由: " + report.DeliveryShortfall
+	}
+	lines := []string{"実行履歴: " + report.RunURL}
 	if report.PullRequestURL != "" {
 		lines = append(lines, "Pull Request: "+report.PullRequestURL)
 	}
 	if report.CommitURL != "" {
 		lines = append(lines, "反映commit: "+report.CommitSHA+" "+report.CommitURL)
 	}
-	if report.StagingEvidenceURL != "" {
-		lines = append(lines, "staging確認先: "+report.StagingEvidenceURL)
-	}
-	if report.ProductionEvidenceURL != "" {
-		lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
-	}
-	// What a deeper delivery would have needed, on the ticket rather than in
-	// a log. A destination asked for production and the change stopped at
-	// its pull request: the requester is owed the reason on the same comment
-	// that tells them where it stopped.
-	if report.DeliveryShortfall != "" {
-		lines = append(lines, "ここまでで止まった理由: "+report.DeliveryShortfall)
+	// A report that composed its own outcome named the places to look
+	// inside it, beside what was actually seen there. One from an engine
+	// that composed none keeps them here, so an older report still says
+	// where its delivery landed.
+	if report.OutcomeText == "" {
+		if report.StagingEvidenceURL != "" {
+			lines = append(lines, "staging確認先: "+report.StagingEvidenceURL)
+		}
+		if report.ProductionEvidenceURL != "" {
+			lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
+		}
 	}
 	footer := facts.render()
-	head := strings.Join(lines, "\n")
-	tail := ""
+	links := "\n\n" + strings.Join(lines, "\n")
+	cost := ""
 	if report.SpendText != "" {
-		tail = "\n\n## この依頼にかかった費用\n" + report.SpendText
+		cost = "\n\n## この依頼にかかった費用\n" + report.SpendText
 	}
+	// Two parts of this comment can be long, and they give way in the order
+	// they are worth least to the person reading: the run record first, then
+	// what was decided. Never the outcome, never the places to look, never
+	// the cost line the requester is owed, and never the footer, whose final
+	// line is the marker the exactly-once machinery anchors on. Whatever
+	// gives way says so and says where the whole of it is, so nothing is
+	// dropped without the ticket admitting it.
+	fixed := len(head) + len(cost) + len(links) + len(footer)
+	assumptions := ""
+	if decided := strings.TrimSpace(report.AssumptionsText); decided != "" {
+		switch {
+		case fixed+len("\n\n")+len(decided) <= MaxTrackerCommentBytes:
+			assumptions = "\n\n" + decided
+		case fixed+len("\n\n")+len(terminalAssumptionsElsewhere) <= MaxTrackerCommentBytes:
+			assumptions = "\n\n" + terminalAssumptionsElsewhere
+		}
+	}
+	body := head + assumptions + cost + links
 	if report.TrailText == "" {
-		return head + tail + footer
+		return body + footer
 	}
-	// The run record is the only part of this comment that can be long, so
-	// it is the part that gives way when the tracker's comment limit binds --
-	// never the footer, whose final line is the marker the exactly-once
-	// machinery anchors on, and never the cost line the requester is owed.
-	// The record is shortened with a sentence saying where the whole of it
-	// is, so nothing is dropped without the ticket saying so.
-	room := MaxTrackerCommentBytes - len(head) - len(terminalTrailHeading) - len(tail) - len(footer)
+	room := MaxTrackerCommentBytes - len(body) - len(terminalTrailHeading) - len(footer)
 	trail := ShortenTrailForComment(report.TrailText, room)
 	if trail == "" {
-		return head + "\n\n" + terminalTrailElsewhere + tail + footer
+		return body + "\n\n" + terminalTrailElsewhere + footer
 	}
-	return head + terminalTrailHeading + trail + tail + footer
+	return body + terminalTrailHeading + trail + footer
 }
 
 const (
@@ -386,6 +412,13 @@ const (
 	// comment leaves it no room at all, so the ticket still says the record
 	// exists and where to read it.
 	terminalTrailElsewhere = "この実行の記録はこのコメントに収まらないため、上の実行履歴をご確認ください。"
+	// terminalAssumptionsElsewhere stands in for what the engine decided on
+	// its own when the comment has no room for the list. The list itself is
+	// long only on a delivery that decided a great deal, which is exactly
+	// the delivery whose requester must not be left unaware that anything
+	// was decided at all.
+	terminalAssumptionsElsewhere = "この依頼で本体が確認せずに決めたことの一覧は、このコメントに収まらないため、" +
+		"Pull Request の説明と上の実行履歴に残してあります。"
 )
 
 // terminalCommentFacts maps every finite terminal code onto the seven-item
