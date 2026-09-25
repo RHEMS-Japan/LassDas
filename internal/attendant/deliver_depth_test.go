@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,8 +39,11 @@ type depthHarness struct {
 	callsFile  string
 	posted     *[]string
 	comments   *[]backlogComment
-	board      *recordingBoard
-	logger     *recordingLogger
+	// listings counts the reads of the ticket's comments, which is what a
+	// stop costs the tracker.
+	listings *atomic.Int32
+	board    *recordingBoard
+	logger   *recordingLogger
 }
 
 // backlogComment is one comment as the tracker's API hands it back.
@@ -167,6 +171,7 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 
 	posted := &[]string{}
 	comments := &[]backlogComment{}
+	listings := &atomic.Int32{}
 	client, err := backlog.NewClient(backlog.Config{SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com",
 		Timeout: time.Second, MaxResponseBytes: 1 << 20},
 		roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -185,6 +190,7 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 					"content": content, "createdUser": map[string]any{"id": 1}, "created": "2026-09-20T12:00:00Z"})
 				return jsonResponse(201, string(encoded)), nil
 			case strings.HasSuffix(r.URL.Path, "/comments"):
+				listings.Add(1)
 				encoded, _ := json.Marshal(*comments)
 				return jsonResponse(200, string(encoded)), nil
 			case r.URL.Path == "/api/v2/issues/30":
@@ -251,7 +257,7 @@ esac
 	harness := &depthHarness{
 		t: t, config: config, hermes: runtime.NewHermes(runtime.Config{HermesBin: bin, HermesBoard: "board"}),
 		runDir: runDir, deliveryID: envelope.DeliveryID, boardFile: boardFile, callsFile: callsFile,
-		posted: posted, comments: comments, board: board, logger: &recordingLogger{},
+		posted: posted, comments: comments, listings: listings, board: board, logger: &recordingLogger{},
 		services: &runtime.Services{Store: store, Backlog: client, Report: reportService, Tick: tick, Route: route, Board: board},
 	}
 	harness.setBoard()

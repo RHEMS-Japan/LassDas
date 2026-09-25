@@ -38,72 +38,162 @@ import (
 // still write go nowhere. The two that merge are different and are handled
 // below.
 
-// stopRequestFile is where a claimed run records that its requester asked
-// it to stop. It lives on the volume beside the run's other records, so a
-// pod replaced between reading the stop and ending the run comes back
-// knowing the run was stopped rather than resuming the work.
-const stopRequestFile = "stop-requested.json"
+// stopReadFile is where a run records its reading of the ticket for a
+// 「停止」: when it last looked, and what it found. It lives on the volume
+// beside the run's other records, so a pod replaced between reading the
+// stop and ending the run comes back knowing the run was stopped rather
+// than resuming the work — and so a restart does not reset the interval
+// below and start listing the tracker from scratch.
+//
+// A fresh attempt never inherits it: the preparation empties the run
+// directory before anything else (internal/runner/runner.go's Prepare), so
+// a stop belongs to the attempt that read it and to no other.
+const stopReadFile = "stop-read.json"
 
-// stopRequestSchemaVersion is this record's shape.
-const stopRequestSchemaVersion = 1
+// stopReadSchemaVersion is this record's shape.
+const stopReadSchemaVersion = 1
 
-// maxStopRequestBytes bounds the read. The record is four short fields;
+// maxStopReadBytes bounds the read. The record is four short fields;
 // anything larger is not one of ours.
-const maxStopRequestBytes = 16 * 1024
+const maxStopReadBytes = 16 * 1024
 
-// stopRequestRecord is the run's own account of the stop: when this engine
-// first saw it, whether the requester has been answered, and which step —
-// if any — the ending is waiting on.
-type stopRequestRecord struct {
-	SchemaVersion int       `json:"schema_version"`
-	At            time.Time `json:"at"`
+// tickStopReadInterval is how often one run's tick may list its ticket for
+// a 「停止」.
+//
+// Unthrottled, this cost one listing per run per pass of a loop that passes
+// every ten seconds — six a minute for every delivery at once, each paging
+// through a long ticket — which is the cost the ladder's own waiting stages
+// already refused to pay (stopReadInterval, ladder.go). Half that interval
+// is used here rather than the ladder's full minute, because this read is
+// the one a requester's stop waits on wherever the delivery happens to be:
+// at a fifth of the requests it still honours a stop inside the minute the
+// contract promises (docs/OPERATING.md).
+//
+// It is deliberately not the interval the reads that spend money use. Those
+// are unthrottled and stay so: a dispatch, a round and a merge each read the
+// ticket afresh, because that read is the last thing between a requester who
+// asked to stop and money being spent.
+const tickStopReadInterval = 30 * time.Second
+
+// stopReadRecord is the run's own account of the stop: when the ticket was
+// last listed for one, when the stop was first seen, whether the requester
+// has been answered, and which step — if any — the ending is waiting on.
+type stopReadRecord struct {
+	SchemaVersion int `json:"schema_version"`
+	// LastReadAt is when the ticket was last listed for a stop by the tick,
+	// which is what the interval above is measured from.
+	LastReadAt time.Time `json:"last_read_at"`
+	// RequestedAt is when the stop was first seen. Zero means the requester
+	// has not asked this run to stop as far as any read has shown.
+	RequestedAt time.Time `json:"requested_at,omitempty"`
 	// Acknowledged says the one-line answer is on the ticket. Kept here as
 	// well as on the ticket because the ticket read that would prove it is
-	// the same listing that finds the stop, and a tick whose listing failed
+	// the same listing that finds the stop, and a pass that did not list
 	// must not post a second answer on the strength of not having looked.
-	Acknowledged bool `json:"acknowledged"`
+	Acknowledged bool `json:"acknowledged,omitempty"`
 	// Waiting names the delivery phase whose merge is in flight, which the
 	// run lets finish before it reports. Empty when nothing had to finish.
 	Waiting string `json:"waiting,omitempty"`
 }
 
-func readStopRequest(runDir string) stopRequestRecord {
-	encoded, err := os.ReadFile(filepath.Join(runDir, stopRequestFile))
-	if err != nil || len(encoded) > maxStopRequestBytes {
-		return stopRequestRecord{}
+// stopped reports whether a read has shown the requester asking this run to
+// stop. Once it has, no later read can take it back: a comment the tracker
+// stops returning is a comment that was written.
+func (r stopReadRecord) stopped() bool { return !r.RequestedAt.IsZero() }
+
+// dueForStopRead says whether the ticket may be listed this pass.
+func (r stopReadRecord) dueForStopRead(now time.Time) bool {
+	return r.LastReadAt.IsZero() || !now.Before(r.LastReadAt.Add(tickStopReadInterval))
+}
+
+func readStopRead(runDir string) stopReadRecord {
+	encoded, err := os.ReadFile(filepath.Join(runDir, stopReadFile))
+	if err != nil || len(encoded) > maxStopReadBytes {
+		return stopReadRecord{}
 	}
-	var record stopRequestRecord
-	if json.Unmarshal(encoded, &record) != nil || record.SchemaVersion != stopRequestSchemaVersion {
-		return stopRequestRecord{}
+	var record stopReadRecord
+	if json.Unmarshal(encoded, &record) != nil || record.SchemaVersion != stopReadSchemaVersion {
+		return stopReadRecord{}
 	}
 	return record
 }
 
-// writeStopRequest seals the record. Best-effort like every other record
-// this package writes: a volume that refuses the write must not be the
-// reason a requester who asked to stop is not obeyed. What it costs is one
-// repeated acknowledgement after a pod restart, which the ticket's own
-// marker then catches.
-func writeStopRequest(runDir string, record stopRequestRecord, logger Logger) {
-	record.SchemaVersion = stopRequestSchemaVersion
-	encoded, err := json.Marshal(record)
+// writeStopRead seals the record. Best-effort like every other record this
+// package writes: a volume that refuses the write must not be the reason a
+// requester who asked to stop is not obeyed. What it costs is a ticket
+// listed once a pass instead of once an interval, and one repeated
+// acknowledgement after a pod restart, which the ticket's own marker then
+// catches.
+//
+// The directory is made first because a queued run reads its ticket for a
+// stop before anything else has had reason to make one.
+func writeStopRead(runDir string, record stopReadRecord, logger Logger) {
+	record.SchemaVersion = stopReadSchemaVersion
+	// 0711 like every other writer of the run directory: the agent user
+	// must be able to enter it later (docs/RUNTIME_POD.md).
+	err := os.MkdirAll(runDir, 0o711)
 	if err == nil {
-		err = os.WriteFile(filepath.Join(runDir, stopRequestFile), encoded, 0o600)
+		var encoded []byte
+		if encoded, err = json.Marshal(record); err == nil {
+			err = os.WriteFile(filepath.Join(runDir, stopReadFile), encoded, 0o600)
+		}
 	}
 	if err != nil {
-		logger.Error("the stop request could not be recorded; the run is stopped anyway",
+		logger.Error("the stop reading could not be recorded; the run is stopped anyway",
 			"error", err.Error())
 	}
+}
+
+// refreshStopRead brings the record up to date from the ticket, at most
+// once per interval, and hands back the listing it used — nil when it did
+// not list, which is every pass inside the interval and every pass of a run
+// that already knows both things a listing could tell it.
+//
+// A listing that fails still counts against the interval. Asking a tracker
+// that is refusing once every ten seconds, for every delivery at once, is
+// the shape that turns one outage into a second one; the stop is delayed by
+// the interval instead, and the reads that gate spending are unaffected.
+func refreshStopRead(
+	ctx context.Context,
+	config runtime.Config,
+	backlog commentLister,
+	run state.RunOverview,
+	record *stopReadRecord,
+	runDir string,
+	now time.Time,
+	logger Logger,
+) []hook.BacklogComment {
+	if record.stopped() && record.Acknowledged {
+		return nil
+	}
+	if !record.dueForStopRead(now) {
+		return nil
+	}
+	record.LastReadAt = now
+	comments, err := backlog.ListComments(ctx, run.IssueID, 0)
+	if err != nil {
+		logger.Error("the stop could not be read this pass; the delivery goes on and is asked again after the interval",
+			"run", run.RunID, "error", err.Error())
+		writeStopRead(runDir, *record, logger)
+		return nil
+	}
+	if !record.stopped() && containsStopComment(comments, config.Tracker.AllowedCreatorID) {
+		record.RequestedAt = now
+	}
+	writeStopRead(runDir, *record, logger)
+	return comments
 }
 
 // honourStopNow is the first thing a claimed run's tick does. It reports
 // whether it handled the run, in which case nothing else in the tick may
 // touch it: no healing, no report, no dispatch.
 //
-// The ticket is listed once and answers two questions — has the requester
-// asked to stop, and is this engine's answer to that already posted — so
-// the read costs one request per claimed run per pass, which is what the
-// round boundaries were already costing whenever they were reached.
+// The ticket is listed at most once per tickStopReadInterval, and only
+// while something is still to be learnt from it: whether the requester has
+// asked to stop, and, once they have, whether this engine's own answer is
+// already posted. A run that knows both never lists it again, however many
+// passes the ending takes — so a delivery waiting for a merge to finish
+// costs the tracker nothing at all.
 //
 // An unreadable listing is not a stop. The engine's whole purpose is to
 // keep going, and the reads that gate spending money are still fail-closed
@@ -123,13 +213,9 @@ func honourStopNow(
 	if services == nil || services.Backlog == nil {
 		return false, nil
 	}
-	comments, err := services.Backlog.ListComments(ctx, run.IssueID, 0)
-	if err != nil {
-		logger.Error("the stop could not be read this tick; the delivery goes on and is asked again next tick",
-			"run", run.RunID, "error", err.Error())
-		return false, nil
-	}
-	if !containsStopComment(comments, config.Tracker.AllowedCreatorID) {
+	record := readStopRead(runDir)
+	comments := refreshStopRead(ctx, config, services.Backlog, run, &record, runDir, time.Now().UTC(), logger)
+	if !record.stopped() {
 		return false, nil
 	}
 	// The ending is a terminal report and a terminal report needs the run's
@@ -144,18 +230,19 @@ func honourStopNow(
 		return false, nil
 	}
 
-	record := readStopRequest(runDir)
-	if record.At.IsZero() {
-		record.At = time.Now().UTC()
-	}
 	record.Waiting = mergeCardInFlight(runDir, run.DeliveryID, view.board)
 	// Written before the ticket is answered and before anything is retired:
 	// of the three, this is the one that survives the process.
-	writeStopRequest(runDir, record, logger)
+	writeStopRead(runDir, record, logger)
 
-	if !record.Acknowledged && acknowledgeStop(ctx, services.Backlog, run, comments, logger) {
+	// Answered from the listing the stop was found in. A pass that did not
+	// list has nothing to check its own marker against, so it leaves the
+	// answer to the pass after the interval rather than posting a second
+	// one blind.
+	if !record.Acknowledged && comments != nil &&
+		acknowledgeStop(ctx, services.Backlog, run, comments, logger) {
 		record.Acknowledged = true
-		writeStopRequest(runDir, record, logger)
+		writeStopRead(runDir, record, logger)
 	}
 
 	if record.Waiting != "" {
@@ -270,32 +357,31 @@ func endStoppedRun(
 // 「停止」 watched their own request sit there. Nothing the holds are
 // waiting for changes what a withdrawn request is worth.
 //
-// It is not throttled. The queued population is whatever the holds are
-// holding, and the delay a throttle would buy is exactly the delay this
-// exists to remove; if the tracker read ever needs rationing, it belongs on
-// the budget hold's own ten-minute clock rather than on the stop.
+// It is on the same interval as the claimed read and shares its record, so
+// a hundred tickets queued behind a paused intake cost the tracker two
+// listings a minute each rather than six every ten seconds.
 //
 // An unreadable listing is not a stop: the holds decide this pass and the
-// question is asked again on the next one.
+// question is asked again after the interval.
 func queuedStopRequested(
 	ctx context.Context,
 	config runtime.Config,
 	services *runtime.Services,
 	run state.RunOverview,
+	runDir string,
 	logger Logger,
 ) bool {
 	if services == nil || services.Backlog == nil {
 		return false
 	}
-	stopped, err := stopRequested(ctx, services.Backlog, config.Tracker.AllowedCreatorID, run.IssueID)
-	if err != nil {
-		logger.Error("the stop could not be read for a queued delivery; the holds decide this tick",
-			"run", run.RunID, "error", err.Error())
-		return false
-	}
-	if stopped {
+	record := readStopRead(runDir)
+	if !record.stopped() {
+		refreshStopRead(ctx, config, services.Backlog, run, &record, runDir, time.Now().UTC(), logger)
+		if !record.stopped() {
+			return false
+		}
 		logger.Info("a queued delivery was stopped by its requester; it is ended ahead of every hold on the intake",
 			"run", run.RunID)
 	}
-	return stopped
+	return true
 }
