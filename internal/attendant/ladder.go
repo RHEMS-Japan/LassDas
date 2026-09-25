@@ -560,11 +560,13 @@ func stageRound(view chainView, stageName string) int {
 // That is the reporting path only, and two regenerating ones still end a
 // delivery under two of these codes. A revise that meets the round ceiling
 // reports the model failure its classification carried (chains.go, the
-// revise arm of classifyChainFailure). A design-backed round whose sealed
-// reviews cannot be read reports the internal failure
-// (chains_design.go, unreadableReviewsOutcome) — no model was asked
-// anything there, and no amount of dispatching the stage again repairs a
-// record. Both reach the report through actionRegenerate, which is why
+// revise arm of classifyChainFailure). And a design-backed round whose
+// sealed review cannot be read reports the internal failure
+// (chains_design.go, unreadableReviewsOutcome) in the one case left to it:
+// a delivery with no seat to ask again — none configured, or a
+// configuration that will not read. A record that names its seat is that
+// seat's own failure to leave a usable answer and climbs this ladder like
+// any other. Both reach the report through actionRegenerate, which is why
 // neither passes this gate.
 //
 // The codes stay in the vocabulary either way: ledger rows and comments

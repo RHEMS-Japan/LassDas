@@ -77,6 +77,10 @@ func TestEveryModelStageKnowsItsSeat(t *testing.T) {
 		Reviewers:   []worker.ModelEndpoint{{ID: "review-a"}, {ID: "review-b"}},
 		Designer:    &designer,
 	}
+	// The roles whose card can actually be asked differently on a second
+	// attempt: the judges, who are launched as one of their seat's
+	// occupants, and the implementing cards, whose instruction is written
+	// again before they are dispatched.
 	for stage, want := range map[string]string{
 		runtime.StageReviewA:       "review-a",
 		runtime.StageReviewB:       "review-b",
@@ -84,7 +88,6 @@ func TestEveryModelStageKnowsItsSeat(t *testing.T) {
 		runtime.StageDesignReviewB: "review-b",
 		runtime.StageImplement:     "author",
 		runtime.StageApply:         "author",
-		runtime.StageInvestigate:   "designer",
 	} {
 		seat, found := SeatFor(models, stage)
 		if !found || seat.ID != want {
@@ -95,6 +98,14 @@ func TestEveryModelStageKnowsItsSeat(t *testing.T) {
 		if _, found := SeatFor(models, none); found {
 			t.Fatalf("%s was given a seat; it runs no model", none)
 		}
+	}
+	// The investigating designer spends a model turn and still has no
+	// seat: it has no second occupant it could be launched as, and its
+	// instruction is built by a verb this change does not touch. A seat
+	// here would spend a whole investigation on a hand that changes
+	// nothing before the delivery waited.
+	if _, found := SeatFor(models, runtime.StageInvestigate); found {
+		t.Fatal("the investigating designer was given a seat with no hand to play")
 	}
 }
 

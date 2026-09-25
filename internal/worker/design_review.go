@@ -189,8 +189,15 @@ func ValidateDesignReviewSet(config Config, subject investigate.ReviewSubject, r
 	seen := make(map[string]struct{}, len(reviews))
 	vendors := make(map[string]struct{}, len(reviews))
 	for _, review := range reviews {
-		endpoint, ok := reviewerByID(config, review.ReviewerID)
-		if !ok || endpoint.Vendor != review.Vendor || endpoint.Model != review.Model || endpoint.BaseURL != review.BaseURL {
+		// Held to the seat, not to one endpoint: the judge that answered is
+		// the configured one for a seat that never moved, and the candidate
+		// that took over for one the ladder moved. A record naming a seat
+		// that is not configured, or an occupant nobody ever configured for
+		// it, is refused exactly as before. Without this the ladder could
+		// move a design seat and the decision would then refuse the review
+		// the move produced, which is a delivery moving and getting nowhere.
+		seat, ok := reviewerByID(config, review.ReviewerID)
+		if !ok || !designReviewSeated(seat, review) {
 			return errors.New("design review names a reviewer that is not configured")
 		}
 		if _, duplicate := seen[review.ReviewerID]; duplicate {
@@ -207,4 +214,17 @@ func ValidateDesignReviewSet(config Config, subject investigate.ReviewSubject, r
 
 func reviewerByID(config Config, id string) (ModelEndpoint, bool) {
 	return config.Models.DesignReviewerFor(id)
+}
+
+// designReviewSeated reports whether a sealed design review names one of
+// the occupants of its seat. The same rule the candidate reviews are held
+// to (Review.Validate), stated here because a design review is a record of
+// its own shape.
+func designReviewSeated(seat ModelEndpoint, review investigate.DesignReview) bool {
+	for _, occupant := range seat.Seat() {
+		if occupant.Vendor == review.Vendor && occupant.Model == review.Model && occupant.BaseURL == review.BaseURL {
+			return true
+		}
+	}
+	return false
 }

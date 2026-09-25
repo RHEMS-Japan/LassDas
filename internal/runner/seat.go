@@ -186,12 +186,17 @@ func SeatFor(models worker.ModelConfig, stage string) (worker.ModelEndpoint, boo
 		return judgeAt(models.DesignJudges(), 1)
 	case runtime.StageImplement, runtime.StageApply:
 		return models.Implementer, models.Implementer.ID != ""
-	case runtime.StageInvestigate:
-		if models.Designer == nil {
-			return worker.ModelEndpoint{}, false
-		}
-		return *models.Designer, true
 	default:
+		// The investigating designer's card is deliberately absent. Its
+		// seat has no second occupant it could be launched as — the roles
+		// that can be are the ones with their own launch definitions — and
+		// its instruction is built from the ticket, the repository and the
+		// previous round by a verb this change does not touch, so a
+		// rebuild here would change nothing about the next attempt. A hand
+		// that changes nothing must not be recorded as played: it costs a
+		// whole investigation and leaves the delivery no better off. What
+		// a shorter investigation should be is the investigating
+		// designer's own contract to decide.
 		return worker.ModelEndpoint{}, false
 	}
 }

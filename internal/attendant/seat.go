@@ -140,21 +140,27 @@ func (s seatClimb) moveTo(place int, occupant worker.ModelEndpoint) func(context
 // configuration written before candidates existed.
 func (s seatClimb) rebuildPrompt() func(context.Context, ladderClimb) error {
 	return func(ctx context.Context, climb ladderClimb) error {
+		// The reviews read the rebuild off the card they are dispatched
+		// with; the implementing cards read a file that was written when
+		// the round began, so for those the instruction is written again
+		// here, before the dispatch. Without it the card would read
+		// exactly what it read the first time and the hand would have
+		// changed nothing.
+		//
+		// The record is written after it, and only if it succeeded. A
+		// record saying the instruction was rebuilt while the file still
+		// holds the one that was not answered is the same silent failure
+		// in a second place: the card would be told it is being asked
+		// differently when it is not.
+		pipeline := &runner.Pipeline{Config: climb.config, Workspace: s.runDir, Logger: climb.logger}
+		if err := pipeline.RerenderInstruction(ctx, s.stage); err != nil {
+			return err
+		}
 		record := s.record
 		record.Seat, record.Stage, record.Round = s.seat.ID, s.stage, s.round
 		record.PromptRebuilt = worker.PromptRebuildShorten
 		record.At = time.Now().UTC()
 		if err := runner.WriteSeatRecord(s.runDir, record); err != nil {
-			return err
-		}
-		// The reviews read the rebuild off the card they are dispatched
-		// with; the implementing cards read a file that was written when
-		// the round began, so for those the instruction is written again
-		// here, after the record and before the dispatch. Without it the
-		// card would read exactly what it read the first time and the hand
-		// would have changed nothing.
-		pipeline := &runner.Pipeline{Config: climb.config, Workspace: s.runDir, Logger: climb.logger}
-		if err := pipeline.RerenderInstruction(ctx, s.stage); err != nil {
 			return err
 		}
 		climb.logger.Info("the seat stays and the instruction is rebuilt shorter",

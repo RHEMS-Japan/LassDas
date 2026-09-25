@@ -229,19 +229,25 @@ func (c Config) validateSeatLaunches() error {
 }
 
 func seatLaunchesCover(seat ModelEndpoint, bindings []ReviewerAgent, role string) error {
-	if len(seat.Candidates) == 0 {
-		return nil
-	}
 	for _, binding := range bindings {
 		if binding.ReviewerID != seat.ID {
 			continue
 		}
+		// The two lists are the same length or the configuration is
+		// wrong in one of two ways. Too few launches and an endpoint the
+		// ladder may move onto has none. Too many — including launches on
+		// a seat with no endpoint candidates at all — and a launch is
+		// written down that nothing can ever reach, which reads as a seat
+		// that can move and is not one.
 		if len(binding.Candidates) != len(seat.Candidates) {
-			return fmt.Errorf("%s %s: every candidate seat needs a launch of its own", role, seat.ID)
+			return fmt.Errorf("%s %s: the candidate seats and their launches must match", role, seat.ID)
 		}
 		return nil
 	}
-	return fmt.Errorf("%s %s: a seat with candidates needs its own launch definitions", role, seat.ID)
+	if len(seat.Candidates) > 0 {
+		return fmt.Errorf("%s %s: a seat with candidates needs its own launch definitions", role, seat.ID)
+	}
+	return nil
 }
 
 // validateCandidates checks the occupants below the configured endpoint.

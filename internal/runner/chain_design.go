@@ -326,7 +326,10 @@ func (p *Pipeline) RenderApplyInstruction(_ context.Context, round int) error {
 	}
 	instruction := applyInstructionPreamble + string(design) + workingCopySection(root, p.designedFiles(round)) +
 		applyInstructionRules + previous + p.previousValidationFailure()
-	return os.WriteFile(p.path("INSTRUCTION.md"), []byte(instruction), 0o600)
+	// Written whole through a temporary file: the card that reads it runs
+	// in another process, and a rebuild caught half-written would hand the
+	// agent an instruction that stops mid-sentence.
+	return writeRecordAtomically(p.path("INSTRUCTION.md"), []byte(instruction))
 }
 
 // previousValidationFailure renders what the deterministic validation refused
