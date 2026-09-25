@@ -96,6 +96,29 @@ func IsDesignStage(stage string) bool {
 	return false
 }
 
+// The delivery's own cards. They are not chain stages — they run outside
+// the chain's namespace, after the publish card is done, and they have no
+// rounds of their own: a change is merged, deployed and observed once,
+// however many times each of those is attempted. They are named here
+// because the failure record a card seals has to be found again by the
+// tick that reads it, and two copies of these names would drift.
+const (
+	DeliverStageChecks    = "checks"
+	DeliverStageIntegrate = "integrate"
+	DeliverStagePromote   = "promote"
+	// DeliverRound is the round a delivery card's records are kept under.
+	DeliverRound = 1
+)
+
+// IsDeliverStage reports whether a stage name is one of the delivery cards.
+func IsDeliverStage(stage string) bool {
+	switch stage {
+	case DeliverStageChecks, DeliverStageIntegrate, DeliverStagePromote:
+		return true
+	}
+	return false
+}
+
 // knownStage reports whether a stage name is one the chain runs.
 // AllStages is every stage a chain can run. It is one list because two
 // copies of it drift: anything that must cover every stage takes it from

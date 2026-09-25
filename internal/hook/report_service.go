@@ -95,7 +95,13 @@ func (s *TerminalReportService) UseAutomaticDeliveryAfter(after time.Time) {
 }
 
 func (s *TerminalReportService) deliveryContinues(report TerminalReportRequest, binding TerminalBinding) bool {
-	return !s.automaticDeliveryAfter.IsZero() && binding.ClaimedAtMillis > 0 &&
+	// A report that names the depth it reached was written by a run that
+	// carried the depth itself: whatever was going to happen has happened,
+	// and there is nothing after the report to promise. Only a report from
+	// before the depth moved inside the run — which is what an empty value
+	// means — can still be followed by a continuation.
+	return report.ReachedDelivery == "" &&
+		!s.automaticDeliveryAfter.IsZero() && binding.ClaimedAtMillis > 0 &&
 		binding.ClaimedAtMillis >= s.automaticDeliveryAfter.UnixMilli() &&
 		report.Code == TerminalSuccess && report.PullRequestURL != "" &&
 		report.StagingEvidenceURL == "" && report.ProductionEvidenceURL == ""
@@ -244,9 +250,43 @@ func successMessage(report TerminalReportRequest) string {
 		return "自動処理が完了し、本番環境への反映と確認が完了しました。"
 	}
 	if report.StagingEvidenceURL != "" {
+		if report.DeliveryShortfall != "" {
+			return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は、下に書いた設定が揃えば自動で行います。"
+		}
 		return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は人が行います。"
 	}
+	if report.DeliveryShortfall != "" {
+		// The delivery was configured to go further and this instance could
+		// not take it there. Saying "the rest is done by a person" would
+		// hand back work the engine is meant to do; what the ticket needs is
+		// what the engine is waiting on, which the shortfall line below
+		// names.
+		return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。本番環境は変更していません。" +
+			"この納品先はもっと先まで届ける設定ですが、そこまで運ぶ設定がこの環境に揃っていないため、ここで止めています。"
+	}
 	return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。マージと以後の反映は人が行います。本番環境は変更していません。"
+}
+
+// cancelledMessage says what the stop stopped, which is not always nothing.
+//
+// The fixed sentence this replaces said the repository and production were
+// unchanged. That was true while a delivery was over the moment its pull
+// request existed; now the requester can stop one whose change is already
+// merged, deployed and looked at, and telling them nothing had moved would
+// send them away from an environment they need to see. Nothing is ever
+// rolled back automatically — that is the other half the ticket is owed.
+func cancelledMessage(report TerminalReportRequest) string {
+	switch {
+	case report.ProductionEvidenceURL != "":
+		return "起票者による中止の指示を確認したため、ここで停止しました。中止を受け取った時点で本番環境への反映と表示の確認までが完了しています。" +
+			"自動での巻き戻しは行っていません。戻す場合は運用の手順で戻してください。"
+	case report.StagingEvidenceURL != "":
+		return "起票者による中止の指示を確認したため、ここで停止しました。中止を受け取った時点で staging への反映と表示の確認までが完了しています。" +
+			"本番環境は変更していません。自動での巻き戻しは行っていません。"
+	case report.PullRequestURL != "":
+		return "起票者による中止の指示を確認したため、ここで停止しました。取り込み用の Pull Request は作成済みで、マージは行っていません。本番環境は変更していません。"
+	}
+	return "起票者による中止の指示を確認したため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。"
 }
 
 // TerminalCommentContent is the comment a finished run leaves on its
@@ -265,7 +305,7 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 		TerminalClarificationRequired:          "実装に着手する前に、依頼者にしか決められない確認事項が見つかったため、対象リポジトリと本番環境は変更せず停止しました。確認事項は運用担当者が確認し、必要に応じてこのチケットのコメントでお知らせします。同じチケットの再投入は不要です。",
 		TerminalReadinessUnresolved:            "着手可否の自動判定が規定回数内に確定しなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。同じチケットの再投入は不要です。",
 		TerminalClarificationExpired:           "確認事項への回答が期限までに得られなかったため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。再度依頼する場合は、確認事項への回答内容を反映した新しいチケットとして起票してください。",
-		TerminalCancelled:                      "起票者による中止の指示を確認したため、対象リポジトリと本番環境は変更せず停止しました。このチケットでの自動処理は終了しています。",
+		TerminalCancelled:                      cancelledMessage(report),
 		TerminalModelFailed:                    modelFailedMessage(report),
 		TerminalNonconverged:                   "自動レビューが最大回数内に収束しなかったため、本番環境には反映していません。",
 		TerminalValidationFailed:               "生成した変更が検証を通過しなかったため、本番環境には反映していません。",
@@ -309,6 +349,13 @@ func terminalCommentContent(report TerminalReportRequest, reportDigest string, d
 	}
 	if report.ProductionEvidenceURL != "" {
 		lines = append(lines, "production確認先: "+report.ProductionEvidenceURL)
+	}
+	// What a deeper delivery would have needed, on the ticket rather than in
+	// a log. A destination asked for production and the change stopped at
+	// its pull request: the requester is owed the reason on the same comment
+	// that tells them where it stopped.
+	if report.DeliveryShortfall != "" {
+		lines = append(lines, "ここまでで止まった理由: "+report.DeliveryShortfall)
 	}
 	footer := facts.render()
 	head := strings.Join(lines, "\n")
@@ -385,6 +432,17 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 	case TerminalCancelled:
 		facts.NextActor = "起票者"
 		facts.Operation = "対応は不要です（中止の指示どおり停止しました）"
+		// What the stop left behind. The default line below says production
+		// is untouched, which is the truth for a stop before anything left
+		// the pod and a falsehood for one after the promotion landed.
+		switch {
+		case report.ProductionEvidenceURL != "":
+			facts.Production = "反映済み（中止の時点で本番への反映と確認が完了しています。自動の巻き戻しは行いません）"
+		case report.StagingEvidenceURL != "":
+			facts.Production = "未変更（staging までは反映済み。自動の巻き戻しは行いません）"
+		case report.PullRequestURL != "":
+			facts.Production = "未変更（Pull Request 作成まで。マージは行っていません）"
+		}
 	case TerminalImplementationReturned:
 		// The implementer answered and the answer is on the ticket, so the
 		// next move is the requester's. The default line — an operator will

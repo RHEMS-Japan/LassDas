@@ -51,7 +51,6 @@ type Pipeline struct {
 	}
 
 	consumerRepository string
-	delivery           string
 	// cloneTarget lets package tests stand in for the network clone of the
 	// destination repository; nil means the real github.com clone.
 	// Production never sets it.
@@ -317,12 +316,15 @@ func (p *Pipeline) verifyToolPins() error {
 }
 
 // resolveConsumer reads the delivery mode for the single consumer the draft
-// located — the workflow's source-job jq over m1-consumer.json. The pod
-// runtime ships the pull_request stopping point first; a consumer that
-// stops at integration or production is refused here, before any work,
-// because its success report needs browser evidence steps this runtime
-// does not carry yet (an honest early stop instead of an unsealable
-// terminal after a real merge).
+// located — the workflow's source-job jq over m1-consumer.json.
+//
+// Every depth is accepted. A destination that asks for integration or
+// production used to be refused here, before any work, because the pod
+// runtime could only propose; the cards that merge, wait for the
+// deployment and observe the screen now run inside the delivery, so the
+// depth is something this run carries out rather than something it turns
+// away. What this stage does is the same either way: publish the change and
+// open the pull request. Everything past it belongs to the delivery cards.
 func (p *Pipeline) resolveConsumer() error {
 	raw, err := readWorkspaceFile(p.Config.ConsumerConfigPath, maxWorkspaceReadBytes)
 	if err != nil {
@@ -350,15 +352,18 @@ func (p *Pipeline) resolveConsumer() error {
 		if consumer.Repository != repository {
 			continue
 		}
+		// The depth is read, not kept: what this stage does is the same at
+		// every depth, and the delivery cards after it are told how far to
+		// go by the attendant, which reads the destination configuration
+		// through its own loader. A value that is not one of the three is
+		// still refused here — the run would otherwise start against a
+		// configuration nothing downstream can act on.
 		switch consumer.Delivery {
-		case "pull_request":
-		case "integration", "production":
-			return fmt.Errorf("consumer %s stops at %s; the pod runtime ships pull_request delivery only", repository, consumer.Delivery)
+		case "pull_request", "integration", "production", "":
 		default:
 			return fmt.Errorf("consumer %s has unknown delivery %q", repository, consumer.Delivery)
 		}
 		p.consumerRepository = repository
-		p.delivery = consumer.Delivery
 		for _, tool := range consumer.Mode.Toolchain {
 			// The workflow provisioned this toolchain per run (pinned Node
 			// and pnpm); the pod image ships it. Assert it is really there

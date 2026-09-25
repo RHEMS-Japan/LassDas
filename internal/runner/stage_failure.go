@@ -457,20 +457,31 @@ func containsAny(text string, markers []string) bool {
 // split every other record in the run directory already observes.
 func StageFailureFile(runDir, stage string, round int) string {
 	directory := "stage"
-	if runtime.IsDesignStage(stage) {
+	switch {
+	case runtime.IsDesignStage(stage):
 		directory = "design"
+	case runtime.IsDeliverStage(stage):
+		directory = "deliver"
 	}
 	return filepath.Join(runDir, "history", fmt.Sprintf("%s-%d", directory, round), stage+"-failure.json")
+}
+
+// sealableStage reports whether a card may seal an account of its failure.
+// The chain's own stages and the delivery's cards: both are dispatched, both
+// can die on a volume that filled or a registry that would not answer, and
+// the ladder picks its remedy from what they wrote. A name that is neither
+// is refused outright — it would otherwise choose the path.
+func sealableStage(stage string) bool {
+	return slices.Contains(runtime.AllStages(), stage) || runtime.IsDeliverStage(stage)
 }
 
 // SealStageFailure writes why this card is about to return non-zero.
 //
 // Best-effort by design, like the trail: a record that cannot be written must
 // never change what the card returns, because the exit code is what the
-// kanban and the attendant already act on. A stage name that is not one of
-// the chain's own is refused outright — it would otherwise choose the path.
+// kanban and the attendant already act on.
 func (p *Pipeline) SealStageFailure(stage string, failure error) {
-	if failure == nil || !slices.Contains(runtime.AllStages(), stage) {
+	if failure == nil || !sealableStage(stage) {
 		return
 	}
 	// The run directory has to exist already. Everything here writes under a
@@ -518,7 +529,7 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 // modes beside it and drifting from them.
 func SealStageFailureRecord(workspace string, record StageFailure) error {
 	record.SchemaVersion = StageFailureSchemaVersion
-	if record.Round < 1 || !slices.Contains(runtime.AllStages(), record.Stage) {
+	if record.Round < 1 || !sealableStage(record.Stage) {
 		return errors.New("a failure record names a stage and a round this chain does not have")
 	}
 	digest, err := stageFailureDigest(record)
@@ -574,6 +585,11 @@ func (p *Pipeline) failureRound(stage string) int {
 			return round
 		}
 		return p.currentDesignRound()
+	case runtime.DeliverStageChecks, runtime.DeliverStageIntegrate, runtime.DeliverStagePromote:
+		// A delivery card counts in no round: the change it carries was
+		// sealed by a round that is over, and the card is dispatched again
+		// against the same one record however many attempts it takes.
+		return runtime.DeliverRound
 	case runtime.StageInvestigate, runtime.StageDesignReviewA, runtime.StageDesignReviewB:
 		// These fail before any decision of their round exists, and the
 		// investigation they belong to may itself be what failed to seal.
@@ -588,7 +604,7 @@ func (p *Pipeline) failureRound(stage string) int {
 // the stage and round asked for: a run directory outlives its cards, and a
 // stale account would explain the wrong failure.
 func ReadStageFailure(runDir, stage string, round int) (StageFailure, bool) {
-	if round < 1 || !slices.Contains(runtime.AllStages(), stage) {
+	if round < 1 || !sealableStage(stage) {
 		return StageFailure{}, false
 	}
 	encoded, err := readWorkspaceFile(StageFailureFile(runDir, stage, round), maxStageFailureRecordBytes)

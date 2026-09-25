@@ -176,10 +176,16 @@ func (p *Pipeline) AttemptedImplementation() bool {
 }
 
 // deliveryStage publishes the adopted candidate: compose the trail, push
-// the feature, open the PR — and stop there for the pull_request delivery
-// (the PoC exit). The integration and production continuations call the
-// same controller subcommands the workflow did; their polling lives inside
-// the controller, unchanged.
+// the feature, open the PR — and stop there, whatever depth the destination
+// asked for.
+//
+// The depth is not this stage's business any more. Merging to the release
+// branch, waiting for the workflow, observing staging, promoting and
+// observing production are the delivery cards' work, dispatched after this
+// one and driven while the run is still claimed; this stage's contract is
+// the published pull request and nothing else. Before, a destination that
+// asked for anything deeper was refused before the run began, so the two
+// halves could never meet.
 func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []string) (Outcome, error) {
 	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), stage)
 	evidence := map[string]string{}
@@ -203,10 +209,7 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []s
 	if url, err := p.readJSONField("feature-pr.json", "payload", "pull_request", "HTMLURL"); err == nil && url != "" {
 		evidence["pull_request_url"] = url
 	}
-	if p.delivery == "pull_request" {
-		return Outcome{Stage: stage, Evidence: evidence}, nil
-	}
-	return p.deliveryUnsupported(stage, evidence)
+	return Outcome{Stage: stage, Evidence: evidence}, nil
 }
 
 const (
@@ -365,12 +368,4 @@ func (p *Pipeline) appendTrailNote(note string) {
 	}
 	defer file.Close()
 	_, _ = file.WriteString("\n" + note + "\n")
-}
-
-func (p *Pipeline) deliveryUnsupported(stage int, evidence map[string]string) (Outcome, error) {
-	// resolveConsumer refuses integration/production consumers before any
-	// work, because their success reports need browser evidence steps this
-	// runtime does not carry yet; reaching here with one is a bug.
-	return Outcome{Code: hook.TerminalInternalFailed, Evidence: evidence},
-		fmt.Errorf("delivery %q reached the delivery stage but is not shipped in the pod runtime", p.delivery)
 }

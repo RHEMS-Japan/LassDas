@@ -142,10 +142,15 @@ type chainView struct {
 	designRound int
 	designCards map[string]runtime.BoardTask
 	all         []runtime.BoardTask
+	// board is the whole listing this tick read. The delivery's cards — the
+	// ones that merge, wait for the workflow and observe a screen — are
+	// keyed outside the chain's namespace, so they are not in any field
+	// above and the delivery hand-off needs the listing itself.
+	board []runtime.BoardTask
 }
 
 func chainViewFor(tasks []runtime.BoardTask, deliveryID string) chainView {
-	view := chainView{cards: map[string]runtime.BoardTask{}, designCards: map[string]runtime.BoardTask{}}
+	view := chainView{cards: map[string]runtime.BoardTask{}, designCards: map[string]runtime.BoardTask{}, board: tasks}
 	rounds := map[int]map[string]runtime.BoardTask{}
 	designRounds := map[int]map[string]runtime.BoardTask{}
 	for _, task := range tasks {
@@ -541,7 +546,10 @@ func advanceClaimedRun(
 		if plan.Shape == runtime.ShapeInvestigation {
 			return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 		}
-		return reportChainSuccess(ctx, config, services, envelope, run, logger)
+		// The change is published. How much further it travels is the
+		// destination's own setting, and the delivery carries it there
+		// before anything calls it a success (deliver_depth.go).
+		return completeDelivery(ctx, config, services, hermes, envelope, run, view, plan, logger)
 	}
 	for _, stage := range stages {
 		task, ok := view.card(stage.Name)
@@ -661,12 +669,22 @@ func resubmitPendingTerminal(
 		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	repository, err := pendingRepository(ctx, terminal, runDir, run, code)
+	// What a rebuilt report carries can depend on the repository it names:
+	// a stop that reached staging cites a commit in that repository, and
+	// all of it is sealed into the digest this re-submission has to
+	// reproduce. Each candidate below is rebuilt with its own.
+	evidenceFor := func(repository string) map[string]string {
+		if code == hook.TerminalCancelled {
+			return stoppedDeliveryEvidence(runDir, repository, code)
+		}
+		return evidence
+	}
+	repository, err := pendingRepository(ctx, terminal, runDir, run, code, evidenceFor)
 	if err != nil {
 		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
 		return nil
 	}
-	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidence}, repository); err != nil {
+	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidenceFor(repository)}, repository); err != nil {
 		return err
 	}
 	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
@@ -683,7 +701,7 @@ func resubmitPendingTerminal(
 // conflict on every tick — the same silence this path exists to end. Both
 // candidates are rebuilt and the one that reproduces the row's digest is
 // sent; neither matching is left to a person.
-func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode) (string, error) {
+func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir string, run state.RunOverview, code hook.TerminalCode, evidenceFor func(string) map[string]string) (string, error) {
 	if run.TerminalReportSHA256 == "" {
 		return "", errors.New("the pending report carries no digest")
 	}
@@ -692,7 +710,7 @@ func pendingRepository(ctx context.Context, terminal *runner.Terminal, runDir st
 		candidates = []string{drafted, ""}
 	}
 	for _, candidate := range candidates {
-		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code}, candidate)
+		digest, err := terminal.ReportDigest(ctx, code, runner.Outcome{Code: code, Evidence: evidenceFor(candidate)}, candidate)
 		if err != nil {
 			if candidate != "" {
 				// The draft's value could not be shaped into a report, so
@@ -730,11 +748,21 @@ func reportChainSuccess(
 	if err != nil {
 		return errors.New("run repository unreadable")
 	}
+	evidence := outcome.Evidence
+	reached := ""
+	// What the delivery actually reached, read back from the records its
+	// cards sealed (deliver_depth.go). Only a delivery whose depth this
+	// engine decided has one: a report begun by an engine from before the
+	// depth moved into the run carries the evidence it carried then, which
+	// is what its re-submission has to reproduce byte for byte.
+	if depth, sealed := readDepthRecord(runDir); sealed {
+		reached, evidence, _ = deliveryOutcome(runDir, repository, depth, evidence)
+	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
-	if err := terminal.Report(ctx, hook.TerminalSuccess, runner.Outcome{Stage: outcome.Stage, Evidence: outcome.Evidence}, repository); err != nil {
+	if err := terminal.Report(ctx, hook.TerminalSuccess, runner.Outcome{Stage: outcome.Stage, Evidence: evidence}, repository); err != nil {
 		return err
 	}
-	logger.Info("chain delivered", "run", run.RunID, "round", outcome.Stage)
+	logger.Info("chain delivered", "run", run.RunID, "round", outcome.Stage, "reached", reached)
 	return nil
 }
 

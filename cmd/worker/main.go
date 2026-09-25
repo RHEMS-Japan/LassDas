@@ -1143,12 +1143,18 @@ func (values *stringList) Set(value string) error {
 	return nil
 }
 
+// readConfig loads the destination configuration through the package's own
+// loader rather than decoding and validating it here.
+//
+// Two paths that each decoded the file separately drifted the moment one of
+// them learnt something the other had not: the loader fills in a
+// destination that does not say how far its changes travel, and this one
+// did not, so a file the engine planned a production delivery from was
+// refused by the first card that read it — "worker configuration was
+// rejected", with nothing saying which line. One loader, one answer.
 func readConfig(filename string) (worker.Config, error) {
-	var config worker.Config
-	if err := worker.ReadJSONFile(filename, worker.MaxConfigJSONBytes, &config); err != nil {
-		return worker.Config{}, errors.New("worker configuration could not be read")
-	}
-	if err := config.Validate(); err != nil {
+	config, err := worker.LoadConfig(filename)
+	if err != nil {
 		return worker.Config{}, errors.New("worker configuration was rejected")
 	}
 	return config, nil

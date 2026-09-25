@@ -256,6 +256,31 @@ func TestLoadAcceptsTheDeliverConfiguration(t *testing.T) {
 	if _, err := deliver.EnabledAfterTime(); err != nil {
 		t.Fatalf("EnabledAfterTime() error = %v", err)
 	}
+	// Nothing waits for a person unless the operator asked for it: a
+	// delivery thrown at eleven at night is meant to be finished by the
+	// morning, and a wait for someone to read a comment is the one thing
+	// that cannot be.
+	if deliver.GoGateRequired() {
+		t.Fatal("the promotion waits for a Go by default")
+	}
+	for _, value := range []string{GoGateOff, ""} {
+		off := deliver
+		off.GoGate = value
+		if off.GoGateRequired() {
+			t.Fatalf("go_gate %q waits for a Go", value)
+		}
+	}
+	required := deliverChainMap()
+	required["go_gate"] = GoGateRequired
+	chain["deliver"] = required
+	raw["chain"] = chain
+	withGate, err := Load(writeRuntimeConfig(t, raw))
+	if err != nil {
+		t.Fatalf("Load() with a required gate error = %v", err)
+	}
+	if !withGate.Chain.Deliver.GoGateRequired() {
+		t.Fatal("go_gate: required did not bring the wait back")
+	}
 }
 
 func TestLoadAcceptsTheDebugRole(t *testing.T) {
@@ -351,6 +376,17 @@ func TestLoadRejectsBrokenConfigs(t *testing.T) {
 			m["orchestration"] = "cards"
 			chain := cardsChainMap()
 			chain["deliver"] = deliverChainMap()
+			m["chain"] = chain
+		},
+		// A misspelling of "required" read as "off" would promote to
+		// production without the look its operator asked for.
+		"deliver with a go gate that is neither answer": func(m map[string]any) {
+			m["orchestration"] = "cards"
+			m["browsercheck_bin"] = "/usr/local/bin/browsercheck"
+			chain := cardsChainMap()
+			deliver := deliverChainMap()
+			deliver["go_gate"] = "Required"
+			chain["deliver"] = deliver
 			m["chain"] = chain
 		},
 	}

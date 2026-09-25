@@ -143,6 +143,12 @@ type ladderClimb struct {
 	stage    string
 	runDir   string
 	logger   Logger
+	// rebuild replaces the chain rebuild below for a card that is not part
+	// of the chain. The delivery cards — the ones that merge, wait for the
+	// workflow and observe a screen — are dispatched outside the chain's
+	// namespace and have no stage after them to retire, so they bring their
+	// own way of being built again. Nil means the chain's own.
+	rebuild func(ctx context.Context, climb ladderClimb) (ladderVerdict, error)
 }
 
 // ladderHands are the hands for one kind of failure, in the order they are
@@ -489,6 +495,9 @@ func dispatchAgain(ctx context.Context, climb ladderClimb) (ladderVerdict, error
 	// is only waiting reads it on its own slower clock.
 	if stopAsked(ctx, climb) {
 		return ladderStopped, nil
+	}
+	if climb.rebuild != nil {
+		return climb.rebuild(ctx, climb)
 	}
 	stages := runtime.ChainStagesFor(config.Chain, climb.plan)
 	from := -1

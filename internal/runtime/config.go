@@ -182,14 +182,31 @@ type DeliverConfig struct {
 	// cut-off — enabling the feature must never reach back through the
 	// ledger's past successes.
 	EnabledAfter string `json:"enabled_after,omitempty"`
+	// GoGate decides whether production waits for a person. Omitted, and
+	// "off", promote as soon as the staging observation passes: a delivery
+	// thrown at eleven at night is meant to be finished by the morning, and
+	// a wait for someone to read a comment is the one thing that cannot be.
+	// "required" restores the wait below, for a destination whose operator
+	// wants to look before production moves.
+	GoGate string `json:"go_gate,omitempty"`
 	// GoWaitSeconds bounds how long the promotion waits for the requester's
-	// Go after the staging report. Zero means the 7-day default; expiry is
-	// reported honestly, never promoted.
+	// Go after the staging report, where go_gate is required. Zero means the
+	// 7-day default; expiry is reported honestly, never promoted.
 	GoWaitSeconds              int `json:"go_wait_seconds,omitempty"`
 	ChecksMaxRuntimeSeconds    int `json:"checks_max_runtime_seconds,omitempty"`
 	IntegrateMaxRuntimeSeconds int `json:"integrate_max_runtime_seconds,omitempty"`
 	PromoteMaxRuntimeSeconds   int `json:"promote_max_runtime_seconds,omitempty"`
 }
+
+// The two answers go_gate takes. Omitted reads as GoGateOff.
+const (
+	GoGateOff      = "off"
+	GoGateRequired = "required"
+)
+
+// GoGateRequired reports whether the promotion to production waits for the
+// requester to write 「Go」 on the ticket.
+func (d DeliverConfig) GoGateRequired() bool { return d.GoGate == GoGateRequired }
 
 // Enabled reports whether the v2 delivery is fully configured.
 func (d DeliverConfig) Enabled() bool {
@@ -550,6 +567,12 @@ func (c Config) validateOrchestration() error {
 		if c.BrowserCheckBin == "" {
 			return errors.New("runtime config: chain.deliver needs browsercheck_bin (the sealed observation binary)")
 		}
+	}
+	// Refused rather than read as "off": a misspelling of required would
+	// otherwise promote to production without the look its operator asked
+	// for, and nothing would say so.
+	if gate := c.Chain.Deliver.GoGate; gate != "" && gate != GoGateOff && gate != GoGateRequired {
+		return errors.New(`runtime config: chain.deliver.go_gate accepts "off" (the default) or "required"`)
 	}
 	return nil
 }

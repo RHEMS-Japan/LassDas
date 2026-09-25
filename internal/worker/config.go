@@ -973,10 +973,36 @@ func LoadConfig(filename string) (Config, error) {
 	if err := ReadJSONFile(filename, MaxConfigJSONBytes, &config); err != nil {
 		return Config{}, errors.New("read worker config: invalid JSON input")
 	}
+	config.applyDeliveryDefault()
 	if err := config.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate worker config: %w", err)
 	}
 	return config, nil
+}
+
+// applyDeliveryDefault fills in how far a destination's changes travel when
+// the file does not say.
+//
+// Production, because the engine is meant to finish the job: a destination
+// that only wants a proposal says so, rather than every destination having
+// to ask for the rest. A CLI destination has no environment to reach, so
+// its only honest default is the proposal.
+//
+// This changes no digest that exists. The field carries no omitempty, so
+// every configuration that loads today already names a value and already
+// hashes with it; only a file that omits it — refused outright until now —
+// is affected at all.
+func (c *Config) applyDeliveryDefault() {
+	for index := range c.Consumers {
+		if c.Consumers[index].Delivery != "" {
+			continue
+		}
+		if c.Consumers[index].EffectiveKind() == "cli" {
+			c.Consumers[index].Delivery = DeliverPullRequest
+			continue
+		}
+		c.Consumers[index].Delivery = DeliverProduction
+	}
 }
 
 // SHA256 returns the canonical digest of the validated configuration. The
