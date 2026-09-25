@@ -143,6 +143,21 @@ func newDepthHarness(t *testing.T, delivery string, deliverOn bool, goGate strin
 			t.Fatal(err)
 		}
 	}
+	// The destination's working copy, which every live delivery has: it is
+	// made once before any card exists and nothing rebuilds it, so a
+	// delivery that reached the promotion without one is an anomaly the
+	// promotion refuses. Tests about that take it away on purpose.
+	for _, workflow := range []string{
+		".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml",
+	} {
+		path := filepath.Join(runDir, "target-repo", filepath.FromSlash(workflow))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("on: push\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	write("ticket-envelope.json", string(encodedEnvelope))
 	write("ticket-draft.json", fmt.Sprintf(`{"repository":%q}`, depthRepository))
 	write("history/readiness/decision.json", `{"request_kind":"change","needs_design":false}`)

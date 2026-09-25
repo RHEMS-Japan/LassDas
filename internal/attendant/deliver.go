@@ -281,9 +281,10 @@ func advanceTowardsPromotion(ctx context.Context, config runtime.Config, service
 // configuration is an operator's edit, and the promotion stops: nothing
 // past this point knows where production is, and the edit gets no other
 // warning, because a delivery this far along is exempt from the restart
-// that a changed configuration otherwise causes (chains.go). The three
-// reads that fail open below are faults rather than answers, and each says
-// at its own line why proceeding is the safer of the two.
+// that a changed configuration otherwise causes (chains.go). The two reads
+// that fail open below are faults rather than answers, and each says at its
+// own line why proceeding is the safer of the two — which it is only
+// because neither of them is about the path itself.
 //
 // The staging record is the caller's, not read again here. It is the one
 // thing this needs that the caller has already parsed, and reading it a
@@ -321,18 +322,24 @@ func verifyBuiltPath(config runtime.Config, runDir string, staging runner.Delive
 	tree := filepath.Join(runDir, "target-repo")
 	if _, err := os.Stat(tree); err != nil {
 		// The working copy is not on the volume, so the file below cannot
-		// be looked for at all. It is re-fetchable by design and the ladder
-		// sweeps run clones to make room, so its absence is a fact about
-		// disk and says nothing about the destination's repository — and
-		// refusing every promotion that follows a sweep would stop
-		// deliveries that are fine.
+		// be looked for at all. That should not happen: the working copy is
+		// made once, before any card of the delivery exists, and nothing
+		// rebuilds it (reclaim.go) — the two hands that reclaim disk take a
+		// finished run's copies or this delivery's verification sandbox,
+		// never a live delivery's working copy. Its absence is an anomaly
+		// rather than a routine fact about disk.
 		//
-		// The cost of being wrong is the promote card's own wall clock: a
-		// workflow that really is missing ends that card with a deployment
-		// that never started, and the ladder takes it from there. That is
-		// the slow ending this check exists to avoid, accepted here because
-		// the alternative stops healthy deliveries on a disk fact.
-		return "", true
+		// So this refuses rather than proceeds, and the asymmetry is the
+		// reason. Proceeding is not a wait that might be wasted: the
+		// promote card opens the promotion pull request and merges it
+		// before anything looks at a deployment, and that merge's base is
+		// the release branch — so a missing workflow surfaces only after
+		// the change is already released, and backing that out is somebody's
+		// afternoon. Refusing costs the delivery a staging landing it has
+		// already made, says which part could not be checked, and can be
+		// promoted again the moment the copy is back.
+		return "本番へ反映する " + workflow + " を確かめられなかった (この依頼の作業コピーが残っていない) ため、" +
+			"本番反映は行わず staging までで止めています。", false
 	}
 	if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(workflow))); err != nil {
 		return "本番へ反映する " + workflow + " がリポジトリに無いため、本番反映は行わず staging までで止めています。", false

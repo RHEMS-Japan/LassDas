@@ -255,17 +255,14 @@ func containsName(names []string, want string) bool {
 	return false
 }
 
-// writeTree puts files into the destination's checked-out tree, which is
-// what the promotion reads to see whether the path it is about to use is
-// actually there.
-func (h *depthHarness) writeTree(t *testing.T, names ...string) {
+// dropFromTree takes something out of the destination's checked-out tree,
+// which is what the promotion reads to see whether the path it is about to
+// use is actually there. The harness puts a whole tree there, because every
+// live delivery has one; a test says which part of it is missing.
+func (h *depthHarness) dropFromTree(t *testing.T, names ...string) {
 	t.Helper()
 	for _, name := range names {
-		path := filepath.Join(h.runDir, "target-repo", filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("on: push\n"), 0o600); err != nil {
+		if err := os.RemoveAll(filepath.Join(h.runDir, "target-repo", filepath.FromSlash(name))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,21 +280,20 @@ func (h *depthHarness) writeTree(t *testing.T, names ...string) {
 func TestTheBuiltPathIsCheckedBeforeProduction(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
-		tree     []string
+		drop     []string
 		proof    bool
 		promotes bool
 		says     string
 	}{
 		{
 			name:     "the built path reaches production",
-			tree:     []string{".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml"},
 			proof:    true,
 			promotes: true,
 		},
 		{
 			// One half of the path built and not the other.
 			name:  "the workflow production needs is not in the repository",
-			tree:  []string{".github/workflows/deploy-staging.yml"},
+			drop:  []string{".github/workflows/deploy-production.yml"},
 			proof: true,
 			says:  "deploy-production.yml",
 		},
@@ -306,14 +302,24 @@ func TestTheBuiltPathIsCheckedBeforeProduction(t *testing.T) {
 			// nothing, and promoting on it would carry an unverified path
 			// into production.
 			name:  "nothing recorded that staging was actually deployed",
-			tree:  []string{".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml"},
 			proof: false,
 			says:  "デプロイが実際に動いた記録",
+		},
+		{
+			// The working copy itself is gone. Nothing rebuilds it for a
+			// live delivery, so the path cannot be checked at all — and
+			// the promotion merges into the release branch before any
+			// deployment is looked at, so proceeding would release a
+			// change whose route nothing verified.
+			name:  "the working copy this delivery was checked out into is gone",
+			drop:  []string{"."},
+			proof: true,
+			says:  "作業コピーが残っていない",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			h := newDepthHarness(t, "production", true, "")
-			h.writeTree(t, testCase.tree...)
+			h.dropFromTree(t, testCase.drop...)
 			h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 			h.write(runner.DeliverChecksFile, `{"ok":true}`)
 			plan := worker.ReleasePathPlan{SchemaVersion: worker.ReleasePathSchemaVersion,
@@ -376,7 +382,7 @@ func TestARefusedPromotionWithNoPlanStillSaysTheRealReason(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
 	// The staging half of the path is there and production's is not, and
 	// no plan is sealed: this destination looked complete at reception.
-	h.writeTree(t, ".github/workflows/deploy-staging.yml")
+	h.dropFromTree(t, ".github/workflows/deploy-production.yml")
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 	h.write(runner.DeliverChecksFile, `{"ok":true}`)
 	if _, sealed := readReleasePathPlan(h.runDir); sealed {
@@ -406,7 +412,6 @@ func TestARefusedPromotionWithNoPlanStillSaysTheRealReason(t *testing.T) {
 // configuration otherwise causes.
 func TestADestinationEditedOutOfTheConfigurationIsNotPromotedTo(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
-	h.writeTree(t, ".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml")
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 	h.write(runner.DeliverChecksFile, `{"ok":true}`)
 	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
@@ -430,7 +435,6 @@ func TestADestinationEditedOutOfTheConfigurationIsNotPromotedTo(t *testing.T) {
 // the same file and fails on its own terms if it is really broken.
 func TestAnUnreadableConfigurationDoesNotStopThePromotion(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
-	h.writeTree(t, ".github/workflows/deploy-staging.yml", ".github/workflows/deploy-production.yml")
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 	h.write(runner.DeliverChecksFile, `{"ok":true}`)
 	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
