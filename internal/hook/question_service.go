@@ -683,6 +683,11 @@ func (s *QuestionTickService) result(decision Decision, code, deliveryID string)
 // postRunNotices posts the owed acceptance and answer-receipt notices. A
 // transient failure returns (result, true) so the tick retries next wake-up;
 // otherwise processing continues.
+//
+// waiting is read once by the caller and serves both notices, from the two
+// sides of the same fact: the receipt may not say a run resumed while it is
+// still waiting, and the acceptance notice tells the requester they owe one
+// answer exactly when it is.
 func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoticeSnapshot, waiting bool) (Result, bool) {
 	deliveryID := notice.Snapshot.DeliveryID
 	posted, err := s.store.RunCommentState(ctx, s.config, RunCommentAck, "")
@@ -690,7 +695,7 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 		return s.failure("question_tick_notice_state", err, deliveryID), true
 	}
 	if !posted {
-		content := AckCommentContent(notice.Snapshot)
+		content := AckCommentContent(notice.Snapshot, waiting)
 		if result, ok := s.postRunComment(ctx, RunCommentAck, "", content, deliveryID); !ok {
 			return result, true
 		}

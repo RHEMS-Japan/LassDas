@@ -6,17 +6,31 @@ import (
 )
 
 // AckCommentContent is the acceptance notice posted once per run: who owns
-// the processing, that no user action is needed unless a question follows,
-// and when to expect the final report (README「Backlog 上の表示と通知」受付 /
-// 結果未着). Deterministic from the sealed snapshot.
-func AckCommentContent(snapshot TicketSnapshot) string {
+// the processing, what the requester is left to do, and when to expect the
+// final report (README「Backlog 上の表示と通知」受付 / 結果未着).
+// Deterministic from the sealed snapshot and the reception it follows.
+//
+// questionOpen is whether the reception's question is waiting for an answer.
+// The notice is posted after the reception has decided — the tick that posts
+// it runs after the pass that put either the plan notice or the question on
+// the ticket — and the two decisions leave the requester opposite jobs:
+// nothing at all, or one answer. It has to be told which, because the
+// reception asks everything it needs in a single round and nothing after the
+// reception asks anything: the line used to promise a question "if one is
+// found", which no code path can keep, and which reads as a reason to wait
+// on a run that is never going to ask.
+func AckCommentContent(snapshot TicketSnapshot, questionOpen bool) string {
 	var builder strings.Builder
 	builder.WriteString("【受付】このチケットの自動処理を受け付けました。\n\n")
 	builder.WriteString("処理の所有者: 自動処理（結果はこのチケットのコメントでお知らせします）\n")
-	builder.WriteString("ご対応のお願い: いまは何もありません。依頼者にしか決められない確認事項が見つかった場合のみ、質問コメントを通知します。\n")
+	if questionOpen {
+		builder.WriteString("ご対応のお願い: 上の質問への回答だけです。この一度きりで、以後は質問しません。\n")
+	} else {
+		builder.WriteString("ご対応のお願い: ありません。受付時の確認は完了しており、以後この依頼について質問することはありません。方針が違う場合は停止の方法をご利用ください。\n")
+	}
 	builder.WriteString("最終報告の目安: 受付から 2 時間以内（質問への回答待ちの期間は除きます）\n")
 	builder.WriteString("目安を過ぎても最終報告がない場合は、再起票や再実行はせず、プロジェクトの運用窓口へこのチケットの番号を添えてご連絡ください。\n")
-	return builder.String() + CommentFacts{
+	facts := CommentFacts{
 		State:      "受付済み・自動処理中",
 		NextActor:  "自動処理",
 		Operation:  "利用者操作なし",
@@ -24,7 +38,16 @@ func AckCommentContent(snapshot TicketSnapshot) string {
 		Production: "未変更",
 		AutoRetry:  "なし（webhook 未達時は 5 分周期の照合で受付を補完）",
 		Marker:     CommentMarker("ack", snapshot.RunID),
-	}.render()
+	}
+	if questionOpen {
+		// "Nobody has to do anything" printed under an open question
+		// contradicts the line above it and sends the requester away from
+		// the one move only they can make. The wording is the question
+		// comment's own, so both comments ask for the same thing.
+		facts.NextActor = "起票者（回答者）"
+		facts.Operation = "上の質問コメントの「回答テンプレート」を書き換えて 1 つのコメントとして投稿"
+	}
+	return builder.String() + facts.render()
 }
 
 // PlanFacts is what the plan notice shows the requester: the automation's

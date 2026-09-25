@@ -53,3 +53,45 @@ func TestDesignDecisionLineNamesEveryVerdict(t *testing.T) {
 		t.Fatal("an unknown reason was reported as known")
 	}
 }
+
+// The acceptance notice follows a reception that has already decided, and
+// the two decisions leave the requester opposite jobs. When the reception
+// proceeded, nothing is owed and nothing will ever be asked: the notice says
+// so outright rather than holding out a question no code path can send.
+func TestAcceptanceNoticeAsksForNothingWhenTheReceptionProceeded(t *testing.T) {
+	content := AckCommentContent(TicketSnapshot{RunID: "run-42", IssueKey: "TICKET-501"}, false)
+	const request = "ご対応のお願い: ありません。受付時の確認は完了しており、以後この依頼について質問することはありません。方針が違う場合は停止の方法をご利用ください。"
+	if !strings.Contains(content, "\n"+request+"\n") {
+		t.Fatalf("the proceeded reception does not say what is owed:\n%s", content)
+	}
+	// The promise that was impossible to keep: nothing after the reception
+	// asks the requester anything.
+	if strings.Contains(content, "質問コメントを通知します") {
+		t.Fatalf("the notice still promises a later question:\n%s", content)
+	}
+	if got := ExtractCommentMarker(content); got != CommentMarker("ack", "run-42") {
+		t.Fatalf("marker line = %q", got)
+	}
+}
+
+// When the reception asked its one question, the notice names the single
+// answer the requester owes and closes the door behind it, and its footer
+// points at the same answer instead of saying no action is needed.
+func TestAcceptanceNoticeAsksOnlyForTheOneAnswerWhenTheReceptionAsked(t *testing.T) {
+	content := AckCommentContent(TicketSnapshot{RunID: "run-42", IssueKey: "TICKET-501"}, true)
+	const request = "ご対応のお願い: 上の質問への回答だけです。この一度きりで、以後は質問しません。"
+	if !strings.Contains(content, "\n"+request+"\n") {
+		t.Fatalf("the open question is not named:\n%s", content)
+	}
+	if strings.Contains(content, "操作: 利用者操作なし") {
+		t.Fatalf("the footer contradicts the open question:\n%s", content)
+	}
+	if got := ExtractCommentMarker(content); got != CommentMarker("ack", "run-42") {
+		t.Fatalf("marker line = %q", got)
+	}
+	// The kinds table carries one acceptance notice, so this rendering is
+	// held to the seven-item contract here.
+	if err := ValidateCommentContract(content, CommentMarker("ack", "run-42")); err != nil {
+		t.Fatalf("the acceptance notice violates the contract: %v", err)
+	}
+}

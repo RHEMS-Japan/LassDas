@@ -85,7 +85,11 @@ func TestEveryAutomatedCommentSatisfiesTheSevenItemContract(t *testing.T) {
 	}
 	cases = append(cases, contractCase{"question", question, CommentMarker("question", runID, "C1")})
 	snapshot := TicketSnapshot{RunID: runID, IssueKey: "TICKET-501"}
-	cases = append(cases, contractCase{"ack", AckCommentContent(snapshot), CommentMarker("ack", runID)})
+	// One case per comment kind: the table checks that no two kinds share a
+	// marker, and the acceptance notice is one kind whichever reception it
+	// follows. Its other rendering is held to the contract beside the
+	// sentence it turns on (notice_message_test.go).
+	cases = append(cases, contractCase{"ack", AckCommentContent(snapshot, false), CommentMarker("ack", runID)})
 	plan := PlanCommentContent(runID, PlanFacts{
 		Request:     "一覧の取得失敗時に再試行の導線を出す",
 		Rationale:   "失敗メッセージの隣に再試行ボタンを描画し、一覧の取得だけをやり直す。",

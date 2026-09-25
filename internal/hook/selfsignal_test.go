@@ -31,8 +31,11 @@ func TestAutomationCommentsAreInertToIntake(t *testing.T) {
 		"question": question,
 		"notify1":  notify1,
 		"notify3":  notify3,
-		"ack":      AckCommentContent(TicketSnapshot{RunID: "TICKET-505"}),
-		"receipt":  receipt,
+		"ack":      AckCommentContent(TicketSnapshot{RunID: "TICKET-505"}, false),
+		// The acceptance notice over an open question names the answer the
+		// requester owes, so it has to be inert on its own account.
+		"ack-question": AckCommentContent(TicketSnapshot{RunID: "TICKET-505"}, true),
+		"receipt":      receipt,
 	}
 	creator := terminalTestConfig().AllowedCreatorID
 	id := int64(200)
