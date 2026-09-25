@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
@@ -118,7 +119,7 @@ func TestClassifyStageFailureReadsAnUnreachableThingAsNetwork(t *testing.T) {
 		"fatal: unable to access 'https://example.invalid/': Could not resolve host: example.invalid",
 		"dial tcp 10.0.0.1:443: connect: connection refused",
 		"x509: certificate signed by unknown authority",
-		"registry returned 503 service unavailable",
+		"the registry returned an error for this tag",
 	} {
 		failure := &verbFailure{verb: "seal-candidate", code: 1, stderr: said}
 		if class := classifyStageFailure(failure); class != FailureClassNetwork {
@@ -432,6 +433,9 @@ func TestClassifyStageFailureReadsASpentKeyAsCredit(t *testing.T) {
 	}
 	for _, refusal := range []string{
 		"402 Payment Required",
+		"model invocation failed with status 402",
+		"the gateway answered http 402",
+		"{\"error\":{\"code\":402,\"message\":\"see your dashboard\"}}",
 		"your key limit has been reached",
 		"monthly quota exceeded for this account",
 		"billing: this organisation has no active payment method",
@@ -493,19 +497,32 @@ func TestClassifyStageFailureReadsASpentKeyAsCredit(t *testing.T) {
 	if class := classifyStageFailure(paused); class != FailureClassModel {
 		t.Fatalf("classifyStageFailure(status 429) = %q", class)
 	}
-	// The numbers a turn reports sit beside the status it got, and an
-	// allowance that happens to end in the payment status is not one.
-	wide, err := json.Marshal(worker.ModelFailureDetail{
-		Phrase: worker.AnswerUnusablePhrase, Model: "m", Calls: 1, Malformed: 1,
-		MaxOutputTokens: 8402, FinalMaxOutputTokens: 8402,
-	})
-	if err != nil {
-		t.Fatal(err)
+	// The numbers a turn reports sit in the same line as the status it got,
+	// and several of them can honestly be 402. Each of these is a model
+	// answer that went wrong; read as a key out of money, the ladder would
+	// stop and wait for a person on a run nothing was stopping.
+	for _, honest := range []worker.ModelFailureDetail{
+		{Phrase: worker.AnswerUnusablePhrase, Malformed: 1, MaxOutputTokens: 402},
+		{Phrase: worker.AnswerUnusablePhrase, Malformed: 1, MaxOutputTokens: 8402, FinalMaxOutputTokens: 8402},
+		{Phrase: worker.AnswerUnusablePhrase, Malformed: 1, LastCompletionTokens: 402},
+		{Phrase: worker.AnswerUnusablePhrase, Malformed: 1, LastRequestID: "gen-x402y"},
+	} {
+		honest.Model = "m"
+		honest.Calls = 1
+		encoded, err := json.Marshal(honest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failure := &verbFailure{verb: "agent-review", code: 1,
+			stderr: worker.FailureDetailLinePrefix + string(encoded) + "\n"}
+		if class := classifyStageFailure(failure); class != FailureClassModel {
+			t.Fatalf("classifyStageFailure(%s) = %q", string(encoded), class)
+		}
 	}
-	roomy := &verbFailure{verb: "agent-review", code: 1,
-		stderr: worker.FailureDetailLinePrefix + string(wide) + "\n"}
-	if class := classifyStageFailure(roomy); class != FailureClassModel {
-		t.Fatalf("classifyStageFailure(8402 tokens) = %q", class)
+	// A plain non-zero exit from a model verb, with none of the words and no
+	// number at all, is a model failure and not a refusal over money.
+	if class := classifyStageFailure(&verbFailure{verb: "agent-review", code: 1}); class != FailureClassModel {
+		t.Fatalf("classifyStageFailure(bare model exit) = %q", class)
 	}
 	// A turn that spent its own allowance is still a model failure: the
 	// phrase for it names no limit that a payment lifts.
@@ -520,5 +537,182 @@ func TestClassifyStageFailureReadsASpentKeyAsCredit(t *testing.T) {
 		stderr: worker.FailureDetailLinePrefix + string(spent) + "\n"}
 	if class := classifyStageFailure(allowance); class != FailureClassModel {
 		t.Fatalf("classifyStageFailure(allowance spent) = %q", class)
+	}
+}
+
+// A word on its own is not a route that could not be reached. Narrowed after
+// review: "registry" alone appears in changes that have nothing to do with
+// one, and a network class sends the remedy looking for another endpoint.
+func TestClassifyStageFailureNeedsMoreThanTheWordRegistry(t *testing.T) {
+	mentioned := &verbFailure{verb: "seal-candidate", code: 1,
+		stderr: "the plugin registry entry was rewritten and the fixture no longer matches"}
+	if class := classifyStageFailure(mentioned); class != FailureClassUnknown {
+		t.Fatalf("classifyStageFailure(a mentioned registry) = %q", class)
+	}
+}
+
+// The publish card reaches the destination through commands of its own. A
+// delivery that could not get there used to arrive with its code and nothing
+// else — a completed non-zero run returns no error — so every one of them
+// sealed as "unknown" whatever had happened.
+func TestPublishSealsWhyTheDestinationWasNotReached(t *testing.T) {
+	pipeline := cardPipeline(t, writeFakeWorker(t, "exit 0\n"))
+	pipeline.Config.ControllerBin = writeFakeWorker(t,
+		"echo \"fatal: unable to access 'https://example.invalid/': "+
+			"Failed to connect to example.invalid port 443: Connection refused\" >&2\nexit 1\n")
+	if err := os.WriteFile(pipeline.path("history/stage-1/decision.json"),
+		[]byte(`{"outcome":"converged"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.RunChainStage(context.Background(), runtime.StagePublish); err == nil {
+		t.Fatal("the publish card did not fail")
+	}
+	record, ok := ReadStageFailure(pipeline.Workspace, runtime.StagePublish, 1)
+	if !ok {
+		t.Fatal("the publish card sealed no account of its failure")
+	}
+	if record.Class != FailureClassNetwork {
+		t.Fatalf("class = %q, want network (error %q)", record.Class, record.Error)
+	}
+	// And the delivery's own ending is still in the record beside it.
+	if record.TerminalCode != string(hook.TerminalReleaseFailed) {
+		t.Fatalf("record terminal code = %q", record.TerminalCode)
+	}
+}
+
+// A record is refused unless it names the stage and round it was found under.
+// A run directory outlives its cards and holds every round side by side, so a
+// neighbour's account sitting at the wrong name explains the wrong failure.
+func TestReadStageFailureRefusesANeighboursAccountUnderTheWrongName(t *testing.T) {
+	pipeline := stageFailurePipeline(t)
+	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.SealStageFailure(runtime.StageReviewA, ErrValidationRejected)
+	sealed, err := os.ReadFile(StageFailureFile(pipeline.Workspace, runtime.StageReviewA, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same bytes, digest and all, under the next reviewer's name.
+	if err := os.WriteFile(StageFailureFile(pipeline.Workspace, runtime.StageReviewB, 1), sealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStageFailure(pipeline.Workspace, runtime.StageReviewB, 1); ok {
+		t.Fatal("one card's account was read as another card's")
+	}
+	// And under another round of its own stage.
+	if err := os.MkdirAll(filepath.Join(pipeline.Workspace, "history", "stage-2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(StageFailureFile(pipeline.Workspace, runtime.StageReviewA, 2), sealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadStageFailure(pipeline.Workspace, runtime.StageReviewA, 2); ok {
+		t.Fatal("one round's account was read as another round's")
+	}
+	// The one it does name still reads.
+	if _, ok := ReadStageFailure(pipeline.Workspace, runtime.StageReviewA, 1); !ok {
+		t.Fatal("the account was refused under its own name")
+	}
+}
+
+// The seal writes into a run directory the preparation made. Where there is
+// none, it writes nothing: a card that failed because its workspace is gone
+// would otherwise build one on the way out, holding a single file that
+// explains a run nothing else knows about.
+func TestSealStageFailureBuildsNoRunDirectoryOfItsOwn(t *testing.T) {
+	parent := t.TempDir()
+	pipeline := &Pipeline{Workspace: filepath.Join(parent, "gone"), Logger: trailTestLogger{}}
+	pipeline.SealStageFailure(runtime.StageReviewA, errors.New("nothing in particular"))
+	if _, err := os.Stat(pipeline.Workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the seal made a workspace: %v", err)
+	}
+	// Nor where the workspace is something other than a directory.
+	file := filepath.Join(parent, "a-file")
+	if err := os.WriteFile(file, []byte("not a run directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notADirectory := &Pipeline{Workspace: file, Logger: trailTestLogger{}}
+	notADirectory.SealStageFailure(runtime.StageReviewA, errors.New("nothing in particular"))
+	body, err := os.ReadFile(file)
+	if err != nil || string(body) != "not a run directory" {
+		t.Fatalf("the seal wrote through a workspace that is not one: %q %v", body, err)
+	}
+}
+
+// A design round is made 0o700 by the card that owns it. A seal that gets
+// there first stands in for that card and must not leave a wider directory
+// behind than it would have.
+func TestSealStageFailureLeavesTheRoundTheModeItsCardWouldHave(t *testing.T) {
+	pipeline := stageFailurePipeline(t)
+	pipeline.SealStageFailure(runtime.StageInvestigate, errors.New("nothing in particular"))
+	info, err := os.Stat(filepath.Join(pipeline.Workspace, "history", "design-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("design round mode = %v", info.Mode().Perm())
+	}
+}
+
+// The sentence is cut to a character, the way the report's own trail is.
+func TestBoundedFailureTextCutsOnARune(t *testing.T) {
+	// A multi-byte rune straddling the bound: the cut backs off onto it
+	// rather than leaving half of it behind.
+	text := strings.Repeat("a", maxStageFailureErrorBytes-1) + "長"
+	cut := boundedFailureText(text)
+	if len(cut) > maxStageFailureErrorBytes || !utf8.ValidString(cut) {
+		t.Fatalf("cut is %d bytes, valid=%v", len(cut), utf8.ValidString(cut))
+	}
+	if strings.HasSuffix(cut, "長") {
+		t.Fatal("a rune the bound cannot hold was kept whole")
+	}
+	if cut != strings.Repeat("a", maxStageFailureErrorBytes-1) {
+		t.Fatalf("the cut lost more than the rune it could not keep: %d bytes", len(cut))
+	}
+}
+
+// The validate card owns one failure: the deterministic verification ran and
+// would not pass the round. That is the branch the card took, never the words
+// the consumer's own checks printed on the way out — a repository whose tests
+// say "connection refused" must not turn its own red build into a route that
+// could not be reached.
+func TestValidationsRefusalStaysItsOwnAnswer(t *testing.T) {
+	repository, baseSHA := gitBaseRepo(t)
+	steps := writeFakeWorker(t, `
+verb="$1"
+if [ "$verb" = "run-validation" ]; then
+  echo "dial tcp 10.0.0.1:443: connect: connection refused" >&2
+  exit 1
+fi
+exit 0
+`)
+	pipeline := cardPipeline(t, steps)
+	baseline := `{"baseline":{"Integration":{"SHA":"` + baseSHA + `"}}}`
+	if err := os.WriteFile(pipeline.path("baseline.json"), []byte(baseline), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pipeline.path("history/stage-1/decision.json"),
+		[]byte(`{"outcome":"converged"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.cloneTarget = func(ctx context.Context, destination string) error {
+		return exec.CommandContext(ctx, "git", "clone", "-q", repository, destination).Run()
+	}
+	t.Cleanup(func() {
+		if err := forceRemoveAll(pipeline.path("validation-target")); err != nil {
+			t.Error(err)
+		}
+	})
+	err := pipeline.RunChainStage(context.Background(), runtime.StageValidate)
+	if !errors.Is(err, ErrValidationRejected) {
+		t.Fatalf("RunChainStage(validate) = %v", err)
+	}
+	record, ok := ReadStageFailure(pipeline.Workspace, runtime.StageValidate, 1)
+	if !ok {
+		t.Fatal("the validate card sealed no account of its failure")
+	}
+	if record.Class != FailureClassValidation {
+		t.Fatalf("class = %q, want validation (error %q)", record.Class, record.Error)
 	}
 }

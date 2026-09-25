@@ -180,6 +180,26 @@ func (p *Pipeline) runVerb(ctx context.Context, name string, arguments []string,
 	return &verbFailure{verb: name, code: code, err: err, stderr: p.lastStepStderr}
 }
 
+// runController runs one destination command the same way, so a delivery that
+// could not reach the destination arrives with what it said rather than as a
+// bare code.
+//
+// The deterministic validation's own verbs stay outside this on purpose. A
+// verify step that runs and refuses is the gate's answer, and the caller
+// turns that into the validation class by the branch it takes; handed back as
+// an error it would let the consumer's test output pick the class instead,
+// and a repository whose tests print "connection refused" would have its own
+// red build read as a route that could not be reached. Without it the publish card's refusal carried no cause at all:
+// a completed non-zero run returns no error, so the outcome travelled with a
+// nil beside it and every delivery failure sealed as "unknown".
+func (p *Pipeline) runController(ctx context.Context, name string, arguments []string) error {
+	code, err := p.controller(ctx, name, arguments)
+	if err == nil && code == 0 {
+		return nil
+	}
+	return &verbFailure{verb: name, code: code, err: err, stderr: p.lastStepStderr}
+}
+
 // modelSpendingVerbs are the worker verbs that spend a model turn, whether
 // through the gateway or through an agent launcher. A non-zero exit from one
 // of them is a model failure even when it left nothing readable behind: the
@@ -217,16 +237,23 @@ var (
 		"no such host", "could not resolve host", "name resolution",
 		"network is unreachable", "no route to host", "i/o timeout",
 		"tls handshake", "x509:", "certificate verify", "certificate has expired",
-		"failed to connect", "unable to access", "registry",
+		"failed to connect", "unable to access",
+		"registry returned", "registry unreachable",
 		"500 internal server error", "502 bad gateway", "503 service unavailable",
 		"504 gateway", "bad gateway", "service unavailable",
 	}
 )
 
-// paymentRequiredPattern finds the status a spending limit answers with,
-// standing alone. A bare substring would read an allowance of 8402 tokens as
-// one, and the numbers a turn reports sit right beside the status it got.
-var paymentRequiredPattern = regexp.MustCompile(`(^|[^0-9])402([^0-9]|$)`)
+// paymentRequiredPattern finds the payment status where a status word puts
+// it, and nowhere else.
+//
+// A standalone number is not enough, even away from longer digit runs. The
+// text this reads includes the worker's own record of the turn, and several
+// of its numeric fields can honestly hold 402 — an allowance, a completion
+// count, a request id with those digits inside it. Each of those is a model
+// answer that went wrong, and reading one as a key out of money would put a
+// person in the way of a run that nothing was stopping.
+var paymentRequiredPattern = regexp.MustCompile(`(status|code|http)"?\s*[:=]?\s*402(\D|$)`)
 
 // rateLimitMarkers are the refusals that read like a spending limit and are
 // not one. Providers answer a burst with "rate limit exceeded" often enough
@@ -346,6 +373,13 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 	if failure == nil || !slices.Contains(runtime.AllStages(), stage) {
 		return
 	}
+	// The run directory has to exist already. Everything here writes under a
+	// workspace the preparation made; a card that failed because the
+	// workspace is gone would otherwise build a history for it on the way
+	// out, and leave a run directory holding one file that explains nothing.
+	if info, err := os.Stat(p.Workspace); err != nil || !info.IsDir() {
+		return
+	}
 	round := p.failureRound(stage)
 	if round < 1 {
 		return
@@ -381,7 +415,15 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 		return
 	}
 	path := StageFailureFile(p.Workspace, stage, round)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// The mode the round's own card would have given it. A seal that gets
+	// there first must not leave a wider directory behind than the card it
+	// is standing in for: the design rounds are made 0o700, the
+	// implementation rounds 0o755.
+	mode := os.FileMode(0o755)
+	if runtime.IsDesignStage(stage) {
+		mode = 0o700
+	}
+	if err := os.MkdirAll(filepath.Dir(path), mode); err != nil {
 		return
 	}
 	// Removed before the write for the reason every other record here is: a
@@ -478,8 +520,13 @@ func boundedFailureText(text string) string {
 	if len(text) <= maxStageFailureErrorBytes {
 		return text
 	}
+	// The cut lands on a character, the same way the report's own trail is
+	// shortened: back off while the last rune is a broken one.
 	cut := text[:maxStageFailureErrorBytes]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
+	for len(cut) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(cut); r != utf8.RuneError || size > 1 {
+			break
+		}
 		cut = cut[:len(cut)-1]
 	}
 	return cut

@@ -126,7 +126,7 @@ func (p *Pipeline) EnsureTrail(ctx context.Context) error {
 		trailArgs = append(trailArgs, "--blocked-step", p.blockedStep)
 	}
 	trailArgs = append(trailArgs, "--out", trailPath)
-	if code, err := p.worker(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+	if err := p.runVerb(ctx, "compose-trail", trailArgs, p.modelKeyEnv()...); err != nil {
 		// The workflow wrote this exact fixed line on compose failure, and it
 		// asserts nothing about what was or was not delivered.
 		fallback := "証跡の自動生成に失敗したため、この実行の詳細は実行履歴を参照してください。\n"
@@ -167,9 +167,9 @@ func (p *Pipeline) deliveryStage(ctx context.Context, stage int, reviewFiles []s
 	if outcome, err := p.publishWithBaseAdvance(ctx, stage, reviewFiles, stageDir, common); err != nil || outcome.Code != "" {
 		return outcome, err
 	}
-	if code, err := p.controller(ctx, "create-feature-pr", append([]string{"create-feature-pr"}, append(common,
+	if err := p.runController(ctx, "create-feature-pr", append([]string{"create-feature-pr"}, append(common,
 		"--feature", p.path("feature.json"), "--trail", trailPath,
-		"--out", p.path("feature-pr.json"))...)); err != nil || code != 0 {
+		"--out", p.path("feature-pr.json"))...)); err != nil {
 		return Outcome{Code: hook.TerminalReleaseFailed}, err
 	}
 	if url, err := p.readJSONField("feature-pr.json", "payload", "pull_request", "HTMLURL"); err == nil && url != "" {
@@ -217,8 +217,8 @@ func (p *Pipeline) publishWithBaseAdvance(ctx context.Context, stage int, review
 		if sourceBase != "" {
 			publishArgs = append(publishArgs, "--source-base", sourceBase)
 		}
-		code, err := p.controller(ctx, "publish-feature", publishArgs)
-		if err == nil && code == 0 {
+		err := p.runController(ctx, "publish-feature", publishArgs)
+		if err == nil {
 			return Outcome{}, nil
 		}
 		invariantCode := p.readPublishInvariant()
@@ -244,11 +244,11 @@ func (p *Pipeline) publishWithBaseAdvance(ctx context.Context, stage int, review
 		if err := os.Remove(p.path(advancedBaselineFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return Outcome{Code: hook.TerminalReleaseFailed}, err
 		}
-		if code, err := p.controller(ctx, "baseline", []string{
+		if err := p.runController(ctx, "baseline", []string{
 			"baseline", "--config", p.Config.ConsumerConfigPath,
 			"--draft", p.path("ticket-draft.json"), "--out", p.path(advancedBaselineFile),
-		}); err != nil || code != 0 {
-			return Outcome{Code: hook.TerminalReleaseFailed}, errors.New("advanced baseline snapshot failed")
+		}); err != nil {
+			return Outcome{Code: hook.TerminalReleaseFailed}, fmt.Errorf("advanced baseline snapshot failed: %w", err)
 		}
 		advancedSHA, err := p.readJSONField(advancedBaselineFile, "baseline", "Integration", "SHA")
 		if err != nil || len(advancedSHA) != 40 {
@@ -259,6 +259,9 @@ func (p *Pipeline) publishWithBaseAdvance(ctx context.Context, stage int, review
 		}
 		if failed, err := p.validationStageAt(ctx, stage, reviewFiles, advancedSHA); err != nil || failed {
 			p.writeStopReason("公開の中断理由: 実行中に統合先ブランチが進み、新しい統合先の上での検証が通らなかったため公開を中止しました。")
+			if err != nil {
+				return Outcome{Code: hook.TerminalReleaseFailed}, fmt.Errorf("revalidation on the advanced base failed: %w", err)
+			}
 			return Outcome{Code: hook.TerminalReleaseFailed}, errors.New("revalidation on the advanced base failed")
 		}
 		baselinePath = p.path(advancedBaselineFile)
