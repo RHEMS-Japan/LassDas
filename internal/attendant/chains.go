@@ -495,13 +495,14 @@ func engineChangedUnderRun(config runtime.Config, runDir string) (string, bool) 
 // fixed by starting the delivery again, and this is that fix for the other
 // half of the binding.
 //
-// A delivery past its pull request is exempt, and that is the whole reason
-// the engine may write a destination's settings at all: from the publish
-// card on, the delivery cards re-verify the sealed records under the digest
-// recorded in the pull request itself (internal/runner/deliver.go's
-// recorded configuration digest), so a configuration that moved afterwards
-// cannot make them unreadable. Restarting one of those would throw away a
-// finished implementation over a setting that no longer constrains it.
+// A delivery past its pull request is exempt, so that an operator editing
+// the configuration in the middle of one does not throw away a finished
+// implementation. From the publish card on, the delivery cards re-verify
+// the sealed records under the digest recorded in the pull request itself
+// (internal/runner/deliver.go's recorded configuration digest), so a
+// setting that moved afterwards cannot make them unreadable and no longer
+// constrains what was already built. Nothing in this engine writes a
+// destination's settings, so every move this notices is a person's.
 func settingsChangedUnderRun(config runtime.Config, runDir string) bool {
 	sealed, err := readField(runDir, "ticket-draft.json", "config_sha256")
 	if err != nil || sealed == "" {
