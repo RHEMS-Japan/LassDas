@@ -38,6 +38,12 @@ type AnswerIntakeInput struct {
 	AnswererID        int64
 	HandledCommentIDs map[int64]bool
 	Comments          []BacklogComment
+	// QuestionPostedAt is when the open question's own comment appeared, in
+	// unix milliseconds, when the caller could see it. Comment ids order the
+	// scope already; this is the same bound stated in the requester's terms,
+	// so a comment written before the question existed cannot become its
+	// answer even if the ids say otherwise. Zero leaves the ids to decide.
+	QuestionPostedAt int64
 	// Readings is what a model made of each comment in scope, keyed by
 	// comment id. The engine does not read a comment itself: whether a
 	// person answered, which choice they picked, and whether they are
@@ -117,23 +123,26 @@ type answerQuestion struct {
 // ignored.
 var (
 	answerCandidatePattern = regexp.MustCompile(`^回答[ \t]*[Cc][0-9]+`)
-	answerHeaderPattern    = regexp.MustCompile(`^回答[ \t]*[Cc]([0-9]+)$`)
-	answerPairPattern      = regexp.MustCompile(`^(?:回答[ \t]*[Cc]([0-9]+)[ \t]+)?[Qq]([0-9]+)[ \t]*:[ \t]*(\S+)$`)
-	cancelPattern          = regexp.MustCompile(`^中止[ \t]*[Cc]([0-9]+)$`)
-	revisionDigitsPattern  = regexp.MustCompile(`^[0-9]+$`)
+	// revisionMarkerPattern reads the round a comment names on its opening
+	// line, whichever of the printed forms the requester used: the template
+	// header, one of the per-choice lines, or the cancel phrase.
+	revisionMarkerPattern = regexp.MustCompile(`^(回答|中止)[ \t]*[Cc]([0-9]+)`)
+	answerHeaderPattern   = regexp.MustCompile(`^回答[ \t]*[Cc]([0-9]+)$`)
+	answerPairPattern     = regexp.MustCompile(`^(?:回答[ \t]*[Cc]([0-9]+)[ \t]+)?[Qq]([0-9]+)[ \t]*:[ \t]*(\S+)$`)
+	cancelPattern         = regexp.MustCompile(`^中止[ \t]*[Cc]([0-9]+)$`)
+	revisionDigitsPattern = regexp.MustCompile(`^[0-9]+$`)
 )
 
-// EvaluateAnswerIntake decides, for one polling snapshot, whether an answer is
-// adopted, the run is cancelled, or replies are owed. The rules follow the
-// README contract: only new comments by the allowlisted answerer after the
-// question comment and before the sealed deadline count; a comment whose
-// first line carries no 回答/中止 revision marker (rescued forms included) is
-// ignored; a marker-bearing comment that cannot be interpreted gets the
-// format guidance once per revision; a well-formed but incomplete answer gets
-// one shortfall reply listing only the missing questions; a first-line cancel
-// wins over any answer and the earliest cancel is the evidence; otherwise the
-// complete valid answer with the highest comment ID (validated in ascending
-// order) is adopted.
+// EvaluateAnswerIntake decides, for one polling snapshot, whether an answer
+// is adopted or the run is cancelled. What is in scope is routing, and this
+// package decides it: a comment by the allowlisted answerer, after the open
+// question's own comment and before the sealed deadline, that does not name
+// a different round. What an in-scope comment means is a reading, except for
+// the cancellation the question printed, which is a fixed phrase and is read
+// here. A cancel wins over an answer and the earliest cancel is the
+// evidence; otherwise the last answer the requester wrote is adopted.
+// Whether that answer covers every question is not asked: the answers go to
+// the role that asked them, and what it cannot derive, it decides.
 func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error) {
 	if err := input.Question.ValidateShape(); err != nil {
 		return AnswerIntakeDecision{}, err
@@ -157,7 +166,23 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 		// before the sealed deadline. Everything later belongs to the expiry
 		// transition.
 		if comment.UserID != input.AnswererID || comment.CommentID <= input.QuestionCommentID ||
-			comment.PostedAt <= 0 || comment.PostedAt >= input.Question.AnswerDeadlineAt {
+			comment.PostedAt <= 0 || comment.PostedAt >= input.Question.AnswerDeadlineAt ||
+			(input.QuestionPostedAt > 0 && comment.PostedAt < input.QuestionPostedAt) ||
+			BelongsToAnotherRound(comment.Body, input.Question.QuestionRevision) {
+			continue
+		}
+		// The cancellation the question printed is read by this engine, not
+		// by a model: it is a fixed phrase the comment asked the requester
+		// for, so honouring it cannot depend on a model being reachable or
+		// on what it makes of the sentence.
+		if IsCancelComment(comment.Body, input.Question.QuestionRevision) {
+			if cancel == nil {
+				cancel = &CancelDecision{
+					CommentID:  comment.CommentID,
+					PostedAt:   comment.PostedAt,
+					BodySHA256: TerminalReportDigest([]byte(comment.Body)),
+				}
+			}
 			continue
 		}
 		reading, read := input.Readings[comment.CommentID]
@@ -186,9 +211,10 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 				return AnswerIntakeDecision{}, errors.New("adopted answer set could not be encoded")
 			}
 			// Ascending, so the last answer the requester wrote is the one
-			// adopted. Whether it covers every question is not asked here:
-			// the answers go to the role that asked them, and a role that
-			// still cannot proceed asks again.
+			// adopted. Whether it covers every question is not asked here,
+			// and not anywhere: the requester is asked once, so a question
+			// they left alone is decided by the reception and written into
+			// the plan notice, never put to them again.
 			adopted = &AdoptedAnswerDecision{
 				CommentID:   comment.CommentID,
 				PostedAt:    comment.PostedAt,
@@ -211,9 +237,72 @@ func EvaluateAnswerIntake(input AnswerIntakeInput) (AnswerIntakeDecision, error)
 	return AnswerIntakeDecision{}, nil
 }
 
+// CommentRevisionTag is the question round a comment names on its first
+// line, and whether it named one at all. A comment that names none is not
+// refused anywhere: a requester may answer in their own words, and the
+// reading is what decides. What the tag is for is the opposite case — a
+// comment that names a round explicitly belongs to that round and to no
+// other.
+func CommentRevisionTag(body string) (int, bool) {
+	match := revisionMarkerPattern.FindStringSubmatch(firstContentLine(normalizeAnswerBody(body)))
+	if match == nil {
+		return 0, false
+	}
+	revision := 0
+	for _, symbol := range match[2] {
+		revision = revision*10 + int(symbol-'0')
+		if revision > 9999 {
+			return 0, false
+		}
+	}
+	if revision < 1 {
+		return 0, false
+	}
+	return revision, true
+}
+
+// BelongsToAnotherRound reports whether a comment names a question round
+// other than the open one. An answer written for an earlier attempt's
+// question is still on the ticket, still by the requester, and still reads
+// as an answer to whoever reads it — so without this it can be adopted as
+// the answer to a question it was never shown (live 2026-09-25: a comment
+// from the previous day, written for C1, was taken while C2 was open).
+func BelongsToAnotherRound(body string, openRevision int) bool {
+	revision, named := CommentRevisionTag(body)
+	return named && revision != openRevision
+}
+
+// IsCancelComment reports whether a comment is the cancellation the open
+// question's own comment prescribes (「中止 C2」 and nothing else on the
+// line). The question tells the requester to write exactly this, so exactly
+// this ends the run whatever else is or is not working: a phrase the
+// automation asked for and then did not act on is the worst of both (live
+// 2026-09-25).
+func IsCancelComment(body string, openRevision int) bool {
+	match := cancelPattern.FindStringSubmatch(firstContentLine(normalizeAnswerBody(body)))
+	if match == nil {
+		return false
+	}
+	revision, named := CommentRevisionTag(body)
+	return named && revision == openRevision
+}
+
+// StopWord is what a requester writes to stop a run, on a line of its own.
+const StopWord = "停止"
+
+// IsStopComment reports whether a comment is that stop. Only the first
+// non-blank line decides, so the word further down an ordinary comment stays
+// an ordinary comment. It is the whole rule for stopping, shared by every
+// place that reads for one.
+func IsStopComment(body string) bool {
+	return firstContentLine(body) == StopWord
+}
+
 // decodeIntakeQuestions extracts the question and choice identifiers from the
 // sealed questions array. Unknown fields are readiness-owned and ignored here;
-// the identifiers themselves must be present, unique and non-empty.
+// the identifiers themselves must be present, unique and non-empty. The set
+// is as long as the reception's one round of questions, up to the protocol
+// ceiling — the grammar numbers questions, it does not count them.
 func decodeIntakeQuestions(encoded string) ([]answerQuestion, error) {
 	var raw []struct {
 		ID      string `json:"id"`

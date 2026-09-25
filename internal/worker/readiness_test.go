@@ -14,30 +14,43 @@ func testReadyOutput() ModelReadinessOutput {
 	}
 }
 
-// The assumption cap is sixteen: a well-specified ticket measurably needed
-// more than the old eight, and dying at the cap turned thoroughness into a
-// model_failed terminal (2026-08-17). Both sides of the boundary are pinned
-// so neither the validator nor the prompt schema can drift alone unnoticed.
-func TestReadinessOutputAcceptsSixteenAssumptionsAndRejectsSeventeen(t *testing.T) {
+// The assumption cap is the destination's, and the default is sixty-four: a
+// reception that asks as little as it can settles the rest itself, and every
+// point it settles is one more line on the record the requester reads. Eight
+// was too few for a well-specified ticket even when the reception still
+// asked (2026-08-17); sixteen is too few once it decides. Both sides of the
+// boundary are pinned so neither the validator nor the prompt schema can
+// drift alone unnoticed.
+func TestAssumptionsAreCappedByTheDestinationNotTheCode(t *testing.T) {
 	build := func(count int) ModelReadinessOutput {
 		output := testReadyOutput()
 		for index := 0; index < count; index++ {
 			output.Assumptions = append(output.Assumptions, ReadinessAssumption{
-				Kind:      "repository_convention",
+				Kind:      AssumptionRepositoryConvention,
 				Statement: "settled point " + strings.Repeat("s", index+1),
 				Evidence:  "written in the ticket",
 			})
 		}
 		return output
 	}
-	if err := validateModelReadinessOutput(build(16)); err != nil {
-		t.Fatalf("sixteen assumptions must validate: %v", err)
+	policy := defaultTestPolicy()
+	if err := policy.refuse(build(DefaultAssumptionMaxItems)); err != nil {
+		t.Fatalf("sixty-four assumptions must be recordable: %v", err)
 	}
-	if err := validateModelReadinessOutput(build(17)); err == nil {
-		t.Fatal("seventeen assumptions must be rejected")
+	if err := policy.refuse(build(DefaultAssumptionMaxItems + 1)); err == nil {
+		t.Fatal("a sixty-fifth assumption must be refused")
 	}
-	if !strings.Contains(readinessJSONSchema(), `"assumptions":{"type":"array","maxItems":16,`) {
-		t.Fatal("the prompt schema no longer matches the sixteen-assumption cap")
+	if !strings.Contains(readinessJSONSchema(policy), `"assumptions":{"type":"array","maxItems":64,`) {
+		t.Fatal("the prompt schema no longer matches the default assumption cap")
+	}
+	// The sealed record is held to the protocol ceiling instead, so a
+	// destination that lowers its number later cannot make the records it
+	// already sealed unreadable.
+	if err := validateModelReadinessOutput(build(DefaultAssumptionMaxItems + 1)); err != nil {
+		t.Fatalf("a sealed assessment inside the ceiling must stay readable: %v", err)
+	}
+	if err := validateModelReadinessOutput(build(AssumptionItemCeiling + 1)); err == nil {
+		t.Fatal("an assessment past the protocol ceiling must be rejected")
 	}
 }
 
@@ -574,8 +587,8 @@ func TestReadinessRefusesFabricatedMeasurements(t *testing.T) {
 // names must be in the schema's enum, or the prompt asks for an answer the
 // checker cannot give.
 func TestCheckerPromptCodesAreInItsSchema(t *testing.T) {
-	prompt := readinessCheckSystemPrompt(ModelEndpoint{Lens: "test"})
-	schema := readinessCheckJSONSchema()
+	prompt := readinessCheckSystemPrompt(ModelEndpoint{Lens: "test"}, defaultTestPolicy())
+	schema := readinessCheckJSONSchema(defaultTestPolicy())
 	codes := regexp.MustCompile(`(?m)^- ([a-z]+(?:-[a-z]+)+):`).FindAllStringSubmatch(prompt, -1)
 	if len(codes) < 7 {
 		t.Fatalf("the prompt names %d codes; expected the defect list", len(codes))
@@ -634,13 +647,13 @@ func TestReceptionKnowsTheCatalogueAndTheTextLimits(t *testing.T) {
 	if !strings.Contains(check, `"catalogue":[{"id":"http.timing"`) {
 		t.Errorf("checker data lacks the catalogue:\n%s", check)
 	}
-	system := readinessSystemPrompt()
+	system := readinessSystemPrompt(defaultTestPolicy())
 	for _, want := range []string{"when USER_DATA_JSON.catalogue is present", "When USER_DATA_JSON.catalogue is present, an investigation stage follows you", "answer needs_design true whenever you left a point to that measurement", "When catalogue is absent, nothing is measured", "never assume that production or the repository cannot be reached or measured", "question and why_blocking are at most 2000 bytes", "reject_code matches ^[a-z][a-z0-9-]{1,63}$"} {
 		if !strings.Contains(system, want) {
 			t.Errorf("assessor contract lacks %q", want)
 		}
 	}
-	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"})
+	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"}, defaultTestPolicy())
 	if !strings.Contains(checker, "would be answered by a measurement with a probe in USER_DATA_JSON.catalogue when that key is present") {
 		t.Error("checker's false-block does not name the catalogue")
 	}
@@ -685,7 +698,7 @@ func TestReceptionRefusalsNameTheFieldAndTheLimit(t *testing.T) {
 		}, `reject_code "` + strings.Repeat("x", 64) + `…" (500 bytes)`},
 		{"bad assumption kind", func(o *ModelReadinessOutput) {
 			o.Assumptions = []ReadinessAssumption{{Kind: "guess", Statement: "s", Evidence: "e"}}
-		}, `assumption 1 kind "guess" is not repository_convention or non_user_visible_implementation`},
+		}, `assumption 1 kind "guess" is not repository_convention, non_user_visible_implementation or defensible_default`},
 	}
 	for _, tc := range cases {
 		output := base()
@@ -784,8 +797,8 @@ func TestTheReceptionContractDoesNotClaimSourceFilesItNeverGot(t *testing.T) {
 		t.Fatalf("the assessor's data does not carry an empty file set:\n%s", prompt)
 	}
 
-	system := readinessSystemPrompt()
-	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"})
+	system := readinessSystemPrompt(defaultTestPolicy())
+	checker := readinessCheckSystemPrompt(ModelEndpoint{Lens: "lens"}, defaultTestPolicy())
 	for _, contract := range []struct{ name, text string }{{"assessor", system}, {"checker", checker}} {
 		if strings.Contains(contract.text, "provided source") {
 			t.Errorf("the %s contract still claims source files were provided", contract.name)

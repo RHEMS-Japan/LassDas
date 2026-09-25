@@ -12,6 +12,7 @@ import (
 
 	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runtime"
+	"automation.internal/ticket-ingress/internal/worker"
 	"net/http"
 )
 
@@ -309,7 +310,7 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 	// once and retried the same record: recomputing per retry could change
 	// the record digest across a day boundary and turn an idempotent
 	// completion into a conflict.
-	notifyAt, deadlineAt := hook.ComputeQuestionSchedule(time.Now().UTC())
+	notifyAt, deadlineAt := hook.ComputeQuestionScheduleWithin(time.Now().UTC(), t.answerWeekdays())
 	return t.submit(ctx, "question", func(issuedAt time.Time) (hook.Result, error) {
 		record := hook.QuestionRecord{
 			Protocol:   hook.QuestionProtocolVersion,
@@ -334,6 +335,18 @@ func (t *Terminal) AskQuestion(ctx context.Context, decisionPath string) error {
 			Record: record, IssuedAt: issuedAt,
 		}), nil
 	})
+}
+
+// answerWeekdays is how long the requester gets to answer, as the
+// destination set it. A configuration that cannot be read is not a reason to
+// leave the question unasked: the requester still has to see it, so the
+// standard window stands and the posting goes on.
+func (t *Terminal) answerWeekdays() int {
+	config, err := worker.LoadConfig(t.config.ConsumerConfigPath)
+	if err != nil {
+		return hook.DefaultQuestionDeadlineWeekdays
+	}
+	return config.AnswerWeekdays()
 }
 
 // submit runs one build-and-process closure with the reporter's retry

@@ -27,8 +27,8 @@ type AnswerReading struct {
 	// Answers maps a question id to the choice id the comment picks.
 	Answers map[string]string `json:"answers"`
 	// NotNeeded and Unanswered are what the reading noticed, and they travel
-	// to the role as context. Nothing in the engine gates on them: a role
-	// that needs more than it was given asks again.
+	// to the reception as context. Nothing in the engine gates on them: what
+	// is still unanswered is decided, not asked for again.
 	NotNeeded  []string `json:"not_needed"`
 	Unanswered []string `json:"unanswered"`
 	// Reason is one sentence for the record, in the requester's language.
@@ -37,11 +37,11 @@ type AnswerReading struct {
 
 // IsAnswer reports whether the reading says the comment was an answer. The
 // engine asks nothing else of it - not whether the choices exist, not
-// whether every question was covered. The answers go to the role that asked, with the
-// questions it asked, and a role that still cannot proceed asks again - the
-// same way it asked the first time. Deciding completeness in code is what
-// left a live delivery waiting forever on a question whose own words made it
-// conditional (2026-09-17).
+// whether every question was covered. Completeness is not a gate because
+// nothing downstream can ask for the rest: the requester is asked once, and
+// what their answers leave open the reception decides itself and records.
+// Deciding completeness in code is what left a live delivery waiting forever
+// on a question whose own words made it conditional (2026-09-17).
 func (r AnswerReading) IsAnswer() bool {
 	return r.Kind == AnswerReadingAnswer && len(r.Answers) > 0
 }

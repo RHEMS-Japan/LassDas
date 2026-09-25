@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -126,13 +127,19 @@ func TestAnswerGate(t *testing.T) {
 			name:     "no lines are refused",
 			comments: []rawComment{question}, questionID: 100,
 			lines:      nil,
-			wantStatus: 400, wantReason: "between one and three",
+			wantStatus: 400, wantReason: "between one and 19",
 		},
 		{
-			name:     "more lines than questions can exist are refused",
+			name:     "more lines than a question set can hold are refused",
 			comments: []rawComment{question}, questionID: 100,
-			lines:      []string{"回答 C1 Q1:a", "回答 C1 Q1:b", "回答 C1 Q2:a", "回答 C1 Q2:c"},
-			wantStatus: 400, wantReason: "between one and three",
+			lines:      repeatedLines("回答 C1 Q1:a", hook.MaxClarificationQuestions+1),
+			wantStatus: 400, wantReason: "between one and 19",
+		},
+		{
+			name:     "a post that leaves a question out names the one it missed",
+			comments: []rawComment{question}, questionID: 100,
+			lines:      []string{"回答 C1 Q1:a"},
+			wantStatus: 400, wantReason: "missing Q2",
 		},
 		{
 			name:     "an unknown comment id is refused",
@@ -250,3 +257,44 @@ func consoleQuestionRecord(t *testing.T) hook.QuestionRecord {
 // hands a requester's comment to a model and asks what it means, so a
 // console line that differs from what a person types changes nothing about
 // what is adopted. The agreement this test checked no longer exists.
+
+func repeatedLines(line string, count int) []string {
+	lines := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// Ten questions are answered in one post, and the tenth is Q10 - the id the
+// numbering only reaches now that the reception asks everything at once. A
+// post that leaves any of them out is refused by name: the reception asks
+// once, so a question nobody answers is decided without the requester, and
+// the panel is the last place that can still be fixed.
+func TestTenQuestionsAreAnsweredInOnePost(t *testing.T) {
+	var builder strings.Builder
+	builder.WriteString("【確認のお願い C1】回答期限: 2026-08-20 17:00\n\n")
+	lines := []string{}
+	for index := 1; index <= 10; index++ {
+		id := fmt.Sprintf("Q%d", index)
+		builder.WriteString(id + ". 確認 " + id + "\n")
+		builder.WriteString("- a: 残す\n  回答 C1 " + id + ":a\n")
+		builder.WriteString("- b: 消す\n  回答 C1 " + id + ":b\n")
+		lines = append(lines, "回答 C1 "+id+":a")
+	}
+	builder.WriteString("\n---\n状態: 回答待ち（質問 C1）\n")
+	builder.WriteString(hook.CommentMarker("question", gateTestRunID, "C1") + "\n")
+	comments := []rawComment{{ID: 100, UserID: 42, Content: builder.String()}}
+
+	if failure := evaluateAnswerGate(comments, 100, lines, answerer); failure != nil {
+		t.Fatalf("a complete ten-question post was refused: %d %s", failure.Status, failure.Reason)
+	}
+	partial := append([]string{}, lines[:8]...)
+	failure := evaluateAnswerGate(comments, 100, partial, answerer)
+	if failure == nil {
+		t.Fatal("a post missing two answers was accepted")
+	}
+	if failure.Status != 400 || !strings.Contains(failure.Reason, "missing Q9, Q10") {
+		t.Fatalf("refusal = %d %q, want the missing questions named in order", failure.Status, failure.Reason)
+	}
+}

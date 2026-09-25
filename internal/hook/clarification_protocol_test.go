@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -115,8 +116,12 @@ func TestClarificationRecordShapeFailsClosed(t *testing.T) {
 			record.Rounds[0].AnswersJSON = `{"Q1":1}`
 			record.Rounds[0].AnswersSHA256 = TerminalReportDigest([]byte(record.Rounds[0].AnswersJSON))
 		}},
-		{name: "answer set with four entries", mutate: func(t *testing.T, record *ClarificationRecord) {
-			record.Rounds[0].AnswersJSON = `{"Q1":"a","Q2":"a","Q3":"a","Q4":"a"}`
+		{name: "one answer past the numbering ceiling", mutate: func(t *testing.T, record *ClarificationRecord) {
+			entries := make([]string, 0, MaxClarificationQuestions+1)
+			for index := 1; index <= MaxClarificationQuestions+1; index++ {
+				entries = append(entries, fmt.Sprintf(`"Q%d":"a"`, index))
+			}
+			record.Rounds[0].AnswersJSON = "{" + strings.Join(entries, ",") + "}"
 			record.Rounds[0].AnswersSHA256 = TerminalReportDigest([]byte(record.Rounds[0].AnswersJSON))
 		}},
 		{name: "answer set trailing data", mutate: func(t *testing.T, record *ClarificationRecord) {

@@ -12,7 +12,8 @@ import (
 const (
 	ClarificationProtocolVersion = "clarification-resume-v1"
 	// MaxAnswerSetBytes bounds the normalized adopted answers for one round.
-	// Three single-choice answers stay far below this.
+	// One line per question ("Q10":"a"), at the protocol ceiling of
+	// MaxClarificationQuestions, stays far below this.
 	MaxAnswerSetBytes = 4 * 1024
 	// MaxClarificationRecordBytes bounds the sealed cumulative record. It is
 	// sized so that every structurally valid composition fits even under the
@@ -137,8 +138,8 @@ func (r ClarificationRecord) ValidateRoute(config ReportRouteConfig) error {
 }
 
 // answerSetShapeValid enforces only the structural bound the sealed store can
-// check without the answer grammar: a JSON object mapping 1..3 question ids to
-// string choices. Grammar validation (known question ids, known choices, no
+// check without the answer grammar: a JSON object mapping question ids to
+// string choices, at most as many as a question set may hold. Grammar validation (known question ids, known choices, no
 // duplicates) is owned by the answer-intake layer that produced the set.
 func answerSetShapeValid(encoded string) bool {
 	decoder := json.NewDecoder(bytes.NewReader([]byte(encoded)))

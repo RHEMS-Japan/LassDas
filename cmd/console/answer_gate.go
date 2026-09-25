@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"automation.internal/ticket-ingress/internal/hook"
@@ -68,7 +70,7 @@ func answerOrCancelCandidate(body string) bool {
 // stream: the browser's claim is only a pointer.
 func evaluateAnswerGate(comments []rawComment, questionCommentID int64, lines []string, answererID int64) *answerGateError {
 	if len(lines) == 0 || len(lines) > hook.MaxClarificationQuestions {
-		return &answerGateError{Status: 400, Reason: "between one and three answer lines"}
+		return &answerGateError{Status: 400, Reason: fmt.Sprintf("between one and %d answer lines", hook.MaxClarificationQuestions)}
 	}
 	var question *rawComment
 	for index := range comments {
@@ -86,9 +88,11 @@ func evaluateAnswerGate(comments []rawComment, questionCommentID int64, lines []
 	tag := qualifiers[0]
 
 	// Only lines the question itself printed may travel, one per question,
-	// and every question must get its line: the engine treats a partial
-	// answer as a shortfall and demands a complete re-post, so letting one
-	// through would only waste the requester a round-trip.
+	// and every question must get its line. The reception asks once and the
+	// stages after it ask nothing, so a question left out of the post is not
+	// asked again - it is decided without the requester. The panel refuses
+	// the partial post and says which questions are missing, which is the
+	// one place that can still be fixed by the person reading it.
 	printed := map[string]bool{}
 	printedQuestions := map[string]bool{}
 	for _, raw := range strings.Split(question.Content, "\n") {
@@ -116,8 +120,8 @@ func evaluateAnswerGate(comments []rawComment, questionCommentID int64, lines []
 		answeredQuestions[strings.ToLower(parts[2])] = true
 		totalBytes += len(line) + 1
 	}
-	if len(answeredQuestions) != len(printedQuestions) {
-		return &answerGateError{Status: 400, Reason: "every question needs its answer line in one post"}
+	if missing := unansweredQuestions(printedQuestions, answeredQuestions); len(missing) > 0 {
+		return &answerGateError{Status: 400, Reason: "every question needs its answer line in one post; missing " + strings.Join(missing, ", ")}
 	}
 	if totalBytes > hook.MaxAnswerBodyBytes {
 		return &answerGateError{Status: 400, Reason: "the answer comment would be too large"}
@@ -155,4 +159,40 @@ func evaluateAnswerGate(comments []rawComment, questionCommentID int64, lines []
 		return &answerGateError{Status: 409, Reason: "an answer or cancel is already posted - the automation is picking it up"}
 	}
 	return nil
+}
+
+// unansweredQuestions names the questions the post leaves out, in the order
+// the question comment numbered them. The requester reads this, so it names
+// the questions rather than counting them.
+func unansweredQuestions(printed, answered map[string]bool) []string {
+	missing := []string{}
+	for question := range printed {
+		if !answered[question] {
+			missing = append(missing, strings.ToUpper(question))
+		}
+	}
+	sort.Slice(missing, func(left, right int) bool {
+		leftNumber, rightNumber := questionNumber(missing[left]), questionNumber(missing[right])
+		if leftNumber != rightNumber {
+			return leftNumber < rightNumber
+		}
+		return missing[left] < missing[right]
+	})
+	return missing
+}
+
+// questionNumber is the number in a question id ("Q10" is 10), so ten sorts
+// after nine instead of between one and two. An id that carries no number
+// sorts first and then alphabetically, which keeps the order stable whatever
+// the question comment printed.
+func questionNumber(id string) int {
+	digits := strings.TrimPrefix(id, "Q")
+	number := 0
+	for _, symbol := range digits {
+		if symbol < '0' || symbol > '9' {
+			return 0
+		}
+		number = number*10 + int(symbol-'0')
+	}
+	return number
 }

@@ -14,6 +14,17 @@ func DisplayZone() *time.Location { return questionZone }
 const (
 	questionNotifyHour   = 10
 	questionDeadlineHour = 17
+	// DefaultQuestionDeadlineWeekdays is how many weekdays a requester has
+	// to answer when the destination sets no number of its own.
+	DefaultQuestionDeadlineWeekdays = 5
+	// MinQuestionDeadlineWeekdays is the shortest window that still carries
+	// the three renotifications the record's shape requires, each on its own
+	// weekday and all before the deadline.
+	MinQuestionDeadlineWeekdays = 3
+	// MaxQuestionDeadlineWeekdays is the longest window offered. Four
+	// working weeks of silence is not a longer wait, it is a different
+	// outcome, and the expiry is what produces it.
+	MaxQuestionDeadlineWeekdays = 20
 )
 
 // ComputeQuestionSchedule turns the question posting instant into the sealed
@@ -24,11 +35,27 @@ const (
 // and AnswerDeadlineAt directly, so shortened test timers are a pure input
 // concern of whoever seals the record.
 func ComputeQuestionSchedule(postedAt time.Time) ([3]int64, int64) {
+	return ComputeQuestionScheduleWithin(postedAt, DefaultQuestionDeadlineWeekdays)
+}
+
+// ComputeQuestionScheduleWithin is ComputeQuestionSchedule over a window the
+// destination chose: the deadline falls on the last weekday of the window at
+// 17:00, and the three renotifications are spread across it in the
+// proportions the five-weekday default uses (the 1st, 3rd and 5th of five).
+// A number outside the offered range falls back to the default rather than
+// producing a schedule nobody asked for — which is also what keeps the three
+// reminders on three separate weekdays, since a window shorter than
+// MinQuestionDeadlineWeekdays has nowhere to put them and the sealed record
+// refuses a schedule that is not strictly increasing.
+func ComputeQuestionScheduleWithin(postedAt time.Time, deadlineWeekdays int) ([3]int64, int64) {
+	if deadlineWeekdays < MinQuestionDeadlineWeekdays || deadlineWeekdays > MaxQuestionDeadlineWeekdays {
+		deadlineWeekdays = DefaultQuestionDeadlineWeekdays
+	}
 	local := postedAt.In(questionZone)
 	year, month, day := local.Date()
 	date := time.Date(year, month, day, 0, 0, 0, 0, questionZone)
-	weekdays := make([]time.Time, 0, 5)
-	for len(weekdays) < 5 {
+	weekdays := make([]time.Time, 0, deadlineWeekdays)
+	for len(weekdays) < deadlineWeekdays {
 		date = date.AddDate(0, 0, 1)
 		if weekday := date.Weekday(); weekday != time.Saturday && weekday != time.Sunday {
 			weekdays = append(weekdays, date)
@@ -37,12 +64,22 @@ func ComputeQuestionSchedule(postedAt time.Time) ([3]int64, int64) {
 	at := func(day time.Time, hour int) int64 {
 		return time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, questionZone).UnixMilli()
 	}
-	notifyAt := [3]int64{
-		at(weekdays[0], questionNotifyHour),
-		at(weekdays[2], questionNotifyHour),
-		at(weekdays[4], questionNotifyHour),
+	// The nth weekday of this window that the nth renotification of the
+	// five-weekday default lands on, rounded to the nearest weekday. For
+	// every window this package offers the three land on three different
+	// weekdays with the deadline on the last, which is the shape the sealed
+	// record requires; that is what MinQuestionDeadlineWeekdays is for, and
+	// a test walks every offered window to hold it true.
+	nth := func(defaultDay int) int {
+		return (defaultDay*deadlineWeekdays + DefaultQuestionDeadlineWeekdays/2) / DefaultQuestionDeadlineWeekdays
 	}
-	return notifyAt, at(weekdays[4], questionDeadlineHour)
+	first, second, third := nth(1), nth(3), nth(5)
+	notifyAt := [3]int64{
+		at(weekdays[first-1], questionNotifyHour),
+		at(weekdays[second-1], questionNotifyHour),
+		at(weekdays[third-1], questionNotifyHour),
+	}
+	return notifyAt, at(weekdays[deadlineWeekdays-1], questionDeadlineHour)
 }
 
 type QuestionTickKind string

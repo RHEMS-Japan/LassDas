@@ -43,10 +43,12 @@ func decodeQuestionMessageItems(encoded string) ([]questionMessageItem, error) {
 	if len(items) < 1 || len(items) > MaxClarificationQuestions {
 		return nil, errors.New("question set is invalid")
 	}
+	seen := map[string]bool{}
 	for _, item := range items {
-		if item.ID == "" || item.Question == "" || len(item.Choices) < 2 {
+		if item.ID == "" || item.Question == "" || len(item.Choices) < 2 || seen[item.ID] {
 			return nil, errors.New("question set is invalid")
 		}
+		seen[item.ID] = true
 		for _, choice := range item.Choices {
 			if choice.ID == "" || choice.Label == "" {
 				return nil, errors.New("question set is invalid")
@@ -68,8 +70,9 @@ func QuestionRevisionTag(revision int) string {
 }
 
 // QuestionCommentContent renders the clarification questions with one
-// copy-paste answer line under every choice, so the requester answers with a
-// single paste instead of typing (README 584).
+// copy-paste answer line under every choice, and a template that answers
+// them all in one paste, so a requester facing ten questions is not asked to
+// collect ten lines by hand (README 584).
 func QuestionCommentContent(record QuestionRecord) (string, error) {
 	if err := record.ValidateShape(); err != nil {
 		return "", err
@@ -78,11 +81,50 @@ func QuestionCommentContent(record QuestionRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tag := QuestionRevisionTag(record.QuestionRevision)
+	return questionCommentBody(items, QuestionRevisionTag(record.QuestionRevision),
+		formatQuestionInstant(record.AnswerDeadlineAt), formatQuestionInstant(record.NotifyAt[0]),
+		record.AutomationRunID), nil
+}
+
+// questionInstantWidth is what formatQuestionInstant renders: a fixed-width
+// layout, so a size measured with this stands for any real instant.
+const questionInstantWidth = "2006-01-02 15:04"
+
+// maxRunIDBytes is the longest run id the comment marker admits
+// (runIDPattern, internal/hook/model.go).
+const maxRunIDBytes = 128
+
+// answerTemplateBlank is what a requester overwrites with the symbol they
+// pick. An underscore cannot be read as a choice, so a template posted
+// unedited is never mistaken for an answer.
+const answerTemplateBlank = "_"
+
+// RenderedQuestionCommentBytes is how large the comment carrying this
+// question set becomes once posted, measured against the widest envelope it
+// could be posted under: the longest run id the marker admits and the last
+// revision tag. A set that fits here fits whichever run asks it, so the
+// reception can hold its own output to the tracker's limit before the set is
+// sealed - long after that, a body the tracker refuses loses the comment and
+// strands the run (MaxTrackerCommentBytes).
+func RenderedQuestionCommentBytes(questionsJSON string) (int, error) {
+	items, err := decodeQuestionMessageItems(questionsJSON)
+	if err != nil {
+		return 0, err
+	}
+	body := questionCommentBody(items, QuestionRevisionTag(MaxClarificationRounds),
+		questionInstantWidth, questionInstantWidth, strings.Repeat("R", maxRunIDBytes))
+	return len(body), nil
+}
+
+// questionCommentBody is the whole posted body for one question set. It is a
+// function of the set and the strings around it and nothing else, which is
+// what lets the size be measured before a record exists.
+func questionCommentBody(items []questionMessageItem, tag, deadline, firstNotify, runID string) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "【確認のお願い %s】回答期限: %s\n\n", tag, formatQuestionInstant(record.AnswerDeadlineAt))
+	fmt.Fprintf(&builder, "【確認のお願い %s】回答期限: %s\n\n", tag, deadline)
 	builder.WriteString("このチケットの自動処理を進めるために、以下の確認が必要です。対象リポジトリと本番環境には、まだ何も変更を加えていません。\n")
-	builder.WriteString("回答は、選びたい選択肢の下にある「回答 " + tag + " ...」の行を、そのままコメントに貼り付けて投稿してください。質問が複数ある場合は、各質問の行を 1 つのコメントにまとめてください。\n")
+	builder.WriteString("確認をお願いするのはこの 1 回だけです。ここに挙がっていない点は、こちらで判断して進め、その判断は着手時の方針コメントに書きます。\n")
+	builder.WriteString("回答は、末尾の「回答テンプレート」をコピーし、" + answerTemplateBlank + " を選んだ記号に書き換えて、1 つのコメントとして投稿してください。選びたい選択肢の下にある「回答 " + tag + " ...」の行を貼り付けても受け付けます。\n")
 	if len(items) == 1 && len(items[0].Choices) > 0 {
 		builder.WriteString("この質問は 1 問だけなので、選択肢の記号 (例: " + items[0].Choices[0].ID + ") だけをコメントしても受け付けます。\n")
 	}
@@ -100,17 +142,26 @@ func QuestionCommentContent(record QuestionRecord) (string, error) {
 			fmt.Fprintf(&builder, "  回答 %s %s:%s\n", tag, item.ID, choice.ID)
 		}
 	}
+	// The template is the block form of the answer grammar: the header line
+	// naming the round, then one line per question. It is what a requester
+	// answering ten questions actually uses - the per-choice lines above are
+	// for the one question they want to paste verbatim.
+	fmt.Fprintf(&builder, "\n【回答テンプレート】(%s を選んだ記号に書き換えて、%d 行すべてを 1 つのコメントに)\n", answerTemplateBlank, len(items)+1)
+	fmt.Fprintf(&builder, "回答 %s\n", tag)
+	for _, item := range items {
+		fmt.Fprintf(&builder, "%s: %s\n", item.ID, answerTemplateBlank)
+	}
 	fmt.Fprintf(&builder, "\n処理を中止する場合は「中止 %s」とだけコメントしてください。\n", tag)
 	builder.WriteString(CommentFacts{
 		State:      "回答待ち（質問 " + tag + "）",
 		NextActor:  "起票者（回答者）",
-		Operation:  "選びたい選択肢の下の「回答 " + tag + " ...」行を、1 つのコメントに貼り付けて投稿",
-		NextEvent:  "次回通知 " + formatQuestionInstant(record.NotifyAt[0]) + " / 回答期限 " + formatQuestionInstant(record.AnswerDeadlineAt) + "（期限を過ぎると変更を加えずに停止）",
+		Operation:  "末尾の「回答テンプレート」を書き換えて 1 つのコメントとして投稿（選択肢の下の「回答 " + tag + " ...」行の貼り付けでも可）",
+		NextEvent:  "次回通知 " + firstNotify + " / 回答期限 " + deadline + "（期限を過ぎると変更を加えずに停止）",
 		Production: "未変更",
 		AutoRetry:  "なし（回答があれば自動で再開）",
-		Marker:     CommentMarker("question", record.AutomationRunID, tag),
+		Marker:     CommentMarker("question", runID, tag),
 	}.render())
-	return builder.String(), nil
+	return builder.String()
 }
 
 // NotifyCommentContent is scheduled reminder number index (1..3).
@@ -124,7 +175,7 @@ func NotifyCommentContent(record QuestionRecord, index int) (string, error) {
 	tag := QuestionRevisionTag(record.QuestionRevision)
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "【再通知 %d/%d %s】回答期限: %s\n\n", index, QuestionNotifyCount, tag, formatQuestionInstant(record.AnswerDeadlineAt))
-	builder.WriteString("確認事項への回答をお待ちしています。質問コメントの選択肢の下にある「回答 " + tag + " ...」の行を、そのままコメントに貼り付けて投稿してください。\n")
+	builder.WriteString("確認事項への回答をお待ちしています。質問コメントの末尾にある「回答テンプレート」を書き換えて、1 つのコメントとして投稿してください。\n")
 	fmt.Fprintf(&builder, "処理を中止する場合は「中止 %s」とだけコメントしてください。\n", tag)
 	nextEvent := "回答期限 " + formatQuestionInstant(record.AnswerDeadlineAt) + "（以後の再通知はありません。期限を過ぎると変更を加えずに停止）"
 	if index < QuestionNotifyCount {
@@ -133,7 +184,7 @@ func NotifyCommentContent(record QuestionRecord, index int) (string, error) {
 	builder.WriteString(CommentFacts{
 		State:      fmt.Sprintf("回答待ち（再通知 %d/%d・質問 %s）", index, QuestionNotifyCount, tag),
 		NextActor:  "起票者（回答者）",
-		Operation:  "質問コメントの「回答 " + tag + " ...」行を、そのまま貼り付けて投稿",
+		Operation:  "質問コメントの「回答テンプレート」を書き換えて 1 つのコメントとして投稿",
 		NextEvent:  nextEvent,
 		Production: "未変更",
 		AutoRetry:  "なし（回答があれば自動で再開）",

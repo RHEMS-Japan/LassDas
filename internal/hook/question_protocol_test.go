@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -67,8 +68,12 @@ func TestQuestionRecordShapeFailsClosed(t *testing.T) {
 			record.QuestionsJSON = "[]"
 			record.QuestionsSHA256 = TerminalReportDigest([]byte("[]"))
 		}},
-		{name: "four questions exceed the round contract", mutate: func(record *QuestionRecord) {
-			record.QuestionsJSON = `[{"id":"Q1"},{"id":"Q2"},{"id":"Q3"},{"id":"Q4"}]`
+		{name: "one question past the numbering ceiling", mutate: func(record *QuestionRecord) {
+			items := make([]string, 0, MaxClarificationQuestions+1)
+			for index := 1; index <= MaxClarificationQuestions+1; index++ {
+				items = append(items, fmt.Sprintf(`{"id":"Q%d"}`, index))
+			}
+			record.QuestionsJSON = "[" + strings.Join(items, ",") + "]"
 			record.QuestionsSHA256 = TerminalReportDigest([]byte(record.QuestionsJSON))
 		}},
 		{name: "question set is not an object array", mutate: func(record *QuestionRecord) {

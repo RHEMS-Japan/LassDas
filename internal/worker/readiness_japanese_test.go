@@ -42,7 +42,7 @@ func TestReadinessPromptCarriesTheWholeWritableScope(t *testing.T) {
 	if !strings.Contains(prompt, `"writable_scope":["client/src/"]`) {
 		t.Fatalf("the prompt does not carry the writable scope: %s", prompt[:200])
 	}
-	system := readinessSystemPrompt()
+	system := readinessSystemPrompt(defaultTestPolicy())
 	for _, must := range []string{
 		"writable_scope",
 		// An ordinary change request is shown no file, and the contract says

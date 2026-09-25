@@ -231,6 +231,22 @@ func readTargetToken(config runtime.Config) (string, error) {
 	return token, nil
 }
 
+// stoppedWhileWorking is the opportunistic stop read between finishing a
+// piece of work and acting on it. Unlike the fail-closed read before the
+// claim, an unreadable listing here proceeds and says so: the work is
+// already spent, and refusing to act on it would re-run the whole gate on
+// every retry. Proceeding is safe in a way it was not before — a question
+// asked in spite of a stop is ended by the answer wait, which reads the
+// stop itself. onFailure names, in the log, what proceeding means here.
+func stoppedWhileWorking(ctx context.Context, backlog commentLister, allowedCreatorID, issueID int64, runID, onFailure string, logger Logger) bool {
+	stopped, err := stopRequested(ctx, backlog, allowedCreatorID, issueID)
+	if err != nil {
+		logger.Error("stop re-check unreadable; "+onFailure, "run", runID, "error", err.Error())
+		return false
+	}
+	return stopped
+}
+
 // startQueuedRun claims one queued run by name, prepares its run directory
 // from scratch and creates the first round — or ends the run honestly when
 // preparation itself decides it (an intake rejection, a readiness stop, a
@@ -318,6 +334,18 @@ func startQueuedRun(
 	_, outcome, runErr := pipeline.PrepareChainRun(ctx)
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	if outcome.QuestionDecisionPath != "" {
+		// The gate takes minutes, and a stop written while it ran is a stop.
+		// Without this the question went out to a requester who had written
+		// 「停止」 eight seconds earlier, and the ticket then sat in the
+		// answer wait (live 2026-09-25).
+		if stoppedWhileWorking(ctx, services.Backlog, config.Tracker.AllowedCreatorID,
+			envelope.Snapshot.IssueID, run.RunID, "asking anyway", logger) {
+			repository, repositoryErr := readField(runDir, "ticket-draft.json", "repository")
+			if repositoryErr != nil {
+				repository = ""
+			}
+			return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
+		}
 		return terminal.AskQuestion(ctx, outcome.QuestionDecisionPath)
 	}
 	if runErr != nil || outcome.Code != "" {

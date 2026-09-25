@@ -140,6 +140,16 @@ func eventConditionMatches(item, values map[string]types.AttributeValue) bool {
 }
 
 func runUpdateConditionMatches(item, values map[string]types.AttributeValue) bool {
+	// The answer wait's read position: the run row has to exist, and the
+	// position only ever moves forward.
+	if scan, ok := values[":scan"]; ok {
+		if len(item) == 0 {
+			return false
+		}
+		current, exists := attributeInt64(item, "question_scan_through")
+		wanted, valid := attributeInt64(map[string]types.AttributeValue{"scan": scan}, "scan")
+		return valid && (!exists || current < wanted)
+	}
 	if _, ok := values[":queued"]; ok {
 		return len(item) > 0 &&
 			attributeEquals(item, "state", values, ":queued") &&
@@ -425,6 +435,10 @@ func applyRunUpdate(item, values map[string]types.AttributeValue) {
 	if _, ok := values[":ingest_activity"]; ok {
 		item["record_type"] = values[":ingest_type"]
 		item["last_activity_id"] = values[":ingest_activity"]
+		return
+	}
+	if _, ok := values[":scan"]; ok {
+		item["question_scan_through"] = values[":scan"]
 		return
 	}
 	if _, ok := values[":run_comment_type"]; ok {

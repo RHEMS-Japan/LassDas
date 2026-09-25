@@ -74,6 +74,27 @@ type Config struct {
 	// configurations' digests unchanged.
 	StagnationRepeatRounds int `json:"stagnation_repeat_rounds,omitempty"`
 
+	// The reception's asking policy. All four are zero-valued when the
+	// destination says nothing, and every accessor answers the default for
+	// zero, so a configuration written before these existed keeps its exact
+	// canonical form — and with it the digest every sealed record of a run
+	// in flight is bound to.
+	//
+	// Questions is how much the reception may ask at all
+	// (QuestionsNone | QuestionsMinimal | QuestionsNormal);
+	// QuestionMaxItems how many questions one set may hold;
+	// QuestionMaxRounds how many times a run may ask the requester
+	// anything, which is once; QuestionDeadlineWeekdays how long they have
+	// to answer.
+	Questions                string `json:"questions,omitempty"`
+	QuestionMaxItems         int    `json:"question_max_items,omitempty"`
+	QuestionMaxRounds        int    `json:"question_max_rounds,omitempty"`
+	QuestionDeadlineWeekdays int    `json:"question_deadline_weekdays,omitempty"`
+	// AssumptionMaxItems bounds the points the reception may settle by
+	// itself and record. Asking less means deciding more, so the record of
+	// what was decided is where the reception's work now shows.
+	AssumptionMaxItems int `json:"assumption_max_items,omitempty"`
+
 	// finishedRunSHA256 pins the digest this configuration's sealed records
 	// are held to. It is unexported so that SHA256, which marshals the
 	// exported fields, still reports the configuration's own digest, and so
@@ -1149,6 +1170,9 @@ func (c Config) Validate() error {
 		if err := c.AnswerKnowledge.validate(); err != nil {
 			return err
 		}
+	}
+	if err := c.validateReception(); err != nil {
+		return err
 	}
 	return nil
 }
