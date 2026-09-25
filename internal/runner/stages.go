@@ -625,6 +625,14 @@ func (p *Pipeline) implementRounds(ctx context.Context, repoRoot, baseRoot, base
 			"--out", stageDir+"/candidate.json",
 		)
 		if code, err := p.worker(ctx, "implement", implementArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			// The implementer may report instead of changing: it is told to
+			// leave the working copy alone and say why when it cannot carry
+			// the request out. The seal refuses that as "the agent changed
+			// nothing", which used to end the run as a model failure with
+			// the reason nowhere on the ticket (live 2026-09-25).
+			if worker.RoundReturnedWork(historyDir, stage) {
+				return Outcome{Code: hook.TerminalImplementationReturned}, nil
+			}
 			return Outcome{Code: hook.TerminalModelFailed}, err
 		}
 		for index, reviewer := range reviewers {

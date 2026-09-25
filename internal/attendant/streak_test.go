@@ -45,6 +45,18 @@ func TestDetectFailureStreakCountsOnlyTheNewestRunOfIdenticalFailures(t *testing
 			runs:  []state.RunOverview{run("a", 1, "terminal", "model_failed"), run("b", 2, "terminal", "input_rejected"), run("c", 3, "terminal", "model_failed")},
 			limit: 3, resolved: never, wantCount: 1, wantActive: false, wantNewest: "c",
 		},
+		// An implementer that reports instead of changing is answering one
+		// ticket honestly; three in a row is the implementer or its
+		// instruction, and the hold has to trip on it like any other
+		// repeated ending.
+		"three returned implementations hold like any failure": {
+			runs: []state.RunOverview{
+				run("a", 1, "terminal", "implementation_returned"),
+				run("b", 2, "terminal", "implementation_returned"),
+				run("c", 3, "terminal", "implementation_returned"),
+			},
+			limit: 3, resolved: never, wantCount: 3, wantActive: true, wantNewest: "c",
+		},
 		"an operator's resolution ends the walk": {
 			runs:  []state.RunOverview{run("a", 1, "terminal", "model_failed"), run("b", 2, "terminal", "model_failed"), run("c", 3, "terminal", "model_failed")},
 			limit: 3, resolved: func(r state.RunOverview) bool { return r.RunID == "b" }, wantCount: 1, wantActive: false, wantNewest: "c",

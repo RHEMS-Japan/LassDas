@@ -51,35 +51,45 @@ func TestClassifyChainFailure(t *testing.T) {
 	}
 	undecided := func() (string, error) { return "", errors.New("missing") }
 
-	action, code := classifyChainFailure(runtime.StageImplement, undecided, undecided)
+	changed := func() bool { return false }
+	reported := func() bool { return true }
+
+	action, code := classifyChainFailure(runtime.StageImplement, undecided, undecided, changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("implement failure = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StagePublish, undecided, undecided)
+	// An implement card whose agent reported instead of changing ends on
+	// its own code: saying the AI failed was false on a run where the AI
+	// had explained itself (live 2026-09-25).
+	action, code = classifyChainFailure(runtime.StageImplement, undecided, undecided, reported)
+	if action != actionReport || code != hook.TerminalImplementationReturned {
+		t.Fatalf("implement report = %v %v", action, code)
+	}
+	action, code = classifyChainFailure(runtime.StagePublish, undecided, undecided, reported)
 	if action != actionReport || code != hook.TerminalReleaseFailed {
 		t.Fatalf("publish failure = %v %v", action, code)
 	}
-	action, _ = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided)
+	action, _ = classifyChainFailure(runtime.StageValidate, decided("revise"), undecided, changed)
 	if action != actionRegenerate {
 		t.Fatalf("revise = %v", action)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), decided("clarification_required"))
+	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), decided("clarification_required"), changed)
 	if action != actionAskQuestion || code != hook.TerminalNonconverged {
 		t.Fatalf("nonconverged with question = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), undecided)
+	action, code = classifyChainFailure(runtime.StageValidate, decided("nonconverged"), undecided, changed)
 	if action != actionReport || code != hook.TerminalNonconverged {
 		t.Fatalf("nonconverged without question = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), undecided)
+	action, code = classifyChainFailure(runtime.StageValidate, decided("converged"), undecided, changed)
 	if action != actionReport || code != hook.TerminalValidationFailed {
 		t.Fatalf("converged but failed = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, undecided, undecided)
+	action, code = classifyChainFailure(runtime.StageValidate, undecided, undecided, changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("undecided validate = %v %v", action, code)
 	}
-	action, code = classifyChainFailure(runtime.StageValidate, decided("elsewhere"), undecided)
+	action, code = classifyChainFailure(runtime.StageValidate, decided("elsewhere"), undecided, changed)
 	if action != actionReport || code != hook.TerminalModelFailed {
 		t.Fatalf("unknown decision = %v %v", action, code)
 	}
