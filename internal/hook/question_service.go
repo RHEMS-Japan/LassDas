@@ -686,7 +686,7 @@ func (s *QuestionTickService) result(decision Decision, code, deliveryID string)
 //
 // waiting is read once by the caller and serves both notices, from the two
 // sides of the same fact: the receipt may not say a run resumed while it is
-// still waiting, and the acceptance notice tells the requester they owe one
+// still waiting, and the acceptance notice tells the requester they owe an
 // answer exactly when it is.
 func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoticeSnapshot, waiting bool) (Result, bool) {
 	deliveryID := notice.Snapshot.DeliveryID
@@ -695,7 +695,11 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 		return s.failure("question_tick_notice_state", err, deliveryID), true
 	}
 	if !posted {
-		content := AckCommentContent(notice.Snapshot, waiting)
+		reception, result, ok := s.receptionState(ctx, waiting, deliveryID)
+		if !ok {
+			return result, true
+		}
+		content := AckCommentContent(notice.Snapshot, reception)
 		if result, ok := s.postRunComment(ctx, RunCommentAck, "", content, deliveryID); !ok {
 			return result, true
 		}
@@ -746,6 +750,35 @@ func (s *QuestionTickService) postRunNotices(ctx context.Context, notice RunNoti
 		}
 	}
 	return Result{}, false
+}
+
+// receptionState works out how far the reception had got, from what the run
+// has already recorded — no configuration is read and no new input is
+// threaded down for it.
+//
+// An answer wait is the reception asking, and the caller has already read
+// that. The plan notice is the reception concluding: it is posted as soon as
+// the readiness gate passes and before the first card, so its marker is the
+// run's own record that the reception is over and asked nothing. Neither
+// means the run was taken but not yet received, which the claim makes
+// possible for as long as a budget hold, a sign-in hold, an unreadable
+// target token or a restart keeps the reception from starting — the claim
+// then returns to the queue and the reception runs later, and may ask.
+//
+// A state that cannot be read blocks the notice rather than guessing at it:
+// the notice is posted once and never revised, and the tick will be back.
+func (s *QuestionTickService) receptionState(ctx context.Context, waiting bool, deliveryID string) (ReceptionState, Result, bool) {
+	if waiting {
+		return ReceptionAsked, Result{}, true
+	}
+	planned, err := s.store.RunCommentState(ctx, s.config, RunCommentPlan, "")
+	if err != nil {
+		return ReceptionPending, s.failure("question_tick_notice_state", err, deliveryID), false
+	}
+	if planned {
+		return ReceptionProceeded, Result{}, true
+	}
+	return ReceptionPending, Result{}, true
 }
 
 func (s *QuestionTickService) postRunComment(ctx context.Context, kind RunCommentKind, qualifier, content, deliveryID string) (Result, bool) {
