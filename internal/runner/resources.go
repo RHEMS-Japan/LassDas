@@ -68,12 +68,11 @@ type resourceClaim struct {
 func (p *Pipeline) RecordCreatedResources(stage, workingCopy string) error {
 	claimPath := filepath.Join(workingCopy, AgentResourcesFile)
 	raw, readErr := readWorkspaceFile(claimPath, maxResourceFileBytes)
-	if err := os.Remove(claimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	if readErr != nil {
-		// No claims, or a file too large to be a list of them. Neither is
-		// this run's failure, and neither is worth ending a card over.
+		// No declarations, or a file too large to be a list of them.
+		// Neither is this run's failure, and neither is worth ending a card
+		// over. The file still goes, in case something is there.
+		p.discardDeclarations(claimPath)
 		return nil
 	}
 	created := make([]worker.CreatedResource, 0, 8)
@@ -113,7 +112,33 @@ func (p *Pipeline) RecordCreatedResources(stage, workingCopy string) error {
 			break
 		}
 	}
-	return p.appendResources(created)
+	// Written down before the file goes. The other order lost every
+	// declaration whenever the removal failed, and turned a card that had
+	// finished its work into a failed one — for a file the engine itself
+	// was tidying up.
+	if err := p.appendResources(created); err != nil {
+		return err
+	}
+	p.discardDeclarations(claimPath)
+	return nil
+}
+
+// discardDeclarations takes the file out of the working copy the next card
+// seals as the change being proposed. A removal that fails is said aloud
+// and not returned: what the agent declared is already in the run's record
+// by this point, and failing the card would throw away work that was done
+// over a file nobody asked about. The content goes first, so a file this
+// process cannot unlink cannot carry a declaration — or a credential an
+// agent wrote into it — into the pull request.
+func (p *Pipeline) discardDeclarations(claimPath string) {
+	if err := os.Remove(claimPath); err == nil || errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	emptied := os.WriteFile(claimPath, nil, 0o600)
+	if p.Logger != nil {
+		p.Logger.Error("resource declarations not removed from the working copy",
+			"path", claimPath, "emptied", emptied == nil)
+	}
 }
 
 // permittedResourceKinds answers whether this run's destination allows a

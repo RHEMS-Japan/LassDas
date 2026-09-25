@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"automation.internal/ticket-ingress/internal/initwizard"
 )
@@ -165,5 +166,68 @@ func TestSetupCheckPrintsTheWarningBesideTheOtherGaps(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "sk-or-a-key-value") {
 		t.Fatalf("the key was printed: %q", out.String())
+	}
+}
+
+// A key with no limit and a key that could not be reached are different
+// things to do something about. Reporting only the first left the second
+// saying nothing about itself.
+func TestBothAnUnlimitedKeyAndAnUnreachableOneAreSaid(t *testing.T) {
+	home := t.TempDir()
+	storedProject(t, home, "https://openrouter.ai/api/v1", map[string]string{
+		"LASSDAS_IMPLEMENTER_KEY": "key-without-a-limit",
+		"LASSDAS_REVIEW_A_KEY":    "key-that-is-refused",
+	})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Authorization") == "Bearer key-that-is-refused" {
+			return &http.Response{StatusCode: 401, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":{"usage":1,"limit":null}}`)), Request: r}, nil
+	})}
+	notice := keyLimitNotice(context.Background(), home, "sample", client)
+	if !strings.Contains(notice, "利用上限が設定されていません") {
+		t.Fatalf("the unlimited key is not reported: %q", notice)
+	}
+	if !strings.Contains(notice, "確認できませんでした") {
+		t.Fatalf("the unreachable key is not reported: %q", notice)
+	}
+	if strings.Count(notice, "\n") != 1 {
+		t.Fatalf("the two are not one sentence each: %q", notice)
+	}
+	for _, secret := range []string{"key-without-a-limit", "key-that-is-refused"} {
+		if strings.Contains(notice, secret) {
+			t.Fatalf("a key was printed: %q", notice)
+		}
+	}
+}
+
+// Every key goes through one client, and its deadline is short enough that
+// a provider which has stopped answering costs seconds rather than minutes.
+func TestOneBoundedClientServesEveryKey(t *testing.T) {
+	home := t.TempDir()
+	storedProject(t, home, "https://openrouter.ai/api/v1", map[string]string{
+		"LASSDAS_IMPLEMENTER_KEY":        "key-one",
+		"LASSDAS_REVIEW_A_KEY":           "key-two",
+		"LASSDAS_REVIEW_B_KEY":           "key-three",
+		"LASSDAS_READINESS_ASSESSOR_KEY": "key-four",
+	})
+	seen := map[*http.Client]bool{}
+	var client *http.Client
+	client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seen[client] = true
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":{"usage":1,"limit":5}}`)), Request: r}, nil
+	})}
+	if notice := keyLimitNotice(context.Background(), home, "sample", client); notice != "" {
+		t.Fatalf("four limited keys were warned about: %q", notice)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the keys did not share one client")
+	}
+	// And the client the check builds for itself is bounded. A provider
+	// that has stopped answering must cost seconds, not the whole of a
+	// default timeout once per key.
+	built := keyLimitClient()
+	if built.Timeout <= 0 || built.Timeout > 10*time.Second {
+		t.Fatalf("the check's own client waits %v per key", built.Timeout)
 	}
 }

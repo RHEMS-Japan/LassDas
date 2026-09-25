@@ -364,3 +364,43 @@ func TestEveryCardCollectsWhatItMade(t *testing.T) {
 		})
 	}
 }
+
+// The declarations are written down before the file goes. The other order
+// lost every one of them whenever the removal failed, and turned a card
+// that had finished its work into a failed one — over a file the engine
+// itself was tidying up.
+func TestADeclarationSurvivesAFileThatCannotBeRemoved(t *testing.T) {
+	pipeline := chainStagePipeline(t)
+	allowConsumerInfrastructure(t, pipeline, "sqs")
+	// A directory in the file's place: the read fails the same way an
+	// unremovable file would, and the removal of a non-empty one fails.
+	workingCopy := pipeline.path("target-repo")
+	if err := os.MkdirAll(workingCopy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claim := filepath.Join(workingCopy, AgentResourcesFile)
+	if err := os.WriteFile(claim, []byte(`{"kind":"sqs","identifier":"one"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The directory holding it is made read-only, so the entry cannot be
+	// unlinked while the file itself still reads.
+	if err := os.Chmod(workingCopy, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(workingCopy, 0o755) })
+
+	if err := pipeline.RecordCreatedResources(runtime.StageImplement, workingCopy); err != nil {
+		t.Fatalf("a card was failed over a file the engine was tidying up: %v", err)
+	}
+	created := readRecordedResources(t, pipeline)
+	if len(created) != 1 || created[0].Identifier != "one" {
+		t.Fatalf("the declaration was lost: %+v", created)
+	}
+	// And what it held is gone, so an unremovable file cannot carry a
+	// declaration — or a credential an agent wrote into it — into the
+	// change being proposed.
+	left, err := os.ReadFile(claim)
+	if err == nil && len(left) > 0 {
+		t.Fatalf("the file still holds %q", left)
+	}
+}

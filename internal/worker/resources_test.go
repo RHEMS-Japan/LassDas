@@ -87,3 +87,57 @@ func TestLoadCreatedResourcesSkipsWhatItCannotRead(t *testing.T) {
 		t.Fatalf("an unnamed record read as %+v", got)
 	}
 }
+
+// A declaration is a model's own words, and both places it is shown render
+// markup. An identifier written to look like the end of a link would come
+// out as a link somebody might follow, believing the engine put it there.
+func TestADeclarationCannotRenderAsMarkup(t *testing.T) {
+	created := []CreatedResource{{
+		Kind:       "sqs",
+		Identifier: "x](https://elsewhere.invalid) `whoami`",
+		Provider:   "<b>aws</b>",
+		Stage:      "implement",
+		CreatedAt:  time.Date(2026, 9, 25, 14, 46, 0, 0, time.UTC),
+	}}
+	rendered := composeCreatedResources(created)
+	for _, construct := range []string{"](https://", "`whoami`", "<b>"} {
+		if strings.Contains(rendered, construct) {
+			t.Fatalf("a declaration rendered as markup (%q):\n%s", construct, rendered)
+		}
+	}
+	// And the text is still there to read: escaped, not thrown away. What
+	// is in the field is how the resource is found again.
+	if !strings.Contains(rendered, "elsewhere.invalid") || !strings.Contains(rendered, "whoami") {
+		t.Fatalf("the declaration was thrown away instead of escaped:\n%s", rendered)
+	}
+}
+
+// An ordinary name comes out exactly as it went in. Escaping a hyphen or a
+// full stop would put a backslash in every report, wherever the text is
+// read as plain text.
+func TestAnOrdinaryResourceNameIsUnchanged(t *testing.T) {
+	created := []CreatedResource{{
+		Kind:       "sqs",
+		Identifier: "arn:aws:sqs:ap-northeast-1:123456789012/lassdas-orders-intake.fifo",
+		Provider:   "aws",
+		Stage:      "implement",
+		CreatedAt:  time.Date(2026, 9, 25, 14, 46, 0, 0, time.UTC),
+	}}
+	rendered := composeCreatedResources(created)
+	if !strings.Contains(rendered, "arn:aws:sqs:ap-northeast-1:123456789012/lassdas-orders-intake.fifo") {
+		t.Fatalf("an ordinary name was altered:\n%s", rendered)
+	}
+	if strings.Contains(rendered, `\\`) {
+		t.Fatalf("a backslash reached an ordinary name:\n%s", rendered)
+	}
+}
+
+// The list says whose word it is. The engine has no standing to ask a
+// provider about an account it reaches only through a credential the
+// destination handed over, so it cannot check that any of this exists.
+func TestTheListSaysItIsADeclarationAndNotACheck(t *testing.T) {
+	rendered := composeCreatedResources([]CreatedResource{{Kind: "sqs", Identifier: "one", Stage: "implement"}})
+	if !strings.Contains(rendered, "申告") {
+		t.Fatalf("the list reads as something the engine verified:\n%s", rendered)
+	}
+}

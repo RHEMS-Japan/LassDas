@@ -202,6 +202,15 @@ func keyLimitNotice(ctx context.Context, home, project string, client *http.Clie
 	// One reading per distinct key, not per variable: a setup that shares
 	// one key across every role would otherwise ask the provider about the
 	// same key seven times and say the same thing seven times.
+	//
+	// One client for all of them, with a deadline short enough that a
+	// provider which has stopped answering costs seconds rather than
+	// minutes. A check that runs nothing must not sit silent while somebody
+	// waits for it: seven keys against a client of its own, at the usual
+	// timeout, is nearly two minutes of nothing.
+	if client == nil {
+		client = keyLimitClient()
+	}
 	checked := map[string]bool{}
 	unlimited, unreachable := 0, 0
 	for _, name := range providerKeyNames(secrets) {
@@ -219,14 +228,29 @@ func keyLimitNotice(ctx context.Context, home, project string, client *http.Clie
 			unlimited++
 		}
 	}
-	switch {
-	case unlimited > 0:
-		return "警告: モデルの鍵に利用上限が設定されていません (" + strconv.Itoa(unlimited) + " 本)。本体は自分では費用を打ち切りません — 依頼が終わるまで手を替えて進み続けるので、止まるのは提供元が鍵を断ったときだけです。" + initwizard.ProviderName(state.BaseURL) + " の鍵の設定画面で上限とリセット周期 (日次・週次・月次) を決めてください。上限に達したら本体は課題にその旨を書いて待ち、上限が上がるかリセットされた時点で続きから再開します"
-	case unreachable > 0 && len(checked) == unreachable:
-		return "鍵の利用上限を確認できませんでした (" + initwizard.ProviderName(state.BaseURL) + " に接続できないか、鍵が使えません)。上限が未設定のままだと本体は費用を自分で打ち切りません"
+	// Both, when both happened. A key with no limit and a key that could
+	// not be reached are different things to do something about, and the
+	// second one said nothing about itself while the first was reported.
+	var lines []string
+	if unlimited > 0 {
+		lines = append(lines, "警告: モデルの鍵に利用上限が設定されていません ("+strconv.Itoa(unlimited)+" 本)。本体は自分では費用を打ち切りません — 依頼が終わるまで手を替えて進み続けるので、止まるのは提供元が鍵を断ったときだけです。"+initwizard.ProviderName(state.BaseURL)+" の鍵の設定画面で上限とリセット周期 (日次・週次・月次) を決めてください。上限に達したら本体は課題にその旨を書いて待ち、上限が上がるかリセットされた時点で続きから再開します")
 	}
-	return ""
+	if unreachable > 0 {
+		lines = append(lines, "鍵の利用上限を確認できませんでした ("+strconv.Itoa(unreachable)+" 本。"+initwizard.ProviderName(state.BaseURL)+" に接続できないか、その鍵が使えません)。上限が未設定のままだと本体は費用を自分で打ち切りません")
+	}
+	return strings.Join(lines, "\n")
 }
+
+// keyLimitClient is the one client every key's reading goes through. One
+// rather than one each: the readings are sequential against the same host,
+// so they share a connection instead of opening and closing one per key.
+func keyLimitClient() *http.Client { return &http.Client{Timeout: keyLimitTimeout} }
+
+// keyLimitTimeout bounds the whole of one key's reading. The check does
+// nothing else and somebody is waiting at a terminal for it; at the usual
+// timeout a provider that had stopped answering held a setup with a key
+// per role for nearly two minutes, saying nothing.
+const keyLimitTimeout = 5 * time.Second
 
 // providerKeyNames are the stored variables that hold a key to the model
 // provider, in a stable order. The destination and tracker keys are not
