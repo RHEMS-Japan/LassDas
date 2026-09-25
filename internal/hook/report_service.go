@@ -245,13 +245,34 @@ func (s *TerminalReportService) reportResult(decision Decision, code, deliveryID
 // evidence shape is the truth here: a proposal-only delivery carries the pull
 // request alone and has touched no environment, and telling its requester
 // that production was verified would be a false completion report.
+//
+// A delivery that stopped short says so once and says it the same way
+// everywhere. Two sentences used to disagree about who takes it the rest of
+// the way -- this one promised the engine would, "automatically, once the
+// settings are complete", while the footer told the requester a person does
+// it -- and the promise was untrue whichever of them the reader believed:
+// the run is terminal, and nothing in it ever issues another promotion
+// card (deliver.go refuses to carry a delivery past its ending). It was
+// untrue in its reason as well. Every shortfall was described as settings
+// that had not been written, including the one that is nothing of the kind:
+// a production branch carrying changes staging does not have.
+//
+// So neither this sentence nor the footer names a cause any more. The
+// shortfall line the comment already carries -- 「ここまでで止まった理由: 」 --
+// is the one place the reason is stated, written by whatever actually held
+// the delivery, and what is said here is only what is true of every one of
+// them: this run is over, production was not reached, and reaching it takes
+// a later request or a person.
 func successMessage(report TerminalReportRequest) string {
 	if report.ProductionEvidenceURL != "" {
 		return "自動処理が完了し、本番環境への反映と確認が完了しました。"
 	}
 	if report.StagingEvidenceURL != "" {
 		if report.DeliveryShortfall != "" {
-			return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は、下に書いた設定が揃えば自動で行います。"
+			return "自動処理が完了し、staging への反映と確認まで完了しました。" +
+				"この実行はここで終わりで、本番へは届いていません（理由は下に書いています）。" +
+				"本番へ届くのは、その理由が解消したあとの新しい依頼か、人の操作によってです。" +
+				"この実行が後から自動で本番へ反映することはありません。"
 		}
 		return "自動処理が完了し、staging への反映と確認まで完了しました。本番への反映は人が行います。"
 	}
@@ -262,7 +283,7 @@ func successMessage(report TerminalReportRequest) string {
 		// what the engine is waiting on, which the shortfall line below
 		// names.
 		return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。本番環境は変更していません。" +
-			"この納品先はもっと先まで届ける設定ですが、そこまで運ぶ設定がこの環境に揃っていないため、ここで止めています。"
+			"この納品先はもっと先まで届ける設定ですが、下に書いた理由でここまでとしています。"
 	}
 	return "自動処理が完了し、取り込み用の Pull Request の作成まで完了しました。マージと以後の反映は人が行います。本番環境は変更していません。"
 }
@@ -494,7 +515,15 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 			facts.Operation = "本番の表示をご確認ください（対応は不要です）"
 			facts.Production = "確認済み（利用者目線の表示確認まで完了）"
 		case report.StagingEvidenceURL != "":
+			// Two instructions for one delivery is one too many. A staging
+			// stop that was asked for ends with a person taking it on; a
+			// staging stop that was held ends with nobody taking it on from
+			// this run, and saying 「人が行います」 there sent the requester
+			// to ask someone to do what the held condition still forbids.
 			facts.Operation = "staging の表示をご確認ください（本番への反映は人が行います）"
+			if report.DeliveryShortfall != "" {
+				facts.Operation = "staging の表示をご確認ください（この実行は本番へ届いておらず、ここで終了しています）"
+			}
 			facts.Production = "未変更（staging まで反映済み）"
 		default:
 			facts.Operation = "Pull Request の内容をご確認のうえ、マージをご判断ください"
