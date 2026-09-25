@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,6 +25,9 @@ type pendingFakeStore struct {
 	expected          string
 	digests           []string
 	begins, completes int
+	// recoveries are the closes of a pending report whose record could not
+	// be reproduced, in the order they were asked for.
+	recoveries []hook.TerminalRecoveryCloseRequest
 }
 
 func (f *pendingFakeStore) BeginTerminal(_ context.Context, request hook.TerminalBeginRequest) (hook.TerminalBinding, hook.TerminalBeginDisposition, error) {
@@ -42,7 +46,14 @@ func (f *pendingFakeStore) CompleteTerminal(context.Context, hook.TerminalComple
 
 // pendingFakeComments is the ticket: it remembers what was posted and finds
 // a comment by the marker on its final line, as the tracker client does.
-type pendingFakeComments struct{ posted []string }
+type pendingFakeComments struct {
+	posted []string
+	// addFailure stands in for a tracker that will not take the comment.
+	addFailure error
+}
+
+// errDeliberate is a tracker refusal a test asked for.
+var errDeliberate = errors.New("the tracker refused this comment")
 
 func (f *pendingFakeComments) FindExactComment(context.Context, int64, string) (int64, bool, error) {
 	return 0, false, nil
@@ -58,6 +69,9 @@ func (f *pendingFakeComments) FindCommentWithMarker(_ context.Context, _ int64, 
 }
 
 func (f *pendingFakeComments) AddComment(_ context.Context, _ int64, content string) (int64, error) {
+	if f.addFailure != nil {
+		return 0, f.addFailure
+	}
 	f.posted = append(f.posted, content)
 	return int64(900 + len(f.posted) - 1), nil
 }
@@ -93,6 +107,9 @@ type pendingFixture struct {
 	store      *pendingFakeStore
 	comments   *pendingFakeComments
 	deliveryID string
+	// firstComment is what the ending posted before everything past the
+	// run directory was taken away again.
+	firstComment string
 }
 
 func newPendingFixture(t *testing.T, firstRepository string) pendingFixture {
@@ -180,8 +197,8 @@ func TestPendingTerminalWithoutCardsIsDrivenToTerminalWithOneComment(t *testing.
 		t.Fatalf("store begins/completes = %d/%d, want the report begun and completed on both ticks", fixture.store.begins, fixture.store.completes)
 	}
 	log := strings.Join(logger.lines, "\n")
-	if strings.Contains(log, "needs an operator") || !strings.Contains(log, "pending terminal report completed") {
-		t.Fatalf("log = %q, want the completion and no operator escalation", logger.lines)
+	if strings.Contains(log, "cannot be rebuilt") || !strings.Contains(log, "pending terminal report completed") {
+		t.Fatalf("log = %q, want the completion and no failed rebuild", logger.lines)
 	}
 }
 
@@ -230,38 +247,61 @@ func TestPendingTerminalSkipsADraftRepositoryThatCannotBeReported(t *testing.T) 
 	}
 }
 
-// A row whose digest no rebuilt report reproduces is left to a person:
-// nothing reaches the store or the ticket, and nothing is requeued.
-func TestPendingTerminalThatCannotBeReproducedStaysWithTheOperator(t *testing.T) {
+// A row whose digest no rebuilt report reproduces is not left silent. The
+// ending is reported from what the ledger holds, once, and the row is
+// closed against that comment — the old behaviour, a log line and a wait
+// with nothing on the ticket, is what the requester never saw.
+func TestPendingTerminalThatCannotBeReproducedIsReportedFromTheLedger(t *testing.T) {
 	fixture := newPendingFixture(t, "")
 	fixture.run.TerminalReportSHA256 = strings.Repeat("f", 64)
 	logger := &pendingTestLogger{}
 	if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), logger); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.store.begins != 0 || len(fixture.comments.posted) != 0 {
-		t.Fatalf("store begins = %d, comments = %d; want nothing sent", fixture.store.begins, len(fixture.comments.posted))
+	if fixture.store.begins != 0 {
+		t.Fatalf("a report was sent for a digest nothing reproduces: %v", fixture.store.digests)
+	}
+	if len(fixture.comments.posted) != 1 || len(fixture.store.recoveries) != 1 {
+		t.Fatalf("comments = %d, ledger closes = %d; want the ending reported once",
+			len(fixture.comments.posted), len(fixture.store.recoveries))
 	}
 	log := strings.Join(logger.lines, "\n")
-	if !strings.Contains(log, "needs an operator") || !strings.Contains(log, "digest") {
-		t.Fatalf("log = %q, want an operator escalation naming the digest", logger.lines)
-	}
-	fixture.run.TerminalReportSHA256 = ""
-	if err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), logger); err != nil || fixture.store.begins != 0 {
-		t.Fatalf("a row without a digest: err = %v, begins = %d; want an operator", err, fixture.store.begins)
+	if !strings.Contains(log, "cannot be rebuilt") || !strings.Contains(log, "digest") {
+		t.Fatalf("log = %q, want the failed rebuild named with its reason", logger.lines)
 	}
 }
 
-// A pending success cannot be rebuilt without its cards and stays with the
-// operator; nothing is posted or requeued.
-func TestPendingSuccessWithoutCardsStaysWithTheOperator(t *testing.T) {
+// A row with no digest at all is the one thing this cannot end. There is no
+// digest to build the marker from, so a comment posted for it could not be
+// recognised on the next tick and would be posted again every time. The
+// tick says so, loudly and every time, rather than repeating itself on the
+// ticket. No engine writes such a row: a pending report always carries the
+// digest it was begun with.
+func TestPendingTerminalWithoutADigestIsRefusedRatherThanRepeated(t *testing.T) {
+	fixture := newPendingFixture(t, "")
+	fixture.run.TerminalReportSHA256 = ""
+	logger := &pendingTestLogger{}
+	err := resubmitPendingTerminal(context.Background(), fixture.config, fixture.services, nil, fixture.run, chainViewFor(nil, fixture.deliveryID), logger)
+	if err == nil {
+		t.Fatal("a row with no digest was reported as ended")
+	}
+	if fixture.store.begins != 0 || len(fixture.comments.posted) != 0 || len(fixture.store.recoveries) != 0 {
+		t.Fatalf("begins = %d, comments = %d, closes = %d; want nothing sent",
+			fixture.store.begins, len(fixture.comments.posted), len(fixture.store.recoveries))
+	}
+}
+
+// A deployment with no report service cannot post anything, and says which
+// one of its parts is missing instead of ending the run quietly.
+func TestPendingSuccessWithoutAReportServiceSaysSo(t *testing.T) {
 	logger := &pendingTestLogger{}
 	run := state.RunOverview{RunID: "TKT-4242", DeliveryID: "delivery_" + strings.Repeat("ab", 16), TerminalCode: string(hook.TerminalSuccess)}
 	if err := resubmitPendingTerminal(context.Background(), runtime.Config{Chain: runtime.ChainConfig{RunsRoot: t.TempDir()}}, nil, nil, run, chainViewFor(nil, run.DeliveryID), logger); err != nil {
 		t.Fatal(err)
 	}
-	if len(logger.lines) != 1 || !strings.Contains(logger.lines[0], "needs an operator") {
-		t.Fatalf("log = %q, want one operator escalation", logger.lines)
+	log := strings.Join(logger.lines, "\n")
+	if !strings.Contains(log, "the chain cards are gone") || !strings.Contains(log, "no report service") {
+		t.Fatalf("log = %q, want the failed rebuild and the missing service", logger.lines)
 	}
 }
 

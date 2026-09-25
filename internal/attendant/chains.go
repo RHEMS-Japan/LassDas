@@ -748,15 +748,27 @@ func classifyPendingTerminal(run state.RunOverview, view chainView) (pendingTerm
 	return pendingTerminalResubmit, ""
 }
 
-// resubmitPendingTerminal submits the same terminal report again. The store
-// re-acquires a pending report whose digest matches once its lease expired,
-// the report service finds the posted comment by its marker, and the
-// completion lands; the cards are then archived as they would have been.
+// resubmitPendingTerminal ends a run whose terminal report was begun and
+// never completed: the comment may be on the ticket already, the
+// completion may have been lost to a store failure, and the quick retries
+// met the run's own lease (live 2026-09-05: a run whose completion failed
+// stayed pending for over an hour with nothing driving it).
+//
+// Three things are tried, in order, and the last of them cannot fail for
+// want of something to read:
+//
+//  1. the comment the run wrote down when it decided its ending, when the
+//     digest beside it is the one the row was begun with;
+//  2. the report rebuilt from the row, the board and the artifacts, for a
+//     run that ended under an engine from before that and kept nothing;
+//  3. the ending as the ledger holds it, for a run neither of those can
+//     speak for.
+//
+// Whichever sends it, the store re-acquires the pending report once its
+// lease has expired, the posted comment is found by its marker rather than
+// posted twice, and the cards are archived as they would have been.
 // Nothing here heals cards, checks for a stop, or requeues: the outcome was
-// decided when the report was first begun (live 2026-09-05: a run whose
-// completion failed stayed pending for over an hour with nothing driving it).
-// A report from before any card existed has no cards to archive and no run
-// directory artifacts to lean on; its envelope comes from the ledger's copy.
+// decided when the report was first begun.
 func resubmitPendingTerminal(
 	ctx context.Context,
 	config runtime.Config,
@@ -766,16 +778,70 @@ func resubmitPendingTerminal(
 	view chainView,
 	logger Logger,
 ) error {
+	runDir := runDirectory(config, run.DeliveryID)
+	kept, hasKept := runner.ReadTerminalComment(runDir)
+	switch {
+	case hasKept && kept.ReportSHA256 == run.TerminalReportSHA256 && kept.Code == run.TerminalCode:
+		if err := runner.ResubmitPersistedComment(ctx, services, kept, logger); err != nil {
+			return err
+		}
+		logger.Info("pending terminal report completed", "run", run.RunID, "code", run.TerminalCode, "source", "kept comment")
+		// The cards are retired for the same endings the rebuilt path
+		// retired them for; a success and an investigation leave theirs
+		// standing, because the delivery's own sync still reads them.
+		if code := hook.TerminalCode(run.TerminalCode); code == hook.TerminalSuccess || code == hook.TerminalInvestigated {
+			return nil
+		}
+		return archiveChain(ctx, hermes, view.all)
+	case hasKept:
+		// The run directory holds a closing comment for a different ending
+		// than the row was begun with. Posting it would tell the requester
+		// about an ending this run did not have, so it is refused.
+		//
+		// The rebuild is not tried again either, and that is deliberate.
+		// A file here at all means an attempt to end this run reached the
+		// point of deciding what to say — the rebuilt report, on an older
+		// run — and the digest it decided is not the row's. That attempt
+		// was therefore refused by the ledger and every repeat of it will
+		// be refused the same way, on artifacts that only ever get
+		// scarcer. Trying it once more each tick is how this run waited
+		// for ever; the ledger's own account is reported instead.
+		logger.Error("the kept closing comment is not the ending this row holds",
+			"run", run.RunID, "code", run.TerminalCode, "kept_code", kept.Code)
+	default:
+		if handled, err := rebuildPendingTerminal(ctx, config, services, hermes, run, view, logger); handled {
+			return err
+		}
+	}
+	return recoverPendingTerminal(ctx, config, services, run, runDir, logger)
+}
+
+// rebuildPendingTerminal is the path for a run that ended under an engine
+// from before the closing comment was written down: the report is made
+// again from the run row, the board's cards and the artifacts, and sent.
+//
+// It reports whether it handled the run. Not handling it is not a failure
+// to log and forget — it is the state this whole path exists for, and the
+// caller reports the ending from the ledger instead.
+func rebuildPendingTerminal(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	hermes *runtime.Hermes,
+	run state.RunOverview,
+	view chainView,
+	logger Logger,
+) (bool, error) {
 	action, reason := classifyPendingTerminal(run, view)
 	if action != pendingTerminalResubmit {
-		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", reason)
-		return nil
+		logger.Error("the pending report cannot be rebuilt", "run", run.RunID, "code", run.TerminalCode, "reason", reason)
+		return false, nil
 	}
 	runDir := runDirectory(config, run.DeliveryID)
 	envelope, err := pendingEnvelope(runDir, run)
 	if err != nil {
-		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", "run envelope unreadable: "+err.Error())
-		return nil
+		logger.Error("the pending report cannot be rebuilt", "run", run.RunID, "code", run.TerminalCode, "reason", "run envelope unreadable: "+err.Error())
+		return false, nil
 	}
 	code := hook.TerminalCode(run.TerminalCode)
 	// An incomplete end carries its reason and last objection again: the
@@ -792,9 +858,9 @@ func resubmitPendingTerminal(
 	}
 	switch code {
 	case hook.TerminalSuccess:
-		return reportChainSuccess(ctx, config, services, envelope, run, logger)
+		return true, reportChainSuccess(ctx, config, services, envelope, run, logger)
 	case hook.TerminalInvestigated:
-		return reportInvestigated(ctx, config, services, envelope, run, view, logger)
+		return true, reportInvestigated(ctx, config, services, envelope, run, view, logger)
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	// What a rebuilt report carries can depend on the repository it names:
@@ -809,14 +875,74 @@ func resubmitPendingTerminal(
 	}
 	repository, err := pendingRepository(ctx, terminal, runDir, run, code, evidenceFor)
 	if err != nil {
-		logger.Error("pending terminal report needs an operator", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
-		return nil
+		logger.Error("the pending report cannot be rebuilt", "run", run.RunID, "code", run.TerminalCode, "reason", err.Error())
+		return false, nil
 	}
 	if err := terminal.Report(ctx, code, runner.Outcome{Code: code, Evidence: evidenceFor(repository)}, repository); err != nil {
-		return err
+		return true, err
 	}
-	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code))
-	return archiveChain(ctx, hermes, view.all)
+	logger.Info("pending terminal report completed", "run", run.RunID, "code", string(code), "source", "rebuilt")
+	return true, archiveChain(ctx, hermes, view.all)
+}
+
+// recoverPendingTerminal ends a run whose closing words are gone for good.
+//
+// It is the last of three, and the only one that cannot fail for want of
+// something to read: the run row holds the ending's code and the digest it
+// was sealed with, and that is all this needs. What goes on the ticket says
+// how the run ended, how far the delivery is recorded as having got, and
+// that the account of it could not be recovered — under the marker the lost
+// report would have carried, so a comment the dead attempt did manage to
+// post is adopted instead of repeated.
+//
+// Waiting instead, which is what used to happen, is not a neutral choice.
+// The requester is never told anything, and the run keeps the project's one
+// pending slot, so every ticket behind it waits too.
+func recoverPendingTerminal(
+	ctx context.Context,
+	config runtime.Config,
+	services *runtime.Services,
+	run state.RunOverview,
+	runDir string,
+	logger Logger,
+) error {
+	if services == nil || services.Report == nil {
+		logger.Error("the ending cannot be reported", "run", run.RunID, "reason", "this deployment has no report service")
+		return nil
+	}
+	request := hook.TerminalRecoveryRequest{
+		AutomationRunID: run.RunID, DeliveryID: run.DeliveryID, IssueID: run.IssueID,
+		Code: hook.TerminalCode(run.TerminalCode), ReportSHA256: run.TerminalReportSHA256,
+		Reached: recordedLanding(runDir),
+	}
+	result := services.Report.ProcessTerminalRecovery(ctx, request)
+	if result.Decision != hook.DecisionAccepted {
+		return fmt.Errorf("the ending was not reported: %s (%s)", result.Decision, result.Code)
+	}
+	logger.Info("pending terminal report completed", "run", run.RunID, "code", run.TerminalCode, "source", "ledger record")
+	return nil
+}
+
+// recordedLanding is how far the delivery is recorded as having gone, for a
+// run whose report cannot be rebuilt. It reads only what the delivery
+// sealed for itself, so it is either the truth or absent — never a guess.
+// Absent is a fine answer: the comment then says the landing is unknown
+// rather than claiming production was untouched.
+func recordedLanding(runDir string) string {
+	depth, sealed := readDepthRecord(runDir)
+	if !sealed {
+		return ""
+	}
+	outcome, err := readChainOutcome(runDir)
+	if err != nil {
+		return ""
+	}
+	repository, err := readField(runDir, "ticket-draft.json", "repository")
+	if err != nil {
+		return ""
+	}
+	reached, _, _ := deliveryOutcome(runDir, repository, depth, outcome.Evidence)
+	return reached
 }
 
 // pendingRepository picks the repository the pending report was begun with.
