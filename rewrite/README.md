@@ -76,8 +76,19 @@ model left in the process environment. A later retry fetches again. The
 selected endpoint is recorded as `model` in the runtime history; this says what
 the harness was asked to use, not which upstream provider ultimately served it
 or whether its work is correct. Selection does not inspect working prose or
-authorize delivery. An unavailable selection service still needs recovery;
-these mechanics do not establish unattended completion or optimal model value.
+authorize delivery. These mechanics do not establish unattended completion or
+optimal model value.
+
+An optional `model_selection.fallback` names a configured ordinary-LLM chat
+service using the same `url`, `model`, and `key_env` fields. It is not inferred
+silently from another role. If primary selection fails, the engine logs that
+reason, fetches the catalog again, and asks this alternative to choose an
+endpoint from the new eligible list. The same publisher limits, peer separation
+and original request apply. This native function call cannot finish the work;
+its only choices are model endpoints. If both services fail, both reasons return
+to the chain without starting a stale worker. Cancellation does not start the
+alternative. A long-lasting outage of every configured selector still needs
+recovery; this is not a guarantee that every external failure can be resolved.
 
 Processes without `model_env` use their explicitly configured command as before
 (including non-LLM tools); the presence of `model_selection` alone does not
@@ -96,6 +107,24 @@ two fresh catalog requests in each. These observations do not establish optimal
 selection, resistance to every misleading catalog entry, or successful task
 completion. The selected worker models were not themselves asked to do work in
 these selection-only probes.
+
+A separate live fault probe replaced the primary selector with an explicit
+HTTP 503 fixture. The configured real chat alternative selected both reviewers
+and their ids reached real child processes. Four actual catalog requests were
+observed: a primary attempt and a fresh alternative attempt for each reviewer.
+The primary reasons remained visible. This tests selection recovery, not a real
+provider outage or completion of a working-role task during that outage.
+
+A fresh native-agent task also used per-launch selection throughout issue
+intake, implementation, two independent reviews, local artifact delivery and
+reporting to a tracker fixture. Five process launches made five catalog fetches;
+requested working-model ids matched the returned API model ids. Thirteen
+independent post-run cases and the generated ten-test suite passed. A stored
+comment followed by HTTP 503 was reconciled by readback without a second POST.
+The fixture had a stale CSV title for this search-CLI task, and that title was
+repeated in the final report; its description and tested artifact were the
+search task. This is a limited local observation, not production delivery,
+restart recovery or a resolution of the earlier CSV counterexamples.
 
 ### Existing native-agent connection
 

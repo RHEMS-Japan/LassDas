@@ -109,7 +109,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	}
 	executor := chain.Processes{Roles: roles}
 	if cfg.ModelSelection != nil {
-		executor.SelectModel = cfg.ModelSelection.choose
+		selection := *cfg.ModelSelection
+		selection.observe = observe
+		executor.SelectModel = selection.choose
 	}
 	engine := chain.Chain{
 		Router:   router,

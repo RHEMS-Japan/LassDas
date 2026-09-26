@@ -216,3 +216,160 @@ func TestExecutableSelectionOutageReturnsToRoutingThenLaunchesFreshModel(t *test
 		t.Fatalf("catalogs=%d routes=%d selections=%d", catalogs, routes, selections)
 	}
 }
+
+func TestSelectionFallbackRefreshesCatalogKeepsIndependenceAndShowsPrimaryReason(t *testing.T) {
+	selector := testSelector(t)
+	selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+	var observed []string
+	selector.observe = func(message string) { observed = append(observed, message) }
+	catalogs, primary, alternative := 0, 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			catalogs++
+			id := "maker-two/before-outage"
+			if catalogs == 2 {
+				id = "maker-two/current"
+			}
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel(id), selectionModel("maker-one/also-current")}}), nil
+		case "selection.example":
+			primary++
+			return catalogReply(request, 503, "primary unavailable: synthetic-selection-only"), nil
+		case "chat-selection.example":
+			alternative++
+			var input struct {
+				Messages []struct{ Content string }
+				Tools    []struct {
+					Function struct {
+						Parameters struct {
+							Properties map[string]struct{ Enum []string }
+						}
+					}
+				}
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				return nil, err
+			}
+			policy := input.Messages[0].Content
+			if !strings.Contains(policy, "latest frontier generation") || !strings.Contains(policy, "maker-two/current") || strings.Contains(policy, "before-outage") || strings.Contains(policy, "maker-one/also-current") {
+				t.Errorf("fallback used old or non-independent choices: %s", policy)
+			}
+			var state chain.State
+			if err := json.Unmarshal([]byte(input.Messages[1].Content), &state); err != nil || state.Request != "original request" {
+				t.Errorf("original not retained: %#v %v", state, err)
+			}
+			if got := input.Tools[0].Function.Parameters.Properties["role"].Enum; !reflect.DeepEqual(got, []string{"maker-two/current"}) {
+				t.Errorf("wrong choices %v", got)
+			}
+			return selectionReply(request, 200, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": `{"role":"maker-two/current"}`}}}}}}}), nil
+		}
+		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+	})
+	model, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
+	if err != nil || model != "maker-two/current" || catalogs != 2 || primary != 1 || alternative != 1 {
+		t.Fatalf("model=%q error=%v catalogs=%d primary=%d alternative=%d", model, err, catalogs, primary, alternative)
+	}
+	if len(observed) != 1 || !strings.Contains(observed[0], "primary unavailable") || strings.Contains(observed[0], "synthetic-selection-only") {
+		t.Fatalf("primary reason lost/leaked: %v", observed)
+	}
+}
+
+func TestSelectionFallbackRetainsBothReasonsAndDoesNotRetryOnStop(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		t.Run(fmt.Sprint(stopped), func(t *testing.T) {
+			selector := testSelector(t)
+			selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			catalogs, chats := 0, 0
+			useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+				if request.URL.Host == "openrouter.ai" {
+					catalogs++
+					return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("maker-one/current")}}), nil
+				}
+				if request.URL.Host == "selection.example" {
+					if stopped {
+						cancel()
+						return nil, context.Canceled
+					}
+					return catalogReply(request, 503, "primary cause"), nil
+				}
+				chats++
+				return catalogReply(request, 429, "alternative cause"), nil
+			})
+			model, err := selector.choose(ctx, chain.Role{Name: "implement"}, chain.Process{}, chain.State{}, nil)
+			if err == nil || model != "" {
+				t.Fatalf("failure was hidden: %q %v", model, err)
+			}
+			if stopped {
+				if catalogs != 1 || chats != 0 {
+					t.Fatalf("stop dispatched alternative: catalogs=%d chats=%d", catalogs, chats)
+				}
+			} else if catalogs != 2 || chats != 1 || !strings.Contains(err.Error(), "primary cause") || !strings.Contains(err.Error(), "alternative cause") {
+				t.Fatalf("causes lost or list reused: %v catalogs=%d chats=%d", err, catalogs, chats)
+			}
+		})
+	}
+}
+
+func TestExecutableWiresConfiguredSelectionFallbackAndLogsRecovery(t *testing.T) {
+	selector := testSelector(t)
+	selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+	dir := t.TempDir()
+	catalogs, routes, primary, alternative := 0, 0, 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			catalogs++
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel(fmt.Sprintf("maker-one/current-%d", catalogs))}}), nil
+		case "selection.example":
+			primary++
+			return catalogReply(request, 503, "recoverable cause: synthetic-selection-only"), nil
+		case "chat-selection.example":
+			alternative++
+			return selectionReply(request, 200, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": `{"role":"maker-one/current-2"}`}}}}}}}), nil
+		case "routing.example":
+			routes++
+			var input struct{ State chain.State }
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				return nil, err
+			}
+			choice := "implement"
+			if routes == 2 {
+				if len(input.State.History) != 1 || input.State.History[0].Model != "maker-one/current-2" || input.State.History[0].Output != "maker-one/current-2\n" || input.State.History[0].Error != "" {
+					t.Errorf("fallback was not wired to the process: %#v", input.State)
+				}
+				choice = "done"
+			} else if routes > 2 {
+				return nil, fmt.Errorf("unexpected additional routing")
+			}
+			return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+		}
+		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+	})
+	var cfg config
+	cfg.Router.Mode = "jev"
+	cfg.Router.Decision = chain.Jev{URL: "https://routing.example/decisions", Model: "router", KeyEnv: "SELECTION_TEST_KEY"}
+	cfg.ModelSelection = &selector
+	cfg.Roles = []chain.Role{{Name: "implement", Processes: []chain.Process{{Name: "worker", ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s\n' "$CHOSEN_MODEL"`}}}}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath, requestPath := filepath.Join(dir, "operator.json"), filepath.Join(dir, "request.txt")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestPath, []byte("original request"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var log bytes.Buffer
+	if err := run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(dir, "run")}, io.Discard, &log); err != nil {
+		t.Fatal(err)
+	}
+	if catalogs != 2 || routes != 2 || primary != 1 || alternative != 1 || !strings.Contains(log.String(), "recoverable cause") || strings.Contains(log.String(), "synthetic-selection-only") {
+		t.Fatalf("recovery missing: catalogs=%d routes=%d primary=%d alternative=%d log=%s", catalogs, routes, primary, alternative, &log)
+	}
+}

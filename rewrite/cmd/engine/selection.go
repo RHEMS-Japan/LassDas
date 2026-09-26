@@ -16,12 +16,31 @@ import (
 // fresh catalog. Publisher names are not a nationality classifier. No model
 // ids, prices, benchmark cutoffs or successful-work answers are baked in.
 type selectionConfig struct {
-	Judge        chain.Jev `json:"judge"`
-	Authors      []string  `json:"authors"`
-	Instructions string    `json:"instructions,omitempty"`
+	Judge        chain.Jev  `json:"judge"`
+	Fallback     *chain.Jev `json:"fallback,omitempty"`
+	Authors      []string   `json:"authors"`
+	Instructions string     `json:"instructions,omitempty"`
+	observe      func(string)
 }
 
 func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
+	if err == nil || ctx.Err() != nil || s.Fallback == nil {
+		return model, err
+	}
+	if s.observe != nil {
+		s.observe("model selector unavailable; using configured chat alternative: " + err.Error())
+	}
+	// This is a new selection attempt, so selectWith fetches a new catalog
+	// rather than letting the alternative decide from an earlier snapshot.
+	model, alternativeError := s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
+	if alternativeError != nil {
+		return "", errors.Join(err, fmt.Errorf("alternative model selector: %w", alternativeError))
+	}
+	return model, nil
+}
+
+func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
 	if len(s.Authors) == 0 {
 		return "", errors.New("configure eligible model publishers; none were supplied")
 	}
@@ -88,7 +107,7 @@ func (s selectionConfig) choose(ctx context.Context, role chain.Role, process ch
 	}
 	instructions := "Select one current frontier/value tool-using model for the assigned responsibility. Restrict the choice to a publisher's latest frontier generation suitable for the task. Being available in today's catalog does not make an old generation current. Do not choose a superseded generation merely because it is cheap or has a coding-specific name. Use the fresh catalog's descriptions, listed_at dates, canonical versions and prices, not a memorized version shortlist. Within the current frontier generation, choose strong task-completion value. A newly listed accelerated SKU is not automatically more capable: throughput alone does not justify its premium. Prices are USD per token. Earlier runtime failures are observations for choosing a useful recovery, not permission to weaken the request or declare completion. Only the listed endpoints can be invoked. This chooses a worker, not a certificate of the eventual answer.\n" +
 		"Responsibility: " + role.Purpose + "\nProcess: " + process.Name + "\nCatalog observation: " + snapshot.FetchedAt.String() + "\n" + s.Instructions
-	model, err := s.Judge.Choose(ctx, input, instructions, choices)
+	model, err := judge.Choose(ctx, input, instructions, choices)
 	if err != nil {
 		return "", err
 	}

@@ -78,3 +78,49 @@ func TestModelErrorRedactsCredentialAndNeverFollowsRedirect(t *testing.T) {
 		})
 	}
 }
+
+func TestChatJudgeOnlyChoosesListedEndpointsAndCannotFinishWork(t *testing.T) {
+	t.Setenv("ROUTER_TEST_TOKEN", "synthetic-router-token")
+	for _, answer := range []string{"maker/current", "done", "maker/unknown"} {
+		t.Run(answer, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Messages []struct{ Content string }
+					Tools    []struct {
+						Function struct {
+							Parameters struct {
+								Properties map[string]struct{ Enum []string }
+							}
+						}
+					}
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				policy := request.Messages[0].Content
+				if !strings.Contains(policy, "current model policy") || !strings.Contains(policy, "fresh metadata") || strings.Contains(policy, "Have the configured independent reviewers") {
+					t.Errorf("model selection got a work-completion policy: %s", policy)
+				}
+				if got := request.Tools[0].Function.Parameters.Properties["role"].Enum; len(got) != 1 || got[0] != "maker/current" {
+					t.Errorf("extra action made available: %v", got)
+				}
+				var state State
+				if err := json.Unmarshal([]byte(request.Messages[1].Content), &state); err != nil || state.Request != "original 日本語" {
+					t.Errorf("original changed: %#v %v", state, err)
+				}
+				args, _ := json.Marshal(map[string]any{"role": answer, "extra": true})
+				json.NewEncoder(w).Encode(map[string]any{"unknown": true, "choices": []any{map[string]any{"message": map[string]any{"content": "Ordinary introductory words.", "tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": string(args)}}}}}}})
+			}))
+			defer server.Close()
+			judge := ChatJudge{Service: Jev{URL: server.URL, Model: "chat-selector", KeyEnv: "ROUTER_TEST_TOKEN", Client: server.Client()}}
+			selected, err := judge.Choose(context.Background(), State{Request: "original 日本語"}, "current model policy", map[string]string{"maker/current": "fresh metadata"})
+			if answer == "maker/current" {
+				if err != nil || selected != answer {
+					t.Fatalf("selected=%q error=%v", selected, err)
+				}
+			} else if err == nil || selected != "" {
+				t.Fatalf("unconfigured/finish action accepted: %q %v", selected, err)
+			}
+		})
+	}
+}
