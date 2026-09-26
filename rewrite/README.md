@@ -171,6 +171,16 @@ interrupted action tells the router that the action may already have happened;
 it must inspect before repeating it. A temporary result-save failure retries
 the save, not the external action. Only one process owns a run directory.
 
+At startup, temporary request-read or history-acquisition failures are also
+logged and retried every ten seconds until cancellation. No role is dispatched
+without the original request and its history store. Once the original is read,
+it is retained while storage recovers; a later source edit does not silently
+replace it during that wait. Existing ownership and different-request checks
+remain in force, and existing pending actions are not cleared by acquisition.
+Command/configuration parsing errors still return before this retry loop. An
+unrecoverable credential, source or storage problem is not automatically fixed
+by waiting; reasons remain visible, not reported as a completed request.
+
 ## What the tests establish
 
 ### Tracker communication available to configured roles
@@ -353,16 +363,16 @@ entry point was replaced.
 - Resolve the observed premature completion: reviewers must compare
   relevant original behavior and preserve objections against the actual request.
   Broader validation still needs misleading reports, repeated failures and restart.
-- Automatic model selection from a freshly fetched catalog. Prototype config
-  currently names experiment models explicitly. These names are not a durable
-  shortlist; refresh the available model list on each selection, initially use
-  current Chinese frontier/value candidates, and do not call a saved snapshot
-current when retrieval fails.
+- Per-launch fresh-catalog selection is connected and has limited live evidence
+  above. Optimal task value, recovery from every provider/credit outage and
+  automatic production setup are not established. No saved snapshot is called
+  current when retrieval fails.
 - Production isolation. Restricting child environment variables does not
   sandbox filesystem/network access; the configured launcher must enforce the
   role's actual permissions. Do not run unconfined commands with broad keys.
-- Startup acquisition/configuration/storage errors currently return from the
-  CLI. Retry coverage inside `Chain.Run` is not startup recovery. Process output
+- Startup request/history acquisition now retries, but command/configuration
+  parsing still returns, a changed source can conflict with an existing run,
+  and an external supervisor for process death is not packaged. Process output
   is buffered in memory; production resource behavior has not been exercised.
 
 Jev routing is one comparison candidate, not a settled architecture decision.

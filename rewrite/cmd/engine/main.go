@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/tracker"
@@ -77,22 +78,6 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if len(roles) == 0 {
 		return errors.New("no roles configured")
 	}
-	var request string
-	if *issue != "" {
-		request, err = cfg.Backlog.Request(ctx, *issue)
-	} else {
-		var data []byte
-		data, err = os.ReadFile(*requestPath)
-		request = string(data)
-	}
-	if err != nil {
-		return err
-	}
-	store, err := chain.Open(*directory, request)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
 	observe := func(message string) { fmt.Fprintln(log, message) }
 	var router chain.Router
 	chat := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: cfg.Instructions}
@@ -107,6 +92,18 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	default:
 		return errors.New("choose router.mode jev or llm")
 	}
+	readRequest := func(ctx context.Context) (string, error) {
+		if *issue != "" {
+			return cfg.Backlog.Request(ctx, *issue)
+		}
+		data, err := os.ReadFile(*requestPath)
+		return string(data), err
+	}
+	store, err := acquireRequest(ctx, *directory, readRequest, 10*time.Second, observe)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
 	executor := chain.Processes{Roles: roles}
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
