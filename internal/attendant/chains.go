@@ -1010,8 +1010,20 @@ func reportChainSuccess(
 	// engine decided has one: a report begun by an engine from before the
 	// depth moved into the run carries the evidence it carried then, which
 	// is what its re-submission has to reproduce byte for byte.
-	if depth, sealed := readDepthRecord(runDir); sealed {
+	depth, sealed := readDepthRecord(runDir)
+	if sealed {
 		reached, evidence, _ = deliveryOutcome(runDir, repository, depth, evidence)
+	}
+	// Re-submitting an already begun report must reproduce its old digest.
+	// A new success has no such exemption: the requested depth must really
+	// be reached, not merely the deepest point the instance could attempt.
+	if run.State != "terminal_report_pending" {
+		if !sealed || depth.Repository != repository {
+			return errors.New("the delivery goal is unavailable; keeping the delivery open")
+		}
+		if reached != depth.Configured {
+			return fmt.Errorf("delivery is not complete: requested %s, reached %s; %s", depth.Configured, reached, evidence["delivery_shortfall"])
+		}
 	}
 	terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 	if err := terminal.Report(ctx, hook.TerminalSuccess, runner.Outcome{Stage: outcome.Stage, Evidence: evidence}, repository); err != nil {

@@ -514,18 +514,13 @@ func TestPullRequestConsumerStopsAtTheProposal(t *testing.T) {
 	}
 }
 
-// A destination that asks for production on an instance with no release
-// path is delivered to its pull request and says what the rest would have
-// needed. It never fails: the change is real and proposed, and the
-// difference is a configuration an operator can supply.
-func TestProductionWithoutAReleasePathReachesThePullRequest(t *testing.T) {
+// A proposal is real progress, but not the requested production delivery.
+// Keep it and name the missing route without closing the request.
+func TestProductionWithoutAReleasePathKeepsItsGoal(t *testing.T) {
 	h := newDepthHarness(t, "production", false, "")
 	h.tick()
 
-	row := h.runRow()
-	if row.TerminalCode != string(hook.TerminalSuccess) {
-		t.Fatalf("run = %s / %s, want a success rather than a failure code (log: %v)", row.State, row.TerminalCode, h.logger.lines)
-	}
+	deliveryMustStillBeOpen(t, h)
 	plan := depthPlanFor(t, h.runDir)
 	if plan.Configured != "production" || plan.Reached != "pull_request" || !plan.short() {
 		t.Fatalf("depth record = %+v", plan)
