@@ -22,6 +22,15 @@ func (f arbitrationHistoryTransport) RoundTrip(r *http.Request) (*http.Response,
 // Exercise the production CLI, gateway serialization and sealed record, not
 // just the library parameter. The transport never makes a network connection.
 func TestArbitrationCLIHandsEarlierAttemptsToTheModel(t *testing.T) {
+	arbitrationCLIHistory(t, false)
+}
+
+func TestArbitrationCLIReadsRepositoryFactsBeforeRuling(t *testing.T) {
+	arbitrationCLIHistory(t, true)
+}
+
+func arbitrationCLIHistory(t *testing.T, repository bool) {
+	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	writeTestJSON(t, configPath, cliTestConfig())
@@ -41,7 +50,14 @@ func TestArbitrationCLIHandsEarlierAttemptsToTheModel(t *testing.T) {
 	if err := os.WriteFile(file, []byte("export const label = 'Old label';\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	source, err := worker.ReadSourceSnapshot(root, strings.Repeat("a", 40), request, config)
+	if err := os.WriteFile(filepath.Join(root, "loader.go"), []byte("package loader\n// A standalone extension exposes GetName and Init without editing the registry.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runCLITestGit(t, root, "init", "-q")
+	runCLITestGit(t, root, "add", ".")
+	runCLITestGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
+	base := strings.TrimSpace(runCLITestGit(t, root, "rev-parse", "HEAD"))
+	source, err := worker.ReadSourceSnapshot(root, base, request, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,20 +118,39 @@ func TestArbitrationCLIHandsEarlierAttemptsToTheModel(t *testing.T) {
 		if prompt.History == nil || len(prompt.History.Rounds) != 1 || prompt.History.Rounds[0].Round != 1 || prompt.History.Rounds[0].Rationale != "Attempt 1 retained the same problem." {
 			t.Error("the CLI did not pass the first attempt through the real model request")
 		}
-		response := worker.ChatResponse{ID: "fixture-arbitration", Choices: []worker.ChatChoice{{FinishReason: worker.ChatFinishStop, Message: worker.ChatMessage{Role: "assistant", Content: `{"ruling":"instruct_implementer","instruction":"Investigate an in-scope alternative instead of repeating the failed change.","overruled":[],"statement":"The prior attempt did not meet the request.","evidence":"The earlier review."}`}}}, Usage: &worker.ChatUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}}
+		answer := `{"ruling":"instruct_implementer","instruction":"Investigate an in-scope alternative instead of repeating the failed change.","overruled":[],"statement":"The prior attempt did not meet the request.","evidence":"The earlier review."}`
+		if repository {
+			if calls == 1 {
+				answer = `{"probe":{"probe":"repo.read","args":{"path":"loader.go"}}}`
+			} else {
+				last := turn.Messages[len(turn.Messages)-1].Content
+				if !strings.Contains(last, "standalone extension exposes GetName and Init") {
+					t.Fatalf("the arbiter was not shown the actual loader: %s", last)
+				}
+				answer = `{"ruling":"instruct_implementer","instruction":"Implement the standalone extension entry points within the permitted new files, without editing the registry.","overruled":[],"statement":"The existing loader supports standalone extensions.","evidence":"The repository measurement of loader.go."}`
+			}
+		}
+		response := worker.ChatResponse{ID: "fixture-arbitration", Choices: []worker.ChatChoice{{FinishReason: worker.ChatFinishStop, Message: worker.ChatMessage{Role: "assistant", Content: answer}}}, Usage: &worker.ChatUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}}
 		body, err := json.Marshal(response)
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, err
 	})
 	stage := filepath.Join(historyDir, "stage-2")
 	args := []string{"arbitrate", "--config", configPath, "--tool-sha", cliToolSHA, "--ticket", filepath.Join(stage, "ticket.json"), "--source", filepath.Join(stage, "source.json"), "--candidate", filepath.Join(stage, "candidate.json"), "--history", historyDir, "--out", filepath.Join(stage, "ruling.json")}
+	if repository {
+		args = append(args, "--repo-root", root)
+	}
 	for _, seat := range config.Models.Reviewers {
 		args = append(args, "--review", filepath.Join(stage, seat.ID+".json"))
 	}
 	if err := run(t.Context(), args); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("model calls=%d, want 1", calls)
+	wantCalls := 1
+	if repository {
+		wantCalls = 2
+	}
+	if calls != wantCalls {
+		t.Fatalf("model calls=%d, want %d", calls, wantCalls)
 	}
 	ruling, err := worker.ReadRulingFile(filepath.Join(stage, "ruling.json"))
 	if err != nil || ruling == nil || ruling.History == nil || len(ruling.History.Rounds) != 1 {
@@ -123,5 +158,14 @@ func TestArbitrationCLIHandsEarlierAttemptsToTheModel(t *testing.T) {
 	}
 	if err := ruling.Validate(current, currentReviews, request, config); err != nil {
 		t.Fatal(err)
+	}
+	if repository {
+		body, _ := json.Marshal(ruling)
+		if !bytes.Contains(body, []byte("standalone extension exposes GetName and Init")) {
+			t.Fatal("the ruling did not retain what the arbiter actually read")
+		}
+		if dirty := runCLITestGit(t, root, "status", "--porcelain=v1", "--untracked-files=all"); dirty != "" {
+			t.Fatalf("arbitration changed the checkout: %s", dirty)
+		}
 	}
 }

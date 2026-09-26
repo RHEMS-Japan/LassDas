@@ -64,6 +64,7 @@ func (p *Pipeline) Arbitrate(ctx context.Context, round int) (*worker.Ruling, er
 		"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
 		"--candidate", stageDir + "/candidate.json",
 		"--history", p.path("history"),
+		"--repo-root", p.path("target-base"),
 	}
 	for _, reviewer := range reviewers {
 		review := filepath.Join(stageDir, reviewer+".json")
