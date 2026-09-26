@@ -107,9 +107,12 @@ type Ruling struct {
 	Assumption         ReadinessAssumption            `json:"assumption"`
 	History            *ArbitrationHistory            `json:"previous_attempts,omitempty"`
 	RepositoryEvidence *ArbitrationRepositoryEvidence `json:"repository_evidence,omitempty"`
-	Invocation         *InvocationUsage               `json:"invocation,omitempty"`
-	DecidedAt          time.Time                      `json:"decided_at"`
-	RulingSHA256       string                         `json:"ruling_sha256"`
+	// Nil in old rulings, preserving their canonical form. New rulings name
+	// the actual configured occupant, including a moved seat's endpoint.
+	Arbiter      *ModelEndpoint   `json:"arbiter,omitempty"`
+	Invocation   *InvocationUsage `json:"invocation,omitempty"`
+	DecidedAt    time.Time        `json:"decided_at"`
+	RulingSHA256 string           `json:"ruling_sha256"`
 }
 
 // Overrules reports whether this ruling sets aside one objection. The key is
@@ -165,6 +168,13 @@ func (r Ruling) Validate(candidate Candidate, reviews []Review, request TicketRe
 	}
 	if err := r.RepositoryEvidence.validate(candidate); err != nil {
 		return err
+	}
+	if r.Arbiter != nil {
+		seat := config.Models.ArbiterEndpoint()
+		if _, configured := SeatPlaceOf(*r.Arbiter, []ModelEndpoint{seat}); !configured || len(r.Arbiter.Candidates) != 0 ||
+			r.Invocation == nil || r.Invocation.Validate(*r.Arbiter) != nil {
+			return errors.New("ruling arbiter is not a configured occupant with matching invocation evidence")
+		}
 	}
 	digest, err := rulingDigest(r)
 	if err != nil || digest != r.RulingSHA256 {
@@ -238,19 +248,35 @@ func (i *ModelInvoker) Arbitrate(
 	decidedAt time.Time,
 	histories ...*ArbitrationHistory,
 ) (Ruling, error) {
-	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, nil, histories...)
+	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, nil, 0, histories...)
 }
 
 // ArbitrateWithRepository gives the same arbiter read-only access to the
 // verified base checkout. It does not enable design, add a model role, or
 // authorize an edit. The existing candidate and review gates still apply.
 func (i *ModelInvoker) ArbitrateWithRepository(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, repository ArbitrationRepository, histories ...*ArbitrationHistory) (Ruling, error) {
-	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, &repository, histories...)
+	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, &repository, 0, histories...)
 }
 
-func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, repository *ArbitrationRepository, histories ...*ArbitrationHistory) (Ruling, error) {
+// ArbitrationOptions selects only an already configured occupant and the
+// existing evidence inputs. It cannot replace the seat or its authority.
+type ArbitrationOptions struct {
+	SeatCandidate int
+	Repository    *ArbitrationRepository
+	History       *ArbitrationHistory
+}
+
+func (i *ModelInvoker) ArbitrateWithOptions(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, options ArbitrationOptions) (Ruling, error) {
+	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, options.Repository, options.SeatCandidate, options.History)
+}
+
+func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, repository *ArbitrationRepository, seatCandidate int, histories ...*ArbitrationHistory) (Ruling, error) {
 	if i == nil || i.api == nil || decidedAt.IsZero() || decidedAt.Location() != time.UTC {
 		return Ruling{}, errors.New("arbitration input is invalid")
+	}
+	endpoint, configured := config.Models.ArbiterEndpoint().SeatOccupant(seatCandidate)
+	if !configured {
+		return Ruling{}, errors.New("arbiter seat has no such candidate")
 	}
 	if err := candidate.Validate(source, request, config); err != nil || len(reviews) != len(config.Models.Reviewers) {
 		return Ruling{}, errors.New("arbitration artifacts were rejected")
@@ -294,7 +320,7 @@ func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, revie
 		Stage: candidate.Stage, DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
 		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA,
 		CandidateSHA256: candidate.CandidateSHA256, ReviewSHA256s: digests,
-		DecidedAt: decidedAt, History: history,
+		DecidedAt: decidedAt, History: history, Arbiter: &endpoint,
 	}
 	var output ModelArbitrationOutput
 	accept := func(answer []byte, _ InvocationUsage) error {
@@ -319,7 +345,7 @@ func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, revie
 		if err := validateRulingBody(decoded.Ruling, decoded.Instruction, decoded.Overruled, assumption); err != nil {
 			return err
 		}
-		if err := arbitrationOutputFits(decoded, history, repository != nil); err != nil {
+		if err := arbitrationOutputFits(decoded, history, repository != nil, endpoint); err != nil {
 			return err
 		}
 		output = decoded
@@ -327,9 +353,9 @@ func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, revie
 	}
 	var usage InvocationUsage
 	if repository == nil {
-		usage, err = i.converseJSON(ctx, config.Models.ArbiterEndpoint(), arbitrateSystemPrompt(), prompt, arbitrateJSONSchema(), maxArbitrateResponseBytes, accept)
+		usage, err = i.converseJSON(ctx, endpoint, arbitrateSystemPrompt(), prompt, arbitrateJSONSchema(), maxArbitrateResponseBytes, accept)
 	} else {
-		usage, sealed.RepositoryEvidence, err = i.converseArbitrationRepository(ctx, config.Models.ArbiterEndpoint(), prompt, *repository, source, request, config, accept)
+		usage, sealed.RepositoryEvidence, err = i.converseArbitrationRepository(ctx, endpoint, prompt, *repository, source, request, config, accept)
 	}
 	if err != nil {
 		return Ruling{}, err
@@ -352,7 +378,7 @@ func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, revie
 // Check the encoded size while the model can still shorten its answer.
 // Escaping can expand prose well beyond the response's raw byte count.
 // Leave room for identity, usage, and (when enabled) every shown observation.
-func arbitrationOutputFits(output ModelArbitrationOutput, history *ArbitrationHistory, repository bool) error {
+func arbitrationOutputFits(output ModelArbitrationOutput, history *ArbitrationHistory, repository bool, endpoint ModelEndpoint) error {
 	body, err := json.Marshal(output)
 	if err != nil {
 		return err
@@ -361,7 +387,15 @@ func arbitrationOutputFits(output ModelArbitrationOutput, history *ArbitrationHi
 	if err != nil {
 		return err
 	}
-	bytes := len(body) + len(prior) + 8*1024
+	actor, err := json.Marshal(endpoint)
+	if err != nil {
+		return err
+	}
+	usage, err := json.Marshal(InvocationUsage{RequestedModel: endpoint.Model})
+	if err != nil {
+		return err
+	}
+	bytes := len(body) + len(prior) + len(actor) + len(usage) + 8*1024
 	if repository {
 		bytes += maxArbitrationEvidenceBytes
 	}

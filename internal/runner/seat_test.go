@@ -72,10 +72,12 @@ func TestADesignSeatIsWrittenToTheDesignRound(t *testing.T) {
 // is the same answer as a seat with nobody else in it.
 func TestEveryModelStageKnowsItsSeat(t *testing.T) {
 	designer := worker.ModelEndpoint{ID: "designer"}
+	arbiter := worker.ModelEndpoint{ID: "arbiter"}
 	models := worker.ModelConfig{
 		Implementer: worker.ModelEndpoint{ID: "author"},
 		Reviewers:   []worker.ModelEndpoint{{ID: "review-a"}, {ID: "review-b"}},
 		Designer:    &designer,
+		Arbiter:     &arbiter,
 	}
 	// The roles whose card can actually be asked differently on a second
 	// attempt: the judges, who are launched as one of their seat's
@@ -88,13 +90,14 @@ func TestEveryModelStageKnowsItsSeat(t *testing.T) {
 		runtime.StageDesignReviewB: "review-b",
 		runtime.StageImplement:     "author",
 		runtime.StageApply:         "author",
+		runtime.StageValidate:      "arbiter",
 	} {
 		seat, found := SeatFor(models, stage)
 		if !found || seat.ID != want {
 			t.Fatalf("%s sits in %q (%v), want %q", stage, seat.ID, found, want)
 		}
 	}
-	for _, none := range []string{runtime.StageValidate, runtime.StagePublish, runtime.StageDesignDecide} {
+	for _, none := range []string{runtime.StagePublish, runtime.StageDesignDecide} {
 		if _, found := SeatFor(models, none); found {
 			t.Fatalf("%s was given a seat; it runs no model", none)
 		}

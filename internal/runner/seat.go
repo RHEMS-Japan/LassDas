@@ -163,8 +163,9 @@ func DropReviewAndDecision(runDir, reviewer string, round int) error {
 // SeatFor is the seat one stage's role sits in, read out of the consumer's
 // model configuration.
 //
-// Only the roles a card actually runs are here. The validate, publish and
-// decide cards run no model at all, and a stage that is not in this list
+// Only the roles a card actually runs are here. Validation's model is the
+// arbiter; its ladder must check the failed step before moving that seat.
+// A stage that is not in this list
 // has no seat to move — which is the same answer as a seat with nobody
 // else in it, and is reached without the caller having to know the
 // difference.
@@ -176,6 +177,9 @@ func SeatFor(models worker.ModelConfig, stage string) (worker.ModelEndpoint, boo
 		return seats[index], true
 	}
 	switch stage {
+	case runtime.StageValidate:
+		seat := models.ArbiterEndpoint()
+		return seat, seat.ID != ""
 	case runtime.StageReviewA:
 		return judgeAt(models.Reviewers, 0)
 	case runtime.StageReviewB:
@@ -199,6 +203,27 @@ func SeatFor(models worker.ModelConfig, stage string) (worker.ModelEndpoint, boo
 		// designer's own contract to decide.
 		return worker.ModelEndpoint{}, false
 	}
+}
+
+// The card reads only the role identity here; the worker loads and validates
+// the complete configured occupant. Never rewrite the consumer config to move
+// a model: its digest also binds all the existing artifacts.
+func (p *Pipeline) arbiterSeatArguments(round int) ([]string, error) {
+	raw, err := os.ReadFile(p.Config.ConsumerConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	var config struct {
+		Models worker.ModelConfig `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, err
+	}
+	seat, found := SeatFor(config.Models, runtime.StageValidate)
+	if !found {
+		return nil, nil
+	}
+	return p.seatArguments(runtime.StageValidate, seat.ID, round), nil
 }
 
 // reviewStage and designReviewStage name the card one of the two review

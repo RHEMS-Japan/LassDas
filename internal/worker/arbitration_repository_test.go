@@ -333,13 +333,13 @@ func TestArbitrationSizeIncludesEscapingHistoryAndRepositoryEvidence(t *testing.
 		t.Fatal(err)
 	}
 	history := &ArbitrationHistory{Rounds: []ArbitrationRound{{Rationale: strings.Repeat("prior context ", 4200)}}}
-	if err := arbitrationOutputFits(output, history, true); err == nil {
+	if err := arbitrationOutputFits(output, history, true, ModelEndpoint{}); err == nil {
 		t.Fatal("encoded evidence overflow was deferred until the artifact writer")
 	}
 	for index := range output.Overruled {
 		output.Overruled[index].Reason = "Not required by the request."
 	}
-	if err := arbitrationOutputFits(output, history, true); err != nil {
+	if err := arbitrationOutputFits(output, history, true, ModelEndpoint{}); err != nil {
 		t.Fatalf("a concise answer could not be accepted: %v", err)
 	}
 }
