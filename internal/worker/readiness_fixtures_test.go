@@ -23,11 +23,17 @@ type readinessFixtureSet struct {
 }
 
 type readinessFixture struct {
-	Name                      string   `json:"name"`
-	RequestBody               string   `json:"request_body"`
-	SourceContent             string   `json:"source_content"`
-	ExpectedDecision          string   `json:"expected_decision"`
-	ExpectedRejectCode        string   `json:"expected_reject_code"`
+	Name               string `json:"name"`
+	RequestBody        string `json:"request_body"`
+	SourceContent      string `json:"source_content"`
+	ExpectedDecision   string `json:"expected_decision"`
+	ExpectedRejectCode string `json:"expected_reject_code"`
+	// ExpectedRejectedReading is the word the reader refused the request
+	// with, for a fixture whose reader refuses one. The refusal is not an
+	// outcome — the engine has no entrance that turns a request away for what
+	// it says — so the fixture declares both what the gate seals and what the
+	// reader balked at.
+	ExpectedRejectedReading   string   `json:"expected_rejected_reading"`
 	AllowedDimensions         []string `json:"allowed_dimensions"`
 	MaxQuestions              int      `json:"max_questions"`
 	WithResolvedClarification bool     `json:"with_resolved_clarification,omitempty"`
@@ -101,6 +107,13 @@ func expectedAssessorResponse(t *testing.T, fixture readinessFixture) string {
 	// that states what should change but not how: a change, no quoted
 	// approach, design kept.
 	const design = `,"request_kind":"change","approach_in_ticket":false,"approach_excerpt":"","needs_design":true}`
+	// A fixture declaring what the reader balked at is a fixture whose reader
+	// refuses. What the gate seals from that refusal is the fixture's expected
+	// decision, and the two are no longer the same thing: the engine has no
+	// entrance that turns a request away for what it says.
+	if fixture.ExpectedRejectedReading != "" {
+		return `{"decision":"reject","questions":[],"assumptions":[],"reject_code":"` + fixture.ExpectedRejectedReading + `"` + design
+	}
 	switch fixture.ExpectedDecision {
 	case ReadinessOutcomeReady:
 		return `{"decision":"ready","questions":[],"assumptions":[{"kind":"non_user_visible_implementation","statement":"Constant naming follows the existing file convention.","evidence":"Existing declarations in client/src/components/Example.tsx"}],"reject_code":""` + design
@@ -181,8 +194,10 @@ func TestReadinessFixturesAreExecutableAndGateCorrectly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecideReadiness() error = %v", err)
 			}
-			if decision.Outcome != fixture.ExpectedDecision || decision.RejectCode != fixture.ExpectedRejectCode {
-				t.Fatalf("decision = %+v, want %s/%s", decision, fixture.ExpectedDecision, fixture.ExpectedRejectCode)
+			if decision.Outcome != fixture.ExpectedDecision || decision.RejectCode != fixture.ExpectedRejectCode ||
+				decision.RejectedReading != fixture.ExpectedRejectedReading {
+				t.Fatalf("decision = %+v, want %s/%s/%s", decision,
+					fixture.ExpectedDecision, fixture.ExpectedRejectCode, fixture.ExpectedRejectedReading)
 			}
 			if fixture.WithResolvedClarification {
 				// Both model calls must actually see the resolved answers

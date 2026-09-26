@@ -160,22 +160,46 @@ func (p askingPolicy) MayAsk() bool { return p.MaxItems > 0 }
 // which is what the requester reads in the plan notice — rather than a
 // refused assessment and a run that ends on a policy it could have obeyed.
 func (p askingPolicy) applyTo(output ModelReadinessOutput) ModelReadinessOutput {
-	if p.MayAsk() || output.Decision != ReadinessOutcomeClarification {
+	if p.MayAsk() {
 		return output
 	}
-	for _, question := range output.Questions {
-		if len(output.Assumptions) >= p.MaxAssumption {
+	switch output.Decision {
+	case ReadinessOutcomeClarification:
+		output.Assumptions = p.foldQuestions(output.Assumptions, output.Questions)
+		output.Decision = ReadinessOutcomeReady
+		output.Questions = nil
+	case ReadinessOutcomeReject:
+		// A refusal is not an outcome: one that drafted questions becomes the
+		// question round (internal/worker sealedReceptionOutcome). So this
+		// destination's "ask nobody anything" has to reach the refusal too, or
+		// a destination that turned questions off would be asked one through
+		// the one answer the policy never looked at.
+		//
+		// The refusal itself stays. It is what the reading said, and the word
+		// it balked at is sealed from it; dropping it here would lose the one
+		// thing that tells the requester and the operator why.
+		if len(output.Questions) > 0 {
+			output.Assumptions = p.foldQuestions(output.Assumptions, output.Questions)
+			output.Questions = nil
+		}
+	}
+	return output
+}
+
+// foldQuestions turns questions nobody may be asked into the record of what
+// was decided instead, up to what the destination lets the reception record.
+func (p askingPolicy) foldQuestions(assumptions []ReadinessAssumption, questions []ReadinessQuestion) []ReadinessAssumption {
+	for _, question := range questions {
+		if len(assumptions) >= p.MaxAssumption {
 			break
 		}
-		output.Assumptions = append(output.Assumptions, ReadinessAssumption{
+		assumptions = append(assumptions, ReadinessAssumption{
 			Kind:      AssumptionDefensibleDefault,
 			Statement: assumptionStatementFor(question),
 			Evidence:  assumptionEvidenceFor(question, p),
 		})
 	}
-	output.Decision = ReadinessOutcomeReady
-	output.Questions = nil
-	return output
+	return assumptions
 }
 
 // assumptionStatementFor says what was settled, in the words the question

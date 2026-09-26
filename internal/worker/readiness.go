@@ -384,11 +384,22 @@ type ReadinessDecision struct {
 	Assumptions       []ReadinessAssumption `json:"assumptions,omitempty"`
 	ReceptionJudgment *ReceptionJudgment    `json:"reception_judgment,omitempty"`
 	RejectCode        string                `json:"reject_code,omitempty"`
-	RequestKind       string                `json:"request_kind"`
-	NeedsDesign       bool                  `json:"needs_design"`
-	DesignReason      string                `json:"design_reason"`
-	ApproachInTicket  bool                  `json:"approach_in_ticket"`
-	ApproachExcerpt   string                `json:"approach_excerpt,omitempty"`
+	// RejectedReading is the word the reception's reader refused the request
+	// with, when it refused one. The refusal is not an outcome — the engine
+	// has no entrance that turns a request away for what it says
+	// (sealedReceptionOutcome) — so what the gate seals is the outcome the
+	// engine can act on, and this beside it, so that the requester's comment
+	// can say the reception balked and an operator can read what it balked at.
+	//
+	// Absent from every decision whose reader did not refuse, which keeps
+	// those decisions' sealed bytes, and the digests bound to them, exactly
+	// what they were.
+	RejectedReading  string `json:"rejected_reading,omitempty"`
+	RequestKind      string `json:"request_kind"`
+	NeedsDesign      bool   `json:"needs_design"`
+	DesignReason     string `json:"design_reason"`
+	ApproachInTicket bool   `json:"approach_in_ticket"`
+	ApproachExcerpt  string `json:"approach_excerpt,omitempty"`
 	// Fallback marks a gate the engine decided without its readers: every
 	// answer both of them gave was unusable. It is omitted from every
 	// decision they did answer, which keeps those decisions' sealed bytes —
@@ -650,9 +661,11 @@ func validateModelReadinessOutput(output ModelReadinessOutput) error {
 			return errors.New("clarification decision must carry questions and no reject code")
 		}
 	case ReadinessOutcomeReject:
-		if len(output.Questions) != 0 {
-			return errors.New("reject decision must carry no questions")
-		}
+		// A reader that refuses and drafts questions in the same answer is
+		// telling the engine both things, and the questions are the half it
+		// can act on (sealedReceptionOutcome). Refusing the answer for
+		// carrying them lost the questions and ended the delivery on the
+		// refusal, which is the one ending this gate may not have.
 		if !identifierPattern.MatchString(output.RejectCode) {
 			// The code is the model's text: its head travels, bounded, so the
 			// refusal stays readable and cannot carry a page of it.
@@ -946,6 +959,51 @@ func (c ReadinessCheck) Validate(assessment ReadinessAssessment, source SourceSn
 	return nil
 }
 
+// sealedReceptionOutcome maps one checked assessment onto the outcome the gate
+// seals. Both places that derive an outcome from an assessment call it — the
+// one that seals the decision and the one that re-derives it on every later
+// read — so a rule added here is added to both and neither can drift.
+//
+// The one thing it does not pass through is the model's "reject".
+//
+// The engine has no entrance that turns a request away for what it says. A
+// request is refused only when it cannot be processed at all: empty,
+// oversized, not valid UTF-8, carrying control characters. Those are checked
+// on the input itself, before any model sees it. Everything else is a request,
+// and a reader that reads one and answers "reject" has not found an
+// unprocessable input — it has formed an opinion about the work.
+//
+// Measured live (2026-09-26): a reader answered "reject" on a request naming a
+// specification document the destination's repository does not have, with no
+// question and no reason recorded. The requester was told their ticket "did
+// not meet the reception conditions", an operator was named as the next person
+// to act, and nothing said what either of them could do. That is the human
+// wait this engine exists not to have.
+//
+// So the refusal becomes whichever of the two things the engine can actually
+// do. A reader that refused and drafted questions has found something worth
+// asking, and the single round of questions is what that is for. A reader that
+// refused and drafted nothing has left nobody anything to answer, so the
+// request goes on as written — and the word it refused with is sealed, so the
+// requester's comment can say the reception balked and the operator can read
+// what it balked at.
+func sealedReceptionOutcome(final ReadinessAssessment) (outcome string, questions []ReadinessQuestion, rejectedReading string) {
+	questions = []ReadinessQuestion{}
+	switch final.Decision {
+	case ReadinessAssessorUnresolvable:
+		return ReadinessOutcomeUnresolved, questions, ""
+	case ReadinessOutcomeClarification:
+		return ReadinessOutcomeClarification, append(questions, final.Questions...), ""
+	case ReadinessOutcomeReject:
+		if len(final.Questions) > 0 {
+			return ReadinessOutcomeClarification, append(questions, final.Questions...), final.RejectCode
+		}
+		return ReadinessOutcomeReady, questions, final.RejectCode
+	default:
+		return final.Decision, questions, ""
+	}
+}
+
 // DecideReadiness seals the gate outcome from complete assessment/check pairs.
 // A checker failure on a non-final attempt is not decidable yet: the caller
 // must rerun the assessor until the attempt limit, then decide. A checker
@@ -994,16 +1052,7 @@ func DecideReadiness(ctx context.Context, assessments []ReadinessAssessment, che
 	}
 	switch {
 	case finalCheck.Verdict == "pass":
-		decision.Outcome = final.Decision
-		if final.Decision == ReadinessAssessorUnresolvable {
-			decision.Outcome = ReadinessOutcomeUnresolved
-		}
-		if final.Decision == ReadinessOutcomeClarification {
-			decision.Questions = append([]ReadinessQuestion(nil), final.Questions...)
-		}
-		if final.Decision == ReadinessOutcomeReject {
-			decision.RejectCode = final.RejectCode
-		}
+		decision.Outcome, decision.Questions, decision.RejectedReading = sealedReceptionOutcome(final)
 	case len(assessments) < MaxReadinessAttempts:
 		return ReadinessDecision{}, errors.New("readiness assessment must be rerun before deciding")
 	default:
@@ -1390,18 +1439,9 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 		finalCheck := checks[len(checks)-1]
 		outcome := ReadinessOutcomeUnresolved
 		questions := []ReadinessQuestion{}
-		rejectCode := ""
+		rejectedReading := ""
 		if finalCheck.Verdict == "pass" {
-			outcome = final.Decision
-			if final.Decision == ReadinessAssessorUnresolvable {
-				outcome = ReadinessOutcomeUnresolved
-			}
-			if final.Decision == ReadinessOutcomeClarification {
-				questions = append([]ReadinessQuestion(nil), final.Questions...)
-			}
-			if final.Decision == ReadinessOutcomeReject {
-				rejectCode = final.RejectCode
-			}
+			outcome, questions, rejectedReading = sealedReceptionOutcome(final)
 		} else if len(assessments) < MaxReadinessAttempts {
 			return expected, errors.New("readiness decision was sealed before the retry")
 		} else if surviving, ok := questionsSurvivingCheck(final, finalCheck); ok {
@@ -1416,12 +1456,15 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 		// moment the model moved.
 		var assumptions []ReadinessAssumption
 		outcome, questions, assumptions = applyReceptionJudgment(outcome, questions, d.ReceptionJudgment)
-		return ReadinessDecision{Outcome: outcome, Questions: questions, RejectCode: rejectCode, Assumptions: assumptions}, nil
+		return ReadinessDecision{
+			Outcome: outcome, Questions: questions, RejectedReading: rejectedReading, Assumptions: assumptions,
+		}, nil
 	}()
 	if err != nil {
 		return err
 	}
-	if d.Outcome != rederived.Outcome || d.RejectCode != rederived.RejectCode {
+	if d.Outcome != rederived.Outcome || d.RejectCode != rederived.RejectCode ||
+		d.RejectedReading != rederived.RejectedReading {
 		return errors.New("readiness decision outcome is invalid")
 	}
 	sealedAssumptions, err := json.Marshal(d.Assumptions)
@@ -1499,6 +1542,12 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 	if err := d.validateReceptionJudgment(config); err != nil {
 		return err
 	}
+	// The reader's own word, held to the same shape the reader answered it in.
+	// Only a reader that refused produces one, so a decision carrying a word
+	// nothing could have written is refused.
+	if d.RejectedReading != "" && !identifierPattern.MatchString(d.RejectedReading) {
+		return errors.New("readiness decision rejected reading is invalid")
+	}
 	switch d.Outcome {
 	case ReadinessOutcomeReady, ReadinessOutcomeUnresolved:
 		if len(d.Questions) != 0 || d.RejectCode != "" {
@@ -1558,8 +1607,8 @@ func (d ReadinessDecision) validateDecidedWithoutReaders() error {
 		return errors.New("a gate decided without its readers can only be ready")
 	case d.Attempts != 0 || len(d.AssessmentSHA256s) != 0 || len(d.CheckSHA256s) != 0:
 		return errors.New("a gate decided without its readers names no attempt")
-	case len(d.Questions) != 0 || d.RejectCode != "":
-		return errors.New("a gate decided without its readers asks nothing")
+	case len(d.Questions) != 0 || d.RejectCode != "" || d.RejectedReading != "":
+		return errors.New("a gate decided without its readers asks nothing and refuses nothing")
 	case len(d.Assumptions) != 0 || d.ReceptionJudgment != nil:
 		return errors.New("a gate decided without its readers settles nothing")
 	case d.RequestKind != RequestKindChange:

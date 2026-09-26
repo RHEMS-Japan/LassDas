@@ -168,3 +168,107 @@ func TestAGateThatCannotBeSealedEndsTheRun(t *testing.T) {
 		t.Fatalf("readinessGate() = %+v, %v; want model_failed", outcome, err)
 	}
 }
+
+// balkedStubWorker fails nothing and seals a gate whose reader refused the
+// request and drafted nothing to ask about: ready, with the word it refused
+// with beside it.
+func balkedStubWorker(t *testing.T, rejectedReading string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "stand-in-worker")
+	body := "#!/bin/sh\n" +
+		"verb=\"$1\"; shift\n" +
+		"out=\"\"\n" +
+		"while [ $# -gt 0 ]; do if [ \"$1\" = \"--out\" ]; then out=\"$2\"; fi; shift; done\n" +
+		"if [ \"$verb\" = \"decide-readiness\" ] && [ -n \"$out\" ]; then\n" +
+		"  printf '%s' '{\"outcome\":\"ready\",\"request_kind\":\"change\",\"needs_design\":false," +
+		"\"design_reason\":\"approach_in_ticket\",\"rejected_reading\":\"" + rejectedReading + "\"}' > \"$out\"\n" +
+		"fi\n" +
+		"if [ \"$verb\" = \"check-readiness\" ] && [ -n \"$out\" ]; then printf '%s' '{\"verdict\":\"pass\"}' > \"$out\"; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// TestAReaderThatRefusedAndAskedNothingLetsTheRunGoOnAndSaysSo: the request is
+// not turned away, and the requester is told once, where the plan notice and
+// the closing comment both look.
+func TestAReaderThatRefusedAndAskedNothingLetsTheRunGoOnAndSaysSo(t *testing.T) {
+	pipeline := receptionPipeline(t, balkedStubWorker(t, "out-of-scope"))
+
+	outcome, err := pipeline.readinessGate(context.Background())
+	if err != nil || outcome.Code != "" {
+		t.Fatalf("readinessGate() = %+v, %v; want the run to go on to the implementer", outcome, err)
+	}
+	recorded := LoadRecordedDecisions(pipeline.Workspace)
+	if len(recorded) != 1 {
+		t.Fatalf("recorded decisions = %+v, want exactly one", recorded)
+	}
+	statement := recorded[0].Statement
+	// What happened, why, and what follows from it — and the reason is the
+	// reader's own word turned into a clause, not the word.
+	for _, want := range []string{"受け付けない", "権限や設定", "確認すべき点", "チケットの本文", "実装役"} {
+		if !strings.Contains(statement, want) {
+			t.Fatalf("the line does not say what happened (%q missing): %q", want, statement)
+		}
+	}
+	for _, code := range []string{"out-of-scope", "reject", "rejected_reading"} {
+		if strings.Contains(statement, code) {
+			t.Fatalf("the line puts the machine word %q in front of the requester: %q", code, statement)
+		}
+	}
+	if recorded[0].Decided {
+		t.Fatalf("the line was filed as a point decided in place of asking: %+v", recorded[0])
+	}
+}
+
+// TestAWordTheEngineHasNoSentenceForIsNotPrinted: the reader chooses the word,
+// so the set this engine knows can never be complete. One it does not know
+// says so, rather than putting an identifier in front of the requester.
+func TestAWordTheEngineHasNoSentenceForIsNotPrinted(t *testing.T) {
+	pipeline := receptionPipeline(t, balkedStubWorker(t, "needs-governance"))
+	if outcome, err := pipeline.readinessGate(context.Background()); err != nil || outcome.Code != "" {
+		t.Fatalf("readinessGate() = %+v, %v", outcome, err)
+	}
+	recorded := LoadRecordedDecisions(pipeline.Workspace)
+	if len(recorded) != 1 {
+		t.Fatalf("recorded decisions = %+v, want exactly one", recorded)
+	}
+	statement := recorded[0].Statement
+	if strings.Contains(statement, "needs-governance") {
+		t.Fatalf("an unknown word was printed in front of the requester: %q", statement)
+	}
+	if !strings.Contains(statement, "実行の記録に残しています") {
+		t.Fatalf("the line does not say where the reason is: %q", statement)
+	}
+}
+
+// TestAReaderThatRefusedAndAskedIsNotRecordedAsProceeding: when the refusal
+// became the question round, the requester is being asked and the line would
+// say the opposite of what is happening.
+func TestAReaderThatRefusedAndAskedIsNotRecordedAsProceeding(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "stand-in-worker")
+	body := "#!/bin/sh\n" +
+		"verb=\"$1\"; shift\n" +
+		"out=\"\"\n" +
+		"while [ $# -gt 0 ]; do if [ \"$1\" = \"--out\" ]; then out=\"$2\"; fi; shift; done\n" +
+		"if [ \"$verb\" = \"decide-readiness\" ] && [ -n \"$out\" ]; then\n" +
+		"  printf '%s' '{\"outcome\":\"clarification_required\",\"request_kind\":\"change\"," +
+		"\"needs_design\":false,\"design_reason\":\"approach_in_ticket\",\"rejected_reading\":\"out-of-scope\"}' > \"$out\"\n" +
+		"fi\n" +
+		"if [ \"$verb\" = \"check-readiness\" ] && [ -n \"$out\" ]; then printf '%s' '{\"verdict\":\"pass\"}' > \"$out\"; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := receptionPipeline(t, script)
+
+	outcome, err := pipeline.readinessGate(context.Background())
+	if err != nil || outcome.Code != hook.TerminalClarificationRequired {
+		t.Fatalf("readinessGate() = %+v, %v; want the question round", outcome, err)
+	}
+	if recorded := LoadRecordedDecisions(pipeline.Workspace); len(recorded) != 0 {
+		t.Fatalf("a delivery being asked about recorded that it proceeded: %+v", recorded)
+	}
+}

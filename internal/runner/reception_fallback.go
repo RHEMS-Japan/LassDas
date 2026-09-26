@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/worker"
 )
 
@@ -48,6 +49,28 @@ const receptionFallbackKind = "reception_unreadable"
 const receptionFallbackStatement = "受付の読み取り役が読める形で答えなかったため、依頼はチケットの本文をそのまま実装役へ渡し、" +
 	"受付からの質問はしていません。何を変えるかは実装役がリポジトリを読んで決めます。"
 
+// receptionBalkedKind names the second line this file can record: the reader
+// refused the request and drafted nothing to ask about, so the request went on
+// as written.
+//
+// It is its own line rather than a variant of the one above because it
+// describes a different thing happening. The reader answered, and was read;
+// what it said was that it would rather not, without naming anything anybody
+// could answer. The engine has no entrance that turns a request away for what
+// it says, so the request goes on — and the requester is told that it did, and
+// why, in the same place every other point the engine settled for them
+// appears.
+const receptionBalkedKind = "reception_balked"
+
+// receptionBalkedStatementFor is what the requester reads, with the reader's
+// own word turned into a clause they can act on. The word itself is a machine
+// identifier and never reaches them; one this engine has no sentence for says
+// so plainly rather than being printed.
+func receptionBalkedStatementFor(word string) string {
+	return "受付の読み取り役はこの依頼を受け付けないと判断しました (" + hook.ReceptionRefusalPhrase(word) + ")。" +
+		"依頼者に確認すべき点は挙げられなかったため、依頼を突き返さず、チケットの本文をそのまま実装役へ渡しています。"
+}
+
 // assumptionsStreamFile is the run's stream of decisions, one JSON object
 // per line, read by the plan notice and the closing comment.
 const assumptionsStreamFile = "history/assumptions.jsonl"
@@ -59,27 +82,34 @@ const assumptionsStreamFile = "history/assumptions.jsonl"
 // the thing that ends it. What the requester then loses is the line, not the
 // work — and the closing comment says which records it could not read.
 func (p *Pipeline) recordReceptionFallback() {
-	if err := appendReceptionFallback(p.Workspace); err != nil {
+	if err := appendReceptionLine(p.Workspace, receptionFallbackKind, receptionFallbackStatement); err != nil {
 		p.Logger.Error("the reception was read without the model and the note could not be written",
 			"error", err.Error())
 	}
 }
 
-func appendReceptionFallback(workspace string) error {
+// recordReceptionBalked is the same, for a reader that refused and named
+// nothing to ask about.
+func (p *Pipeline) recordReceptionBalked(word string) {
+	if err := appendReceptionLine(p.Workspace, receptionBalkedKind, receptionBalkedStatementFor(word)); err != nil {
+		p.Logger.Error("the reception refused the request and the note could not be written",
+			"error", err.Error())
+	}
+}
+
+func appendReceptionLine(workspace, kind, statement string) error {
 	if workspace == "" {
 		return errors.New("the run directory is not known")
 	}
 	path := filepath.Join(workspace, assumptionsStreamFile)
-	recorded, err := receptionFallbackRecorded(path)
+	recorded, err := receptionLineRecorded(path, kind)
 	if err != nil {
 		return err
 	}
 	if recorded {
 		return nil
 	}
-	encoded, err := json.Marshal(runAssumption{
-		Kind: receptionFallbackKind, Statement: receptionFallbackStatement,
-	})
+	encoded, err := json.Marshal(runAssumption{Kind: kind, Statement: statement})
 	if err != nil {
 		return err
 	}
@@ -97,10 +127,10 @@ func appendReceptionFallback(workspace string) error {
 	return file.Close()
 }
 
-// receptionFallbackRecorded reports whether this delivery already carries the
-// line. The whole stream is read rather than a marker file kept beside it:
-// the stream is the record, and a marker could disagree with it.
-func receptionFallbackRecorded(path string) (bool, error) {
+// receptionLineRecorded reports whether this delivery already carries the line
+// of this kind. The whole stream is read rather than a marker file kept beside
+// it: the stream is the record, and a marker could disagree with it.
+func receptionLineRecorded(path, kind string) (bool, error) {
 	encoded, err := readWorkspaceFile(path, maxOutcomeArtifactBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -116,7 +146,7 @@ func receptionFallbackRecorded(path string) (bool, error) {
 		if json.Unmarshal([]byte(line), &assumption) != nil {
 			continue
 		}
-		if assumption.Kind == receptionFallbackKind {
+		if assumption.Kind == kind {
 			return true, nil
 		}
 	}

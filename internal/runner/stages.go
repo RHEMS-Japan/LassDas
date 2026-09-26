@@ -575,12 +575,27 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		p.noteReceptionRecord("受付の判定のまとめ")
 		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), err
 	}
+	// A reader that refused the request and named nothing to ask about. The
+	// request goes on as written, and the requester is told so once, where the
+	// plan notice and the closing comment both look. Read before the outcome
+	// below, because it is the outcome that says whether anybody is being
+	// asked: a refusal that did draft questions is being asked about, and says
+	// nothing more.
+	if balked, err := p.readJSONField(relPath(p.Workspace, decision), "rejected_reading"); err == nil &&
+		balked != "" && readinessOutcome == "ready" {
+		p.recordReceptionBalked(balked)
+	}
 	switch readinessOutcome {
 	case "ready":
 		return Outcome{}, nil
 	case "clarification_required":
 		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: decision}, nil
 	case "reject":
+		// No reader reaches here any more: a refusal over what a request says
+		// is not an outcome this gate seals (internal/worker
+		// sealedReceptionOutcome). The arm stays for a decision an older
+		// engine sealed, and the comment it ends with now states a mechanical
+		// reason and names the requester.
 		return Outcome{Code: hook.TerminalReadinessRejected}, nil
 	case "unresolved":
 		return Outcome{Code: hook.TerminalReadinessUnresolved}, nil
