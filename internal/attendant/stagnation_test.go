@@ -239,15 +239,26 @@ for a in "$@"; do
 done
 case "$1" in
   arbitrate) printf '%s' '`+rulingBody+`' > "$out" ;;
+  decide) printf '{"outcome":"revise","ruling":%s}' "$(cat "${out%/*}/ruling.json")" > "$out" ;;
   *) [ -n "$out" ] && printf 'RECORD\n' > "$out" ;;
 esac
 exit 0
 `), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.ConsumerConfigPath, []byte(consumerConfig), 0o600); err != nil {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(consumerConfig), &parsed); err != nil {
 		t.Fatal(err)
 	}
+	parsed["consumers"] = []map[string]string{{"repository": "example/consumer", "delivery": "pull_request"}}
+	encoded, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ConsumerConfigPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(runDir, "baseline.json"), map[string]any{"baseline": map[string]any{"Integration": map[string]string{"SHA": strings.Repeat("a", 40)}}})
 	quiet, err := backlog.NewClient(backlog.Config{
 		SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com",
 		Timeout: time.Second, MaxResponseBytes: 1 << 20,
@@ -285,18 +296,37 @@ const rulingBody = `{"schema_version":1,"prompt_version":1,"stage":2,"ruling":"i
 
 const plainConsumer = `{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`
 
+// The scheduler has handed the same validation card to the worker. Exercise
+// its actual entry point, outside the attendant's tick, before the next tick
+// consumes its result. The stand-in worker replaces only external verbs.
+func finishArbitrationCard(t *testing.T, config runtime.Config, runDir string, round int) {
+	t.Helper()
+	pipeline := &runner.Pipeline{Config: config, Workspace: runDir, Logger: &recordingLogger{}}
+	if err := pipeline.RunChainStage(context.Background(), runtime.StageValidate); err == nil {
+		t.Fatal("the fixture still needs revision; a ruling alone is not a pass")
+	}
+	if ruling, err := runner.ReadRuling(runDir, round); err != nil || ruling == nil {
+		t.Fatalf("the card did not write a ruling: %v", err)
+	}
+}
+
 // The delivery that used to be handed back to its requester as a question:
 // two rounds, the same objection, nobody yielding. The engine rules on it,
 // the ruling is sealed beside the round, and the next round is told what to
 // satisfy. Nothing is posted to the ticket.
 func TestADeadlockedDeliveryIsRuledOnRatherThanAsked(t *testing.T) {
-	fixture, config, envelope, view, _, rulingPath := stagnantFixture(t, plainConsumer)
+	fixture, config, envelope, view, runDir, rulingPath := stagnantFixture(t, plainConsumer)
 	hermes, boardLog := fakeBoard(t)
 	logger := &recordingLogger{}
 	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
 	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
 		runtime.StageValidate, logger); err != nil {
 		t.Fatalf("the failure was not handled: %v", err)
+	}
+	finishArbitrationCard(t, config, runDir, 2)
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, logger); err != nil {
+		t.Fatal(err)
 	}
 	if len(fixture.comments.posted) != 0 {
 		t.Fatalf("the requester was asked or told something: %q", fixture.comments.posted)
@@ -353,13 +383,16 @@ func TestAnOverrulingSendsTheSameRoundBackToBeDecided(t *testing.T) {
 		runtime.StageValidate, &recordingLogger{}); err != nil {
 		t.Fatalf("the failure was not handled: %v", err)
 	}
-	if _, err := os.Stat(rulingPath); err != nil {
-		t.Fatalf("no ruling was sealed: %v", err)
+	if _, err := os.Stat(rulingPath); !os.IsNotExist(err) {
+		t.Fatalf("the scheduler wrote a ruling instead of dispatching: %v", err)
 	}
-	// The decision counted without the ruling is gone, so the card that runs
-	// next decides the round again instead of reading the old answer back.
-	if _, err := os.Stat(filepath.Join(runDir, "history", "stage-2", "decision.json")); err == nil {
-		t.Error("the decision counted without the ruling is still there")
+	finishArbitrationCard(t, config, runDir, 2)
+	ruling, err := runner.ReadRuling(runDir, 2)
+	if err != nil || ruling == nil {
+		t.Fatalf("the card left no ruling: %v", err)
+	}
+	if applied, err := runner.RulingApplied(runDir, 2, ruling); err != nil || !applied {
+		t.Fatalf("the card did not count the ruling: applied=%v, err=%v", applied, err)
 	}
 	board, err := os.ReadFile(boardLog)
 	if err != nil {
@@ -404,7 +437,7 @@ func TestAConfiguredRoundLimitStopsTheDeliveryAndStagnationFiresFirst(t *testing
 		t.Error("the limit was reached and the engine ruled anyway")
 	}
 	// One round earlier the same deadlock is ruled on instead.
-	fixture2, config2, envelope2, view2, _, rulingPath2 := stagnantFixture(t,
+	fixture2, config2, envelope2, view2, runDir2, rulingPath2 := stagnantFixture(t,
 		`{"max_stages":3,"max_rounds":5,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`)
 	hermes2, _ := fakeBoard(t)
 	if err := handleChainFailure(context.Background(), config2, fixture2.services, hermes2, envelope2, run, view2,
@@ -414,6 +447,7 @@ func TestAConfiguredRoundLimitStopsTheDeliveryAndStagnationFiresFirst(t *testing
 	if len(fixture2.store.digests) != 0 {
 		t.Fatalf("the delivery ended below its limit: %v", fixture2.store.digests)
 	}
+	finishArbitrationCard(t, config2, runDir2, 2)
 	if _, err := os.Stat(rulingPath2); err != nil {
 		t.Fatalf("the deadlock below the limit was not ruled on: %v", err)
 	}
@@ -469,10 +503,10 @@ func TestTheRecordCeilingEndsTheDeliveryRatherThanRenderingAnotherRound(t *testi
 	}
 }
 
-// A requester who writes 「停止」 while the engine is ruling on a deadlock is
-// answered before the next round starts spending. The stop read at the top
-// of the tick was minutes and one model call ago.
-func TestAStopDuringArbitrationStopsTheNextRound(t *testing.T) {
+// A stop appearing between the tick's first read and the card dispatch
+// prevents that dispatch. In-flight stops are measured with a blocked
+// worker in arbitration_card_test.go.
+func TestAStopBeforeArbitrationDispatchStopsTheRound(t *testing.T) {
 	fixture, config, envelope, view, _, _ := stagnantFixture(t, plainConsumer)
 	// A tracker that says nothing the first time it is asked and carries
 	// the stop the second: the first read is the tick's own, the second is
@@ -546,6 +580,11 @@ func TestARoundRefusedTwiceByTheSameOutputIsRuledOn(t *testing.T) {
 	if len(fixture.store.digests) != 0 || len(fixture.comments.posted) != 0 {
 		t.Fatalf("the delivery ended: %v %q", fixture.store.digests, fixture.comments.posted)
 	}
+	finishArbitrationCard(t, config, runDir, 2)
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, &recordingLogger{}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(rulingPath); err != nil {
 		t.Fatalf("the repeated refusal was not ruled on: %v", err)
 	}
@@ -585,9 +624,9 @@ func TestARoundRefusedTwiceByTheSameOutputIsRuledOn(t *testing.T) {
 
 // The same boundary on the other shape. A design-backed delivery whose
 // change is written again under the design it has goes through its own
-// regenerating path, and a requester who writes 「停止」 while the engine is
-// ruling on the deadlock is answered there too.
-func TestAStopDuringArbitrationStopsTheNextDesignBackedRound(t *testing.T) {
+// regenerating path, and a stop before the arbitration card is dispatched
+// is answered there too.
+func TestAStopBeforeArbitrationDispatchStopsTheDesignBackedRound(t *testing.T) {
 	fixture, config, envelope, view, runDir, _ := stagnantFixture(t,
 		`{"max_stages":3,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]},"agents":{"applier":{"command":"true"}}}`)
 	// A delivery built from an approved design: the shape decides which
