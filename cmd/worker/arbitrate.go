@@ -27,6 +27,7 @@ func runArbitrate(ctx context.Context, args []string) error {
 	candidatePath := flags.String("candidate", "", "")
 	clarificationPath := flags.String("clarification", "", "")
 	validationFailurePath := flags.String("validation-failure", "", "")
+	historyDir := flags.String("history", "", "")
 	outputPath := flags.String("out", "", "")
 	var reviewPaths stringList
 	flags.Var(&reviewPaths, "review", "")
@@ -57,11 +58,15 @@ func runArbitrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	history, err := worker.LoadArbitrationHistory(*historyDir, candidate.Stage, request, config)
+	if err != nil {
+		return err
+	}
 	invoker, err := newModelInvoker(ctx, config.Models.ArbiterEndpoint())
 	if err != nil {
 		return err
 	}
-	ruling, err := invoker.Arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC())
+	ruling, err := invoker.Arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC(), history)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "arbitration failed", err)
 		return errors.New("arbitration failed")
