@@ -74,6 +74,21 @@ the initial examples did not establish the full requested behavior. Review
 context and handling of objections need further live investigation, not a
 new answer-format or content-certification gate.
 
+An adversarial-review follow-up supplied the original source read-only. A
+reviewer reproduced the regression, the router sent it back for repair, and
+the repaired artifact passed the boundary examples. But the router then skipped
+independent review of that new implementation before delivery. The routing
+instruction now explicitly distinguishes reviews of current work from reviews
+before a later change. In captured-state comparisons, each routing model chose
+new review in three trials with that instruction; the previous Jev instruction
+chose delivery in all three. This is limited prompt evidence, not a guarantee.
+A subsequent isolated replay from the repaired implementation actually invoked
+both current-work reviewers, then delivered, exercised the artifact and wrote
+the final report. Separate execution passed the ten original examples and
+the field-limit boundary comparisons. This replay began from a captured
+mid-run state; a fresh end-to-end run is still needed. It does not establish
+general reliability, nor does it make the earlier premature completions valid.
+
 For these single trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
@@ -94,7 +109,7 @@ as a supported deployment. No existing production entry point was replaced.
 
 - Automatic intake/claiming, isolated per-request checkout, tracker stop and
   final-comment posting/readback, and live delivery integration.
-- Repair and retest the observed premature completion: reviewers must compare
+- Retest the observed premature completion from a fresh request: reviewers must compare
   relevant original behavior and preserve objections against the actual request.
   Broader validation still needs misleading reports, repeated failures and restart.
 - Automatic model selection from a freshly fetched catalog. Prototype config

@@ -29,6 +29,10 @@ func TestDecisionTransportFailureUsesChatInstructionsWithoutLosingReports(t *tes
 			return
 		}
 		messages := request["messages"].([]any)
+		policy := messages[0].(map[string]any)["content"].(string)
+		if !strings.Contains(policy, "not an earlier implementation") || !strings.Contains(policy, "not independent reviews of the changed work") {
+			t.Error("the current-work review instruction did not reach the chat router")
+		}
 		content := messages[1].(map[string]any)["content"].(string)
 		var state State
 		if err := json.Unmarshal([]byte(content), &state); err != nil {
