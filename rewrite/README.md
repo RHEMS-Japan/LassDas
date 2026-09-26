@@ -154,6 +154,30 @@ change and the router chose completion. Separate post-run execution reproduced
 four such dropped-row cases. Disclosing a deviation did not fulfill the request
 to preserve ordinary input. The routing/role comparison remains open.
 
+The matched fresh ordinary-LLM run also repaired the field-limit regression,
+re-reviewed the changed work and executed the delivered artifact. It added
+verification both before and after the written report, yet still chose done
+with the same empty-value row loss in four independently reproduced cases.
+Its 28 generated tests and the ten initial post-run examples passed; neither
+was enough to establish the preservation requirement. The packaged native
+bridge was used for this run, with no manual source repair or restart.
+
+In a separate comparison using the identical captured Jev-run history, Jev
+chose done three times and the ordinary LLM chose another verification three
+times. The latter instructions still treated disclosed deviations as acceptable;
+an extra verification choice is not evidence that the defect would be repaired.
+Both routers chose done on an explicitly intended behavior-change control.
+The full ordinary-LLM run above demonstrates why counting verification steps
+alone is insufficient. Switching routers has not resolved this observed failure.
+That run also encountered relay timeouts before recovering, so its latency and
+returned usage totals are not a clean model-performance or billing comparison.
+
+Finally, replaying the ordinary-LLM failure history with the same model, prompt
+and 4,000-token ceiling but `low` versus `max` reasoning still produced done in
+all three trials of each setting. Both chose done on the intended-change routing
+control; none ended through token exhaustion. Raising this reasoning setting alone did
+not fix the observed completion judgment, so it was not adopted as a repair.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
