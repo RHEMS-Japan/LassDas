@@ -74,6 +74,11 @@ func (p *Pipeline) Arbitrate(ctx context.Context, round int) (*worker.Ruling, er
 		args = append(args, "--review", review)
 	}
 	args = append(args, p.clarificationArgs()...)
+	seatArgs, err := p.arbiterSeatArguments(round)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, seatArgs...)
 	// A round both seats passed and the destination's own commands refused
 	// leaves no objection to rule on. What the commands printed is what the
 	// ruling is made from there, so it goes with the round's other records.

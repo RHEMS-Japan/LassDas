@@ -77,6 +77,36 @@ func TestArbitrationRunsInsideTheValidationCard(t *testing.T) {
 	}
 }
 
+func TestTheArbitrationCardPassesItsSelectedSeatToTheWorker(t *testing.T) {
+	p := arbitrationCardFixture(t)
+	raw, err := os.ReadFile(p.Config.ConsumerConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	config["models"].(map[string]any)["arbiter"] = map[string]string{"id": "arbiter"}
+	raw, err = json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Config.ConsumerConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSeatRecord(p.Workspace, SeatRecord{Seat: "arbiter", Stage: runtime.StageValidate, Round: 2, Candidate: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RunChainStage(t.Context(), runtime.StageValidate); err == nil || !strings.Contains(err.Error(), "sent back for revision") {
+		t.Fatalf("the fixture ruling was not executed: %v", err)
+	}
+	calls, err := os.ReadFile(p.Config.WorkerBin + ".log")
+	if err != nil || !strings.Contains(string(calls), "--seat-candidate 1") {
+		t.Fatalf("the selected occupant never reached the worker: %v\n%s", err, calls)
+	}
+}
+
 func editArbitrationWorker(t *testing.T, p *Pipeline, edit func(string) string) string {
 	t.Helper()
 	raw, err := os.ReadFile(p.Config.WorkerBin)

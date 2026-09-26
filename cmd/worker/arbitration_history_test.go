@@ -29,11 +29,30 @@ func TestArbitrationCLIReadsRepositoryFactsBeforeRuling(t *testing.T) {
 	arbitrationCLIHistory(t, true)
 }
 
-func arbitrationCLIHistory(t *testing.T, repository bool) {
+func TestArbitrationCLIUsesTheChosenEndpointAndCredentialName(t *testing.T) {
+	for _, repository := range []bool{false, true} {
+		t.Run(fmt.Sprint(repository), func(t *testing.T) {
+			arbitrationCLIHistory(t, repository, 1)
+		})
+	}
+}
+
+func arbitrationCLIHistory(t *testing.T, repository bool, chosen ...int) {
 	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	writeTestJSON(t, configPath, cliTestConfig())
+	configured := cliTestConfig()
+	place := 0
+	if len(chosen) > 0 {
+		place = chosen[0]
+		alternative := configured.Models.Readiness.Assessor
+		alternative.ID = ""
+		alternative.Vendor, alternative.Model = "Vendor C", "model-alternative"
+		alternative.BaseURL, alternative.APIKeyEnv = "https://alternative.example/api/v1", "TEST_MODEL_KEY_ALTERNATIVE"
+		alternative.Effort, alternative.MaxOutputTokens = "medium", 3072
+		configured.Models.Readiness.Assessor.Candidates = []worker.ModelEndpoint{alternative}
+	}
+	writeTestJSON(t, configPath, configured)
 	config, err := worker.LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +118,12 @@ func arbitrationCLIHistory(t *testing.T, repository bool) {
 		}
 		current, currentReviews = candidate, reviews
 	}
-	t.Setenv(config.Models.ArbiterEndpoint().APIKeyEnv, "fixture-only-no-network")
+	endpoint, ok := config.Models.ArbiterEndpoint().SeatOccupant(place)
+	if !ok {
+		t.Fatal("fixture has no requested occupant")
+	}
+	t.Setenv(config.Models.ArbiterEndpoint().APIKeyEnv, "")
+	t.Setenv(endpoint.APIKeyEnv, "fixture-only-no-network")
 	savedTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = savedTransport })
 	calls := 0
@@ -108,6 +132,10 @@ func arbitrationCLIHistory(t *testing.T, repository bool) {
 		var turn worker.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&turn); err != nil {
 			return nil, err
+		}
+		if turn.Model != endpoint.Model || turn.MaxTokens != endpoint.MaxOutputTokens || turn.ReasoningEffort != endpoint.Effort ||
+			!strings.HasPrefix(r.URL.String(), endpoint.BaseURL+"/") || r.Header.Get("Authorization") != "Bearer fixture-only-no-network" {
+			t.Fatal("arbitration used a different model, route, allowance or credential from the selected occupant")
 		}
 		var prompt struct {
 			History *worker.ArbitrationHistory `json:"previous_attempts"`
@@ -136,6 +164,9 @@ func arbitrationCLIHistory(t *testing.T, repository bool) {
 	})
 	stage := filepath.Join(historyDir, "stage-2")
 	args := []string{"arbitrate", "--config", configPath, "--tool-sha", cliToolSHA, "--ticket", filepath.Join(stage, "ticket.json"), "--source", filepath.Join(stage, "source.json"), "--candidate", filepath.Join(stage, "candidate.json"), "--history", historyDir, "--out", filepath.Join(stage, "ruling.json")}
+	if place != 0 {
+		args = append(args, "--seat-candidate", fmt.Sprint(place))
+	}
 	if repository {
 		args = append(args, "--repo-root", root)
 	}
@@ -158,6 +189,9 @@ func arbitrationCLIHistory(t *testing.T, repository bool) {
 	}
 	if err := ruling.Validate(current, currentReviews, request, config); err != nil {
 		t.Fatal(err)
+	}
+	if ruling.Arbiter == nil || ruling.Arbiter.Model != endpoint.Model || ruling.Arbiter.BaseURL != endpoint.BaseURL || ruling.Arbiter.APIKeyEnv != endpoint.APIKeyEnv {
+		t.Fatal("the sealed ruling names a different arbiter from the actual call")
 	}
 	if repository {
 		body, _ := json.Marshal(ruling)

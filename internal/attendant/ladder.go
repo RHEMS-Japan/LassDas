@@ -336,6 +336,12 @@ func climbLadder(ctx context.Context, climb ladderClimb) (ladderVerdict, error) 
 	if !found {
 		return waitRung(ctx, climb, class, record, now)
 	}
+	// A remedy may write the seat or reclaim files before dispatchAgain
+	// checks the ticket. A stop already present must prevent that work too,
+	// not merely prevent launching the next card after claiming a move.
+	if stopAsked(ctx, climb) {
+		return ladderStopped, nil
+	}
 	// The record is written before the hand is played, so a pod that stops
 	// between the two comes back having spent the hand rather than about to
 	// play it a second time.

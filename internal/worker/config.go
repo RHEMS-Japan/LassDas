@@ -990,13 +990,10 @@ type ModelConfig struct {
 	// ticket and say what it asks for. Optional, and omitted when empty, so
 	// an existing configuration's canonical form is untouched.
 	//
-	// Candidates declared on this seat load and are held to the same rules
-	// as any other seat's, and nothing moves the arbiter onto one yet: a
-	// ruling is made in the attendant's own tick rather than on a card, so
-	// there is no failed card for the ladder to climb from. An arbiter that
-	// will not answer leaves the round to go on to the next one, which is
-	// the delivery carrying itself rather than stopping. Moving the seat is
-	// work for whoever gives the ruling a card of its own.
+	// Its validation card can move among these configured candidates after
+	// an arbitration failure. This role calls the endpoint directly, so it
+	// does not need an agent launch definition. The selected occupant is
+	// recorded in the ruling without changing this configuration's digest.
 	Arbiter *ModelEndpoint `json:"arbiter,omitempty"`
 	// ReceptionJudge, when present, is a decision model the reception may
 	// put its own questions to: it answers with an option and a number

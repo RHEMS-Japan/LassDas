@@ -62,6 +62,11 @@ func modelHands(climb ladderClimb) []ladderHand {
 		return nil
 	}
 	hands := candidateHands(seat)
+	// Arbitration has a direct model call, not the reviewer's rebuildable
+	// instruction. Only candidate changes are real remedies here.
+	if seat.stage == runtime.StageValidate {
+		return hands
+	}
 	if seat.record.PromptRebuilt == "" {
 		hands = append(hands, ladderHand{
 			step: rungSeat, name: "prompt:" + worker.PromptRebuildShorten,
@@ -94,7 +99,8 @@ func candidateHands(seat seatClimb) []ladderHand {
 
 // launchable reports whether this place has a launch of its own.
 //
-// Only the review seats can have one. An implementing seat is launched by
+// Review seats need an agent launch; arbitration calls its endpoint
+// directly. An implementing seat is launched by
 // the one implementer definition, so moving its endpoint would change what
 // the record says without changing who answers — and a record that says a
 // model answered when another one did is worse than no move at all. Those
@@ -102,6 +108,11 @@ func candidateHands(seat seatClimb) []ladderHand {
 // ask.
 func (s seatClimb) launchable(place int) bool {
 	switch s.stage {
+	case runtime.StageValidate:
+		// The worker calls this endpoint directly; no agent profile is
+		// involved. Its complete endpoint is validated by the worker.
+		_, configured := s.seat.SeatOccupant(place)
+		return configured
 	case runtime.StageReviewA, runtime.StageReviewB:
 		_, launched := s.agents.ReviewerAgentSeat(s.seat.ID, place)
 		return launched
@@ -196,6 +207,12 @@ func seatMoveReason(climb ladderClimb, stage string, round int) string {
 // seatOfFailedStage gathers the seat the failed stage runs, what has
 // already been done about it, and what the other review seat is sitting on.
 func seatOfFailedStage(climb ladderClimb) (seatClimb, bool) {
+	if climb.stage == runtime.StageValidate {
+		failure, sealed := runner.ReadStageFailure(climb.runDir, climb.stage, stageRound(climb.view, climb.stage))
+		if !sealed || failure.Step != "arbitrate" {
+			return seatClimb{}, false
+		}
+	}
 	models, agents, err := loadSeatConfig(climb.config.ConsumerConfigPath)
 	if err != nil {
 		climb.logger.Error("the consumer's seats could not be read; the seat cannot be moved",

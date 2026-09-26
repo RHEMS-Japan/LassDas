@@ -31,10 +31,11 @@ func runArbitrate(ctx context.Context, args []string) error {
 	historyDir := flags.String("history", "", "")
 	repoRoot := flags.String("repo-root", "", "")
 	outputPath := flags.String("out", "", "")
+	seatCandidate := flags.Int("seat-candidate", 0, "")
 	var reviewPaths stringList
 	flags.Var(&reviewPaths, "review", "")
 	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *candidatePath, *outputPath) ||
-		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 {
+		!worker.ValidToolSHA(*toolSHA) || len(reviewPaths) == 0 || *seatCandidate < 0 {
 		return errors.New("arbitrate arguments are invalid")
 	}
 	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
@@ -64,17 +65,19 @@ func runArbitrate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	invoker, err := newModelInvoker(ctx, config.Models.ArbiterEndpoint())
+	endpoint, configured := config.Models.ArbiterEndpoint().SeatOccupant(*seatCandidate)
+	if !configured {
+		return errors.New("arbiter seat has no such candidate")
+	}
+	invoker, err := newModelInvoker(ctx, endpoint)
 	if err != nil {
 		return err
 	}
-	var ruling worker.Ruling
-	if *repoRoot == "" {
-		ruling, err = invoker.Arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC(), history)
-	} else {
-		repository := worker.ArbitrationRepository{Root: *repoRoot, RecordsPath: filepath.Join(filepath.Dir(*outputPath), "arbitration-measurements.jsonl")}
-		ruling, err = invoker.ArbitrateWithRepository(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC(), repository, history)
+	options := worker.ArbitrationOptions{SeatCandidate: *seatCandidate, History: history}
+	if *repoRoot != "" {
+		options.Repository = &worker.ArbitrationRepository{Root: *repoRoot, RecordsPath: filepath.Join(filepath.Dir(*outputPath), "arbitration-measurements.jsonl")}
 	}
+	ruling, err := invoker.ArbitrateWithOptions(ctx, candidate, reviews, clarification, refused, source, request, config, time.Now().UTC(), options)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "arbitration failed", err)
 		return errors.New("arbitration failed")
