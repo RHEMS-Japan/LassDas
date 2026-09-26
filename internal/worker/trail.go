@@ -106,65 +106,78 @@ func LoadTrailStages(historyDir string, config Config, toolSHA string) ([]trailS
 		if _, err := os.Stat(filepath.Join(stageDir, "decision.json")); err != nil {
 			break
 		}
-		var request TicketRequest
-		if err := ReadJSONFile(filepath.Join(stageDir, "ticket.json"), MaxTicketJSONBytes, &request); err != nil {
-			return nil, errors.New("trail stage ticket could not be read")
-		}
-		if err := request.Validate(config); err != nil || request.ToolSHA != toolSHA {
-			return nil, errors.New("trail stage ticket was rejected")
-		}
-		var source SourceSnapshot
-		if err := ReadJSONFile(filepath.Join(stageDir, "source.json"), MaxArtifactJSONBytes, &source); err != nil {
-			return nil, errors.New("trail stage source could not be read")
-		}
-		if err := source.Validate(request, config); err != nil {
-			return nil, errors.New("trail stage source was rejected")
-		}
-		var candidate Candidate
-		if err := ReadJSONFile(filepath.Join(stageDir, "candidate.json"), MaxArtifactJSONBytes, &candidate); err != nil {
-			return nil, errors.New("trail stage candidate could not be read")
-		}
-		reviews := make([]Review, 0, len(config.Models.Reviewers))
-		for _, endpoint := range config.Models.Reviewers {
-			var review Review
-			if err := ReadJSONFile(filepath.Join(stageDir, endpoint.ID+".json"), MaxReviewJSONBytes, &review); err != nil {
-				return nil, errors.New("trail stage review could not be read")
-			}
-			reviews = append(reviews, review)
-		}
-		var sealed StageDecision
-		if err := ReadJSONFile(filepath.Join(stageDir, "decision.json"), MaxReviewJSONBytes, &sealed); err != nil {
-			return nil, errors.New("trail stage decision could not be read")
-		}
-		// Under the ruling the round was actually counted under, which the
-		// sealed decision carries and the round's own directory does not.
-		//
-		// Only one of the two rulings is in a decision. An overruling is
-		// made before the round is decided and the verdict is counted
-		// without the objections it set aside, so the decision has it. The
-		// other ruling is made after a round was decided and sent back: it
-		// tells the next round what to satisfy and changes nothing about
-		// this one, so this decision was sealed without it and must be
-		// re-derived without it. Reading the round's ruling file here
-		// handed the second kind to the tally, which changed the digest,
-		// and the mismatch took the whole record of the run out of the
-		// requester's final comment and the pull request.
-		decision, err := DecideStage(candidate, reviews, source, request, config, sealed.Ruling)
+		stage, err := loadTrailStage(stageDir, number, config, toolSHA)
 		if err != nil {
-			return nil, errors.New("trail stage did not rederive")
+			return nil, err
 		}
-		if sealed.DecisionSHA256 != decision.DecisionSHA256 {
-			return nil, errors.New("trail stage decision does not match")
-		}
-		stages = append(stages, trailStage{
-			Stage: number, Candidate: candidate, Reviews: reviews, Decision: decision,
-			Source: source, Request: request,
-		})
+		stages = append(stages, stage)
 	}
 	if len(stages) == 0 {
 		return nil, errors.New("trail has no stages")
 	}
 	return stages, nil
+}
+
+// loadTrailStage is shared with arbitration so earlier attempts are checked
+// by the same artifact chain as the requester-facing trail, one round at a time.
+func loadTrailStage(stageDir string, number int, config Config, toolSHA string) (trailStage, error) {
+	var request TicketRequest
+	if err := ReadJSONFile(filepath.Join(stageDir, "ticket.json"), MaxTicketJSONBytes, &request); err != nil {
+		return trailStage{}, errors.New("trail stage ticket could not be read")
+	}
+	if err := request.Validate(config); err != nil || request.ToolSHA != toolSHA {
+		return trailStage{}, errors.New("trail stage ticket was rejected")
+	}
+	var source SourceSnapshot
+	if err := ReadJSONFile(filepath.Join(stageDir, "source.json"), MaxArtifactJSONBytes, &source); err != nil {
+		return trailStage{}, errors.New("trail stage source could not be read")
+	}
+	if err := source.Validate(request, config); err != nil {
+		return trailStage{}, errors.New("trail stage source was rejected")
+	}
+	var candidate Candidate
+	if err := ReadJSONFile(filepath.Join(stageDir, "candidate.json"), MaxArtifactJSONBytes, &candidate); err != nil {
+		return trailStage{}, errors.New("trail stage candidate could not be read")
+	}
+	if candidate.Stage != number {
+		return trailStage{}, errors.New("trail stage candidate names another round")
+	}
+	reviews := make([]Review, 0, len(config.Models.Reviewers))
+	for _, endpoint := range config.Models.Reviewers {
+		var review Review
+		if err := ReadJSONFile(filepath.Join(stageDir, endpoint.ID+".json"), MaxReviewJSONBytes, &review); err != nil {
+			return trailStage{}, errors.New("trail stage review could not be read")
+		}
+		reviews = append(reviews, review)
+	}
+	var sealed StageDecision
+	if err := ReadJSONFile(filepath.Join(stageDir, "decision.json"), MaxReviewJSONBytes, &sealed); err != nil {
+		return trailStage{}, errors.New("trail stage decision could not be read")
+	}
+	// Under the ruling the round was actually counted under, which the
+	// sealed decision carries and the round's own directory does not.
+	//
+	// Only one of the two rulings is in a decision. An overruling is
+	// made before the round is decided and the verdict is counted
+	// without the objections it set aside, so the decision has it. The
+	// other ruling is made after a round was decided and sent back: it
+	// tells the next round what to satisfy and changes nothing about
+	// this one, so this decision was sealed without it and must be
+	// re-derived without it. Reading the round's ruling file here
+	// handed the second kind to the tally, which changed the digest,
+	// and the mismatch took the whole record of the run out of the
+	// requester's final comment and the pull request.
+	decision, err := DecideStage(candidate, reviews, source, request, config, sealed.Ruling)
+	if err != nil {
+		return trailStage{}, errors.New("trail stage did not rederive")
+	}
+	if sealed.DecisionSHA256 != decision.DecisionSHA256 {
+		return trailStage{}, errors.New("trail stage decision does not match")
+	}
+	return trailStage{
+		Stage: number, Candidate: candidate, Reviews: reviews, Decision: decision,
+		Source: source, Request: request,
+	}, nil
 }
 
 // ComposeTrail renders the loaded stages, the adopted clarification decisions

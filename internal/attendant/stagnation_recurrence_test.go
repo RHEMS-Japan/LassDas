@@ -175,6 +175,15 @@ func TestAnOscillatingReviewIsRuledOnAndTheNextAttemptReceivesTheRuling(t *testi
 	if !strings.Contains(string(calls), "arbitrate ") || !strings.Contains(string(calls), "--ruling "+rulingPath) {
 		t.Fatalf("the next attempt did not receive a ruling on the oscillation:\n%s", calls)
 	}
+	arbitrated := ""
+	for _, line := range strings.Split(string(calls), "\n") {
+		if strings.HasPrefix(line, "arbitrate ") {
+			arbitrated = line
+		}
+	}
+	if !strings.Contains(arbitrated, "--history "+filepath.Join(runDir, "history")) {
+		t.Fatalf("the arbiter was not given the earlier attempts: %s", arbitrated)
+	}
 	board, err := os.ReadFile(boardLog)
 	if err != nil || !strings.Contains(string(board), fixture.deliveryID+":implement:r4") {
 		t.Fatalf("the next implementation attempt was not dispatched: %v\n%s", err, board)
