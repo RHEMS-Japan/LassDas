@@ -19,6 +19,8 @@ From this directory:
 go run ./cmd/engine --config operator.json --request request.txt --run-dir run
 # Or read an issue's original title and description:
 go run ./cmd/engine --config operator.json --issue EXAMPLE-1 --run-dir run
+# Continuously collect new issues within an explicit operator scope:
+go run ./cmd/engine --config operator.json --watch --run-dir queue
 # Fetch the current model catalog before selecting experiment models:
 go run ./cmd/engine --list-models
 ```
@@ -33,6 +35,59 @@ do not assume that a CLI's `--quiet` flag removes reasoning displays or other
 UI output. A live experiment found that those displays inflated the next
 role's context. Its thin native SDK adapter forwards the complete final prose
 on stdout and diagnostics on stderr, without classifying the answer.
+
+### Automatic intake experiment
+
+`--watch` uses the configured tracker and requires an explicit intake scope:
+
+```json
+"intake": {
+  "project_id": 17,
+  "created_since": "2026-01-02T00:00:00Z",
+  "poll_interval_seconds": 30,
+  "max_running": 1
+}
+```
+
+This is part of `operator.json`, not a format imposed on a requester. The
+timestamp is inclusive. Only issues in that project created at or after it are
+accepted; issue status does not narrow that scope. Interval and capacity default
+to 30 seconds and one running request. The explicit starting time prevents
+silently executing every historical ticket. Do not activate this on a real
+project without authority for the chosen scope and the configured actions.
+
+Each scan uses fresh tracker pages. The first accepted native issue record is
+saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
+the original request. Its title and complete description go directly to the
+existing single-request engine, without a model-generated reception contract.
+The per-issue workspace, agent homes and runtime history remain in that job
+directory. The collector schedules unfinished histories and does not rerun
+histories whose router chose done. This is not an independent claim that the
+router's completion judgment was correct. Accepted work remains available for
+restart even if discovery is unavailable or the issue disappears remotely.
+
+One process owns a queue directory. Graceful cancellation waits for its active
+children to stop before releasing ownership. Restarting the same queue reuses
+original requests, pending histories and workspaces; the existing engine tells
+the router that interrupted actions may already have happened. Discovery errors
+and unfinished-child reasons remain in the log. Discovery currently runs before
+dispatch, so slow scans can delay starting queued work. This is not distributed
+ownership across separate queue roots or supervision after a hard process crash.
+
+In watch mode a process directory must be empty or relative to its job workspace,
+not a shared absolute checkout. The launcher receives `TASK_WORKSPACE`,
+`TASK_HOME` (different for each role process), and `TASK_ISSUE`. These names cannot
+also be credential/model-selection destinations. The Hermes bridge uses
+`TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
+paths must be available from the per-job directory. Repository preparation and
+actual delivery permissions still have to be supplied by the configured roles.
+
+**These are logical working directories, not filesystem/network isolation.**
+An authorized launcher must confine access to other requests, controller state,
+credentials and delivery targets before live untrusted work is enabled. Stop
+comments, production packaging and real tracker-to-production operation are not
+implemented by this collector. Its tests use fixture APIs and actual local child
+processes, not live-model judgments or a production tracker.
 
 ### Current model list
 
@@ -138,6 +193,7 @@ the installation's `run_agent` module importable, for example with a scoped
 Provide these process settings explicitly:
 
 - `HERMES_HOME`: a separate writable agent directory for each role/reviewer.
+  Watch mode instead supplies and creates a per-process `TASK_HOME`.
 - `OPENROUTER_BASE_URL` and `NATIVE_MODEL`: the selected endpoint and model.
   The bridge has no model default, shortlist or catalog-selection policy.
 - `OPENROUTER_API_KEY`: map a named credential source through `secrets`, not
@@ -238,12 +294,13 @@ it requests pages of 100, ordered by creation, and returns the native records
 with original descriptions and unknown metadata intact. Every invocation starts
 a new scan. An unreadable/failed page, repeated issue or out-of-project response
 returns a reason and no partial stdout list. The service's offset pagination is
-not an atomic snapshot; an eventual polling loop must rescan to pick up changes
+not an atomic snapshot; the polling collector rescans to pick up changes
 during pagination. Empty projects return an empty array.
 
 This reads existing issues as well as new ones. Listing is not claiming or
-authorizing their execution. Automatic polling/selection of the intended intake
-scope, durable per-issue scheduling and isolated workspaces are not wired yet.
+authorizing their execution. The opt-in `--watch` collector described above
+connects explicit intake scope to durable per-issue scheduling and logical
+working directories; actual permission isolation is still the launcher's job.
 The command does not reuse the old reception contracts or ask a model to reject
 requests based on their prose format. Tests include multi-page local TLS reads
 through a real CLI child and a failed second page with no partial output.
@@ -388,9 +445,10 @@ entry point was replaced.
 
 ## Still missing before production use
 
-- Automatic intake/claiming, isolated per-request checkout, tracker stop,
-  integration of the role's final-comment posting/readback into unattended runs,
-  and live delivery integration.
+- The scoped polling prototype needs a genuinely isolated per-request checkout,
+  tracker stop, production supervision and live delivery integration. Its logical
+  directories are not a permission boundary. Final-comment posting/readback has
+  only been exercised by native agents against a tracker fixture.
 - Resolve the observed premature completion: reviewers must compare
   relevant original behavior and preserve objections against the actual request.
   Broader validation still needs misleading reports, repeated failures and restart.

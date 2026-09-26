@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import types
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,7 +16,7 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
 
         class NativeAgent:
@@ -23,6 +24,7 @@ class BridgeTests(unittest.TestCase):
                 events.append(("configuration", kwargs))
                 print("native startup display")
                 events.append(("dotenv", os.environ.get("PYTHON_DOTENV_DISABLED")))
+                events.append(("home", os.environ.get("HERMES_HOME")))
 
             def run_conversation(self, user_message):
                 events.append(("request", user_message))
@@ -42,6 +44,8 @@ class BridgeTests(unittest.TestCase):
                "NATIVE_REASONING_EFFORT": "high", "NATIVE_MAX_TOKENS": "7000"}
         if home:
             env["HERMES_HOME"] = "/isolated-test/role"
+        if task_home:
+            env["TASK_HOME"] = str(task_home)
         failure, code = None, None
         with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent)}), \
              patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["bridge"]), \
@@ -98,6 +102,15 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertIsInstance(failure, RuntimeError)
         self.assertIn("HERMES_HOME", str(failure))
+
+    def test_task_home_takes_precedence_over_a_global_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_home = Path(directory) / "request-role-home"
+            events, out, err, code, failure = self.run_bridge({"final_response": "ordinary result"}, task_home=task_home)
+            self.assertIsNone(failure)
+            self.assertTrue(task_home.is_dir())
+            self.assertIn(("home", str(task_home)), events)
+            self.assertEqual(out, "ordinary result")
 
 
 if __name__ == "__main__":

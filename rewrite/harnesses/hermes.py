@@ -6,12 +6,18 @@ or model shortlist belongs here.
 """
 import contextlib
 import os
+from pathlib import Path
 import sys
 
 
 def main():
     # Never discover the operator's personal agent home or dotenv credentials.
     # A separate home per role also keeps parallel reviewers' sessions apart.
+    if os.environ.get("TASK_HOME"):
+        # Watch mode supplies a different home per request and process. Never
+        # reuse a global native home merely because the operator had one set.
+        os.environ["HERMES_HOME"] = os.environ["TASK_HOME"]
+        Path(os.environ["TASK_HOME"]).mkdir(parents=True, exist_ok=True, mode=0o700)
     if not os.environ.get("HERMES_HOME"):
         raise RuntimeError("Set HERMES_HOME to this role's isolated agent directory")
     os.environ["PYTHON_DOTENV_DISABLED"] = "1"

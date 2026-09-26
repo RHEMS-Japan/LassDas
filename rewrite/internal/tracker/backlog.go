@@ -28,6 +28,12 @@ func (b Backlog) Request(ctx context.Context, issue string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return RequestText(data)
+}
+
+// RequestText renders native issue data without a model-authored admission
+// contract. Intake can retain the exact original from its discovery response.
+func RequestText(data []byte) (string, error) {
 	var ticket struct {
 		Key         string `json:"issueKey"`
 		Summary     string `json:"summary"`

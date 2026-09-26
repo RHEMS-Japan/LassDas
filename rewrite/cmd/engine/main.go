@@ -26,6 +26,7 @@ type config struct {
 	Roles          []chain.Role     `json:"roles"`
 	Backlog        tracker.Backlog  `json:"backlog"`
 	ModelSelection *selectionConfig `json:"model_selection,omitempty"`
+	Intake         *intakeConfig    `json:"intake,omitempty"`
 }
 
 func main() {
@@ -44,18 +45,21 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	requestPath := flags.String("request", "", "original request as text")
 	issue := flags.String("issue", "", "read the original issue from the configured tracker")
 	showModels := flags.Bool("list-models", false, "fetch the current OpenRouter catalog; no request is run")
+	watch := flags.Bool("watch", false, "poll the explicitly configured intake into separate request directories")
 	directory := flags.String("run-dir", "", "private directory for this request's history")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *showModels {
-		if *configPath != "" || *requestPath != "" || *issue != "" || *directory != "" || flags.NArg() != 0 {
+		if *configPath != "" || *requestPath != "" || *issue != "" || *directory != "" || *watch || flags.NArg() != 0 {
 			return errors.New("--list-models is a separate catalog query; do not combine it with a request")
 		}
 		return writeModelList(ctx, output)
 	}
-	if *configPath == "" || (*requestPath == "") == (*issue == "") || *directory == "" {
-		return errors.New("provide --config, --run-dir and exactly one of --request or --issue")
+	if *configPath == "" || *directory == "" || flags.NArg() != 0 ||
+		(*watch && (*requestPath != "" || *issue != "")) ||
+		(!*watch && (*requestPath == "") == (*issue == "")) {
+		return errors.New("provide --config, --run-dir and either --watch or exactly one of --request/--issue")
 	}
 	data, err := os.ReadFile(*configPath)
 	if err != nil {
@@ -91,6 +95,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		}
 	default:
 		return errors.New("choose router.mode jev or llm")
+	}
+	if *watch {
+		return watchRequests(ctx, cfg, *directory, log)
 	}
 	readRequest := func(ctx context.Context) (string, error) {
 		if *issue != "" {
