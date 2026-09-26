@@ -184,6 +184,9 @@ func TestAnOscillatingReviewIsRuledOnAndTheNextAttemptReceivesTheRuling(t *testi
 	if !strings.Contains(arbitrated, "--history "+filepath.Join(runDir, "history")) {
 		t.Fatalf("the arbiter was not given the earlier attempts: %s", arbitrated)
 	}
+	if !strings.Contains(arbitrated, "--repo-root "+filepath.Join(runDir, "target-base")) {
+		t.Fatalf("arbitration has no read-only base checkout: %s", arbitrated)
+	}
 	board, err := os.ReadFile(boardLog)
 	if err != nil || !strings.Contains(string(board), fixture.deliveryID+":implement:r4") {
 		t.Fatalf("the next implementation attempt was not dispatched: %v\n%s", err, board)

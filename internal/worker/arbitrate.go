@@ -92,23 +92,24 @@ type ModelArbitrationOutput struct {
 // assumption. The remaining fields keep the derivation auditable beside
 // every other sealed artifact of the round.
 type Ruling struct {
-	SchemaVersion   int                 `json:"schema_version"`
-	PromptVersion   int                 `json:"prompt_version"`
-	Stage           int                 `json:"stage"`
-	DeliveryID      string              `json:"delivery_id"`
-	InputSHA256     string              `json:"input_sha256"`
-	ConfigSHA256    string              `json:"config_sha256"`
-	ToolSHA         string              `json:"tool_sha"`
-	CandidateSHA256 string              `json:"candidate_sha256"`
-	ReviewSHA256s   []string            `json:"review_sha256s"`
-	Ruling          string              `json:"ruling"`
-	Instruction     string              `json:"instruction,omitempty"`
-	Overruled       []OverruledFinding  `json:"overruled,omitempty"`
-	Assumption      ReadinessAssumption `json:"assumption"`
-	History         *ArbitrationHistory `json:"previous_attempts,omitempty"`
-	Invocation      *InvocationUsage    `json:"invocation,omitempty"`
-	DecidedAt       time.Time           `json:"decided_at"`
-	RulingSHA256    string              `json:"ruling_sha256"`
+	SchemaVersion      int                            `json:"schema_version"`
+	PromptVersion      int                            `json:"prompt_version"`
+	Stage              int                            `json:"stage"`
+	DeliveryID         string                         `json:"delivery_id"`
+	InputSHA256        string                         `json:"input_sha256"`
+	ConfigSHA256       string                         `json:"config_sha256"`
+	ToolSHA            string                         `json:"tool_sha"`
+	CandidateSHA256    string                         `json:"candidate_sha256"`
+	ReviewSHA256s      []string                       `json:"review_sha256s"`
+	Ruling             string                         `json:"ruling"`
+	Instruction        string                         `json:"instruction,omitempty"`
+	Overruled          []OverruledFinding             `json:"overruled,omitempty"`
+	Assumption         ReadinessAssumption            `json:"assumption"`
+	History            *ArbitrationHistory            `json:"previous_attempts,omitempty"`
+	RepositoryEvidence *ArbitrationRepositoryEvidence `json:"repository_evidence,omitempty"`
+	Invocation         *InvocationUsage               `json:"invocation,omitempty"`
+	DecidedAt          time.Time                      `json:"decided_at"`
+	RulingSHA256       string                         `json:"ruling_sha256"`
 }
 
 // Overrules reports whether this ruling sets aside one objection. The key is
@@ -160,6 +161,9 @@ func (r Ruling) Validate(candidate Candidate, reviews []Review, request TicketRe
 		return err
 	}
 	if err := r.History.validate(candidate.Stage, request, config); err != nil {
+		return err
+	}
+	if err := r.RepositoryEvidence.validate(candidate); err != nil {
 		return err
 	}
 	digest, err := rulingDigest(r)
@@ -234,6 +238,17 @@ func (i *ModelInvoker) Arbitrate(
 	decidedAt time.Time,
 	histories ...*ArbitrationHistory,
 ) (Ruling, error) {
+	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, nil, histories...)
+}
+
+// ArbitrateWithRepository gives the same arbiter read-only access to the
+// verified base checkout. It does not enable design, add a model role, or
+// authorize an edit. The existing candidate and review gates still apply.
+func (i *ModelInvoker) ArbitrateWithRepository(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, repository ArbitrationRepository, histories ...*ArbitrationHistory) (Ruling, error) {
+	return i.arbitrate(ctx, candidate, reviews, clarification, refused, source, request, config, decidedAt, &repository, histories...)
+}
+
+func (i *ModelInvoker) arbitrate(ctx context.Context, candidate Candidate, reviews []Review, clarification *ClarificationContext, refused *ValidationFailure, source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time, repository *ArbitrationRepository, histories ...*ArbitrationHistory) (Ruling, error) {
 	if i == nil || i.api == nil || decidedAt.IsZero() || decidedAt.Location() != time.UTC {
 		return Ruling{}, errors.New("arbitration input is invalid")
 	}
@@ -282,7 +297,7 @@ func (i *ModelInvoker) Arbitrate(
 		DecidedAt: decidedAt, History: history,
 	}
 	var output ModelArbitrationOutput
-	usage, err := i.converseJSON(ctx, config.Models.ArbiterEndpoint(), arbitrateSystemPrompt(), prompt, arbitrateJSONSchema(), maxArbitrateResponseBytes, func(answer []byte, _ InvocationUsage) error {
+	accept := func(answer []byte, _ InvocationUsage) error {
 		var decoded ModelArbitrationOutput
 		if err := decodeModelJSON(answer, &decoded, "ruling"); err != nil {
 			return fmt.Errorf("arbitration response is invalid: %w", err)
@@ -304,9 +319,18 @@ func (i *ModelInvoker) Arbitrate(
 		if err := validateRulingBody(decoded.Ruling, decoded.Instruction, decoded.Overruled, assumption); err != nil {
 			return err
 		}
+		if err := arbitrationOutputFits(decoded, history, repository != nil); err != nil {
+			return err
+		}
 		output = decoded
 		return nil
-	})
+	}
+	var usage InvocationUsage
+	if repository == nil {
+		usage, err = i.converseJSON(ctx, config.Models.ArbiterEndpoint(), arbitrateSystemPrompt(), prompt, arbitrateJSONSchema(), maxArbitrateResponseBytes, accept)
+	} else {
+		usage, sealed.RepositoryEvidence, err = i.converseArbitrationRepository(ctx, config.Models.ArbiterEndpoint(), prompt, *repository, source, request, config, accept)
+	}
 	if err != nil {
 		return Ruling{}, err
 	}
@@ -323,6 +347,28 @@ func (i *ModelInvoker) Arbitrate(
 		return Ruling{}, err
 	}
 	return sealed, nil
+}
+
+// Check the encoded size while the model can still shorten its answer.
+// Escaping can expand prose well beyond the response's raw byte count.
+// Leave room for identity, usage, and (when enabled) every shown observation.
+func arbitrationOutputFits(output ModelArbitrationOutput, history *ArbitrationHistory, repository bool) error {
+	body, err := json.Marshal(output)
+	if err != nil {
+		return err
+	}
+	prior, err := json.Marshal(history)
+	if err != nil {
+		return err
+	}
+	bytes := len(body) + len(prior) + 8*1024
+	if repository {
+		bytes += maxArbitrationEvidenceBytes
+	}
+	if bytes > int(MaxReviewJSONBytes) {
+		return errors.New("the ruling plus its evidence is too large to record; shorten the instruction, reasons and assumption without changing the decision")
+	}
+	return nil
 }
 
 func sealRuling(ruling Ruling) (Ruling, error) {
@@ -412,7 +458,7 @@ Your standard is the ticket's own acceptance conditions — what the requester a
 When previous_attempts is present, read the earlier candidates' rationales, reviews, rulings and refused validation. Identify which attempted fixes were undone or failed; do not prescribe the same failed approach again without explaining what evidence makes the new attempt different. unavailable_rounds, unavailable_evidence and omitted_for_size are missing evidence, not successful rounds.
 Earlier findings and rulings are context, not permission: only standing_findings in the current round can be overruled. Honor the requester's explicit scope and prohibitions. An assumption cannot authorize out-of-scope edits, weaker acceptance conditions, or skipped validation. If repository facts are missing, instruct the implementer to investigate a concrete in-scope alternative rather than asserting that a restriction may be ignored.
 Rule "overrule_reviewer" when the change already satisfies what the ticket asks and the standing objections are asking for more than that (polish, a different style, work the ticket did not request). Name every objection you set aside by its reviewer_id, code and path exactly as they appear in the data, and say in one or two sentences why the ticket does not require it.
-Rule "instruct_implementer" when the change genuinely falls short of the ticket. Write one concrete instruction, in the requester's language, stating what the next attempt must satisfy in the words of the acceptance conditions — observable behavior, not code identifiers, and not a restatement of the objections.
+Rule "instruct_implementer" when the change genuinely falls short of the ticket. Write one concrete instruction, in the requester's language, stating what the next attempt must satisfy in the words of the acceptance conditions — observable behavior, not merely code identifiers, and not a restatement of the objections. When repository observations establish a concrete in-scope route, include that route and the relevant paths or entry points in the instruction so the implementer can act on the new facts. Distinguish measured facts from an untested proposal; do not claim a proposed route has passed validation.
 When standing_findings is empty, the reviewers passed the change and the destination's own build and test commands refused it, twice, printing the same thing both times: read refused_validation, work out what the change has to do differently for those commands to accept it, and rule "instruct_implementer" saying so. There is nothing to overrule there, because the commands are not a reviewer. Do not tell the next attempt to weaken or skip a check.
 Every ruling also records what you assumed: "statement" is the assumption in one sentence, "evidence" is where in the data it comes from.
 Return exactly one JSON object and no Markdown. Use exactly one of the two rulings: an overruling carries an empty instruction, an instructing ruling carries an empty overruled list.
