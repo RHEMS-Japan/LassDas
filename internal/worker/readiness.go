@@ -99,6 +99,19 @@ const (
 	DesignReasonTriggerWord  = "trigger_word"
 	DesignReasonProposer     = "proposer"
 	DesignReasonChecker      = "checker_disagreed"
+	// DesignReasonReceptionUnread is the one reason no model can claim: the
+	// reception's readers answered nothing the engine could use, so the gate
+	// was decided without them (reception_fallback.go). There is no judgment
+	// to keep a design and none to skip one, and the delivery goes to the
+	// implementer, which reads the destination's repository itself.
+	//
+	// It can only ever appear on a decision marked Fallback, which nothing a
+	// model writes can set, and a decision so marked is validated against
+	// this fixed shape instead of against the rule the model-answered
+	// decisions are held to. Neither judgment can therefore reach it, and
+	// the rule that a model may keep a design but never skip one is
+	// untouched.
+	DesignReasonReceptionUnread = "reception_unread"
 
 	// The kinds an assumption is recorded under. A repository convention and
 	// an implementation nobody sees are what the reception could always
@@ -145,13 +158,15 @@ var DesignReasons = []string{
 	DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff,
 	DesignReasonApproachMissing, DesignReasonTooManyFiles,
 	DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker,
+	DesignReasonReceptionUnread,
 }
 
 // DesignReasonKeepsDesign reports whether a reason means the design stage is
 // kept. Unknown reasons are not a valid decision at all.
 func DesignReasonKeepsDesign(reason string) (keeps bool, known bool) {
 	switch reason {
-	case DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff:
+	case DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff,
+		DesignReasonReceptionUnread:
 		return false, true
 	case DesignReasonApproachMissing, DesignReasonTooManyFiles,
 		DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker:
@@ -374,7 +389,13 @@ type ReadinessDecision struct {
 	DesignReason      string                `json:"design_reason"`
 	ApproachInTicket  bool                  `json:"approach_in_ticket"`
 	ApproachExcerpt   string                `json:"approach_excerpt,omitempty"`
-	DecisionSHA256    string                `json:"decision_sha256"`
+	// Fallback marks a gate the engine decided without its readers: every
+	// answer both of them gave was unusable. It is omitted from every
+	// decision they did answer, which keeps those decisions' sealed bytes —
+	// and the digests bound to them — exactly what they were, and nothing a
+	// model writes can set it.
+	Fallback       bool   `json:"fallback,omitempty"`
+	DecisionSHA256 string `json:"decision_sha256"`
 }
 
 func (i *ModelInvoker) AssessReadiness(
@@ -497,7 +518,7 @@ func (i *ModelInvoker) CheckReadiness(
 
 func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 	var output ModelReadinessOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output); err != nil {
 		return ModelReadinessOutput{}, errors.New("model readiness response is invalid")
 	}
 	return output, nil
@@ -505,7 +526,7 @@ func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 
 func DecodeModelReadinessCheckOutput(encoded []byte) (ModelReadinessCheckOutput, error) {
 	var output ModelReadinessCheckOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output); err != nil {
 		return ModelReadinessCheckOutput{}, errors.New("model readiness check response is invalid")
 	}
 	return output, nil
@@ -1258,6 +1279,14 @@ func designStands(needsDesign bool, reason, kind string, approachInTicket bool, 
 	if kind != RequestKindChange && kind != RequestKindInvestigation {
 		return false
 	}
+	// The one reason this rule never allows. A gate decided without its
+	// readers skips its design, and the record that says so is held to its
+	// own fixed form and never reaches here; a record that did reach here has
+	// a reading behind it, and a reading may keep a design but never skip one
+	// on this reason.
+	if reason == DesignReasonReceptionUnread {
+		return false
+	}
 	// A sealed pair stands when the reason is one this engine knows and it
 	// agrees with itself. Re-deriving the rule here used to reject a record
 	// the moment the rule changed, which would have stranded every delivery
@@ -1322,6 +1351,17 @@ func questionsSurvivingCheck(final ReadinessAssessment, finalCheck ReadinessChec
 func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []ReadinessCheck, source SourceSnapshot, request TicketRequest, config Config) error {
 	if err := d.ValidateBinding(source, request, config); err != nil {
 		return err
+	}
+	// A gate decided without its readers has no chain to be re-derived from,
+	// and that is the whole of what distinguishes it: ValidateBinding above
+	// already held it to the one shape it may have. Asking for the chain
+	// here would make the fallback unrepresentable, which is the ending this
+	// path exists to remove.
+	if d.Fallback {
+		if len(assessments) != 0 || len(checks) != 0 {
+			return errors.New("readiness decision was not decided without its readers")
+		}
+		return nil
 	}
 	if len(assessments) != d.Attempts || len(checks) != d.Attempts {
 		return errors.New("readiness decision chain is incomplete")
@@ -1422,9 +1462,21 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 	}
 	if d.SchemaVersion != ReadinessDecisionSchemaVersion || d.DeliveryID != request.DeliveryID || d.InputSHA256 != request.InputSHA256 ||
 		d.ConfigSHA256 != request.ConfigSHA256 || d.ToolSHA != request.ToolSHA || d.SourceSHA256 != source.SourceSHA256 ||
-		d.Attempts < 1 || d.Attempts > MaxReadinessAttempts ||
-		len(d.AssessmentSHA256s) != d.Attempts || len(d.CheckSHA256s) != d.Attempts ||
 		!sha256Pattern.MatchString(d.DecisionSHA256) {
+		return errors.New("readiness decision identity is invalid")
+	}
+	if d.Fallback {
+		if err := d.validateDecidedWithoutReaders(); err != nil {
+			return err
+		}
+		digest, err := readinessDecisionDigest(d)
+		if err != nil || digest != d.DecisionSHA256 {
+			return errors.New("readiness decision digest is invalid")
+		}
+		return nil
+	}
+	if d.Attempts < 1 || d.Attempts > MaxReadinessAttempts ||
+		len(d.AssessmentSHA256s) != d.Attempts || len(d.CheckSHA256s) != d.Attempts {
 		return errors.New("readiness decision identity is invalid")
 	}
 	for index := range d.AssessmentSHA256s {
@@ -1493,6 +1545,70 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 		return errors.New("readiness decision digest is invalid")
 	}
 	return nil
+}
+
+// validateDecidedWithoutReaders holds a gate decided without its readers to
+// the only shape it may have. Every field is fixed, so there is nothing here
+// a model could have influenced and nothing an operator has to choose: the
+// request is to be got on with, nobody is asked anything, and the work goes
+// to the implementer.
+func (d ReadinessDecision) validateDecidedWithoutReaders() error {
+	switch {
+	case d.Outcome != ReadinessOutcomeReady:
+		return errors.New("a gate decided without its readers can only be ready")
+	case d.Attempts != 0 || len(d.AssessmentSHA256s) != 0 || len(d.CheckSHA256s) != 0:
+		return errors.New("a gate decided without its readers names no attempt")
+	case len(d.Questions) != 0 || d.RejectCode != "":
+		return errors.New("a gate decided without its readers asks nothing")
+	case len(d.Assumptions) != 0 || d.ReceptionJudgment != nil:
+		return errors.New("a gate decided without its readers settles nothing")
+	case d.RequestKind != RequestKindChange:
+		return errors.New("a gate decided without its readers reads the request as a change")
+	case d.NeedsDesign || d.DesignReason != DesignReasonReceptionUnread:
+		return errors.New("a gate decided without its readers goes to the implementer")
+	case d.ApproachInTicket || d.ApproachExcerpt != "":
+		return errors.New("a gate decided without its readers quotes nothing")
+	}
+	return nil
+}
+
+// FallbackReadinessDecision is the gate the engine decides when both of the
+// reception's readers answered nothing it could use.
+//
+// It is ready, because the alternative is to end a delivery over the shape
+// of an answer, which is the thing this engine has decided not to do. It
+// asks nobody anything, because there is no reading behind it to have raised
+// a question. It goes to the implementer with the request as written,
+// because the implementer reads the destination's repository, which is where
+// the rest of what the readers would have supplied is. The requester is told
+// all of this in one line on the ticket (reception_fallback.go).
+//
+// Every safety check downstream is untouched: the candidate's paths are
+// still held to the destination's writable scope, its text to the forbidden
+// list, its size to the bounds. What is gone is a stop, not a guard.
+func FallbackReadinessDecision(source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time) (ReadinessDecision, error) {
+	if err := source.Validate(request, config); err != nil {
+		return ReadinessDecision{}, errors.New("readiness decision input is invalid")
+	}
+	if decidedAt.IsZero() {
+		return ReadinessDecision{}, errors.New("readiness decision input is invalid")
+	}
+	decision := ReadinessDecision{
+		SchemaVersion: ReadinessDecisionSchemaVersion, DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
+		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA, SourceSHA256: source.SourceSHA256,
+		Outcome: ReadinessOutcomeReady, AssessmentSHA256s: []string{}, CheckSHA256s: []string{},
+		Questions: []ReadinessQuestion{}, RequestKind: RequestKindChange,
+		NeedsDesign: false, DesignReason: DesignReasonReceptionUnread, Fallback: true,
+	}
+	digest, err := readinessDecisionDigest(decision)
+	if err != nil {
+		return ReadinessDecision{}, errors.New("readiness decision could not be sealed")
+	}
+	decision.DecisionSHA256 = digest
+	if err := decision.Validate(nil, nil, source, request, config); err != nil {
+		return ReadinessDecision{}, err
+	}
+	return decision, nil
 }
 
 // validateReceptionJudgment holds a sealed judgment to the role that could

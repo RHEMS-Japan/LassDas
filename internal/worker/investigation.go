@@ -304,7 +304,7 @@ func (i *ModelInvoker) Investigate(ctx context.Context, endpoint ModelEndpoint, 
 // that it carries exactly one of the parts the phase allows.
 func decodeTurnAnswer(encoded []byte, phase string) (turnAnswer, error) {
 	var answer turnAnswer
-	if err := decodeStrictJSON(encoded, &answer); err != nil {
+	if err := decodeModelJSON(encoded, &answer); err != nil {
 		return turnAnswer{}, fmt.Errorf("the answer is not one JSON object with probe, read, report or design: %w", err)
 	}
 	parts := 0

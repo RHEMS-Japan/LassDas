@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"automation.internal/ticket-ingress/internal/cardsecret"
+	"automation.internal/ticket-ingress/internal/modeljson"
 )
 
 const (
@@ -646,7 +647,7 @@ func (d StageDecision) Validate(candidate Candidate, reviews []Review, source So
 
 func DecodeModelCandidateOutput(encoded []byte) (ModelCandidateOutput, error) {
 	var output ModelCandidateOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output); err != nil {
 		return ModelCandidateOutput{}, errors.New("model candidate response is invalid")
 	}
 	return output, nil
@@ -654,7 +655,7 @@ func DecodeModelCandidateOutput(encoded []byte) (ModelCandidateOutput, error) {
 
 func DecodeModelReviewOutput(encoded []byte) (ModelReviewOutput, error) {
 	var output ModelReviewOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output); err != nil {
 		return ModelReviewOutput{}, errors.New("model review response is invalid")
 	}
 	return output, nil
@@ -879,6 +880,24 @@ func gitBlobDigest(value []byte) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
+// decodeModelJSON reads a model's answer for what this engine needs: keys
+// the struct does not carry are ignored, prose or a code fence around the
+// JSON is peeled off, and a needed field of the wrong type is still an
+// error. Why an answer is read differently from a record is in
+// internal/modeljson.
+func decodeModelJSON(encoded []byte, destination any) error {
+	return modeljson.Decode(encoded, destination)
+}
+
+// decodeStrictJSON reads a record this engine wrote, or configuration a
+// person wrote: one JSON value, every key known to the struct, no
+// duplicates. An unknown key there means the bytes were written by a
+// different engine or a different version of this one, and reading them as
+// if they were understood is how a record silently gains authority.
+//
+// It is not for a model's answer. Those go through decodeModelJSON, and the
+// two names are spelled out at every call site so the intent of each read is
+// readable where the read is.
 func decodeStrictJSON(encoded []byte, destination any) error {
 	if err := rejectDuplicateJSONKeys(encoded); err != nil {
 		return err

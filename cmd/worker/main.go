@@ -76,6 +76,8 @@ func run(ctx context.Context, args []string) error {
 		return runReceptionTicket(args[1:])
 	case "check-readiness":
 		return runCheckReadiness(ctx, args[1:])
+	case "decide-readiness-without-readers":
+		return runDecideReadinessWithoutReaders(args[1:])
 	case "decide-readiness":
 		return runDecideReadiness(ctx, args[1:])
 	case "generate":
@@ -877,6 +879,37 @@ func runDecideReadiness(ctx context.Context, args []string) error {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "readiness decision was rejected", err)
 		return errors.New("readiness decision was rejected")
+	}
+	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReadinessJSONBytes); err != nil {
+		return errors.New("readiness decision artifact could not be written")
+	}
+	return nil
+}
+
+// runDecideReadinessWithoutReaders seals the gate the engine decides when
+// both of the reception's readers answered nothing it could use. It takes no
+// assessment and no check, because there are none: the delivery reaching
+// here is the delivery whose readers did not produce one. It calls no model
+// and needs no model key.
+func runDecideReadinessWithoutReaders(args []string) error {
+	flags := commandFlags("decide-readiness-without-readers")
+	configPath := flags.String("config", "", "")
+	toolSHA := flags.String("tool-sha", "", "")
+	ticketPath := flags.String("ticket", "", "")
+	sourcePath := flags.String("source", "", "")
+	outputPath := flags.String("out", "", "")
+	if !parseFlags(flags, args) || !allPresent(*configPath, *toolSHA, *ticketPath, *sourcePath, *outputPath) ||
+		!worker.ValidToolSHA(*toolSHA) {
+		return errors.New("decide-readiness-without-readers arguments are invalid")
+	}
+	config, request, source, err := readBoundInputs(*configPath, *toolSHA, *ticketPath, *sourcePath)
+	if err != nil {
+		return err
+	}
+	decision, err := worker.FallbackReadinessDecision(source, request, config, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: %s: %v\n", "the gate could not be decided without its readers", err)
+		return errors.New("the gate could not be decided without its readers")
 	}
 	if err := worker.WriteJSONFileExclusive(*outputPath, decision, worker.MaxReadinessJSONBytes); err != nil {
 		return errors.New("readiness decision artifact could not be written")

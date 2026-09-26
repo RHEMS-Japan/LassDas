@@ -785,18 +785,22 @@ func (i *ModelInvoker) ReviewCandidate(
 	}
 	var review Review
 	usage, err := i.converseJSON(ctx, endpoint, reviewSystemPrompt(endpoint), prompt, reviewJSONSchema(request), maxReviewResponseBytes, func(answer []byte, usage InvocationUsage) error {
-		output, err := DecodeModelReviewOutput(answer)
-		if err != nil {
-			// Models occasionally wrap the JSON in prose or a code fence even
-			// under a response schema (measured 2026-08-20: two consecutive
-			// stage-2 reviews, HTTP 200, unparseable as-is — the terminal
-			// failure of the first pod acceptance run). Peel the wrapping with
-			// the same extractor the agent-review path always used; every
-			// schema and verdict check still runs on what is found.
-			if block, blockErr := lastJSONObject(string(answer)); blockErr == nil {
-				output, err = DecodeModelReviewOutput([]byte(block))
-			}
+		// Models occasionally wrap the JSON in prose or a code fence even
+		// under a response schema (measured 2026-08-20: two consecutive
+		// stage-2 reviews, HTTP 200, unparseable as-is — the terminal
+		// failure of the first pod acceptance run). Two rules find the
+		// answer inside such a wrapping and they disagree about one case, so
+		// the narrower one is asked first: the extractor the agent-review
+		// path always used takes the last balanced object carrying a
+		// verdict, which is the answer when a model quoted the format
+		// before writing it, while the general reading takes the first
+		// complete JSON value, which is the answer everywhere else. Every
+		// schema and verdict check still runs on whichever is found.
+		located := answer
+		if block, blockErr := lastJSONObject(string(answer)); blockErr == nil {
+			located = []byte(block)
 		}
+		output, err := DecodeModelReviewOutput(located)
 		if err != nil {
 			return err
 		}
@@ -830,7 +834,7 @@ func (i *ModelInvoker) Preflight(ctx context.Context, endpoint ModelEndpoint) (I
 			var decoded struct {
 				Status string `json:"status"`
 			}
-			if err := decodeStrictJSON(answer, &decoded); err != nil {
+			if err := decodeModelJSON(answer, &decoded); err != nil {
 				return fmt.Errorf("model preflight response is invalid: %w", err)
 			}
 			if decoded.Status != "ready" {
@@ -852,12 +856,16 @@ const modelAnswerAttempts = 3
 // converseJSON is one model conversation followed by everything the caller
 // does to accept the answer — decoding it, checking it against the contract,
 // sealing the artifact — with the retry every JSON-answering call needs. An
-// answer the accept function refuses (prose, a code fence, an unknown field,
-// a pass verdict that still lists reasons, a question id outside Q1–Q19) is
-// answered in the same conversation with the model's own answer
-// and the objection appended, up to modelAnswerAttempts times. Two live
+// answer the accept function refuses is answered in the same conversation
+// with the model's own answer
+// and the objection appended, up to modelAnswerAttempts times. What can
+// still be refused is what the answer says — a pass verdict that also lists
+// reasons, a question id outside Q1–Q19, a path outside the allowance — and
+// no longer how it is shaped: a key the struct does not carry, or prose
+// around the JSON, is read past before the accept function sees it
+// (internal/modeljson). Two live
 // tickets died on their first unreadable readiness answer with nothing
-// recorded (two live tickets), and the next one died one step later on an
+// recorded, and the next one died one step later on an
 // answer that decoded but failed the contract's meaning; the
 // model now gets to correct itself before the run fails, and the final error
 // carries the objection, the request id and the head of the answer so the

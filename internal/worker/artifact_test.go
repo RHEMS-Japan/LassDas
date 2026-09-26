@@ -409,12 +409,22 @@ func TestTheDeclaredBudgetNoLongerRewritesAnObjectionIntoAnEnding(t *testing.T) 
 	}
 }
 
-func TestStrictModelResponseRejectsUnknownFieldAndTrailingValue(t *testing.T) {
-	if _, err := DecodeModelCandidateOutput([]byte(`{"files":[],"rationale":"x","extra":true}`)); err == nil {
-		t.Fatal("DecodeModelCandidateOutput() accepted an unknown field")
+// A model answer is read for what the engine needs: a key the shape does not
+// carry, and a value written after the answer, are read past rather than
+// costing the round the answer was given in (internal/modeljson). What the
+// answer says is still held to the contract by the validators.
+func TestAModelResponseIsReadPastItsShape(t *testing.T) {
+	candidate, err := DecodeModelCandidateOutput([]byte(`{"files":[],"rationale":"x","extra":true}`))
+	if err != nil || candidate.Rationale != "x" {
+		t.Fatalf("an unknown key must be read past: %v, %+v", err, candidate)
 	}
-	if _, err := DecodeModelReviewOutput([]byte(`{"verdict":"pass","findings":[]} {}`)); err == nil {
-		t.Fatal("DecodeModelReviewOutput() accepted a trailing value")
+	review, err := DecodeModelReviewOutput([]byte(`{"verdict":"pass","findings":[]} {}`))
+	if err != nil || review.Verdict != "pass" {
+		t.Fatalf("a value written after the answer must be read past: %v, %+v", err, review)
+	}
+	// A needed field of the wrong type has nothing in it to read.
+	if _, err := DecodeModelCandidateOutput([]byte(`{"files":{"path":"x"},"rationale":"x"}`)); err == nil {
+		t.Fatal("a files field that is not a list was accepted")
 	}
 }
 

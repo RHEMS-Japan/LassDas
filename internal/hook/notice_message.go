@@ -142,6 +142,7 @@ var designReasonPhrases = map[string]string{
 	"trigger_word":           "本文に稼働環境の観測を示す語があるため",
 	"proposer":               "受付の起案役が設計の省略に同意しなかったため",
 	"checker_disagreed":      "受付の確認役が設計の省略に同意しなかったため（起案役と不一致）",
+	"reception_unread":       "受付の読み取り役が読める形で答えなかったため、依頼の本文をそのまま実装役へ渡した",
 }
 
 // designReasonUnknownPhrase is what the ticket says for a reason code this

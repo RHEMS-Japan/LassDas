@@ -593,7 +593,11 @@ func TestInvestigateReturnsParseCauseToTheNextTurn(t *testing.T) {
 		t.Fatalf("turns=%d requests=%d probes=%d; malformed JSON must run no probe", result.Turns, len(api.requests), input.Session.Used)
 	}
 	messages := api.requests[1].Messages
-	if messages[len(messages)-2].Content != broken || !strings.Contains(messages[len(messages)-1].Content, "JSON object is incomplete") {
+	// The cause travels whatever it turns out to be: an answer cut off part
+	// way is read as far as it can be, and what stopped the reading is what
+	// the next turn is told.
+	if messages[len(messages)-2].Content != broken ||
+		!strings.Contains(messages[len(messages)-1].Content, "the answer is not one JSON object with probe, read, report or design") {
 		t.Fatalf("the next turn lost the malformed answer or parse cause: %s", messages[len(messages)-1].Content)
 	}
 	if err := result.Investigation.Validate(input.Identity, path); err != nil {

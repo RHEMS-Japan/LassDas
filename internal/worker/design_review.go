@@ -98,7 +98,7 @@ func DecodeAgentDesignReviewOutput(transcript string) (investigate.ModelDesignRe
 		return investigate.ModelDesignReviewOutput{}, errors.New("the design reviewing agent did not report a verdict")
 	}
 	var output investigate.ModelDesignReviewOutput
-	if err := decodeStrictJSON([]byte(block), &output); err != nil {
+	if err := decodeModelJSON([]byte(block), &output); err != nil {
 		return investigate.ModelDesignReviewOutput{}, errors.New("model design review response is invalid")
 	}
 	for i, finding := range output.Findings {

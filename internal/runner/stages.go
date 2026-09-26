@@ -91,8 +91,18 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 	}); err != nil || code != 0 {
 		// The intake is a model turn too: its failure leaves the requester
 		// a note and the run its detail, like the other reception stages.
+		//
+		// What no longer reaches here is a reader whose answers could not be
+		// used: the step makes the reading itself and exits cleanly, saying
+		// so in the record (reception_fallback.go). What is left is the step
+		// failing to run at all — no key, no network, no room on the volume.
 		p.noteReceptionCutoff(intakeStage)
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
+	}
+	// A reading made without the model is told to the requester once, where
+	// the plan notice and the closing comment both look.
+	if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
+		p.recordReceptionFallback()
 	}
 	gaps, err := p.readJSONField("intake.json", "gaps")
 	if err != nil {
@@ -505,6 +515,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		assessArgs = append(assessArgs, p.releasePathArgs()...)
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			if outcome, decided := p.decideWithoutReaders(ctx, "受付の判定"); decided {
+				return outcome, nil
+			}
 			p.noteReceptionCutoff("受付の判定")
 			return receptionModelFailure("AI による受付の判定"), err
 		}
@@ -517,6 +530,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		checkArgs = append(checkArgs, p.releasePathArgs()...)
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			if outcome, decided := p.decideWithoutReaders(ctx, "受付の確認"); decided {
+				return outcome, nil
+			}
 			p.noteReceptionCutoff("受付の確認")
 			return receptionModelFailure("AI による受付の確認"), err
 		}
@@ -544,6 +560,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+		if outcome, decided := p.decideWithoutReaders(ctx, "受付の判定のまとめ"); decided {
+			return outcome, nil
+		}
 		// A model verb that failed, so the note is the one that reads the
 		// cause: the record note would say the record could not be read
 		// under a headline saying the AI could not finish, and both land in

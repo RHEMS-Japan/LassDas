@@ -98,15 +98,45 @@ func TestDecodeAgentDesignReviewOutputIsStrict(t *testing.T) {
 	if _, err := DecodeAgentDesignReviewOutput(echoed); err == nil {
 		t.Fatal("an echoed format example was taken as the verdict")
 	}
-	for _, transcript := range []string{
-		`{"verdict":"revise","findings":[{"code":"c-d","section":"cause","message":"m","path":"client/src/label.ts"}]}`,
-		`{"verdict":"revise","findings":[{"code":"c-d","section":"cause","message":"m","line":3}]}`,
-		`{"verdict":"pass","findings":[],"note":"looks fine"}`,
-		`{"verdict":"pass","findings":[],"verdict":"revise"}`,
-		"Looks good to me.",
-	} {
-		if _, err := DecodeAgentDesignReviewOutput(transcript); err == nil {
-			t.Errorf("a verdict was accepted from %q", transcript)
+	// A transcript with no verdict object in it is still no verdict: there is
+	// nothing to read.
+	if _, err := DecodeAgentDesignReviewOutput("Looks good to me."); err == nil {
+		t.Error("a verdict was accepted from prose that stated none")
+	}
+	// Everything else here used to be refused and is now read. Each is a
+	// judge that judged the design and said so, in a shape the engine did
+	// not expect: a field of the candidate review's shape the defect was
+	// hung on, a field of the judge's own, the same key written twice. The
+	// round is what refusing them cost.
+	read := map[string]struct {
+		transcript string
+		verdict    string
+	}{
+		"a finding carrying a path": {
+			transcript: `{"verdict":"revise","findings":[{"code":"c-d","section":"cause","message":"m","path":"client/src/label.ts"}]}`,
+			verdict:    investigate.VerdictRevise,
+		},
+		"a finding carrying a line": {
+			transcript: `{"verdict":"revise","findings":[{"code":"c-d","section":"cause","message":"m","line":3}]}`,
+			verdict:    investigate.VerdictRevise,
+		},
+		"a note of the judge's own": {
+			transcript: `{"verdict":"pass","findings":[],"note":"looks fine"}`,
+			verdict:    investigate.VerdictPass,
+		},
+		"the verdict written twice": {
+			transcript: `{"verdict":"pass","findings":[],"verdict":"revise"}`,
+			verdict:    investigate.VerdictRevise,
+		},
+	}
+	for name, want := range read {
+		output, err := DecodeAgentDesignReviewOutput(want.transcript)
+		if err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+			continue
+		}
+		if output.Verdict != want.verdict {
+			t.Errorf("%s read verdict %q, want %q", name, output.Verdict, want.verdict)
 		}
 	}
 }

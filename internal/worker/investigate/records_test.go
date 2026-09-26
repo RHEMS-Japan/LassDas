@@ -283,8 +283,17 @@ func TestDesignRenderingIsDeterministic(t *testing.T) {
 	if err != nil || read.DesignSHA256 != design.DesignSHA256 || RenderDesign(read, investigation) != first {
 		t.Errorf("round trip: %v", err)
 	}
-	if _, err := DecodeModelDesignOutput([]byte(`{"cause":"x","extra":1}`)); err == nil {
-		t.Error("unknown field accepted")
+	// A key the record does not carry is read past rather than losing the
+	// design that came with it; what the design says is still checked by
+	// NewDesign above.
+	tolerated, err := DecodeModelDesignOutput([]byte(`{"cause":"x","extra":1}`))
+	if err != nil || tolerated.Cause != "x" {
+		t.Errorf("a design answered with an extra key must still be read: %v, %+v", err, tolerated)
+	}
+	// A needed field of the wrong type is still an error: there is nothing to
+	// read there.
+	if _, err := DecodeModelDesignOutput([]byte(`{"cause":["x"]}`)); err == nil {
+		t.Error("a cause that is not text was accepted")
 	}
 }
 

@@ -165,11 +165,21 @@ func TestDesignReviewArtifacts(t *testing.T) {
 	if err != nil || read.Validate(testIdentity, subject) != nil || read.ReviewSHA256 != pass.ReviewSHA256 {
 		t.Errorf("round trip: %v", err)
 	}
-	if _, err := DecodeModelDesignReviewOutput([]byte(`{"verdict":"revise","findings":[{"code":"x-y","section":"cause","message":"m","path":"web/page.tmpl"}]}`)); err == nil {
-		t.Error("a finding carrying a path was accepted")
+	// A finding that also carries a candidate review's field is the finding
+	// it is: the reviewer judged the design and named a defect, and which
+	// extra field it hung it on is not a reason to lose the judgment.
+	withPath, err := DecodeModelDesignReviewOutput([]byte(`{"verdict":"revise","findings":[{"code":"x-y","section":"cause","message":"m","path":"web/page.tmpl"}]}`))
+	if err != nil || withPath.Verdict != VerdictRevise || len(withPath.Findings) != 1 || withPath.Findings[0].Section != "cause" {
+		t.Errorf("a finding carrying a path must still be read: %v, %+v", err, withPath)
 	}
-	if _, err := DecodeModelDesignReviewOutput([]byte(`{"verdict":"pass","findings":[]} trailing`)); err == nil {
-		t.Error("trailing content was accepted")
+	// Prose after the answer is peeled off the same way prose before it is.
+	trailing, err := DecodeModelDesignReviewOutput([]byte(`{"verdict":"pass","findings":[]} trailing`))
+	if err != nil || trailing.Verdict != VerdictPass {
+		t.Errorf("a verdict followed by prose must still be read: %v, %+v", err, trailing)
+	}
+	// A needed field of the wrong type still fails.
+	if _, err := DecodeModelDesignReviewOutput([]byte(`{"verdict":{"is":"pass"},"findings":[]}`)); err == nil {
+		t.Error("a verdict that is not text was accepted")
 	}
 }
 
