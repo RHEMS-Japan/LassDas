@@ -34,8 +34,8 @@ func launch(t *testing.T, transcript string) AgentRun {
 
 // A report that says the ticket left something open is answered by the
 // engine, not by the requester: the reading that is easiest to defend is
-// stated, recorded as an assumption, and put into the instruction the same
-// round runs under next.
+// requested only within unspecified details of the original contract. The
+// record says what was instructed, not that a default was already adopted.
 func TestAReportThatLacksInformationIsAnsweredWithADefensibleDefault(t *testing.T) {
 	const report = "依頼に、並び順を新しい順にするか古い順にするかが書かれていません。\nどちらにするかの判断は依頼者に返します。"
 	answer := AnswerReturn(launch(t, report), nil, answeredAt())
@@ -46,8 +46,8 @@ func TestAReportThatLacksInformationIsAnsweredWithADefensibleDefault(t *testing.
 	if answer.Assumption.Kind != AssumptionImplementerReturn {
 		t.Fatalf("assumption kind = %q", answer.Assumption.Kind)
 	}
-	if !strings.Contains(answer.Assumption.Statement, "最も擁護できる既定") {
-		t.Fatalf("the assumption does not state the reading taken: %q", answer.Assumption.Statement)
+	if !strings.Contains(answer.Assumption.Statement, "再試行するよう指示した") {
+		t.Fatalf("the record does not state the instruction actually given: %q", answer.Assumption.Statement)
 	}
 	if !strings.Contains(answer.Assumption.Evidence, shortDigest(answer.ReportSHA256)) {
 		t.Fatalf("the assumption is not bound to the report it answers: %q", answer.Assumption.Evidence)
@@ -55,10 +55,7 @@ func TestAReportThatLacksInformationIsAnsweredWithADefensibleDefault(t *testing.
 	if len(answer.Supply) != 0 {
 		t.Fatalf("a report that named no key asked for one to be supplied: %q", answer.Supply)
 	}
-	// The three things the instruction has to say, in the requester's own
-	// language: there is nowhere to hand this back to, choose the default
-	// yourself, and finishing with nothing changed is not an option.
-	for _, want := range []string{"作業を返す先はありません", "最も擁護できる既定", "変更を 1 つも加えずに終了することはできません"} {
+	for _, want := range []string{"依頼者へ質問せず", "未指定の実装詳細に限り", "最も擁護できる既定", "元の条件を優先", "変更禁止の条件を守って"} {
 		if !strings.Contains(answer.Instruction, want) {
 			t.Fatalf("the instruction does not say %q:\n%s", want, answer.Instruction)
 		}
@@ -68,17 +65,16 @@ func TestAReportThatLacksInformationIsAnsweredWithADefensibleDefault(t *testing.
 	}
 }
 
-// A report that asks for a key is answered with a stand-in, and what has to
-// be supplied for the real thing is written down in the agent's own words —
-// which is what the operator later reads instead of a question.
-func TestAReportThatAsksForAKeyGetsAStandInAndTheSupplyIsRecorded(t *testing.T) {
+// A mention of a key is kept as a reported obstacle. It does not authorize
+// a substitute or make a promise that an operator will supply anything.
+func TestAReportThatAsksForAKeyDoesNotAuthorizeASubstitute(t *testing.T) {
 	const report = "外部の天気サービスを呼ぶ必要がありますが、API キーが渡されていません。\n" +
 		"取得先の URL は決まっています。\n" +
 		"アクセストークンを用意してもらえれば実装できます。"
 	answer := AnswerReturn(launch(t, report), nil, answeredAt())
 
-	if answer.Assumption.Kind != AssumptionCredentialSubstituted {
-		t.Fatalf("assumption kind = %q, want the stand-in", answer.Assumption.Kind)
+	if answer.Assumption.Kind != AssumptionImplementerReturn {
+		t.Fatalf("assumption kind = %q, want a constrained retry", answer.Assumption.Kind)
 	}
 	if len(answer.Supply) != 2 {
 		t.Fatalf("what must be supplied = %q, want the two lines that named it", answer.Supply)
@@ -86,9 +82,9 @@ func TestAReportThatAsksForAKeyGetsAStandInAndTheSupplyIsRecorded(t *testing.T) 
 	if !strings.Contains(answer.Supply[0], "API キー") || !strings.Contains(answer.Supply[1], "アクセストークン") {
 		t.Fatalf("the supply does not quote the report: %q", answer.Supply)
 	}
-	for _, want := range []string{"代役 (test double / fake)", "供給すべきか"} {
+	for _, want := range []string{"既に許可された設定と手段の範囲", "要求された実接続や本番納品の代わりにしてはいけません"} {
 		if !strings.Contains(answer.Instruction, want) {
-			t.Fatalf("the instruction does not ask for a stand-in: %q\n%s", want, answer.Instruction)
+			t.Fatalf("the instruction lost a recovery boundary: %q\n%s", want, answer.Instruction)
 		}
 	}
 	if !strings.Contains(answer.Instruction, "API キー") {

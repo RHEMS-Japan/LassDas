@@ -917,12 +917,9 @@ func ruledAssumptions(runDir string, notes *outcomeNotes) []string {
 	return lines
 }
 
-// returnedAssumptions reads what the engine put in place of what an
-// implementing role said it was missing. A role that hands the work back
-// asking for a decision is answered with the reading easiest to defend, and
-// one asking for a key is answered with a stand-in and a note of what has to
-// be supplied for the real thing — and the note is the part the requester
-// cannot be left without.
+// returnedAssumptions reads the recorded recovery instructions and what an
+// implementing role reported missing. Those quoted reports are not proof
+// that a supply is actually required or that a substitute was delivered.
 //
 // Read structurally, for the same reason as the rulings above.
 func returnedAssumptions(runDir string, notes *outcomeNotes) []string {
@@ -945,7 +942,7 @@ func returnedAssumptions(runDir string, notes *outcomeNotes) []string {
 			}
 			for _, supply := range entry.Supply {
 				if supply = clipRunes(supply, outcomeItemRunes); supply != "" {
-					lines = append(lines, "本物として供給が必要なもの: "+supply)
+					lines = append(lines, "実装役が不足と報告したもの (未検証): "+supply)
 				}
 			}
 		}
