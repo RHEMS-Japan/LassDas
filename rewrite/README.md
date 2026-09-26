@@ -99,6 +99,42 @@ the save, not the external action. Only one process owns a run directory.
 
 ## What the tests establish
 
+### Tracker communication available to configured roles
+
+`go build ./cmd/tracker` provides `read`, `comments`, `comment`, and `post`
+actions. Configure its endpoint, assigned issue and named credential source in
+the authorized role's environment. For example, inside that role's isolation:
+
+```sh
+tracker --base-url https://tracker.example/api/v2 --key-env REPORT_KEY --issue EXAMPLE-1 post < report.txt
+tracker --base-url https://tracker.example/api/v2 --key-env REPORT_KEY --issue EXAMPLE-1 --comment-id 42 comment
+tracker --base-url https://tracker.example/api/v2 --key-env REPORT_KEY --issue EXAMPLE-1 --after-id 0 comments
+```
+
+The reporting agent invokes this as a tool with its prepared report, not as the
+role harness itself: harness stdin contains the assignment and earlier reports,
+which must not accidentally be posted as the final comment.
+
+Post stdin is sent unchanged as the API's form `content`; there is no success
+template, answer schema or completion mark. The native comment receipt goes to
+stdout. `comment` reads that API id back, and `comments` retrieves all pages
+after the cursor, including a possible inclusive page boundary without duplicates.
+This follows the [comment API](https://developer.nulab.com/docs/backlog/api/2/add-comment/).
+
+A failed or unreadable submission response is ambiguous: the command reports
+the reason and does not automatically retry the POST. The role must inspect the
+actual comments before deciding what to do next. Redirects are refused and
+credential values are redacted from transport errors. These commands do not
+certify the report, mark the request complete, grant permission to post, or
+enforce issue-level authorization beyond the configured service credential.
+The launcher must provide only the authorized capabilities. No live tracker
+posting or unattended restart reconciliation has been validated yet.
+
+The new command is tested as a real subprocess against a local TLS tracker,
+including verbatim prose publication and readback. This is not live delivery.
+
+### Automated checks
+
 ```sh
 GOMAXPROCS=2 go test -p 1 -count=1 ./...
 GOMAXPROCS=2 go test -race -p 1 -count=1 ./...
@@ -197,8 +233,9 @@ entry point was replaced.
 
 ## Still missing before production use
 
-- Automatic intake/claiming, isolated per-request checkout, tracker stop and
-  final-comment posting/readback, and live delivery integration.
+- Automatic intake/claiming, isolated per-request checkout, tracker stop,
+  integration of the role's final-comment posting/readback into unattended runs,
+  and live delivery integration.
 - Resolve the observed premature completion: reviewers must compare
   relevant original behavior and preserve objections against the actual request.
   Broader validation still needs misleading reports, repeated failures and restart.
