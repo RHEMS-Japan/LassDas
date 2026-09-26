@@ -26,8 +26,11 @@ credential environment-variable names, and `roles`. Each role has a name,
 purpose, and one or more processes. A process specifies an argv array,
 directory, explicit environment, and named credential sources. Standard input
 carries the original request, current assignment, and previous reports without
-shell interpolation. An existing harness that reads stdin can be used directly;
-for example, a supported native CLI may accept `chat --query-file - --quiet`.
+shell interpolation. Use the existing harness's final-response interface;
+do not assume that a CLI's `--quiet` flag removes reasoning displays or other
+UI output. A live experiment found that those displays inflated the next
+role's context. Its thin native SDK adapter forwards the complete final prose
+on stdout and diagnostics on stderr, without classifying the answer.
 
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure
@@ -54,12 +57,46 @@ redirect refusal, and routing fallback. They do not establish real model
 judgment or real tracker-to-production delivery. A fixture choosing `done` is
 only an executable-wiring test.
 
+## Isolated live observations
+
+Two fresh live-model runs used the real engine run path and an installed native
+agent's tool loop to repair a small CSV CLI, obtain two independent model reviews,
+build a real zipapp, execute that artifact, and write the requested report.
+Neither run needed manual repair or restart after it began. Both routers chose
+done, and both artifacts passed 10 separate post-run inputs. However, a further
+comparison with the original exposed a regression in both artifacts: a plain
+CSV cell with 131,073 characters worked before and now raises a field-limit
+error. A review in the ordinary-LLM run even mentioned the regression but
+dismissed it as outside scope despite the request to preserve ordinary input.
+
+These are **not accepted completions**. Reaching the report stage and passing
+the initial examples did not establish the full requested behavior. Review
+context and handling of objections need further live investigation, not a
+new answer-format or content-certification gate.
+
+For these single trials, Jev routing took about six minutes and ordinary-LLM
+routing about fourteen. The latter selected extra investigation/verification
+steps, and the working roles also took different amounts of time. This is not
+evidence of a general speed advantage or an optimal routing architecture.
+
+The run used a test binary whose only substitution was trusting a local TLS
+relay certificate; it did not substitute the models, router or agent execution.
+This was file-based intake, not the live tracker path.
+
+This is one local task, not a production acceptance or proof of reliable
+completion. Earlier integration attempts required manual sandbox/TLS setup
+repairs, and a resumed run's report incorrectly claimed the test suite emitted
+no stderr. Those attempts are not counted as clean unattended completions.
+The experiment launcher, native adapter and role sandbox are not yet packaged
+as a supported deployment. No existing production entry point was replaced.
+
 ## Still missing before production use
 
 - Automatic intake/claiming, isolated per-request checkout, tracker stop and
   final-comment posting/readback, and live delivery integration.
-- Live-model validation of this executable with the existing native agent
-  harness, including misleading reports, repeated failures, and restart.
+- Repair and retest the observed premature completion: reviewers must compare
+  relevant original behavior and preserve objections against the actual request.
+  Broader validation still needs misleading reports, repeated failures and restart.
 - Automatic model selection from a freshly fetched catalog. Prototype config
   currently names experiment models explicitly. These names are not a durable
   shortlist; refresh the available model list on each selection, initially use
