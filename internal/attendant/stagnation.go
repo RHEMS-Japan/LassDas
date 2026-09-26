@@ -27,7 +27,7 @@ import (
 // on being started for as long as the provider's key holds out. Nothing in
 // that loop is a decision about the request. The engine has to make one.
 //
-// Two signals say the delivery has stopped moving, and each is deliberately
+// Three signals say the delivery has stopped moving, and each is deliberately
 // an exact match rather than a resemblance:
 //
 //	S1  the objections did not move. The same seats raised the same codes
@@ -37,6 +37,10 @@ import (
 //	S2  the change did not move. The round wrote the same bytes to the same
 //	    paths. For a round the judges passed and the destination's own
 //	    commands refused, the same bytes paired with the same refusal.
+//	S3  a finding disappeared and returned, or the change returned to bytes
+//	    already refused. Fixing one objection by undoing the fix for another
+//	    is not progress. Other findings may have moved in the meantime, so
+//	    requiring the entire set to recur would miss this oscillation.
 //
 // The objection's identity is (seat, code, path) and deliberately not the
 // message: the same complaint is worded differently every time a model is
@@ -93,10 +97,16 @@ func readRoundSignature(runDir string, reviewers []string, round int) (roundSign
 	if err := worker.ReadJSONFile(filepath.Join(stageDir, "candidate.json"), worker.MaxArtifactJSONBytes, &candidate); err != nil {
 		return roundSignature{}, false
 	}
+	if candidate.Stage != round || len(candidate.Files) == 0 {
+		return roundSignature{}, false
+	}
 	signature := roundSignature{findings: make(map[findingKey]struct{}, 8), candidate: candidateFingerprint(candidate)}
 	for _, reviewer := range reviewers {
 		var review worker.Review
 		if err := worker.ReadJSONFile(filepath.Join(stageDir, reviewer+".json"), worker.MaxReviewJSONBytes, &review); err != nil {
+			return roundSignature{}, false
+		}
+		if review.Stage != round || review.ReviewerID != reviewer || (review.Verdict != "pass" && review.Verdict != "revise") {
 			return roundSignature{}, false
 		}
 		if review.Verdict != "revise" {
@@ -156,27 +166,72 @@ func (s roundSignature) repeats(previous roundSignature) bool {
 	return s.candidate != "" && s.candidate == previous.candidate && s.validation == previous.validation
 }
 
-// stagnated reports whether the delivery has stopped moving at this round:
-// the signal holding for repeat consecutive rounds, each read whole.
+// recurrence counts returns separated by at least one observed absence.
+// Continuous presence does not count: an objection left standing while other
+// objections are being fixed is not evidence of an oscillation.
+type recurrence struct {
+	absent  bool
+	returns int
+}
+
+func (r *recurrence) observe(present bool) int {
+	if !present {
+		r.absent = true
+	} else if r.absent {
+		r.returns++
+		r.absent = false
+	}
+	return r.returns
+}
+
+// stagnated reports consecutive unchanged rounds or a return to a resolved
+// finding / rejected change. The setting counts repetitions of either
+// signal. Every intervening round must be readable: absence of a record is
+// not evidence that an objection was answered. The existing record ceiling
+// also bounds this lookback; no model call or extra record is needed.
 func stagnated(runDir string, reviewers []string, round, repeat int) bool {
 	if repeat < 1 {
 		repeat = worker.DefaultStagnationRepeatRounds
 	}
-	if round < repeat+1 {
+	if round < repeat+1 || round > worker.StageCeiling {
 		return false
 	}
-	newer, readable := readRoundSignature(runDir, reviewers, round)
+	current, readable := readRoundSignature(runDir, reviewers, round)
 	if !readable {
 		return false
 	}
-	for step := 0; step < repeat; step++ {
-		older, readable := readRoundSignature(runDir, reviewers, round-step-1)
-		if !readable || !newer.repeats(older) {
+	findings := make(map[findingKey]*recurrence, len(current.findings))
+	for key := range current.findings {
+		findings[key] = &recurrence{}
+	}
+	var change recurrence
+	newer := current
+	consecutive, unchanged := true, 0
+	for prior := round - 1; prior >= 1; prior-- {
+		older, readable := readRoundSignature(runDir, reviewers, prior)
+		if !readable {
 			return false
+		}
+		consecutive = consecutive && newer.repeats(older)
+		if consecutive {
+			unchanged++
+			if unchanged >= repeat {
+				return true
+			}
+		}
+		for key, seen := range findings {
+			_, present := older.findings[key]
+			if seen.observe(present) >= repeat {
+				return true
+			}
+		}
+		sameChange := current.candidate != "" && current.candidate == older.candidate && current.validation == older.validation
+		if change.observe(sameChange) >= repeat {
+			return true
 		}
 		newer = older
 	}
-	return true
+	return false
 }
 
 // arbitrationTimeout bounds the one model call this makes inside the
@@ -279,8 +334,9 @@ func ruleOnStagnation(
 	return verdict == ladderHandled, nil
 }
 
-// consumerStagnationRounds reads how many consecutive identical rounds the
-// destination calls a deadlock, leniently: an absent or unreadable value is
+// consumerStagnationRounds reads how many repetitions (unchanged rounds or
+// returns to a resolved finding / rejected change) call for arbitration.
+// An absent or unreadable value is
 // the default, because a delivery that cannot read this setting is better
 // ruled on early than never.
 func consumerStagnationRounds(consumerConfigPath string) int {

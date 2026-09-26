@@ -68,8 +68,8 @@ type Config struct {
 	// by the arbiter rather than by a count. An operator who sets a number
 	// gets a delivery that stops at it.
 	MaxRounds int `json:"max_rounds,omitempty"`
-	// StagnationRepeatRounds is how many consecutive rounds must be
-	// identical before the engine rules on the deadlock. Zero means
+	// StagnationRepeatRounds counts unchanged rounds or returns to a
+	// previously resolved finding / rejected change before arbitration. Zero means
 	// DefaultStagnationRepeatRounds. omitempty keeps existing
 	// configurations' digests unchanged.
 	StagnationRepeatRounds int `json:"stagnation_repeat_rounds,omitempty"`
@@ -108,11 +108,8 @@ type Config struct {
 // gets when it sets none.
 const DefaultDesignMaxRounds = 3
 
-// DefaultStagnationRepeatRounds is how many consecutive identical rounds
-// make a deadlock when a configuration sets no number: one. A round that
-// objects to exactly what the round before it objected to, or that changes
-// not one byte of what that round changed, has already shown that asking
-// again produces the same thing.
+// DefaultStagnationRepeatRounds is how many unchanged rounds or returns to
+// a resolved finding / rejected change make a deadlock by default: one.
 const DefaultStagnationRepeatRounds = 1
 
 // StageCeiling is the highest round number any sealed record may carry.
@@ -161,7 +158,7 @@ func (c Config) RoundLimit() int {
 	return c.MaxRounds
 }
 
-// StagnationRounds is how many consecutive identical rounds make a deadlock.
+// StagnationRounds is how many repetitions call for arbitration.
 func (c Config) StagnationRounds() int {
 	if c.StagnationRepeatRounds < 1 {
 		return DefaultStagnationRepeatRounds
