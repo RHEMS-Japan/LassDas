@@ -74,13 +74,9 @@ const (
 	// FailureClassCredit covers the provider refusing because the key has
 	// reached its spending limit or the account has nothing left to spend.
 	//
-	// It is the one failure no seat can be moved around. The limit is set on
-	// the provider's key by the person who owns it, not in this engine, so
-	// every candidate model and vendor reached through that key meets the
-	// same refusal — the remedy is a person raising or resetting the limit.
-	// Filed as a plain model failure it would read as "try someone else",
-	// which is exactly the night that ends with nothing done; the record has
-	// to say which one it was by the morning.
+	// A configured alternative launch may have a different account. The
+	// ladder can try it, but cannot fix credit by shortening the same ask
+	// or changing a provider's spending limit.
 	FailureClassCredit FailureClass = "credit"
 	// FailureClassUnknown is the honest answer when none of the above
 	// recognised it. It is a class like the others, not an error: a record
@@ -115,6 +111,10 @@ type StageFailure struct {
 	Stage string       `json:"stage"`
 	Round int          `json:"round"`
 	Class FailureClass `json:"class"`
+	// Step names an unfinished operation inside the card. In particular an
+	// arbiter failure must not be mistaken for the revise decision written
+	// before the arbiter ran. Omitted in older records, preserving their digest.
+	Step string `json:"step,omitempty"`
 	// TerminalCode is the ending the delivery itself named, kept only by the
 	// publish stage. Without it the difference between "the destination
 	// refused the change" and "the machinery broke" survives nowhere: the
@@ -555,6 +555,10 @@ func (p *Pipeline) SealStageFailure(stage string, failure error) {
 		FailedAt:      time.Now().UTC(),
 	}
 	var refused *deliveryRefusal
+	var arbitration *arbitrationFailure
+	if errors.As(failure, &arbitration) {
+		record.Step = "arbitrate"
+	}
 	if errors.As(failure, &refused) {
 		record.TerminalCode = string(refused.code)
 	}

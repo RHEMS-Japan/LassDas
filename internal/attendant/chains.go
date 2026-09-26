@@ -1042,6 +1042,14 @@ func handleChainFailure(
 	}, func() bool {
 		return worker.RoundReturnedWork(filepath.Join(runDir, "history"), view.round)
 	})
+	// The revise/converged decision predates arbitration. A failed model
+	// turn after that decision is unfinished card work, not permission to
+	// discard the ruling and pay for another identical implementation.
+	if stageName == runtime.StageValidate {
+		if failure, sealed := runner.ReadStageFailure(runDir, stageName, view.round); sealed && failure.Step == "arbitrate" {
+			action, code = actionReport, hook.TerminalModelFailed
+		}
+	}
 	// What the tick decided, beside the card it found. The card is only
 	// where the chain stopped moving: a validate card blocked because the
 	// round was sent back reads as "the failure is validate" unless the

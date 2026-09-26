@@ -384,11 +384,10 @@ var receptionSteps = []string{
 	"locate-target", "read-contract", "read-ticket", "reception-ticket", "snapshot",
 }
 
-// The ruling is not here. It is started by the attendant when it finds a
-// delivery that has stopped moving, not from inside a card's own work, so
-// the walk has no card to decide its stage from and the table decides it.
+// Arbitration now runs inside the validation card, so its placement is
+// derived from the actual call graph too, not just pinned by the table.
 var derivedSteps = []string{
-	"agent-design-review", "agent-review", "apply", "decide", "decide-design",
+	"agent-design-review", "agent-review", "apply", "arbitrate", "decide", "decide-design",
 	"investigate", "run-instruction", "run-validation",
 	"seal-candidate", "verify-applied", "verify-publish-gate",
 }

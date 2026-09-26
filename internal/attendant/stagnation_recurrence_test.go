@@ -167,6 +167,11 @@ func TestAnOscillatingReviewIsRuledOnAndTheNextAttemptReceivesTheRuling(t *testi
 	if len(fixture.comments.posted) != 0 || len(fixture.store.digests) != 0 {
 		t.Fatal("the review loop asked the requester or ended the delivery")
 	}
+	finishArbitrationCard(t, config, runDir, 3)
+	if err := handleChainFailure(context.Background(), config, fixture.services, hermes, envelope, run, view,
+		runtime.StageValidate, &recordingLogger{}); err != nil {
+		t.Fatal(err)
+	}
 	calls, err := os.ReadFile(config.WorkerBin + ".log")
 	if err != nil {
 		t.Fatal(err)

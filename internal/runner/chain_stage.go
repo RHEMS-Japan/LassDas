@@ -460,39 +460,40 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 	if round == 0 {
 		return errors.New("no sealed candidate to validate")
 	}
-	stageDir := fmt.Sprintf("%s/stage-%d", p.path("history"), round)
-	reviewFlags := make([]string, 0, 2*len(reviewers))
-	for _, reviewer := range reviewers {
-		reviewFlags = append(reviewFlags, "--review", fmt.Sprintf("%s/%s.json", stageDir, reviewer))
-	}
-	// A re-dispatched card resumes behind its own sealed decision instead
-	// of deciding twice (the output is exclusive-create, and the round it
-	// belongs to must not drift).
-	if _, err := os.Stat(stageDir + "/decision.json"); err != nil {
-		decideArgs := append([]string{
-			"decide", "--config", p.Config.ConsumerConfigPath, "--tool-sha", p.Config.Identity.EngineSHA,
-			"--ticket", stageDir + "/ticket.json", "--source", stageDir + "/source.json",
-			"--candidate", stageDir + "/candidate.json",
-		}, reviewFlags...)
-		// This round was ruled on and is being decided again. The ruling
-		// says which objections the ticket does not require, and the
-		// verdict is counted without them; a round nobody ruled on has no
-		// such file and is counted exactly as it always was.
-		ruling, err := ReadRuling(p.Workspace, round)
-		if err != nil {
-			return err
-		}
-		if ruling != nil && ruling.Ruling == worker.RulingOverruleReviewer {
-			decideArgs = append(decideArgs, "--ruling", RulingFile(p.Workspace, round))
-		}
-		decideArgs = append(decideArgs, "--out", stageDir+"/decision.json")
-		if err := p.runVerb(ctx, "decide", decideArgs); err != nil {
-			return fmt.Errorf("the round could not be decided: %w", err)
-		}
+	if err := p.decideChainRound(ctx, round, reviewers, false); err != nil {
+		return err
 	}
 	outcome, err := p.readJSONField(fmt.Sprintf("history/stage-%d/decision.json", round), "outcome")
 	if err != nil {
 		return errors.New("the decision could not be read back")
+	}
+	if outcome == "revise" {
+		ruling, err := p.arbitrateRefusedRound(ctx, reviewers, round)
+		if err != nil {
+			return err
+		}
+		if ruling != nil && ruling.Ruling == worker.RulingOverruleReviewer {
+			applied, err := RulingApplied(p.Workspace, round, ruling)
+			if err != nil {
+				return &arbitrationFailure{err}
+			}
+			if !applied {
+				if err := p.decideChainRound(ctx, round, reviewers, true); err != nil {
+					return &arbitrationFailure{err}
+				}
+				applied, err = RulingApplied(p.Workspace, round, ruling)
+				if err != nil {
+					return &arbitrationFailure{err}
+				}
+				if !applied {
+					return &arbitrationFailure{errors.New("the decision did not count the ruling")}
+				}
+				outcome, err = p.readJSONField(fmt.Sprintf("history/stage-%d/decision.json", round), "outcome")
+				if err != nil {
+					return &arbitrationFailure{err}
+				}
+			}
+		}
 	}
 	switch outcome {
 	case "converged":
@@ -500,6 +501,16 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 		return errors.New("the round was sent back for revision")
 	default:
 		return fmt.Errorf("the decision outcome %q is not one this chain knows", outcome)
+	}
+	// An arbitration retry after a measured validation refusal resumes the
+	// unfinished ruling, not the already-run commands. No ruling can turn
+	// a refused deterministic check into a pass.
+	if _, refused := ReadValidationFailure(p.Workspace, round); refused &&
+		RoundsStagnated(p.Workspace, reviewers, round, ConsumerStagnationRounds(p.Config.ConsumerConfigPath)) {
+		if _, err := p.arbitrateRefusedRound(ctx, reviewers, round); err != nil {
+			return err
+		}
+		return ErrValidationRejected
 	}
 	// A resumed attempt redoes the validation from scratch — its outputs
 	// are exclusive-create and the sandbox is rebuilt anyway; minutes of
@@ -517,6 +528,9 @@ func (p *Pipeline) chainValidate(ctx context.Context, reviewers []string) error 
 		// that wrote it, told what was printed. Without this the output lived
 		// in the pod's log alone and the run ended on it.
 		p.SealValidationFailure(round, refusal.step, refusal.output)
+		if _, err := p.arbitrateRefusedRound(ctx, reviewers, round); err != nil {
+			return err
+		}
 		// The sentinel, not a fresh sentence: this is the one failure the
 		// validate card owns, and the class turns on having taken this branch.
 		return ErrValidationRejected
