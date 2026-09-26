@@ -596,6 +596,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}
 	switch readinessOutcome {
 	case "ready":
+		if inconclusive, err := p.readJSONField(relPath(p.Workspace, decision), "inconclusive_reading"); err == nil && inconclusive == "true" {
+			p.recordInconclusiveReception()
+		}
 		return Outcome{}, nil
 	case "clarification_required":
 		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: decision}, nil
@@ -606,8 +609,10 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		// engine sealed, and the comment it ends with now states a mechanical
 		// reason and names the requester.
 		return Outcome{Code: hook.TerminalReadinessRejected}, nil
-	case "unresolved":
-		return Outcome{Code: hook.TerminalReadinessUnresolved}, nil
+	case worker.ReadinessOutcomeUnresolved, "unresolved":
+		// An older worker may still seal this outcome. Re-derive from the
+		// complete bound chain; never turn a label alone into permission.
+		return p.continueUnresolvedReception()
 	default:
 		// The workflow's jq select() hard-failed on a malformed outcome; a
 		// decision file this pipeline cannot read is a model failure, not a

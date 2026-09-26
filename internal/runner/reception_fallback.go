@@ -62,6 +62,36 @@ const receptionFallbackStatement = "受付の読み取り役が読める形で�
 // appears.
 const receptionBalkedKind = "reception_balked"
 
+func (p *Pipeline) recordInconclusiveReception() {
+	const statement = "受付で依頼の解釈を確定できなかったため、未検証の解釈は採用せず、チケットの本文と制約をそのまま次の担当へ渡します。" +
+		"この判定から追加の質問は出していません。必要な設計・検証・レビューと、変更してよい範囲は変えません。"
+	if err := appendReceptionLine(p.Workspace, "reception_inconclusive", statement); err != nil {
+		p.Logger.Error("the inconclusive reception note could not be written", "error", err.Error())
+	}
+}
+
+// Preserve old evidence while upgrading an unfinished gate, not a terminal
+// ledger entry. A forged label or incomplete chain cannot enter this path.
+func (p *Pipeline) continueUnresolvedReception() (Outcome, error) {
+	config, request, source, err := receptionInputs(p.Workspace, p.Config.ConsumerConfigPath)
+	if err != nil {
+		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), err
+	}
+	decision, err := rederiveAcceptedReception(p.Workspace, source, request, config)
+	if err == nil && !decision.InconclusiveReading {
+		err = errors.New("the checked reception did not have an inconclusive reading")
+	}
+	if err == nil {
+		_, err = restoreReception(p.path("history/readiness/decision.json"), decision)
+	}
+	if err != nil {
+		p.noteReceptionRecord("受付の判定のまとめ")
+		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), err
+	}
+	p.recordInconclusiveReception()
+	return Outcome{}, nil
+}
+
 // receptionBalkedStatementFor is what the requester reads, with the reader's
 // own word turned into a clause they can act on. The word itself is a machine
 // identifier and never reaches them; one this engine has no sentence for says
