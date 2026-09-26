@@ -171,6 +171,16 @@ interrupted action tells the router that the action may already have happened;
 it must inspect before repeating it. A temporary result-save failure retries
 the save, not the external action. Only one process owns a run directory.
 
+One fresh native-agent trial was deliberately interrupted with SIGTERM after
+the tracker fixture stored its first comment, before returning the receipt.
+The test harness restarted the same engine command with the unchanged pending
+history. The router sent investigation and reporting roles to inspect what had
+happened. They read back the existing report without another POST: one stored
+comment, identical to the report file. The local artifact passed 13 independent
+post-run cases and its generated 10-test suite. This observes reconciliation
+after a supplied restart; it does not package a production supervisor, exercise
+a machine/power failure, or establish general exactly-once delivery.
+
 At startup, temporary request-read or history-acquisition failures are also
 logged and retried every ten seconds until cancellation. No role is dispatched
 without the original request and its history store. Once the original is read,
@@ -185,7 +195,7 @@ by waiting; reasons remain visible, not reported as a completed request.
 
 ### Tracker communication available to configured roles
 
-`go build ./cmd/tracker` provides `read`, `comments`, `comment`, and `post`
+`go build ./cmd/tracker` provides `issues`, `read`, `comments`, `comment`, and `post`
 actions. Configure its endpoint, assigned issue and named credential source in
 the authorized role's environment. For example, inside that role's isolation:
 
@@ -211,11 +221,32 @@ actual comments before deciding what to do next. Redirects are refused and
 credential values are redacted from transport errors. These commands do not
 certify the report, mark the request complete, grant permission to post, or
 enforce issue-level authorization beyond the configured service credential.
-The launcher must provide only the authorized capabilities. No live tracker
-posting or unattended restart reconciliation has been validated yet.
+The launcher must provide only the authorized capabilities. No live-tracker
+posting or production restart supervision has been validated yet.
 
 The new command is tested as a real subprocess against a local TLS tracker,
 including verbatim prose publication and readback. This is not live delivery.
+
+For read-only issue discovery, provide an explicit project rather than an issue:
+
+```sh
+tracker --base-url https://tracker.example/api/v2 --key-env INTAKE_KEY --project-id 17 issues
+```
+
+This follows the [issue-list API](https://developer.nulab.com/docs/backlog/api/2/get-issue-list/):
+it requests pages of 100, ordered by creation, and returns the native records
+with original descriptions and unknown metadata intact. Every invocation starts
+a new scan. An unreadable/failed page, repeated issue or out-of-project response
+returns a reason and no partial stdout list. The service's offset pagination is
+not an atomic snapshot; an eventual polling loop must rescan to pick up changes
+during pagination. Empty projects return an empty array.
+
+This reads existing issues as well as new ones. Listing is not claiming or
+authorizing their execution. Automatic polling/selection of the intended intake
+scope, durable per-issue scheduling and isolated workspaces are not wired yet.
+The command does not reuse the old reception contracts or ask a model to reject
+requests based on their prose format. Tests include multi-page local TLS reads
+through a real CLI child and a failed second page with no partial output.
 
 An isolated native-agent run has now read an issue through the public intake
 path, performed work and two review rounds, delivered a local artifact, and

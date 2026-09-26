@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -154,5 +155,96 @@ func TestCLIInvalidSelectionOrUnreadableReportDoesNotSubmit(t *testing.T) {
 	err := run(context.Background(), append(base, "post"), failingInput{}, &out, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "stdin unavailable") || out.Len() != 0 {
 		t.Fatalf("unreadable report sent: %v", err)
+	}
+}
+
+func TestCLIProjectIssuesReadsAllPagesAndPrintsNothingOnPartialFailure(t *testing.T) {
+	var mu sync.Mutex
+	failSecond := false
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		query := r.URL.Query()
+		if r.Method != "GET" || r.URL.Path != "/api/v2/issues" || query.Get("projectId[]") != "17" || query.Get("apiKey") != "synthetic-CLI-key" {
+			t.Error("issue discovery widened scope or performed a write")
+			w.WriteHeader(400)
+			return
+		}
+		offset, err := strconv.Atoi(query.Get("offset"))
+		if err != nil {
+			t.Error(err)
+		}
+		if failSecond && offset == 100 {
+			w.WriteHeader(503)
+			io.WriteString(w, "later page unavailable: synthetic-CLI-key")
+			return
+		}
+		rows := []any{}
+		for id := offset + 1; id <= 105 && len(rows) < 100; id++ {
+			rows = append(rows, map[string]any{"id": id, "projectId": 17, "issueKey": "EXAMPLE-" + strconv.Itoa(id), "description": "日本語\nKeep `literal` $(text)", "futureField": true})
+		}
+		json.NewEncoder(w).Encode(rows)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(t.TempDir(), "tracker-cert.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fail := range []bool{false, true} {
+		mu.Lock()
+		failSecond, calls = fail, 0
+		mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		command := exec.CommandContext(ctx, binary, "-test.run=^TestTrackerCLIHelper$", "--", "--base-url", server.URL+"/api/v2", "--key-env", "TRACKER_TEST_KEY", "--project-id", "17", "issues")
+		command.Env = []string{"TRACKER_CLI_TEST_CHILD=1", "TRACKER_TEST_KEY=synthetic-CLI-key", "TRACKER_CLI_TEST_CERT=" + certificate}
+		var out, log bytes.Buffer
+		command.Stdout, command.Stderr = &out, &log
+		err := command.Run()
+		cancel()
+		mu.Lock()
+		gotCalls := calls
+		mu.Unlock()
+		if gotCalls != 2 {
+			t.Fatalf("pagination calls=%d", gotCalls)
+		}
+		if fail {
+			if err == nil || out.Len() != 0 || !strings.Contains(log.String(), "later page unavailable") || strings.Contains(log.String(), "synthetic-CLI-key") {
+				t.Fatalf("partial output or lost/leaked cause: error=%v stdout=%s stderr=%s", err, &out, &log)
+			}
+		} else {
+			var rows []struct {
+				ID          int
+				Description string
+				FutureField bool
+			}
+			if err != nil || log.Len() != 0 || json.Unmarshal(out.Bytes(), &rows) != nil || len(rows) != 105 {
+				t.Fatalf("issue discovery failed: %v stdout=%s stderr=%s", err, &out, &log)
+			}
+			for i, row := range rows {
+				if row.ID != i+1 || !row.FutureField || row.Description != "日本語\nKeep `literal` $(text)" {
+					t.Fatalf("issue changed: %#v", row)
+				}
+			}
+		}
+	}
+}
+
+func TestCLIRejectsUnscopedAndMixedIssueDiscoveryArguments(t *testing.T) {
+	base := []string{"--base-url", "https://tracker.invalid/api/v2", "--key-env", "MISSING_TRACKER_TEST_KEY"}
+	for _, tail := range [][]string{
+		{"issues"}, {"--project-id", "-1", "issues"}, {"--project-id", "17", "--issue", "EXAMPLE-1", "issues"},
+		{"--project-id", "17", "--after-id", "2", "issues"}, {"--project-id", "17", "--comment-id", "3", "issues"},
+		{"--project-id", "17", "--issue", "EXAMPLE-1", "post"},
+	} {
+		var out bytes.Buffer
+		if err := run(context.Background(), append(base, tail...), strings.NewReader("body"), &out, io.Discard); err == nil || out.Len() != 0 || strings.Contains(err.Error(), "credential") {
+			t.Fatalf("invalid arguments reached service access: %v error=%v", tail, err)
+		}
 	}
 }
