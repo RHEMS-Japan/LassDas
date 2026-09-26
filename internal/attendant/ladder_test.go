@@ -545,11 +545,9 @@ func TestAnInterruptedCardIsNotCountedAsAModelFailure(t *testing.T) {
 	}
 }
 
-// A key that has reached its limit is the one failure no seat could help
-// with: every model the engine could move to is reached through that key.
-// So it goes straight to the waiting rung, the ticket is told once and not
-// once a tick, the delivery is kept rather than ended, and it carries on
-// the moment the key answers again.
+// With no configured alternative launch, a key at its limit goes straight
+// to the waiting rung. A shorter prompt cannot restore credit. The ticket
+// is told once, and the stage resumes when its next attempt can answer.
 func TestAKeyAtItsLimitWaitsIsToldOnceAndResumes(t *testing.T) {
 	setup := newLadderSetup(t, runner.StageFailure{
 		Stage: runtime.StageReviewA, Round: 1, Class: runner.FailureClassCredit,

@@ -61,6 +61,23 @@ func modelHands(climb ladderClimb) []ladderHand {
 	if !found {
 		return nil
 	}
+	hands := candidateHands(seat)
+	if seat.record.PromptRebuilt == "" {
+		hands = append(hands, ladderHand{
+			step: rungSeat, name: "prompt:" + worker.PromptRebuildShorten,
+			reclaim: seat.rebuildPrompt(),
+		})
+	}
+	return hands
+}
+
+// candidateHands is shared by unanswered-model and credit failures. The
+// configured launch, not an endpoint's label, is what can change accounts.
+// Different launch definitions can still use one account: without reading
+// credentials or changing billing, the only evidence that another launch
+// can answer is its actual attempt. The ladder spends each hand once, even
+// when the failure class changes, and retains reviewer independence.
+func candidateHands(seat seatClimb) []ladderHand {
 	hands := make([]ladderHand, 0, seat.seat.SeatDepth())
 	for place := 1; place < seat.seat.SeatDepth(); place++ {
 		occupant, seated := seat.seat.SeatOccupant(place)
@@ -70,12 +87,6 @@ func modelHands(climb ladderClimb) []ladderHand {
 		hands = append(hands, ladderHand{
 			step: rungSeat, name: fmt.Sprintf("seat:%d", place),
 			reclaim: seat.moveTo(place, occupant),
-		})
-	}
-	if seat.record.PromptRebuilt == "" {
-		hands = append(hands, ladderHand{
-			step: rungSeat, name: "prompt:" + worker.PromptRebuildShorten,
-			reclaim: seat.rebuildPrompt(),
 		})
 	}
 	return hands

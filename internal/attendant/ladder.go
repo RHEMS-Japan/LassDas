@@ -161,6 +161,16 @@ func ladderHands(class runner.FailureClass, climb ladderClimb) []ladderHand {
 	switch class {
 	case runner.FailureClassModel:
 		return modelHands(climb)
+	case runner.FailureClassCredit:
+		// A refusal by one launch says nothing about a different launch's
+		// account. Try the alternatives the operator already configured;
+		// never change a key's limit or discover new credentials. Shortening
+		// the same unfunded ask cannot help, so this has no prompt hand.
+		seat, found := seatOfFailedStage(climb)
+		if !found {
+			return nil
+		}
+		return candidateHands(seat)
 	case runner.FailureClassTimeout:
 		// A step that did not fit in its wall gets the model's hands. The
 		// remedy for a role that cannot answer in the time it is given is
@@ -195,9 +205,7 @@ func ladderHands(class runner.FailureClass, climb ladderClimb) []ladderHand {
 		// hands for this rung.
 		return []ladderHand{{step: rungTool, name: "tool:fresh-card"}}
 	default:
-		// A key that has reached its limit — no seat could help, every one
-		// of them is reached through that key — and a failure nobody could
-		// name. Both wait.
+		// A failure nobody could name waits.
 		//
 		// A refused verification is here too, and never arrives: it is the
 		// validate card's own answer about the change, and the round it
