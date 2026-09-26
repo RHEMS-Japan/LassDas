@@ -165,30 +165,40 @@ type ModelIntakeOutput struct {
 // fixed header block: what the requester used to be made to declare is read
 // out of what they actually wrote.
 type ContractIntake struct {
-	SchemaVersion    int             `json:"schema_version"`
-	PromptVersion    int             `json:"prompt_version"`
-	DeliveryID       string          `json:"delivery_id"`
-	InputSHA256      string          `json:"input_sha256"`
-	ConfigSHA256     string          `json:"config_sha256"`
-	ToolSHA          string          `json:"tool_sha"`
-	RawSHA256        string          `json:"raw_sha256"`
-	AssessorID       string          `json:"assessor_id"`
-	Vendor           string          `json:"vendor"`
-	Model            string          `json:"model"`
-	BaseURL          string          `json:"base_url"`
-	Effort           string          `json:"effort,omitempty"`
-	StructuredOutput bool            `json:"structured_output"`
-	MaxOutputTokens  int32           `json:"max_output_tokens"`
-	Repository       string          `json:"repository"`
-	VerificationPath string          `json:"verification_path"`
-	ExpectedText     string          `json:"expected_text"`
-	AbsentText       string          `json:"absent_text"`
-	Request          string          `json:"request"`
-	Gaps             []IntakeGap     `json:"gaps"`
-	Rationale        string          `json:"rationale"`
-	Invocation       InvocationUsage `json:"invocation"`
-	ReadAt           time.Time       `json:"read_at"`
-	IntakeSHA256     string          `json:"intake_sha256"`
+	SchemaVersion    int         `json:"schema_version"`
+	PromptVersion    int         `json:"prompt_version"`
+	DeliveryID       string      `json:"delivery_id"`
+	InputSHA256      string      `json:"input_sha256"`
+	ConfigSHA256     string      `json:"config_sha256"`
+	ToolSHA          string      `json:"tool_sha"`
+	RawSHA256        string      `json:"raw_sha256"`
+	AssessorID       string      `json:"assessor_id"`
+	Vendor           string      `json:"vendor"`
+	Model            string      `json:"model"`
+	BaseURL          string      `json:"base_url"`
+	Effort           string      `json:"effort,omitempty"`
+	StructuredOutput bool        `json:"structured_output"`
+	MaxOutputTokens  int32       `json:"max_output_tokens"`
+	Repository       string      `json:"repository"`
+	VerificationPath string      `json:"verification_path"`
+	ExpectedText     string      `json:"expected_text"`
+	AbsentText       string      `json:"absent_text"`
+	Request          string      `json:"request"`
+	Gaps             []IntakeGap `json:"gaps"`
+	Rationale        string      `json:"rationale"`
+	// Fallback marks a reading the engine made without the model: every
+	// answer the reader gave was unusable, so the request is the ticket's
+	// own text and nothing was read out of it. It is omitted from a reading
+	// a model did answer, which keeps that reading's sealed bytes — and
+	// every digest bound to them — exactly what they were.
+	//
+	// Nothing a model writes can set it. It is not a field of
+	// ModelIntakeOutput, so an answer naming it is read past like any other
+	// key the shape does not carry.
+	Fallback     bool            `json:"fallback,omitempty"`
+	Invocation   InvocationUsage `json:"invocation"`
+	ReadAt       time.Time       `json:"read_at"`
+	IntakeSHA256 string          `json:"intake_sha256"`
 }
 
 // Complete reports whether every field needed to build a draft was readable.
@@ -232,9 +242,24 @@ func (c ContractIntake) Validate(raw RawTicket, config Config) error {
 		c.AssessorID != endpoint.ID || c.Vendor != endpoint.Vendor || c.Model != endpoint.Model ||
 		c.BaseURL != endpoint.BaseURL || c.Effort != endpoint.Effort ||
 		c.StructuredOutput != endpoint.StructuredOutput || c.MaxOutputTokens != endpoint.MaxOutputTokens ||
-		c.Invocation.Validate(endpoint) != nil || c.ReadAt.IsZero() || c.ReadAt.Location() != time.UTC ||
+		c.ReadAt.IsZero() || c.ReadAt.Location() != time.UTC ||
 		!sha256Pattern.MatchString(c.IntakeSHA256) {
 		return errors.New("contract intake identity is invalid")
+	}
+	// A reading a model answered carries that turn's evidence. A fallback
+	// carries what the unusable turns spent, which is a real cost the report
+	// has to show and not a turn that produced anything: the answers were
+	// refused, so there is no finish reason or answer length to hold it to.
+	// What is still held is the name of the model that was asked.
+	if c.Fallback {
+		if c.Invocation.RequestedModel != endpoint.Model {
+			return errors.New("contract intake identity is invalid")
+		}
+	} else if c.Invocation.Validate(endpoint) != nil {
+		return errors.New("contract intake identity is invalid")
+	}
+	if err := c.validateFallbackShape(raw); err != nil {
+		return err
 	}
 	if err := validateIntakeContent(c.Repository, c.VerificationPath, c.ExpectedText, c.AbsentText, c.Request, c.Gaps, config); err != nil {
 		return err
@@ -247,6 +272,54 @@ func (c ContractIntake) Validate(raw RawTicket, config Config) error {
 	digest, err := sealedDigest(unsealed)
 	if err != nil || digest != c.IntakeSHA256 {
 		return errors.New("contract intake digest is invalid")
+	}
+	return nil
+}
+
+// fallbackIntakeRequestFor is the request a reading made without the model
+// states: the ticket's own text, trimmed, and cut to the bound every request
+// is held to. The cut is a size bound, not a shape rule — it stays.
+func fallbackIntakeRequestFor(raw RawTicket) string {
+	request := strings.TrimSpace(raw.Description)
+	if len(request) > maxTicketRequestBytes {
+		request = strings.TrimSpace(strings.ToValidUTF8(request[:maxTicketRequestBytes], ""))
+	}
+	return request
+}
+
+// fallbackIntakeRationale is what a reading made without the model says for
+// itself, in the one place the plan notice shows how the request was read. It
+// is fixed, so the reading cannot claim to have read anything, and it is the
+// only rationale such a reading may carry.
+const fallbackIntakeRationale = "受付の読み取り役が読める形で答えなかったため、チケットの本文をそのまま依頼として渡しています。"
+
+// validateFallbackShape holds a reading the engine made without the model to
+// the only shape it may have: the ticket's own text as the request, nothing
+// read out of it, and no rationale — there is no reading to explain. A gap
+// is still allowed, because the one gap this path can produce is the
+// engine's own synthesized question about which destination is meant, built
+// from the configuration rather than from an answer.
+//
+// The check runs on every intake, not only on a fallback: a reading that
+// does carry a model's answer must not be able to claim it was made without
+// one, which is what would let a request pass through unread.
+func (c ContractIntake) validateFallbackShape(raw RawTicket) error {
+	if !c.Fallback {
+		return nil
+	}
+	if c.Request != fallbackIntakeRequestFor(raw) {
+		return errors.New("contract intake fallback request is not the ticket's text")
+	}
+	if c.VerificationPath != "" || c.ExpectedText != "" || c.AbsentText != "" {
+		return errors.New("contract intake fallback reads more than the ticket's text")
+	}
+	if c.Rationale != fallbackIntakeRationale {
+		return errors.New("contract intake fallback explains a reading it did not make")
+	}
+	for _, gap := range c.Gaps {
+		if gap.Field != intakeRepositoryField {
+			return errors.New("contract intake fallback names a gap no model raised")
+		}
 	}
 	return nil
 }
@@ -398,9 +471,61 @@ func (i *ModelInvoker) ReadContract(ctx context.Context, raw RawTicket, config C
 		return nil
 	})
 	if err != nil {
+		// Every answer arrived and none could be used. The reception is the
+		// one place this engine asks anybody anything, and it is not on the
+		// ladder: there is no other seat to move this seat to and nothing
+		// waiting would change. So the reading is made without the model
+		// rather than the request ending here — the ticket's own words are
+		// the request, the implementer reads the repository for the rest,
+		// and the run says on the ticket that it did this.
+		//
+		// Only an answer that could not be used takes this path. A provider
+		// that refused, a key that is spent, a network that is not there:
+		// none of those is the model answering badly, and a reading made
+		// without the model would hide an instance an operator has to fix.
+		if errors.Is(err, errModelResponseContent) {
+			if fallback, fallbackErr := FallbackContractIntake(raw, config, usage, time.Now().UTC()); fallbackErr == nil {
+				return fallback, usage, nil
+			}
+		}
 		return ContractIntake{}, usage, err
 	}
 	return intake, usage, nil
+}
+
+// FallbackContractIntake is the reading the engine makes when the reader
+// answered nothing it could use: the request is the ticket's own text, no
+// wording promise is claimed, and the destination is either the one
+// configured or the engine's own synthesized question about which it is.
+//
+// It is exported because the shape is the contract: a caller replaying a
+// run, and the test that pins what a requester ends up with, both have to be
+// able to produce exactly this and nothing else.
+func FallbackContractIntake(raw RawTicket, config Config, invocation InvocationUsage, readAt time.Time) (ContractIntake, error) {
+	if err := raw.Validate(config); err != nil {
+		return ContractIntake{}, err
+	}
+	endpoint := config.Models.Readiness.Assessor
+	var gaps []IntakeGap
+	repository := resolveIntakeRepository("", config, &gaps)
+	sort.Slice(gaps, func(a, b int) bool { return gaps[a].Field < gaps[b].Field })
+	sealed, err := SealContractIntake(ContractIntake{
+		SchemaVersion: ArtifactSchemaVersion, PromptVersion: intakePromptVersion,
+		DeliveryID: raw.DeliveryID, InputSHA256: raw.InputSHA256,
+		ConfigSHA256: raw.ConfigSHA256, ToolSHA: raw.ToolSHA, RawSHA256: raw.RawSHA256,
+		AssessorID: endpoint.ID, Vendor: endpoint.Vendor, Model: endpoint.Model, BaseURL: endpoint.BaseURL,
+		Effort: endpoint.Effort, StructuredOutput: endpoint.StructuredOutput, MaxOutputTokens: endpoint.MaxOutputTokens,
+		Repository: repository, Request: fallbackIntakeRequestFor(raw),
+		Gaps: gaps, Rationale: fallbackIntakeRationale, Fallback: true,
+		Invocation: invocation, ReadAt: readAt.UTC(),
+	})
+	if err != nil {
+		return ContractIntake{}, err
+	}
+	if err := sealed.Validate(raw, config); err != nil {
+		return ContractIntake{}, err
+	}
+	return sealed, nil
 }
 
 // SealContractIntake computes the digest that binds an intake to its contents.
@@ -484,7 +609,7 @@ func resolveIntakeRepository(read string, config Config, gaps *[]IntakeGap) stri
 
 func DecodeModelIntakeOutput(encoded []byte) (ModelIntakeOutput, error) {
 	var output ModelIntakeOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "request"); err != nil {
 		return ModelIntakeOutput{}, fmt.Errorf("model intake output is invalid: %v", err)
 	}
 	return output, nil

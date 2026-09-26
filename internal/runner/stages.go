@@ -83,6 +83,9 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		"--clarification-out", p.path("clarification.json"),
 		"--out", p.path("raw-ticket.json"),
 	}); err != nil || code != 0 {
+		if err == nil && code == 2 {
+			return pretripResult{}, Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
+		}
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if code, err := p.worker(ctx, "read-contract", []string{
@@ -91,6 +94,11 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 	}); err != nil || code != 0 {
 		// The intake is a model turn too: its failure leaves the requester
 		// a note and the run its detail, like the other reception stages.
+		//
+		// What no longer reaches here is a reader whose answers could not be
+		// used: the step makes the reading itself and exits cleanly, saying
+		// so in the record (reception_fallback.go). What is left is the step
+		// failing to run at all — no key, no network, no room on the volume.
 		p.noteReceptionCutoff(intakeStage)
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
@@ -99,6 +107,9 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if gaps != "" && gaps != "[]" && gaps != "null" {
+		if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
+			p.recordReceptionDestinationGap()
+		}
 		// The workflow's words (report step): an intake that still has open
 		// questions can only be missing the destination; until the
 		// ask-and-resume path is wired end to end for it, stop honestly —
@@ -106,6 +117,11 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		// run dying unreported. Same honest terminal here; intake gaps are
 		// not the readiness question format and are never posted as one.
 		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
+	}
+	// Readiness is still ahead. Record the intake's substitution, not a
+	// handoff or the absence of questions that have not been decided yet.
+	if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
+		p.recordIntakeFallback()
 	}
 
 	// ---- source (build-draft, the reception contract, baseline, snapshot) ----
@@ -120,7 +136,10 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 	switch code {
 	case 0:
 	case 2:
-		return pretripResult{}, Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
+		// build-draft reserves this exit for an unanswered intake question,
+		// not unreadable input. Keep that distinction even if the earlier
+		// gap check did not observe it.
+		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
 	default:
 		return pretripResult{}, Outcome{Code: "internal_failed"}, nil
 	}
@@ -505,6 +524,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		assessArgs = append(assessArgs, p.releasePathArgs()...)
 		assessArgs = append(assessArgs, "--out", assessment)
 		if code, err := p.worker(ctx, "assess-readiness", assessArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			if outcome, decided := p.decideWithoutReaders(ctx, "受付の判定"); decided {
+				return outcome, nil
+			}
 			p.noteReceptionCutoff("受付の判定")
 			return receptionModelFailure("AI による受付の判定"), err
 		}
@@ -517,6 +539,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		checkArgs = append(checkArgs, p.releasePathArgs()...)
 		checkArgs = append(checkArgs, "--out", check)
 		if code, err := p.worker(ctx, "check-readiness", checkArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+			if outcome, decided := p.decideWithoutReaders(ctx, "受付の確認"); decided {
+				return outcome, nil
+			}
 			p.noteReceptionCutoff("受付の確認")
 			return receptionModelFailure("AI による受付の確認"), err
 		}
@@ -544,6 +569,9 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 	}, readinessArgs...)
 	decideArgs = append(decideArgs, "--out", decision)
 	if code, err := p.worker(ctx, "decide-readiness", decideArgs, p.modelKeyEnv()...); err != nil || code != 0 {
+		if outcome, decided := p.decideWithoutReaders(ctx, "受付の判定のまとめ"); decided {
+			return outcome, nil
+		}
 		// A model verb that failed, so the note is the one that reads the
 		// cause: the record note would say the record could not be read
 		// under a headline saying the AI could not finish, and both land in
@@ -556,12 +584,27 @@ func (p *Pipeline) readinessGate(ctx context.Context) (Outcome, error) {
 		p.noteReceptionRecord("受付の判定のまとめ")
 		return receptionModelFailure("受付の判定のまとめの記録の読み取り"), err
 	}
+	// A reader that refused the request and named nothing to ask about. The
+	// request goes on as written, and the requester is told so once, where the
+	// plan notice and the closing comment both look. Read before the outcome
+	// below, because it is the outcome that says whether anybody is being
+	// asked: a refusal that did draft questions is being asked about, and says
+	// nothing more.
+	if balked, err := p.readJSONField(relPath(p.Workspace, decision), "rejected_reading"); err == nil &&
+		balked != "" && readinessOutcome == "ready" {
+		p.recordReceptionBalked(balked)
+	}
 	switch readinessOutcome {
 	case "ready":
 		return Outcome{}, nil
 	case "clarification_required":
 		return Outcome{Code: hook.TerminalClarificationRequired, QuestionDecisionPath: decision}, nil
 	case "reject":
+		// No reader reaches here any more: a refusal over what a request says
+		// is not an outcome this gate seals (internal/worker
+		// sealedReceptionOutcome). The arm stays for a decision an older
+		// engine sealed, and the comment it ends with now states a mechanical
+		// reason and names the requester.
 		return Outcome{Code: hook.TerminalReadinessRejected}, nil
 	case "unresolved":
 		return Outcome{Code: hook.TerminalReadinessUnresolved}, nil

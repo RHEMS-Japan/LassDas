@@ -28,6 +28,7 @@ var pinnedStages = map[string]string{
 	"reception-ticket": "intake", "locate-target": "intake",
 	"baseline": "intake", "snapshot": "intake", "assess-readiness": "intake",
 	"check-readiness": "intake", "decide-readiness": "intake", "git-checkout": "intake",
+	"decide-readiness-without-readers": "intake",
 
 	"investigate": "investigate",
 
@@ -379,6 +380,7 @@ func TestTheTableAgreesWithTheCardThatRunsEachStep(t *testing.T) {
 // nobody noticed.
 var receptionSteps = []string{
 	"assess-readiness", "baseline", "build-draft", "check-readiness", "decide-readiness",
+	"decide-readiness-without-readers",
 	"locate-target", "read-contract", "read-ticket", "reception-ticket", "snapshot",
 }
 

@@ -53,6 +53,10 @@ var liveStages = map[string]string{
 	"assess-readiness": "intake",
 	"check-readiness":  "intake",
 	"decide-readiness": "intake",
+	// The reception's readers answered nothing usable and the gate was
+	// decided without them. Still the reception: it is the same card, and
+	// what it produced is the same record.
+	"decide-readiness-without-readers": "intake",
 
 	// 調査 — the investigate card.
 	"investigate": "investigate",

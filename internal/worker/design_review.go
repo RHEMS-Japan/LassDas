@@ -83,9 +83,8 @@ func ResolveDesignLens(config Config, reviewerID, selector, subject string) (str
 // DecodeAgentDesignReviewOutput reads the verdict out of what the design
 // reviewing agent printed, by the rule DecodeAgentReviewOutput applies: the
 // text up to the echoed instruction's final rule line is ignored and the
-// last balanced verdict object is the answer. The object is then decoded
-// strictly into the design review shape, so a finding carrying a path or a
-// line - the candidate review's fields - is refused rather than dropped.
+// last balanced verdict object is the answer. Fields the design review does
+// not use are ignored; validation still checks every finding it will act on.
 func DecodeAgentDesignReviewOutput(transcript string) (investigate.ModelDesignReviewOutput, error) {
 	if len(transcript) > MaxAgentTranscriptBytes {
 		return investigate.ModelDesignReviewOutput{}, errors.New("transcript is too large")
@@ -98,7 +97,7 @@ func DecodeAgentDesignReviewOutput(transcript string) (investigate.ModelDesignRe
 		return investigate.ModelDesignReviewOutput{}, errors.New("the design reviewing agent did not report a verdict")
 	}
 	var output investigate.ModelDesignReviewOutput
-	if err := decodeStrictJSON([]byte(block), &output); err != nil {
+	if err := decodeModelJSON([]byte(block), &output); err != nil {
 		return investigate.ModelDesignReviewOutput{}, errors.New("model design review response is invalid")
 	}
 	for i, finding := range output.Findings {

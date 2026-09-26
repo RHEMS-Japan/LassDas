@@ -99,6 +99,19 @@ const (
 	DesignReasonTriggerWord  = "trigger_word"
 	DesignReasonProposer     = "proposer"
 	DesignReasonChecker      = "checker_disagreed"
+	// DesignReasonReceptionUnread is the one reason no model can claim: the
+	// reception's readers answered nothing the engine could use, so the gate
+	// was decided without them (reception_fallback.go). There is no judgment
+	// to keep a design and none to skip one, and the delivery goes to the
+	// implementer, which reads the destination's repository itself.
+	//
+	// It can only ever appear on a decision marked Fallback, which nothing a
+	// model writes can set, and a decision so marked is validated against
+	// this fixed shape instead of against the rule the model-answered
+	// decisions are held to. Neither judgment can therefore reach it, and
+	// the rule that a model may keep a design but never skip one is
+	// untouched.
+	DesignReasonReceptionUnread = "reception_unread"
 
 	// The kinds an assumption is recorded under. A repository convention and
 	// an implementation nobody sees are what the reception could always
@@ -145,13 +158,15 @@ var DesignReasons = []string{
 	DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff,
 	DesignReasonApproachMissing, DesignReasonTooManyFiles,
 	DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker,
+	DesignReasonReceptionUnread,
 }
 
 // DesignReasonKeepsDesign reports whether a reason means the design stage is
 // kept. Unknown reasons are not a valid decision at all.
 func DesignReasonKeepsDesign(reason string) (keeps bool, known bool) {
 	switch reason {
-	case DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff:
+	case DesignReasonInvestigation, DesignReasonApproachInTicket, DesignReasonDefaultOff,
+		DesignReasonReceptionUnread:
 		return false, true
 	case DesignReasonApproachMissing, DesignReasonTooManyFiles,
 		DesignReasonTriggerWord, DesignReasonProposer, DesignReasonChecker:
@@ -369,12 +384,29 @@ type ReadinessDecision struct {
 	Assumptions       []ReadinessAssumption `json:"assumptions,omitempty"`
 	ReceptionJudgment *ReceptionJudgment    `json:"reception_judgment,omitempty"`
 	RejectCode        string                `json:"reject_code,omitempty"`
-	RequestKind       string                `json:"request_kind"`
-	NeedsDesign       bool                  `json:"needs_design"`
-	DesignReason      string                `json:"design_reason"`
-	ApproachInTicket  bool                  `json:"approach_in_ticket"`
-	ApproachExcerpt   string                `json:"approach_excerpt,omitempty"`
-	DecisionSHA256    string                `json:"decision_sha256"`
+	// RejectedReading is the word the reception's reader refused the request
+	// with, when it refused one. The refusal is not an outcome — the engine
+	// has no entrance that turns a request away for what it says
+	// (sealedReceptionOutcome) — so what the gate seals is the outcome the
+	// engine can act on, and this beside it, so that the requester's comment
+	// can say the reception balked and an operator can read what it balked at.
+	//
+	// Absent from every decision whose reader did not refuse, which keeps
+	// those decisions' sealed bytes, and the digests bound to them, exactly
+	// what they were.
+	RejectedReading  string `json:"rejected_reading,omitempty"`
+	RequestKind      string `json:"request_kind"`
+	NeedsDesign      bool   `json:"needs_design"`
+	DesignReason     string `json:"design_reason"`
+	ApproachInTicket bool   `json:"approach_in_ticket"`
+	ApproachExcerpt  string `json:"approach_excerpt,omitempty"`
+	// Fallback marks a gate the engine decided without its readers: every
+	// answer both of them gave was unusable. It is omitted from every
+	// decision they did answer, which keeps those decisions' sealed bytes —
+	// and the digests bound to them — exactly what they were, and nothing a
+	// model writes can set it.
+	Fallback       bool   `json:"fallback,omitempty"`
+	DecisionSHA256 string `json:"decision_sha256"`
 }
 
 func (i *ModelInvoker) AssessReadiness(
@@ -497,7 +529,7 @@ func (i *ModelInvoker) CheckReadiness(
 
 func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 	var output ModelReadinessOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "decision"); err != nil {
 		return ModelReadinessOutput{}, errors.New("model readiness response is invalid")
 	}
 	return output, nil
@@ -505,7 +537,7 @@ func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 
 func DecodeModelReadinessCheckOutput(encoded []byte) (ModelReadinessCheckOutput, error) {
 	var output ModelReadinessCheckOutput
-	if err := decodeStrictJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "verdict"); err != nil {
 		return ModelReadinessCheckOutput{}, errors.New("model readiness check response is invalid")
 	}
 	return output, nil
@@ -533,6 +565,29 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 			output.Assumptions[index].Kind = AssumptionImplementationDetail
 		}
 	}
+}
+
+// A decision label cannot erase a question that the reader actually wrote.
+// Normalize only fresh model output; sealed records must still validate as
+// written. IDs label positions in this new question set, not external facts.
+func normalizeReceptionDecision(output ModelReadinessOutput) ModelReadinessOutput {
+	switch output.Decision {
+	case ReadinessOutcomeReady, ReadinessOutcomeClarification, ReadinessOutcomeReject, ReadinessAssessorUnresolvable:
+	default:
+		return output
+	}
+	if output.RejectCode != "" {
+		output.Decision = ReadinessOutcomeReject
+	} else if len(output.Questions) > 0 && output.Decision != ReadinessOutcomeReject {
+		output.Decision = ReadinessOutcomeClarification
+	} else if len(output.Questions) == 0 && output.Decision == ReadinessOutcomeClarification {
+		output.Decision = ReadinessOutcomeReady
+	}
+	output.Questions = append([]ReadinessQuestion(nil), output.Questions...)
+	for index := range output.Questions {
+		output.Questions[index].ID = fmt.Sprintf("Q%d", index+1)
+	}
+	return output
 }
 
 // fabricatedEvidencePattern matches what only a measurement could have
@@ -629,13 +684,18 @@ func validateModelReadinessOutput(output ModelReadinessOutput) error {
 			return errors.New("clarification decision must carry questions and no reject code")
 		}
 	case ReadinessOutcomeReject:
-		if len(output.Questions) != 0 {
-			return errors.New("reject decision must carry no questions")
-		}
-		if !identifierPattern.MatchString(output.RejectCode) {
-			// The code is the model's text: its head travels, bounded, so the
-			// refusal stays readable and cannot carry a page of it.
-			return fmt.Errorf("reject_code %q (%d bytes) does not match ^[a-z][a-z0-9-]{1,63}$", boundedHead(output.RejectCode, 64), len(output.RejectCode))
+		// A reader that refuses and drafts questions in the same answer is
+		// telling the engine both things, and the questions are the half it
+		// can act on (sealedReceptionOutcome). Refusing the answer for
+		// carrying them lost the questions and ended the delivery on the
+		// refusal, which is the one ending this gate may not have.
+		// An absent reason or a sentence is still a refusal, not an unread
+		// answer. Keep the existing byte bound and text safety checks; only
+		// the identifier spelling ceases to decide whether the reader spoke.
+		if output.RejectCode != "" {
+			if problem := plainTextProblem(output.RejectCode, 64); problem != "" {
+				return fmt.Errorf("reject_code %q %s", boundedHead(output.RejectCode, 64), problem)
+			}
 		}
 	case ReadinessAssessorUnresolvable:
 		if len(output.Questions) != 0 || output.RejectCode != "" {
@@ -757,6 +817,7 @@ func NewReadinessAssessment(attempt int, output ModelReadinessOutput, clarificat
 	// objected to, so a ticket cannot die on how a model filled these in.
 	design := judgeAssessmentDesign(output, request, consumer)
 	output = design.applyTo(output)
+	output = normalizeReceptionDecision(output)
 	// How much this destination lets the reception ask is settled the same
 	// way: a model that asked where this run may not ask has its questions
 	// turned into the record of what was decided, rather than the whole
@@ -925,6 +986,57 @@ func (c ReadinessCheck) Validate(assessment ReadinessAssessment, source SourceSn
 	return nil
 }
 
+// sealedReceptionOutcome maps one checked assessment onto the outcome the gate
+// seals. Both places that derive an outcome from an assessment call it — the
+// one that seals the decision and the one that re-derives it on every later
+// read — so a rule added here is added to both and neither can drift.
+//
+// The one thing it does not pass through is the model's "reject".
+//
+// The engine has no entrance that turns a request away for what it says. A
+// request is refused only when it cannot be processed at all: empty,
+// oversized, not valid UTF-8, carrying control characters. Those are checked
+// on the input itself, before any model sees it. Everything else is a request,
+// and a reader that reads one and answers "reject" has not found an
+// unprocessable input — it has formed an opinion about the work.
+//
+// Measured live (2026-09-26): a reader answered "reject" on a request naming a
+// specification document the destination's repository does not have, with no
+// question and no reason recorded. The requester was told their ticket "did
+// not meet the reception conditions", an operator was named as the next person
+// to act, and nothing said what either of them could do. That is the human
+// wait this engine exists not to have.
+//
+// So the refusal becomes whichever of the two things the engine can actually
+// do. A reader that refused and drafted questions has found something worth
+// asking, and the single round of questions is what that is for. A reader that
+// refused and drafted nothing has left nobody anything to answer, so the
+// request goes on as written — and the word it refused with is sealed, so the
+// requester's comment can say the reception balked and the operator can read
+// what it balked at.
+func sealedReceptionOutcome(final ReadinessAssessment) (outcome string, questions []ReadinessQuestion, rejectedReading string) {
+	questions = []ReadinessQuestion{}
+	switch final.Decision {
+	case ReadinessAssessorUnresolvable:
+		return ReadinessOutcomeUnresolved, questions, ""
+	case ReadinessOutcomeClarification:
+		return ReadinessOutcomeClarification, append(questions, final.Questions...), ""
+	case ReadinessOutcomeReject:
+		reason := final.RejectCode
+		if strings.TrimSpace(reason) == "" {
+			// The assessment retains the empty reason. This marker makes the
+			// refusal visible in the gate without inventing a reason for it.
+			reason = "unspecified"
+		}
+		if len(final.Questions) > 0 {
+			return ReadinessOutcomeClarification, append(questions, final.Questions...), reason
+		}
+		return ReadinessOutcomeReady, questions, reason
+	default:
+		return final.Decision, questions, ""
+	}
+}
+
 // DecideReadiness seals the gate outcome from complete assessment/check pairs.
 // A checker failure on a non-final attempt is not decidable yet: the caller
 // must rerun the assessor until the attempt limit, then decide. A checker
@@ -973,16 +1085,7 @@ func DecideReadiness(ctx context.Context, assessments []ReadinessAssessment, che
 	}
 	switch {
 	case finalCheck.Verdict == "pass":
-		decision.Outcome = final.Decision
-		if final.Decision == ReadinessAssessorUnresolvable {
-			decision.Outcome = ReadinessOutcomeUnresolved
-		}
-		if final.Decision == ReadinessOutcomeClarification {
-			decision.Questions = append([]ReadinessQuestion(nil), final.Questions...)
-		}
-		if final.Decision == ReadinessOutcomeReject {
-			decision.RejectCode = final.RejectCode
-		}
+		decision.Outcome, decision.Questions, decision.RejectedReading = sealedReceptionOutcome(final)
 	case len(assessments) < MaxReadinessAttempts:
 		return ReadinessDecision{}, errors.New("readiness assessment must be rerun before deciding")
 	default:
@@ -1258,6 +1361,14 @@ func designStands(needsDesign bool, reason, kind string, approachInTicket bool, 
 	if kind != RequestKindChange && kind != RequestKindInvestigation {
 		return false
 	}
+	// The one reason this rule never allows. A gate decided without its
+	// readers skips its design, and the record that says so is held to its
+	// own fixed form and never reaches here; a record that did reach here has
+	// a reading behind it, and a reading may keep a design but never skip one
+	// on this reason.
+	if reason == DesignReasonReceptionUnread {
+		return false
+	}
 	// A sealed pair stands when the reason is one this engine knows and it
 	// agrees with itself. Re-deriving the rule here used to reject a record
 	// the moment the rule changed, which would have stranded every delivery
@@ -1323,6 +1434,17 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 	if err := d.ValidateBinding(source, request, config); err != nil {
 		return err
 	}
+	// A gate decided without its readers has no chain to be re-derived from,
+	// and that is the whole of what distinguishes it: ValidateBinding above
+	// already held it to the one shape it may have. Asking for the chain
+	// here would make the fallback unrepresentable, which is the ending this
+	// path exists to remove.
+	if d.Fallback {
+		if len(assessments) != 0 || len(checks) != 0 {
+			return errors.New("readiness decision was not decided without its readers")
+		}
+		return nil
+	}
 	if len(assessments) != d.Attempts || len(checks) != d.Attempts {
 		return errors.New("readiness decision chain is incomplete")
 	}
@@ -1350,18 +1472,9 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 		finalCheck := checks[len(checks)-1]
 		outcome := ReadinessOutcomeUnresolved
 		questions := []ReadinessQuestion{}
-		rejectCode := ""
+		rejectedReading := ""
 		if finalCheck.Verdict == "pass" {
-			outcome = final.Decision
-			if final.Decision == ReadinessAssessorUnresolvable {
-				outcome = ReadinessOutcomeUnresolved
-			}
-			if final.Decision == ReadinessOutcomeClarification {
-				questions = append([]ReadinessQuestion(nil), final.Questions...)
-			}
-			if final.Decision == ReadinessOutcomeReject {
-				rejectCode = final.RejectCode
-			}
+			outcome, questions, rejectedReading = sealedReceptionOutcome(final)
 		} else if len(assessments) < MaxReadinessAttempts {
 			return expected, errors.New("readiness decision was sealed before the retry")
 		} else if surviving, ok := questionsSurvivingCheck(final, finalCheck); ok {
@@ -1376,12 +1489,15 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 		// moment the model moved.
 		var assumptions []ReadinessAssumption
 		outcome, questions, assumptions = applyReceptionJudgment(outcome, questions, d.ReceptionJudgment)
-		return ReadinessDecision{Outcome: outcome, Questions: questions, RejectCode: rejectCode, Assumptions: assumptions}, nil
+		return ReadinessDecision{
+			Outcome: outcome, Questions: questions, RejectedReading: rejectedReading, Assumptions: assumptions,
+		}, nil
 	}()
 	if err != nil {
 		return err
 	}
-	if d.Outcome != rederived.Outcome || d.RejectCode != rederived.RejectCode {
+	if d.Outcome != rederived.Outcome || d.RejectCode != rederived.RejectCode ||
+		d.RejectedReading != rederived.RejectedReading {
 		return errors.New("readiness decision outcome is invalid")
 	}
 	sealedAssumptions, err := json.Marshal(d.Assumptions)
@@ -1422,9 +1538,21 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 	}
 	if d.SchemaVersion != ReadinessDecisionSchemaVersion || d.DeliveryID != request.DeliveryID || d.InputSHA256 != request.InputSHA256 ||
 		d.ConfigSHA256 != request.ConfigSHA256 || d.ToolSHA != request.ToolSHA || d.SourceSHA256 != source.SourceSHA256 ||
-		d.Attempts < 1 || d.Attempts > MaxReadinessAttempts ||
-		len(d.AssessmentSHA256s) != d.Attempts || len(d.CheckSHA256s) != d.Attempts ||
 		!sha256Pattern.MatchString(d.DecisionSHA256) {
+		return errors.New("readiness decision identity is invalid")
+	}
+	if d.Fallback {
+		if err := d.validateDecidedWithoutReaders(); err != nil {
+			return err
+		}
+		digest, err := readinessDecisionDigest(d)
+		if err != nil || digest != d.DecisionSHA256 {
+			return errors.New("readiness decision digest is invalid")
+		}
+		return nil
+	}
+	if d.Attempts < 1 || d.Attempts > MaxReadinessAttempts ||
+		len(d.AssessmentSHA256s) != d.Attempts || len(d.CheckSHA256s) != d.Attempts {
 		return errors.New("readiness decision identity is invalid")
 	}
 	for index := range d.AssessmentSHA256s {
@@ -1446,6 +1574,11 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 	}
 	if err := d.validateReceptionJudgment(config); err != nil {
 		return err
+	}
+	// The bounded wording is bound to the actual assessment by Validate.
+	// A sentence is as readable as a code; neither gains authority here.
+	if d.RejectedReading != "" && validatePlainText(d.RejectedReading, 64, false) != nil {
+		return errors.New("readiness decision rejected reading is invalid")
 	}
 	switch d.Outcome {
 	case ReadinessOutcomeReady, ReadinessOutcomeUnresolved:
@@ -1493,6 +1626,70 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 		return errors.New("readiness decision digest is invalid")
 	}
 	return nil
+}
+
+// validateDecidedWithoutReaders holds a gate decided without its readers to
+// the only shape it may have. Every field is fixed, so there is nothing here
+// a model could have influenced and nothing an operator has to choose: the
+// request is to be got on with, nobody is asked anything, and the work goes
+// to the implementer.
+func (d ReadinessDecision) validateDecidedWithoutReaders() error {
+	switch {
+	case d.Outcome != ReadinessOutcomeReady:
+		return errors.New("a gate decided without its readers can only be ready")
+	case d.Attempts != 0 || len(d.AssessmentSHA256s) != 0 || len(d.CheckSHA256s) != 0:
+		return errors.New("a gate decided without its readers names no attempt")
+	case len(d.Questions) != 0 || d.RejectCode != "" || d.RejectedReading != "":
+		return errors.New("a gate decided without its readers asks nothing and refuses nothing")
+	case len(d.Assumptions) != 0 || d.ReceptionJudgment != nil:
+		return errors.New("a gate decided without its readers settles nothing")
+	case d.RequestKind != RequestKindChange:
+		return errors.New("a gate decided without its readers reads the request as a change")
+	case d.NeedsDesign || d.DesignReason != DesignReasonReceptionUnread:
+		return errors.New("a gate decided without its readers goes to the implementer")
+	case d.ApproachInTicket || d.ApproachExcerpt != "":
+		return errors.New("a gate decided without its readers quotes nothing")
+	}
+	return nil
+}
+
+// FallbackReadinessDecision is the gate the engine decides when both of the
+// reception's readers answered nothing it could use.
+//
+// It is ready, because the alternative is to end a delivery over the shape
+// of an answer, which is the thing this engine has decided not to do. It
+// asks nobody anything, because there is no reading behind it to have raised
+// a question. It goes to the implementer with the request as written,
+// because the implementer reads the destination's repository, which is where
+// the rest of what the readers would have supplied is. The requester is told
+// all of this in one line on the ticket (reception_fallback.go).
+//
+// Every safety check downstream is untouched: the candidate's paths are
+// still held to the destination's writable scope, its text to the forbidden
+// list, its size to the bounds. What is gone is a stop, not a guard.
+func FallbackReadinessDecision(source SourceSnapshot, request TicketRequest, config Config, decidedAt time.Time) (ReadinessDecision, error) {
+	if err := source.Validate(request, config); err != nil {
+		return ReadinessDecision{}, errors.New("readiness decision input is invalid")
+	}
+	if decidedAt.IsZero() {
+		return ReadinessDecision{}, errors.New("readiness decision input is invalid")
+	}
+	decision := ReadinessDecision{
+		SchemaVersion: ReadinessDecisionSchemaVersion, DeliveryID: request.DeliveryID, InputSHA256: request.InputSHA256,
+		ConfigSHA256: request.ConfigSHA256, ToolSHA: request.ToolSHA, SourceSHA256: source.SourceSHA256,
+		Outcome: ReadinessOutcomeReady, AssessmentSHA256s: []string{}, CheckSHA256s: []string{},
+		Questions: []ReadinessQuestion{}, RequestKind: RequestKindChange,
+		NeedsDesign: false, DesignReason: DesignReasonReceptionUnread, Fallback: true,
+	}
+	digest, err := readinessDecisionDigest(decision)
+	if err != nil {
+		return ReadinessDecision{}, errors.New("readiness decision could not be sealed")
+	}
+	decision.DecisionSHA256 = digest
+	if err := decision.Validate(nil, nil, source, request, config); err != nil {
+		return ReadinessDecision{}, err
+	}
+	return decision, nil
 }
 
 // validateReceptionJudgment holds a sealed judgment to the role that could

@@ -142,6 +142,31 @@ var designReasonPhrases = map[string]string{
 	"trigger_word":           "本文に稼働環境の観測を示す語があるため",
 	"proposer":               "受付の起案役が設計の省略に同意しなかったため",
 	"checker_disagreed":      "受付の確認役が設計の省略に同意しなかったため（起案役と不一致）",
+	"reception_unread":       "受付の読み取り役が読める形で答えなかったため、依頼の本文をそのまま実装役へ渡した",
+}
+
+// receptionRefusalPhrases are the requester-facing clauses for the words the
+// reception's reader refuses a request with (internal/worker's reject codes).
+// The reader chooses the word, so this can never be exhaustive; what it is for
+// is that a word this package does know reaches the requester as a sentence
+// instead of as a code.
+var receptionRefusalPhrases = map[string]string{
+	"out-of-scope": "本体に渡されていない権限や設定がないと果たせないと見たため",
+	"unspecified":  "理由は示されていません",
+}
+
+// receptionRefusalUnknownPhrase is what the ticket says for a word this
+// package has no sentence for. A machine code is never put in front of a
+// requester; it stays in the sealed record, where an operator reads it.
+const receptionRefusalUnknownPhrase = "理由は実行の記録に残しています"
+
+// ReceptionRefusalPhrase is the requester-facing clause for one word the
+// reception's reader refused a request with.
+func ReceptionRefusalPhrase(word string) string {
+	if phrase, known := receptionRefusalPhrases[word]; known {
+		return phrase
+	}
+	return receptionRefusalUnknownPhrase
 }
 
 // designReasonUnknownPhrase is what the ticket says for a reason code this

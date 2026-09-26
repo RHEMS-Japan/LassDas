@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"automation.internal/ticket-ingress/internal/modeljson"
 	"automation.internal/ticket-ingress/internal/probe"
 )
 
@@ -78,7 +79,7 @@ type Finding struct {
 }
 
 // ModelInvestigationOutput is what the model answers with when it stops
-// probing. Decoded strictly; validated against the measurements.
+// probing. Read tolerantly, then validated against the measurements.
 type ModelInvestigationOutput struct {
 	Questions []string  `json:"questions"`
 	Findings  []Finding `json:"findings"`
@@ -739,18 +740,30 @@ func digestBytes(value []byte) string {
 }
 
 // DecodeModelInvestigationOutput and DecodeModelDesignOutput read the
-// model's answers strictly: unknown fields are an error, like every other
-// model answer the kernel accepts.
+// model's answers for what the kernel needs: a key the record does not carry
+// is ignored and prose around the JSON is peeled off, while every check
+// below on what the fields say is unchanged. A report refused for naming one
+// field the kernel had never heard of cost the round it was answered in, and
+// the round is what a design is measured in.
 func DecodeModelInvestigationOutput(encoded []byte) (ModelInvestigationOutput, error) {
 	var output ModelInvestigationOutput
-	return output, decodeStrict(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "questions", "findings")
 }
 
 func DecodeModelDesignOutput(encoded []byte) (ModelDesignOutput, error) {
 	var output ModelDesignOutput
-	return output, decodeStrict(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "cause", "approach")
 }
 
+// decodeModelJSON reads a model's answer; decodeStrict reads a record this
+// package sealed. Both names are spelled at every call site so the intent of
+// a read is readable where the read is (internal/modeljson).
+func decodeModelJSON(encoded []byte, destination any, keys ...string) error {
+	return modeljson.DecodeAnswer(encoded, destination, keys...)
+}
+
+// decodeStrict reads a sealed record: one JSON value, every key known. An
+// unknown key means another engine wrote it.
 func decodeStrict(encoded []byte, destination any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
 	decoder.DisallowUnknownFields()

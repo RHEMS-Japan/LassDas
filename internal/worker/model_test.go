@@ -204,9 +204,25 @@ func TestConverseAppliesBoundedInvocationDeadline(t *testing.T) {
 	}
 }
 
-func TestStrictModelResponseRejectsDuplicateKeys(t *testing.T) {
-	if _, err := DecodeModelReviewOutput([]byte(`{"verdict":"pass","verdict":"revise","findings":[]}`)); err == nil {
-		t.Fatal("DecodeModelReviewOutput() accepted duplicate keys")
+// A key written twice in a model's answer is read the way every JSON reader
+// reads one — the last value wins — rather than costing the answer.
+//
+// Refusing it belongs to a record this engine sealed, where two readers
+// disagreeing about the same bytes is a disagreement about identity. An
+// answer is not a record: what the engine keeps is what it re-seals from
+// what it read, and that carries each key once.
+func TestAKeyWrittenTwiceInAnAnswerTakesTheLastValue(t *testing.T) {
+	review, err := DecodeModelReviewOutput([]byte(`{"verdict":"pass","verdict":"revise","findings":[]}`))
+	if err != nil {
+		t.Fatalf("a key written twice must not cost the answer: %v", err)
+	}
+	if review.Verdict != "revise" {
+		t.Fatalf("verdict = %q, want the last value written", review.Verdict)
+	}
+	// The record path is untouched: a sealed record with a duplicate key is
+	// still refused.
+	if err := decodeStrictJSON([]byte(`{"verdict":"pass","verdict":"revise","findings":[]}`), &ModelReviewOutput{}); err == nil {
+		t.Fatal("a record carrying a duplicate key was accepted")
 	}
 }
 
@@ -454,12 +470,16 @@ func TestConverseJSONDoesNotRetryATransportFailure(t *testing.T) {
 
 const testReadinessAnswerJSON = `{"decision":"ready","questions":[],"assumptions":[],"reject_code":""}`
 
-// The readiness assessor goes through the retrying call: a first answer
-// with a field the contract does not know is corrected on the second try.
+// The readiness assessor goes through the retrying call: a first answer with
+// no JSON in it at all is corrected on the second try.
+//
+// A first answer carrying a field the contract does not know used to stand
+// here, and is now read on the first try: the retry is for an answer that
+// cannot be read, not for one shaped differently than expected.
 func TestAssessReadinessSurvivesOneUnreadableAnswer(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
 	valid := chatOutput(testReadinessAnswerJSON)
-	broken := chatOutput(strings.Replace(testReadinessAnswerJSON, `"decision"`, `"decision_note":"x","decision"`, 1))
+	broken := chatOutput("I am not able to assess this request.")
 	api := &sequenceChatAPI{outputs: []*ChatResponse{broken, valid}}
 	invoker, _ := NewModelInvoker(api)
 	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err != nil {

@@ -329,13 +329,12 @@ func TestAgentDesignReviewSealsAReviseWithItsSection(t *testing.T) {
 	}
 }
 
-// A transcript outside the contract - the candidate review's fields, an
-// extra field, a pass that still objects, a section the subject does not
-// have, no verdict at all - seals nothing.
+// A transcript whose verdict says something outside the contract - a pass
+// that still objects, a section the subject does not have, no verdict at
+// all - seals nothing. What the verdict says is the contract; what shape it
+// arrived in is not.
 func TestAgentDesignReviewRefusesAVerdictOutsideTheContract(t *testing.T) {
 	bodies := map[string]string{
-		"a finding with a path":    `echo '{"verdict":"revise","findings":[{"code":"stale-caller","section":"files","message":"m","path":"client/src/label.ts"}]}'`,
-		"an extra field":           `echo '{"verdict":"pass","findings":[],"confidence":"high"}'`,
 		"a pass that objects":      `echo '{"verdict":"pass","findings":[{"code":"x-y","section":"cause","message":"m"}]}'`,
 		"a section of a report":    `echo '{"verdict":"revise","findings":[{"code":"x-y","section":"unknowns","message":"m"}]}'`,
 		"a missing section":        `echo '{"verdict":"revise","findings":[{"code":"x-y","message":"m"}]}'`,
@@ -349,6 +348,41 @@ func TestAgentDesignReviewRefusesAVerdictOutsideTheContract(t *testing.T) {
 		}
 		if _, err := os.Stat(fixture.path("design-review-a.json")); err == nil {
 			t.Errorf("%s left a review artifact behind", name)
+		}
+	}
+}
+
+// A verdict the contract accepts is sealed whatever shape it arrived in. A
+// judge that hung its defect on a field of the candidate review's shape, or
+// added one of its own, has still judged the design and named the defect,
+// and the round is what losing the judgment would cost.
+func TestAgentDesignReviewSealsAVerdictWhateverShapeItArrivedIn(t *testing.T) {
+	shapes := map[string]struct {
+		body    string
+		verdict string
+	}{
+		"a finding with a path": {
+			body:    `echo '{"verdict":"revise","findings":[{"code":"stale-caller","section":"cause","message":"m","path":"client/src/label.ts"}]}'`,
+			verdict: investigate.VerdictRevise,
+		},
+		"an extra field": {
+			body:    `echo '{"verdict":"pass","findings":[],"confidence":"high"}'`,
+			verdict: investigate.VerdictPass,
+		},
+		"prose around the verdict": {
+			body:    `echo 'Here is my judgment: {"verdict":"pass","findings":[]}'`,
+			verdict: investigate.VerdictPass,
+		},
+	}
+	for name, shape := range shapes {
+		fixture := newDesignFixture(t, shape.body, nil)
+		if err := fixture.review(t, "design-review-a", "review-a", true); err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+			continue
+		}
+		review := fixture.readReview(t, "design-review-a")
+		if review.Verdict != shape.verdict {
+			t.Errorf("%s sealed verdict %q, want %q", name, review.Verdict, shape.verdict)
 		}
 	}
 }

@@ -185,17 +185,20 @@ type DesignFinding struct {
 }
 
 // ModelDesignReviewOutput is the one JSON object a design reviewer answers
-// with. Decoded strictly: a finding carrying a path, a line or any other
-// field of the candidate review's shape is refused, not ignored.
+// with. A finding carrying a path, a line or any other field of the
+// candidate review's shape keeps the finding: the reviewer judged the
+// design and named a defect, and which extra field it hung the defect on is
+// not a reason to lose the judgment (internal/modeljson).
 type ModelDesignReviewOutput struct {
 	Verdict  string          `json:"verdict"`
 	Findings []DesignFinding `json:"findings"`
 }
 
-// DecodeModelDesignReviewOutput reads the reviewer's answer strictly.
+// DecodeModelDesignReviewOutput reads the reviewer's answer for the verdict
+// and the findings it carries.
 func DecodeModelDesignReviewOutput(encoded []byte) (ModelDesignReviewOutput, error) {
 	var output ModelDesignReviewOutput
-	return output, decodeStrict(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "verdict")
 }
 
 // DesignReview is one reviewer's sealed judgment of one subject record.

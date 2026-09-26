@@ -98,7 +98,7 @@ type Outcome struct {
 	// Evidence collects the terminal report's evidence fields, keyed by the
 	// same names the workflow's report step assembled.
 	Evidence map[string]string
-	// ParseRejected marks the build-draft rejection path (input_rejected).
+	// ParseRejected marks unreadable ticket input (input_rejected).
 	ParseRejected bool
 }
 
