@@ -32,6 +32,41 @@ UI output. A live experiment found that those displays inflated the next
 role's context. Its thin native SDK adapter forwards the complete final prose
 on stdout and diagnostics on stderr, without classifying the answer.
 
+### Existing native-agent connection
+
+`harnesses/hermes.py` is the stdin bridge to an installed Hermes SDK. It uses
+the SDK's existing agent/tool loop, not a new implementation of one. In the
+role's isolated execution environment, configure the process argv as the
+installation's Python executable followed by the absolute bridge path. Make
+the installation's `run_agent` module importable, for example with a scoped
+`PYTHONPATH`. This repository does not install or modify that dependency.
+
+Provide these process settings explicitly:
+
+- `HERMES_HOME`: a separate writable agent directory for each role/reviewer.
+- `OPENROUTER_BASE_URL` and `NATIVE_MODEL`: the selected endpoint and model.
+  The bridge has no model default, shortlist or catalog-selection policy.
+- `OPENROUTER_API_KEY`: map a named credential source through `secrets`, not
+  a literal credential in `env` or the configuration file.
+- Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
+  (default `6000`, per native API response, not a request failure limit).
+
+The adapter disables dotenv discovery, implicit memory/context-file loading
+and native background review. Supply the repository knowledge locations and
+actual role permissions in the configured instructions; the agent may read
+them within its sandbox. It enables the native terminal/file tools. A custom
+native home/config must not silently point those tools at an unrelated host.
+
+**The bridge is not a sandbox.** The configured container/launcher must enforce
+filesystem, network and credential access. Separate environment variables alone
+do not make a host execution safe. The local experiments enforce these limits
+outside the adapter; production packaging is still missing.
+
+The full native final response goes to stdout and all redirected native display
+output to stderr. A failed native run returns a nonzero exit and its partial
+report/reason, so the chain can decide recovery. Even a cleanup failure retains
+the report already obtained. No model response must conform to an answer schema.
+
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure
 can use the configured ordinary-LLM router. Role errors and timeouts become
@@ -47,6 +82,7 @@ the save, not the external action. Only one process owns a run directory.
 ```sh
 GOMAXPROCS=2 go test -p 1 -count=1 ./...
 GOMAXPROCS=2 go test -race -p 1 -count=1 ./...
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s harnesses -p 'test_*.py'
 ```
 
 Tests use API fixtures, local TLS servers, and real local child processes. They
@@ -102,8 +138,9 @@ This is one local task, not a production acceptance or proof of reliable
 completion. Earlier integration attempts required manual sandbox/TLS setup
 repairs, and a resumed run's report incorrectly claimed the test suite emitted
 no stderr. Those attempts are not counted as clean unattended completions.
-The experiment launcher, native adapter and role sandbox are not yet packaged
-as a supported deployment. No existing production entry point was replaced.
+The native adapter is now included here, but the experiment launcher and role
+sandbox are not packaged as a supported deployment. No existing production
+entry point was replaced.
 
 ## Still missing before production use
 
