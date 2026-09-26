@@ -198,7 +198,7 @@ type ModelDesignReviewOutput struct {
 // and the findings it carries.
 func DecodeModelDesignReviewOutput(encoded []byte) (ModelDesignReviewOutput, error) {
 	var output ModelDesignReviewOutput
-	return output, decodeModelJSON(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "verdict")
 }
 
 // DesignReview is one reviewer's sealed judgment of one subject record.

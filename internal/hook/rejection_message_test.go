@@ -45,18 +45,17 @@ func TestARejectedTicketIsToldWhyAndWhoActs(t *testing.T) {
 	}
 }
 
-// The mechanical rejection of an unprocessable ticket is unchanged. Its
-// sentence is pinned here so that a later edit to the rejection above cannot
-// take it along.
-func TestTheMechanicalInputRejectionIsUnchanged(t *testing.T) {
+// The actual read-ticket exit uses input_rejected, not readiness_rejected.
+// Its requester must get a reason and an action too.
+func TestTheMechanicalInputRejectionNamesTheReasonAndTheRequester(t *testing.T) {
 	digest := strings.Repeat("0", 64)
 	report := TerminalReportRequest{Code: TerminalInputRejected, AutomationRunID: "run-1"}
 
 	comment := TerminalCommentContent(report, digest)
-	if !strings.Contains(comment, "入力が許可された形式または範囲に一致しなかったため、変更していません。") {
-		t.Errorf("the input rejection's own sentence changed:\n%s", comment)
+	if !strings.Contains(comment, "入力の読み取り検査") || !strings.Contains(comment, "読める本文で起票し直してください") {
+		t.Errorf("the input rejection lacks a reason and action:\n%s", comment)
 	}
-	if facts := terminalCommentFacts(report, digest); facts.Production != "未変更" {
+	if facts := terminalCommentFacts(report, digest); facts.Production != "未変更" || facts.NextActor != "起票者" {
 		t.Errorf("facts = %+v", facts)
 	}
 }

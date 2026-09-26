@@ -74,6 +74,56 @@ func Decode(encoded []byte, destination any) error {
 	return json.NewDecoder(bytes.NewReader(value)).Decode(destination)
 }
 
+// DecodeAnswer reads the last complete object carrying a role's answer key.
+// Earlier examples and later unrelated metadata are not the answer. Selection
+// precedes decoding, so a bad type in the final answer cannot resurrect an
+// earlier example or leave fields from two different answers in destination.
+func DecodeAnswer(encoded []byte, destination any, keys ...string) error {
+	if destination == nil || len(keys) == 0 {
+		return errors.New("model answer destination or keys are invalid")
+	}
+	if len(encoded) > MaxAnswerBytes {
+		return errors.New("the answer is too large to read")
+	}
+	// Preserve the ordinary single-value path, including its type errors.
+	if trimmed := bytes.TrimSpace(encoded); json.Valid(trimmed) {
+		return Decode(trimmed, destination)
+	}
+	var selected []byte
+	attempts := 0
+	for start := 0; start < len(encoded); start++ {
+		if encoded[start] != '{' && encoded[start] != '[' {
+			continue
+		}
+		attempts++
+		if attempts > maxSalvageAttempts {
+			// Choosing a known earlier example when the tail was not read
+			// would be worse than asking the model for a shorter answer.
+			return errors.New("the answer has too many JSON fragments")
+		}
+		end, closed := balancedEnd(encoded, start)
+		if !closed || !json.Valid(encoded[start:end]) {
+			continue
+		}
+		value := encoded[start:end]
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(value, &fields) == nil {
+			for _, key := range keys {
+				if _, present := fields[key]; present {
+					selected = value
+					break
+				}
+			}
+		}
+		// A nested example or metadata object cannot replace its container.
+		start = end - 1
+	}
+	if selected == nil {
+		return ErrNoJSONValue
+	}
+	return Decode(selected, destination)
+}
+
 // OneJSONValue is the bytes Decode reads: the answer itself when the whole
 // of it is one JSON value, and otherwise the first complete object or array
 // found inside it.

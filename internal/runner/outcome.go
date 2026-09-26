@@ -734,6 +734,7 @@ func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []strin
 	// instead, so they belong at the head of the list the requester reads
 	// for exactly that.
 	var sealed struct {
+		Fallback          bool            `json:"fallback"`
 		Assumptions       []runAssumption `json:"assumptions"`
 		ReceptionJudgment *struct {
 			Confidence float64 `json:"confidence"`
@@ -755,7 +756,9 @@ func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []strin
 			}
 		}
 	}
-	for attempt := readinessAssessmentAttempts; attempt >= 1; attempt-- {
+	// A fallback gate deliberately discarded the unfinished assessment/check
+	// chain. Keep those files as evidence, not as assumptions of the work.
+	for attempt := readinessAssessmentAttempts; !sealed.Fallback && attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []runAssumption `json:"assumptions"`
 		}
@@ -848,10 +851,8 @@ func settledInPlaceOfAsking(kind string) bool {
 const readinessAssessmentAttempts = 3
 
 // appendedAssumptions reads the run's running stream of decisions, one JSON
-// object per line. Nothing writes it on this engine yet; the reader is here
-// because the decisions it will carry are made while the delivery runs, and
-// a report composed from per-round records alone would have to be changed
-// again for each new producer of one.
+// object per line. Reception fallback, seat changes and later decisions
+// share this stream so plan notices and closing comments read the same facts.
 func appendedAssumptions(runDir string, notes *outcomeNotes) []runAssumption {
 	encoded, err := readWorkspaceFile(filepath.Join(runDir, "history", "assumptions.jsonl"), maxOutcomeArtifactBytes)
 	if err != nil {

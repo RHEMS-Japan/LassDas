@@ -122,19 +122,19 @@ func TestAssessReadinessSealsAssessment(t *testing.T) {
 	}
 }
 
-func TestAssessReadinessRejectsInconsistentDecision(t *testing.T) {
+func TestAssessReadinessReadsContentDespiteInconsistentDecision(t *testing.T) {
 	config, request, source := validArtifactFixture(t)
-	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[{"id":"Q1","dimension":"user_visible_behavior","question":"Which one?","why_blocking":"Changes result.","choices":[]}],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
-		t.Fatal("AssessReadiness() accepted ready with questions")
+	invoker, _ := NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"ready","questions":[` + oneDraftedQuestion + `],"assumptions":[],"reject_code":""}`)})
+	if assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err != nil || assessment.Decision != ReadinessOutcomeClarification || len(assessment.Questions) != 1 {
+		t.Fatalf("a readable question was lost: assessment=%+v err=%v", assessment, err)
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"clarification_required","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
-		t.Fatal("AssessReadiness() accepted clarification without questions")
+	if assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err != nil || assessment.Decision != ReadinessOutcomeReady {
+		t.Fatalf("an empty question set became an unread answer: assessment=%+v err=%v", assessment, err)
 	}
 	invoker, _ = NewModelInvoker(&fakeChatAPI{output: chatOutput(`{"decision":"reject","questions":[],"assumptions":[],"reject_code":""}`)})
-	if _, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err == nil {
-		t.Fatal("AssessReadiness() accepted reject without a reject code")
+	if assessment, _, err := invoker.AssessReadiness(context.Background(), 1, nil, nil, nil, nil, source, request, config, nil); err != nil || assessment.Decision != ReadinessOutcomeReject || assessment.RejectCode != "" {
+		t.Fatalf("a readable refusal without a reason was lost: assessment=%+v err=%v", assessment, err)
 	}
 }
 
@@ -686,16 +686,16 @@ func TestReceptionRefusalsNameTheFieldAndTheLimit(t *testing.T) {
 		{"empty evidence", func(o *ModelReadinessOutput) {
 			o.Assumptions = []ReadinessAssumption{{Kind: "repository_convention", Statement: "s", Evidence: ""}}
 		}, "assumption 1 evidence is empty"},
-		{"bad reject code", func(o *ModelReadinessOutput) {
+		{"control character in reject code", func(o *ModelReadinessOutput) {
 			o.Decision = ReadinessOutcomeReject
 			o.Questions = nil
-			o.RejectCode = "Out Of Scope"
-		}, `reject_code "Out Of Scope" (12 bytes) does not match ^[a-z][a-z0-9-]{1,63}$`},
+			o.RejectCode = "Out\x00Of Scope"
+		}, `reject_code "Out\x00Of Scope" has a control character`},
 		{"long reject code is cut", func(o *ModelReadinessOutput) {
 			o.Decision = ReadinessOutcomeReject
 			o.Questions = nil
 			o.RejectCode = strings.Repeat("x", 500)
-		}, `reject_code "` + strings.Repeat("x", 64) + `…" (500 bytes)`},
+		}, `reject_code "` + strings.Repeat("x", 64) + `…" is 500 bytes (limit 64)`},
 		{"bad assumption kind", func(o *ModelReadinessOutput) {
 			o.Assumptions = []ReadinessAssumption{{Kind: "guess", Statement: "s", Evidence: "e"}}
 		}, `assumption 1 kind "guess" is not repository_convention, non_user_visible_implementation or defensible_default`},

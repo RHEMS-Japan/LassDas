@@ -79,7 +79,7 @@ type Finding struct {
 }
 
 // ModelInvestigationOutput is what the model answers with when it stops
-// probing. Decoded strictly; validated against the measurements.
+// probing. Read tolerantly, then validated against the measurements.
 type ModelInvestigationOutput struct {
 	Questions []string  `json:"questions"`
 	Findings  []Finding `json:"findings"`
@@ -747,19 +747,19 @@ func digestBytes(value []byte) string {
 // the round is what a design is measured in.
 func DecodeModelInvestigationOutput(encoded []byte) (ModelInvestigationOutput, error) {
 	var output ModelInvestigationOutput
-	return output, decodeModelJSON(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "questions", "findings")
 }
 
 func DecodeModelDesignOutput(encoded []byte) (ModelDesignOutput, error) {
 	var output ModelDesignOutput
-	return output, decodeModelJSON(encoded, &output)
+	return output, decodeModelJSON(encoded, &output, "cause", "approach")
 }
 
 // decodeModelJSON reads a model's answer; decodeStrict reads a record this
 // package sealed. Both names are spelled at every call site so the intent of
 // a read is readable where the read is (internal/modeljson).
-func decodeModelJSON(encoded []byte, destination any) error {
-	return modeljson.Decode(encoded, destination)
+func decodeModelJSON(encoded []byte, destination any, keys ...string) error {
+	return modeljson.DecodeAnswer(encoded, destination, keys...)
 }
 
 // decodeStrict reads a sealed record: one JSON value, every key known. An

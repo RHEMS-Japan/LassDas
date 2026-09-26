@@ -269,7 +269,7 @@ func (i *ModelInvoker) Arbitrate(
 	var output ModelArbitrationOutput
 	usage, err := i.converseJSON(ctx, config.Models.ArbiterEndpoint(), arbitrateSystemPrompt(), prompt, arbitrateJSONSchema(), maxArbitrateResponseBytes, func(answer []byte, _ InvocationUsage) error {
 		var decoded ModelArbitrationOutput
-		if err := decodeModelJSON(answer, &decoded); err != nil {
+		if err := decodeModelJSON(answer, &decoded, "ruling"); err != nil {
 			return fmt.Errorf("arbitration response is invalid: %w", err)
 		}
 		// An objection the round does not carry cannot be set aside. The

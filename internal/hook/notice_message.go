@@ -152,6 +152,7 @@ var designReasonPhrases = map[string]string{
 // instead of as a code.
 var receptionRefusalPhrases = map[string]string{
 	"out-of-scope": "本体に渡されていない権限や設定がないと果たせないと見たため",
+	"unspecified":  "理由は示されていません",
 }
 
 // receptionRefusalUnknownPhrase is what the ticket says for a word this

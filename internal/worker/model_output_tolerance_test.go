@@ -5,7 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -238,26 +238,42 @@ var strictDecodeCallers = map[string]string{
 	"readiness_fixtures_test.go": "the fixture file the readiness tests load",
 	// Tests that assert the two decoders' own behaviour, using an accept
 	// function that stands in for a caller's.
-	"model_test.go":           "the record path, in the test about a key written twice",
+	"model_test.go":           "one duplicate-key record check and two deliberately strict stand-in accept functions",
 	"model_objection_test.go": "an accept function standing in for a caller's, in a test about the objection",
+	"investigate/records.go":  "the sealed investigation and design records",
+	"investigate/review.go":   "the sealed design review and decision records",
+}
+
+var strictDecodeCounts = map[string]int{
+	"readiness_fixtures_test.go": 1,
+	"model_test.go":              3,
+	"model_objection_test.go":    2,
+	"investigate/records.go":     2,
+	"investigate/review.go":      2,
 }
 
 // TestNoModelAnswerIsReadStrictly walks the package's own source. A call to
 // the strict decoder outside the set above is a model answer being held to a
 // record's rules again.
 func TestNoModelAnswerIsReadStrictly(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	var callers []string
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+		if calls := strictDecodeCalls(t, path); calls > 0 {
+			callers = append(callers, path)
+			if calls != strictDecodeCounts[path] {
+				t.Errorf("%s: strict calls = %d, want %d (%s)", path, calls, strictDecodeCounts[path], strictDecodeCallers[path])
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	var callers []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
-			continue
-		}
-		if strictDecodeCalls(t, entry.Name()) > 0 {
-			callers = append(callers, entry.Name())
-		}
 	}
 	sort.Strings(callers)
 	expected := make([]string, 0, len(strictDecodeCallers))
@@ -285,8 +301,14 @@ func strictDecodeCalls(t *testing.T, filename string) int {
 		if !isCall {
 			return true
 		}
-		if name, isName := call.Fun.(*ast.Ident); isName && name.Name == "decodeStrictJSON" {
+		if name, isName := call.Fun.(*ast.Ident); isName && (name.Name == "decodeStrictJSON" || name.Name == "decodeStrict") {
 			calls++
+		}
+		if method, ok := call.Fun.(*ast.SelectorExpr); ok && method.Sel.Name == "DisallowUnknownFields" {
+			allowed := map[string]bool{"artifact.go": true, "io.go": true, "model_failure_detail.go": true, "investigate/records.go": true}
+			if !allowed[filename] {
+				t.Errorf("%s: strict decoding outside a record reader", filename)
+			}
 		}
 		return true
 	})

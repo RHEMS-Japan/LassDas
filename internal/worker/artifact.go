@@ -647,7 +647,7 @@ func (d StageDecision) Validate(candidate Candidate, reviews []Review, source So
 
 func DecodeModelCandidateOutput(encoded []byte) (ModelCandidateOutput, error) {
 	var output ModelCandidateOutput
-	if err := decodeModelJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "files"); err != nil {
 		return ModelCandidateOutput{}, errors.New("model candidate response is invalid")
 	}
 	return output, nil
@@ -655,7 +655,7 @@ func DecodeModelCandidateOutput(encoded []byte) (ModelCandidateOutput, error) {
 
 func DecodeModelReviewOutput(encoded []byte) (ModelReviewOutput, error) {
 	var output ModelReviewOutput
-	if err := decodeModelJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "verdict"); err != nil {
 		return ModelReviewOutput{}, errors.New("model review response is invalid")
 	}
 	return output, nil
@@ -885,7 +885,10 @@ func gitBlobDigest(value []byte) string {
 // JSON is peeled off, and a needed field of the wrong type is still an
 // error. Why an answer is read differently from a record is in
 // internal/modeljson.
-func decodeModelJSON(encoded []byte, destination any) error {
+func decodeModelJSON(encoded []byte, destination any, keys ...string) error {
+	if len(keys) > 0 {
+		return modeljson.DecodeAnswer(encoded, destination, keys...)
+	}
 	return modeljson.Decode(encoded, destination)
 }
 

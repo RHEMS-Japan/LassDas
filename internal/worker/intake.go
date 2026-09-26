@@ -609,7 +609,7 @@ func resolveIntakeRepository(read string, config Config, gaps *[]IntakeGap) stri
 
 func DecodeModelIntakeOutput(encoded []byte) (ModelIntakeOutput, error) {
 	var output ModelIntakeOutput
-	if err := decodeModelJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "request"); err != nil {
 		return ModelIntakeOutput{}, fmt.Errorf("model intake output is invalid: %v", err)
 	}
 	return output, nil

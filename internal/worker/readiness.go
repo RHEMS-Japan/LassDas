@@ -529,7 +529,7 @@ func (i *ModelInvoker) CheckReadiness(
 
 func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 	var output ModelReadinessOutput
-	if err := decodeModelJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "decision"); err != nil {
 		return ModelReadinessOutput{}, errors.New("model readiness response is invalid")
 	}
 	return output, nil
@@ -537,7 +537,7 @@ func DecodeModelReadinessOutput(encoded []byte) (ModelReadinessOutput, error) {
 
 func DecodeModelReadinessCheckOutput(encoded []byte) (ModelReadinessCheckOutput, error) {
 	var output ModelReadinessCheckOutput
-	if err := decodeModelJSON(encoded, &output); err != nil {
+	if err := decodeModelJSON(encoded, &output, "verdict"); err != nil {
 		return ModelReadinessCheckOutput{}, errors.New("model readiness check response is invalid")
 	}
 	return output, nil
@@ -565,6 +565,29 @@ func normalizeReadinessTaxonomy(output *ModelReadinessOutput) {
 			output.Assumptions[index].Kind = AssumptionImplementationDetail
 		}
 	}
+}
+
+// A decision label cannot erase a question that the reader actually wrote.
+// Normalize only fresh model output; sealed records must still validate as
+// written. IDs label positions in this new question set, not external facts.
+func normalizeReceptionDecision(output ModelReadinessOutput) ModelReadinessOutput {
+	switch output.Decision {
+	case ReadinessOutcomeReady, ReadinessOutcomeClarification, ReadinessOutcomeReject, ReadinessAssessorUnresolvable:
+	default:
+		return output
+	}
+	if output.RejectCode != "" {
+		output.Decision = ReadinessOutcomeReject
+	} else if len(output.Questions) > 0 && output.Decision != ReadinessOutcomeReject {
+		output.Decision = ReadinessOutcomeClarification
+	} else if len(output.Questions) == 0 && output.Decision == ReadinessOutcomeClarification {
+		output.Decision = ReadinessOutcomeReady
+	}
+	output.Questions = append([]ReadinessQuestion(nil), output.Questions...)
+	for index := range output.Questions {
+		output.Questions[index].ID = fmt.Sprintf("Q%d", index+1)
+	}
+	return output
 }
 
 // fabricatedEvidencePattern matches what only a measurement could have
@@ -666,10 +689,13 @@ func validateModelReadinessOutput(output ModelReadinessOutput) error {
 		// can act on (sealedReceptionOutcome). Refusing the answer for
 		// carrying them lost the questions and ended the delivery on the
 		// refusal, which is the one ending this gate may not have.
-		if !identifierPattern.MatchString(output.RejectCode) {
-			// The code is the model's text: its head travels, bounded, so the
-			// refusal stays readable and cannot carry a page of it.
-			return fmt.Errorf("reject_code %q (%d bytes) does not match ^[a-z][a-z0-9-]{1,63}$", boundedHead(output.RejectCode, 64), len(output.RejectCode))
+		// An absent reason or a sentence is still a refusal, not an unread
+		// answer. Keep the existing byte bound and text safety checks; only
+		// the identifier spelling ceases to decide whether the reader spoke.
+		if output.RejectCode != "" {
+			if problem := plainTextProblem(output.RejectCode, 64); problem != "" {
+				return fmt.Errorf("reject_code %q %s", boundedHead(output.RejectCode, 64), problem)
+			}
 		}
 	case ReadinessAssessorUnresolvable:
 		if len(output.Questions) != 0 || output.RejectCode != "" {
@@ -791,6 +817,7 @@ func NewReadinessAssessment(attempt int, output ModelReadinessOutput, clarificat
 	// objected to, so a ticket cannot die on how a model filled these in.
 	design := judgeAssessmentDesign(output, request, consumer)
 	output = design.applyTo(output)
+	output = normalizeReceptionDecision(output)
 	// How much this destination lets the reception ask is settled the same
 	// way: a model that asked where this run may not ask has its questions
 	// turned into the record of what was decided, rather than the whole
@@ -995,10 +1022,16 @@ func sealedReceptionOutcome(final ReadinessAssessment) (outcome string, question
 	case ReadinessOutcomeClarification:
 		return ReadinessOutcomeClarification, append(questions, final.Questions...), ""
 	case ReadinessOutcomeReject:
-		if len(final.Questions) > 0 {
-			return ReadinessOutcomeClarification, append(questions, final.Questions...), final.RejectCode
+		reason := final.RejectCode
+		if strings.TrimSpace(reason) == "" {
+			// The assessment retains the empty reason. This marker makes the
+			// refusal visible in the gate without inventing a reason for it.
+			reason = "unspecified"
 		}
-		return ReadinessOutcomeReady, questions, final.RejectCode
+		if len(final.Questions) > 0 {
+			return ReadinessOutcomeClarification, append(questions, final.Questions...), reason
+		}
+		return ReadinessOutcomeReady, questions, reason
 	default:
 		return final.Decision, questions, ""
 	}
@@ -1542,10 +1575,9 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 	if err := d.validateReceptionJudgment(config); err != nil {
 		return err
 	}
-	// The reader's own word, held to the same shape the reader answered it in.
-	// Only a reader that refused produces one, so a decision carrying a word
-	// nothing could have written is refused.
-	if d.RejectedReading != "" && !identifierPattern.MatchString(d.RejectedReading) {
+	// The bounded wording is bound to the actual assessment by Validate.
+	// A sentence is as readable as a code; neither gains authority here.
+	if d.RejectedReading != "" && validatePlainText(d.RejectedReading, 64, false) != nil {
 		return errors.New("readiness decision rejected reading is invalid")
 	}
 	switch d.Outcome {

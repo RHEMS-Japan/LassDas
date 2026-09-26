@@ -88,6 +88,26 @@ func (p *Pipeline) recordReceptionFallback() {
 	}
 }
 
+// Intake has not run the readiness gate yet. It may still ask a question,
+// or fail to prepare the source, so this note records only what happened.
+func (p *Pipeline) recordIntakeFallback() {
+	const statement = "受付の読み取り役が読める形で答えなかったため、依頼内容にはチケットの本文をそのまま使っています。" +
+		"実装への着手可否と確認事項は、この後の受付判定で決まります。"
+	if err := appendReceptionLine(p.Workspace, receptionFallbackKind, statement); err != nil {
+		p.Logger.Error("the intake fallback note could not be written", "error", err.Error())
+	}
+}
+
+// The destination question is not wired to the readiness answer protocol.
+// Report the actual stop without promising a handoff or a posted question.
+func (p *Pipeline) recordReceptionDestinationGap() {
+	const statement = "受付の読み取り役が読める形で答えず、設定された複数の納品先から対象を確定できませんでした。" +
+		"依頼の本文は記録しましたが、実装には着手していません。納品先の選択肢をコメントで質問して再開する処理は未対応です。"
+	if err := appendReceptionLine(p.Workspace, receptionFallbackKind, statement); err != nil {
+		p.Logger.Error("the unresolved destination note could not be written", "error", err.Error())
+	}
+}
+
 // recordReceptionBalked is the same, for a reader that refused and named
 // nothing to ask about.
 func (p *Pipeline) recordReceptionBalked(word string) {

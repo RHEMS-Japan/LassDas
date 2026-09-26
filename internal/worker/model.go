@@ -834,7 +834,7 @@ func (i *ModelInvoker) Preflight(ctx context.Context, endpoint ModelEndpoint) (I
 			var decoded struct {
 				Status string `json:"status"`
 			}
-			if err := decodeModelJSON(answer, &decoded); err != nil {
+			if err := decodeModelJSON(answer, &decoded, "status"); err != nil {
 				return fmt.Errorf("model preflight response is invalid: %w", err)
 			}
 			if decoded.Status != "ready" {

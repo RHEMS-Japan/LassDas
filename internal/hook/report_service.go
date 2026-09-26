@@ -398,7 +398,7 @@ func TerminalCommentContent(report TerminalReportRequest, reportDigest string) s
 func terminalCommentContent(report TerminalReportRequest, reportDigest string, deliveryContinues bool) string {
 	message := map[TerminalCode]string{
 		TerminalSuccess:                        successMessage(report),
-		TerminalInputRejected:                  "入力が許可された形式または範囲に一致しなかったため、変更していません。",
+		TerminalInputRejected:                  "入力の読み取り検査で、本文または依頼の識別情報を処理できなかったため、対象リポジトリと本番環境は変更していません。本文が空・大きすぎる・文字として壊れている状態でないかを確認し、読める本文で起票し直してください。",
 		TerminalReadinessRejected:              "チケットの本文が読み取れる形ではなかったため（空・大きすぎる・文字として壊れている、のいずれか）、対象リポジトリと本番環境は変更していません。読める本文で起票し直してください。",
 		TerminalClarificationRequired:          "実装に着手する前に、依頼者にしか決められない確認事項が見つかったため、対象リポジトリと本番環境は変更せず停止しました。確認事項は運用担当者が確認し、必要に応じてこのチケットのコメントでお知らせします。同じチケットの再投入は不要です。",
 		TerminalReadinessUnresolved:            "着手可否の自動判定が規定回数内に確定しなかったため、対象リポジトリと本番環境は変更せず停止しました。運用担当者が内容を確認します。同じチケットの再投入は不要です。",
@@ -618,7 +618,7 @@ func terminalCommentFacts(report TerminalReportRequest, reportDigest string) Com
 			facts.NextActor = "起票者"
 			facts.Operation = "調査の範囲を絞って再度起票すると、改めて調査します"
 		}
-	case TerminalReadinessRejected:
+	case TerminalInputRejected, TerminalReadinessRejected:
 		// The one rejection this engine has is on the input itself — a body
 		// that is empty, too large, or not readable as text. That is the
 		// requester's to fix and nobody else's, and the default line here

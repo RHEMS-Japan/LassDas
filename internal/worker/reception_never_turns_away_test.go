@@ -176,11 +176,17 @@ func TestTheReadersRefusalIsNeverTheSealedOutcome(t *testing.T) {
 	}
 }
 
-// TestAWordNoReaderWroteIsRefused: the sealed word is the reader's own, in the
-// shape the reader answers it in. A decision carrying something else is a
-// record nobody wrote.
+// A decision's refusal is bound to the actual assessment, not to an alphabet.
+// A different sentence is still forged even though both sentences are readable.
 func TestAWordNoReaderWroteIsRefused(t *testing.T) {
-	decision, request, source, config := decisionFor(t, rejectingAssessor("out-of-scope", ""))
+	config, request, source := validArtifactFixture(t)
+	assessment, check := receptionPair(t, 1, ModelReadinessOutput{
+		Decision: ReadinessOutcomeReject, RejectCode: "out-of-scope",
+	}, "pass", source, request, config)
+	decision, err := DecideReadiness(t.Context(), []ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	forged := decision
 	forged.RejectedReading = "運用担当者が確認します"
@@ -189,8 +195,8 @@ func TestAWordNoReaderWroteIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	forged.DecisionSHA256 = digest
-	if err := forged.ValidateBinding(source, request, config); err == nil {
-		t.Fatal("a rejected reading outside the reader's own shape was accepted")
+	if err := forged.Validate([]ReadinessAssessment{assessment}, []ReadinessCheck{check}, source, request, config); err == nil {
+		t.Fatal("a rejected reading no assessment carried was accepted")
 	}
 }
 

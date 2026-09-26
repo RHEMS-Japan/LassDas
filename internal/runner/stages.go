@@ -83,6 +83,9 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		"--clarification-out", p.path("clarification.json"),
 		"--out", p.path("raw-ticket.json"),
 	}); err != nil || code != 0 {
+		if err == nil && code == 2 {
+			return pretripResult{}, Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
+		}
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if code, err := p.worker(ctx, "read-contract", []string{
@@ -99,16 +102,14 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		p.noteReceptionCutoff(intakeStage)
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
-	// A reading made without the model is told to the requester once, where
-	// the plan notice and the closing comment both look.
-	if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
-		p.recordReceptionFallback()
-	}
 	gaps, err := p.readJSONField("intake.json", "gaps")
 	if err != nil {
 		return pretripResult{}, Outcome{Code: "internal_failed"}, err
 	}
 	if gaps != "" && gaps != "[]" && gaps != "null" {
+		if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
+			p.recordReceptionDestinationGap()
+		}
 		// The workflow's words (report step): an intake that still has open
 		// questions can only be missing the destination; until the
 		// ask-and-resume path is wired end to end for it, stop honestly —
@@ -116,6 +117,11 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 		// run dying unreported. Same honest terminal here; intake gaps are
 		// not the readiness question format and are never posted as one.
 		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
+	}
+	// Readiness is still ahead. Record the intake's substitution, not a
+	// handoff or the absence of questions that have not been decided yet.
+	if fallback, err := p.readJSONField("intake.json", "fallback"); err == nil && fallback == "true" {
+		p.recordIntakeFallback()
 	}
 
 	// ---- source (build-draft, the reception contract, baseline, snapshot) ----
@@ -130,7 +136,10 @@ func (p *Pipeline) pretrip(ctx context.Context) (pretripResult, Outcome, error) 
 	switch code {
 	case 0:
 	case 2:
-		return pretripResult{}, Outcome{Code: hook.TerminalInputRejected, ParseRejected: true}, nil
+		// build-draft reserves this exit for an unanswered intake question,
+		// not unreadable input. Keep that distinction even if the earlier
+		// gap check did not observe it.
+		return pretripResult{}, Outcome{Code: hook.TerminalClarificationRequired}, nil
 	default:
 		return pretripResult{}, Outcome{Code: "internal_failed"}, nil
 	}
