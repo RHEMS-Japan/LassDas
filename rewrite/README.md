@@ -122,10 +122,19 @@ A subsequent isolated replay from the repaired implementation actually invoked
 both current-work reviewers, then delivered, exercised the artifact and wrote
 the final report. Separate execution passed the ten original examples and
 the field-limit boundary comparisons. This replay began from a captured
-mid-run state; a fresh end-to-end run is still needed. It does not establish
+mid-run state; it is not a fresh end-to-end completion. It does not establish
 general reliability, nor does it make the earlier premature completions valid.
 
-For these single trials, Jev routing took about six minutes and ordinary-LLM
+A later fresh Jev run performed implementation, two reviews, repair, two new
+reviews, delivery, artifact execution and reporting without manual intervention.
+It still did not satisfy the request: an empty-value row in a single-column CSV
+was dropped, whereas the original preserved it. An independent reviewer had
+explicitly reported this data loss, but it was treated as a documented behavior
+change and the router chose completion. Separate post-run execution reproduced
+four such dropped-row cases. Disclosing a deviation did not fulfill the request
+to preserve ordinary input. The routing/role comparison remains open.
+
+For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
 evidence of a general speed advantage or an optimal routing architecture.
@@ -146,7 +155,7 @@ entry point was replaced.
 
 - Automatic intake/claiming, isolated per-request checkout, tracker stop and
   final-comment posting/readback, and live delivery integration.
-- Retest the observed premature completion from a fresh request: reviewers must compare
+- Resolve the observed premature completion: reviewers must compare
   relevant original behavior and preserve objections against the actual request.
   Broader validation still needs misleading reports, repeated failures and restart.
 - Automatic model selection from a freshly fetched catalog. Prototype config
