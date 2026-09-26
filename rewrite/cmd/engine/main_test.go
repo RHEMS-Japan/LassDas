@@ -95,14 +95,14 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var log bytes.Buffer
-	if err := run(ctx, args, &log); err != nil {
+	if err := run(ctx, args, io.Discard, &log); err != nil {
 		t.Fatal(err)
 	}
 	received, err := os.ReadFile(artifact)
 	if err != nil || !strings.Contains(string(received), wantRequest) || !strings.Contains(string(received), "Read the original request; keep its wording.") {
 		t.Fatalf("process lost the request or assignment: %s (%v)", received, err)
 	}
-	if err := run(ctx, args, &log); err != nil {
+	if err := run(ctx, args, io.Discard, &log); err != nil {
 		t.Fatal(err)
 	}
 	if modelCalls != 2 || trackerCalls != 2 {

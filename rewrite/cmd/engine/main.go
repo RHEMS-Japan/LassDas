@@ -29,21 +29,28 @@ type config struct {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, log io.Writer) error {
+func run(ctx context.Context, args []string, output, log io.Writer) error {
 	flags := flag.NewFlagSet("engine", flag.ContinueOnError)
 	flags.SetOutput(log)
 	configPath := flags.String("config", "", "configured roles and router")
 	requestPath := flags.String("request", "", "original request as text")
 	issue := flags.String("issue", "", "read the original issue from the configured tracker")
+	showModels := flags.Bool("list-models", false, "fetch the current OpenRouter catalog; no request is run")
 	directory := flags.String("run-dir", "", "private directory for this request's history")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *showModels {
+		if *configPath != "" || *requestPath != "" || *issue != "" || *directory != "" || flags.NArg() != 0 {
+			return errors.New("--list-models is a separate catalog query; do not combine it with a request")
+		}
+		return writeModelList(ctx, output)
 	}
 	if *configPath == "" || (*requestPath == "") == (*issue == "") || *directory == "" {
 		return errors.New("provide --config, --run-dir and exactly one of --request or --issue")

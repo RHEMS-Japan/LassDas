@@ -19,6 +19,8 @@ From this directory:
 go run ./cmd/engine --config operator.json --request request.txt --run-dir run
 # Or read an issue's original title and description:
 go run ./cmd/engine --config operator.json --issue EXAMPLE-1 --run-dir run
+# Fetch the current model catalog before selecting experiment models:
+go run ./cmd/engine --list-models
 ```
 
 `operator.json` configures `router.mode` (`jev` or `llm`), routing endpoints,
@@ -31,6 +33,24 @@ do not assume that a CLI's `--quiet` flag removes reasoning displays or other
 UI output. A live experiment found that those displays inflated the next
 role's context. Its thin native SDK adapter forwards the complete final prose
 on stdout and diagnostics on stderr, without classifying the answer.
+
+### Current model list
+
+`--list-models` makes a new credential-free OpenRouter catalog request on every
+invocation and prints JSON with the observation time and complete model entries
+on stdout. It requests all output modalities, including decision models, with
+no pagination limit. Unknown model metadata is preserved. This follows the
+[catalog API](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+
+There is no saved-list fallback: unavailable, invalid, empty or oversized
+responses produce an error and no partial list. The query is separate from
+running a request and cannot be combined with request flags. An administrative
+query error does not label a work request completed or failed.
+
+This supplies fresh selection input, not automatic model selection. Initial
+working/comparison model choices remain restricted to current Chinese
+frontier/value candidates; the catalog alone does not prove value for a task.
+Do not substitute a fixed shortlist or the cheapest price for that assessment.
 
 ### Existing native-agent connection
 
@@ -162,7 +182,7 @@ entry point was replaced.
   currently names experiment models explicitly. These names are not a durable
   shortlist; refresh the available model list on each selection, initially use
   current Chinese frontier/value candidates, and do not call a saved snapshot
-  current when retrieval fails.
+current when retrieval fails.
 - Production isolation. Restricting child environment variables does not
   sandbox filesystem/network access; the configured launcher must enforce the
   role's actual permissions. Do not run unconfined commands with broad keys.
