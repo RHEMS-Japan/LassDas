@@ -22,7 +22,10 @@ type Process struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Secrets      map[string]string `json:"secrets,omitempty"`
 	Instructions string            `json:"instructions,omitempty"`
-	Timeout      time.Duration     `json:"-"`
+	// ModelEnv requests a fresh model choice for this launch and passes the
+	// endpoint id to the existing harness via this environment variable.
+	ModelEnv string        `json:"model_env,omitempty"`
+	Timeout  time.Duration `json:"-"`
 	// PromptArgument is for harnesses taking their instruction as an argument.
 	// Otherwise stdin carries it. Neither path goes through a shell expansion.
 	PromptArgument bool `json:"prompt_argument,omitempty"`
@@ -34,7 +37,10 @@ type Role struct {
 	Processes []Process `json:"processes"`
 }
 
-type Processes struct{ Roles map[string]Role }
+type Processes struct {
+	Roles       map[string]Role
+	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
+}
 
 func (p Processes) Execute(ctx context.Context, assignment Assignment, state State) []Result {
 	name := assignment.Role
@@ -44,12 +50,39 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	}
 	results := make([]Result, len(role.Processes))
 	var group sync.WaitGroup
+	var selected []string
 	for index, process := range role.Processes {
+		model := ""
+		if process.ModelEnv != "" {
+			started := time.Now().UTC()
+			var err error
+			if p.SelectModel == nil {
+				err = fmt.Errorf("no current-model selector is configured")
+			} else if _, secret := process.Secrets[process.ModelEnv]; secret {
+				err = fmt.Errorf("model environment variable overlaps a credential")
+			} else {
+				model, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
+			}
+			if err != nil {
+				results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
+					Error: "Selecting a current model: " + err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}
+				continue
+			}
+			selected = append(selected, model)
+			// Do not mutate configured maps shared by this role's next launch.
+			environment := make(map[string]string, len(process.Env)+1)
+			for name, value := range process.Env {
+				environment[name] = value
+			}
+			environment[process.ModelEnv] = model
+			process.Env = environment
+		}
 		group.Add(1)
-		go func(index int, process Process) {
+		go func(index int, process Process, model string) {
 			defer group.Done()
 			results[index] = process.run(ctx, role, assignment, state)
-		}(index, process)
+			results[index].Model = model
+		}(index, process, model)
 	}
 	group.Wait()
 	return results

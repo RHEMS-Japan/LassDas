@@ -47,10 +47,55 @@ responses produce an error and no partial list. The query is separate from
 running a request and cannot be combined with request flags. An administrative
 query error does not label a work request completed or failed.
 
-This supplies fresh selection input, not automatic model selection. Initial
-working/comparison model choices remain restricted to current Chinese
-frontier/value candidates; the catalog alone does not prove value for a task.
-Do not substitute a fixed shortlist or the cheapest price for that assessment.
+The catalog alone does not prove value for a task. Do not substitute a fixed
+version shortlist or the cheapest price for that assessment.
+
+### Experimental per-launch model selection
+
+The engine can select a current working model before each configured process
+launch. Set that process's `model_env` to the environment variable its existing
+harness reads (`NATIVE_MODEL` for the shipped bridge). Configure the shared
+`model_selection.judge` with the same decision-service fields as
+`router.decision` (`url`, `model`, `key_env`), and `model_selection.authors` with
+the approved publisher ids. No new account or credential value is required.
+For the initial Chinese-model experiments the configured publishers are
+`qwen`, `z-ai`, `deepseek`, `moonshotai`, and `minimax`; these names are not
+hard-coded in the selector and are not a complete nationality classifier.
+
+Every selection fetches a new complete catalog. Text/tool-capable entries from
+those publishers, with their current descriptions, dates and prices, are passed
+to the decision model along with the original request and role responsibility.
+Runtime failures of previously selected models also inform the choice. Versions
+and price thresholds are not fixed in code. Processes in one parallel group
+select different publishers, fetching the list again for each selection. The
+work processes still receive the same prior reports, not a peer's new answer.
+
+Catalog or selection errors return their reasons to the chain as role
+observations. They neither complete the request nor silently launch an old
+model left in the process environment. A later retry fetches again. The
+selected endpoint is recorded as `model` in the runtime history; this says what
+the harness was asked to use, not which upstream provider ultimately served it
+or whether its work is correct. Selection does not inspect working prose or
+authorize delivery. An unavailable selection service still needs recovery;
+these mechanics do not establish unattended completion or optimal model value.
+
+Processes without `model_env` use their explicitly configured command as before
+(including non-LLM tools); the presence of `model_selection` alone does not
+rewrite their environment. Production packaging and automatic setup remain
+unimplemented. API-fixture tests exercise a real child process after a catalog
+outage and verify fresh selection, publisher separation and reason retention;
+they are not evidence of live task quality.
+
+A live selection-only probe fetched the catalog separately for both reviewers,
+called the actual decision service, and passed the selected ids to real child
+processes. The first version selected an older coding model despite newer
+frontier entries. The selector now supplies readable listing dates and canonical
+versions, and explicitly distinguishes current availability from current
+generation. Three subsequent probes selected the current-generation pair, with
+two fresh catalog requests in each. These observations do not establish optimal
+selection, resistance to every misleading catalog entry, or successful task
+completion. The selected worker models were not themselves asked to do work in
+these selection-only probes.
 
 ### Existing native-agent connection
 
@@ -236,6 +281,23 @@ Removing prior reports alone did not resolve the observed failure and was
 not adopted. The review copies did not include earlier post-run test inputs;
 the original run and source hashes were unchanged. This is one controlled
 case, not proof that review context never matters.
+
+A further native comparison retained the original history and clarified that
+reviewers cannot authorize a departure from the requester's requirements.
+Both reviewers still accepted the unwanted blank-row behavior. They also
+accepted a synthetic control that explicitly requested that change. The
+wording did not fix the negative case and was not adopted as a demonstrated
+repair. The original run and source remained unchanged.
+
+A separate fresh line-search task exercised the same native chain: add opt-in
+regular-expression search while preserving literal search, then deliver and
+report. It reached two independent reviews, a local artifact and a report
+without manual intervention. All 13 post-run artifact cases and the generated
+9-test suite passed; packaged source matched the reviewed working source.
+The report nevertheless included an inaccurate explanatory regex example.
+Passing those functional cases is not proof that every report claim is correct,
+and this task does not resolve the earlier CSV failure or demonstrate live
+tracker-to-production delivery.
 
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification

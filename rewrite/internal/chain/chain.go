@@ -12,8 +12,11 @@ import (
 
 // Result records what ran, not whether its answer deserves to proceed.
 type Result struct {
-	Role        string    `json:"role"`
-	Speaker     string    `json:"speaker"`
+	Role    string `json:"role"`
+	Speaker string `json:"speaker"`
+	// Model is the endpoint requested for this process, not a quality mark or
+	// proof of which provider ultimately served the request.
+	Model       string    `json:"model,omitempty"`
 	Output      string    `json:"output"`
 	Instruction string    `json:"instruction,omitempty"`
 	Diagnostics string    `json:"diagnostics,omitempty"`

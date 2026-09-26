@@ -21,9 +21,10 @@ type config struct {
 		Decision chain.Jev `json:"decision"`
 		LLM      chain.Jev `json:"llm"`
 	} `json:"router"`
-	Instructions string          `json:"instructions"`
-	Roles        []chain.Role    `json:"roles"`
-	Backlog      tracker.Backlog `json:"backlog"`
+	Instructions   string           `json:"instructions"`
+	Roles          []chain.Role     `json:"roles"`
+	Backlog        tracker.Backlog  `json:"backlog"`
+	ModelSelection *selectionConfig `json:"model_selection,omitempty"`
 }
 
 func main() {
@@ -106,9 +107,13 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	default:
 		return errors.New("choose router.mode jev or llm")
 	}
+	executor := chain.Processes{Roles: roles}
+	if cfg.ModelSelection != nil {
+		executor.SelectModel = cfg.ModelSelection.choose
+	}
 	engine := chain.Chain{
 		Router:   router,
-		Executor: chain.Processes{Roles: roles}, Store: store,
+		Executor: executor, Store: store,
 		Observe: observe,
 	}
 	return engine.Run(ctx)
