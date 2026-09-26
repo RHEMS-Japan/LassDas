@@ -133,6 +133,20 @@ posting or unattended restart reconciliation has been validated yet.
 The new command is tested as a real subprocess against a local TLS tracker,
 including verbatim prose publication and readback. This is not live delivery.
 
+An isolated native-agent run has now read an issue through the public intake
+path, performed work and two review rounds, delivered a local artifact, and
+used this command to post its prose report to a tracker fixture. The first
+submission stored the comment but returned HTTP 503. The reporting agent
+inspected the actual comments, confirmed the unchanged report was present,
+and did not repeat the POST. One comment was stored. This establishes that
+observed recovery in a mock service, not real-service permissions, restart
+reconciliation, or general exactly-once delivery.
+
+The router nevertheless chose done with an unmet preservation requirement:
+the artifact still dropped empty-value rows in four independently reproduced
+cases. Its generated tests and the first ten examples passed. Successful
+publication and readback did not make that request complete.
+
 ### Automated checks
 
 ```sh
@@ -213,6 +227,15 @@ and 4,000-token ceiling but `low` versus `max` reasoning still produced done in
 all three trials of each setting. Both chose done on the intended-change routing
 control; none ended through token exhaustion. Raising this reasoning setting alone did
 not fix the observed completion judgment, so it was not adopted as a repair.
+
+A native-review comparison also tested whether earlier role reports caused
+the same error. Two models independently reviewed identical read-only code
+with the original request, first with those reports and then without them.
+Both models accepted the unwanted blank-row behavior in both conditions.
+Removing prior reports alone did not resolve the observed failure and was
+not adopted. The review copies did not include earlier post-run test inputs;
+the original run and source hashes were unchanged. This is one controlled
+case, not proof that review context never matters.
 
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
