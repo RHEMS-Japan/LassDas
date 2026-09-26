@@ -16,10 +16,9 @@ import (
 // An implementing agent that hands the work back used to be the end of the
 // delivery. The report was true and the ending was honest, and it still
 // left a requester who went to bed with a ticket waking up to a question.
-// Three things a report asks for — a decision the ticket did not make, a
-// key, a way into something outside the run — and the requester asked for
-// none of them to come back: decide it, stand something in for it, and go
-// on.
+// Recovery must not ask the requester, but it must also not invent
+// authority: a missing key is not permission to deliver a fake, and an
+// unchanged working tree is not permission to violate a no-change rule.
 //
 // So the report is read, answered here, and the same round is started
 // again. The same round rather than the next one: nothing was produced, so
@@ -27,9 +26,9 @@ import (
 // carry forward. What changes is the instruction, which now carries what
 // the engine decided and the agent's own previous words.
 //
-// What the engine decided is written down before the round starts again.
-// That is what the requester reads at the end — not "the AI asked for a
-// key" but "a stand-in was built and this is what has to be supplied".
+// The recovery instruction is written before the round starts again. The
+// requester reads what was instructed and what was reported missing, not
+// an unverified claim that the obstacle was resolved or a stand-in built.
 //
 // The answering is bounded, and that bound is the whole of what stands
 // between this and a delivery that launches an agent every hour all night

@@ -131,23 +131,20 @@ func ReportText(transcript string) string {
 // and the requester asked for the opposite of that. So after reception
 // nothing is handed back: the round is answered here and started again.
 //
-// Two things a returned report can be short of, and one answer to each.
-// Information the ticket did not settle is answered with the reading that
-// is easiest to defend — the request and the working copy decide it, and
-// what was decided is recorded as an assumption so the report can say it
-// out loud. A key, or a way into something outside the run, is answered
-// with a stand-in: the change is built against a test double so the
-// destination's own commands can still judge it, and what has to be
-// supplied for the real thing is recorded beside it. Neither answer is a
-// question.
+// A returned report does not grant new authority. The next attempt must
+// preserve the original constraints, including a requirement for real
+// integration or an explicit condition that prohibits changes. This code
+// has not inspected that contract or verified the report's claims, so it
+// records a request to recheck rather than a default or substitute already
+// adopted. An unchanged tree is still not a verified completion.
 
 const (
 	// AssumptionImplementerReturn is the reading the engine put in place of
 	// what a returned report said was missing.
 	AssumptionImplementerReturn = "implementer_return"
-	// AssumptionCredentialSubstituted is a stand-in put where a key or a
-	// way into an outside service was asked for, with what must be supplied
-	// for the real thing recorded beside it.
+	// AssumptionCredentialSubstituted is retained for historical records.
+	// A report mentioning a credential is not evidence that a stand-in was
+	// authorized, built, or delivered; new return answers do not use it.
 	AssumptionCredentialSubstituted = "credential_substituted"
 )
 
@@ -270,15 +267,11 @@ func (r *ReturnedRound) Assumptions() []ReadinessAssumption {
 // the engine makes itself, or a return it will not answer, which its caller
 // hands to the ladder.
 //
-// The engine writes the answer itself rather than asking a model. The
-// decision does not vary: the work is never handed back, missing
-// information takes the most defensible reading, and a key becomes a
-// stand-in. A model would be paid to restate a rule that is already written
-// down, once per return, inside the attendant's own loop — and a returned
-// round has neither a sealed candidate nor a sealed review, which is what
-// the arbiter seat reads. The arbiter rules on rounds that produced
-// something and disagreed about it; this is a round that produced nothing,
-// and the answer to it is policy rather than judgement.
+// The engine writes the recovery constraints rather than asking a model
+// to restate them. It does not decide what the original contract allows:
+// the implementer must reread it and inspect the reported obstacle. In
+// particular, a missing credential does not authorize a fake delivery,
+// and producing a diff is not authority to violate a no-change condition.
 //
 // Two returns are not answered. One that repeats a report already answered,
 // at any attempt, because the answer has plainly not moved the implementer
@@ -332,12 +325,9 @@ func boundedReport(report string) string {
 // returnSupplyMarkers are the words a report uses when what it was missing
 // is a key or a way into something outside the run.
 //
-// A plain word match, over a report that has already been through
-// ReportText. It is deliberately loose in one direction only: a line that
-// matches but meant something else costs one quoted line and a differently
-// named assumption, while a line that does not match still gets the
-// stand-in, because the instruction states that rule for every return. So
-// there is no reading of a report that sends the work back.
+// A plain word match over ReportText, used only to quote what the agent
+// reported. A match neither proves that a credential is missing nor
+// authorizes a substitute or a request for one.
 var returnSupplyMarkers = []string{
 	"api key", "api_key", "apikey", "access key", "access token",
 	"secret", "credential", "password", "oauth",
@@ -387,22 +377,29 @@ func boundedSupplyLine(line string) string {
 	return strings.TrimSpace(kept)
 }
 
-// returnAssumption is what the engine put in place of what the report said
-// it lacked, in the terms the requester's own report is built from.
+// returnAssumption records what the engine instructed, not work it has not
+// observed. The report remains evidence of what the agent said, not proof
+// that the obstacle is real or that it has been resolved.
 func returnAssumption(returned ReturnedWork) ReadinessAssumption {
 	evidence := fmt.Sprintf("実装役の報告 (%d 回目、報告の指紋 %s)", returned.Attempt, shortDigest(returned.ReportSHA256))
 	if len(returned.Supply) > 0 {
-		return ReadinessAssumption{
-			Kind:      AssumptionCredentialSubstituted,
-			Statement: "鍵や外部サービスへの接続が要ると報告された点は、本物を使わずに代役を実装して検証を通し、本物として供給すべきものを報告に残す。",
-			Evidence:  evidence + " が挙げた不足: " + strings.Join(returned.Supply, " / "),
-		}
+		evidence += " が挙げた不足 (未検証): " + strings.Join(returned.Supply, " / ")
 	}
 	return ReadinessAssumption{
 		Kind:      AssumptionImplementerReturn,
-		Statement: "情報が足りないと報告された点は、依頼と作業コピーの中で最も擁護できる既定を採用して進める。",
+		Statement: "元の依頼・設計・変更範囲・検収条件を変えず、不足の報告を根拠と照合して再試行するよう指示した。代用品の採用や不足の解消を確認したわけではない。",
 		Evidence:  evidence,
 	}
+}
+
+// ContinuationInstruction renders today's recovery rules even for a record
+// written by an older engine. The historical instruction remains on disk
+// as evidence, but is not reissued as authority to weaken the contract.
+func (r ReturnedWork) ContinuationInstruction() string {
+	if !r.Answered {
+		return ""
+	}
+	return returnInstruction(r)
 }
 
 // shortDigest is a digest at the length a person reads it at.
@@ -417,10 +414,11 @@ func shortDigest(digest string) string {
 // language, as a requirement rather than an option.
 func returnInstruction(returned ReturnedWork) string {
 	lines := []string{
-		"前の実行では、作業コピーを変更せずに理由だけを報告して終えました。この自動化に作業を返す先はありません。同じ巡をもう一度実行しますので、今回は次のとおり進めてください。",
-		"- 依頼に書かれていない点は、依頼と作業コピーの中で最も擁護できる既定を自分で選び、選んだ理由を最後の報告に書いてください。決められないことを理由に中断しないでください。",
-		"- 鍵・資格情報・外部サービスへの接続が要る点は、本物を使わずに代役 (test double / fake) を実装し、決められた検証が通る状態にしてください。本物として何を供給すべきかは最後の報告に書いてください。運用担当者がそれを読んで用意します。",
-		"- 変更を 1 つも加えずに終了することはできません。",
+		"前の実行では、作業コピーを変更せずに報告して終えました。依頼者へ質問せず、元の依頼を読み直して、報告した障害を根拠と照合してください。同じ巡を再試行します。",
+		"- この再指示は、元の依頼・設計・変更範囲・検収条件・納品先を変更する許可ではありません。元の条件を優先してください。",
+		"- 未指定の実装詳細に限り、依頼と作業コピーの根拠から最も擁護できる既定を選び、その理由を記録してください。明示された条件に反する推測や、存在しない資料の内容の創作はしないでください。",
+		"- 鍵・資格情報・外部サービスの不足は、既に許可された設定と手段の範囲で確かめてください。テスト用の代役 (test double / fake) は、元の依頼が許す範囲の検証にだけ使い、要求された実接続や本番納品の代わりにしてはいけません。権限・予算を増やしたり、運用担当者が後で用意すると約束したりしないでください。",
+		"- 変更禁止の条件を守ってください。変更件数を増やすためだけの編集はしないでください。未解決なら、確かめた根拠と未達の条件を報告し、未実施の検証や未納品を完了と書かないでください。変更が無いというだけで成功にはなりません。",
 	}
 	if len(returned.Supply) > 0 {
 		lines = append(lines, "- 前の実行が不足として挙げたもの: "+strings.Join(returned.Supply, " / "))

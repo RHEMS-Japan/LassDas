@@ -134,17 +134,16 @@ func runRunInstruction(ctx context.Context, args []string) error {
 	outcome, halted, runErr := worker.RunAgentUnlessHaltedWithHomeFiles(ctx, agent, *repoRoot, prompt, consumer.Mode.AllowedFilePrefixes, consumer.Mode.IgnoredByproducts, haltFile, homeFiles, homeToken)
 	emptyAttempts := 0
 	if runErr == nil && !halted && len(outcome.ChangedFiles) == 0 {
-		// The agent finished, wrote nothing, and said it was done: on the
-		// tenth live run the applier described the file it had created in
-		// detail, and the working copy was untouched (2026-09-09). The
-		// working tree is what counts, so it is asked once more with that
-		// fact in front of it — but only when there is room for the note
+		// The agent finished and the working copy is unchanged. That does
+		// not establish what its report claimed or whether the contract
+		// permits changes. It is asked once more to check that observation
+		// against the original conditions — only when there is room for the note
 		// and time for another launch, and the first attempt's record is
 		// written first, so a wall that fires during the second attempt
 		// leaves the first one's evidence behind.
 		retry := prompt + emptyResultRetryNote(haltFile != "")
 		if len(retry) <= designPromptBudget(retry, homeToken) && firstAttemptWasQuick(outcome, agent) {
-			// The attempt that reported work it had not done is kept beside
+			// The attempt that left the working copy unchanged is kept beside
 			// the final record, not in its place: a wall or a failure
 			// during the second launch leaves this behind, and what the
 			// model actually claimed stays readable (the count alone says
@@ -250,11 +249,10 @@ func firstAttemptWasQuick(outcome worker.AgentOutcome, agent worker.AgentConfig)
 	return outcome.Duration < time.Duration(agent.TimeoutSeconds)*time.Second/time.Duration(retryTimeShare)
 }
 
-// emptyResultRetryNote is appended when an agent reported success without
-// touching the working copy. It states the measurement, not a scolding: the
-// engine read the tree and found nothing, so whatever the previous message
-// said, the work is still to do. The design and the objection are named
-// only for the role that has them.
+// emptyResultRetryNote carries the observed unchanged tree, not a guessed
+// interpretation of the report. This launch precedes the returned-work
+// recovery, so it must preserve the original constraints too. The design
+// and objection are named only for the role that has them.
 func emptyResultRetryNote(withDesign bool) string {
 	note := `
 
@@ -262,13 +260,21 @@ func emptyResultRetryNote(withDesign bool) string {
 
 ## The working copy is unchanged
 
-Your previous answer reported the work as done. The engine then read the
-working copy and found no change at all — no new file, no edited file.
-Nothing you described exists.
+The engine read the working copy and found no new or edited file. This
+observation alone does not say what your report claimed or why you made
+no changes. A message describing edits is not an edit.
 
-Only the working copy counts. A message describing edits is not an edit;
-the seal reads the tree. Make the changes now with your tools, one file at
-a time.
+Reread the original request and, when provided, the approved design. This
+retry does not change the writable scope, acceptance criteria or delivery
+target. Honor an explicit no-change condition; do not create a cosmetic
+edit just to produce a diff. Do not invent missing reference material or
+replace required real integration with a fake. Use only the authority and
+resources already provided, without asking the requester.
+
+An unchanged tree is not proof of completion. If permitted changes are
+still needed, make those changes with your tools. Otherwise report the
+evidence you checked and distinguish satisfied conditions from unresolved
+ones; do not claim unperformed verification or delivery.
 
 Write with the absolute paths under "Where the working copy is" above. A
 relative path lands in your own home, not in the working copy, and that
@@ -276,9 +282,10 @@ is the most common reason a change reported as done is not there.
 `
 	if withDesign {
 		note += `
-Start with the first file the design lists. If you cannot make the
-changes, write the objection file the rules above describe instead of
-reporting success.
+When the original conditions permit the designed changes, start with
+the first file the design lists. If the design cannot be applied within
+those conditions, write the objection file the rules above describe
+instead of changing the contract or reporting success.
 `
 	}
 	return note

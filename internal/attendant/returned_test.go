@@ -274,10 +274,9 @@ func TestAReturnedRoundIsAnsweredAndStartedAgain(t *testing.T) {
 	}
 }
 
-// A report that asks for a key is answered the same way: a stand-in is
-// asked for, and what has to be supplied for the real thing is written down
-// where the requester's report is built from — not sent back as a request.
-func TestAReturnAskingForAKeyRecordsTheStandInAndTheSupply(t *testing.T) {
+// A reported missing key is preserved without requesting one or claiming
+// that a substitute has been authorized or built.
+func TestAReturnAskingForAKeyRecordsAConstrainedRetry(t *testing.T) {
 	const report = "外部の決済サービスを呼ぶ必要がありますが、API キーが渡されていません。"
 	setup := newReturnedSetup(t, report)
 	if err := setup.tick(t); err != nil {
@@ -288,14 +287,15 @@ func TestAReturnAskingForAKeyRecordsTheStandInAndTheSupply(t *testing.T) {
 		t.Fatalf("nothing was recorded beside the round: %+v %v", record, err)
 	}
 	answer := record.Latest()
-	if answer.Assumption.Kind != worker.AssumptionCredentialSubstituted {
-		t.Fatalf("the record does not say a stand-in was put in place: %+v", answer.Assumption)
+	if answer.Assumption.Kind != worker.AssumptionImplementerReturn ||
+		!strings.Contains(answer.Assumption.Statement, "確認したわけではない") {
+		t.Fatalf("the record claims an unverified substitution: %+v", answer.Assumption)
 	}
 	if len(answer.Supply) != 1 || !strings.Contains(answer.Supply[0], "API キー") {
 		t.Fatalf("what must be supplied was not recorded: %q", answer.Supply)
 	}
-	if !strings.Contains(answer.Instruction, "代役 (test double / fake)") {
-		t.Fatalf("the round was not told to build a stand-in:\n%s", answer.Instruction)
+	if !strings.Contains(answer.Instruction, "要求された実接続や本番納品の代わりにしてはいけません") {
+		t.Fatalf("the round may substitute a fake for the required delivery:\n%s", answer.Instruction)
 	}
 	if len(setup.fixture.comments.posted) != 0 {
 		t.Fatalf("the requester was asked for a key: %q", setup.fixture.comments.posted)

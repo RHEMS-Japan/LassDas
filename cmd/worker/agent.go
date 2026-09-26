@@ -701,7 +701,7 @@ func implementPrompt(
 		sections = append(sections,
 			"",
 			"### この巡は一度戻ってきています (本体が決めたこと)",
-			returned.Instruction,
+			returned.ContinuationInstruction(),
 			"",
 			"#### 前の実行であなた自身が書いた報告",
 			returned.Report,
