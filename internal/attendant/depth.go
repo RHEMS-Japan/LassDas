@@ -3,8 +3,10 @@ package attendant
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,11 +25,9 @@ import (
 // delivery card is issued — from the destination's `delivery` and from
 // whether this instance has the cards configured to carry it.
 //
-// A destination that asks for more than the instance can carry is not a
-// failure and never becomes one. It is delivered as far as the instance
-// goes, and the difference is written down: on the ticket as one line, and
-// here as a record, so that the step which builds the missing path has
-// something to read.
+// Capability is not completion. If the instance cannot reach the requested
+// depth, the record names what is missing while the same delivery remains
+// open. Restoring the route may change its capability, never its goal.
 
 // deliveryDepthFile is where the decision is sealed, beside the delivery's
 // other records on the volume.
@@ -52,8 +52,7 @@ type depthPlan struct {
 	DecidedAt time.Time `json:"decided_at"`
 }
 
-// short reports whether the delivery stops before the destination asked it
-// to.
+// short reports whether the available route falls short of the goal.
 func (p depthPlan) short() bool { return p.Reached != p.Configured }
 
 // reachesIntegration and reachesProduction say which delivery cards this
@@ -85,10 +84,8 @@ func (p depthPlan) shortfallText() string {
 // planDeliveryDepth decides the depth for one delivery.
 //
 // The destination's configuration is read leniently — the few fields this
-// needs, not the whole typed structure — for the same reason every other
-// read in this package is: the attendant must be able to say something
-// about a delivery whose configuration it cannot fully parse, and a depth
-// it cannot read is the proposal, which changes nothing anywhere.
+// needs, not the whole typed structure. An unreadable depth is an error,
+// not permission to replace the goal with a proposal-only delivery.
 func planDeliveryDepth(config runtime.Config, run state.RunOverview, runDir string) (depthPlan, error) {
 	repository, err := readField(runDir, "ticket-draft.json", "repository")
 	if err != nil {
@@ -129,6 +126,35 @@ func planDeliveryDepth(config runtime.Config, run state.RunOverview, runDir stri
 	return plan, nil
 }
 
+// currentDeliveryPlan preserves the requested repository and depth while
+// rechecking whether the configured route can now carry the delivery. It
+// never changes operator settings or revives a run before enabled_after.
+func currentDeliveryPlan(config runtime.Config, run state.RunOverview, runDir string) (depthPlan, error) {
+	previous, sealed := readDepthRecord(runDir)
+	if !sealed {
+		if _, err := os.Lstat(filepath.Join(runDir, deliveryDepthFile)); !errors.Is(err, os.ErrNotExist) {
+			return depthPlan{}, errors.New("the saved delivery goal is unreadable; keeping the delivery and its evidence")
+		}
+	}
+	current, err := planDeliveryDepth(config, run, runDir)
+	if err != nil {
+		return depthPlan{}, fmt.Errorf("delivery goal recovery is pending: %w", err)
+	}
+	if sealed {
+		if current.Repository != previous.Repository || current.Configured != previous.Configured {
+			return depthPlan{}, errors.New("the current configuration does not match this delivery's recorded goal")
+		}
+		if current.Reached == previous.Reached && slices.Equal(current.Missing, previous.Missing) {
+			return previous, nil
+		}
+		current.DecidedAt = previous.DecidedAt
+	}
+	if err := writeDepthRecord(runDir, current); err != nil {
+		return depthPlan{}, fmt.Errorf("the delivery goal could not be recorded; keeping the delivery open: %w", err)
+	}
+	return current, nil
+}
+
 // consumerDelivery reads one destination's depth out of the destination
 // configuration, applying the same default the typed loader applies: a
 // command-line destination has no environment to reach and proposes, and
@@ -167,23 +193,44 @@ func consumerDelivery(consumerConfigPath, repository string) (string, error) {
 	return "", errors.New("repository is not a configured consumer")
 }
 
-// sealDepthRecord writes the decision down, once. Best-effort by design:
-// the record is what a later step reads to build the missing path, and a
-// volume that refuses the write must not stop the delivery that is
-// otherwise ready to go.
+// sealDepthRecord is the best-effort snapshot used by cancellation: a stop
+// must not wait for storage to recover. New delivery work instead requires
+// currentDeliveryPlan to persist its goal before issuing cards.
 func sealDepthRecord(runDir string, plan depthPlan, logger Logger) depthPlan {
 	if existing, ok := readDepthRecord(runDir); ok {
 		return existing
 	}
-	encoded, err := json.Marshal(plan)
-	if err == nil {
-		err = os.WriteFile(filepath.Join(runDir, deliveryDepthFile), encoded, 0o600)
-	}
-	if err != nil {
+	if err := writeDepthRecord(runDir, plan); err != nil {
 		logger.Error("the delivery depth could not be recorded; the delivery continues",
 			"repository", plan.Repository, "error", err.Error())
 	}
 	return plan
+}
+
+func writeDepthRecord(runDir string, plan depthPlan) error {
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > maxDepthRecordBytes {
+		return errors.New("delivery goal record exceeds its size limit")
+	}
+	file, err := os.CreateTemp(runDir, ".delivery-depth-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if _, err = file.Write(encoded); err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(temporary, filepath.Join(runDir, deliveryDepthFile))
 }
 
 // maxDepthRecordBytes bounds the read. The record is a handful of short
@@ -194,12 +241,25 @@ const maxDepthRecordBytes = 16 * 1024
 // name a depth is no record: a half-written file must not be read as "this
 // delivery proposes and nothing else".
 func readDepthRecord(runDir string) (depthPlan, bool) {
-	encoded, err := os.ReadFile(filepath.Join(runDir, deliveryDepthFile))
-	if err != nil || len(encoded) > maxDepthRecordBytes {
+	encoded, err := worker.ReadBoundedRegularFile(filepath.Join(runDir, deliveryDepthFile), maxDepthRecordBytes)
+	if err != nil {
 		return depthPlan{}, false
 	}
 	var plan depthPlan
 	if json.Unmarshal(encoded, &plan) != nil || plan.SchemaVersion != depthSchemaVersion {
+		return depthPlan{}, false
+	}
+	switch plan.Configured {
+	case string(worker.DeliverPullRequest):
+		if plan.Reached != string(worker.DeliverPullRequest) {
+			return depthPlan{}, false
+		}
+	case string(worker.DeliverIntegration):
+		if plan.Reached == string(worker.DeliverProduction) {
+			return depthPlan{}, false
+		}
+	case string(worker.DeliverProduction):
+	default:
 		return depthPlan{}, false
 	}
 	switch plan.Reached {

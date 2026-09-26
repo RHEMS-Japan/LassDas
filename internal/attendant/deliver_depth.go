@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -500,23 +501,12 @@ func completeDelivery(
 	logger Logger,
 ) error {
 	runDir := runDirectory(config, run.DeliveryID)
-	depth, sealed := readDepthRecord(runDir)
-	if !sealed {
-		decided, err := planDeliveryDepth(config, run, runDir)
-		if err != nil {
-			// The destination's depth cannot be read at all. The change is
-			// published and nothing here can say where else it should go,
-			// so the delivery ends on what it has — which is the proposal,
-			// and the report says so rather than claiming anything more.
-			logger.Error("the delivery depth could not be decided; the delivery ends at its pull request",
-				"run", run.RunID, "error", err.Error())
-			return reportChainSuccess(ctx, config, services, envelope, run, logger)
-		}
-		depth = sealDepthRecord(runDir, decided, logger)
-		if depth.short() {
-			logger.Info("the destination asks for a deeper delivery than this instance can carry",
-				"run", run.RunID, "configured", depth.Configured, "reached", depth.Reached, "missing", depth.Missing)
-		}
+	depth, err := currentDeliveryPlan(config, run, runDir)
+	if err != nil {
+		return err
+	}
+	if depth.short() {
+		return fmt.Errorf("the configured delivery route is incomplete; keeping the delivery open: %s", depth.shortfallText())
 	}
 	if !depth.reachesIntegration() {
 		return reportChainSuccess(ctx, config, services, envelope, run, logger)

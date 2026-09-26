@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"automation.internal/ticket-ingress/internal/hook"
 	"automation.internal/ticket-ingress/internal/runner"
 	"automation.internal/ticket-ingress/internal/runtime"
 	"automation.internal/ticket-ingress/internal/state"
@@ -338,10 +337,7 @@ func TestTheBuiltPathIsCheckedBeforeProduction(t *testing.T) {
 				t.Fatalf("promoted = %v, want %v (log: %v)", promoted, testCase.promotes, h.logger.lines)
 			}
 			if !testCase.promotes {
-				row := h.runRow()
-				if row.State != "terminal" || row.TerminalCode != string(hook.TerminalSuccess) {
-					t.Fatalf("run = %s / %s (log: %v)", row.State, row.TerminalCode, h.logger.lines)
-				}
+				deliveryMustStillBeOpen(t, h)
 				reached, _, shortfall := deliveryOutcome(h.runDir, depthRepository, depthPlanFor(t, h.runDir),
 					map[string]string{"pull_request_url": "https://github.com/example/consumer/pull/9"})
 				if reached != "integration" {
@@ -425,16 +421,20 @@ func TestADestinationEditedOutOfTheConfigurationIsNotPromotedTo(t *testing.T) {
 	if strings.Contains(h.calls(), "deliver:promote") {
 		t.Fatalf("a destination that is no longer configured was promoted to: %s", h.calls())
 	}
-	if reason := releasePathHold(h.runDir); !strings.Contains(reason, "設定から外れている") {
-		t.Fatalf("the reason does not say the destination is gone: %q", reason)
+	deliveryMustStillBeOpen(t, h)
+	if log := strings.Join(h.logger.lines, "\n"); !strings.Contains(log, "repository is not a configured consumer") {
+		t.Fatalf("the reason does not say the destination is gone: %q", log)
 	}
 }
 
-// A configuration that cannot be read at all is a fault rather than an
-// answer, and the promotion goes ahead: every card of the delivery reads
-// the same file and fails on its own terms if it is really broken.
-func TestAnUnreadableConfigurationDoesNotStopThePromotion(t *testing.T) {
+// An unreadable configuration is not permission to promote. Keep the
+// existing delivery and resume it when the same configuration is readable.
+func TestAnUnreadableConfigurationDefersThePromotion(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
+	original, err := os.ReadFile(h.config.ConsumerConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 	h.write(runner.DeliverChecksFile, `{"ok":true}`)
 	h.sealPhase(runner.DeliverStagingReportFile, h.stagingPass())
@@ -442,7 +442,15 @@ func TestAnUnreadableConfigurationDoesNotStopThePromotion(t *testing.T) {
 	if err := os.WriteFile(h.config.ConsumerConfigPath, []byte(`{"consumers":[`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h.tick() // promotes
+	h.tick() // retains the delivery without issuing a promotion
+	deliveryMustStillBeOpen(t, h)
+	if strings.Contains(h.calls(), "deliver:promote") {
+		t.Fatal("an unreadable configuration authorized promotion")
+	}
+	if err := os.WriteFile(h.config.ConsumerConfigPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.tick()
 
 	if !strings.Contains(h.calls(), "deliver:promote") {
 		t.Fatalf("an unlucky read stopped a healthy delivery: %s (log: %v)", h.calls(), h.logger.lines)

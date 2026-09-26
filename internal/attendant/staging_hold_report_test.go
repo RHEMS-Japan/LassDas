@@ -8,14 +8,10 @@ import (
 	"automation.internal/ticket-ingress/internal/runner"
 )
 
-// A delivery held at staging tells the requester one thing, and it is true.
-//
-// The comment this covers used to say both「本番への反映は、下に書いた設定が
-// 揃えば自動で行います」and「本番への反映は人が行います」in the same breath,
-// for a run that was already terminal and would never issue another
-// promotion card. It also called the hold a matter of settings when the
-// hold was a production branch carrying changes staging does not have.
-func TestAHeldStagingEndingPromisesNothingAutomatic(t *testing.T) {
+// A held staging result is neither production nor a completed request.
+// Do not claim completion, promise recovery not yet implemented, or label
+// a diverged production branch as merely missing settings.
+func TestAHeldStagingDeliveryDoesNotClaimCompletion(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
 	writeAcceptedReception(t, h, "一覧を絞り込めるようにする")
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
@@ -23,42 +19,41 @@ func TestAHeldStagingEndingPromisesNothingAutomatic(t *testing.T) {
 	h.sealPhase(runner.DeliverStagingReportFile, h1StagingHold())
 
 	h.tick() // posts the staging report
-	h.tick() // reads the hold and ends the run
+	h.tick() // reads the hold without treating staging as the goal
 
-	row := h.runRow()
-	if row.State != "terminal" || row.TerminalCode != string(hook.TerminalSuccess) {
-		t.Fatalf("run = %s / %s, want a terminal success (log: %v)", row.State, row.TerminalCode, h.logger.lines)
-	}
+	deliveryMustStillBeOpen(t, h)
 	if strings.Contains(h.calls(), "deliver:promote") {
 		t.Fatalf("a held promotion ran: %s", h.calls())
 	}
-	comment := (*h.posted)[len(*h.posted)-1]
+	comment := strings.Join(*h.posted, "\n")
+	if strings.Contains(comment, hook.TerminalMarkerPrefix(depthRunID)) {
+		t.Fatal("a held production delivery posted a final comment")
+	}
 
-	// Nothing in a finished run reaches production later on its own.
+	// Resolving a sealed promotion hold is not implemented yet.
 	for _, promise := range []string{"設定が揃えば自動で", "自動で行います"} {
 		if strings.Contains(comment, promise) {
 			t.Errorf("the ending still promises production automatically (%q):\n%s", promise, comment)
 		}
 	}
-	// And the same comment does not also hand the job to a person: two
-	// instructions for one delivery is the contradiction this is about.
+	// Do not hand off a supposedly completed delivery to a person either.
 	if strings.Contains(comment, "本番への反映は人が行います") {
 		t.Errorf("the ending gives a second, contradicting instruction:\n%s", comment)
 	}
-	// What it does say: the run is over and production was not reached.
+	// The request is still open. A held route is not a completed delivery.
 	for _, said := range []string{
 		"この実行はここで終わりで、本番へは届いていません",
 		"この実行が後から自動で本番へ反映することはありません",
 		"staging の表示をご確認ください（この実行は本番へ届いておらず、ここで終了しています）",
 	} {
-		if !strings.Contains(comment, said) {
-			t.Errorf("the ending does not say %q:\n%s", said, comment)
+		if strings.Contains(comment, said) {
+			t.Errorf("the open delivery claims to have ended (%q):\n%s", said, comment)
 		}
 	}
 	// The reason is the hold that actually held it, and it is not called a
 	// missing setting.
-	if !strings.Contains(comment, "ここまでで止まった理由: 本番にはステージングに無い変更が入っています（分岐状態）。") {
-		t.Errorf("the stated reason is not the hold that held it:\n%s", comment)
+	if log := strings.Join(h.logger.lines, "\n"); !strings.Contains(log, h1StagingHold().PromotionHold) {
+		t.Errorf("the unfinished delivery lost its hold reason: %s", log)
 	}
 	if strings.Contains(comment, "そこまで運ぶ設定がこの環境に揃っていない") {
 		t.Errorf("a diverged production branch is described as missing settings:\n%s", comment)
