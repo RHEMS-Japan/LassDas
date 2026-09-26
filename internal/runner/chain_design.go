@@ -26,23 +26,19 @@ import (
 // from: the record the reception sealed is not on the volume, or is not
 // readable as a decision.
 //
-// It is told apart from every other reason the shape is unavailable
-// because it is the only one a delivery can come back from. A pod with no
-// design profiles will have none on the next tick either, and a
-// destination that configures no applier launch configures none a minute
-// later; both are an instance an operator has to change. This one is a
-// file, derived from the ticket by the reception, and the reception can
-// derive it again (internal/attendant/reception_again.go).
+// Recovery first uses the accepted decision's sealed copy, then complete
+// checked inputs from older runs (reception_record.go). This error means
+// neither is currently usable. The attendant keeps the claim and existing
+// cards, so restoration can resume without questions or a fresh reception.
 var ErrReadinessDecisionUnreadable = errors.New("the readiness decision cannot be read")
 
 // ChainPlanFromDecision derives the chain's shape from the sealed readiness
 // decision and the consumer's switches. It is the one place the mode is
 // decided (§6: request_kind and needs_design, nothing else).
 func ChainPlanFromDecision(runDir string, consumerConfigPath string) (runtime.ChainPlan, error) {
-	decision := filepath.Join(runDir, "history", "readiness", "decision.json")
-	raw, err := os.ReadFile(decision)
+	raw, err := receptionRecord(runDir, consumerConfigPath)
 	if err != nil {
-		return runtime.ChainPlan{}, fmt.Errorf("%w: %s", ErrReadinessDecisionUnreadable, "not on the volume")
+		return runtime.ChainPlan{}, err
 	}
 	var parsed struct {
 		RequestKind string `json:"request_kind"`

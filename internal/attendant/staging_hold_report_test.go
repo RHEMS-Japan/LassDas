@@ -17,7 +17,7 @@ import (
 // hold was a production branch carrying changes staging does not have.
 func TestAHeldStagingEndingPromisesNothingAutomatic(t *testing.T) {
 	h := newDepthHarness(t, "production", true, "")
-	h.write("readiness-ticket.json", `{"request":"一覧を絞り込めるようにする"}`)
+	writeAcceptedReception(t, h, "一覧を絞り込めるようにする")
 	h.setBoard(h.card(deliverStageChecks, "done", 1), h.card(deliverStageIntegrate, "done", 1))
 	h.write(runner.DeliverChecksFile, `{"ok":true}`)
 	h.sealPhase(runner.DeliverStagingReportFile, h1StagingHold())

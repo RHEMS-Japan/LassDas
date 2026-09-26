@@ -346,20 +346,19 @@ func TestTheDesignStageIsHandedTheRequestersAnswers(t *testing.T) {
 	argvOf := func(t *testing.T, withAnswers bool) (string, string) {
 		t.Helper()
 		pipeline := chainStagePipeline(t)
+		pipeline.Workspace, pipeline.Config.ConsumerConfigPath, _ = receptionRecoveryFixture(t)
 		record := filepath.Join(t.TempDir(), "worker.log")
 		fake := filepath.Join(t.TempDir(), "fake-worker")
 		if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+record+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		pipeline.Config.WorkerBin = fake
-		pipeline.Config.ConsumerConfigPath = "/etc/consumer.json"
 		pipeline.Config.Identity.EngineSHA = strings.Repeat("a", 40)
 		if err := os.MkdirAll(pipeline.designRoundDir(1), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range []string{
 			filepath.Join(pipeline.designRoundDir(1), "investigation.json"),
-			pipeline.path("readiness-ticket.json"),
 			pipeline.path("ticket-draft.json"),
 		} {
 			if err := os.WriteFile(name, []byte(`{}`), 0o600); err != nil {
@@ -378,10 +377,6 @@ func TestTheDesignStageIsHandedTheRequestersAnswers(t *testing.T) {
 		// The designer's own call: a round it has not sealed yet, and a
 		// readiness decision that asks for a design.
 		if err := os.MkdirAll(filepath.Join(pipeline.path("history"), "readiness"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pipeline.path("history"), "readiness", "decision.json"),
-			[]byte(`{"request_kind":"change","needs_design":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(filepath.Join(pipeline.designRoundDir(1), "investigation.json")); err != nil {

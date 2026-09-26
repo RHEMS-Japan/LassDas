@@ -412,20 +412,24 @@ func startQueuedRun(
 		}
 		return terminal.Report(ctx, hook.TerminalCancelled, runner.Outcome{Code: hook.TerminalCancelled}, repository)
 	}
+	return startAcceptedChain(ctx, config, services, hermes, run, pipeline, logger)
+}
+
+// Shared by the reception's first handoff and a claimed run interrupted
+// before its first card. Neither path repeats the reception or discards
+// its records if deriving the plan needs recovery.
+func startAcceptedChain(ctx context.Context, config runtime.Config, services *runtime.Services,
+	hermes *runtime.Hermes, run state.RunOverview, pipeline *runner.Pipeline, logger Logger) error {
+	runDir := pipeline.Workspace
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
-		// A decision that cannot be read is not a decision that cannot be
-		// made, so the reception makes it again rather than the delivery
-		// ending on a corrupted file (reception_again.go). No card exists
-		// yet: returning leaves a claim with no chain, which the next tick
-		// puts back in the queue, and the tick after that runs the
-		// reception from the ticket.
-		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
-			return nil
+		if errors.Is(err, runner.ErrReadinessDecisionUnreadable) {
+			return fmt.Errorf("accepted reception recovery is pending; keeping the claim: %w", err)
 		}
 		// Fail closed: a request the decision routed to the investigating
 		// designer must not be handed to the implementer instead.
 		logger.Error("chain shape unavailable; ending honestly", "run", run.RunID, "error", err.Error())
+		terminal := runner.NewTerminal(config, services, pipeline.Envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)
 		return terminal.Report(ctx, hook.TerminalInternalFailed, runner.Outcome{Code: hook.TerminalInternalFailed}, pipeline.Repository())
 	}
 	if plan.Shape == runtime.ShapeImplement {
@@ -443,10 +447,10 @@ func startQueuedRun(
 }
 
 // chainPlanFor reads the shape the readiness decision asks for. It fails
-// closed: a decision that cannot be read, or a shape whose profiles the pod
-// does not have, is an error the caller ends the run with — the decision
-// said "investigate" or "design first", and running the implementer instead
-// would silently do something else with the requester's ticket.
+// closed: a decision that cannot be restored stays pending; a shape whose
+// profiles the pod does not have still reaches the configuration failure
+// path. Neither may silently run the implementer when the decision said
+// "investigate" or "design first".
 func chainPlanFor(config runtime.Config, runDir string, run state.RunOverview, logger Logger) (runtime.ChainPlan, error) {
 	plan, err := runner.ChainPlanFromDecision(runDir, config.ConsumerConfigPath)
 	if err != nil {
@@ -565,7 +569,7 @@ func advanceClaimedRun(
 	if handled, err := honourStopNow(ctx, config, services, hermes, run, view, runDir, logger); handled || err != nil {
 		return err
 	}
-	if !view.hasChain() {
+	if !view.hasChain() && !runner.ReceptionStarted(runDir) {
 		logger.Info("claimed run has no chain; requeueing", "run", run.RunID)
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
@@ -613,20 +617,17 @@ func advanceClaimedRun(
 		}
 		return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
 	}
+	if !view.hasChain() {
+		pipeline := &runner.Pipeline{Config: config, Services: services, Envelope: envelope, Workspace: runDir, Logger: logger}
+		return startAcceptedChain(ctx, config, services, hermes, run, pipeline, logger)
+	}
 	plan, err := chainPlanFor(config, runDir, run, logger)
 	if err != nil {
-		// The same restart the two changes above make, for the same
-		// reason: what this delivery cannot read is a record it can have
-		// derived again, and ending it would end it on nothing anybody
-		// decided (reception_again.go). Once — a delivery already carrying
-		// the note ends below.
-		if receptionAgainFor(err, runDir, time.Now().UTC(), run.RunID, logger) {
-			for _, task := range view.all {
-				if archiveErr := hermes.Archive(ctx, task.ID); archiveErr != nil {
-					return archiveErr
-				}
-			}
-			return services.Store.RecoverLostClaim(ctx, run.Key, run.ClaimedAt, time.Now().UTC())
+		if errors.Is(err, runner.ErrReadinessDecisionUnreadable) {
+			// Recovery already tried the sealed copy and checked inputs.
+			// An unavailable volume is not a failed request. Keep the
+			// exact cards and evidence; retry restoration on the next tick.
+			return fmt.Errorf("accepted reception recovery is pending; keeping the chain: %w", err)
 		}
 		logger.Error("chain shape unavailable for a claimed run; ending honestly", "run", run.RunID, "error", err.Error())
 		terminal := runner.NewTerminal(config, services, envelope, chainOwnerRunID(run.DeliveryID), runDir, logger)

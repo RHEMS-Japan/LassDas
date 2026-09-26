@@ -12,7 +12,7 @@
 
 1. **[README.md](../README.md) の「いまの契約」** — いま動いているものの正本。巡・停滞の裁定・はしご・質問・Go・終端条件と、その設定と既定
 2. **各変更の commit** — 1 コミット 1 文の主語のある文で、なぜそう変えたかが本文に入っている。下の 12 本がその単位
-3. **コード内のコメント** — この repo は「なぜそうなっているか」をコードの隣に置く方針で書かれている。`internal/attendant/ladder.go`、`internal/attendant/stagnation.go`、`internal/attendant/depth.go`、`internal/attendant/reception_again.go`、`internal/hook/report_service.go` の先頭コメントは、それぞれの機構の設計文書そのもの
+3. **コード内のコメント** — この repo は「なぜそうなっているか」をコードの隣に置く方針で書かれている。`internal/attendant/ladder.go`、`internal/attendant/stagnation.go`、`internal/attendant/depth.go`、`internal/runner/reception_record.go`、`internal/hook/report_service.go` の先頭コメントは、それぞれの機構の設計文書そのもの
 
 領域ごとの文書は `docs/` にある。導入は [SETUP.md](SETUP.md)、依頼を出す人向けは [OPERATING.md](OPERATING.md) と [TICKET_AUTHORING.md](TICKET_AUTHORING.md)、製品の方向は [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md)、設計役の仕様は [INVESTIGATING_DESIGNER.md](INVESTIGATING_DESIGNER.md)。
 
@@ -44,6 +44,8 @@
 ### 完成へ進める裁定と復旧
 
 レビューの往復検知は、既存の裁定を呼ぶ条件の修正であり、納品の保証ではない。裁定役には現在の候補・指摘・依頼と、検査済みの過去の試行履歴を渡し、実際に渡した材料を裁定記録に残すようになった。チェーンからの引き渡し、実際の worker CLI の送信内容、壊れた記録・別依頼・履歴の上限・改変の検知は自動試験で確認する。**モデルがその材料から有効な代案を選んで納品できるかは実機で未検証。** 裁定役自身によるリポジトリ調査もまだ無い。指摘コード自体が毎回変わる往復は検知できない。期限・回数・内部エラーで終わる経路は残り、これらを失敗報告や同じ処理の無限反復ではなく、許可された範囲内での完成へ変えることが未達事項である。依頼の明示的な変更範囲を裁定役の「前提」で広げて達成扱いにはしない。
+
+受付済み判定の破損は `internal/runner/reception_record.go` で保存済みの判定または検算済みの材料から復元する。カードを捨てたり受付へ戻したりはせず、最初のカード作成前の中断も同じ引き渡し処理で再開する。判定役の答え・設計要否の保持、異なる依頼や改変済み記録の拒否、繰り返す破損、復元待機中の停止を自動試験で確かめる。実機への反映と障害注入は未確認。復元材料そのものをすべて失った場合は保持して待つだけであり、完成へ至る自動復旧は引き続き未達。
 
 ### ダイジェストのコミットを作る段
 
