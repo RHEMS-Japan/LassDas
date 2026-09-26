@@ -734,9 +734,10 @@ func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []strin
 	// instead, so they belong at the head of the list the requester reads
 	// for exactly that.
 	var sealed struct {
-		Fallback          bool            `json:"fallback"`
-		Assumptions       []runAssumption `json:"assumptions"`
-		ReceptionJudgment *struct {
+		Fallback            bool            `json:"fallback"`
+		InconclusiveReading bool            `json:"inconclusive_reading"`
+		Assumptions         []runAssumption `json:"assumptions"`
+		ReceptionJudgment   *struct {
 			Confidence float64 `json:"confidence"`
 		} `json:"reception_judgment"`
 	}
@@ -756,9 +757,10 @@ func receptionAssumptions(runDir string, notes *outcomeNotes) ([]string, []strin
 			}
 		}
 	}
-	// A fallback gate deliberately discarded the unfinished assessment/check
-	// chain. Keep those files as evidence, not as assumptions of the work.
-	for attempt := readinessAssessmentAttempts; !sealed.Fallback && attempt >= 1; attempt-- {
+	// Unusable or inconclusive readings are evidence, not accepted assumptions
+	// of the work. In particular, a failed check must not reappear here as a
+	// decision made on the requester's behalf.
+	for attempt := readinessAssessmentAttempts; !sealed.Fallback && !sealed.InconclusiveReading && attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []runAssumption `json:"assumptions"`
 		}

@@ -63,11 +63,12 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	// questions are dropped, which is after the assessment below was
 	// sealed, so the assessment knows nothing about them.
 	var decision struct {
-		Fallback     bool   `json:"fallback"`
-		NeedsDesign  bool   `json:"needs_design"`
-		DesignReason string `json:"design_reason"`
-		RequestKind  string `json:"request_kind"`
-		Assumptions  []struct {
+		InconclusiveReading bool   `json:"inconclusive_reading"`
+		Fallback            bool   `json:"fallback"`
+		NeedsDesign         bool   `json:"needs_design"`
+		DesignReason        string `json:"design_reason"`
+		RequestKind         string `json:"request_kind"`
+		Assumptions         []struct {
 			Kind      string `json:"kind"`
 			Statement string `json:"statement"`
 		} `json:"assumptions"`
@@ -95,9 +96,8 @@ func loadPlanFacts(runDir string) hook.PlanFacts {
 	if line := receptionAgainAssumption(runDir); line != "" {
 		facts.Assumptions = append(facts.Assumptions, line)
 	}
-	// The gate made without readers supersedes their abandoned assumptions.
-	// Their files remain useful to an operator, but are not the plan's facts.
-	for attempt := readinessAttempts; !decision.Fallback && attempt >= 1; attempt-- {
+	// Unusable or inconclusive readings remain evidence, not adopted facts.
+	for attempt := readinessAttempts; !decision.Fallback && !decision.InconclusiveReading && attempt >= 1; attempt-- {
 		var assessment struct {
 			Assumptions []struct {
 				Kind      string `json:"kind"`

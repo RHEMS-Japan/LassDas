@@ -64,8 +64,9 @@ const (
 
 	// ReadinessAssessorUnresolvable is the assessor's own decision that a
 	// blocking ambiguity cannot be reduced to 2-4 bounded choices (or that
-	// required credentials are missing). It never surfaces questions and maps
-	// to the readiness_unresolved outcome for the operator.
+	// required credentials are missing). It never surfaces questions. The
+	// engine retains that reading and continues with the original request;
+	// the reading is not permission to expand scope or bypass credentials.
 	ReadinessAssessorUnresolvable = "unresolvable"
 
 	ReadinessOutcomeReady         = "ready"
@@ -394,12 +395,17 @@ type ReadinessDecision struct {
 	// Absent from every decision whose reader did not refuse, which keeps
 	// those decisions' sealed bytes, and the digests bound to them, exactly
 	// what they were.
-	RejectedReading  string `json:"rejected_reading,omitempty"`
-	RequestKind      string `json:"request_kind"`
-	NeedsDesign      bool   `json:"needs_design"`
-	DesignReason     string `json:"design_reason"`
-	ApproachInTicket bool   `json:"approach_in_ticket"`
-	ApproachExcerpt  string `json:"approach_excerpt,omitempty"`
+	RejectedReading string `json:"rejected_reading,omitempty"`
+	// InconclusiveReading records that the checked reception could not settle
+	// the request. The original request continues without adopting unchecked
+	// questions or assumptions. The complete chain and its design judgment
+	// remain bound below. Omission preserves previously sealed decisions.
+	InconclusiveReading bool   `json:"inconclusive_reading,omitempty"`
+	RequestKind         string `json:"request_kind"`
+	NeedsDesign         bool   `json:"needs_design"`
+	DesignReason        string `json:"design_reason"`
+	ApproachInTicket    bool   `json:"approach_in_ticket"`
+	ApproachExcerpt     string `json:"approach_excerpt,omitempty"`
 	// Fallback marks a gate the engine decided without its readers: every
 	// answer both of them gave was unusable. It is omitted from every
 	// decision they did answer, which keeps those decisions' sealed bytes —
@@ -1040,8 +1046,9 @@ func sealedReceptionOutcome(final ReadinessAssessment) (outcome string, question
 // DecideReadiness seals the gate outcome from complete assessment/check pairs.
 // A checker failure on a non-final attempt is not decidable yet: the caller
 // must rerun the assessor until the attempt limit, then decide. A checker
-// failure on the final attempt resolves to readiness_unresolved and never
-// surfaces unchecked questions to the requester.
+// failure on the final attempt never surfaces unchecked questions. If no
+// checked question survives, the original request continues with an explicit
+// inconclusive reading, not a failed delivery or an invented interpretation.
 func DecideReadiness(ctx context.Context, assessments []ReadinessAssessment, checks []ReadinessCheck, source SourceSnapshot, request TicketRequest, config Config, judge ReceptionJudge) (ReadinessDecision, error) {
 	if err := source.Validate(request, config); err != nil ||
 		len(assessments) == 0 || len(assessments) > MaxReadinessAttempts || len(assessments) != len(checks) {
@@ -1112,6 +1119,10 @@ func DecideReadiness(ctx context.Context, assessments []ReadinessAssessment, che
 			decision.ReceptionJudgment = judgment
 			decision.Outcome, decision.Questions, decision.Assumptions = outcome, questions, settled
 		}
+	}
+	if decision.Outcome == ReadinessOutcomeUnresolved {
+		decision.Outcome = ReadinessOutcomeReady
+		decision.InconclusiveReading = true
 	}
 	digest, err := readinessDecisionDigest(decision)
 	if err != nil {
@@ -1496,6 +1507,12 @@ func (d ReadinessDecision) Validate(assessments []ReadinessAssessment, checks []
 	if err != nil {
 		return err
 	}
+	if d.InconclusiveReading {
+		if rederived.Outcome != ReadinessOutcomeUnresolved {
+			return errors.New("readiness decision has no inconclusive reading")
+		}
+		rederived.Outcome = ReadinessOutcomeReady
+	}
 	if d.Outcome != rederived.Outcome || d.RejectCode != rederived.RejectCode ||
 		d.RejectedReading != rederived.RejectedReading {
 		return errors.New("readiness decision outcome is invalid")
@@ -1540,6 +1557,11 @@ func (d ReadinessDecision) ValidateBinding(source SourceSnapshot, request Ticket
 		d.ConfigSHA256 != request.ConfigSHA256 || d.ToolSHA != request.ToolSHA || d.SourceSHA256 != source.SourceSHA256 ||
 		!sha256Pattern.MatchString(d.DecisionSHA256) {
 		return errors.New("readiness decision identity is invalid")
+	}
+	if d.InconclusiveReading && (d.Fallback || d.Outcome != ReadinessOutcomeReady ||
+		len(d.Questions) != 0 || len(d.Assumptions) != 0 || d.ReceptionJudgment != nil ||
+		d.RejectCode != "" || d.RejectedReading != "") {
+		return errors.New("an inconclusive reading settles no interpretation of the request")
 	}
 	if d.Fallback {
 		if err := d.validateDecidedWithoutReaders(); err != nil {

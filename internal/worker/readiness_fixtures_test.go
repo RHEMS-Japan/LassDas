@@ -33,11 +33,12 @@ type readinessFixture struct {
 	// outcome — the engine has no entrance that turns a request away for what
 	// it says — so the fixture declares both what the gate seals and what the
 	// reader balked at.
-	ExpectedRejectedReading   string   `json:"expected_rejected_reading"`
-	AllowedDimensions         []string `json:"allowed_dimensions"`
-	MaxQuestions              int      `json:"max_questions"`
-	WithResolvedClarification bool     `json:"with_resolved_clarification,omitempty"`
-	Note                      string   `json:"note"`
+	ExpectedRejectedReading     string   `json:"expected_rejected_reading"`
+	ExpectedInconclusiveReading bool     `json:"expected_inconclusive_reading,omitempty"`
+	AllowedDimensions           []string `json:"allowed_dimensions"`
+	MaxQuestions                int      `json:"max_questions"`
+	WithResolvedClarification   bool     `json:"with_resolved_clarification,omitempty"`
+	Note                        string   `json:"note"`
 }
 
 func loadReadinessFixtures(t *testing.T) []readinessFixture {
@@ -113,6 +114,9 @@ func expectedAssessorResponse(t *testing.T, fixture readinessFixture) string {
 	// entrance that turns a request away for what it says.
 	if fixture.ExpectedRejectedReading != "" {
 		return `{"decision":"reject","questions":[],"assumptions":[],"reject_code":"` + fixture.ExpectedRejectedReading + `"` + design
+	}
+	if fixture.ExpectedInconclusiveReading {
+		return `{"decision":"unresolvable","questions":[],"assumptions":[],"reject_code":""` + design
 	}
 	switch fixture.ExpectedDecision {
 	case ReadinessOutcomeReady:
@@ -195,7 +199,7 @@ func TestReadinessFixturesAreExecutableAndGateCorrectly(t *testing.T) {
 				t.Fatalf("DecideReadiness() error = %v", err)
 			}
 			if decision.Outcome != fixture.ExpectedDecision || decision.RejectCode != fixture.ExpectedRejectCode ||
-				decision.RejectedReading != fixture.ExpectedRejectedReading {
+				decision.RejectedReading != fixture.ExpectedRejectedReading || decision.InconclusiveReading != fixture.ExpectedInconclusiveReading {
 				t.Fatalf("decision = %+v, want %s/%s/%s", decision,
 					fixture.ExpectedDecision, fixture.ExpectedRejectCode, fixture.ExpectedRejectedReading)
 			}

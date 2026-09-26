@@ -830,17 +830,17 @@ AI が利用者へ質問できるのは、次の 4 条件をすべて満たす�
 
 **質問には原則として結果の異なる 2〜4 個の選択肢を付ける。** 起票者が 1 行で答えられる形にし、考える作業を押し戻さない。選択肢を出せるということは、取りうる案を洗い出し終えているということでもある。洗い出せていないまま「どうしますか」と聞くのは判断の丸投げになる。
 
-**選択肢を立てられないことが明確な場合に限り、自由記述で問い返してよい。** その場合はコメントにその旨を明示し、証拠に残す（システムが案を出せなかったという事実を隠さない）。それでも整理できない不明点は `readiness_unresolved` として operator へ渡す。変数名、CSS の手段、component の内部構成、test の実装方法、既存 source から分かること、任意改善、結果を変えない好みは質問しない。API key、password、private key、token、cookie その他の credential / secret を質問したり、Backlog へ貼るよう求めたりしない。資格情報が不足している場合は利用者への要件質問ではなく operator configuration failure として停止する。新しい CI/CD、release controller、IAM / RBAC、repository governance、許可範囲外の変更が必要な場合は、質問によってその場で scope を広げず `out_of_scope` として停止する。
+受付が不明点を質問にまとめられなかった場合や、検算が上限まで合格しなかった場合も、その判定だけで依頼を終了しない。`inconclusive_reading` を記録した `ready` として、元の依頼文と制約を次の担当へ渡す。未検証の質問・前提は採用せず、必要な設計工程と判定・検算の全記録を保持する。これは不明点が解消したという判定ではない。変数名、CSS の手段、component の内部構成、test の実装方法、既存 source から分かること、任意改善、結果を変えない好みは質問しない。API key、password、private key、token、cookie その他の credential / secret を質問したり、Backlog へ貼るよう求めたりしない。資格情報や権限が不足しているという読み取りも、資格情報の取得・公開や scope 拡張を許可するものではない。対象範囲、鍵、検証、レビュー、納品の各ゲートは維持する。実際の資格情報不足・通信失敗・記録不読を復旧して完成まで届けることは、別の未達事項として残る。
 
 ### 着手可否の判定経路
 
 1. 決定的な形式・許可範囲検査を行う
 2. 対象 source を読み取り専用で取得し、immutable snapshot を固定する
-3. candidate 生成前に primary assessor が着手可否を strict JSON で判定する
+3. candidate 生成前に primary assessor が着手可否を判定する。モデルの回答は必要な欄を読み、本体の保存記録は厳密に検査する
 4. 別 vendor の checker が false-ready、false-block、不正な質問、scope 見落としを独立検査する
-5. checker が不合格にした場合は primary assessor を 1 回だけ再実行し、新しい assessor artifact / digest に対して checker も必ず再実行する。古い checker 結果を再利用しない
-6. 再実行した checker も合格しなければ、利用者へ未検証の質問を投げず `readiness_unresolved` で停止する
-7. `ready` artifact と checker の `pass` が揃うまで、candidate 生成と対象 repo への書き込みを許可しない
+5. checker が不合格にした場合は合計 3 組まで判定・検算を行う。新しい assessor artifact / digest に対して checker も必ず再実行し、古い checker 結果を再利用しない
+6. 検算に通った質問が残れば既存の質問経路へ渡す。検算上限または `unresolvable` により解釈を確定できなければ、質問や解釈を捏造せず本文のまま続ける。その理由を前提欄に記録する
+7. 入力・設定・source に束縛された `ready` artifact が次工程の前提となる。未解決の読み取りでも、設計・変更範囲・成果物の検証・レビューは省略しない。旧 `readiness_unresolved` 記録の検証互換は保ち、未終了の受付は完全な判定・検算の列からのみ再導出できる
 
 primary assessor の最小出力は次とする。自由な文章、未知の field、不正 schema、モデル無応答、途中終了は `ready` と解釈しない。
 

@@ -251,7 +251,7 @@ func TestDecideReadinessOutcomes(t *testing.T) {
 
 	thirdAssessment, thirdCheck := testAssessmentPair(t, 3, testClarificationOutput(), "fail", source, request, config)
 	unresolved, err := DecideReadiness(t.Context(), []ReadinessAssessment{failedOnce, secondAssessment, thirdAssessment}, []ReadinessCheck{failedCheck, secondCheck, thirdCheck}, source, request, config, nil)
-	if err != nil || unresolved.Outcome != ReadinessOutcomeUnresolved || len(unresolved.Questions) != 0 {
+	if err != nil || unresolved.Outcome != ReadinessOutcomeReady || !unresolved.InconclusiveReading || len(unresolved.Questions) != 0 {
 		t.Fatalf("decision = %+v, error = %v", unresolved, err)
 	}
 
@@ -390,12 +390,13 @@ func TestDecideReadinessSurvivingQuestionsOutliveABlamedOne(t *testing.T) {
 		t.Fatalf("the surviving question was not renumbered from the invariant start: %+v", decision.Questions[0])
 	}
 
-	// A set-level objection (no question_id) keeps the fail-closed outcome.
+	// A set-level objection (no question_id) discards every unchecked question,
+	// but continues with the original request instead of ending the delivery.
 	decision, err = chain(ModelReadinessCheckOutput{Verdict: "fail", Reasons: []ReadinessCheckReason{
 		{Code: "false-block", Message: "Q1 is answerable from the provided source.", QuestionID: "Q1"},
 		{Code: "inconsistent-decision", Message: "The assessment contradicts itself."},
 	}})
-	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+	if err != nil || decision.Outcome != ReadinessOutcomeReady || !decision.InconclusiveReading || len(decision.Questions) != 0 {
 		t.Fatalf("decision = %+v, error = %v", decision, err)
 	}
 
@@ -404,16 +405,16 @@ func TestDecideReadinessSurvivingQuestionsOutliveABlamedOne(t *testing.T) {
 		{Code: "false-block", Message: "Q1 is answerable from the provided source.", QuestionID: "Q1"},
 		{Code: "invalid-question", Message: "Q2 duplicates the first question.", QuestionID: "Q2"},
 	}})
-	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+	if err != nil || decision.Outcome != ReadinessOutcomeReady || !decision.InconclusiveReading || len(decision.Questions) != 0 {
 		t.Fatalf("decision = %+v, error = %v", decision, err)
 	}
 
-	// A question-scoped failure on a non-clarification assessment changes nothing.
+	// A failed non-clarification assessment also continues without adopting it.
 	first, firstCheck := testAssessmentPair(t, 1, testReadyOutput(), "fail", source, request, config)
 	second, secondCheck := testAssessmentPair(t, 2, testReadyOutput(), "fail", source, request, config)
 	third, thirdCheck := testAssessmentPair(t, 3, testReadyOutput(), "fail", source, request, config)
 	decision, err = DecideReadiness(t.Context(), []ReadinessAssessment{first, second, third}, []ReadinessCheck{firstCheck, secondCheck, thirdCheck}, source, request, config, nil)
-	if err != nil || decision.Outcome != ReadinessOutcomeUnresolved {
+	if err != nil || decision.Outcome != ReadinessOutcomeReady || !decision.InconclusiveReading {
 		t.Fatalf("decision = %+v, error = %v", decision, err)
 	}
 }
@@ -487,7 +488,7 @@ func TestDecideReadinessRescueIgnoresSetLevelCodes(t *testing.T) {
 			[]ReadinessAssessment{first, second, third},
 			[]ReadinessCheck{firstCheck, secondCheck, thirdCheck},
 			source, request, config, nil)
-		if err != nil || decision.Outcome != ReadinessOutcomeUnresolved || len(decision.Questions) != 0 {
+		if err != nil || decision.Outcome != ReadinessOutcomeReady || !decision.InconclusiveReading || len(decision.Questions) != 0 {
 			t.Fatalf("code %s: decision = %+v, error = %v", code, decision, err)
 		}
 	}
