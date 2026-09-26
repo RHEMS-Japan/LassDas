@@ -1150,6 +1150,22 @@ func handleChainFailure(
 		if stopErr != nil {
 			return fmt.Errorf("stop check before round %d: %w", view.round+1, stopErr)
 		}
+		// A round limit prevents buying another implementation, not finishing
+		// this round's arbitration. An old card or interrupted recount may
+		// still have an unused ruling at the limit; give it the same recovery
+		// as a lower round, without creating a round beyond the cap. A stop
+		// observed during dispatch must survive this call too.
+		if !stopped {
+			var handled bool
+			var ruleErr error
+			handled, stopped, ruleErr = ruleOnStagnation(ctx, config, services, hermes, envelope, run, view, logger)
+			if ruleErr != nil {
+				return ruleErr
+			}
+			if handled {
+				return nil
+			}
+		}
 		switch {
 		case stopped:
 			// The requester asked the run to stop: finished cards stay
@@ -1187,25 +1203,6 @@ func handleChainFailure(
 			if failure, sealed := runner.ReadValidationFailure(runDir, view.round); sealed {
 				logger.Info("the deterministic validation refused the round; the next round is told what it printed",
 					"run", run.RunID, "round", view.round, "step", failure.Step, "output_sha256", failure.OutputSHA256)
-			}
-			// Before another round is paid for, whether this one did
-			// anything. A round that objected to exactly what the round
-			// before it objected to, or that wrote exactly the same bytes,
-			// is not going to be answered by starting another one just like
-			// it; the engine rules on it instead. Ruling may put this same
-			// round back to work without the objections the ticket does not
-			// require, and then this tick is done.
-			//
-			// Asked before the chain's shape is read, and not conditional on
-			// it: what the rounds did is readable from the records whatever
-			// shape the delivery has, and a shape that will not read must
-			// not be the reason a deadlock goes on being paid for.
-			ruled, ruleErr := ruleOnStagnation(ctx, config, services, hermes, envelope, run, view, logger)
-			if ruleErr != nil {
-				return ruleErr
-			}
-			if ruled {
-				return nil
 			}
 			plan, planErr := chainPlanFor(config, runDir, run, logger)
 			if planErr != nil || plan.Shape != runtime.ShapeDesign {

@@ -408,13 +408,18 @@ func TestAnOverrulingSendsTheSameRoundBackToBeDecided(t *testing.T) {
 	}
 }
 
-// An operator who writes down a round limit gets a delivery that stops at
-// it, and the deadlock is still ruled on before that number is reached.
-func TestAConfiguredRoundLimitStopsTheDeliveryAndStagnationFiresFirst(t *testing.T) {
+// A ruling may finish the last round, but an instruction asking for another
+// implementation cannot silently increase the operator's round allowance.
+func TestAConfiguredRoundLimitPreventsAnotherImplementationAfterArbitration(t *testing.T) {
 	fixture, config, envelope, view, runDir, rulingPath := stagnantFixture(t,
 		`{"max_stages":3,"max_rounds":2,"models":{"reviewers":[{"id":"review-a"},{"id":"review-b"}]}}`)
 	hermes, _ := fakeBoard(t)
 	run := state.RunOverview{DeliveryID: fixture.deliveryID, RunID: "TKT-4242", IssueID: 4242, IssueKey: "TKT-4242"}
+	finishArbitrationCard(t, config, runDir, 2)
+	before, err := os.ReadFile(rulingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The ending an operator's own limit produces: the seats answered and
 	// did not agree within the rounds that operator paid for.
 	terminal := runner.NewTerminal(config, fixture.services, envelope, chainOwnerRunID(fixture.deliveryID), runDir, &recordingLogger{})
@@ -428,13 +433,13 @@ func TestAConfiguredRoundLimitStopsTheDeliveryAndStagnationFiresFirst(t *testing
 		runtime.StageValidate, &recordingLogger{}); err != nil {
 		t.Fatalf("the failure was not handled: %v", err)
 	}
-	// Round 2 is the limit, so the delivery ends here, and the deadlock was
-	// never ruled on because the limit was reached first.
+	// Round 2 is the limit and its completed ruling still requires new
+	// implementation. The cap must not be bypassed or the ruling rewritten.
 	if len(fixture.store.digests) != 1 {
 		t.Fatalf("terminal reports begun = %d, want 1", len(fixture.store.digests))
 	}
-	if _, err := os.Stat(rulingPath); err == nil {
-		t.Error("the limit was reached and the engine ruled anyway")
+	if after, err := os.ReadFile(rulingPath); err != nil || string(after) != string(before) {
+		t.Error("the completed ruling was discarded or rewritten")
 	}
 	// One round earlier the same deadlock is ruled on instead.
 	fixture2, config2, envelope2, view2, runDir2, rulingPath2 := stagnantFixture(t,
@@ -507,10 +512,23 @@ func TestTheRecordCeilingEndsTheDeliveryRatherThanRenderingAnotherRound(t *testi
 // prevents that dispatch. In-flight stops are measured with a blocked
 // worker in arbitration_card_test.go.
 func TestAStopBeforeArbitrationDispatchStopsTheRound(t *testing.T) {
-	fixture, config, envelope, view, _, _ := stagnantFixture(t, plainConsumer)
+	for _, limited := range []bool{false, true} {
+		t.Run(fmt.Sprint(limited), func(t *testing.T) {
+			consumer := plainConsumer
+			if limited {
+				consumer = strings.Replace(consumer, `"max_stages":3`, `"max_stages":3,"max_rounds":2`, 1)
+			}
+			stopBeforeArbitrationDispatch(t, consumer)
+		})
+	}
+}
+
+func stopBeforeArbitrationDispatch(t *testing.T, consumer string) {
+	t.Helper()
+	fixture, config, envelope, view, _, _ := stagnantFixture(t, consumer)
 	// A tracker that says nothing the first time it is asked and carries
 	// the stop the second: the first read is the tick's own, the second is
-	// the one taken after the ruling.
+	// inside dispatch, including a round already at its configured limit.
 	reads := 0
 	talkative, err := backlog.NewClient(backlog.Config{
 		SpaceKey: "example", APIKey: "k", Origin: "https://example.backlog.com",
