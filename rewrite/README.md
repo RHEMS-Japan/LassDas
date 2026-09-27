@@ -271,6 +271,68 @@ repeated in the final report; its description and tested artifact were the
 search task. This is a limited local observation, not production delivery,
 restart recovery or a resolution of the earlier CSV counterexamples.
 
+### Optional Git workspace preparation
+
+Watch mode already binds each process to its request's workspace and agent home.
+For a Git project, the configured command can use `harnesses/git_workspace.py`
+before its existing isolation launcher; no extra engine stage is needed:
+
+```json
+{
+  "command": ["python3", "/opt/engine/harnesses/git_workspace.py", "--", "/opt/operator/isolated-role-launcher"],
+  "env": {
+    "TASK_REPOSITORY": "https://git.example/project.git",
+    "TASK_BRANCH": "main"
+  }
+}
+```
+
+The paths are operator-owned examples, not installed executables. Keep the
+process `directory` empty or `.` so the wrapper starts in the watch-created
+job workspace. `TASK_REPOSITORY` is an operator-approved URL or absolute local
+repository path, never an address extracted from a model answer. `TASK_BRANCH`
+optionally selects an existing branch or tag; otherwise the remote default is
+used. Authentication, when needed, must be provided explicitly and scoped to
+that source, not embedded in its URL. Personal/system Git configuration and
+clone templates are not loaded, and credential prompting is disabled.
+Use this wrapper on roles that need source preparation, not on the stop reporter:
+reporting a cancellation must not depend on cloning an unavailable repository.
+
+Only an empty workspace is prepared. Git clones into private sibling staging,
+checks out a detached HEAD there when a commit exists, then atomically publishes
+the directory. A new, empty remote can reach the first implementation with its
+unborn Git HEAD; lack of an initial commit does not block that work.
+The local transport optimization is disabled to avoid sharing source objects
+through local hardlinks; see [Git clone options](https://git-scm.com/docs/git-clone).
+A per-job OS file lock serializes preparation, not the later role work. Both
+parallel launchers enter the published directory before starting their roles.
+This optional launcher requires POSIX file locking and same-filesystem staging.
+
+Any nonempty workspace is reused unchanged, even when the configured upstream
+has moved or is unavailable. There is no fetch, reset, cleaning, repository
+certification or inspection of agent-edited Git configuration outside the role
+sandbox. Changing the configured source/ref does not replace an active job.
+This preserves local commits, dirty edits and untracked progress; it does not
+claim that existing work is a valid or undamaged checkout. A failed clone or
+checkout never starts the role and its reason reaches the existing chain. A
+retry can prepare the still-empty workspace. A killed preparation can leave
+unpublished private staging for operator cleanup; it is never treated as work.
+Submodule/LFS setup and remote authentication are not automatically provisioned.
+
+The wrapper is **not an isolation boundary**. Its job parent, lock and staging
+must be private to the controller. The command after `--` must establish the
+actual role's filesystem/network permissions before running its agent. Do not
+grant a read-only reviewer broad write access just to let it prepare a checkout.
+The original stdin and selected model environment pass through without parsing
+or rewriting. There is no model-output gate, new role, or engine setting here.
+
+Real local Git/process tests exercise parallel preparation, separate tickets,
+clone failure/retry, interruption before publication, non-cooperating writes,
+and preservation of existing work. An actual watch-loop test starts two jobs,
+cancels them mid-work, moves the upstream and makes it unavailable, then resumes
+both with the same original request, base and unfinished files. Its tracker and
+router are fixtures: this proves the connection, not model quality or delivery.
+
 ### Existing native-agent connection
 
 `harnesses/hermes.py` is the stdin bridge to an installed Hermes SDK. It uses
@@ -754,8 +816,9 @@ entry point was replaced.
 
 ## Still missing before production use
 
-- The scoped polling prototype needs a genuinely isolated per-request checkout,
-  a visible stop acknowledgment/final report, production supervision and live
+- The optional Git launcher prepares per-request checkouts, but the scoped
+  polling prototype still needs enforced filesystem/network isolation, a visible
+  stop acknowledgment/final report, production supervision and live
   delivery integration. Its logical
   directories are not a permission boundary. Final-comment posting/readback has
   only been exercised by native agents against a tracker fixture.
