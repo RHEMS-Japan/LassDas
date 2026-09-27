@@ -264,6 +264,12 @@ establish a general ranking, but raising effort did not repair it. The separate
 intended-change controls were stopped after this negative result, not counted
 as completed comparisons. No higher default or answer-content gate was adopted.
 
+A different current two-publisher pair, chosen by the public per-launch selector
+from fresh catalogs, also approved the same behavior change. Both final reports
+were complete, after recovery from two private relay-observation errors. This
+does not establish general model rankings; changing the pair alone did not
+repair this counterexample either.
+
 The adapter disables dotenv discovery, implicit memory/context-file loading
 and native background review. Supply the repository knowledge locations and
 actual role permissions in the configured instructions; the agent may read
