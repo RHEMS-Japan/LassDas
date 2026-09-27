@@ -418,6 +418,22 @@ read-only denial, expiry, cancellation and ambiguous writes. They are not live
 service/model or production-isolation acceptance. An already accepted external
 write cannot be undone by closing the local endpoint.
 
+An additional offline watch trial used the installed SDK and its real terminal
+tool under an OS sandbox. A trusted laboratory launcher added only the newly
+issued loopback port to the existing profile before confinement. The actual
+tracker CLI posted once, observed a simulated lost receipt, and read the same
+comment back. A read-only role's POST and direct HTTP to another issue were
+denied; protected controller/sibling fixture files and the direct upstream
+socket were inaccessible. A stop during an outstanding POST cancelled the
+upstream request on the first stop read, without undoing its already stored
+comment; the native child PIDs and scoped listener were gone afterwards.
+The model responses and tracker were fixtures. SDK metadata probes returned
+recorded 404s, not unreported all-success API traffic. This verifies this local
+connection, not live-model reasoning, a packaged production sandbox or arbitrary
+escape resistance. The laboratory launcher is not installed by the product.
+An SDK attempt to fetch external model metadata also failed under confinement;
+this trial does not exercise the engine's live per-launch catalog selection.
+
 #### Direct operator-configured tracker tool
 
 `go build ./cmd/tracker` provides `issues`, `read`, `comments`, `comment`, and `post`
