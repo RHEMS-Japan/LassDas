@@ -254,6 +254,16 @@ level or that more reasoning improves delivery. Choose an effort supported by
 the selected endpoint's current catalog metadata. Earlier native trials that
 only recorded the bridge's setting do not establish the actual wire effort.
 
+A subsequent paired native review kept the original request, source, earlier
+reports and selected two-model pair unchanged, with the same 12,000-token
+response ceiling. Both reviewers accepted the known empty-value-row loss at
+both `low` and `high`, treating documentation and tests as justification for
+the behavior change. The actual API bodies carried the selected effort; no
+completed response hit the token ceiling. This one counterexample does not
+establish a general ranking, but raising effort did not repair it. The separate
+intended-change controls were stopped after this negative result, not counted
+as completed comparisons. No higher default or answer-content gate was adopted.
+
 The adapter disables dotenv discovery, implicit memory/context-file loading
 and native background review. Supply the repository knowledge locations and
 actual role permissions in the configured instructions; the agent may read
