@@ -894,6 +894,33 @@ directory; both missing- and existing-delivery cases leave that directory alone.
 No mandatory extra stage, new role, answer certificate or production policy was
 adopted from this one controlled continuation.
 
+The actual history immediately after that final implementation was replayed
+without changing its request, reports, role responsibilities or operator
+instructions. Jev selected delivery in all three decisions; an ordinary routing
+LLM, selected from a fresh catalog each time, selected another independent review
+in all three. The existing routing instruction already required review after
+changes. A synthetic completed-history control led both to finish, but neither
+that control nor one actual history establishes general routing superiority.
+
+A subsequent fresh ordinary-LLM-led issue-intake trial started from the original
+Git fixture, with no copied verifier, prescribed first assignment, operator
+resume or observer input. It went through investigation, implementation, two
+independent reviewers, delivery, report, verification, report and completion.
+Two routing timeouts recovered automatically through fresh selection. Every
+routing/working invocation used the current catalog:18 fetches for10 routing
+attempts and8 working-role launches. The final report was posted and read back;
+the later updated report was a second, different comment, not a duplicate post.
+
+However, the delivered bytes passed only16/25 known observations:10/10 basic,
+3/8 empty-row,2/4 empty-header and1/3 large-cell cases. Generated tests were10/10.
+Both reviewers observed behavior changes and dismissed them as old bugs; the
+verifier also accepted the work. The final completion claim was therefore still
+wrong. The run took about18 minutes without human recovery, but **unattended
+termination was not unattended fulfillment**. Choosing a different router did
+not solve this review-quality failure. The earlier manually assisted25/25 run
+and this fresh16/25 run must not be conflated. No production entry point was
+changed or completion certificate introduced.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
