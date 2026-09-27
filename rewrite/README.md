@@ -664,6 +664,35 @@ Passing those functional cases is not proof that every report claim is correct,
 and this task does not resolve the earlier CSV failure or demonstrate live
 tracker-to-production delivery.
 
+A controlled implementation-only comparison examined what happens *after*
+the router chooses implementation. Four isolated copies had the same original
+request, source, tests and two actual independent review reports. One received
+the captured Jev role-only choice; three received all three previously captured
+ordinary-LLM instructions, unchanged, not a selected best instruction. Earlier
+history was absent in every arm for this diagnostic; that is not a production
+policy to discard history. No post-run counterexample was supplied to a role.
+Every launch fetched the public catalog anew and selected the same working
+endpoint, with the same reasoning/token settings.
+
+The role-only arm left the source unchanged and still dropped empty-value rows.
+All three concrete-instruction arms repaired that row loss. Two also preserved
+empty header names; one still lost their values. Separate sandboxed executions
+confirmed these differences. All four generated test suites passed, including
+the unchanged defective arm. These are four single observations of one captured
+state, not a general model ranking or reliable-completion rate.
+
+Instructions were not uniformly sound: one asked the implementer to build at
+the delivery path outside its writable scope. The role reported a permission
+error there and a temporary build instead, with delivery still to do.
+Its native harness also appended a misleading file-mutation warning
+about a different relative path, despite the actual source changing. Neither
+that warning nor the role's success prose was used as an acceptance result.
+The observer-built artifacts were only for checking, not delivery. This trial
+did not run fresh independent reviews, delivery or final posting after repair.
+It suggests useful task instructions deserve comparison alongside role choice;
+it does not overturn the earlier full-chain failures or establish Jev as the
+best router. No new working-answer format or content gate was introduced.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
