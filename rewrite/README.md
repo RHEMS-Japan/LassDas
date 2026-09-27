@@ -138,12 +138,46 @@ work while another request owns the only execution slot. They also exercise
 HTTP failure, an unresponsive read, storage failure and restart after deletion
 of the remote stop. These are not live tracker or native-model stop trials.
 
-**Prior external effects are not rolled back by cancellation.** The prototype
-currently logs the stop locally; a tracker acknowledgment and final report of
-actual external effects remain to be connected. The control monitor is specific
-to `--watch`, not the standalone `--request`/`--issue` command. Large-queue API
+**Prior external effects are not rolled back by cancellation.** The control
+monitor is specific to `--watch`, not the standalone `--request`/`--issue` command. Large-queue API
 rate limits, per-request monitoring resource usage, distributed ownership and
 crash supervision are not production-validated.
+
+To send a stop report, set `intake.stop_report_role` to an existing configured
+reporting role. An unknown role is rejected before intake. The saved stop holds
+the original work first; then only that role is available to the existing
+router/engine. The full accepted request, native stop comment and stopped-work
+history reach it as context. No new model or working-answer format is required.
+Without this operator setting, a stop is logged locally but not reported to the
+tracker. Use a reporting harness restricted to observation and the assigned
+issue's comments; merely naming a broadly privileged harness `report` does not
+make it safe. Permissions are not narrowed by a prose instruction.
+
+Reporting uses the same local history store in `stop-report/`. It does not
+clear the stop or mark the original request delivered. A restart resumes only
+unfinished reporting, even if the remote stop was removed or discovery is down.
+The same role home, issue-scoped access, configured model selector and execution
+capacity are reused; a model-enabled reporting retry fetches a fresh catalog.
+There is no content check that turns the role's prose into a completion stamp.
+Reporting completion is still the router's judgment, not independent proof that
+the final comment is correct or exists. A privileged/misbehaving reporter or a
+router that incorrectly chooses done can violate that expectation; real-model
+acceptance remains necessary. Do not interpret the fixture tests as that proof.
+
+Tests use real subprocesses and a synthetic tracker/router to exercise queued
+and active stops, report submission stored before a 503, comment readback without
+a duplicate POST, controller cancellation during submission and reporting-only
+restart, original-history preservation, and denial of another role's dispatch.
+They also verify fresh model selection on both reporting launches. No live issue
+or production delivery was used.
+
+A further installed-SDK run exercised watch intake → saved stop → reporting-only
+engine → native terminal → tracker CLI, under the existing laboratory OS sandbox.
+The source stored one report before returning 503; list/id readback found its
+unchanged prose. The original run stayed unfinished with no role execution,
+while reporting finished. Recorded child PIDs and scoped access disappeared.
+Model answers and the tracker were synthetic; this validates wiring and the
+observed access boundary, not real-model judgment or production isolation.
 
 ### Current model list
 

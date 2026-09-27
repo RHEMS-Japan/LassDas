@@ -25,6 +25,7 @@ type intakeConfig struct {
 	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
 	MaxRunning          int     `json:"max_running,omitempty"`
 	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
+	StopReportRole      string  `json:"stop_report_role,omitempty"`
 }
 
 type sourceIssue struct {
@@ -49,6 +50,9 @@ func (w *serialLog) Write(p []byte) (int, error) {
 func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
 	if cfg.Intake == nil || cfg.Intake.ProjectID <= 0 {
 		return errors.New("watch requires an explicit intake.project_id")
+	}
+	if err := validateStopReporter(cfg); err != nil {
+		return err
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	if err != nil {
@@ -108,6 +112,20 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	observe := func(message string) { fmt.Fprintln(log, message) }
+	launch := func(name string, work func() error) {
+		active[name] = true
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := work(); err != nil {
+				observe("request " + name + " remains unfinished: " + err.Error())
+			}
+			select {
+			case finished <- name:
+			case <-ctx.Done():
+			}
+		}()
+	}
 	// Discovery must not hold up cancellation or local recovery of already
 	// accepted work. Its only writes are immutable native issue snapshots.
 	workers.Add(1)
@@ -155,6 +173,13 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
+				if cfg.Intake.StopReportRole != "" {
+					if done, err := stoppedReportDone(directory); err != nil {
+						observe("reading stopped report: " + err.Error())
+					} else if !done {
+						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, slots, log) })
+					}
+				}
 				continue
 			}
 			request, err := tracker.RequestText(raw)
@@ -199,19 +224,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe(err.Error())
 				continue
 			}
-			name := entry.Name()
-			active[name] = true
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				if err := runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log); err != nil {
-					observe("request " + name + " remains unfinished: " + err.Error())
-				}
-				select {
-				case finished <- name:
-				case <-ctx.Done():
-				}
-			}()
+			launch(entry.Name(), func() error {
+				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log)
+			})
 		}
 		// Launch failures are retried on the next tick, not in a busy loop.
 		for waiting := true; waiting; {

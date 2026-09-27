@@ -103,7 +103,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			stopChild()
 			if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), instruction); err == nil {
 				observe("stopped at an authorized user's request; earlier external effects have not been undone")
-				return nil
+				return reportStoppedRequest(ctx, cfg, issue, directory, slots, log)
 			} else {
 				observe("stopped; waiting to retain the original stop instruction: " + err.Error())
 			}
