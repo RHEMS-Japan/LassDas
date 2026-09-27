@@ -721,6 +721,20 @@ from judging it complete correctly: the same chain called both done. The positiv
 result does not resolve the negative case, establish a reliable-completion rate,
 or prove every report assertion or real tracker-to-production operation.
 
+An additional read-only diagnostic dispatched the existing investigation role
+on each candidate immediately after its first current review pair. It retained
+the original request and all eleven actual reports, without injecting an
+expected counterexample or a repair instruction. Each investigator was freshly
+selected from the public catalog and ran the actual native harness. Both
+recommended delivery. The defective case inherited the review's dismissal of
+lost values as garbage input instead of proposing a repair; separate sandboxed
+checks still reproduced that loss. The other candidate continued to match the
+25 observed checks. Neither source was edited and no delivery or posting ran
+in this diagnostic. Thus manually adding the existing investigation role did
+not resolve the observed false acceptance. It does not establish autonomous
+selection of investigation, justify a mandatory extra stage, or show that all
+possible investigative assignments fail. No such stage was added.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
