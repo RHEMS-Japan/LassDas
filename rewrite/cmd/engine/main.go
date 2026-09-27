@@ -78,6 +78,16 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		if _, exists := roles[role.Name]; exists {
 			return errors.New("two roles have the same name")
 		}
+		// Every role needs the same operator workflow context as the router.
+		// Keep the configuration untouched: watch serializes it for each job,
+		// so mutating its process slice here would duplicate these instructions.
+		if cfg.Instructions != "" {
+			role.Processes = append([]chain.Process(nil), role.Processes...)
+			for i := range role.Processes {
+				role.Processes[i].Instructions = "Shared operator workflow instructions:\n" + cfg.Instructions +
+					"\n\nProcess-specific instructions:\n" + role.Processes[i].Instructions
+			}
+		}
 		roles[role.Name], purposes[role.Name] = role, role.Purpose
 	}
 	if len(roles) == 0 {

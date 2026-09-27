@@ -29,6 +29,8 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "received.txt")
 	const original = "Keep every original condition.\nExample: {\"gaps\":null,\"new_field\":true}\nLiteral `words` and $(not-a-command), 日本語."
+	const workflow = "Shared workflow: the configured report role can post and read back the assigned ticket. Do not infer its permissions from your own.\nLiteral $(not-an-operator-command)."
+	const processInstructions = "Work only in the assigned directory; hand off other roles' work."
 	wantRequest := "Original issue: EXAMPLE-1\nTitle: Original title\n\n" + original
 	modelCalls, trackerCalls := 0, 0
 	previous := http.DefaultTransport
@@ -50,6 +52,9 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 			var input struct{ Messages []struct{ Content string } }
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) != 2 {
 				return nil, fmt.Errorf("unexpected routing input: %v", err)
+			}
+			if !strings.Contains(input.Messages[0].Content, workflow) {
+				t.Error("router lost the shared workflow")
 			}
 			var state chain.State
 			if err := json.Unmarshal([]byte(input.Messages[1].Content), &state); err != nil || state.Request != wantRequest {
@@ -77,10 +82,11 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 	})
 	var cfg config
 	cfg.Router.Mode = "llm"
+	cfg.Instructions = workflow
 	cfg.Router.LLM = chain.Jev{URL: "https://model.example/chat/completions", Model: "fixture-model", KeyEnv: "TEST_MODEL_KEY"}
 	cfg.Backlog = tracker.Backlog{BaseURL: "https://tracker.example/api/v2", KeyEnv: "TEST_TRACKER_KEY"}
 	cfg.Roles = []chain.Role{{Name: "implement", Purpose: "Work on the original request.", Processes: []chain.Process{{
-		Name: "worker", Directory: dir,
+		Name: "worker", Directory: dir, Instructions: processInstructions,
 		Command: []string{"/bin/sh", "-c", "cat > \"$1\"; printf '%s\\n' 'Ordinary prose, not a model contract.'", "worker", artifact},
 	}}}}
 	data, err := json.Marshal(cfg)
@@ -101,6 +107,9 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 	received, err := os.ReadFile(artifact)
 	if err != nil || !strings.Contains(string(received), wantRequest) || !strings.Contains(string(received), "Read the original request; keep its wording.") {
 		t.Fatalf("process lost the request or assignment: %s (%v)", received, err)
+	}
+	if strings.Count(string(received), workflow) != 1 || strings.Count(string(received), processInstructions) != 1 {
+		t.Fatalf("process did not receive shared and process-specific instructions exactly once: %s", received)
 	}
 	if err := run(ctx, args, io.Discard, &log); err != nil {
 		t.Fatal(err)

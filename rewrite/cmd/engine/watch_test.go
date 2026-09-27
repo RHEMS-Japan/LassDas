@@ -70,6 +70,8 @@ func loadWatchState(root string, id int) (chain.State, error) {
 
 func TestWatchCLICollectsNewIssuesOnceIntoSeparateWorkingDirectories(t *testing.T) {
 	cfg := watchConfiguration(t)
+	const workflow = "Shared workflow: preserve every accepted condition, then use the configured delivery and reporting roles."
+	cfg.Instructions = workflow
 	root := t.TempDir()
 	const original = "Original conditions\n日本語 and $(literal) `prose`"
 	var mu sync.Mutex
@@ -161,6 +163,9 @@ func TestWatchCLICollectsNewIssuesOnceIntoSeparateWorkingDirectories(t *testing.
 		received, err := os.ReadFile(filepath.Join(workspace, "received.txt"))
 		if err != nil || !strings.Contains(string(received), state.Request) {
 			t.Fatalf("child missed original: %s %v", received, err)
+		}
+		if strings.Count(string(received), workflow) != 1 {
+			t.Fatalf("watch lost or duplicated shared workflow: %s", received)
 		}
 		cwd, _ := os.ReadFile(filepath.Join(workspace, "actual-directory.txt"))
 		resolved, _ := filepath.EvalSymlinks(workspace)

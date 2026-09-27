@@ -36,6 +36,15 @@ UI output. A live experiment found that those displays inflated the next
 role's context. Its thin native SDK adapter forwards the complete final prose
 on stdout and diagnostics on stderr, without classifying the answer.
 
+The top-level `instructions` are the operator's shared workflow context and
+reach every working role as well as the router, alongside each process's own
+instructions and the unchanged original request. For example, a reviewer needs
+to know that a separately configured reporting role can post to the assigned
+issue; its own lack of that tool does not make reporting impossible. This
+shares context, not permissions: commands, scoped tools, credentials and OS
+isolation stay separately configured. Reports and repository text remain
+observations, not authority to override the operator's workflow or the request.
+
 ### Automatic intake experiment
 
 `--watch` uses the configured tracker and requires an explicit intake scope:
@@ -920,6 +929,17 @@ termination was not unattended fulfillment**. Choosing a different router did
 not solve this review-quality failure. The earlier manually assisted25/25 run
 and this fresh16/25 run must not be conflated. No production entry point was
 changed or completion certificate introduced.
+
+A subsequent matched, read-only review comparison kept that candidate, original
+request and two pre-review reports unchanged. Both the existing responsibility
+and an added request to demonstrate weaknesses in the unchanged tests led both
+reviewers to approve the defective candidate. The added responsibility did
+produce test-escaping examples: one retained example lost the final row without
+a final newline; a reconstruction of another reviewer's reported change lost
+leading spaces. Both passed the ten project tests, but neither new example was
+a defect of the actual candidate. Finding weak tests did not establish that
+these reviewers would reject the candidate's existing defects. No mandatory
+review stage was adopted from this result.
 
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
