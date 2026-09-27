@@ -59,7 +59,11 @@ func (j Jev) request(ctx context.Context, payload any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// This transport also carries ordinary reasoning-model routing/selection.
+	// A live completion took 35–40 seconds: a short RPC timeout discarded it
+	// and retried the same work. Bound a stalled inference, not normal latency.
+	// Parent cancellation (including requester stop) still interrupts at once.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, j.URL, bytes.NewReader(body))
 	if err != nil {

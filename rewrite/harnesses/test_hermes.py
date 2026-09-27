@@ -18,7 +18,7 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high"):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high", mutation_verifier=None, failed_file_attempts=None):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
         interrupted = threading.Event()
 
@@ -35,6 +35,8 @@ class BridgeTests(unittest.TestCase):
                 print("native startup display")
                 events.append(("dotenv", os.environ.get("PYTHON_DOTENV_DISABLED")))
                 events.append(("home", os.environ.get("HERMES_HOME")))
+                events.append(("file_mutation_verifier", os.environ.get("HERMES_FILE_MUTATION_VERIFIER")))
+                self._turn_failed_file_mutations = failed_file_attempts
 
             def run_conversation(self, user_message):
                 events.append(("request", user_message))
@@ -45,6 +47,8 @@ class BridgeTests(unittest.TestCase):
                         raise RuntimeError("native interrupt did not reach the tool loop")
                 if error:
                     raise error
+                if failed_file_attempts and os.environ.get("HERMES_FILE_MUTATION_VERIFIER") != "0":
+                    return {**result, "final_response": result["final_response"] + "\n\nFile-mutation verifier: file(s) were NOT modified"}
                 return result
 
             def interrupt(self, *, hard_cancel=False):
@@ -64,6 +68,8 @@ class BridgeTests(unittest.TestCase):
                "NATIVE_MAX_TOKENS": "7000"}
         if reasoning_effort is not None:
             env["NATIVE_REASONING_EFFORT"] = reasoning_effort
+        if mutation_verifier is not None:
+            env["HERMES_FILE_MUTATION_VERIFIER"] = mutation_verifier
         if home:
             env["HERMES_HOME"] = "/isolated-test/role"
         if task_home:
@@ -108,6 +114,53 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(events[-2:], [("backgrounds_closed", True), ("closed", True)])
         for sig, handler in previous.items():
             self.assertEqual(signal.getsignal(sig), handler)
+
+    def test_native_file_warning_is_not_added_to_role_prose_and_reason_is_retained(self):
+        attempts = {"scratch/example.txt": {"tool": "patch", "error_preview": "text did not match"}}
+        events, out, err, code, failure = self.run_bridge(
+            {"final_response": "The later terminal operation changed the file."}, failed_file_attempts=attempts)
+        self.assertIsNone(failure)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "The later terminal operation changed the file.")
+        self.assertIn(("file_mutation_verifier", "0"), events)
+        for detail in ("patch", "scratch/example.txt", "text did not match"):
+            self.assertIn(detail, err)
+        self.assertNotIn("were NOT modified", err)
+        self.assertEqual(attempts, {"scratch/example.txt": {"tool": "patch", "error_preview": "text did not match"}})
+
+    def test_explicit_native_footer_setting_remains_operator_controlled(self):
+        events, out, err, code, failure = self.run_bridge(
+            {"final_response": "ordinary report"}, mutation_verifier="1",
+            failed_file_attempts={"example.txt": {"tool": "patch", "error_preview": "old text not found"}})
+        self.assertIsNone(failure)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "ordinary report\n\nFile-mutation verifier: file(s) were NOT modified")
+        self.assertIn(("file_mutation_verifier", "1"), events)
+        self.assertIn("old text not found", err)
+
+    def test_failed_file_attempt_reason_survives_native_exception_and_cleanup(self):
+        events, out, err, code, failure = self.run_bridge(error=RuntimeError("transport stopped"),
+            failed_file_attempts={"scratch/example.txt": {"tool": "write_file", "error_preview": "permission denied"}})
+        self.assertEqual(str(failure), "transport stopped")
+        self.assertIn("permission denied", err)
+        self.assertIn("current file state not checked", err)
+        self.assertEqual(events[-2:], [("backgrounds_closed", True), ("closed", True)])
+
+    def test_missing_or_unrecognized_optional_metadata_cannot_erase_model_report(self):
+        for attempts in (None, [], {"example.txt": None}):
+            events, out, err, code, failure = self.run_bridge(
+                {"final_response": "ordinary report"}, failed_file_attempts=attempts)
+            self.assertIsNone(failure)
+            self.assertEqual(out, "ordinary report")
+            self.assertEqual(code, 0)
+            self.assertEqual(events[-2:], [("backgrounds_closed", True), ("closed", True)])
+
+    def test_footer_like_words_in_model_prose_are_not_filtered(self):
+        prose = "The earlier output said:\nFile-mutation verifier: file(s) were NOT modified\nI checked the actual file instead."
+        events, out, err, code, failure = self.run_bridge({"final_response": prose})
+        self.assertIsNone(failure)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, prose)
 
     def test_native_failure_keeps_partial_report_and_reason(self):
         events, out, err, code, failure = self.run_bridge(

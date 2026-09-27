@@ -23,6 +23,11 @@ def main():
     if not os.environ.get("HERMES_HOME"):
         raise RuntimeError("Set HERMES_HOME to this role's isolated agent directory")
     os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+    # SDK bookkeeping only tracks patch/write_file, not later terminal writes.
+    # Its optional footer can therefore falsely claim a recovered file was not
+    # changed. Use its existing switch, not a filter on the model's prose.
+    # An explicit operator override remains authoritative.
+    os.environ.setdefault("HERMES_FILE_MUTATION_VERIFIER", "0")
     with contextlib.redirect_stdout(sys.stderr):
         from run_agent import AIAgent
         from tools.process_registry import process_registry
@@ -89,6 +94,19 @@ def main():
     finally:
         finished.set()
         interrupter.join(timeout=1)
+        # Keep the original failed-attempt reasons, including on cancellation
+        # or an SDK exception. These are not observations of the final file.
+        # This optional SDK metadata must never prevent native tool teardown.
+        try:
+            failed = getattr(agent, "_turn_failed_file_mutations", None)
+            if isinstance(failed, dict):
+                for path, attempt in failed.items():
+                    if isinstance(attempt, dict):
+                        print("Native file tool attempt failed (earlier attempt; current file state not checked): "
+                              f"[{attempt.get('tool', 'unknown')}] {path!r}: {attempt.get('error_preview', '')}",
+                              file=sys.stderr)
+        except Exception as error:
+            print(f"Native file-attempt diagnostics unavailable: {error}", file=sys.stderr)
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 try:

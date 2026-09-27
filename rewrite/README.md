@@ -36,6 +36,23 @@ UI output. A live experiment found that those displays inflated the next
 role's context. Its thin native SDK adapter forwards the complete final prose
 on stdout and diagnostics on stderr, without classifying the answer.
 
+The bridge defaults the SDK's optional file-mutation footer off through
+`HERMES_FILE_MUTATION_VERIFIER=0`; an explicit operator value is respected.
+The installed SDK can retain a failed `patch` after a later successful terminal
+write and append a false "not modified" claim to the final response. A real-SDK
+local fixture reproduced that sequence. Failed tool attempts and their original
+reason previews still go to stderr, identified as earlier attempts, not proof
+of the current file state. The bridge does not strip footer-like text from
+answers or edit the SDK installation. It forwards the SDK's `final_response`
+unchanged; the SDK itself may normalize provider text before returning it.
+
+Routing and model-selection inference share a five-minute request timeout,
+not a task deadline or attempt limit. The former thirty-second limit discarded
+valid completions taking 35–40 seconds and repeatedly selected the same work.
+A local TLS response delayed 31 seconds now reaches the caller. Earlier parent
+deadlines and cancellation still interrupt response-header and response-body
+waits; a timeout goes to the existing recovery loop, never to a completion claim.
+
 The top-level `instructions` are the operator's shared workflow context and
 reach every working role as well as the router, alongside each process's own
 instructions and the unchanged original request. For example, a reviewer needs
@@ -982,6 +999,22 @@ sandbox are not packaged as a supported deployment. No existing production
 entry point was replaced.
 
 ## Still missing before production use
+
+A separate JSON-configuration merge task reached delivery and one final fixture
+comment with exact readback after a manual resume. Its first 30-minute observation
+window interrupted review; the resumed run finished in about 14 minutes. This is
+not an uninterrupted overnight acceptance. The actual archive passed 38 declared
+independent observations and 47 generated tests. Both reviewers identified a deep
+merge recursion regression and the implementation role repaired it before
+delivery. Independent runs of the delivered archive confirmed the reported
+995/1500/2000-depth cases now work. However, a separately observed input containing
+`1e999` still produces `Infinity` with a successful exit, which is not JSON.
+The original implementation also had this defect; the requested valid JSON
+output remains unmet despite the final report's "no work remains" claim.
+The 38-case result does not establish complete fulfillment or repair the earlier
+CSV failures. This trial used the old timeout and SDK-footer behavior; the
+subsequent fixes above have local transport/native-SDK tests, not a new live
+end-to-end completion result.
 
 - The optional Git launcher prepares per-request checkouts, but the scoped
   polling prototype still needs enforced filesystem/network isolation, a visible
