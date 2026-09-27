@@ -13,6 +13,7 @@ import (
 func TestDecisionTransportFailureUsesChatInstructionsWithoutLosingReports(t *testing.T) {
 	t.Setenv("ROUTER_TEST_TOKEN", "synthetic-router-token")
 	const report = "There is no prescribed report format. Example {\"extra\":true}. Still need to upload the corrected artifact."
+	const diagnostic = "Earlier upload attempt returned no receipt. Later work may have recovered; inspect actual delivery."
 	var paths []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
@@ -38,8 +39,8 @@ func TestDecisionTransportFailureUsesChatInstructionsWithoutLosingReports(t *tes
 		if err := json.Unmarshal([]byte(content), &state); err != nil {
 			t.Error(err)
 		}
-		if len(state.History) != 1 || state.History[0].Output != report {
-			t.Error("report was rewritten")
+		if len(state.History) != 1 || state.History[0].Output != report || state.History[0].Diagnostics != diagnostic {
+			t.Error("report or diagnostic was lost")
 		}
 		fmt.Fprint(w, `{"extra":"ignored","choices":[{"message":{"content":"I will hand the work on.","tool_calls":[{"function":{"name":"handoff","arguments":"{\"role\":\"deliver\",\"instruction\":\"Use the corrected build, then run it.\",\"unknown\":true}"}}]}}]}`)
 	}))
@@ -47,7 +48,7 @@ func TestDecisionTransportFailureUsesChatInstructionsWithoutLosingReports(t *tes
 	roles := map[string]string{"deliver": "publish the reviewed work"}
 	primary := DecisionRouter{Judge: Jev{URL: server.URL + "/decisions", Model: "decision-fixture", KeyEnv: "ROUTER_TEST_TOKEN", Client: server.Client()}, Roles: roles}
 	secondary := ChatRouter{Service: Jev{URL: server.URL + "/chat", Model: "chat-fixture", KeyEnv: "ROUTER_TEST_TOKEN", Client: server.Client()}, Roles: roles}
-	result, err := (Alternate{Primary: primary, Secondary: secondary}).Next(context.Background(), State{Request: "original", History: []Result{{Output: report}}})
+	result, err := (Alternate{Primary: primary, Secondary: secondary}).Next(context.Background(), State{Request: "original", History: []Result{{Output: report, Diagnostics: diagnostic}}})
 	if err != nil || result.Role != "deliver" || result.Instruction != "Use the corrected build, then run it." {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

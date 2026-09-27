@@ -37,7 +37,7 @@ func (r DecisionRouter) Next(ctx context.Context, state State) (Assignment, erro
 	if r.Judge == nil {
 		return Assignment{}, errors.New("no routing model is configured")
 	}
-	next, err := r.Judge.Choose(ctx, routingView(state), routingInstructions+"\n"+r.Instructions, choices)
+	next, err := r.Judge.Choose(ctx, state, routingInstructions+"\n"+r.Instructions, choices)
 	if err != nil {
 		return Assignment{}, err
 	}
@@ -45,19 +45,6 @@ func (r DecisionRouter) Next(ctx context.Context, state State) (Assignment, erro
 		return Assignment{}, errors.New("the router named an unconfigured role")
 	}
 	return Assignment{Role: next}, nil
-}
-
-// Keep every prose report intact. Verbose successful process diagnostics are
-// saved for operators/working roles but are not a second copy of the report.
-// A context-limit failure can use the configured alternative router; silently
-// deleting an earlier objection or the middle of a report is not recovery.
-func routingView(state State) State {
-	view := state
-	view.History = append([]Result(nil), state.History...)
-	for i := range view.History {
-		view.History[i].Diagnostics = ""
-	}
-	return view
 }
 
 // Alternate is only transport/availability recovery. It neither votes on

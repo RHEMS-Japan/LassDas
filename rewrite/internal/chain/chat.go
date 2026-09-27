@@ -27,7 +27,7 @@ func (r ChatRouter) Next(ctx context.Context, state State) (Assignment, error) {
 	}
 	choices["done"] = "The original request is complete."
 	instructions := routingInstructions + "\n" + r.Instructions + "\nAvailable roles: " + string(rolesJSON) + "\nInvoke handoff for the next role. Include useful instructions for that role, or choose done when the request is complete."
-	return chatAction(ctx, r.Service, routingView(state), instructions, choices, "Invoke one configured role, or finish a completed request.")
+	return chatAction(ctx, r.Service, state, instructions, choices, "Invoke one configured role, or finish a completed request.")
 }
 
 // ChatJudge uses the same native function-call transport for choosing a model

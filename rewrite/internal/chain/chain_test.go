@@ -20,11 +20,12 @@ func (f testJudge) Choose(ctx context.Context, s State, text string, roles map[s
 func TestRouterPreservesFullReportsAndEarlierObjections(t *testing.T) {
 	s := State{Request: "Deliver the actual requested behavior, not a report of failure."}
 	for i := 0; i < 15; i++ {
-		s.History = append(s.History, Result{Role: "review", Output: "opening\n" + strings.Repeat("ordinary prose. ", 100) + "unresolved: the published artifact is still the old one\n" + strings.Repeat("detail. ", 100)})
+		s.History = append(s.History, Result{Role: "review", Output: "opening\n" + strings.Repeat("ordinary prose. ", 100) + "unresolved: the published artifact is still the old one\n" + strings.Repeat("detail. ", 100),
+			Diagnostics: "Earlier tool attempt: upload receipt missing.\nThis is not a verdict about the final state."})
 	}
 	r := DecisionRouter{Roles: map[string]string{"investigate": "inspect the artifact"}, Judge: testJudge(func(_ context.Context, got State, instructions string, _ map[string]string) (string, error) {
 		if !reflect.DeepEqual(got, s) {
-			t.Error("the router lost earlier reports or the middle of a report")
+			t.Error("the router lost earlier reports, diagnostics, or the middle of a report")
 		}
 		if !strings.Contains(instructions, "not an earlier implementation") || !strings.Contains(instructions, "not independent reviews of the changed work") {
 			t.Error("the current-work review instruction did not reach the decision model")

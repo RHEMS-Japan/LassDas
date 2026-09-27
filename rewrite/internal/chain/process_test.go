@@ -120,6 +120,32 @@ func TestProcessGetsOriginalAndAssignmentWithoutShellInterpolation(t *testing.T)
 	}
 }
 
+func TestSuccessfulProcessDiagnosticsReachNextRoleWithoutBecomingAVerdict(t *testing.T) {
+	t.Setenv("HANDOFF_TEST_SECRET", "synthetic-handoff-secret")
+	worker := Process{Name: "worker", Command: []string{"/bin/sh", "-c",
+		`printf 'My part is ready.'; printf 'Earlier tool attempt failed: %s\nLater terminal command returned zero.\n' "$ROLE_KEY" >&2`},
+		Secrets: map[string]string{"ROLE_KEY": "HANDOFF_TEST_SECRET"}}
+	state := State{Request: "Deliver the original request. Unknown {\"field\":true}."}
+	result := worker.run(context.Background(), Role{Name: "implement"}, Assignment{Role: "implement"}, state)
+	if result.Error != "" || result.Output != "My part is ready." {
+		t.Fatalf("ordinary successful exit was turned into a failure: %#v", result)
+	}
+	const diagnostics = "Earlier tool attempt failed: [credential]\nLater terminal command returned zero.\n"
+	if result.Diagnostics != diagnostics {
+		t.Fatalf("redacted diagnostics changed: %q", result.Diagnostics)
+	}
+	state.History = []Result{result}
+	reader := Process{Name: "next", Command: []string{"/bin/cat"}}
+	next := reader.run(context.Background(), Role{Name: "review"}, Assignment{Role: "review"}, state)
+	if next.Error != "" || !strings.Contains(next.Output, state.Request) || !strings.Contains(next.Output, result.Output) ||
+		!strings.Contains(next.Output, diagnostics) || strings.Contains(next.Output, "synthetic-handoff-secret") {
+		t.Fatalf("next role lost observations or received a credential: %#v", next)
+	}
+	if state.History[0].Error != "" || state.History[0].Diagnostics != diagnostics {
+		t.Fatal("handoff reclassified or changed the earlier result")
+	}
+}
+
 func TestProcessKeepsFailureReasonAndOnlyReceivesNamedCredentials(t *testing.T) {
 	t.Setenv("UNRELATED_TEST_CREDENTIAL", "not-for-this-role")
 	t.Setenv("FIXTURE_ROLE_SOURCE", "synthetic-test-value")

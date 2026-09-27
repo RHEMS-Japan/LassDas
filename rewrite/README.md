@@ -46,6 +46,15 @@ of the current file state. The bridge does not strip footer-like text from
 answers or edit the SDK installation. It forwards the SDK's `final_response`
 unchanged; the SDK itself may normalize provider text before returning it.
 
+The already-redacted process diagnostics also reach both routing APIs and the
+next working role, separately from the role's answer. A successful process exit
+can still contain an earlier failed tool operation. Previously those diagnostics
+were saved but omitted from both handoffs, so retaining a reason on stderr did
+not let the next role use it. Forwarding observations does not classify a role's
+answer or turn an earlier tool failure into a verdict about the current work.
+This increases routing context; it is not a solution for unbounded histories
+or evidence that models will correctly resolve every reported contradiction.
+
 Routing and model-selection inference share a five-minute request timeout,
 not a task deadline or attempt limit. The former thirty-second limit discarded
 valid completions taking 35–40 seconds and repeatedly selected the same work.
