@@ -20,17 +20,19 @@ import (
 // Intake settings are operator scope, not a format required of requesters.
 // The explicit timestamp prevents quietly starting every historical issue.
 type intakeConfig struct {
-	ProjectID           int64  `json:"project_id"`
-	CreatedSince        string `json:"created_since"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
-	MaxRunning          int    `json:"max_running,omitempty"`
+	ProjectID           int64   `json:"project_id"`
+	CreatedSince        string  `json:"created_since"`
+	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
+	MaxRunning          int     `json:"max_running,omitempty"`
+	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
 }
 
 type sourceIssue struct {
-	ID        int64     `json:"id"`
-	Key       string    `json:"issueKey"`
-	ProjectID int64     `json:"projectId"`
-	Created   time.Time `json:"created"`
+	ID        int64              `json:"id"`
+	Key       string             `json:"issueKey"`
+	ProjectID int64              `json:"projectId"`
+	Created   time.Time          `json:"created"`
+	Creator   struct{ ID int64 } `json:"createdUser"`
 }
 
 type serialLog struct {
@@ -55,6 +57,11 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	delay, capacity := cfg.Intake.PollIntervalSeconds, cfg.Intake.MaxRunning
 	if delay < 0 || time.Duration(delay) > time.Duration(1<<63-1)/time.Second || capacity < 0 {
 		return errors.New("intake interval and capacity must be positive")
+	}
+	for _, id := range cfg.Intake.StopUserIDs {
+		if id <= 0 {
+			return errors.New("intake.stop_user_ids must contain positive user ids")
+		}
 	}
 	if delay == 0 {
 		delay = 30
@@ -95,45 +102,24 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	finished := make(chan string, capacity)
+	slots := make(chan struct{}, capacity)
+	collected := make(chan struct{}, 1)
 	active := map[string]bool{}
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	observe := func(message string) { fmt.Fprintln(log, message) }
+	// Discovery must not hold up cancellation or local recovery of already
+	// accepted work. Its only writes are immutable native issue snapshots.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		collectIssues(ctx, cfg, jobs, since, interval, collected, observe)
+	}()
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
-		}
-		rows, err := cfg.Backlog.Issues(ctx, cfg.Intake.ProjectID)
-		if err != nil {
-			observe("issue discovery unavailable: " + err.Error())
-		} else {
-			for _, raw := range rows {
-				var issue sourceIssue
-				if err := json.Unmarshal(raw, &issue); err != nil || issue.Created.IsZero() {
-					observe("issue discovery returned no readable creation time; it was not accepted")
-					continue
-				}
-				if issue.Created.Before(since) {
-					continue
-				}
-				directory := filepath.Join(jobs, strconv.FormatInt(issue.ID, 10))
-				path := filepath.Join(directory, "issue.json")
-				if _, err := os.Stat(path); err == nil {
-					continue
-				} else if !errors.Is(err, os.ErrNotExist) {
-					observe("reading issue intake: " + err.Error())
-					continue
-				}
-				if err := os.MkdirAll(directory, 0700); err != nil {
-					observe("creating request directory: " + err.Error())
-					continue
-				}
-				if err := writeRuntimeFile(path, raw); err != nil {
-					observe("saving original issue: " + err.Error())
-				}
-			}
 		}
 		// Already accepted work remains runnable even when discovery is down or
 		// the issue later disappears from the remote list.
@@ -147,7 +133,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			return a < b
 		})
 		for _, entry := range entries {
-			if len(active) >= capacity || ctx.Err() != nil {
+			if ctx.Err() != nil {
 				break
 			}
 			id, err := strconv.ParseInt(entry.Name(), 10, 64)
@@ -163,6 +149,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			var issue sourceIssue
 			if err := json.Unmarshal(raw, &issue); err != nil || issue.ID != id || issue.ProjectID != cfg.Intake.ProjectID || issue.Key == "" {
 				observe("accepted issue record could not be read for its source; no replacement used")
+				continue
+			}
+			if stopped, err := savedStop(directory, issue, cfg.Intake.StopUserIDs); err != nil {
+				observe("request " + entry.Name() + " held: " + err.Error())
+				continue
+			} else if stopped {
 				continue
 			}
 			request, err := tracker.RequestText(raw)
@@ -209,14 +201,16 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 			name := entry.Name()
 			active[name] = true
-			observe("starting accepted request " + name)
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
-				if err := run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log); err != nil {
+				if err := runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log); err != nil {
 					observe("request " + name + " remains unfinished: " + err.Error())
 				}
-				finished <- name
+				select {
+				case finished <- name:
+				case <-ctx.Done():
+				}
 			}()
 		}
 		// Launch failures are retried on the next tick, not in a busy loop.
@@ -226,9 +220,65 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				return ctx.Err()
 			case name := <-finished:
 				delete(active, name)
+			case <-collected:
+				waiting = false
 			case <-tick.C:
 				waiting = false
 			}
+		}
+	}
+}
+
+func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, collected chan<- struct{}, observe func(string)) {
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for ctx.Err() == nil {
+		rows, err := cfg.Backlog.Issues(ctx, cfg.Intake.ProjectID)
+		changed := false
+		if err != nil {
+			observe("issue discovery unavailable: " + err.Error())
+		} else {
+			for _, raw := range rows {
+				if ctx.Err() != nil {
+					return
+				}
+				var issue sourceIssue
+				if err := json.Unmarshal(raw, &issue); err != nil || issue.Created.IsZero() {
+					observe("issue discovery returned no readable creation time; it was not accepted")
+					continue
+				}
+				if issue.Created.Before(since) {
+					continue
+				}
+				directory := filepath.Join(jobs, strconv.FormatInt(issue.ID, 10))
+				path := filepath.Join(directory, "issue.json")
+				if _, err := os.Stat(path); err == nil {
+					continue
+				} else if !errors.Is(err, os.ErrNotExist) {
+					observe("reading issue intake: " + err.Error())
+					continue
+				}
+				if err := os.MkdirAll(directory, 0700); err != nil {
+					observe("creating request directory: " + err.Error())
+					continue
+				}
+				if err := writeRuntimeFile(path, raw); err != nil {
+					observe("saving original issue: " + err.Error())
+				} else {
+					changed = true
+				}
+			}
+		}
+		if changed {
+			select {
+			case collected <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
 		}
 	}
 }

@@ -34,7 +34,17 @@ func watchConfiguration(t *testing.T) config {
 }
 
 func watchedIssue(id int, description, created string) map[string]any {
-	return map[string]any{"id": id, "projectId": 17, "issueKey": fmt.Sprintf("EXAMPLE-%d", id), "summary": "Original title", "description": description, "created": created, "unknown": true}
+	return map[string]any{"id": id, "projectId": 17, "issueKey": fmt.Sprintf("EXAMPLE-%d", id), "summary": "Original title", "description": description, "created": created, "createdUser": map[string]any{"id": 55}, "unknown": true}
+}
+
+func useWatchTransport(t *testing.T, fn roundTripFunc) {
+	t.Helper()
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "watch-tracker.example" && strings.HasSuffix(r.URL.Path, "/comments") {
+			return selectionReply(r, 200, []any{}), nil
+		}
+		return fn(r)
+	})
 }
 
 func waitFor(t *testing.T, condition func() bool) {
@@ -65,7 +75,7 @@ func TestWatchCLICollectsNewIssuesOnceIntoSeparateWorkingDirectories(t *testing.
 	var mu sync.Mutex
 	scans := 0
 	modelCalls := map[string]int{}
-	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+	useWatchTransport(t, func(request *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if request.URL.Host == "watch-tracker.example" {
@@ -193,7 +203,7 @@ func TestWatchResumesAcceptedPendingWorkDuringDiscoveryOutage(t *testing.T) {
 	store.Close()
 	var mu sync.Mutex
 	sawInterrupted, scans := false, 0
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+	useWatchTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if r.URL.Host == "watch-tracker.example" {
@@ -290,7 +300,7 @@ func TestWatchCancellationReapsActiveChildAndSameQueueResumesPendingWork(t *test
 	root := t.TempDir()
 	var mu sync.Mutex
 	offline, sawInterrupted := false, false
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+	useWatchTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if r.URL.Host == "watch-tracker.example" {
@@ -368,7 +378,7 @@ func TestWatchExclusiveQueueOwnershipPreventsASecondCollector(t *testing.T) {
 	cfg.Intake.PollIntervalSeconds = 60
 	var mu sync.Mutex
 	scans := 0
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+	useWatchTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		scans++
@@ -399,7 +409,7 @@ func TestWatchExclusiveQueueOwnershipPreventsASecondCollector(t *testing.T) {
 }
 
 func TestWatchRequiresExplicitIntakeScopeBeforeCreatingAnything(t *testing.T) {
-	for _, mutate := range []func(*config){func(c *config) { c.Intake = nil }, func(c *config) { c.Intake.ProjectID = 0 }, func(c *config) { c.Intake.CreatedSince = "" }, func(c *config) { c.Intake.MaxRunning = -1 }, func(c *config) { c.Intake.PollIntervalSeconds = -1 }, func(c *config) { c.Intake.PollIntervalSeconds = 1 << 40 }} {
+	for _, mutate := range []func(*config){func(c *config) { c.Intake = nil }, func(c *config) { c.Intake.ProjectID = 0 }, func(c *config) { c.Intake.CreatedSince = "" }, func(c *config) { c.Intake.MaxRunning = -1 }, func(c *config) { c.Intake.PollIntervalSeconds = -1 }, func(c *config) { c.Intake.PollIntervalSeconds = 1 << 40 }, func(c *config) { c.Intake.StopUserIDs = []int64{0} }} {
 		cfg := watchConfiguration(t)
 		mutate(&cfg)
 		root := filepath.Join(t.TempDir(), "must-not-exist")
@@ -418,7 +428,7 @@ func TestWatchHonorsCapacityAndStartsWaitingRequestsAfterAChildReturns(t *testin
 	root := t.TempDir()
 	var mu sync.Mutex
 	running, peak := 0, 0
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+	useWatchTransport(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host == "watch-tracker.example" {
 			return selectionReply(r, 200, []any{watchedIssue(41, "one", "2026-01-03T00:00:00Z"), watchedIssue(42, "two", "2026-01-03T00:00:00Z"), watchedIssue(43, "three", "2026-01-03T00:00:00Z")}), nil
 		}
@@ -452,25 +462,36 @@ func TestWatchHonorsCapacityAndStartsWaitingRequestsAfterAChildReturns(t *testin
 	jobFile := func(id int, name string) string {
 		return filepath.Join(root, "jobs", fmt.Sprint(id), "workspace", name)
 	}
-	for _, id := range []int{41, 42} {
-		waitFor(t, func() bool { _, err := os.Stat(jobFile(id, "started")); return err == nil })
+	var started []int
+	waitFor(t, func() bool {
+		started = nil
+		for _, id := range []int{41, 42, 43} {
+			if _, err := os.Stat(jobFile(id, "started")); err == nil {
+				started = append(started, id)
+			}
+		}
+		return len(started) >= 2
+	})
+	if len(started) != 2 {
+		t.Fatal("more than two request children started")
 	}
+	waiting := 41 + 42 + 43 - started[0] - started[1]
 	// Both capacity slots contain real running children. A third has been
 	// accepted durably, but must not have started its own child.
-	if _, err := os.Stat(filepath.Join(root, "jobs", "43", "issue.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "jobs", fmt.Sprint(waiting), "issue.json")); err != nil {
 		t.Fatal("waiting request was not retained:", err)
 	}
-	if _, err := os.Stat(jobFile(43, "started")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(jobFile(waiting, "started")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("more children than the configured capacity")
 	}
-	if err := os.WriteFile(jobFile(41, "proceed"), nil, 0600); err != nil {
+	if err := os.WriteFile(jobFile(started[0], "proceed"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { _, err := os.Stat(jobFile(43, "started")); return err == nil })
-	if state, err := loadWatchState(root, 42); err != nil || state.Done || state.Pending == nil {
+	waitFor(t, func() bool { _, err := os.Stat(jobFile(waiting, "started")); return err == nil })
+	if state, err := loadWatchState(root, started[1]); err != nil || state.Done || state.Pending == nil {
 		t.Fatalf("second job no longer running while third started: %#v %v", state, err)
 	}
-	for _, id := range []int{42, 43} {
+	for _, id := range []int{started[1], waiting} {
 		if err := os.WriteFile(jobFile(id, "proceed"), nil, 0600); err != nil {
 			t.Fatal(err)
 		}

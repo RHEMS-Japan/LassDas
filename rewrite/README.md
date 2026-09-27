@@ -70,8 +70,9 @@ One process owns a queue directory. Graceful cancellation waits for its active
 children to stop before releasing ownership. Restarting the same queue reuses
 original requests, pending histories and workspaces; the existing engine tells
 the router that interrupted actions may already have happened. Discovery errors
-and unfinished-child reasons remain in the log. Discovery currently runs before
-dispatch, so slow scans can delay starting queued work. This is not distributed
+and unfinished-child reasons remain in the log. Discovery now runs separately
+from accepted-work scheduling and stop observation, so a stuck list request
+does not block cancellation or recovery of local work. This is not distributed
 ownership across separate queue roots or supervision after a hard process crash.
 
 In watch mode a process directory must be empty or relative to its job workspace,
@@ -84,10 +85,52 @@ actual delivery permissions still have to be supplied by the configured roles.
 
 **These are logical working directories, not filesystem/network isolation.**
 An authorized launcher must confine access to other requests, controller state,
-credentials and delivery targets before live untrusted work is enabled. Stop
-comments, production packaging and real tracker-to-production operation are not
+credentials and delivery targets before live untrusted work is enabled.
+Production packaging and real tracker-to-production operation are not
 implemented by this collector. Its tests use fixture APIs and actual local child
 processes, not live-model judgments or a production tracker.
+
+### Requester stop in watch mode
+
+The issue's original creator can stop its queued or running work by posting a
+comment whose first nonblank line is exactly `停止`. A reason can follow on later
+lines. Optional `intake.stop_user_ids` lists additional authorized operator user
+ids. The account identity comes from native tracker metadata, not a name claimed
+in text. Quotes, later mentions, role reports and other users' comments are not
+stop instructions. If the requester identity is unavailable and no operator is
+configured, work waits with the reason visible instead of running without an
+identified stop authority. A shared bot/requester account cannot distinguish
+machine posts from human instructions; use separately scoped service identities.
+
+Each accepted unfinished request reads its control comments before starting and
+on the configured polling interval, independently of occupied execution slots,
+other roles and issue discovery. It uses the native
+[comment API](https://developer.nulab.com/docs/backlog/api/2/get-comment-list/).
+The collector rereads the full comment history, including edits to older
+comments. An authorized stop cancels the current process group/router call;
+it does not wait for an LLM to agree. The native stop comment is retained as
+`stop-request.json`. The work remains stopped on restart even if that remote
+comment is deleted. An unreadable saved instruction holds work too. No automatic
+resume command is implemented. This record is the user's instruction, not a
+completion mark attached to a model answer.
+
+An unreadable/unavailable control channel pauses an active engine and retains
+unfinished history; once reads recover it can resume with the existing warning
+that an interrupted action may already have taken effect. A control read is
+bounded by the polling interval (and the transport's existing deadline). This
+does not promise instantaneous stopping during a network failure. The fixture
+tests confirm cancellation in the first read that returns an authorized stop,
+including implementation, review, delivery, reporting, router waits, and queued
+work while another request owns the only execution slot. They also exercise
+HTTP failure, an unresponsive read, storage failure and restart after deletion
+of the remote stop. These are not live tracker or native-model stop trials.
+
+**Prior external effects are not rolled back by cancellation.** The prototype
+currently logs the stop locally; a tracker acknowledgment and final report of
+actual external effects remain to be connected. The control monitor is specific
+to `--watch`, not the standalone `--request`/`--issue` command. Large-queue API
+rate limits, per-request monitoring resource usage, distributed ownership and
+crash supervision are not production-validated.
 
 ### Current model list
 
@@ -446,7 +489,8 @@ entry point was replaced.
 ## Still missing before production use
 
 - The scoped polling prototype needs a genuinely isolated per-request checkout,
-  tracker stop, production supervision and live delivery integration. Its logical
+  a visible stop acknowledgment/final report, production supervision and live
+  delivery integration. Its logical
   directories are not a permission boundary. Final-comment posting/readback has
   only been exercised by native agents against a tracker fixture.
 - Resolve the observed premature completion: reviewers must compare
