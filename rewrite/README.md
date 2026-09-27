@@ -506,6 +506,21 @@ Native background tools belong to this invocation; a service intended to outlive
 it must be handed to the configured delivery runtime, not left in its scratch
 process tree.
 
+A bounded Linux-container experiment used the public chain/store/process code
+with synthetic routing and real direct and detached worker processes. Killing a
+controller underneath a surviving init left both workers writing. Making that
+same controller the container's PID 1 instead stopped both after SIGKILL; reopening
+the same request history in a fresh container retained the interruption and
+finished without old workers continuing. A separate abrupt-exit experiment used
+the runtime's `on-failure` restart policy: observed container events were exit 42,
+automatic start, and exit 0. No application restart loop or worker-PID ledger was
+added. This exercises [PID-namespace lifetime](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)
+and an existing [runtime restart policy](https://docs.docker.com/engine/containers/start-containers-automatically/),
+not real-model recovery or exactly-once external writes. It does not package or
+activate this layout, provide per-role isolation within a running container,
+test daemon/machine loss, or validate native-agent tools in Linux. In particular,
+`on-failure` is not a daemon-restart policy; that operational case remains open.
+
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure
 can use the configured ordinary-LLM router. Role errors and timeouts become
