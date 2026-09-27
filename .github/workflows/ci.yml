@@ -12,6 +12,37 @@ permissions:
   contents: read
 
 jobs:
+  # The role chain is a separate Go module: the root ./... does not include it.
+  # These are local process/fixture tests, not live-model or deployment trials.
+  role-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: rewrite
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: "-p=1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: go.mod
+          cache: false # This module currently uses only the standard library.
+      - name: Build the role-chain commands
+        run: go build ./...
+      - name: Check the role-chain code
+        run: go vet ./...
+      - name: Test the role chain
+        run: go test -count=1 ./...
+      - name: Check concurrent execution
+        run: go test -race -count=1 ./...
+      - name: Test native bridge and Git preparation
+        run: python3 -B -m unittest discover -s harnesses -p 'test_*.py'
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
