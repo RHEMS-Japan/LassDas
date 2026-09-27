@@ -797,6 +797,39 @@ not resolve the observed false acceptance. It does not establish autonomous
 selection of investigation, justify a mandatory extra stage, or show that all
 possible investigative assignments fail. No such stage was added.
 
+A matched routing replay used those same original requests and first eleven
+reports, including the first current review pair, with no new instruction,
+counterexample or edited report. Jev and the ordinary-LLM router were each
+called three times per candidate. Every ordinary-LLM choice fetched the public
+catalog anew. On the defective candidate both routers chose delivery all three
+times. The ordinary LLM supplied concrete build instructions but did not send
+the observed lost values for repair. On the comparison candidate it chose
+delivery three times; Jev chose another review once and delivery twice.
+These are routing observations, not six independent work completions. Replacing
+choice-only routing with instruction-bearing routing did not resolve this
+captured false acceptance. No router default was changed.
+
+A subsequent fresh issue-intake trial started with an empty workspace and a
+new synthetic Git repository. The configured public Git launcher performed
+the initial clone before the native implementation process entered its sandbox;
+later roles reused the same work. SDK/startup probes used a separate workspace.
+The actual issue-fetch path, implementation, two independent reviewers,
+delivery and report ran without operator repair. Five role processes fetched
+five fresh model catalogs. This was one explicit `--issue` invocation against
+the tracker fixture, not automatic `--watch` discovery or live production.
+
+It reached a real local zipapp and a final comment with exact list readback
+in about six minutes, but still falsely claimed completion. Post-run execution
+of the delivered artifact (not a rebuild) matched 16 of 25 checks: five empty-row
+cases and two empty-header cases lost values, and two previously readable
+large-cell inputs now raised the CSV library's default-size error. All 13
+implementation-authored tests passed. Both reviewers had accepted the changed
+empty-row behavior; neither caught the large-cell regression. The final report
+claimed no functional work remained. Source preparation/reuse therefore has
+live-model integration evidence, not evidence of reliable semantic completion.
+The original synthetic repository and the checked source/artifact/report were
+unchanged by the observer. No expected counterexample was fed back to the run.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
