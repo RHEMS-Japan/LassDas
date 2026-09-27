@@ -105,3 +105,37 @@ install that supervisor. A surviving unrelated init can leave old work running.
 Retained unfinished histories are needed for restart; deleting them can repeat
 external actions. Neither history nor a namespace provides exactly-once remote
 delivery. Machine/daemon loss and live overnight delivery remain unverified.
+
+## Observed controller command and crash recovery
+
+For this tested containment layout, make the controller the runtime's actual
+main process. Do not assume an unrelated surviving init will reap its work.
+For a prepared runtime, the controller command is:
+
+```sh
+exec /opt/engine/bin/ticket-engine \
+  --config /etc/ticket-automation/operator.json \
+  --watch --run-dir /var/lib/ticket-automation/queue
+```
+
+These are example installation paths. Keep the queue durable and private from
+roles, give the controller only configured credentials, and use the authorized
+runtime's restart policy. This command alone does not provide the SDK, security
+profile, networking or a deployment. Do not add a second application restart
+loop. A one-request command ending is different from the continuous collector.
+
+An offline test used the built executable as container PID 1, actual Git
+preparation, native SDK/tools, two parallel review seats and the bundled tracker
+helper. Fixture APIs supplied a ticket, routing/model responses and delivery
+service. After the final comment was stored but before its receipt returned,
+SIGQUIT crashed the actual controller with exit 2. The existing runtime's
+`on-failure` policy restarted it without a test-issued start/restart command.
+The old detached tool stopped, accepted source text survived a later remote edit,
+the service's delivered bytes remained unchanged, and reporting read back the
+one stored comment without another POST. Five completed native tool invocations
+were checked for actual successful results; the interrupted posting invocation
+had no returned result. This demonstrates one crash/reconciliation path in the
+packaged watch wiring, not independent model reasoning or general exactly-once
+delivery. No live tracker, provider, delivery target or daemon restart was used.
+The outer sandbox limitations above still apply; `on-failure` does not by itself
+restart a container after daemon restart.

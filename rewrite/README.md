@@ -552,6 +552,21 @@ allowed write and failed the two forbidden accesses. The fixture, not an LLM,
 chose these actions; this proves executable wiring, not reliable judgment,
 tracker intake or production delivery.
 
+A subsequent packaged watch test connected fixture-ticket discovery, actual
+Git preparation, native tool execution in implementation/two review seats,
+HTTP delivery and the issue-scoped reporting helper. The controller was the
+container's actual PID 1. After a comment was stored but its receipt withheld,
+SIGQUIT caused exit 2; the existing runtime automatically restarted the same
+executable and queue. Original intake survived a changed discovery response,
+the old detached worker stopped, and the resumed reporter read back the single
+stored comment without reposting or repeating delivery. The source, delivered
+bytes and all five completed tool results were observed, not inferred from done.
+An earlier version of that observer missed two fixture tool errors; rechecking
+the original observation with the corrected check rejects it. This test uses
+scripted model/router responses, not a live-model recovery judgment. The runtime
+layout and limits are documented in [RUNTIME.md](RUNTIME.md); no live service
+configuration was installed or changed.
+
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure
 can use the configured ordinary-LLM router. Role errors and timeouts become
