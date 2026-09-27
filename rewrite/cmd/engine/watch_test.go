@@ -300,6 +300,7 @@ func TestWatchCancellationReapsActiveChildAndSameQueueResumesPendingWork(t *test
 	root := t.TempDir()
 	var mu sync.Mutex
 	offline, sawInterrupted := false, false
+	modelCalls := 0
 	useWatchTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -313,11 +314,15 @@ func TestWatchCancellationReapsActiveChildAndSameQueueResumesPendingWork(t *test
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			return nil, err
 		}
+		modelCalls++
+		if !strings.Contains(input.State.Request, "original before shutdown") {
+			t.Error("restart lost original request")
+		}
 		choice := "implement"
-		if len(input.State.History) > 0 && input.State.History[0].Speaker == "runtime" && strings.Contains(input.State.History[0].Error, "may have taken effect") {
+		if len(input.State.History) >= 2 && input.State.History[0].Speaker == "worker" && input.State.History[0].Error == context.Canceled.Error() && input.State.History[1].Speaker == "runtime" && strings.Contains(input.State.History[1].Error, "may have taken effect") {
 			sawInterrupted = true
 		}
-		if len(input.State.History) == 2 && strings.Contains(input.State.History[1].Output, "Recovered using the same workspace") {
+		if len(input.State.History) == 3 && strings.Contains(input.State.History[2].Output, "Recovered using the same workspace") {
 			choice = "done"
 		}
 		return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
@@ -353,7 +358,7 @@ func TestWatchCancellationReapsActiveChildAndSameQueueResumesPendingWork(t *test
 		t.Fatalf("known experiment child is still alive: %v", err)
 	}
 	state, err := loadWatchState(root, 31)
-	if err != nil || state.Done || state.Pending == nil || state.Pending.Role != "implement" {
+	if err != nil || state.Done || state.Pending == nil || state.Pending.Role != "implement" || len(state.History) != 1 || state.History[0].Speaker != "worker" || state.History[0].Error != context.Canceled.Error() {
 		t.Fatalf("shutdown lost unfinished work: %#v %v", state, err)
 	}
 	mu.Lock()
@@ -368,8 +373,8 @@ func TestWatchCancellationReapsActiveChildAndSameQueueResumesPendingWork(t *test
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !sawInterrupted {
-		t.Fatal("restart silently repeated the interrupted action")
+	if !sawInterrupted || modelCalls != 3 {
+		t.Fatalf("restart lost interruption or repeated recovered work: saw=%v calls=%d", sawInterrupted, modelCalls)
 	}
 }
 

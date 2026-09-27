@@ -303,11 +303,14 @@ func TestStopReadOutagePausesAndRecoversPendingWorkInsteadOfEndingIt(t *testing.
 				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 					return nil, err
 				}
+				if !strings.Contains(input.State.Request, "Original conditions") {
+					t.Error("control outage lost original request")
+				}
 				choice := "implement"
-				if len(input.State.History) == 2 && strings.Contains(input.State.History[1].Output, "Recovered original work") {
+				if len(input.State.History) == 3 && strings.Contains(input.State.History[2].Output, "Recovered original work") {
 					choice = "done"
-					if input.State.History[0].Speaker != "runtime" || !strings.Contains(input.State.History[0].Error, "may have taken effect") {
-						t.Error("control outage resumed without observing interrupted effects")
+					if input.State.History[0].Speaker != "worker" || input.State.History[0].Error != context.Canceled.Error() || input.State.History[1].Speaker != "runtime" || !strings.Contains(input.State.History[1].Error, "may have taken effect") {
+						t.Error("control outage lost returned cancellation or warning about interrupted effects")
 					}
 				}
 				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
@@ -318,7 +321,7 @@ func TestStopReadOutagePausesAndRecoversPendingWorkInsteadOfEndingIt(t *testing.
 			unavailable.Store(true)
 			waitFor(t, func() bool { return badReads.Load() >= 2 && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
 			state, err := loadWatchState(root, 51)
-			if err != nil || state.Done || state.Pending == nil || models.Load() != 1 {
+			if err != nil || state.Done || state.Pending == nil || len(state.History) != 1 || state.History[0].Error != context.Canceled.Error() || models.Load() != 1 {
 				t.Fatalf("control outage lost pending work: %#v %v models=%d", state, err, models.Load())
 			}
 			if _, err := os.Stat(filepath.Join(root, "jobs", "51", "stop-request.json")); !errors.Is(err, os.ErrNotExist) {
@@ -327,6 +330,9 @@ func TestStopReadOutagePausesAndRecoversPendingWorkInsteadOfEndingIt(t *testing.
 			unavailable.Store(false)
 			waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
 			finish()
+			if models.Load() != 3 {
+				t.Fatalf("control outage repeated recovered work: calls=%d", models.Load())
+			}
 			if !strings.Contains(log.String(), "control channel offline") || strings.Contains(log.String(), "synthetic-watch-key") {
 				t.Fatal("control failure cause was lost or leaked a credential")
 			}

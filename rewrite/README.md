@@ -114,6 +114,19 @@ comment is deleted. An unreadable saved instruction holds work too. No automatic
 resume command is implemented. This record is the user's instruction, not a
 completion mark attached to a model answer.
 
+If a stopped role returns reports or errors, the chain makes one final local
+history-write attempt to retain them, without another model call or external
+action. The interrupted assignment remains pending: on an authorized resume,
+the next role sees both the reports and the warning that external effects may
+already exist. A local write failure is logged and returned, not retried forever
+during shutdown. This does not recover unreturned output, bypass a saved stop,
+or guarantee persistence through disk failure, a hung filesystem or a hard crash.
+An installed-SDK trial with a synthetic model and tracker stopped a pending
+comment POST after the tracker had stored it. The returned cancellation and
+diagnostics survived in history, no further routing occurred, and the recorded
+native child PIDs and scoped listener were gone. A stored remote effect is not
+undone by retaining its local observation.
+
 An unreadable/unavailable control channel pauses an active engine and retains
 unfinished history; once reads recover it can resume with the existing warning
 that an interrupted action may already have taken effect. A control read is

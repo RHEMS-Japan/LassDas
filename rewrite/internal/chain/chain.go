@@ -90,7 +90,7 @@ func (c Chain) Run(ctx context.Context) error {
 	if state.Pending != nil {
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
-			Error:      "The process stopped before recording the result. The action may have taken effect. Inspect the working tree and external state before repeating it.",
+			Error:      "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
 			FinishedAt: time.Now().UTC(),
 		})
 		state.Pending = nil
@@ -129,6 +129,19 @@ func (c Chain) Run(ctx context.Context) error {
 		state.History = append(state.History, results...)
 		state.Pending = nil
 		if err := c.save(ctx, state); err != nil {
+			if ctx.Err() != nil {
+				// Stop authorizes no more work, but do not discard results that
+				// the stopped role already returned. Make one local write attempt
+				// without the cancelled retry loop. Keep Pending so a later
+				// authorized resume still warns about uncertain external effects.
+				state.Pending = &next
+				if saveErr := c.Store.Save(state); saveErr != nil {
+					cause := fmt.Errorf("retaining stopped role results: %w", saveErr)
+					c.observe(cause.Error())
+					return errors.Join(err, cause)
+				}
+				return ctx.Err()
+			}
 			return fmt.Errorf("saving role result: %w", err)
 		}
 		if err := ctx.Err(); err != nil {

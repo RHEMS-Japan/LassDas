@@ -233,3 +233,120 @@ func TestFileStoreExclusiveOwnerAndOriginalRequest(t *testing.T) {
 		t.Fatal("original history was changed")
 	}
 }
+
+func TestCancellationRetainsReturnedReportsAndRestartWarning(t *testing.T) {
+	const request = "Publish only once and inspect the actual external result."
+	dir := t.TempDir()
+	store, err := Open(dir, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	launches, routes := 0, 0
+	partial := []Result{{Role: "deliver", Speaker: "first", Model: "fixture/model", Output: "Uploaded part of the release.\n{\"unknown\":true}", Diagnostics: "The remote receipt was interrupted.", Error: "context canceled", StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC()},
+		{Role: "deliver", Speaker: "second", Output: "", Error: "receipt unavailable"}}
+	engine := Chain{Store: store, Router: testRouter(func(context.Context, State) (Assignment, error) {
+		routes++
+		return Assignment{Role: "deliver", Instruction: "Keep the original destination."}, nil
+	}),
+		Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+			launches++
+			cancel()
+			return append([]Result(nil), partial...)
+		})}
+	if err := engine.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stop not returned: %v", err)
+	}
+	store.Close()
+	store, err = Open(dir, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	saved, err := store.Load()
+	if err != nil || saved.Done || saved.Request != request || len(saved.History) != 2 || saved.Pending == nil || saved.Pending.Role != "deliver" || routes != 1 || launches != 1 {
+		t.Fatalf("stopped results discarded/finished: %#v err=%v routes=%d launches=%d", saved, err, routes, launches)
+	}
+	for i, r := range partial {
+		r.Instruction = "Keep the original destination."
+		if !reflect.DeepEqual(saved.History[i], r) {
+			t.Fatalf("report changed: %#v", saved.History[i])
+		}
+	}
+	// This explicitly simulates operator-authorized resumption. Watch's saved
+	// stop still prevents an ordinary restart from resuming stopped work.
+	var resumed []string
+	engine = Chain{Store: store, Router: testRouter(func(_ context.Context, s State) (Assignment, error) {
+		if len(s.History) == 3 {
+			if s.Pending != nil || s.History[2].Speaker != "runtime" || !strings.Contains(s.History[2].Error, "may have taken effect") || s.History[0].Output != partial[0].Output {
+				t.Fatal("restart lost reports or interrupted-write warning")
+			}
+			return Assignment{Role: "verify"}, nil
+		}
+		return Assignment{Role: "done"}, nil
+	}), Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+		resumed = append(resumed, a.Role)
+		return []Result{{Role: a.Role, Output: "Inspected the existing destination; did not repeat publication."}}
+	})}
+	if err := engine.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resumed, []string{"verify"}) {
+		t.Fatalf("publication repeated: %v", resumed)
+	}
+}
+
+type cancellationStore struct {
+	memoryStore
+	cancel       context.CancelFunc
+	reportWrites int
+	failLast     bool
+}
+
+func (s *cancellationStore) Save(state State) error {
+	if len(state.History) > 0 {
+		s.reportWrites++
+		if s.reportWrites == 1 {
+			s.cancel()
+			return errors.New("storage interrupted while saving the report")
+		}
+		if s.failLast {
+			return errors.New("storage still unavailable on shutdown")
+		}
+	}
+	return s.memoryStore.Save(state)
+}
+
+func TestCancellationDuringSaveAttemptsLocalRetentionWithoutRepeatingWork(t *testing.T) {
+	for _, failLast := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recovered", true: "still-unavailable"}[failLast], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := &cancellationStore{memoryStore: memoryStore{state: State{Request: "original"}}, cancel: cancel, failLast: failLast}
+			launches, routes := 0, 0
+			var observations []string
+			engine := Chain{Store: store, RetryDelay: time.Hour, Observe: func(s string) { observations = append(observations, s) },
+				Router: testRouter(func(context.Context, State) (Assignment, error) { routes++; return Assignment{Role: "report"}, nil }),
+				Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+					launches++
+					return []Result{{Role: "report", Output: "The comment may already be stored."}}
+				})}
+			started := time.Now()
+			err := engine.Run(ctx)
+			if !errors.Is(err, context.Canceled) || time.Since(started) > time.Second || launches != 1 || routes != 1 || store.reportWrites != 2 {
+				t.Fatalf("shutdown retried work/waited/lost local attempt: %v launches=%d routes=%d writes=%d", err, launches, routes, store.reportWrites)
+			}
+			if store.state.Done || store.state.Pending == nil || store.state.Pending.Role != "report" {
+				t.Fatalf("ambiguous action lost: %#v", store.state)
+			}
+			if failLast {
+				if len(store.state.History) != 0 || !strings.Contains(err.Error(), "storage still unavailable on shutdown") || !strings.Contains(strings.Join(observations, "\n"), "storage still unavailable on shutdown") {
+					t.Fatalf("shutdown storage reason lost: %v state=%#v observations=%v", err, store.state, observations)
+				}
+			} else if len(store.state.History) != 1 || store.state.History[0].Output != "The comment may already be stored." {
+				t.Fatalf("returned report lost: %#v", store.state)
+			}
+		})
+	}
+}
