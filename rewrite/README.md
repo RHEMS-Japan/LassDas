@@ -260,6 +260,37 @@ output to stderr. A failed native run returns a nonzero exit and its partial
 report/reason, so the chain can decide recovery. Even a cleanup failure retains
 the report already obtained. No model response must conform to an answer schema.
 
+On cancellation the runner sends SIGTERM to the harness process group, allowing
+native cleanup before escalating that same group to SIGKILL after three seconds.
+The bridge forwards SIGTERM/SIGINT to the installed agent's hard interrupt from
+a separate thread, then invokes the native background-process registry teardown
+and closes the agent. A registry cleanup is needed because native local tools
+can be registered under an environment id rather than the agent session id.
+This adapter owns one agent/registry per process; it is not a shared gateway.
+Cancelled work keeps its partial report but never receives a successful exit.
+An interrupted SDK result with no final response remains an empty report, not
+a report-format error.
+
+An offline trial used the installed SDK and its actual terminal tool against a
+synthetic model endpoint. With the old immediate SIGKILL, a detached terminal
+kept writing after cancellation returned. With native teardown connected, both
+foreground execution and a background command during a hung model request
+stopped writing and their recorded child PIDs disappeared. The isolated role
+must be allowed to signal its own tool processes; the trial separately checked
+that signaling the test controller outside that sandbox remained forbidden.
+These are process-lifecycle observations, not real-model or live-tracker trials.
+The accepted-request watch path was also exercised in all four roles
+(implement/review/deliver/report), both foreground and background. Each applied
+the authorized stop on its first read, retained the stop without marking the
+request done, and reaped the native child. With a 40ms poll, cancellation plus
+recording took 1.061–1.091 seconds, not a one-poll wall-clock guarantee.
+Graceful cleanup is not containment: a hard crash, a non-cooperating harness,
+untracked detached children or remote work still require an execution sandbox
+or supervisor that owns their lifetime. Earlier external effects are not undone.
+Native background tools belong to this invocation; a service intended to outlive
+it must be handed to the configured delivery runtime, not left in its scratch
+process tree.
+
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure
 can use the configured ordinary-LLM router. Role errors and timeouts become

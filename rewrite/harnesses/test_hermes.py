@@ -4,7 +4,9 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
 import types
 import tempfile
 import unittest
@@ -16,8 +18,16 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
+        interrupted = threading.Event()
+
+        class NativeRegistry:
+            def kill_all(self):
+                events.append(("backgrounds_closed", True))
+                print("native background cleanup display")
+                if background_cleanup_error:
+                    raise background_cleanup_error
 
         class NativeAgent:
             def __init__(self, **kwargs):
@@ -29,9 +39,19 @@ class BridgeTests(unittest.TestCase):
             def run_conversation(self, user_message):
                 events.append(("request", user_message))
                 print("native tool trace")
+                if stop_signal:
+                    signal.getsignal(stop_signal)(stop_signal, None)
+                    if not interrupted.wait(1):
+                        raise RuntimeError("native interrupt did not reach the tool loop")
                 if error:
                     raise error
                 return result
+
+            def interrupt(self, *, hard_cancel=False):
+                events.append(("interrupted", hard_cancel))
+                interrupted.set()
+                if interrupt_error:
+                    raise interrupt_error
 
             def close(self):
                 events.append(("closed", True))
@@ -47,7 +67,8 @@ class BridgeTests(unittest.TestCase):
         if task_home:
             env["TASK_HOME"] = str(task_home)
         failure, code = None, None
-        with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent)}), \
+        with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent),
+                                     "tools.process_registry": types.SimpleNamespace(process_registry=NativeRegistry())}), \
              patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["bridge"]), \
              patch.object(sys, "stdin", io.StringIO("original\n依頼\nunchanged")), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -67,6 +88,7 @@ class BridgeTests(unittest.TestCase):
             self.assertIn(diagnostic, err)
         self.assertIn(("request", "original\n依頼\nunchanged"), events)
         self.assertIn(("dotenv", "1"), events)
+        self.assertEqual(events[-2], ("backgrounds_closed", True))
         self.assertEqual(events[-1], ("closed", True))
         config = events[0][1]
         self.assertEqual(config["enabled_toolsets"], ["terminal", "file"])
@@ -74,6 +96,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(config["max_tokens"], 7000)
         self.assertEqual(config["reasoning_config"], {"effort": "high"})
         self.assertTrue(config["skip_background_review"])
+
+    def test_background_cleanup_failure_still_closes_agent_and_keeps_report(self):
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        events, out, err, code, failure = self.run_bridge(
+            {"final_response": "Actual work remains visible"}, background_cleanup_error=RuntimeError("background cleanup failed"))
+        self.assertEqual(out, "Actual work remains visible")
+        self.assertEqual(str(failure), "background cleanup failed")
+        self.assertEqual(events[-2:], [("backgrounds_closed", True), ("closed", True)])
+        for sig, handler in previous.items():
+            self.assertEqual(signal.getsignal(sig), handler)
 
     def test_native_failure_keeps_partial_report_and_reason(self):
         events, out, err, code, failure = self.run_bridge(
@@ -111,6 +143,34 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(task_home.is_dir())
             self.assertIn(("home", str(task_home)), events)
             self.assertEqual(out, "ordinary result")
+
+    def test_stop_signals_use_native_hard_interrupt_and_restore_handlers(self):
+        for number in (signal.SIGTERM, signal.SIGINT):
+            previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+            events, out, err, code, failure = self.run_bridge({"final_response": "Actual partial work"}, stop_signal=number)
+            self.assertIsNone(failure)
+            self.assertEqual(code, 128 + number)
+            self.assertIn(("interrupted", True), events)
+            self.assertEqual(events[-2:], [("backgrounds_closed", True), ("closed", True)])
+            self.assertEqual(out, "Actual partial work")
+            for sig, handler in previous.items():
+                self.assertEqual(signal.getsignal(sig), handler)
+
+    def test_native_interrupt_error_is_visible_and_never_a_success_exit(self):
+        events, out, err, code, failure = self.run_bridge({"final_response": "Unfinished"}, stop_signal=signal.SIGTERM, interrupt_error=RuntimeError("native cancellation unavailable"))
+        self.assertIsNone(failure)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "Unfinished")
+        self.assertIn("native cancellation unavailable", err)
+        self.assertEqual(events[-1], ("closed", True))
+
+    def test_native_interrupt_with_no_final_response_is_not_a_type_error(self):
+        events, out, err, code, failure = self.run_bridge({"final_response": None, "failed": True, "error": "Interrupted by caller"}, stop_signal=signal.SIGTERM)
+        self.assertIsNone(failure)
+        self.assertEqual(code, 143)
+        self.assertEqual(out, "")
+        self.assertIn("Interrupted by caller", err)
+        self.assertEqual(events[-1], ("closed", True))
 
 
 if __name__ == "__main__":

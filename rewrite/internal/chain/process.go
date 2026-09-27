@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -138,14 +139,41 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	var output, diagnostics bytes.Buffer
 	command.Stdout, command.Stderr = &output, &diagnostics
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	finished := make(chan struct{})
+	var stopping sync.WaitGroup
+	var stopError error
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		// Let a native harness cancel its own tools and release resources.
+		// SIGKILL alone bypasses that cleanup; native tools may own separate
+		// process groups. A non-cooperative harness still gets bounded time.
+		if err := syscall.Kill(-command.Process.Pid, syscall.SIGTERM); err != nil {
+			if !errors.Is(err, syscall.ESRCH) {
+				stopError = fmt.Errorf("requesting role shutdown: %w", err)
+			}
+			return err
+		}
+		stopping.Add(1)
+		go func() {
+			defer stopping.Done()
+			timer := time.NewTimer(3 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-finished:
+			case <-timer.C:
+				if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					stopError = fmt.Errorf("forcing role shutdown: %w", err)
+				}
+			}
+		}()
+		return nil
 	}
-	command.WaitDelay = 2 * time.Second
+	command.WaitDelay = 5 * time.Second
 	err := command.Run()
+	close(finished)
+	stopping.Wait()
 	result.Output = output.String()
 	result.Diagnostics = diagnostics.String()
 	if err != nil {
@@ -153,6 +181,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	}
 	if ctx.Err() != nil {
 		result.Error = ctx.Err().Error()
+	}
+	if stopError != nil {
+		result.Error += "\n" + stopError.Error()
 	}
 	if result.Error != "" && result.Diagnostics != "" {
 		result.Error += "\n" + result.Diagnostics

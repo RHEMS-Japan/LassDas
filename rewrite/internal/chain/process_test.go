@@ -3,6 +3,8 @@ package chain
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,6 +118,76 @@ func TestProcessTimeoutReturnsAnObservationAndStopIsPrompt(t *testing.T) {
 	if time.Since(started) > time.Second {
 		t.Fatal("process group outlived the cancellation")
 	}
+}
+
+func TestProcessCancellationLetsHarnessCleanUpBeforeReturning(t *testing.T) {
+	dir := t.TempDir()
+	process := Process{Name: "cleanup-aware", Directory: dir, Command: []string{"/bin/sh", "-c", `trap 'printf cleaned > cleaned; exit 0' TERM; printf 'partial work'; printf ready > ready; while :; do sleep 0.05; done`}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan Result, 1)
+	go func() {
+		result <- process.run(ctx, Role{Name: "implement"}, Assignment{Role: "implement"}, State{Request: "original"})
+	}()
+	waitProcessFile(t, filepath.Join(dir, "ready"))
+	cancel()
+	var got Result
+	select {
+	case got = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cooperative harness did not stop")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cleaned")); err != nil {
+		t.Fatal("harness was killed without running its cleanup")
+	}
+	if got.Output != "partial work" || !strings.Contains(got.Error, "context canceled") {
+		t.Fatalf("cancellation erased partial work or looked successful: %#v", got)
+	}
+}
+
+func TestProcessCancellationForcesAnUnresponsiveHarnessToStop(t *testing.T) {
+	dir := t.TempDir()
+	// Finite even when an escalation mutation breaks the cleanup under test.
+	process := Process{Name: "ignores-term", Directory: dir, Command: []string{"/bin/sh", "-c", `trap '' TERM; printf ready > ready; i=0; while [ "$i" -lt 160 ]; do sleep 0.05; i=$((i+1)); done`}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan Result, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		result <- process.run(ctx, Role{Name: "implement"}, Assignment{Role: "implement"}, State{Request: "original"})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("bounded shutdown fixture was not reaped")
+		}
+	})
+	waitProcessFile(t, filepath.Join(dir, "ready"))
+	started := time.Now()
+	cancel()
+	select {
+	case got := <-result:
+		if !strings.Contains(got.Error, "context canceled") || time.Since(started) < 2800*time.Millisecond || time.Since(started) > 4500*time.Millisecond {
+			t.Fatalf("shutdown did not allow the cleanup period: elapsed=%s result=%#v", time.Since(started), got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unresponsive harness survived the shutdown period")
+	}
+}
+
+func waitProcessFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("known harness did not become ready")
 }
 
 func TestIndependentProcessesReceiveNoPeerAnswer(t *testing.T) {

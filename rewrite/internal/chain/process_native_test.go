@@ -21,7 +21,10 @@ func TestNativeBridgeProcessKeepsPartialReportAndFailureObservation(t *testing.T
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	const native = `import os
+	const native = `import os, sys, types
+def stop_backgrounds():
+ print("background cleanup diagnostic")
+sys.modules["tools.process_registry"] = types.SimpleNamespace(process_registry=types.SimpleNamespace(kill_all=stop_backgrounds))
 print("native import diagnostic")
 assert os.environ["PYTHON_DOTENV_DISABLED"] == "1"
 class AIAgent:
@@ -55,7 +58,7 @@ class AIAgent:
 	if !strings.Contains(result.Error, "exit status 1") || !strings.Contains(result.Error, "provider unavailable [credential]") {
 		t.Fatalf("native failure reason missing: %q", result.Error)
 	}
-	for _, part := range []string{"import", "startup", "tool", "cleanup"} {
+	for _, part := range []string{"import", "startup", "tool", "cleanup", "background cleanup"} {
 		if !strings.Contains(result.Diagnostics, part+" diagnostic") {
 			t.Errorf("missing %s diagnostic", part)
 		}

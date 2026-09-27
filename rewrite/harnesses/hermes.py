@@ -7,7 +7,9 @@ or model shortlist belongs here.
 import contextlib
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
 
 
 def main():
@@ -23,6 +25,7 @@ def main():
     os.environ["PYTHON_DOTENV_DISABLED"] = "1"
     with contextlib.redirect_stdout(sys.stderr):
         from run_agent import AIAgent
+        from tools.process_registry import process_registry
     if sys.argv[1:] == ["--check-import"]:
         print("native agent import available")
         return 0
@@ -39,20 +42,61 @@ def main():
             max_tokens=int(os.environ.get("NATIVE_MAX_TOKENS", "6000")),
             skip_context_files=True, skip_memory=True, skip_background_review=True,
         )
+
+    # Native terminal commands can have their own process groups. Give the
+    # installed agent its existing hard-interrupt path before closing it.
+    # The signal handler only records intent: calling SDK locks from a Python
+    # signal handler can deadlock if that same thread already holds a lock.
+    stop_signal = 0
+    finished = threading.Event()
+
+    def request_stop(number, _frame):
+        nonlocal stop_signal
+        stop_signal = number
+
+    previous = {number: signal.signal(number, request_stop)
+                for number in (signal.SIGTERM, signal.SIGINT)}
+
+    def interrupt_tools():
+        while not finished.wait(0.02):
+            if stop_signal:
+                try:
+                    agent.interrupt(hard_cancel=True)
+                except Exception as error:
+                    print(f"Native interruption failed: {error}", file=sys.stderr)
+                return
+
+    interrupter = threading.Thread(target=interrupt_tools, daemon=True)
+    interrupter.start()
     try:
         with contextlib.redirect_stdout(sys.stderr):
             result = agent.run_conversation(user_message=prompt)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.
-        sys.stdout.write(result.get("final_response", ""))
+        response = result.get("final_response")
+        if response is not None:
+            sys.stdout.write(response)
         sys.stdout.flush()
         if result.get("error"):
             print(result["error"], file=sys.stderr)
-        return 1 if result.get("failed") else 0
+        return 128 + stop_signal if stop_signal else (1 if result.get("failed") else 0)
     finally:
-        with contextlib.redirect_stdout(sys.stderr):
-            agent.close()
+        finished.set()
+        interrupter.join(timeout=1)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    # This one-shot process owns one agent and its registry.
+                    # Native local tools may be registered under a shared
+                    # environment id, not the session id used by close().
+                    # Use native teardown, not a second process-tree walker.
+                    process_registry.kill_all()
+                finally:
+                    agent.close()
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
 
 
 if __name__ == "__main__":
