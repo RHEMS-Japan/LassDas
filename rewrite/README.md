@@ -941,6 +941,18 @@ a defect of the actual candidate. Finding weak tests did not establish that
 these reviewers would reject the candidate's existing defects. No mandatory
 review stage was adopted from this result.
 
+After repairing delivery of shared operator instructions to every role, another
+fresh ordinary-LLM trial completed investigation, implementation, two reviews,
+delivery, verification and a single report with exact fixture-comment readback.
+It took about nine minutes with no operator repair or restart. The request,
+operator workflow and role responsibilities were unchanged; fourteen fresh
+catalog fetches covered seven routing calls and seven working-role launches.
+The actual delivery still passed only16/25 known observations while its thirteen
+generated tests passed. Empty cells/header values were lost and ordinary large
+cells raised an error. The reviewers and verifier again waived an observed
+behavior change, and the final report claimed fulfillment. Correct context
+wiring did not establish correct completion judgment.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
