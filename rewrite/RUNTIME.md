@@ -15,6 +15,20 @@ set up credentials, change an existing service, or select a production policy.
 Go, its ordinary build cache and this module's source are needed at build time.
 The Go commands are static by default; Python/SDK dependencies are not bundled.
 
+## HTTPS with a private certificate authority
+
+Keep TLS verification enabled. Go 1.27 supports `SSL_CERT_FILE` on macOS;
+older builds may ignore it and use the system keychain. A bundle built with
+Go 1.27.1 was exercised with `SSL_CERT_FILE` pointing to public roots plus the
+test service's public certificate, and `GODEBUG=x509sslcertoverrideplatform=1`
+because this module retains an older Go compatibility baseline. The actual
+tracker command read the configured service, rejected it without that added
+certificate, and the engine fetched the live model catalog. No OS trust store
+or SDK installation was changed. This is connection evidence, not fulfillment.
+See the [Go certificate-pool documentation](https://pkg.go.dev/crypto/x509#SystemCertPool).
+The environment must be configured for the controller and, separately, any
+working SDK that needs it; role environments do not inherit controller values.
+
 ## Linux role launch
 
 `harnesses/linux_role.py` runs a configured command using the installed
