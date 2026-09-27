@@ -27,6 +27,7 @@ type config struct {
 	Backlog        tracker.Backlog  `json:"backlog"`
 	ModelSelection *selectionConfig `json:"model_selection,omitempty"`
 	Intake         *intakeConfig    `json:"intake,omitempty"`
+	AssignedIssue  string           `json:"assigned_issue,omitempty"`
 }
 
 func main() {
@@ -97,7 +98,21 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		return errors.New("choose router.mode jev or llm")
 	}
 	if *watch {
+		if cfg.AssignedIssue != "" {
+			return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
+		}
 		return watchRequests(ctx, cfg, *directory, log)
+	}
+	assigned := cfg.AssignedIssue
+	if *issue != "" {
+		if assigned != "" && assigned != *issue {
+			return errors.New("configured tracker assignment differs from --issue")
+		}
+		assigned = *issue
+	}
+	prepareAccess, err := roleAccess(cfg, assigned)
+	if err != nil {
+		return err
 	}
 	readRequest := func(ctx context.Context) (string, error) {
 		if *issue != "" {
@@ -111,7 +126,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		return err
 	}
 	defer store.Close()
-	executor := chain.Processes{Roles: roles}
+	executor := chain.Processes{Roles: roles, Prepare: prepareAccess}
 	if cfg.ModelSelection != nil {
 		selection := *cfg.ModelSelection
 		selection.observe = observe

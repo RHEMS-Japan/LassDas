@@ -282,6 +282,17 @@ replays each. No corrective work ran in these decision-only replays. This does
 not justify adopting blind review as a sufficient safeguard or either router
 as a proven solution; no new response gate or default review interface was added.
 
+A diagnostic continuation then started with those two current reviews and the
+unchanged original request/source, omitting four older reports only from that
+experiment's initial context. Both router types chose implementation in the
+decision replay. In the actual native continuation, the implementation role
+added tests but did not change the source; new reviewers again accepted the
+behavior, and Jev proceeded through delivery, verification and a read-back final
+comment. Independent post-run checks still found the empty-value-row loss. Six
+working launches made six fresh catalog requests. Dispatching corrective work
+is not evidence that the correction happened. Neither deleting history nor
+adding the separately tested chronology instruction was adopted into the engine.
+
 The adapter disables dotenv discovery, implicit memory/context-file loading
 and native background review. Supply the repository knowledge locations and
 actual role permissions in the configured instructions; the agent may read
@@ -363,9 +374,61 @@ by waiting; reasons remain visible, not reported as a completed request.
 
 ### Tracker communication available to configured roles
 
+#### Issue-scoped role access
+
+Set a process's `tracker_access` to `read` or `comment` to give it temporary
+access to the assigned issue without giving it the controller's tracker account
+key. `read` permits the issue and its comments; `comment` additionally permits
+posting ordinary comment content. The assignment comes from the operator's
+`--issue`, the accepted watch issue, or explicit `assigned_issue` configuration
+for file-based requests. It is never inferred from model prose. Watch mode
+assigns each issue separately and rejects a queue-wide `assigned_issue`.
+
+The process receives `TASK_TRACKER_URL`, `TASK_TRACKER_ISSUE`, the public
+`TASK_TRACKER_CERT`, and an ephemeral `TASK_TRACKER_KEY`. It can use the existing
+tracker tool from its authorized environment:
+
+```sh
+tracker --base-url "$TASK_TRACKER_URL" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue "$TASK_TRACKER_ISSUE" post < report.txt
+tracker --base-url "$TASK_TRACKER_URL" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue "$TASK_TRACKER_ISSUE" --comment-id 42 comment
+```
+
+Each launch gets a separate loopback TLS endpoint, certificate and access key.
+The server closes when the role returns or the request is cancelled. TLS trust
+is explicit, not disabled; the scoped client does not use ambient HTTP proxies.
+Runtime access values are not serialized into operator/watch configuration, and
+echoed keys are scrubbed from role history. Do not also map the controller's
+tracker key through any role's `secrets` when scoped access is enabled; this
+configuration is rejected. Other reserved environment collisions are rejected.
+
+Changing CLI arguments or using HTTP directly does not grant another issue,
+project discovery, deletion, status changes or explicit notification recipients.
+Posting can still cause the tracker's ordinary comment notifications. A report's
+content is not parsed, scored, rewritten or accepted as proof of completion.
+API transport limits remain, and ambiguous submissions are not replayed by this
+server. Roles can inspect posted comments with their same scoped access.
+
+These permissions **do not isolate a process from the controller, sibling
+processes, other files or the network**. The configured OS/container launcher
+must do that and keep account credentials/controller state inaccessible. The
+loopback address requires the launcher to provide access to the same loopback
+network; cross-host/container networking is not configured here. A local mock
+tracker and real child-process/CLI trials cover assignment, post/readback,
+read-only denial, expiry, cancellation and ambiguous writes. They are not live
+service/model or production-isolation acceptance. An already accepted external
+write cannot be undone by closing the local endpoint.
+
+#### Direct operator-configured tracker tool
+
 `go build ./cmd/tracker` provides `issues`, `read`, `comments`, `comment`, and `post`
 actions. Configure its endpoint, assigned issue and named credential source in
-the authorized role's environment. For example, inside that role's isolation:
+the authorized role's environment.
+
+Direct use has whatever authority the supplied upstream account key grants;
+`--issue` alone is not a permission boundary. Prefer the scoped role connection
+above for autonomous work.
+
+For example, inside that role's isolation:
 
 ```sh
 tracker --base-url https://tracker.example/api/v2 --key-env REPORT_KEY --issue EXAMPLE-1 post < report.txt

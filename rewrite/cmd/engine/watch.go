@@ -287,6 +287,10 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 // network sandbox. The configured launcher must enforce actual permissions.
 func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 	bound := cfg
+	bound.AssignedIssue = issue
+	if _, err := roleAccess(bound, issue); err != nil {
+		return config{}, err
+	}
 	bound.Roles = make([]chain.Role, len(cfg.Roles))
 	workspace := filepath.Join(directory, "workspace")
 	for i, role := range cfg.Roles {

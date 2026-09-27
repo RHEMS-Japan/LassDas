@@ -30,6 +30,7 @@ func run(ctx context.Context, args []string, input io.Reader, output, log io.Wri
 	flags.SetOutput(log)
 	base := flags.String("base-url", "", "configured Backlog API base URL")
 	key := flags.String("key-env", "", "name of the credential environment variable, never its value")
+	certificate := flags.String("cert-env", "", "optional environment variable containing the assigned local API's public PEM certificate")
 	issue := flags.String("issue", "", "the assigned issue id or key")
 	project := flags.Int64("project-id", 0, "the explicit project to read with the issues action")
 	after := flags.Int64("after-id", 0, "list comments after this API id")
@@ -52,6 +53,14 @@ func run(ctx context.Context, args []string, input io.Reader, output, log io.Wri
 		return errors.New("comment selection flags do not match the action")
 	}
 	b := tracker.Backlog{BaseURL: *base, KeyEnv: *key}
+	if *certificate != "" {
+		client, err := tracker.CertificateClient(os.Getenv(*certificate))
+		if err != nil {
+			return err
+		}
+		defer client.CloseIdleConnections()
+		b.Client = client
+	}
 	var data any
 	var err error
 	switch action {

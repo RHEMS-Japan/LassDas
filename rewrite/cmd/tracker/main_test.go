@@ -19,7 +19,91 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"ticket-runner/internal/tracker"
 )
+
+func TestScopedTrackerCLIHelper(t *testing.T) {
+	if os.Getenv("SCOPED_CLI_TEST_CHILD") != "1" {
+		return
+	}
+	if os.Getenv("SCOPED_CLI_TEST_ACCOUNT") != "" {
+		t.Fatal("account credential inherited")
+	}
+	for i, arg := range os.Args {
+		if arg == "--" {
+			os.Args = append([]string{"tracker"}, os.Args[i+1:]...)
+			main()
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
+}
+
+func TestCLIPostsThroughScopedAccessWithExplicitCertificate(t *testing.T) {
+	t.Setenv("SCOPED_CLI_TEST_ACCOUNT", "synthetic-controller-account")
+	const prose = "ordinary 日本語\n{\"unrecognized\":null} $(literal)\n"
+	var mu sync.Mutex
+	posts := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Query().Get("apiKey") != "synthetic-controller-account" {
+			t.Error("wrong upstream authority")
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "POST /issues/EXAMPLE-1/comments":
+			posts++
+			if err := r.ParseForm(); err != nil || r.PostForm.Get("content") != prose {
+				t.Error("prose changed")
+			}
+			w.WriteHeader(201)
+		case "GET /issues/EXAMPLE-1/comments/7":
+		default:
+			t.Errorf("unexpected operation: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": 7, "content": prose})
+	}))
+	defer upstream.Close()
+	access, err := tracker.ServeIssue(context.Background(), tracker.Backlog{BaseURL: upstream.URL, KeyEnv: "SCOPED_CLI_TEST_ACCOUNT", Client: upstream.Client()}, "EXAMPLE-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer access.Close()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(issue, certificate, input string, tail ...string) ([]byte, error) {
+		t.Helper()
+		args := []string{"-test.run=^TestScopedTrackerCLIHelper$", "--", "--base-url", access.URL, "--key-env", "SCOPED_CLI_KEY", "--cert-env", "SCOPED_CLI_CERT", "--issue", issue}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, append(args, tail...)...)
+		cmd.Env = []string{"SCOPED_CLI_TEST_CHILD=1", "SCOPED_CLI_KEY=" + access.Key, "SCOPED_CLI_CERT=" + certificate}
+		cmd.Stdin = strings.NewReader(input)
+		return cmd.CombinedOutput()
+	}
+	posted, err := call("EXAMPLE-1", access.Certificate, prose, "post")
+	if err != nil {
+		t.Fatalf("post: %s %v", posted, err)
+	}
+	read, err := call("EXAMPLE-1", access.Certificate, "", "--comment-id", "7", "comment")
+	if err != nil || string(posted) != string(read) {
+		t.Fatalf("readback: %s %v", read, err)
+	}
+	for _, args := range []struct{ issue, cert string }{{"EXAMPLE-2", access.Certificate}, {"EXAMPLE-1", ""}, {"EXAMPLE-1", "not a PEM"}} {
+		out, err := call(args.issue, args.cert, prose, "post")
+		if err == nil || strings.Contains(string(out), access.Key) {
+			t.Fatalf("unauthorized request succeeded/leaked access: %s %v", out, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 1 {
+		t.Fatalf("submitted %d times", posts)
+	}
+}
 
 func TestTrackerCLIHelper(t *testing.T) {
 	if os.Getenv("TRACKER_CLI_TEST_CHILD") != "1" {

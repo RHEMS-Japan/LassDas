@@ -17,12 +17,16 @@ import (
 // Process is a configured role's harness. Its permissions are those of the
 // configured command/container, not permissions invented by a model response.
 type Process struct {
-	Name         string            `json:"name"`
-	Command      []string          `json:"command"`
-	Directory    string            `json:"directory"`
-	Env          map[string]string `json:"env,omitempty"`
-	Secrets      map[string]string `json:"secrets,omitempty"`
-	Instructions string            `json:"instructions,omitempty"`
+	Name      string            `json:"name"`
+	Command   []string          `json:"command"`
+	Directory string            `json:"directory"`
+	Env       map[string]string `json:"env,omitempty"`
+	Secrets   map[string]string `json:"secrets,omitempty"`
+	// Credentials are ephemeral controller-issued values, never operator JSON.
+	Credentials map[string]string `json:"-"`
+	// TrackerAccess is an operator grant, not a model-produced instruction.
+	TrackerAccess string `json:"tracker_access,omitempty"`
+	Instructions  string `json:"instructions,omitempty"`
 	// ModelEnv requests a fresh model choice for this launch and passes the
 	// endpoint id to the existing harness via this environment variable.
 	ModelEnv string        `json:"model_env,omitempty"`
@@ -41,6 +45,9 @@ type Role struct {
 type Processes struct {
 	Roles       map[string]Role
 	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
+	// Prepare attaches launch-scoped resources. Release runs after the child
+	// returns, including cancellation. It must not evaluate the child's answer.
+	Prepare func(context.Context, Process) (Process, func(), error)
 }
 
 func (p Processes) Execute(ctx context.Context, assignment Assignment, state State) []Result {
@@ -61,6 +68,8 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				err = fmt.Errorf("no current-model selector is configured")
 			} else if _, secret := process.Secrets[process.ModelEnv]; secret {
 				err = fmt.Errorf("model environment variable overlaps a credential")
+			} else if _, secret := process.Credentials[process.ModelEnv]; secret {
+				err = fmt.Errorf("model environment variable overlaps a controller credential")
 			} else {
 				model, err = p.SelectModel(ctx, role, process, state, append([]string(nil), selected...))
 			}
@@ -81,6 +90,20 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 		group.Add(1)
 		go func(index int, process Process, model string) {
 			defer group.Done()
+			if p.Prepare != nil {
+				started := time.Now().UTC()
+				prepared, release, err := p.Prepare(ctx, process)
+				if release != nil {
+					defer release()
+				}
+				if err != nil {
+					results[index] = Result{Role: name, Speaker: process.Name, Model: model,
+						Instruction: assignment.Instruction, Error: "Preparing role access: " + err.Error(),
+						StartedAt: started, FinishedAt: time.Now().UTC()}
+					return
+				}
+				process = prepared
+			}
 			results[index] = process.run(ctx, role, assignment, state)
 			results[index].Model = model
 		}(index, process, model)
@@ -102,6 +125,18 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 		env[name] = value
 	}
 	var secrets []string
+	for name, value := range p.Credentials {
+		if _, overlaps := p.Secrets[name]; overlaps || name == p.ModelEnv {
+			result.Error, result.FinishedAt = "Controller-issued credential overlaps another role environment source.", time.Now().UTC()
+			return result
+		}
+		if value == "" {
+			result.Error, result.FinishedAt = "A controller-issued role credential is unavailable.", time.Now().UTC()
+			return result
+		}
+		env[name] = value
+		secrets = append(secrets, value)
+	}
 	for name, source := range p.Secrets {
 		value := os.Getenv(source)
 		if value == "" {

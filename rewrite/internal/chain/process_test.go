@@ -2,14 +2,42 @@ package chain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestLaunchPreparationFailureReleasesAndReturnsAnObservation(t *testing.T) {
+	var attempts, released atomic.Int32
+	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", `printf '%s' "$LOCAL_KEY"; printf '%s' "$LOCAL_KEY" >&2`}}
+	p := Processes{Roles: map[string]Role{"report": {Name: "report", Processes: []Process{process}}},
+		Prepare: func(ctx context.Context, p Process) (Process, func(), error) {
+			release := func() { released.Add(1) }
+			if attempts.Add(1) == 1 {
+				return p, release, errors.New("local service could not listen")
+			}
+			p.Credentials = map[string]string{"LOCAL_KEY": "synthetic-controller-issued-access"}
+			return p, release, nil
+		}}
+	first := p.Execute(context.Background(), Assignment{Role: "report"}, State{Request: "original"})
+	if len(first) != 1 || !strings.Contains(first[0].Error, "local service could not listen") || first[0].Output != "" || released.Load() != 1 {
+		t.Fatalf("preparation error was hidden: %#v release=%d", first, released.Load())
+	}
+	second := p.Execute(context.Background(), Assignment{Role: "report"}, State{Request: "original", History: first})
+	if second[0].Error != "" || second[0].Output != "[credential]" || second[0].Diagnostics != "[credential]" || released.Load() != 2 {
+		t.Fatalf("second launch failed or leaked access: %#v release=%d", second, released.Load())
+	}
+	encoded, err := json.Marshal(Process{Credentials: map[string]string{"LOCAL_KEY": "synthetic-controller-issued-access"}})
+	if err != nil || strings.Contains(string(encoded), "synthetic") || strings.Contains(string(encoded), "LOCAL_KEY") {
+		t.Fatalf("ephemeral access serialized: %s %v", encoded, err)
+	}
+}
 
 func TestProcessesUseFreshChoicesWithoutMutatingConfigOrSharingReports(t *testing.T) {
 	initial := map[string]string{"MODEL": "old/configured"}
