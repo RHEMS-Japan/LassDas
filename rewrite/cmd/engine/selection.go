@@ -44,7 +44,11 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	if r.selection.observe != nil {
 		r.selection.observe("routing with freshly selected model: " + model)
 	}
-	return chat.Next(ctx, state)
+	next, err := chat.Next(ctx, state)
+	if err != nil {
+		return chain.Assignment{}, fmt.Errorf("routing model %s: %w", model, err)
+	}
+	return next, nil
 }
 
 func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
@@ -125,7 +129,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 	// in the actual role and routing prompts.
 	input := chain.State{Request: state.Request}
 	for _, result := range state.History {
-		if result.Model != "" && result.Error != "" {
+		if result.Error != "" && (result.Model != "" || (result.Role == "router" && result.Speaker == "runtime")) {
 			input.History = append(input.History, chain.Result{Role: result.Role, Speaker: result.Speaker, Model: result.Model, Error: result.Error})
 		}
 	}

@@ -62,7 +62,11 @@ func (r Alternate) Next(ctx context.Context, state State) (Assignment, error) {
 	if r.Observe != nil {
 		r.Observe("primary router unavailable; using configured alternative: " + err.Error())
 	}
-	return r.Secondary.Next(ctx, state)
+	next, alternativeError := r.Secondary.Next(ctx, state)
+	if alternativeError != nil {
+		return Assignment{}, errors.Join(err, alternativeError)
+	}
+	return next, nil
 }
 
 func excerpt(text string, limit int) string {

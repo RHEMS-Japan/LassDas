@@ -170,3 +170,101 @@ func TestExecutableSelectsFreshChatRouterIncludingDecisionFallback(t *testing.T)
 		})
 	}
 }
+
+func TestRoutingOutageReachesFreshSelectionAndNextRole(t *testing.T) {
+	selector := testSelector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	const requestText = "Deliver the original request, unchanged 日本語."
+	store, err := chain.Open(t.TempDir(), requestText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	catalogs, selections, chats, failedCalls := 0, 0, 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			catalogs++
+			return selectionReply(request, 200, map[string]any{"data": []any{
+				selectionModel("maker-one/current"), selectionModel("maker-two/current"),
+			}}), nil
+		case "selection.example":
+			selections++
+			var input struct{ State chain.State }
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				return nil, err
+			}
+			if input.State.Request != requestText {
+				t.Error("model selection lost the original request")
+			}
+			// The fixture changes its choice only if the actual failed call
+			// reaches it. This tests information flow, not LLM reasoning quality.
+			choice := "maker-one/current"
+			for _, result := range input.State.History {
+				if result.Role == "router" && strings.Contains(result.Error, "maker-one/current") && strings.Contains(result.Error, "HTTP 503") {
+					choice = "maker-two/current"
+				}
+			}
+			if data, _ := json.Marshal(input); strings.Contains(string(data), "synthetic-selection-only") {
+				t.Error("failure observation exposed a credential")
+			}
+			return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+		case "routing.example":
+			chats++
+			var input struct {
+				Model    string
+				Messages []struct{ Role, Content string }
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				return nil, err
+			}
+			if input.Model == "maker-one/current" {
+				failedCalls++
+				if failedCalls == 2 {
+					cancel() // Bound the broken implementation's uninformative retry.
+				}
+				return catalogReply(request, 503, "temporarily unavailable; synthetic-selection-only"), nil
+			}
+			var state chain.State
+			if len(input.Messages) != 2 || json.Unmarshal([]byte(input.Messages[1].Content), &state) != nil {
+				t.Fatal("cannot observe routing input")
+			}
+			if state.Request != requestText || len(state.History) == 0 || state.History[0].Role != "router" {
+				t.Fatalf("router did not get the original request and outage: %+v", state)
+			}
+			for _, result := range state.History {
+				if strings.HasSuffix(result.Output, "ordinary work report\n") {
+					return routingSelectionReply(request, chain.Assignment{Role: "done"}), nil
+				}
+			}
+			return routingSelectionReply(request, chain.Assignment{Role: "implement", Instruction: "Continue the original work."}), nil
+		default:
+			return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+		}
+	})
+	engine := chain.Chain{Store: store, RetryDelay: time.Millisecond,
+		Router: selectedChatRouter{selection: selector, chat: chain.ChatRouter{
+			Service: chain.Jev{URL: "https://routing.example/chat", KeyEnv: "SELECTION_TEST_KEY"},
+			Roles:   map[string]string{"implement": "Implement the request"},
+		}},
+		Executor: chain.Processes{Roles: map[string]chain.Role{"implement": {
+			Name: "implement", Processes: []chain.Process{{Name: "worker", Command: []string{"/bin/sh", "-c", "cat; printf 'ordinary work report\\n'"}}},
+		}}},
+	}
+	if err := engine.Run(ctx); err != nil {
+		t.Fatalf("recovery could not use the routing failure: %v catalogs=%d selections=%d chats=%d", err, catalogs, selections, chats)
+	}
+	state, err := store.Load()
+	if err != nil || !state.Done || len(state.History) != 2 || failedCalls != 1 || catalogs != 3 || selections != 3 || chats != 3 {
+		t.Fatalf("unexpected recovery: state=%+v err=%v catalogs=%d selections=%d chats=%d failures=%d", state, err, catalogs, selections, chats, failedCalls)
+	}
+	for _, text := range []string{requestText, "maker-one/current", "HTTP 503", "temporarily unavailable"} {
+		if !strings.Contains(state.History[1].Output, text) {
+			t.Errorf("next process did not receive %q", text)
+		}
+	}
+	if data, _ := json.Marshal(state); strings.Contains(string(data), "synthetic-selection-only") {
+		t.Error("persisted failure exposed a credential")
+	}
+}

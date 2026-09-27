@@ -62,6 +62,17 @@ A local TLS response delayed 31 seconds now reaches the caller. Earlier parent
 deadlines and cancellation still interrupt response-header and response-body
 waits; a timeout goes to the existing recovery loop, never to a completion claim.
 
+Unsuccessful routing calls are also retained in the ordinary runtime history,
+not just printed to a log. The next routing attempt, fresh model selection and
+working role can see the actual failure; a dynamically selected routing endpoint
+is named in its error. If both configured routing services fail, both reasons
+survive. A successful alternative still proceeds normally, and caller cancellation
+does not become a model failure or authorize more work. This does not blacklist a
+model or force a recovery choice: the selection model decides from a fresh catalog
+and the observations. Tests demonstrate the handoff and persisted recovery, not
+that a real model will always choose an effective alternative. Long-running history
+growth and provider context limits remain unresolved.
+
 The top-level `instructions` are the operator's shared workflow context and
 reach every working role as well as the router, alongside each process's own
 instructions and the unchanged original request. For example, a reviewer needs

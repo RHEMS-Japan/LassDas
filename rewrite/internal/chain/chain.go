@@ -102,12 +102,23 @@ func (c Chain) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		started := time.Now().UTC()
 		next, err := c.Router.Next(ctx, state)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
 			c.observe("routing unavailable: " + err.Error())
+			// Logging alone leaves the next model with the same uninformed
+			// input. Retain the failed invocation as an observation, just as
+			// for working processes, without inventing a completion verdict.
+			state.History = append(state.History, Result{
+				Role: "router", Speaker: "runtime", Error: err.Error(),
+				StartedAt: started, FinishedAt: time.Now().UTC(),
+			})
+			if err := c.save(ctx, state); err != nil {
+				return err
+			}
 			if err := c.wait(ctx); err != nil {
 				return err
 			}

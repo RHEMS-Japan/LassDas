@@ -366,7 +366,10 @@ func TestStoppedReporterCannotDispatchAnotherRole(t *testing.T) {
 		return n, err
 	})
 	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, writer)
-	waitFor(t, func() bool { return rejected.Load() })
+	waitFor(t, func() bool {
+		state, err := stopReportState(root)
+		return rejected.Load() && err == nil && len(state.History) == 1
+	})
 	finish()
 	if !strings.Contains(log.String(), "unconfigured role") {
 		t.Fatal("routing into stopped work was not rejected")
@@ -375,8 +378,12 @@ func TestStoppedReporterCannotDispatchAnotherRole(t *testing.T) {
 		t.Fatal("a stopped implementation was launched")
 	}
 	state, err := stopReportState(root)
-	if err != nil || state.Done || state.Pending != nil || len(state.History) != 0 {
+	if err != nil || state.Done || state.Pending != nil || len(state.History) != 1 {
 		t.Fatalf("invalid dispatch claimed a report: %#v %v", state, err)
+	}
+	observed := state.History[0]
+	if observed.Role != "router" || observed.Speaker != "runtime" || observed.Output != "" || !strings.Contains(observed.Error, "unconfigured role") {
+		t.Fatalf("rejected dispatch was not kept solely as a runtime failure: %+v", observed)
 	}
 }
 

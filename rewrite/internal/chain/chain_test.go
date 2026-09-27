@@ -139,6 +139,78 @@ func TestFailuresAndFreeFormAnswersDoNotEndTheRequest(t *testing.T) {
 	}
 }
 
+func TestRoutingFailureSurvivesStorageRetryAndRestart(t *testing.T) {
+	const reason = "routing service HTTP 503: temporarily unavailable"
+	store := &memoryStore{state: State{Request: "Deliver the original request."}}
+	ctx, cancel := context.WithCancel(context.Background())
+	routes := 0
+	engine := Chain{Store: store, RetryDelay: time.Millisecond,
+		Router: testRouter(func(_ context.Context, state State) (Assignment, error) {
+			routes++
+			if routes == 1 {
+				store.saveFailures = 2
+				return Assignment{}, errors.New(reason)
+			}
+			if len(state.History) != 1 || state.History[0].Error != reason || !reflect.DeepEqual(state, store.state) {
+				t.Errorf("retry lost the saved routing failure: state=%+v saved=%+v", state, store.state)
+			}
+			cancel()
+			return Assignment{}, ctx.Err()
+		}),
+		Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+			t.Fatal("no working role was assigned")
+			return nil
+		}),
+	}
+	if err := engine.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stop did not interrupt recovery: %v", err)
+	}
+	if len(store.state.History) != 1 || store.state.Done || store.state.Pending != nil {
+		t.Fatalf("routing failure was discarded or became a completed/pending action: %+v", store.state)
+	}
+	observation := store.state.History[0]
+	if observation.Role != "router" || observation.Speaker != "runtime" || observation.Error != reason || observation.Output != "" || observation.StartedAt.IsZero() || observation.FinishedAt.Before(observation.StartedAt) {
+		t.Fatalf("not an actual runtime failure observation: %+v", observation)
+	}
+	// A later authorized restart must have the same observation. Cancellation
+	// is not itself a failed model call and must not add another result.
+	engine.Router = testRouter(func(_ context.Context, state State) (Assignment, error) {
+		if !reflect.DeepEqual(state.History, []Result{observation}) || state.Request != store.state.Request {
+			t.Fatalf("restart lost or rewrote the observation: %+v", state)
+		}
+		return Assignment{Role: "done"}, nil
+	})
+	if err := engine.Run(context.Background()); err != nil || !store.state.Done {
+		t.Fatalf("restart failed: %v state=%+v", err, store.state)
+	}
+}
+
+func TestRoutingAlternativeRetainsBothUnavailableReasons(t *testing.T) {
+	primaryFailure := errors.New("primary routing service unavailable")
+	alternativeFailure := errors.New("alternative routing service unavailable")
+	for _, alternativeFails := range []bool{false, true} {
+		router := Alternate{
+			Primary: testRouter(func(context.Context, State) (Assignment, error) {
+				return Assignment{}, primaryFailure
+			}),
+			Secondary: testRouter(func(context.Context, State) (Assignment, error) {
+				if alternativeFails {
+					return Assignment{}, alternativeFailure
+				}
+				return Assignment{Role: "investigate"}, nil
+			}),
+		}
+		next, err := router.Next(context.Background(), State{Request: "original"})
+		if alternativeFails {
+			if !errors.Is(err, primaryFailure) || !errors.Is(err, alternativeFailure) || next.Role != "" {
+				t.Fatalf("one of the routing failures was lost: next=%+v err=%v", next, err)
+			}
+		} else if err != nil || next.Role != "investigate" {
+			t.Fatalf("successful alternative treated as unavailable: next=%+v err=%v", next, err)
+		}
+	}
+}
+
 func TestRestartObservesInterruptedActionBeforeAnyRepeat(t *testing.T) {
 	directory := t.TempDir()
 	store, err := Open(directory, "Publish once, after checking the destination.")
