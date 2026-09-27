@@ -830,6 +830,30 @@ live-model integration evidence, not evidence of reliable semantic completion.
 The original synthetic repository and the checked source/artifact/report were
 unchanged by the observer. No expected counterexample was fed back to the run.
 
+A controlled early-verification trial then invoked the existing verifier once
+before implementation. It saw the original request/source, not a changed
+implementation or its tests/approvals, and wrote runnable checks in a shared
+directory writable only by verification. Subsequent roles could read/run them;
+all later actions were chosen by the existing router. This fixed first dispatch
+was an experimental intervention, not autonomous selection of a new stage.
+The checks were ordinary project code, not a format or gate for LLM answers.
+
+The verifier created 14 checks, and later roles actually reused them against
+source and delivery. A separate sandboxed observer found those same checks
+passed both the previously defective delivery and the comparison delivery.
+The new trial also ended falsely complete: its delivered artifact passed all
+14 shared checks and all 13 project tests, but still failed the same nine of
+the 25 independent post-run cases. Both reviewers again waived changed empty-row
+behavior. Creating checks before implementation did not make them sufficient.
+The first verification report even described its throwaway reference as correct
+because it passed those finite checks; that claim is not acceptance evidence.
+
+The run recovered from one relay timeout and later investigated a misleading
+native file-write warning. It confirmed the real report file and the already
+posted comment without a duplicate post. Those recovery observations do not
+resolve the defective artifact or its inaccurate completion claim. No mandatory
+early-verification stage or new output certificate was adopted.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
