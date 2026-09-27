@@ -1033,8 +1033,25 @@ The original implementation also had this defect; the requested valid JSON
 output remains unmet despite the final report's "no work remains" claim.
 The 38-case result does not establish complete fulfillment or repair the earlier
 CSV failures. This trial used the old timeout and SDK-footer behavior; the
-subsequent fixes above have local transport/native-SDK tests, not a new live
-end-to-end completion result.
+subsequent clean trial described below used those fixes.
+
+A fresh run of the same configuration task, with no source repair, supplied
+counterexample or manual restart, reached delivery and an exactly read-back
+fixture comment in about 52 minutes. Independent execution of its actual archive
+passed the same 38 declared cases and its 51 generated tests. Three separate
+concurrent-reader observations saw only the old and final output, not a partial
+file; finite sampling is not a guarantee for every schedule. Independent reviewers
+found numeric overflow, and the chain repaired it before delivery: `1e999` now
+returns an error instead of emitting non-JSON `Infinity` successfully.
+
+This is not uniform improvement or proof of the full goal. The delivered program
+now rejects object depths 1500 and 2000 that the original accepts; depth 995 still
+matches. Its final report discloses the depth limit. The request did not explicitly
+require unlimited depth, so neither unlimited-input support nor preservation of
+all original behavior has been established. Three review pairs also added work
+on traceback presentation beyond the original error-reporting request. One
+uninterrupted fixture delivery does not resolve the earlier CSV false completion,
+prove optimal routing/model selection, or validate live overnight operation.
 
 - The optional Git launcher prepares per-request checkouts, but the scoped
   polling prototype still needs enforced filesystem/network isolation, a visible
