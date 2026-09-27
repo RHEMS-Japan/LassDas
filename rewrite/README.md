@@ -693,6 +693,34 @@ It suggests useful task instructions deserve comparison alongside role choice;
 it does not overturn the earlier full-chain failures or establish Jev as the
 best router. No new working-answer format or content gate was introduced.
 
+Two downstream continuations then retained the six earlier pre-delivery reports,
+both captured independent reviews and each selected implementation's actual
+report. One candidate still lost values under an empty header; the other matched
+the previous observations. Both used fresh per-launch model selection and the
+actual Jev chain, without manually choosing its next step. This was a controlled
+mid-run splice, not fresh intake or a claim that the earlier implementation had
+seen the restored history. Observer inputs and old delivery/report files were
+not copied into either workspace.
+
+The defective candidate reached two new reviews, delivery, artifact checks,
+reporting, actual fixture-comment readback and done. A reviewer had explicitly
+reproduced the lost values but called that input garbage and the difference
+non-blocking. The delivered artifact still lost those values in both LF and
+CRLF cases, despite all 23 generated tests passing. The published completion
+claim was therefore wrong. An empty header name is not excluded by the field
+grammar in [RFC 4180 section 2](https://www.rfc-editor.org/rfc/rfc4180#section-2);
+that reference was checked by the observer, not supplied during the run.
+
+The other candidate reached two review pairs, delivery, artifact verification,
+reporting and exact fixture-comment readback. Its actual delivery matched all
+25 separate post-run checks, and its 24 generated tests passed. It performed
+one additional review pair on unchanged source before proceeding; the cause
+of that extra choice is not established. Neither continuation needed manual
+repair or restart after launch. These results distinguish getting work delivered
+from judging it complete correctly: the same chain called both done. The positive
+result does not resolve the negative case, establish a reliable-completion rate,
+or prove every report assertion or real tracker-to-production operation.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
