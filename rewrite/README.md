@@ -13,6 +13,10 @@ working role's answer passes a certificate check.
 
 ## Current executable
 
+A local build bundle and a Linux role launcher are now available. See
+[runtime setup and remaining prerequisites](RUNTIME.md). These do not activate
+intake or change the existing production entry point.
+
 From this directory:
 
 ```sh
@@ -128,6 +132,10 @@ also be credential/model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
 actual delivery permissions still have to be supplied by the configured roles.
+The bridge also seeds the native terminal's existing working-directory setting
+from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began
+terminal commands in its private home despite the correct process directory;
+earlier laboratory launchers supplied this setting themselves.
 
 **These are logical working directories, not filesystem/network isolation.**
 An authorized launcher must confine access to other requests, controller state,
@@ -517,9 +525,32 @@ automatic start, and exit 0. No application restart loop or worker-PID ledger wa
 added. This exercises [PID-namespace lifetime](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)
 and an existing [runtime restart policy](https://docs.docker.com/engine/containers/start-containers-automatically/),
 not real-model recovery or exactly-once external writes. It does not package or
-activate this layout, provide per-role isolation within a running container,
-test daemon/machine loss, or validate native-agent tools in Linux. In particular,
+activate this supervisor layout or test daemon/machine loss. The separate Linux
+role launcher observation below exercises native tools, not crash recovery. In particular,
 `on-failure` is not a daemon-restart policy; that operational case remains open.
+
+The optional `harnesses/linux_role.py` has also been exercised on Linux with the
+installed native SDK and its real terminal tool, using a synthetic model API.
+An implementation process wrote its allowed source file, could not read the
+controller-only fixture, and could not write the reporting directory. Separate
+implementation/review/delivery/report launches exercised different write grants,
+network-off versus explicit network inheritance, private PID namespaces, and
+refusal of further user namespaces. A detached local child stopped when its
+role exited. Ordinary prose with surrounding text and unknown JSON fields,
+stderr and a nonzero exit passed through unchanged. These finite offline checks
+do not prove arbitrary escape resistance, live model quality or delivery.
+The tested outer runtime needed explicit namespace-enabling diagnostic options;
+the bundle does not apply them or provide a production egress policy. Details
+and configuration examples are in [RUNTIME.md](RUNTIME.md).
+
+The locally built bundle was then run as the actual engine executable, through
+the Linux launcher, installed SDK and real terminal tool. A local TLS router
+fixture received the unchanged request, returned a work assignment and observed
+the complete report/diagnostics before choosing done. Reopening that completed
+history made no further routing or worker call. The native tool performed the
+allowed write and failed the two forbidden accesses. The fixture, not an LLM,
+chose these actions; this proves executable wiring, not reliable judgment,
+tracker intake or production delivery.
 
 Multiple processes for one role run independently with the same prior history.
 They do not see one another's current report. A Jev transport/context failure

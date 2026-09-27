@@ -18,7 +18,7 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high", mutation_verifier=None, failed_file_attempts=None):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high", mutation_verifier=None, failed_file_attempts=None, task_workspace=None, terminal_cwd=None):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
         interrupted = threading.Event()
 
@@ -35,6 +35,7 @@ class BridgeTests(unittest.TestCase):
                 print("native startup display")
                 events.append(("dotenv", os.environ.get("PYTHON_DOTENV_DISABLED")))
                 events.append(("home", os.environ.get("HERMES_HOME")))
+                events.append(("terminal_cwd", os.environ.get("TERMINAL_CWD")))
                 events.append(("file_mutation_verifier", os.environ.get("HERMES_FILE_MUTATION_VERIFIER")))
                 self._turn_failed_file_mutations = failed_file_attempts
 
@@ -74,6 +75,10 @@ class BridgeTests(unittest.TestCase):
             env["HERMES_HOME"] = "/isolated-test/role"
         if task_home:
             env["TASK_HOME"] = str(task_home)
+        if task_workspace is not None:
+            env["TASK_WORKSPACE"] = task_workspace
+        if terminal_cwd is not None:
+            env["TERMINAL_CWD"] = terminal_cwd
         failure, code = None, None
         with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent),
                                      "tools.process_registry": types.SimpleNamespace(process_registry=NativeRegistry())}), \
@@ -208,6 +213,20 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(task_home.is_dir())
             self.assertIn(("home", str(task_home)), events)
             self.assertEqual(out, "ordinary result")
+
+    def test_task_workspace_seeds_native_terminal_before_agent_start(self):
+        events, out, err, code, failure = self.run_bridge(
+            {"final_response": "ordinary result"}, task_workspace="/isolated-test/request/workspace")
+        self.assertIsNone(failure)
+        self.assertIn(("terminal_cwd", "/isolated-test/request/workspace"), events)
+        self.assertEqual(out, "ordinary result")
+
+    def test_explicit_terminal_directory_and_non_task_invocation_are_unchanged(self):
+        for workspace, terminal in (("/isolated-test/workspace", "/isolated-test/workspace/subdir"), (None, None)):
+            events, out, err, code, failure = self.run_bridge(
+                {"final_response": "ordinary result"}, task_workspace=workspace, terminal_cwd=terminal)
+            self.assertIsNone(failure)
+            self.assertIn(("terminal_cwd", terminal), events)
 
     def test_stop_signals_use_native_hard_interrupt_and_restore_handlers(self):
         for number in (signal.SIGTERM, signal.SIGINT):

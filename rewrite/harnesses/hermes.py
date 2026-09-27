@@ -22,6 +22,11 @@ def main():
         Path(os.environ["TASK_HOME"]).mkdir(parents=True, exist_ok=True, mode=0o700)
     if not os.environ.get("HERMES_HOME"):
         raise RuntimeError("Set HERMES_HOME to this role's isolated agent directory")
+    if os.environ.get("TASK_WORKSPACE"):
+        # The native terminal may default to its home, not the process cwd.
+        # Seed its existing setting before SDK imports/configuration. An
+        # explicit native directory remains the operator's choice.
+        os.environ.setdefault("TERMINAL_CWD", os.environ["TASK_WORKSPACE"])
     os.environ["PYTHON_DOTENV_DISABLED"] = "1"
     # SDK bookkeeping only tracks patch/write_file, not later terminal writes.
     # Its optional footer can therefore falsely claim a recovered file was not
