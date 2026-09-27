@@ -270,6 +270,18 @@ were complete, after recovery from two private relay-observation errors. This
 does not establish general model rankings; changing the pair alone did not
 repair this counterexample either.
 
+A private black-box comparison then withheld source, authored tests and previous
+reports from the reviewers, exposing only the original request and the actual
+original/candidate CLI input and output. One reviewer independently observed
+that the candidate dropped an empty line that previously produced a record,
+but treated the preservation requirement as debatable; the other found no
+functional counterexample. Neither tried the known single-column case. Appending
+these actual reports to the unchanged pre-delivery history still led both Jev
+and a fresh-catalog-selected ordinary routing LLM to choose delivery in three
+replays each. No corrective work ran in these decision-only replays. This does
+not justify adopting blind review as a sufficient safeguard or either router
+as a proven solution; no new response gate or default review interface was added.
+
 The adapter disables dotenv discovery, implicit memory/context-file loading
 and native background review. Supply the repository knowledge locations and
 actual role permissions in the configured instructions; the agent may read
