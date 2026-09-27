@@ -85,13 +85,19 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	}
 	observe := func(message string) { fmt.Fprintln(log, message) }
 	var router chain.Router
-	chat := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: cfg.Instructions}
+	chatService := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: cfg.Instructions}
+	var chat chain.Router = chatService
+	if cfg.ModelSelection != nil {
+		selection := *cfg.ModelSelection
+		selection.observe = observe
+		chat = selectedChatRouter{chat: chatService, selection: selection}
+	}
 	switch cfg.Router.Mode {
 	case "llm":
 		router = chat
 	case "jev":
 		router = chain.DecisionRouter{Judge: cfg.Router.Decision, Roles: purposes, Instructions: cfg.Instructions}
-		if cfg.Router.LLM.Model != "" {
+		if cfg.Router.LLM.Model != "" || (cfg.ModelSelection != nil && cfg.Router.LLM.URL != "") {
 			router = chain.Alternate{Primary: router, Secondary: chat, Observe: observe}
 		}
 	default:

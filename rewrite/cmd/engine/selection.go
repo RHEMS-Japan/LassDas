@@ -23,6 +23,30 @@ type selectionConfig struct {
 	observe      func(string)
 }
 
+// Routing is also a model invocation. Use the same fresh selection policy as
+// working roles, including when chat is the decision service's alternative.
+// Selection failure returns to the existing recovery loop; never use an old
+// endpoint to conceal it. Neither selection nor this wrapper judges prose.
+type selectedChatRouter struct {
+	chat      chain.ChatRouter
+	selection selectionConfig
+}
+
+func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.Assignment, error) {
+	model, err := r.selection.choose(ctx,
+		chain.Role{Name: "router", Purpose: "Choose the next responsible role from the original request and independent reports; resolve remaining work before delivery or completion"},
+		chain.Process{Name: "routing"}, state, nil)
+	if err != nil {
+		return chain.Assignment{}, err
+	}
+	chat := r.chat
+	chat.Service.Model = model
+	if r.selection.observe != nil {
+		r.selection.observe("routing with freshly selected model: " + model)
+	}
+	return chat.Next(ctx, state)
+}
+
 func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
 	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {

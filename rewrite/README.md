@@ -207,6 +207,17 @@ For the initial Chinese-model experiments the configured publishers are
 `qwen`, `z-ai`, `deepseek`, `moonshotai`, and `minimax`; these names are not
 hard-coded in the selector and are not a complete nationality classifier.
 
+With `model_selection` configured, ordinary-LLM routing also selects from a
+fresh catalog before every routing decision. This applies both to
+`router.mode=llm` and to a configured chat alternative after the decision
+service is unavailable. Set `router.llm.url` and `key_env` for that transport;
+its `model` is not used as a pinned or failure fallback. Selection failure
+returns to the existing recovery loop. The selected routing model is logged;
+the original request, responsibilities and prose history remain unchanged.
+Without `model_selection`, `router.llm.model` remains the operator's explicit
+model choice. The decision model used to select an endpoint is separate from
+the selected model that assigns work; neither certifies a role's answer.
+
 Every selection fetches a new complete catalog. Text/tool-capable entries from
 those publishers, with their current descriptions, dates and prices, are passed
 to the decision model along with the original request and role responsibility.
