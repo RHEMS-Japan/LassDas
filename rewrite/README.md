@@ -953,6 +953,17 @@ cells raised an error. The reviewers and verifier again waived an observed
 behavior change, and the final report claimed fulfillment. Correct context
 wiring did not establish correct completion judgment.
 
+A further fresh trial asked the existing verifier to develop checks before
+implementation and the existing reviewers to challenge those checks. The real
+router chose every assignment; no earlier solution or known counterexample was
+supplied. It completed in about29 minutes, including recovery from two selection
+HTTP520s, and posted one report with exact fixture readback. Its fourteen project
+tests and twelve model-created checks passed, but the actual delivery again
+passed only16/25 independent observations. The check notes waived preservation
+of empty rows, later roles accepted that waiver, and large-cell crashes remained
+undetected. Earlier checks did not establish fulfillment either; this workflow
+is not adopted as a mandatory stage. The original request remains unmet.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
