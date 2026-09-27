@@ -18,7 +18,7 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high"):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
         interrupted = threading.Event()
 
@@ -61,7 +61,9 @@ class BridgeTests(unittest.TestCase):
 
         env = {"OPENROUTER_BASE_URL": "https://model.example/api/v1",
                "OPENROUTER_API_KEY": "synthetic-test-only", "NATIVE_MODEL": "maker/test",
-               "NATIVE_REASONING_EFFORT": "high", "NATIVE_MAX_TOKENS": "7000"}
+               "NATIVE_MAX_TOKENS": "7000"}
+        if reasoning_effort is not None:
+            env["NATIVE_REASONING_EFFORT"] = reasoning_effort
         if home:
             env["HERMES_HOME"] = "/isolated-test/role"
         if task_home:
@@ -115,6 +117,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(out, "Only half completed")
         self.assertIn("transport unavailable", err)
         self.assertEqual(events[-1], ("closed", True))
+
+    def test_reasoning_setting_is_an_explicit_openrouter_request_override(self):
+        for setting, expected in ((None, "low"), ("low", "low"), ("high", "high")):
+            events, out, err, code, failure = self.run_bridge({"final_response": "plain report"}, reasoning_effort=setting)
+            self.assertIsNone(failure)
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "plain report")
+            config = events[0][1]
+            self.assertEqual(config["reasoning_config"], {"effort": expected})
+            self.assertEqual(config.get("request_overrides"), {"extra_body": {"reasoning": {"effort": expected}}})
 
     def test_native_exception_still_closes_agent(self):
         events, out, err, code, failure = self.run_bridge(error=RuntimeError("connection stopped"))

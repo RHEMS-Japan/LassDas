@@ -31,6 +31,7 @@ def main():
         return 0
 
     prompt = sys.stdin.read()
+    reasoning = {"effort": os.environ.get("NATIVE_REASONING_EFFORT", "low")}
     with contextlib.redirect_stdout(sys.stderr):
         agent = AIAgent(
             base_url=os.environ["OPENROUTER_BASE_URL"],
@@ -38,7 +39,11 @@ def main():
             provider="openrouter", model=os.environ["NATIVE_MODEL"],
             enabled_toolsets=["terminal", "file"], quiet_mode=True,
             tool_progress_mode="off",
-            reasoning_config={"effort": os.environ.get("NATIVE_REASONING_EFFORT", "low")},
+            reasoning_config=reasoning,
+            # This bridge targets OpenRouter, including an explicitly supplied
+            # relay. Native URL heuristics can omit reasoning for a relay host;
+            # use the SDK's request override so the chosen setting reaches it.
+            request_overrides={"extra_body": {"reasoning": reasoning}},
             max_tokens=int(os.environ.get("NATIVE_MAX_TOKENS", "6000")),
             skip_context_files=True, skip_memory=True, skip_background_review=True,
         )

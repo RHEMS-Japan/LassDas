@@ -244,6 +244,16 @@ Provide these process settings explicitly:
 - Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
   (default `6000`, per native API response, not a request failure limit).
 
+The reasoning setting is also passed through the SDK's explicit OpenRouter
+request override. An installed-SDK trial found that its URL-based capability
+check omitted this setting when using a relay, despite receiving it in the
+constructor. A local HTTP receiver reproduced the missing parameter and now
+observes the default/explicit `low` and explicit `high`, along with the configured
+token limit. This verifies transmission, not that a provider honors every effort
+level or that more reasoning improves delivery. Choose an effort supported by
+the selected endpoint's current catalog metadata. Earlier native trials that
+only recorded the bridge's setting do not establish the actual wire effort.
+
 The adapter disables dotenv discovery, implicit memory/context-file loading
 and native background review. Supply the repository knowledge locations and
 actual role permissions in the configured instructions; the agent may read
