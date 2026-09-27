@@ -854,6 +854,35 @@ posted comment without a duplicate post. Those recovery observations do not
 resolve the defective artifact or its inaccurate completion claim. No mandatory
 early-verification stage or new output certificate was adopted.
 
+A subsequent controlled continuation asked the existing reviewers to build
+plausible incorrect implementations that pass those same checks. They produced
+runnable whitespace and ragged-row counterexamples without being supplied the
+known failing inputs. During later reviews they also found empty-header data
+loss and the standard library's field-size limit. The working roles repaired
+these defects and published a real zipapp. Independent execution of its bytes
+matched all 25 previously observed cases, plus five inputs from the reviewers;
+the generated project suite had 22 passing tests. One fixture comment was posted
+and its readback matched the report. The independent 14 checks stayed unchanged:
+their passing result alone still does not establish adequate coverage.
+
+This is useful evidence of discovery and repair, **not clean unattended
+acceptance**. The initial test-quality review was prescribed and reused an
+earlier verifier's actual checks/report. An observation deadline interrupted a
+later review; an operator resumed the same work, original request, reports and
+fixture state, with a longer private relay deadline. Crucially, after the last
+source correction the router selected delivery without another independent
+review of the edited work. The finite artifact checks do not establish review
+convergence on that final version or reliable behavior on other requests.
+
+There was also an observation artifact: two controller-generated test inputs
+were left in the workspace at interruption and became visible on resumption.
+They were controller artifacts, not worker changes, and contained no field-size
+example; nevertheless the run had observer influence. The private
+observer now executes an unchanged copy of delivered bytes outside the working
+directory; both missing- and existing-delivery cases leave that directory alone.
+No mandatory extra stage, new role, answer certificate or production policy was
+adopted from this one controlled continuation.
+
 For the first two trials, Jev routing took about six minutes and ordinary-LLM
 routing about fourteen. The latter selected extra investigation/verification
 steps, and the working roles also took different amounts of time. This is not
