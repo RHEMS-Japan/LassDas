@@ -141,11 +141,17 @@ func (c Chain) Run(ctx context.Context) error {
 			return err
 		}
 		started := time.Now().UTC()
+		if notes := state.launchLimitNotes(); len(notes) > 0 {
+			state.History = append(state.History, notes...)
+			if err := c.save(ctx, state); err != nil {
+				return err
+			}
+		}
 		next, err := c.Router.Next(ctx, state)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err == nil && !state.permits(next.Role) {
+		if err == nil && !state.offered(next.Role) {
 			err = fmt.Errorf("action %q is not connected after %q (recovering=%t); available: %v", next.Role, state.Step, state.Recovering, state.nextActions())
 		}
 		if err != nil {

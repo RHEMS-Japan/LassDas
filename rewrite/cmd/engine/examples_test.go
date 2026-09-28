@@ -589,6 +589,19 @@ func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
 	}
 }
 
+// The roles the work is sent back to are capped in every connected-role
+// example, so a review that keeps objecting cannot run all night.
+func TestOperatorExampleCapsTheRolesWorkIsSentBackTo(t *testing.T) {
+	for _, example := range operatorExamples {
+		cfg := loadExample(t, example.path)
+		for _, role := range []string{"implement", "draft_report"} {
+			if cfg.Workflow == nil || cfg.Workflow.LaunchLimit[role] < 1 {
+				t.Fatalf("%s: %s has no launch limit", example.path, role)
+			}
+		}
+	}
+}
+
 func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 	cfg := operatorExample(t)
 	if !slices.Equal(cfg.Workflow.Start, []string{"elicit"}) {

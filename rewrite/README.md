@@ -229,6 +229,27 @@ Production packaging and real tracker-to-production operation are not
 implemented by this collector. Its tests use fixture APIs and actual local child
 processes, not live-model judgments or a production tracker.
 
+### A cap on how often a role runs
+
+A reviewer that keeps sending the work back and a router that keeps following
+it would run all night. `workflow.launch_limit` names the roles the work is
+sent back to and how many times each may be launched for one request, counted
+between two answers from the requester:
+
+```json
+"launch_limit": {"implement": 4, "draft_report": 2}
+```
+
+At its cap a role is left out of the choices offered at the next decision, and
+the runtime writes one note into the history saying so in its own words. When
+every role connected after a step is at its cap they all stay offered: the cap
+changes what is offered and never ends a request. Nothing here reads what a
+role wrote; it counts launches. The shipped example caps `implement` and
+`draft_report`. An ordered run (`router.mode: "stages"`) takes no cap, because
+its progress is decided by observed results. A live run without a cap, routed
+by a chat model, sent the report back and forth between its writer and its
+reviewer until the harness's limit; the cap is what bounds that.
+
 ### Settling the request at the entrance
 
 The shipped example starts at `elicit`, which settles what a request asks for
