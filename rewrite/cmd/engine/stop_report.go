@@ -117,8 +117,16 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	bound.Intake = nil
 	// This is a separate report-only task after the user's stop, not another
 	// step in the stopped delivery workflow. Keep only the reporting role and
-	// its existing recovery loop; never restart the original connections.
+	// its existing recovery loop; never restart the original connections. An
+	// ordered run has no connections to keep either, so the report falls back
+	// to the same decision service that run would have asked at its entrance.
 	bound.Workflow = nil
+	if bound.Router.Mode == "stages" {
+		bound.Router.Mode = "llm"
+		if bound.Router.Decision.Model != "" {
+			bound.Router.Mode = "jev"
+		}
+	}
 	bound.Instructions = stopReportingInstructions
 	encoded, err := json.Marshal(bound)
 	if err != nil {

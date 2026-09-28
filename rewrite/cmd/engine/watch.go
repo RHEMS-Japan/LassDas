@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,7 +27,18 @@ type intakeConfig struct {
 	MaxRunning          int     `json:"max_running,omitempty"`
 	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
+	QuestionRole        string  `json:"question_role,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	// MinModelCredit is the USD balance below which the shared model key can no
+	// longer carry the work. Absent or zero asks the provider nothing.
+	MinModelCredit float64 `json:"min_model_credit,omitempty"`
+	// ModelCreditURL overrides where that balance is read, so a gateway can
+	// answer instead of the provider.
+	ModelCreditURL string `json:"model_credit_url,omitempty"`
+	// StallNoticeMinutes is how long a request may go without completing a step
+	// before the requester is told. Absent means 90 minutes; zero says nothing.
+	StallNoticeMinutes *int         `json:"stall_notice_minutes,omitempty"`
+	Client             *http.Client `json:"-"`
 }
 
 type sourceIssue struct {
@@ -53,6 +65,15 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 		return errors.New("watch requires an explicit intake.project_id")
 	}
 	if err := validateStopReporter(cfg); err != nil {
+		return err
+	}
+	if err := validateQuestionRole(cfg); err != nil {
+		return err
+	}
+	if err := validateNotices(cfg); err != nil {
+		return err
+	}
+	if err := prepareStages(&cfg); err != nil {
 		return err
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
@@ -156,6 +177,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			b, _ := strconv.ParseInt(entries[j].Name(), 10, 64)
 			return a < b
 		})
+		// One shared model key serves the whole queue, so ask once per tick
+		// rather than once per waiting request.
+		creditLow, creditKnown := modelCreditHold(ctx, cfg, observe)
 		for _, entry := range entries {
 			if ctx.Err() != nil {
 				break
@@ -207,6 +231,31 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if state.Done {
 				continue
 			}
+			if state.Waiting {
+				// This request put a question to the person who filed it. Only
+				// an authorized stop, or their reply after that question, makes
+				// it runnable again; anything else leaves it untouched.
+				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
+				if err != nil {
+					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
+					continue
+				}
+				if !resume {
+					continue
+				}
+			}
+			// Nothing else tells the requester why an accepted request sits
+			// still. These are the controller's own fixed words, posted at most
+			// once per condition, and none of them ends the request.
+			notice := requestNotices(cfg, issue, directory)
+			if creditKnown {
+				if err := applyBudgetNotice(ctx, notice, creditLow); err != nil {
+					observe("request " + entry.Name() + ": budget notice not confirmed: " + err.Error())
+				}
+				if creditLow {
+					continue
+				}
+			}
 			bound, err := bindRequestConfig(cfg, directory, issue.Key)
 			if err != nil {
 				observe(err.Error())
@@ -229,6 +278,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if err := writeRuntimeFile(requestPath, []byte(request)); err != nil {
 				observe(err.Error())
 				continue
+			}
+			// An interrupted action or an unfinished recovery means the work is
+			// picked up again, not started afresh. Say so before it runs, so
+			// the requester is not left reading a silent gap in the night.
+			if state.Pending != nil || state.Recovering {
+				if err := notice.post(ctx, resumeNotice, resumeNoticeText); err != nil {
+					observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+				}
 			}
 			launch(entry.Name(), func() error {
 				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log)

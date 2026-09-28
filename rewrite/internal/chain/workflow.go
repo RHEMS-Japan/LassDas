@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 )
@@ -12,11 +13,26 @@ type Workflow struct {
 	Start   []string            `json:"start"`
 	After   map[string][]string `json:"after"`
 	Recover map[string][]string `json:"recover"`
+	// Stages is the other form of the same operator configuration: an ordered
+	// run whose progress the runtime decides from observed results instead of
+	// a model choosing among connected names. When it is set, start, after and
+	// recover are unused.
+	Stages []Stage `json:"stages,omitempty"`
+	// Question names the role the entrance may put the requester-only points
+	// to. The engine fills it from intake.question_role, so the accepted run
+	// says by itself where a person may be asked; it is not a stage.
+	Question string `json:"question,omitempty"`
 }
 
 func (w *Workflow) Validate(roles map[string]string) error {
 	if w == nil {
 		return nil
+	}
+	if len(w.Stages) > 0 {
+		return w.validateStages(roles)
+	}
+	if w.Question != "" {
+		return errors.New("workflow.question belongs to an ordered run; connect the question role with after and recover instead")
 	}
 	check := func(source string, targets []string, completion bool) error {
 		if len(targets) == 0 {
@@ -58,7 +74,8 @@ func (w *Workflow) Validate(roles map[string]string) error {
 }
 
 func (w *Workflow) clone() *Workflow {
-	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{}}
+	copy := &Workflow{Start: slices.Clone(w.Start), After: map[string][]string{}, Recover: map[string][]string{},
+		Stages: slices.Clone(w.Stages), Question: w.Question}
 	for role, next := range w.After {
 		copy.After[role] = slices.Clone(next)
 	}
@@ -69,6 +86,9 @@ func (w *Workflow) clone() *Workflow {
 }
 
 func (s State) nextActions() []string {
+	if len(s.Workflow.Stages) > 0 {
+		return s.stageActions()
+	}
 	if s.Step == "" {
 		return s.Workflow.Start
 	}

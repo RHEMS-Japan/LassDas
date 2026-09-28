@@ -21,6 +21,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             expected = ["bin/ticket-engine", "bin/ticket-tracker", "START.md",
                         "RUNTIME.md", "README.md", "examples/operator.json",
+                        "examples/operator-stages.json",
                         "harnesses/hermes.py", "harnesses/git_workspace.py",
                         "harnesses/linux_role.py"]
             self.assertEqual(sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*") if p.is_file()), sorted(expected))

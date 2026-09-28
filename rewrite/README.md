@@ -229,6 +229,152 @@ Production packaging and real tracker-to-production operation are not
 implemented by this collector. Its tests use fixture APIs and actual local child
 processes, not live-model judgments or a production tracker.
 
+### Settling the request at the entrance
+
+The shipped example starts at `elicit`, which settles what a request asks for
+before the work is handed over. It reads the original request, the prepared
+checkout and the operator instructions, then writes in ordinary prose the
+requirements as it will carry them out, the points it decided itself with their
+reasons, the points only the requester can decide with two to four choices
+each, and any permission or credential the work needs but was not given. Its
+connected actions are `elicit`, `ask_requester` and `investigate`, so settling
+further, putting the open points to the requester and proceeding are ordinary
+choices among connected role names. There is no new decision mechanism and no
+check of what the role wrote.
+
+The standard it settles against, in the words the decision model and the
+entrance actions are both given: can this request be carried to a delivered,
+verified result by morning with nobody available to answer? Points the roles
+can settle from the request, the repository or the operator instructions are
+settled and written down with their reason. Whatever is left goes to the
+requester straight away, before anything is investigated or built, in one
+comment listing each undecided point with two to four choices so it can be
+answered in a single reply. A general request for clarification is not a
+question.
+
+The choice at the entrance is deliberately one-sided. Proceeding with an open
+point costs a night's work while asking costs one reply, so `investigate` is
+expected only when every point that only the requester could decide is absent
+or already answered and the settled requirements state the completion condition
+to be held to; when in doubt the expected choice is `ask_requester`, and
+`investigate` is never a way to find out what was wanted. That is wording and
+connections only. Nothing measures a confidence level, counts open points or
+inspects what the role wrote, so a model that ignores the standard still
+proceeds and no test here can tell you it will not.
+
+`ask_requester` posts one comment carrying the requester-only points and reads
+the stored text back. It has comment access and no workspace write permission,
+and neither it nor `elicit` is connected to `done`: the entrance cannot end a
+request at a person.
+
+```json
+"intake": {
+  "question_role": "ask_requester"
+}
+```
+
+`intake.question_role` names the configured role whose successful run waits for
+a person. It must name an existing role with a comment-capable process, which
+is checked before any work is accepted. Without the setting nothing waits.
+
+A successful run of that role holds the request. The run history records that
+it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
+far that issue's comments had gone at the moment of the question. The request
+is then skipped until the issue's creator, or an operator listed in
+`intake.stop_user_ids`, posts a comment after that point. That comment's text
+is appended to the history as the requester's own words, exactly as posted, the
+hold is cleared, and the record is kept as `answer-<comment id>.json` so the
+same comment cannot be read as a second answer. The next decision sees the
+answer and only the actions connected after the question, which in the example
+returns to `elicit`.
+
+The stop check runs first, so a comment whose first nonblank line is `停止` is
+a stop, never an answer. An unsuccessful question recovers through the
+configured `recover` connections instead of waiting for a reply to a question
+that was never asked. A `--issue`/`--request` run has nobody watching the issue
+for an answer, so it exits non-zero saying that `--watch` resumes the request.
+
+What this does not do: the text of an answer is never checked, so a reply that
+does not actually answer the question simply reaches the next decision like any
+other report. Only the first comment after the recorded point becomes the
+answer; further comments are not appended, and a later question moves the point
+past them. While a request waits, each poll reads that issue's comments inside
+the collector loop, so a slow tracker delays the loop by up to one interval for
+every waiting request. Nothing notifies the requester beyond the posted comment
+itself, and an unanswered question waits indefinitely unless someone stops it.
+
+### Stages instead of roles
+
+`router.mode: "stages"` replaces the connected graph with an ordered list. A
+stage is a configured role plus the kind of fact that satisfies it, and the
+runtime, not a model, decides what runs next.
+
+```json
+"router": { "mode": "stages" },
+"workflow": {
+  "stages": [
+    { "name": "elicit", "kind": "model" },
+    { "name": "work", "kind": "model" },
+    { "name": "verify", "kind": "command", "on_failure": "work" },
+    { "name": "deliver", "kind": "command", "on_failure": "work" },
+    { "name": "verify_merged", "kind": "command", "on_failure": "work" },
+    { "name": "report", "kind": "model" },
+    { "name": "confirm_report", "kind": "command", "on_failure": "report" }
+  ]
+}
+```
+
+The next assignment is the first stage that is not yet satisfied.
+
+- A **command stage** is a role whose processes launch no model. It is
+  satisfied when all of its processes exit 0, and its output joins the history
+  exactly as any other result does. When it does not exit 0, the run assigns
+  the stage named by `on_failure` with that output already in the record, and
+  then returns to the command stage. There is no counter and no ending: a
+  command that keeps failing keeps cycling.
+- A **model stage** is satisfied when its processes ran without a process
+  error. What the model wrote is never read, decoded or compared, so writing
+  "done", "verified" or "delivered" advances nothing. The command stage that
+  follows is what proves the work.
+- The run is `done` when the last stage is satisfied. The last stage must be a
+  command, so an observed exit status and not a model's words finishes it.
+- `on_failure` must name a model stage, and a model stage takes none: a process
+  error or an interrupted launch simply runs that stage again, with the
+  runtime's usual note about the interruption in the record.
+
+After every stage the engine appends its own record of what it observed: how
+each process ended, and the content of the file named by that process's
+`receipt` setting when there is one. It is plain text for the next stage to
+read, not a shape anything has to answer in, and it is also where one launch
+ends, so a repaired stage is never read as part of the launch that failed.
+
+**What no model decides here**: which stage runs next, whether a stage is
+satisfied, whether a failure is recoverable, and when the request is complete.
+The only judgment left is at the entrance. If `intake.question_role` is set,
+then after the first stage the configured decision service (the decision API
+when `router.decision` names a model, the chat API otherwise) is consulted once
+with exactly two choices: the question role, or the next stage. It is never
+offered `done`, so the entrance still cannot end a request at a person, and the
+question role cannot be a stage, so it satisfies nothing. A question holds the
+request and the reply resumes it exactly as described above; the reply returns
+the run to its first stage. After that no routing decision exists at all.
+
+`examples/operator-stages.json` is the same delivery as `operator.json` written
+this way. Its command stages run operator-supplied programs under
+`/opt/ticket-automation/operator`: a build, a test run, the delivery, a check
+of the delivered target, and a script that reads the stored comment back and
+compares it with the reported text. Those programs are yours to write; the
+engine only observes what they return. The stopped-report role is not part of
+the run, and a stop from the requester still wins over everything here.
+
+**Known limit**: one worker may carry several stages, because a stage's process
+may be the same launcher as another's, and each launch receives the goal and
+the whole record. Nothing shares a session between launches and nothing trims
+the record, so the input grows with every stage and every repair cycle, and a
+long repair loop will eventually exceed a model's context. No session sharing
+or summarizing is implemented here on purpose: measure it first. Nothing in
+this mode has run with a live model or a real tracker.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a
@@ -317,6 +463,91 @@ unchanged prose. The original run stayed unfinished with no role execution,
 while reporting finished. Recorded child PIDs and scoped access disappeared.
 Model answers and the tracker were synthetic; this validates wiring and the
 observed access boundary, not real-model judgment or production isolation.
+
+### What the requester is told at night
+
+A request filed at eleven and stopped at two by an outage used to say nothing
+at all: the chain kept retrying, and the only trace was a log nobody was
+reading. Three fixed notices close that silence. The controller writes every
+one of them, always in the same words. No model composes them, none of them
+judges a role's answer, and none of them ends a request: the work carries on or
+resumes by itself in every case.
+
+Each notice is recorded in `queue/jobs/<id>/notices.json` before it is
+submitted and marked afterwards, with the same atomic write the other runtime
+files use. A submission that fails is retried on later ticks. Because the
+wording is fixed and the controller's own, a retry first reads the issue's
+comments back and matches that exact text, so an ambiguous answer from the
+tracker cannot turn into two identical comments.
+
+**After a restart.** When the queue picks up a request whose history holds an
+interrupted action or an unfinished recovery, it posts:
+
+> 自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。
+
+A clean start says nothing. The same request does not say it again inside 30
+minutes, even across further restarts, so a crash loop cannot fill the issue
+with one sentence.
+
+**When the shared model key runs out.** This is the one failure no role can
+recover from: no investigation, redesign or handoff puts money back on a key.
+
+```json
+"intake": {
+  "min_model_credit": 5,
+  "model_credit_url": "https://openrouter.ai/api/v1/key"
+}
+```
+
+`min_model_credit` is a US dollar floor. Absent or zero asks the provider
+nothing, which is what the shipped example does until an operator chooses a
+figure. When it is set, the remaining balance on the key named by
+`router.decision.key_env` is read before a request is launched and on every
+tick of a running one. `model_credit_url` defaults to the OpenRouter key
+endpoint above and may point at a gateway instead; it must be an HTTPS URL
+without credentials or a query. The answer's `limit_remaining` is read as the
+balance, and a null there means the key has no limit, which never pauses
+anything. Below the floor, the running role is stopped exactly as an authorized
+stop stops it, nothing new is launched, and the requester is told once:
+
+> 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（人の操作は不要です）。
+
+The balance keeps being read each tick. When it is back above the floor the
+request is launched again and says so once:
+
+> モデル利用枠が回復したため、自動処理を再開しました。
+
+The pause and the recovery alternate, so each episode gets one line of each. An
+endpoint that cannot be read is not evidence of an empty budget: it never
+pauses work and never posts, and the reason goes to the log with the
+credential value removed.
+
+**When nothing has completed for a long time.** `intake.stall_notice_minutes`
+is how long a running request may go without a completed step before the
+requester hears about it. Absent means 90 minutes and zero switches it off. The
+window is measured from the last history entry that finished without an error,
+so any successful role output inside it keeps the request quiet. Past the
+window:
+
+> 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。復旧を試し続けており、人の操作は不要です。
+
+The quoted failure is the first nonblank line of the most recent error, with
+every configured credential value replaced by `[credential]` and the result cut
+to 200 characters. The notice repeats at most once per six hours per request.
+It is a notice and nothing else: routing, recovery and the request's goal are
+untouched by it.
+
+All three go out through the controller's own tracker credential, the same one
+the stop report uses. No role is given the means to post them.
+
+What this does not do: these notices say that the machinery is still trying,
+not that it will succeed. They are posted from the collector loop, so a slow
+tracker delays that loop while one is being submitted. A request that is
+waiting for the requester's answer is not stalled and says nothing further.
+Nothing here notices a crash loop that never reaches the collector at all, a
+full disk, or a provider that answers quickly and uselessly. The budget reader
+has been exercised against a local fixture of the documented response shape,
+not against a live provider key.
 
 ### Current model list
 
@@ -420,6 +651,72 @@ The fixture had a stale CSV title for this search-CLI task, and that title was
 repeated in the final report; its description and tested artifact were the
 search task. This is a limited local observation, not production delivery,
 restart recovery or a resolution of the earlier CSV counterexamples.
+
+### Naming one model instead of selecting
+
+`model_selection.fixed` names a single endpoint id, such as
+`publisher/model-name`. Every process with a `model_env` then receives that id
+for every launch: no catalog is fetched, no gateway list is fetched and the
+selector is never asked. Configured `authors` stay in the file and are ignored
+while it is set; an empty or blank value reads as no fixed model at all, and an
+id without a publisher is refused with the rest of the configuration. Routing
+uses the same named model when a routing LLM is selected.
+
+A named model cannot be excluded from its own group, so the peer separation
+that gives a parallel review group two publishers does not apply: both
+reviewers run that one model, and their reports are no longer independent in
+that sense. This is an experiment switch for comparing one strong model against
+per-launch selection among the configured publishers. It is not a
+recommendation, and neither arrangement is established here as the better one.
+With a gateway configured, the named id is invoked through it exactly as a
+selected one is.
+
+### Invoking through a gateway
+
+Selection and invocation can use different accounts. The optional
+`model_selection.gateway` names an OpenAI-compatible gateway that serves the
+same catalog models under prefixed ids:
+
+```json
+"gateway": {
+  "models_url": "https://gateway.example.invalid/v1/models",
+  "key_env": "GATEWAY_API_KEY",
+  "prefix": "openrouter/"
+}
+```
+
+With it configured, every model chosen for a launch is reached through that
+gateway, so the working roles' and the routing LLM's token spend is invoiced to
+the gateway account instead of the catalog account. Point each process's
+`env.OPENROUTER_BASE_URL` and `secrets.OPENROUTER_API_KEY`, and
+`router.llm.url`/`key_env`, at the same gateway.
+`examples/operator-gateway.json` differs from `examples/operator.json` in
+exactly those places and in nothing else.
+
+The decision service stays on OpenRouter. The gateway measured here answers
+chat completions but not the decisions API (HTTP 405), so
+`model_selection.judge` and `router.decision` keep their OpenRouter URL and
+`MODEL_API_KEY`, and their spend stays on that account.
+
+Selection also keeps reading the public OpenRouter catalog. The gateway list
+publishes ids, dates and an owner, without prices or `supported_parameters`,
+which is not enough to decide eligibility or value. That list is used only to
+drop eligible ids the gateway does not serve, and it is fetched again for every
+selection under the same bounds as the public catalog: one bounded request, no
+redirect, no partial list, no saved snapshot. It is the one catalog request
+that carries a credential, so its endpoint must be HTTPS. When the list is
+unavailable, that selection attempt is unavailable and returns to the existing
+recovery loop; nothing falls back to invoking the un-prefixed id, which would
+bill the account the operator is moving away from.
+
+`prefix + id` is a route to the same model, not a different model and not a
+mark of quality. The judge is offered bare catalog ids, publisher separation in
+a parallel review group still compares publishers rather than the gateway name,
+and the runtime history records the chosen id as `model` with the route beside
+it as `model_prefix`. A gateway configured without `models_url`, `key_env` or
+`prefix` is refused before any request is accepted, because a half-configured
+one would quietly keep invoking the account being moved away from. Without
+`model_selection.gateway`, none of this applies and invocation is unchanged.
 
 ### Optional Git workspace preparation
 
@@ -1165,6 +1462,13 @@ sandbox are not packaged as a supported deployment. No existing production
 entry point was replaced.
 
 ## Still missing before production use
+
+The entrance described above has never run with a live model or a real
+tracker. Its tests use fixture APIs, fixture role programs and an actual local
+collector: they establish that the hold, the boundary, the stop precedence and
+the resume behave as described, not that a model actually settles a request,
+asks a useful question, or stops asking once it has an answer. Whether a real
+requester's reply is enough to carry a request through unattended is unmeasured.
 
 A separate JSON-configuration merge task reached delivery and one final fixture
 comment with exact readback after a manual resume. Its first 30-minute observation

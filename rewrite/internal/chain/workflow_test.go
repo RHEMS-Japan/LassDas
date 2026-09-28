@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -323,5 +324,93 @@ func TestWorkflowMissingResultsAndCancellationRetainRecovery(t *testing.T) {
 				t.Fatal("missing result was treated as success")
 			}
 		})
+	}
+}
+
+// The entrance the shipped example connects: the request is settled first, the
+// requester is asked only from there, and neither of those can finish the work.
+func entranceWorkflow() *Workflow {
+	return &Workflow{
+		Start: []string{"elicit"},
+		After: map[string][]string{
+			"elicit":        {"elicit", "ask_requester", "investigate"},
+			"ask_requester": {"elicit"},
+			"investigate":   {"done"},
+		},
+		Recover: map[string][]string{
+			"elicit":        {"elicit"},
+			"ask_requester": {"elicit"},
+			"investigate":   {"investigate"},
+		},
+	}
+}
+
+func entrancePurposes() map[string]string {
+	roles := map[string]string{}
+	for name := range entranceWorkflow().After {
+		roles[name] = "Configured responsibility " + name
+	}
+	return roles
+}
+
+// The requester's own words are an ordinary report to the next decision. They
+// are not decoded, scored or turned into permission to skip the settled
+// connections: after a question, only what the operator connected is offered.
+func TestTheRequestersAnswerReachesTheNextDecisionWithOnlyItsConnections(t *testing.T) {
+	t.Setenv("WORKFLOW_MODEL_KEY", "synthetic-workflow-only")
+	const answer = "(a) release/ でお願いします。上限は 3 件までで。"
+	state := State{Request: "Original 日本語", Step: "ask_requester", Workflow: entranceWorkflow(), History: []Result{
+		{Role: "ask_requester", Output: "Posted one question and read it back."},
+		{Role: "ask_requester", Speaker: "requester", Output: answer},
+	}}
+	for _, mode := range []string{"jev", "llm"} {
+		for _, reply := range []string{"elicit", "ask_requester", "investigate", "done"} {
+			t.Run(mode+"/"+reply, func(t *testing.T) {
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if !strings.Contains(string(raw), answer) {
+						t.Error("the requester's own words did not reach the decision")
+					}
+					var body map[string]any
+					if err := json.Unmarshal(raw, &body); err != nil {
+						t.Error(err)
+						return
+					}
+					if mode == "jev" {
+						criteria := body["questions"].(map[string]any)["next"].(map[string]any)["criteria"].(map[string]any)
+						if len(criteria) != 1 || criteria["elicit"] == nil {
+							t.Errorf("extra roles exposed after the answer: %v", criteria)
+						}
+						json.NewEncoder(w).Encode(map[string]any{"answers": map[string]any{"next": map[string]string{"choice": reply}}})
+					} else {
+						function := body["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+						enum := function["parameters"].(map[string]any)["properties"].(map[string]any)["role"].(map[string]any)["enum"].([]any)
+						if len(enum) != 1 || enum[0] != "elicit" {
+							t.Errorf("extra roles exposed after the answer: %v", enum)
+						}
+						args, _ := json.Marshal(Assignment{Role: reply})
+						json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": string(args)}}}}}}})
+					}
+				}))
+				defer server.Close()
+				service := Jev{URL: server.URL, Model: "fixture", KeyEnv: "WORKFLOW_MODEL_KEY", Client: server.Client()}
+				var router Router = DecisionRouter{Judge: service, Roles: entrancePurposes()}
+				if mode == "llm" {
+					router = ChatRouter{Service: service, Roles: entrancePurposes()}
+				}
+				next, err := router.Next(context.Background(), state)
+				if reply == "elicit" {
+					if err != nil || next.Role != reply {
+						t.Fatalf("next=%+v err=%v", next, err)
+					}
+				} else if err == nil {
+					t.Fatalf("unconnected action accepted after an answer: %+v", next)
+				}
+			})
+		}
 	}
 }

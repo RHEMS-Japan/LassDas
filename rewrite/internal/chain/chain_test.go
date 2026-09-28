@@ -423,3 +423,121 @@ func TestCancellationDuringSaveAttemptsLocalRetentionWithoutRepeatingWork(t *tes
 		})
 	}
 }
+
+const requesterAnswer = "(a) release/ でお願いします。"
+
+// A question put to the person who filed the request is not a failure and not
+// a completion. The chain stops there, says so, and leaves the conversation to
+// whoever owns it; it never decides what an answer has to look like.
+func TestAQuestionToTheRequesterHoldsTheRequestWithoutEndingIt(t *testing.T) {
+	store := &memoryStore{state: State{Request: "Settle what this asks for before starting."}}
+	routed, launched := 0, 0
+	engine := Chain{Store: store, RetryDelay: time.Millisecond, WaitAfter: "ask_requester",
+		Router: testRouter(func(_ context.Context, state State) (Assignment, error) {
+			routed++
+			for _, result := range state.History {
+				if result.Speaker == "requester" {
+					return Assignment{Role: "done"}, nil
+				}
+			}
+			return Assignment{Role: "ask_requester"}, nil
+		}),
+		Executor: testExecutor(func(_ context.Context, assignment Assignment, _ State) []Result {
+			launched++
+			return []Result{{Role: assignment.Role, Output: "Posted one question and read it back."}}
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); !errors.Is(err, ErrWaiting) {
+		t.Fatalf("the question did not hold the request: %v", err)
+	}
+	if !store.state.Waiting || store.state.Done || store.state.Step != "ask_requester" || len(store.state.History) != 1 {
+		t.Fatalf("held state: %+v", store.state)
+	}
+	if err := engine.Run(ctx); !errors.Is(err, ErrWaiting) || routed != 1 || launched != 1 {
+		t.Fatalf("a waiting request was dispatched again: routed=%d launched=%d err=%v", routed, launched, err)
+	}
+	// Only the owner of the conversation appends the reply and clears the hold.
+	store.state.History = append(store.state.History, Result{Role: "ask_requester", Speaker: "requester", Output: requesterAnswer})
+	store.state.Waiting = false
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !store.state.Done || store.state.Waiting || routed != 2 || launched != 1 {
+		t.Fatalf("the answer did not carry the request on: routed=%d launched=%d state=%+v", routed, launched, store.state)
+	}
+}
+
+// An unsuccessful question asked nobody anything, so waiting for an answer
+// would end the request at a person. It is ordinary recovery instead.
+func TestAnUnsuccessfulQuestionRecoversInsteadOfWaiting(t *testing.T) {
+	store := &memoryStore{state: State{Request: "Settle what this asks for before starting."}}
+	routed := 0
+	engine := Chain{Store: store, RetryDelay: time.Millisecond, WaitAfter: "ask_requester", Workflow: entranceWorkflow(),
+		Router: testRouter(func(_ context.Context, state State) (Assignment, error) {
+			routed++
+			switch routed {
+			case 1:
+				return Assignment{Role: "elicit"}, nil
+			case 2:
+				return Assignment{Role: "ask_requester"}, nil
+			case 3:
+				if !state.Recovering || !reflect.DeepEqual(state.nextActions(), []string{"elicit"}) {
+					t.Fatalf("an unsuccessful question did not recover: %+v", state)
+				}
+				return Assignment{Role: "elicit"}, nil
+			case 4:
+				return Assignment{Role: "investigate"}, nil
+			}
+			return Assignment{Role: "done"}, nil
+		}),
+		Executor: testExecutor(func(_ context.Context, assignment Assignment, _ State) []Result {
+			if assignment.Role == "ask_requester" {
+				return []Result{{Role: assignment.Role, Error: "comment submission not confirmed"}}
+			}
+			return []Result{{Role: assignment.Role, Output: "ordinary prose"}}
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Waiting {
+		t.Fatal("an unsuccessful question waited for an answer that was never asked for")
+	}
+	if !store.state.Done || routed != 5 {
+		t.Fatalf("routed=%d state=%+v", routed, store.state)
+	}
+}
+
+// The requester is asked by the configured question role, at the entrance,
+// instead of being told that acceptance ends their part. Neither instruction
+// asks a role to check, decode or grade what anyone answered.
+func TestTheQuestionRoleReplacesSilenceAfterAcceptance(t *testing.T) {
+	prompt := processPrompt(Role{Name: "implement", Purpose: "Do the work"}, Process{}, Assignment{}, State{})
+	for name, text := range map[string]string{"routing instructions": routingInstructions, "process prompt": prompt} {
+		if strings.Contains(text, "after acceptance") {
+			t.Fatalf("the %s still end the requester's part at acceptance", name)
+		}
+		if !strings.Contains(text, "configured question role") {
+			t.Fatalf("the %s do not say who may ask the requester", name)
+		}
+	}
+}
+
+// What the entrance is held to, in the words every decision receives. A vague
+// request is bounced back at once instead of being guessed at: proceeding with
+// an open point loses a night, asking costs one reply. This is wording and
+// connections; nothing here inspects or scores what a role wrote.
+const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
+const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
+
+func TestTheEntranceStandardReachesEveryDecision(t *testing.T) {
+	for _, sentence := range []string{byMorningStandard, askWhenInDoubt} {
+		if !strings.Contains(routingInstructions, sentence) {
+			t.Fatalf("the routing instructions do not carry the entrance standard: %q", sentence)
+		}
+	}
+}
