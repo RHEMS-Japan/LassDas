@@ -29,11 +29,10 @@ Errors, silence and unsuccessful attempts are reasons to choose a useful recover
 Choose done only when the reports and actual observations establish all of the original request, the independent reviews, the required delivery and post-delivery verification, and a readable result report at the agreed destination. Missing evidence is not proof of completion. Do not expand permissions, change spending limits or weaken the request to finish.`
 
 func (r DecisionRouter) Next(ctx context.Context, state State) (Assignment, error) {
-	choices := make(map[string]string, len(r.Roles)+1)
-	for role, purpose := range r.Roles {
-		choices[role] = purpose
+	choices, err := routingChoices(state, r.Roles)
+	if err != nil {
+		return Assignment{}, err
 	}
-	choices["done"] = "The requested result has been delivered and verified, with no original requirement outstanding."
 	if r.Judge == nil {
 		return Assignment{}, errors.New("no routing model is configured")
 	}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,25 @@ type config struct {
 	ModelSelection *selectionConfig `json:"model_selection,omitempty"`
 	Intake         *intakeConfig    `json:"intake,omitempty"`
 	AssignedIssue  string           `json:"assigned_issue,omitempty"`
+	Workflow       *chain.Workflow  `json:"workflow,omitempty"`
+}
+
+// Give the dispatcher the same configured work instructions as its workers.
+// A role title alone does not describe which tools and boundaries it has.
+// These are operator facts, not a verdict about a worker's answer. Do not
+// serialize Process: commands, environment and credentials are not router input.
+func routingRoleDescription(role chain.Role) string {
+	var description strings.Builder
+	description.WriteString(role.Purpose)
+	for _, process := range role.Processes {
+		access := process.TrackerAccess
+		if access == "" {
+			access = "none"
+		}
+		fmt.Fprintf(&description, "\nConfigured process %s; engine-issued tracker access: %s.\n%s\n",
+			process.Name, access, process.Instructions)
+	}
+	return description.String()
 }
 
 func main() {
@@ -78,6 +98,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		if _, exists := roles[role.Name]; exists {
 			return errors.New("two roles have the same name")
 		}
+		purposes[role.Name] = routingRoleDescription(role)
 		// Every role needs the same operator workflow context as the router.
 		// Keep the configuration untouched: watch serializes it for each job,
 		// so mutating its process slice here would duplicate these instructions.
@@ -88,10 +109,13 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 					"\n\nProcess-specific instructions:\n" + role.Processes[i].Instructions
 			}
 		}
-		roles[role.Name], purposes[role.Name] = role, role.Purpose
+		roles[role.Name] = role
 	}
 	if len(roles) == 0 {
 		return errors.New("no roles configured")
+	}
+	if err := cfg.Workflow.Validate(purposes); err != nil {
+		return err
 	}
 	observe := func(message string) { fmt.Fprintln(log, message) }
 	var router chain.Router
@@ -151,7 +175,8 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	engine := chain.Chain{
 		Router:   router,
 		Executor: executor, Store: store,
-		Observe: observe,
+		Workflow: cfg.Workflow,
+		Observe:  observe,
 	}
 	return engine.Run(ctx)
 }

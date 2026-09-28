@@ -10,7 +10,7 @@ source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 # for inspection rather than recursively deleting an operator-selected path.
 mkdir -- "$1"
 output_dir=$(CDPATH= cd -- "$1" && pwd -P)
-mkdir "$output_dir/bin" "$output_dir/harnesses"
+mkdir "$output_dir/bin" "$output_dir/harnesses" "$output_dir/examples"
 for command in engine tracker; do
   GOMAXPROCS="${GOMAXPROCS:-2}" CGO_ENABLED="${CGO_ENABLED:-0}" \
     go -C "$source_dir" build -p 1 -trimpath \
@@ -19,5 +19,8 @@ done
 for harness in git_workspace hermes linux_role; do
   cp "$source_dir/harnesses/$harness.py" "$output_dir/harnesses/$harness.py"
 done
-cp "$source_dir/RUNTIME.md" "$output_dir/RUNTIME.md"
+for guide in START RUNTIME README; do
+  cp "$source_dir/$guide.md" "$output_dir/$guide.md"
+done
+cp "$source_dir/examples/operator.json" "$output_dir/examples/operator.json"
 printf '%s\n' "$output_dir"

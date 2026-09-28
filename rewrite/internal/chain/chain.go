@@ -29,10 +29,13 @@ type Result struct {
 // fields to validate. Pending records a started action whose result may have
 // been lost; it is not permission to repeat an external write after a crash.
 type State struct {
-	Request string      `json:"request"`
-	History []Result    `json:"history"`
-	Pending *Assignment `json:"pending,omitempty"`
-	Done    bool        `json:"done"`
+	Request    string      `json:"request"`
+	History    []Result    `json:"history"`
+	Pending    *Assignment `json:"pending,omitempty"`
+	Done       bool        `json:"done"`
+	Workflow   *Workflow   `json:"workflow,omitempty"`
+	Step       string      `json:"step,omitempty"`
+	Recovering bool        `json:"recovering,omitempty"`
 }
 
 // Assignment is a dispatch instruction, not a certificate of output quality.
@@ -58,6 +61,7 @@ type Chain struct {
 	Router   Router
 	Executor Executor
 	Store    Store
+	Workflow *Workflow
 	// RetryDelay spaces unavailable-router calls. It does not limit attempts
 	// or turn an outage into a completed delivery.
 	RetryDelay time.Duration
@@ -87,7 +91,17 @@ func (c Chain) Run(ctx context.Context) error {
 	if state.Done {
 		return nil
 	}
+	if state.Workflow == nil && c.Workflow != nil {
+		if len(state.History) != 0 || state.Pending != nil || state.Step != "" {
+			return errors.New("cannot attach new workflow connections to an already started free-routing request")
+		}
+		state.Workflow = c.Workflow.clone()
+		if err := c.save(ctx, state); err != nil {
+			return err
+		}
+	}
 	if state.Pending != nil {
+		state.Step, state.Recovering = state.Pending.Role, true
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
 			Error:      "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
@@ -106,6 +120,9 @@ func (c Chain) Run(ctx context.Context) error {
 		next, err := c.Router.Next(ctx, state)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err == nil && !state.permits(next.Role) {
+			err = fmt.Errorf("action %q is not connected after %q (recovering=%t); available: %v", next.Role, state.Step, state.Recovering, state.nextActions())
 		}
 		if err != nil {
 			c.observe("routing unavailable: " + err.Error())
@@ -134,8 +151,10 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 		c.observe("running " + next.Role)
 		results := c.Executor.Execute(ctx, next, state)
+		state.Step, state.Recovering = next.Role, len(results) == 0
 		for i := range results {
 			results[i].Instruction = next.Instruction
+			state.Recovering = state.Recovering || results[i].Error != ""
 		}
 		state.History = append(state.History, results...)
 		state.Pending = nil

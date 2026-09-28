@@ -85,6 +85,11 @@ func stoppedReportConfiguration(t *testing.T) config {
 		t.Fatal(err)
 	}
 	cfg.Roles = append(cfg.Roles, chain.Role{Name: "report", Purpose: "Report actual observations at the assigned issue without performing implementation or delivery.", Processes: []chain.Process{{Name: "reporter", TrackerAccess: "comment", Command: []string{binary, "-test.run=^TestStoppedReporterHelper$"}, Env: map[string]string{"STOP_REPORT_TEST_CHILD": "1"}}}})
+	cfg.Workflow = &chain.Workflow{
+		Start:   []string{"implement"},
+		After:   map[string][]string{"implement": {"report"}, "report": {"done"}},
+		Recover: map[string][]string{"implement": {"implement"}, "report": {"report"}},
+	}
 	// JSON keeps the pre-implementation test executable: an old engine ignores
 	// this operator setting and therefore never supplies the promised report.
 	raw, _ := json.Marshal(cfg)

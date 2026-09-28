@@ -17,15 +17,14 @@ type ChatRouter struct {
 }
 
 func (r ChatRouter) Next(ctx context.Context, state State) (Assignment, error) {
-	rolesJSON, err := json.Marshal(r.Roles)
+	choices, err := routingChoices(state, r.Roles)
 	if err != nil {
 		return Assignment{}, err
 	}
-	choices := make(map[string]string, len(r.Roles)+1)
-	for name, purpose := range r.Roles {
-		choices[name] = purpose
+	rolesJSON, err := json.Marshal(choices)
+	if err != nil {
+		return Assignment{}, err
 	}
-	choices["done"] = "The original request is complete."
 	instructions := routingInstructions + "\n" + r.Instructions + "\nAvailable roles: " + string(rolesJSON) + "\nInvoke handoff for the next role. Include useful instructions for that role, or choose done when the request is complete."
 	return chatAction(ctx, r.Service, state, instructions, choices, "Invoke one configured role, or finish a completed request.")
 }

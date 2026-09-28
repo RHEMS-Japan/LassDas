@@ -1,5 +1,10 @@
 # Role-chain experiment
 
+Start with [the handoff and startup guide](START.md) and the complete
+[editable operator example](examples/operator.json). Both ship in the local
+bundle. The example's intake scope is intentionally unset; it does not activate
+an existing project or provision delivery/network permissions.
+
 This is a standalone, undeployed prototype, not the production entry point.
 It does not import the previous worker or runner. It is not a claim that an
 arbitrary request will finish unattended or reach a live delivery target.
@@ -59,6 +64,18 @@ answer or turn an earlier tool failure into a verdict about the current work.
 This increases routing context; it is not a solution for unbounded histories
 or evidence that models will correctly resolve every reported contradiction.
 
+A role's processes need not all be model harnesses. An operator can also
+configure an existing project test or deployed-service check as an ordinary
+process, leaving its `model_env` unset and granting only the permissions that
+command needs. Processes in the same role run in parallel; all their actual
+stdout, stderr and exit observations reach the next routing decision. For
+example, a verification role can return both an agent's report and the project
+command's failure, without depending on the agent to repeat that failure in
+its prose. The routing model still chooses investigation, repair or other work;
+the command is not a new completion gate. Checks are fallible project inputs,
+not permission to narrow the request, and passing them alone does not establish
+completion. Configuring such a command does not solve discovering missing tests.
+
 Routing and model-selection inference share a five-minute request timeout,
 not a task deadline or attempt limit. The former thirty-second limit discarded
 valid completions taking 35–40 seconds and repeatedly selected the same work.
@@ -85,6 +102,67 @@ issue; its own lack of that tool does not make reporting impossible. This
 shares context, not permissions: commands, scoped tools, credentials and OS
 isolation stay separately configured. Reports and repository text remain
 observations, not authority to override the operator's workflow or the request.
+The router also receives each available role's process instructions and
+engine-issued tracker access from that same configuration, not only its title.
+Commands, directories, environment values and credential mappings are not
+included in this description. These facts help assignment; they neither grant
+access nor guarantee that a model will interpret them correctly.
+
+### Configured action connections
+
+An operator can supply `workflow` to make required connections explicit instead
+of relying on prose to prevent skipped work. Names refer to configured roles:
+
+```json
+"workflow": {
+  "start": ["implement"],
+  "after": {
+    "implement": ["review"],
+    "review": ["implement", "deliver"],
+    "deliver": ["verify"],
+    "verify": ["implement", "report"],
+    "report": ["done"]
+  },
+  "recover": {
+    "implement": ["implement"],
+    "review": ["review", "implement"],
+    "deliver": ["verify"],
+    "verify": ["verify", "implement"],
+    "report": ["verify"]
+  }
+}
+```
+
+Both routing APIs receive only currently connected choices. Dispatch also
+refuses an unconnected action without ending the request. The model still
+interprets reports, chooses repair or progression, and decides when the work
+is actually complete; working answers have no new schema or content check.
+Role names and connections are project settings, not built-in stages. To review
+a report before publication, configure separate drafting, reviewing and posting
+actions with appropriate permissions. One reporting action that can both rewrite
+and post does not establish pre-publication review of what was actually posted.
+
+All processes finish before the next decision. A process error, missing results,
+or an interrupted pending action uses `recover`, which cannot select `done`.
+An exit-zero process with empty stdout is not rejected. Recovery has no attempt
+cap or invented failure terminal; it may still need resources or authority that
+the system cannot supply. On interruption, the next role must inspect uncertain
+external effects before repeating a write. Saved-result retries do not repeat
+the executed action. This is ordinary runtime recovery, not approval of output.
+
+The accepted run saves its connections and current position before dispatch;
+restart keeps these even if the operator file supplies different connections.
+Other operator configuration is not frozen. Missing/unconfigured connections
+are startup errors, not failed deliveries. A new graph cannot silently attach
+to an already-started free-routing history. Without `workflow`, free routing
+remains available for comparison, with **no enforced ordering**.
+
+The example only establishes connections: reviewers can still make a wrong
+judgment, tools can fail, and delivery can remain incomplete. Neither a traversed
+graph nor passing tests proves unattended overnight completion. Local tests
+exercise skipped dispatch, error recovery, persisted interruption, unchanged
+prose, both API protocols and actual child processes; these are not live-model
+or production acceptance results.
 
 ### Automatic intake experiment
 
