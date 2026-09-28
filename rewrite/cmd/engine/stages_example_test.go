@@ -173,6 +173,10 @@ const stagesReport = "できるようになったこと\n試験用の納品先�
 const stagesQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
 const stagesAnswer = "(a) release/ でお願いします。\n"
 
+// Every model stage in the fixture claims the whole request is finished. In an
+// ordered run that claim is never read, so it must move nothing at all.
+const stagesClaim = "Everything is done, verified and delivered; the request is complete.\n"
+
 // Actual subprocess fixture for the ordered run. The command stages are real
 // child processes whose exit status the runtime observes; no model runs here.
 func TestStagesRoleHelper(t *testing.T) {
@@ -232,6 +236,10 @@ func TestStagesRoleHelper(t *testing.T) {
 		if _, err := b.AddComment(context.Background(), issue, text); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// os.Exit below skips deferred work, so the claim is written up front.
+	if slices.Contains([]string{"elicit", "ask_requester", "work", "report"}, action) {
+		fmt.Print(stagesClaim)
 	}
 	switch action {
 	case "elicit":
@@ -463,6 +471,9 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 				if result.Error != "" {
 					failures++
 				}
+				if slices.Contains([]string{"elicit", "work", "report"}, result.Role) && !strings.Contains(result.Output, stagesClaim) {
+					t.Fatalf("the fixture stopped claiming completion, so nothing pins that the run ignores it: %+v", result)
+				}
 				if result.Model != "" {
 					workingModels++
 				}
@@ -500,5 +511,97 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			t.Logf("%d stage launches recorded, %d model decisions, one delivered artifact and one stored/read-back comment", records, routes)
 		})
+	}
+}
+
+// A stop from the requester still wins over an ordered run. The stopped report
+// is not a stage, so it runs on the configured decision service with no run to
+// walk, and the stopped request itself stays untouched and unfinished.
+func TestStoppedOrderedRunReportsWithoutWalkingItsStages(t *testing.T) {
+	cfg := stagesFixtureConfig(t)
+	var mu sync.Mutex
+	rows := []json.RawMessage{stopComment(51, 55, "停止\nDo not prepare new work.")}
+	routes, posts, catalogs, selections := 0, 0, 0, 0
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host == "tracker.example.invalid" {
+			switch r.Method + " " + r.URL.Path {
+			case "GET /api/v2/issues":
+				return selectionReply(r, 200, []any{watchedIssue(51, stagesRequest, "2026-01-03T00:00:00Z")}), nil
+			case "GET /api/v2/issues/EXAMPLE-51/comments":
+				return selectionReply(r, 200, rows), nil
+			case "POST /api/v2/issues/EXAMPLE-51/comments":
+				if err := r.ParseForm(); err != nil {
+					return nil, err
+				}
+				posts++
+				row, _ := json.Marshal(map[string]any{"id": 702, "issueId": 51, "projectId": 17, "createdUser": map[string]int{"id": 99}, "content": r.Form.Get("content")})
+				rows = append(rows, row)
+				return selectionReply(r, 201, json.RawMessage(row)), nil
+			}
+		}
+		if r.URL.Host == "openrouter.ai" {
+			switch r.URL.Path {
+			case "/api/v1/models":
+				catalogs++
+				return selectionReply(r, 200, map[string]any{"data": []any{selectionModel(fmt.Sprintf("qwen/fixture-%d", catalogs))}}), nil
+			case "/api/alpha/decisions":
+				selections++
+				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": fmt.Sprintf("qwen/fixture-%d", catalogs)}}}), nil
+			case "/api/v1/chat/completions":
+				var body struct {
+					Tools []struct {
+						Function struct {
+							Parameters struct {
+								Properties struct {
+									Role struct {
+										Enum []string `json:"enum"`
+									} `json:"role"`
+								} `json:"properties"`
+							} `json:"parameters"`
+						} `json:"function"`
+					} `json:"tools"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					return nil, err
+				}
+				offered := body.Tools[0].Function.Parameters.Properties.Role.Enum
+				slices.Sort(offered)
+				if !slices.Equal(offered, []string{"done", "stop_report"}) {
+					t.Errorf("the ordered run remained dispatchable after the stop: %v", offered)
+				}
+				choice := "stop_report"
+				if routes > 0 {
+					choice = "done"
+				}
+				routes++
+				return routingSelectionReply(r, chain.Assignment{Role: choice}), nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected stopped-run destination %s %s", r.Method, r.URL.Path)
+	})
+	root := t.TempDir()
+	var log bytes.Buffer
+	finish := startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+	waitFor(t, func() bool { s, e := stopReportState(root); return e == nil && s.Done })
+	finish()
+	state, err := loadWatchState(root, 51)
+	if err != nil || state.Done || state.Pending != nil || len(state.History) != 0 {
+		t.Fatalf("the stopped run was walked or completed: %+v %v", state, err)
+	}
+	report, err := stopReportState(root)
+	if err != nil || report.Workflow != nil {
+		t.Fatalf("the stopped report carried the ordered run: %+v %v", report.Workflow, err)
+	}
+	for _, result := range report.History {
+		if result.Speaker == "runtime" && strings.Contains(result.Output, "Runtime record for stage") {
+			t.Fatalf("the stopped report was recorded as a stage: %+v", result)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 1 || routes != 2 {
+		t.Fatalf("stopped-report posts=%d routes=%d", posts, routes)
 	}
 }
