@@ -155,6 +155,19 @@ are not applied by the bundle. See Docker's
 BuildKit's [nested rootless runtime notes](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
 Supported host security policy and live network isolation remain deployment work.
 
+Creating a Kubernetes `NetworkPolicy` object does not prove that the network
+plugin enforces it. In an actual credential-free cluster trial, a policy selected
+the diagnostic workload and denied all ingress/egress, yet TCP connections to a
+public address and the link-local metadata address remained possible. The same
+result occurred for a Job-owned Pod, both after a propagation wait and after the
+workflow completed. The installed network agent had policy enforcement disabled.
+Only TCP handshakes were attempted; no metadata/token/credential request was made.
+Before live credentials or untrusted work are admitted, test both required allowed
+traffic and forbidden traffic from the actual workload. Check the cluster plugin's
+configuration; do not infer isolation from accepted YAML, Pod readiness, or an
+otherwise successful workflow. Changes to a shared network plugin have their own
+deployment scope and must not be silently applied by this bundle.
+
 Run the controller under a supervisor that owns its workers' lifetime and retains
 the run directory. A separate experiment demonstrated controller-as-container-
 PID-1 crash containment and automatic runtime restart; this bundle does not
@@ -196,3 +209,14 @@ packaged watch wiring, not independent model reasoning or general exactly-once
 delivery. No live tracker, provider, delivery target or daemon restart was used.
 The outer sandbox limitations above still apply; `on-failure` does not by itself
 restart a container after daemon restart.
+
+A separate credential-free Kubernetes Job ran the packaged ten-action operator
+example using the actual engine, installed native SDK and fixture model/tracker/
+delivery APIs. The controller was PID 1; a crash after comment storage caused one
+automatic container restart, followed by readback rather than a second post.
+All eleven completed native tool calls succeeded, the accepted original request
+survived, and one delivery/one comment remained. The Job, Pod and dedicated policy
+were removed afterward. This confirms that bounded integration/recovery path,
+not live model judgment, production delivery, or effective egress isolation; the
+network negative observation above came from this same trial. It still used the
+diagnostic syscall profile described above, not an approved production profile.
