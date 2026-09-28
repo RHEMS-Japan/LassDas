@@ -11,6 +11,17 @@ import unittest
 SCRIPT = Path(__file__).with_name("mirror_loop.py").resolve()
 TOKEN = "fixture-delivery-credential-4b8e10"
 
+IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid")
+
+
+def git_environment():
+    """No personal configuration, and no guessed identity either: a runtime
+    with neither is exactly where these programs have to work."""
+    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+            "GIT_CONFIG_VALUE_0": "true"}
+
 
 @unittest.skipUnless(shutil.which("git"), "requires Git")
 class MirrorTests(unittest.TestCase):
@@ -27,11 +38,8 @@ class MirrorTests(unittest.TestCase):
         self.git(self.source, "commit", "-m", "Codex: initial")
 
     def git(self, directory, *arguments):
-        return subprocess.run(["git", "-C", str(directory), "-c", "user.name=Fixture",
-                               "-c", "user.email=fixture@example.invalid", *arguments],
-                              check=True, capture_output=True, text=True,
-                              env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
-                                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"})
+        return subprocess.run(["git", "-C", str(directory), *IDENTITY, *arguments],
+                              check=True, capture_output=True, text=True, env=git_environment())
 
     def loop(self, **extra):
         """Start the real loop, not a single cycle, and let it run."""
@@ -50,10 +58,11 @@ class MirrorTests(unittest.TestCase):
             child.kill()
 
     def environment(self, **extra):
-        environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+        environment = dict(git_environment(), PYTHONDONTWRITEBYTECODE="1")
+        environment.update({
                        "HOME": str(self.root), "GITHUB_TOKEN": TOKEN,
                        "DELIVERY_REPOSITORY": "owner/project", "MIRROR_PATH": str(self.mirror),
-                       "DELIVERY_REMOTE_URL": str(self.source), "MIRROR_INTERVAL_SECONDS": "0.2"}
+                       "DELIVERY_REMOTE_URL": str(self.source), "MIRROR_INTERVAL_SECONDS": "0.2"})
         environment.update(extra)
         return environment
 

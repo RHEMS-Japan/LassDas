@@ -18,6 +18,16 @@ import urllib.parse
 SCRIPT = Path(__file__).with_name("deliver_git.py").resolve()
 SUPPORT = Path(__file__).with_name("delivery_support.py").resolve()
 TOKEN = "fixture-delivery-credential-2f1a9c"
+IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid")
+
+
+def git_environment():
+    """No personal configuration, and no guessed identity either: a runtime
+    with neither is exactly where these programs have to work."""
+    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+            "GIT_CONFIG_VALUE_0": "true"}
 
 
 def service_handler(state):
@@ -28,8 +38,26 @@ def service_handler(state):
             pass
 
         def bare(self, *arguments):
-            return subprocess.run(["git", "-C", state["repository"], *arguments],
-                                  capture_output=True, text=True, check=True).stdout.strip()
+            environment = dict(git_environment(), GIT_AUTHOR_NAME="Fixture",
+                               GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                               GIT_COMMITTER_NAME="Fixture",
+                               GIT_COMMITTER_EMAIL="fixture@example.invalid")
+            return subprocess.run(["git", "-C", state["repository"], *IDENTITY, *arguments],
+                                  env=environment, capture_output=True, text=True,
+                                  check=True).stdout.strip()
+
+        def handle_one_request(self):
+            try:
+                return super().handle_one_request()
+            except subprocess.CalledProcessError as error:
+                # Answer with the failure instead of closing the socket, so a
+                # broken fixture shows up as a failed assertion here.
+                state["fixture_errors"].append(str(error))
+                try:
+                    self.answer(500, {"message": "fixture: " + str(error)})
+                except OSError:
+                    pass
+                self.close_connection = True
 
         def answer(self, status, payload):
             body = json.dumps(payload).encode()
@@ -118,7 +146,8 @@ class DeliveryTests(unittest.TestCase):
         self.git(self.root, "clone", "--no-local", str(self.remote), str(self.workspace))
         self.git(self.workspace, "checkout", "--detach", "HEAD")
         self.state = {"repository": str(self.remote), "pulls": [], "requests": [], "authorization": set(),
-                      "post_failures": 0, "merge_refusal": None}
+                      "post_failures": 0, "merge_refusal": None, "fixture_errors": []}
+        self.addCleanup(lambda: self.assertEqual(self.state["fixture_errors"], []))
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), service_handler(self.state))
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -142,15 +171,13 @@ class DeliveryTests(unittest.TestCase):
         return str(directory) + os.pathsep + os.environ["PATH"]
 
     def git(self, directory, *arguments):
-        return subprocess.run(["git", "-C", str(directory), "-c", "user.name=Fixture",
-                               "-c", "user.email=fixture@example.invalid", *arguments],
-                              check=True, capture_output=True, text=True,
-                              env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
-                                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"})
+        return subprocess.run(["git", "-C", str(directory), *IDENTITY, *arguments],
+                              check=True, capture_output=True, text=True, env=git_environment())
 
     def environment(self, **extra):
         address = "http://127.0.0.1:%d" % self.server.server_address[1]
-        environment = {"PATH": self.path, "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+        environment = dict(git_environment(), PATH=self.path, PYTHONDONTWRITEBYTECODE="1")
+        environment.update({
                        "HOME": str(self.home), "TASK_ISSUE": "TICKET-41",
                        "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home),
                        "GITHUB_TOKEN": TOKEN, "DELIVERY_REPOSITORY": "owner/project",
@@ -158,7 +185,7 @@ class DeliveryTests(unittest.TestCase):
                        "DELIVERY_API_BASE": address, "DELIVERY_POLL_SECONDS": "0.1",
                        "DELIVERY_MERGE_TIMEOUT_SECONDS": "20", "DELIVERY_RETRY_SECONDS": "0.05",
                        "DELIVERY_RETRY_CAP_SECONDS": "0.1",
-                       "DELIVERY_ALLOWED_PATHS": "main.go:go.mod:library/"}
+                       "DELIVERY_ALLOWED_PATHS": "main.go:go.mod:library/"})
         environment.update(extra)
         return environment
 
