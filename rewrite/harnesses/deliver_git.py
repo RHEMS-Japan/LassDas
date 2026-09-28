@@ -120,10 +120,17 @@ def stage_and_commit(workspace, issue, allowed, receipt):
             return head(workspace), False
         raise DeliveryError("No change under the allowed paths is ready to deliver")
     refuse_forbidden_text(diff)
-    support.run(support.git("-C", str(workspace),
-                            "-c", "user.name=" + (os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"),
-                            "-c", "user.email=" + (os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"),
-                            "commit", "--no-verify", "-m", "Deliver " + issue))
+    name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
+    address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
+    # Both halves on purpose. A runtime with no Git identity cannot derive one
+    # from an account, and a configuration that forbids guessing refuses the
+    # commit outright; the environment settles author and committer as well.
+    environment = support.git_environment()
+    environment.update(GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=address,
+                       GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=address)
+    support.run(support.git("-C", str(workspace), "-c", "user.name=" + name, "-c", "user.email=" + address,
+                            "commit", "--no-verify", "-m", "Deliver " + issue),
+                environment=environment)
     return head(workspace), True
 
 
