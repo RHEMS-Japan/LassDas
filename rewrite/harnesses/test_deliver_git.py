@@ -269,9 +269,12 @@ class DeliveryTests(unittest.TestCase):
         # and already merged at the service, but its result never got written.
         interrupted = {key: value for key, value in complete.items() if key not in ("merge_sha", "merged_at")}
         (self.workspace / ".git/ticket-engine/delivery.json").write_text(json.dumps(interrupted))
+        pushes = [line for line in self.git_log.read_text().splitlines() if " push " in line]
         resumed = self.deliver()
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         self.assertEqual(self.receipt()["merge_sha"], complete["merge_sha"])
+        # The resumed run finds its commit already published and pushes nothing.
+        self.assertEqual([line for line in self.git_log.read_text().splitlines() if " push " in line], pushes)
         self.assertEqual(self.methods().count("POST"), 1)
         self.assertEqual(self.methods().count("PUT"), 1)
 
