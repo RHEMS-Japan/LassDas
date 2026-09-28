@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +35,11 @@ type Process struct {
 	// PromptArgument is for harnesses taking their instruction as an argument.
 	// Otherwise stdin carries it. Neither path goes through a shell expansion.
 	PromptArgument bool `json:"prompt_argument,omitempty"`
+	// Receipt names a file, relative to this process's directory, that the
+	// runtime reads back once the process returns and puts in the stage's
+	// runtime record. It is the operator's own file: nothing requires it to
+	// exist, and nothing here decodes or checks what it contains.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 type Role struct {
@@ -211,6 +217,15 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	stopping.Wait()
 	result.Output = output.String()
 	result.Diagnostics = diagnostics.String()
+	if p.Receipt != "" {
+		// An absent or unreadable receipt is an observation like any other. It
+		// is never turned into a failure or into proof that a delivery landed.
+		if content, readErr := os.ReadFile(filepath.Join(p.Directory, p.Receipt)); readErr != nil {
+			result.Receipt = p.Receipt + " could not be read back: " + readErr.Error()
+		} else {
+			result.Receipt = p.Receipt + ", read back by the runtime:\n" + string(content)
+		}
+	}
 	if err != nil {
 		result.Error = err.Error()
 	}
@@ -227,6 +242,7 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 		result.Output = strings.ReplaceAll(result.Output, secret, "[credential]")
 		result.Diagnostics = strings.ReplaceAll(result.Diagnostics, secret, "[credential]")
 		result.Error = strings.ReplaceAll(result.Error, secret, "[credential]")
+		result.Receipt = strings.ReplaceAll(result.Receipt, secret, "[credential]")
 	}
 	result.FinishedAt = time.Now().UTC()
 	return result

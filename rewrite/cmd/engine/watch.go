@@ -59,6 +59,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	if err := validateQuestionRole(cfg); err != nil {
 		return err
 	}
+	if err := prepareStages(&cfg); err != nil {
+		return err
+	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	if err != nil {
 		return errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp")

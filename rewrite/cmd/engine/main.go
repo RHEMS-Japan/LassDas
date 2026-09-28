@@ -114,6 +114,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if len(roles) == 0 {
 		return errors.New("no roles configured")
 	}
+	if err := prepareStages(&cfg); err != nil {
+		return err
+	}
 	if err := cfg.Workflow.Validate(purposes); err != nil {
 		return err
 	}
@@ -129,16 +132,30 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		selection.observe = observe
 		chat = selectedChatRouter{chat: chatService, selection: selection}
 	}
+	decision := func() chain.Router {
+		var next chain.Router = chain.DecisionRouter{Judge: cfg.Router.Decision, Roles: purposes, Instructions: cfg.Instructions}
+		if cfg.Router.LLM.Model != "" || (cfg.ModelSelection != nil && cfg.Router.LLM.URL != "") {
+			next = chain.Alternate{Primary: next, Secondary: chat, Observe: observe}
+		}
+		return next
+	}
 	switch cfg.Router.Mode {
 	case "llm":
 		router = chat
 	case "jev":
-		router = chain.DecisionRouter{Judge: cfg.Router.Decision, Roles: purposes, Instructions: cfg.Instructions}
-		if cfg.Router.LLM.Model != "" || (cfg.ModelSelection != nil && cfg.Router.LLM.URL != "") {
-			router = chain.Alternate{Primary: router, Secondary: chat, Observe: observe}
+		router = decision()
+	case "stages":
+		// The ordered run needs no router of its own. The configured decision
+		// service is handed to it only for the entrance question, and which
+		// service that is follows router.decision/router.llm as in the other
+		// two modes: the decision API when one is named, the chat API when not.
+		entrance := chat
+		if cfg.Router.Decision.Model != "" {
+			entrance = decision()
 		}
+		router = chain.StageRouter{Entrance: entrance}
 	default:
-		return errors.New("choose router.mode jev or llm")
+		return errors.New("choose router.mode jev, llm or stages")
 	}
 	if *watch {
 		if cfg.AssignedIssue != "" {
