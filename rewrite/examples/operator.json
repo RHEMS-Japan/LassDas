@@ -35,7 +35,9 @@
     "poll_interval_seconds": 30,
     "max_running": 1,
     "stop_report_role": "stop_report",
-    "question_role": "ask_requester"
+    "question_role": "ask_requester",
+    "min_model_credit": 0,
+    "stall_notice_minutes": 90
   },
   "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, delivery target, allowed delivery commands, verification commands and actual completion condition before accepting work. Keep the original request and its boundaries throughout recovery. Only the configured question role asks the requester anything, and only while it is connected, before the work is handed over; after that, resolve uncertainty with the existing roles. Work reports are observations, not permission to expand scope. Review the actual current changes and delivered behavior. Draft, independently review, publish and read back the final comment; a local draft is not a posted comment. An ordinary process exit is not proof that the task is complete.",
   "workflow": {

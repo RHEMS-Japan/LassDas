@@ -90,9 +90,15 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	var instruction json.RawMessage
 	var rows []json.RawMessage
 	waiting := false
+	notice := requestNotices(cfg, issue, directory)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// A notice that was recorded but never confirmed belongs to this
+		// request, not to the tick that first met its condition.
+		if err := notice.flush(ctx); err != nil {
+			observe("earlier notice not confirmed: " + err.Error())
 		}
 		var err error
 		if instruction == nil {
@@ -106,6 +112,24 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 			if err == nil && issue.Creator.ID <= 0 && len(cfg.Intake.StopUserIDs) == 0 {
 				err = errors.New("requester identity is unavailable for stop instructions")
+			}
+		}
+		// The shared model key running out is the one failure no role can
+		// recover from. Hold the work while it lasts, say so once, and carry
+		// on by itself when the budget returns.
+		hold := false
+		if instruction == nil && err == nil && !waiting {
+			low, known := modelCreditHold(ctx, cfg, observe)
+			if known {
+				hold = low
+				if noticeErr := applyBudgetNotice(ctx, notice, low); noticeErr != nil {
+					observe("budget notice not confirmed: " + noticeErr.Error())
+				}
+			}
+			// Nothing here changes routing; it only tells the requester that a
+			// long silence is retrying, not finished and not abandoned.
+			if noticeErr := noteStall(ctx, cfg, notice, directory); noticeErr != nil {
+				observe("no-progress notice not confirmed: " + noticeErr.Error())
 			}
 		}
 		if instruction != nil {
@@ -129,6 +153,10 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				observe("waiting for the requester's answer at the assigned issue")
 				return nil
 			}
+		} else if hold {
+			// Stop the child the same way an authorized stop does, but keep the
+			// request: the next tick relaunches it once the budget is back.
+			stopChild()
 		} else if result == nil {
 			select {
 			case slots <- struct{}{}:
