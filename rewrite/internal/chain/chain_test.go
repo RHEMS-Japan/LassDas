@@ -532,10 +532,12 @@ func TestTheQuestionRoleReplacesSilenceAfterAcceptance(t *testing.T) {
 // an open point loses a night, asking costs one reply. This is wording and
 // connections; nothing here inspects or scores what a role wrote.
 const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
-const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
+const requesterPointTest = "A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone."
+const preferencesAreSettled = "Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question."
+const askWhenInDoubt = "Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; when you cannot tell whether a point is of that kind, ask the requester, and never proceed in order to find out."
 
 func TestTheEntranceStandardReachesEveryDecision(t *testing.T) {
-	for _, sentence := range []string{byMorningStandard, askWhenInDoubt} {
+	for _, sentence := range []string{byMorningStandard, requesterPointTest, preferencesAreSettled, askWhenInDoubt} {
 		if !strings.Contains(routingInstructions, sentence) {
 			t.Fatalf("the routing instructions do not carry the entrance standard: %q", sentence)
 		}
