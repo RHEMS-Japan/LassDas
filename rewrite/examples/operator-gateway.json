@@ -1,0 +1,759 @@
+{
+  "router": {
+    "mode": "llm",
+    "decision": {
+      "url": "https://openrouter.ai/api/alpha/decisions",
+      "model": "typesafe/jev-1.13",
+      "key_env": "MODEL_API_KEY"
+    },
+    "llm": {
+      "url": "https://gateway.example.invalid/v1/chat/completions",
+      "key_env": "GATEWAY_API_KEY"
+    }
+  },
+  "model_selection": {
+    "judge": {
+      "url": "https://openrouter.ai/api/alpha/decisions",
+      "model": "typesafe/jev-1.13",
+      "key_env": "MODEL_API_KEY"
+    },
+    "authors": [
+      "deepseek",
+      "minimax",
+      "moonshotai",
+      "qwen",
+      "z-ai"
+    ],
+    "gateway": {
+      "models_url": "https://gateway.example.invalid/v1/models",
+      "key_env": "GATEWAY_API_KEY",
+      "prefix": "openrouter/"
+    }
+  },
+  "backlog": {
+    "base_url": "https://tracker.example.invalid/api/v2",
+    "key_env": "TRACKER_API_KEY"
+  },
+  "intake": {
+    "project_id": 0,
+    "created_since": "REPLACE_WITH_RFC3339_ACCEPTANCE_START",
+    "poll_interval_seconds": 30,
+    "max_running": 1,
+    "stop_report_role": "stop_report"
+  },
+  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, delivery target, allowed delivery commands, verification commands and actual completion condition before accepting work. Keep the original request and its boundaries throughout recovery. Do not ask the requester after acceptance. Work reports are observations, not permission to expand scope. Review the actual current changes and delivered behavior. Draft, independently review, publish and read back the final comment; a local draft is not a posted comment. An ordinary process exit is not proof that the task is complete.",
+  "workflow": {
+    "start": [
+      "investigate"
+    ],
+    "after": {
+      "investigate": [
+        "design",
+        "implement"
+      ],
+      "design": [
+        "implement"
+      ],
+      "implement": [
+        "review"
+      ],
+      "review": [
+        "implement",
+        "deliver"
+      ],
+      "deliver": [
+        "verify"
+      ],
+      "verify": [
+        "implement",
+        "draft_report"
+      ],
+      "draft_report": [
+        "review_report"
+      ],
+      "review_report": [
+        "draft_report",
+        "implement",
+        "post_report"
+      ],
+      "post_report": [
+        "confirm_report"
+      ],
+      "confirm_report": [
+        "draft_report",
+        "implement",
+        "post_report",
+        "done"
+      ]
+    },
+    "recover": {
+      "investigate": [
+        "investigate"
+      ],
+      "design": [
+        "design",
+        "investigate"
+      ],
+      "implement": [
+        "implement",
+        "investigate"
+      ],
+      "review": [
+        "review",
+        "implement"
+      ],
+      "deliver": [
+        "verify"
+      ],
+      "verify": [
+        "verify",
+        "implement"
+      ],
+      "draft_report": [
+        "draft_report"
+      ],
+      "review_report": [
+        "review_report",
+        "draft_report"
+      ],
+      "post_report": [
+        "confirm_report"
+      ],
+      "confirm_report": [
+        "confirm_report",
+        "post_report"
+      ]
+    }
+  },
+  "roles": [
+    {
+      "name": "investigate",
+      "purpose": "Read the original request and existing project context; investigate an actionable approach within the authorized scope.",
+      "processes": [
+        {
+          "name": "investigator",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read existing documentation and implementation. Return observations and a useful next assignment without changing project files. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "design",
+      "purpose": "Resolve the implementation approach from the request and investigation; preserve scope and delivery conditions.",
+      "processes": [
+        {
+          "name": "designer",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Return a practical plan in ordinary prose. Do not replace a required live delivery with a simulation.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "implement",
+      "purpose": "Implement or repair the requested behavior and appropriate tests.",
+      "processes": [
+        {
+          "name": "implementer",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--write",
+            "src",
+            "--write",
+            "tests",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Use existing project conventions. Read previous concrete findings; fix the cause, preserve original requirements and verify the actual edited work.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "review",
+      "purpose": "Two independent reviewers challenge the current implementation, tests and original acceptance conditions.",
+      "processes": [
+        {
+          "name": "reviewer-a",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Inspect source and tests yourself. Look for concrete counterexamples and missing tests. Do not change the workspace. Return your own findings, including unresolved requirements; do not rely only on another role's claimed success. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        },
+        {
+          "name": "reviewer-b",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Inspect source and tests yourself. Look for concrete counterexamples and missing tests. Do not change the workspace. Return your own findings, including unresolved requirements; do not rely only on another role's claimed success. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "deliver",
+      "purpose": "Carry the reviewed result to the operator-approved target using only approved tools and credentials.",
+      "processes": [
+        {
+          "name": "delivery",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--write",
+            "release",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read operator delivery instructions. Perform only the authorized delivery. Inspect uncertain external effects before repeating a write. Do not alter source or declare a shallower destination to be the requested delivery.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          }
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "purpose": "Check the actual delivered behavior against the original request.",
+      "processes": [
+        {
+          "name": "verifier",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Run the operator-approved verification against the actual delivery target. Return observed failures and what remains unverified, not an inference from source alone. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "draft_report",
+      "purpose": "Write or correct the recipient-facing final report in report/result.md; no tracker posting.",
+      "processes": [
+        {
+          "name": "report-writer",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--write",
+            "report",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Write the final text for the requester, grounded in actual delivered behavior and observations. State what changed, what was checked and limitations. Do not include internal handoff instructions or assert evidence you did not observe. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "review_report",
+      "purpose": "Independently challenge the actual final report against the request, delivered work and observations.",
+      "processes": [
+        {
+          "name": "report-reviewer-a",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read report/result.md in full and independently verify its factual claims. Return concrete corrections. Passing a test does not prove unrelated claims. Do not write or post. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        },
+        {
+          "name": "report-reviewer-b",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read report/result.md in full and independently verify its factual claims. Return concrete corrections. Passing a test does not prove unrelated claims. Do not write or post. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        },
+        {
+          "name": "actual-report-text",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/bin/cat",
+            "report/result.md"
+          ],
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git"
+          },
+          "instructions": "Return the actual local report text unchanged; this is an observation, not a verdict."
+        }
+      ]
+    },
+    {
+      "name": "post_report",
+      "purpose": "Post the reviewed report unchanged and read the stored comment back; no workspace writes.",
+      "processes": [
+        {
+          "name": "publisher",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed. Use the same tracker command with post, feeding report/result.md on stdin, to publish without rewriting. Read actual comments first when submission is uncertain, to avoid repeating an already-stored comment. Read back the stored text; never report success from a missing receipt alone.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    },
+    {
+      "name": "confirm_report",
+      "purpose": "Read the actual saved comment and compare it to the reviewed report and delivered outcome.",
+      "processes": [
+        {
+          "name": "report-confirmation",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read the actual saved comment and report/result.md. Verify that the saved comment describes the delivered behavior truthfully and matches the reviewed text. Return concrete corrections for missing, false or unposted work. Read assigned issue comments with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "read"
+        },
+        {
+          "name": "stored-comment-text",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/bin/sh",
+            "-c",
+            "exec /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments"
+          ],
+          "env": {
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git"
+          },
+          "tracker_access": "read",
+          "instructions": "Return actual assigned-issue comments unchanged; this is an observation, not completion approval."
+        }
+      ]
+    },
+    {
+      "name": "stop_report",
+      "purpose": "Report an authorized stop and actual observations at the assigned issue without resuming the stopped work.",
+      "processes": [
+        {
+          "name": "stopped-reporter",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "The original request has been stopped. Inspect only existing observations and assigned-issue comments; do not clone, implement, deliver, undo effects or change workspace files. Post a truthful account of what happened and what remains uncertain, without claiming original completion. Read existing comments before an uncertain repeat, and read back the stored report. Use /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" with comments or post. Do not print credentials or private raw diagnostics.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://gateway.example.invalid/v1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "GATEWAY_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    }
+  ]
+}
