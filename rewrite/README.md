@@ -495,6 +495,72 @@ repeated in the final report; its description and tested artifact were the
 search task. This is a limited local observation, not production delivery,
 restart recovery or a resolution of the earlier CSV counterexamples.
 
+### Naming one model instead of selecting
+
+`model_selection.fixed` names a single endpoint id, such as
+`publisher/model-name`. Every process with a `model_env` then receives that id
+for every launch: no catalog is fetched, no gateway list is fetched and the
+selector is never asked. Configured `authors` stay in the file and are ignored
+while it is set; an empty or blank value reads as no fixed model at all, and an
+id without a publisher is refused with the rest of the configuration. Routing
+uses the same named model when a routing LLM is selected.
+
+A named model cannot be excluded from its own group, so the peer separation
+that gives a parallel review group two publishers does not apply: both
+reviewers run that one model, and their reports are no longer independent in
+that sense. This is an experiment switch for comparing one strong model against
+per-launch selection among the configured publishers. It is not a
+recommendation, and neither arrangement is established here as the better one.
+With a gateway configured, the named id is invoked through it exactly as a
+selected one is.
+
+### Invoking through a gateway
+
+Selection and invocation can use different accounts. The optional
+`model_selection.gateway` names an OpenAI-compatible gateway that serves the
+same catalog models under prefixed ids:
+
+```json
+"gateway": {
+  "models_url": "https://gateway.example.invalid/v1/models",
+  "key_env": "GATEWAY_API_KEY",
+  "prefix": "openrouter/"
+}
+```
+
+With it configured, every model chosen for a launch is reached through that
+gateway, so the working roles' and the routing LLM's token spend is invoiced to
+the gateway account instead of the catalog account. Point each process's
+`env.OPENROUTER_BASE_URL` and `secrets.OPENROUTER_API_KEY`, and
+`router.llm.url`/`key_env`, at the same gateway.
+`examples/operator-gateway.json` differs from `examples/operator.json` in
+exactly those places and in nothing else.
+
+The decision service stays on OpenRouter. The gateway measured here answers
+chat completions but not the decisions API (HTTP 405), so
+`model_selection.judge` and `router.decision` keep their OpenRouter URL and
+`MODEL_API_KEY`, and their spend stays on that account.
+
+Selection also keeps reading the public OpenRouter catalog. The gateway list
+publishes ids, dates and an owner, without prices or `supported_parameters`,
+which is not enough to decide eligibility or value. That list is used only to
+drop eligible ids the gateway does not serve, and it is fetched again for every
+selection under the same bounds as the public catalog: one bounded request, no
+redirect, no partial list, no saved snapshot. It is the one catalog request
+that carries a credential, so its endpoint must be HTTPS. When the list is
+unavailable, that selection attempt is unavailable and returns to the existing
+recovery loop; nothing falls back to invoking the un-prefixed id, which would
+bill the account the operator is moving away from.
+
+`prefix + id` is a route to the same model, not a different model and not a
+mark of quality. The judge is offered bare catalog ids, publisher separation in
+a parallel review group still compares publishers rather than the gateway name,
+and the runtime history records the chosen id as `model` with the route beside
+it as `model_prefix`. A gateway configured without `models_url`, `key_env` or
+`prefix` is refused before any request is accepted, because a half-configured
+one would quietly keep invoking the account being moved away from. Without
+`model_selection.gateway`, none of this applies and invocation is unchanged.
+
 ### Optional Git workspace preparation
 
 Watch mode already binds each process to its request's workspace and agent home.

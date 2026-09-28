@@ -90,6 +90,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
+	if err := cfg.ModelSelection.validate(); err != nil {
+		return err
+	}
 	roles, purposes := map[string]chain.Role{}, map[string]string{}
 	for _, role := range cfg.Roles {
 		if role.Name == "" || role.Name == "done" || len(role.Processes) == 0 {
@@ -174,6 +177,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		selection := *cfg.ModelSelection
 		selection.observe = observe
 		executor.SelectModel = selection.choose
+		executor.ModelPrefix = selection.invocationPrefix()
 	}
 	engine := chain.Chain{
 		Router:   router,

@@ -16,7 +16,11 @@ type Result struct {
 	Speaker string `json:"speaker"`
 	// Model is the endpoint requested for this process, not a quality mark or
 	// proof of which provider ultimately served the request.
-	Model       string    `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// ModelPrefix is the gateway prefix prepended to Model when this process
+	// was invoked, so the history shows which account the call was billed to.
+	// It is a route to the same model, not a different model or a quality mark.
+	ModelPrefix string    `json:"model_prefix,omitempty"`
 	Output      string    `json:"output"`
 	Instruction string    `json:"instruction,omitempty"`
 	Diagnostics string    `json:"diagnostics,omitempty"`

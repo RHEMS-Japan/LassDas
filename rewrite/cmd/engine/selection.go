@@ -20,7 +20,64 @@ type selectionConfig struct {
 	Fallback     *chain.Jev `json:"fallback,omitempty"`
 	Authors      []string   `json:"authors"`
 	Instructions string     `json:"instructions,omitempty"`
-	observe      func(string)
+	// Fixed names one model for every launch instead of choosing one. It is an
+	// experiment switch for comparing a single strong model against per-launch
+	// selection, not a recommendation and not a statement about either result.
+	Fixed string `json:"fixed,omitempty"`
+	// Gateway is optional. Without it, selection and invocation are unchanged.
+	Gateway *gatewayConfig `json:"gateway,omitempty"`
+	observe func(string)
+}
+
+// An OpenAI-compatible gateway can serve the same catalog models under
+// prefixed ids while billing a different account. Its list publishes ids
+// without capabilities or prices, so it narrows the eligible set and never
+// replaces the public catalog the judge reads. The prefix is a route to the
+// same model, not a different model and not a judgement about its answer.
+type gatewayConfig struct {
+	ModelsURL string `json:"models_url"`
+	KeyEnv    string `json:"key_env"`
+	Prefix    string `json:"prefix"`
+}
+
+// fixedModel is the operator's named model, or empty when none is configured.
+// Whitespace alone is not a model id, so it reads as no fixed model at all.
+func (s selectionConfig) fixedModel() string {
+	return strings.TrimSpace(s.Fixed)
+}
+
+// invocationPrefix is prepended when reaching the chosen model, and nowhere
+// else: eligibility, the judge's choices and the recorded model keep the
+// catalog id. An empty prefix leaves invocation exactly as configured.
+func (s selectionConfig) invocationPrefix() string {
+	if s.Gateway == nil {
+		return ""
+	}
+	return s.Gateway.Prefix
+}
+
+// A half-configured gateway would silently invoke the bare id on the account
+// the operator is moving away from, and an unusable fixed id would only fail
+// at launch. Refuse both before any request is accepted.
+func (s *selectionConfig) validate() error {
+	if s == nil {
+		return nil
+	}
+	if fixed := s.fixedModel(); fixed != "" && !strings.Contains(fixed, "/") {
+		return errors.New("model_selection.fixed must be a full publisher/model endpoint id")
+	}
+	if s.Gateway == nil {
+		return nil
+	}
+	switch {
+	case strings.TrimSpace(s.Gateway.ModelsURL) == "":
+		return errors.New("model_selection.gateway.models_url must name the gateway's model list endpoint")
+	case strings.TrimSpace(s.Gateway.KeyEnv) == "":
+		return errors.New("model_selection.gateway.key_env must name the environment variable holding the gateway credential")
+	case strings.TrimSpace(s.Gateway.Prefix) == "":
+		return errors.New("model_selection.gateway.prefix must give the prefix the gateway lists catalog models under")
+	}
+	return nil
 }
 
 // Routing is also a model invocation. Use the same fresh selection policy as
@@ -40,9 +97,19 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 		return chain.Assignment{}, err
 	}
 	chat := r.chat
-	chat.Service.Model = model
+	// Routing is an invocation too: it reaches the same model by the same
+	// route as the working roles. The chosen id itself is unchanged.
+	endpoint := r.selection.invocationPrefix() + model
+	chat.Service.Model = endpoint
 	if r.selection.observe != nil {
-		r.selection.observe("routing with freshly selected model: " + model)
+		notice := "routing with freshly selected model: " + model
+		if r.selection.fixedModel() != "" {
+			notice = "routing with the configured fixed model: " + model
+		}
+		if endpoint != model {
+			notice += "; invoked through the configured gateway as " + endpoint
+		}
+		r.selection.observe(notice)
 	}
 	next, err := chat.Next(ctx, state)
 	if err != nil {
@@ -52,6 +119,12 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 }
 
 func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+	// The operator named the model, so there is nothing to look up or judge:
+	// no catalog, no gateway list and no selector call. Peer separation cannot
+	// exclude a fixed model, so a parallel review group runs the same one.
+	if fixed := s.fixedModel(); fixed != "" {
+		return fixed, nil
+	}
 	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {
 		return model, err
@@ -120,6 +193,21 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 			return "", err
 		}
 		choices[model.ID] = string(data)
+	}
+	if s.Gateway != nil {
+		// Keep only ids this gateway actually serves, using a list fetched for
+		// this attempt. A failure here leaves the attempt unavailable: falling
+		// back to the bare id would invoke the account being moved away from,
+		// and an earlier list would claim availability nobody observed.
+		served, err := gatewayModelIDs(ctx, *s.Gateway)
+		if err != nil {
+			return "", err
+		}
+		for id := range choices {
+			if !served[s.Gateway.Prefix+id] {
+				delete(choices, id)
+			}
+		}
 	}
 	if len(choices) == 0 {
 		return "", errors.New("fresh catalog has no eligible independent model; no earlier selection was reused")

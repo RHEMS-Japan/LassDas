@@ -45,6 +45,11 @@ type Role struct {
 type Processes struct {
 	Roles       map[string]Role
 	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
+	// ModelPrefix reaches the selected model through a gateway that lists it
+	// under a prefixed id. Only the value handed to the harness changes; the
+	// selection, the peer separation and the recorded model keep the catalog
+	// id, and the prefix is recorded beside it.
+	ModelPrefix string
 	// Prepare attaches launch-scoped resources. Release runs after the child
 	// returns, including cancellation. It must not evaluate the child's answer.
 	Prepare func(context.Context, Process) (Process, func(), error)
@@ -60,7 +65,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	var group sync.WaitGroup
 	var selected []string
 	for index, process := range role.Processes {
-		model := ""
+		model, prefix := "", ""
 		if process.ModelEnv != "" {
 			started := time.Now().UTC()
 			var err error
@@ -79,16 +84,17 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				continue
 			}
 			selected = append(selected, model)
+			prefix = p.ModelPrefix
 			// Do not mutate configured maps shared by this role's next launch.
 			environment := make(map[string]string, len(process.Env)+1)
 			for name, value := range process.Env {
 				environment[name] = value
 			}
-			environment[process.ModelEnv] = model
+			environment[process.ModelEnv] = prefix + model
 			process.Env = environment
 		}
 		group.Add(1)
-		go func(index int, process Process, model string) {
+		go func(index int, process Process, model, prefix string) {
 			defer group.Done()
 			if p.Prepare != nil {
 				started := time.Now().UTC()
@@ -97,7 +103,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 					defer release()
 				}
 				if err != nil {
-					results[index] = Result{Role: name, Speaker: process.Name, Model: model,
+					results[index] = Result{Role: name, Speaker: process.Name, Model: model, ModelPrefix: prefix,
 						Instruction: assignment.Instruction, Error: "Preparing role access: " + err.Error(),
 						StartedAt: started, FinishedAt: time.Now().UTC()}
 					return
@@ -105,8 +111,8 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				process = prepared
 			}
 			results[index] = process.run(ctx, role, assignment, state)
-			results[index].Model = model
-		}(index, process, model)
+			results[index].Model, results[index].ModelPrefix = model, prefix
+		}(index, process, model, prefix)
 	}
 	group.Wait()
 	return results

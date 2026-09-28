@@ -19,9 +19,9 @@ import (
 	"ticket-runner/internal/tracker"
 )
 
-func operatorExample(t *testing.T) config {
+func loadExample(t *testing.T, path string) config {
 	t.Helper()
-	data, err := os.ReadFile("../../examples/operator.json")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,37 @@ func operatorExample(t *testing.T) config {
 	return cfg
 }
 
+func operatorExample(t *testing.T) config {
+	t.Helper()
+	return loadExample(t, "../../examples/operator.json")
+}
+
+// The same shipped configuration with invocation moved to a gateway account.
+func gatewayExample(t *testing.T) config {
+	t.Helper()
+	return loadExample(t, "../../examples/operator-gateway.json")
+}
+
+// Both shipped examples are held to the same boundaries. The expected
+// credential names are written here, not read back out of the file.
+var operatorExamples = []struct {
+	name, path, workerKey string
+	gateway               bool
+}{
+	{"openrouter", "../../examples/operator.json", "MODEL_API_KEY", false},
+	{"gateway", "../../examples/operator-gateway.json", "GATEWAY_API_KEY", true},
+}
+
 func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
-	cfg := operatorExample(t)
+	for _, example := range operatorExamples {
+		t.Run(example.name, func(t *testing.T) {
+			exampleBoundaries(t, example.path, example.workerKey, example.gateway)
+		})
+	}
+}
+
+func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
+	cfg := loadExample(t, path)
 	purposes := map[string]string{}
 	for _, role := range cfg.Roles {
 		purposes[role.Name] = role.Purpose
@@ -41,8 +70,11 @@ func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
 			if process.Env["NATIVE_MODEL"] != "" {
 				t.Fatal("example pinned a working model")
 			}
-			if process.ModelEnv != "" && (process.ModelEnv != "NATIVE_MODEL" || process.Secrets["OPENROUTER_API_KEY"] != "MODEL_API_KEY") {
+			if process.ModelEnv != "" && (process.ModelEnv != "NATIVE_MODEL" || process.Secrets["OPENROUTER_API_KEY"] != workerKey) {
 				t.Fatal("example lost per-launch selection or named credential source")
+			}
+			if process.ModelEnv != "" && gateway && process.Env["OPENROUTER_BASE_URL"] != gatewayBase(cfg) {
+				t.Fatal("worker still invokes the catalog account directly")
 			}
 			for _, source := range process.Secrets {
 				if source == cfg.Backlog.KeyEnv {
@@ -91,6 +123,27 @@ func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
 	if cfg.ModelSelection == nil || len(cfg.ModelSelection.Authors) != 5 || cfg.Router.LLM.Model != "" {
 		t.Fatal("example lost current-catalog selection")
 	}
+	if (cfg.ModelSelection.Gateway != nil) != gateway {
+		t.Fatal("example gained or lost its invocation gateway")
+	}
+	if gateway {
+		if err := cfg.ModelSelection.validate(); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ModelSelection.Gateway.Prefix != "openrouter/" || cfg.ModelSelection.Gateway.KeyEnv != workerKey {
+			t.Fatalf("gateway invocation route incomplete: %+v", cfg.ModelSelection.Gateway)
+		}
+		// Only invocation moves. The decisions API is not served by the
+		// gateway, so selection and routing decisions stay where they are.
+		for _, decisions := range []chain.Jev{cfg.ModelSelection.Judge, cfg.Router.Decision} {
+			if decisions.KeyEnv != "MODEL_API_KEY" || !strings.Contains(decisions.URL, "openrouter.ai") {
+				t.Fatalf("decision service left the catalog account: %+v", decisions)
+			}
+		}
+		if cfg.Router.LLM.KeyEnv != workerKey || !strings.HasPrefix(cfg.Router.LLM.URL, gatewayBase(cfg)+"/") {
+			t.Fatalf("routing invocation did not follow the roles: %+v", cfg.Router.LLM)
+		}
+	}
 	if _, err := bindRequestConfig(cfg, filepath.Join(t.TempDir(), "job"), "EXAMPLE-41"); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +160,11 @@ func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("unset scope created queue")
 	}
+}
+
+// The gateway's own base URL, derived from the one place it is configured.
+func gatewayBase(cfg config) string {
+	return strings.TrimSuffix(cfg.ModelSelection.Gateway.ModelsURL, "/models")
 }
 
 const exampleRequest = "Create and deliver Hello 日本語, independently review it, then post the verified outcome."
@@ -242,8 +300,17 @@ func TestExampleRoleHelper(t *testing.T) {
 }
 
 func TestOperatorExampleStopReportsWithoutPreparingWork(t *testing.T) {
-	cfg := operatorExample(t)
+	for _, example := range operatorExamples {
+		t.Run(example.name, func(t *testing.T) {
+			exampleStopReport(t, example.path)
+		})
+	}
+}
+
+func exampleStopReport(t *testing.T, path string) {
+	cfg := loadExample(t, path)
 	t.Setenv("MODEL_API_KEY", "synthetic-example-model")
+	t.Setenv("GATEWAY_API_KEY", "synthetic-example-gateway")
 	t.Setenv("TRACKER_API_KEY", "synthetic-example-tracker")
 	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
 	// Test stopped reporting with a fixture decision API. Fresh model selection
@@ -324,8 +391,17 @@ func TestOperatorExampleStopReportsWithoutPreparingWork(t *testing.T) {
 // the real collector, processes, scope server and persisted history. Only the
 // process programs and external service/model responses are fixtures here.
 func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
-	cfg := operatorExample(t)
+	for _, example := range operatorExamples {
+		t.Run(example.name, func(t *testing.T) {
+			exampleIntakeToArtifact(t, example.path)
+		})
+	}
+}
+
+func exampleIntakeToArtifact(t *testing.T, path string) {
+	cfg := loadExample(t, path)
 	t.Setenv("MODEL_API_KEY", "synthetic-example-model")
+	t.Setenv("GATEWAY_API_KEY", "synthetic-example-gateway")
 	t.Setenv("TRACKER_API_KEY", "synthetic-example-tracker")
 	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
 	binary, err := os.Executable()
@@ -341,8 +417,25 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var comments []any
-	catalogs, selections, routes, posts := 0, 0, 0, 0
+	catalogs, selections, routes, posts, lists := 0, 0, 0, 0, 0
 	want := []string{"elicit", "investigate", "design", "implement", "review", "deliver", "verify", "draft_report", "review_report", "post_report", "confirm_report", "done"}
+	gateway := cfg.ModelSelection.Gateway
+	// Routing is an invocation too, so it moves to the gateway with the roles.
+	routing := func(r *http.Request) (*http.Response, error) {
+		if routes >= len(want) {
+			return nil, fmt.Errorf("unexpected extra route")
+		}
+		var input struct{ Model string }
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			return nil, err
+		}
+		if (gateway != nil) != strings.HasPrefix(input.Model, "openrouter/") {
+			t.Errorf("routing invoked %q on the wrong account", input.Model)
+		}
+		choice := want[routes]
+		routes++
+		return routingSelectionReply(r, chain.Assignment{Role: choice}), nil
+	}
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -384,12 +477,22 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 				}
 				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
 			case "/api/v1/chat/completions":
-				if routes >= len(want) {
-					return nil, fmt.Errorf("unexpected extra route")
+				return routing(r)
+			}
+		}
+		if gateway != nil && r.URL.Host == "gateway.example.invalid" {
+			switch r.URL.Path {
+			case "/v1/models":
+				lists++
+				if r.Header.Get("Authorization") != "Bearer synthetic-example-gateway" {
+					t.Error("gateway list did not use the gateway credential")
 				}
-				choice := want[routes]
-				routes++
-				return routingSelectionReply(r, chain.Assignment{Role: choice}), nil
+				return selectionReply(r, 200, map[string]any{"data": []any{
+					gatewayEntry(gateway.Prefix + fmt.Sprintf("qwen/fixture-%d", catalogs)),
+					gatewayEntry(gateway.Prefix + fmt.Sprintf("z-ai/fixture-%d", catalogs)),
+				}}), nil
+			case "/v1/chat/completions":
+				return routing(r)
 			}
 		}
 		return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
@@ -429,6 +532,15 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 		if result.Model != "" {
 			workingModels++
 			groups[result.Role] = append(groups[result.Role], result.Model)
+			wantPrefix := ""
+			if gateway != nil {
+				wantPrefix = gateway.Prefix
+			}
+			// The catalog id is what was chosen; the prefix says how it was
+			// reached. Recording the joined id would lose the publisher.
+			if result.ModelPrefix != wantPrefix || strings.HasPrefix(result.Model, "openrouter/") {
+				t.Fatalf("history did not separate the chosen model from its route: %+v", result)
+			}
 		}
 	}
 	for _, name := range []string{"review", "review_report"} {
@@ -438,8 +550,12 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if posts != 1 || len(comments) != 1 || routes != len(want) || catalogs != selections || selections != routes+workingModels {
-		t.Fatalf("posts=%d routes=%d selections=%d catalogs=%d working=%d", posts, routes, selections, catalogs, workingModels)
+	wantLists := 0
+	if gateway != nil {
+		wantLists = selections
+	}
+	if posts != 1 || len(comments) != 1 || routes != len(want) || catalogs != selections || selections != routes+workingModels || lists != wantLists {
+		t.Fatalf("posts=%d routes=%d selections=%d catalogs=%d working=%d gateway lists=%d", posts, routes, selections, catalogs, workingModels, lists)
 	}
 	t.Logf("11 actions, 2 independent review groups, %d fresh selections, actual artifact and one stored/read-back comment", selections)
 }
