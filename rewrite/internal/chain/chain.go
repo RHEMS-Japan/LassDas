@@ -20,9 +20,14 @@ type Result struct {
 	// ModelPrefix is the gateway prefix prepended to Model when this process
 	// was invoked, so the history shows which account the call was billed to.
 	// It is a route to the same model, not a different model or a quality mark.
-	ModelPrefix string    `json:"model_prefix,omitempty"`
-	Output      string    `json:"output"`
-	Instruction string    `json:"instruction,omitempty"`
+	ModelPrefix string `json:"model_prefix,omitempty"`
+	Output      string `json:"output"`
+	Instruction string `json:"instruction,omitempty"`
+	// Receipt carries the content of the file the operator named for this
+	// process, read back by the runtime after the process returned. It reaches
+	// the stage's runtime record; it is not a field of the saved history and
+	// nothing here interprets what it says.
+	Receipt     string    `json:"-"`
 	Diagnostics string    `json:"diagnostics,omitempty"`
 	Error       string    `json:"error,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
@@ -174,6 +179,12 @@ func (c Chain) Run(ctx context.Context) error {
 		for i := range results {
 			results[i].Instruction = next.Instruction
 			state.Recovering = state.Recovering || results[i].Error != ""
+		}
+		// In an ordered run the runtime writes down what this launch actually
+		// returned, so the next stage reads observed facts instead of a claim
+		// about them, and so a repeated stage is not read as one long launch.
+		if record, staged := state.stageRecord(next, results); staged {
+			results = append(results, record)
 		}
 		state.History = append(state.History, results...)
 		state.Pending = nil

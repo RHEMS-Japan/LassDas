@@ -303,6 +303,78 @@ the collector loop, so a slow tracker delays the loop by up to one interval for
 every waiting request. Nothing notifies the requester beyond the posted comment
 itself, and an unanswered question waits indefinitely unless someone stops it.
 
+### Stages instead of roles
+
+`router.mode: "stages"` replaces the connected graph with an ordered list. A
+stage is a configured role plus the kind of fact that satisfies it, and the
+runtime, not a model, decides what runs next.
+
+```json
+"router": { "mode": "stages" },
+"workflow": {
+  "stages": [
+    { "name": "elicit", "kind": "model" },
+    { "name": "work", "kind": "model" },
+    { "name": "verify", "kind": "command", "on_failure": "work" },
+    { "name": "deliver", "kind": "command", "on_failure": "work" },
+    { "name": "verify_merged", "kind": "command", "on_failure": "work" },
+    { "name": "report", "kind": "model" },
+    { "name": "confirm_report", "kind": "command", "on_failure": "report" }
+  ]
+}
+```
+
+The next assignment is the first stage that is not yet satisfied.
+
+- A **command stage** is a role whose processes launch no model. It is
+  satisfied when all of its processes exit 0, and its output joins the history
+  exactly as any other result does. When it does not exit 0, the run assigns
+  the stage named by `on_failure` with that output already in the record, and
+  then returns to the command stage. There is no counter and no ending: a
+  command that keeps failing keeps cycling.
+- A **model stage** is satisfied when its processes ran without a process
+  error. What the model wrote is never read, decoded or compared, so writing
+  "done", "verified" or "delivered" advances nothing. The command stage that
+  follows is what proves the work.
+- The run is `done` when the last stage is satisfied. The last stage must be a
+  command, so an observed exit status and not a model's words finishes it.
+- `on_failure` must name a model stage, and a model stage takes none: a process
+  error or an interrupted launch simply runs that stage again, with the
+  runtime's usual note about the interruption in the record.
+
+After every stage the engine appends its own record of what it observed: how
+each process ended, and the content of the file named by that process's
+`receipt` setting when there is one. It is plain text for the next stage to
+read, not a shape anything has to answer in, and it is also where one launch
+ends, so a repaired stage is never read as part of the launch that failed.
+
+**What no model decides here**: which stage runs next, whether a stage is
+satisfied, whether a failure is recoverable, and when the request is complete.
+The only judgment left is at the entrance. If `intake.question_role` is set,
+then after the first stage the configured decision service (the decision API
+when `router.decision` names a model, the chat API otherwise) is consulted once
+with exactly two choices: the question role, or the next stage. It is never
+offered `done`, so the entrance still cannot end a request at a person, and the
+question role cannot be a stage, so it satisfies nothing. A question holds the
+request and the reply resumes it exactly as described above; the reply returns
+the run to its first stage. After that no routing decision exists at all.
+
+`examples/operator-stages.json` is the same delivery as `operator.json` written
+this way. Its command stages run operator-supplied programs under
+`/opt/ticket-automation/operator`: a build, a test run, the delivery, a check
+of the delivered target, and a script that reads the stored comment back and
+compares it with the reported text. Those programs are yours to write; the
+engine only observes what they return. The stopped-report role is not part of
+the run, and a stop from the requester still wins over everything here.
+
+**Known limit**: one worker may carry several stages, because a stage's process
+may be the same launcher as another's, and each launch receives the goal and
+the whole record. Nothing shares a session between launches and nothing trims
+the record, so the input grows with every stage and every repair cycle, and a
+long repair loop will eventually exceed a model's context. No session sharing
+or summarizing is implemented here on purpose: measure it first. Nothing in
+this mode has run with a live model or a real tracker.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a
