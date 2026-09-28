@@ -421,6 +421,53 @@ repeated in the final report; its description and tested artifact were the
 search task. This is a limited local observation, not production delivery,
 restart recovery or a resolution of the earlier CSV counterexamples.
 
+### Invoking through a gateway
+
+Selection and invocation can use different accounts. The optional
+`model_selection.gateway` names an OpenAI-compatible gateway that serves the
+same catalog models under prefixed ids:
+
+```json
+"gateway": {
+  "models_url": "https://gateway.example.invalid/v1/models",
+  "key_env": "GATEWAY_API_KEY",
+  "prefix": "openrouter/"
+}
+```
+
+With it configured, every model chosen for a launch is reached through that
+gateway, so the working roles' and the routing LLM's token spend is invoiced to
+the gateway account instead of the catalog account. Point each process's
+`env.OPENROUTER_BASE_URL` and `secrets.OPENROUTER_API_KEY`, and
+`router.llm.url`/`key_env`, at the same gateway.
+`examples/operator-gateway.json` differs from `examples/operator.json` in
+exactly those places and in nothing else.
+
+The decision service stays on OpenRouter. The gateway measured here answers
+chat completions but not the decisions API (HTTP 405), so
+`model_selection.judge` and `router.decision` keep their OpenRouter URL and
+`MODEL_API_KEY`, and their spend stays on that account.
+
+Selection also keeps reading the public OpenRouter catalog. The gateway list
+publishes ids, dates and an owner, without prices or `supported_parameters`,
+which is not enough to decide eligibility or value. That list is used only to
+drop eligible ids the gateway does not serve, and it is fetched again for every
+selection under the same bounds as the public catalog: one bounded request, no
+redirect, no partial list, no saved snapshot. It is the one catalog request
+that carries a credential, so its endpoint must be HTTPS. When the list is
+unavailable, that selection attempt is unavailable and returns to the existing
+recovery loop; nothing falls back to invoking the un-prefixed id, which would
+bill the account the operator is moving away from.
+
+`prefix + id` is a route to the same model, not a different model and not a
+mark of quality. The judge is offered bare catalog ids, publisher separation in
+a parallel review group still compares publishers rather than the gateway name,
+and the runtime history records the chosen id as `model` with the route beside
+it as `model_prefix`. A gateway configured without `models_url`, `key_env` or
+`prefix` is refused before any request is accepted, because a half-configured
+one would quietly keep invoking the account being moved away from. Without
+`model_selection.gateway`, none of this applies and invocation is unchanged.
+
 ### Optional Git workspace preparation
 
 Watch mode already binds each process to its request's workspace and agent home.
