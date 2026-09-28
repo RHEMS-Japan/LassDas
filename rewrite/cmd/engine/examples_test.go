@@ -178,7 +178,9 @@ const exampleQuestion = "依頼者にしか決められない点があります�
 const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
 const askWithChoices = "each with two to four concrete choices, in ordinary prose the requester can answer in a single reply"
 const notAGeneralPlea = "A general request for clarification is not a question: name the undecided points and their choices."
-const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
+const requesterPointTest = "A point is the requester's to decide only when the request, the repository and the operator instructions do not settle it and it changes what the delivered result does, where it goes or what the work may touch: a behaviour the request leaves open without saying you may choose, a target that cannot be told apart, access or a credential that was not given, instructions that contradict each other, or an action that cannot be undone."
+const preferencesAreSettled = "Wording, naming, language, level of detail and style are never questions: take the reading closest to the request and to what the repository already does, write the choice down with its reason, and leave it to the review of the delivered result; a point once decided is settled and is not listed again as a question."
+const askWhenInDoubt = "Proceeding with such an open point costs a night's work and asking costs one reply, so proceed only when every point of that kind is absent or already answered and the settled requirements state the completion condition to be held to; when you cannot tell whether a point is of that kind, ask the requester, and never proceed in order to find out."
 const exampleAnswer = "(a) release/ でお願いします。\n"
 
 // Actual subprocess fixture, not a native SDK/model or permission-sandbox test.
@@ -565,6 +567,28 @@ func exampleIntakeToArtifact(t *testing.T, path string) {
 // The shipped example asks the requester only at the entrance: the request is
 // settled before anything is built, the question is reachable only from there,
 // and neither of those two actions can finish the work or change the checkout.
+// Every shipped example's entrance actions carry the standard in the same
+// words; a copy that drifted would tell its decision something different.
+func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
+	for _, path := range []string{"../../examples/operator.json", "../../examples/operator-gateway.json", "../../examples/operator-stages.json"} {
+		cfg := loadExample(t, path)
+		roles := map[string]chain.Role{}
+		for _, role := range cfg.Roles {
+			roles[role.Name] = role
+		}
+		for _, name := range []string{"elicit", "ask_requester"} {
+			for _, sentence := range []string{requesterPointTest, preferencesAreSettled, askWhenInDoubt} {
+				if !strings.Contains(routingRoleDescription(roles[name]), sentence) {
+					t.Fatalf("%s: %s does not carry: %s", path, name, sentence)
+				}
+			}
+		}
+		if !strings.Contains(routingRoleDescription(roles["elicit"]), byMorningStandard) {
+			t.Fatalf("%s: the entrance does not say what standard it settles the request against", path)
+		}
+	}
+}
+
 func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 	cfg := operatorExample(t)
 	if !slices.Equal(cfg.Workflow.Start, []string{"elicit"}) {
@@ -597,8 +621,10 @@ func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 	// costs one reply. Every action the router can choose there says so, in the
 	// same words, and the entrance says which standard it settles against.
 	for _, name := range []string{"elicit", "ask_requester", "investigate"} {
-		if !strings.Contains(routingRoleDescription(roles[name]), askWhenInDoubt) {
-			t.Fatalf("%s does not tell the decision which way to err", name)
+		for _, sentence := range []string{requesterPointTest, preferencesAreSettled, askWhenInDoubt} {
+			if !strings.Contains(routingRoleDescription(roles[name]), sentence) {
+				t.Fatalf("%s does not tell the decision which way to err: %s", name, sentence)
+			}
 		}
 	}
 	if !strings.Contains(routingRoleDescription(roles["elicit"]), byMorningStandard) {

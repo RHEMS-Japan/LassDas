@@ -252,15 +252,30 @@ comment listing each undecided point with two to four choices so it can be
 answered in a single reply. A general request for clarification is not a
 question.
 
-The choice at the entrance is deliberately one-sided. Proceeding with an open
-point costs a night's work while asking costs one reply, so `investigate` is
-expected only when every point that only the requester could decide is absent
-or already answered and the settled requirements state the completion condition
-to be held to; when in doubt the expected choice is `ask_requester`, and
-`investigate` is never a way to find out what was wanted. That is wording and
-connections only. Nothing measures a confidence level, counts open points or
-inspects what the role wrote, so a model that ignores the standard still
-proceeds and no test here can tell you it will not.
+What counts as the requester's point is said in the same words everywhere: a
+point is theirs only when the request, the repository and the operator
+instructions do not settle it and it changes what the delivered result does,
+where it goes or what the work may touch (a behaviour the request leaves open
+without saying you may choose, a target that cannot be told apart, access or a
+credential that was not given, instructions that contradict each other, an
+action that cannot be undone). Wording, naming, language, level of detail and
+style are never questions: the entrance takes the reading closest to the
+request and to what the repository already does, writes the choice down with
+its reason, and leaves it to the review of the delivered result; a point once
+decided is settled and is not listed again as a question. A first live run
+without this distinction asked three such preference questions on a request
+that was complete, and lost the night to them.
+
+The choice at the entrance is deliberately one-sided. Proceeding with such an
+open point costs a night's work while asking costs one reply, so `investigate`
+is expected only when every point of that kind is absent or already answered
+and the settled requirements state the completion condition to be held to;
+when the entrance cannot tell whether a point is of that kind the expected
+choice is `ask_requester`, and `investigate` is never a way to find out what
+was wanted. That is wording and connections only. Nothing measures a
+confidence level, counts open points or inspects what the role wrote, so a
+model that ignores the standard still proceeds and no test here can tell you
+it will not.
 
 `ask_requester` posts one comment carrying the requester-only points and reads
 the stored text back. It has comment access and no workspace write permission,
