@@ -1,0 +1,241 @@
+# The permanent runtime for one consumer's role chain (rewrite/START.md).
+# Copy this file, replace every <placeholder>, and apply it after the two
+# ConfigMaps. One replica: the controller owns its queue directory, and a
+# second copy of it would accept the same ticket twice.
+#
+# What is measured and what is not is listed in README.md next to this file.
+# Read it before applying: some fields here are requirements found by running
+# the actual launcher in this cluster, and others are proposals.
+#
+# Secrets are referenced by name only. Never write a key value into this file,
+# into the ConfigMaps, or into any log; create them with the operator's own
+# secret path and let the Pod read them through secretKeyRef.
+#
+# <image> must be pullable on a node that has never run it: the Pod moves when
+# its node is replaced, and a registry that needs a credential needs an
+# imagePullSecret named in this spec. An image that only exists in one node's
+# cache strands this workload the first time it is rescheduled.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: <consumer>-ticket-engine
+  namespace: <namespace>
+spec:
+  serviceName: <consumer>-ticket-engine   # no Service object is created; the runtime takes no request
+  replicas: 1
+  selector:
+    matchLabels: { app: <consumer>-ticket-engine }
+  template:
+    metadata:
+      labels: { app: <consumer>-ticket-engine }
+      annotations:
+        # Work in progress survives a restart, but an eviction in the middle
+        # of a delivery leaves the external half of it to be reconciled.
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      terminationGracePeriodSeconds: 120
+      # The role launcher needs a Pod user namespace for its private /proc.
+      # Without this the launcher refuses to start a role; it does not fall
+      # back to running one unconfined.
+      hostUsers: false
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/arch: arm64          # the image is built for arm64 only
+        <node-pool-label>: "<value>"       # the operator's own node pool, if any
+      tolerations:
+        - key: <node-pool-taint>
+          operator: Equal
+          value: "<value>"
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # 1-2. This Pod's own egress rules, in this Pod's own network
+        # namespace. NET_ADMIN is confined to these two containers; no host
+        # network, no node mount, and no change to the cluster's plugin.
+        # <network-tool-image>: exactly the reference the cluster's own network
+        # DaemonSet uses, read from that DaemonSet's container image field, not
+        # the digest a node happens to have cached. With imagePullPolicy Never
+        # this works until the Pod lands on a replacement node, and then the
+        # init container fails with no image to pull.
+        - name: network-v4
+          image: <network-tool-image>:<tag>
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/sbin/xtables-nft-multi", "iptables-restore", "--noflush", "--wait", "5", "/policy/ipv4.rules"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: network-policy, mountPath: /policy, readOnly: true }
+            - { name: network-run, mountPath: /run }
+        - name: network-v6
+          image: <network-tool-image>:<tag>
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/sbin/xtables-nft-multi", "ip6tables-restore", "--noflush", "--wait", "5", "/policy/ipv6.rules"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: network-policy, mountPath: /policy, readOnly: true }
+            - { name: network-run, mountPath: /run }
+        # 3. Compile the operator's role syscall profile and install the
+        # launcher wrapper that loads it. The engine container's PATH finds
+        # this wrapper before the real bubblewrap, so every role launch
+        # carries the filter; a missing filter ends the launch.
+        - name: policy
+          image: <image>@sha256:<digest>
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /runtime-policy/bin
+              cp /opt/ticket-automation/runtime-policy/role_bwrap_policy.py /runtime-policy/bin/bwrap
+              chmod 0755 /runtime-policy/bin/bwrap
+              rm -f /runtime-policy/role-filter.bpf
+              python3 -B /opt/ticket-automation/runtime-policy/compile_role_seccomp.py \
+                /opt/ticket-automation/runtime-policy/moby-seccomp.json \
+                /runtime-policy/role-filter.bpf
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: runtime-policy, mountPath: /runtime-policy }
+        # 4. The mirror the roles clone from. It holds the delivery
+        # credential so the roles never do. Started as a sidecar: its startup
+        # check keeps the engine from accepting work before the first copy
+        # exists. If this API server refuses restartPolicy on an init
+        # container, move this entry to containers: below and expect the
+        # first workspace preparation to fail until the mirror appears.
+        - name: mirror
+          image: <image>@sha256:<digest>
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          command: ["/usr/bin/python3", "-B", "/opt/ticket-automation/scripts/mirror_loop.py"]
+          env:
+            - { name: MIRROR_PATH, value: /var/lib/ticket-automation/mirror/<repository-name>.git }
+            - { name: DELIVERY_REPOSITORY, value: <owner>/<repository-name> }
+            - { name: MIRROR_INTERVAL_SECONDS, value: "60" }
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: { name: <delivery-secret>, key: <delivery-token-key> }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -d /var/lib/ticket-automation/mirror/<repository-name>.git"]
+            periodSeconds: 5
+            failureThreshold: 120
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/ticket-automation }
+            - { name: temporary, mountPath: /tmp }
+      containers:
+        - name: engine
+          image: <image>@sha256:<digest>
+          imagePullPolicy: IfNotPresent
+          # The controller is this container's main process, so the runtime's
+          # restart policy owns its workers' lifetime. Do not add a second
+          # restart loop, and do not wrap this in a shell that survives it.
+          command:
+            - /opt/ticket-automation/bundle/bin/ticket-engine
+            - --config
+            - /etc/ticket-automation/operator.json
+            - --watch
+            - --run-dir
+            - /var/lib/ticket-automation/queue
+          # Measured requirement, not a recommended profile: with the default
+          # seccomp profile this runtime refused the launcher's nested
+          # namespaces even with procMount Unmasked. Non-root, no capability,
+          # no privilege escalation and a read-only root are kept, and roles
+          # themselves run under the compiled filter from the policy step.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: Unconfined }
+            procMount: Unmasked
+          env:
+            # The role launcher wrapper must come first; the Go toolchain is
+            # on this path for consumers whose verification builds Go.
+            - { name: PATH, value: "/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin" }
+            - { name: HOME, value: /var/lib/ticket-automation/controller }
+            - { name: GOMAXPROCS, value: "2" }
+            # Credentials by name only. The controller passes each role just
+            # the names its configuration grants; the parent environment is
+            # not inherited by a role process.
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: <model-secret>, key: <model-key> }
+            - name: TRACKER_API_KEY
+              valueFrom:
+                secretKeyRef: { name: <tracker-secret>, key: <tracker-key> }
+            - name: DELIVERY_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: { name: <delivery-secret>, key: <delivery-token-key> }
+          resources:
+            requests: { cpu: "1", memory: 3Gi }
+            limits: { memory: 6Gi }
+          # No liveness probe: a restart during a role's work loses that
+          # work's process, and the controller already resumes from its queue.
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/ticket-automation }
+            - { name: temporary, mountPath: /tmp }
+            - { name: config, mountPath: /etc/ticket-automation, readOnly: true }
+            - { name: runtime-policy, mountPath: /runtime-policy, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: <consumer>-ticket-engine-operator }
+        - name: network-policy
+          configMap: { name: <consumer>-ticket-engine-egress }
+        - name: network-run
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: runtime-policy
+          emptyDir: { sizeLimit: 16Mi }
+        # A role's temporary directory is inside its own namespace; this is
+        # the controller's and the toolchain's. Deliberately without a
+        # sizeLimit: exceeding one evicts the Pod in the middle of a request,
+        # which is a worse failure than a full filesystem. Watch it instead
+        # (README.md, "Before it accepts work").
+        - name: temporary
+          emptyDir: {}
+  volumeClaimTemplates:
+    # The queue holds unfinished histories. Deleting it does not clean up:
+    # it loses the record of what has already been done outside this cluster.
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: <storage-class>
+        resources:
+          requests: { storage: 20Gi }
