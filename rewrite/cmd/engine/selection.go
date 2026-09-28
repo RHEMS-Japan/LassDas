@@ -20,6 +20,10 @@ type selectionConfig struct {
 	Fallback     *chain.Jev `json:"fallback,omitempty"`
 	Authors      []string   `json:"authors"`
 	Instructions string     `json:"instructions,omitempty"`
+	// Fixed names one model for every launch instead of choosing one. It is an
+	// experiment switch for comparing a single strong model against per-launch
+	// selection, not a recommendation and not a statement about either result.
+	Fixed string `json:"fixed,omitempty"`
 	// Gateway is optional. Without it, selection and invocation are unchanged.
 	Gateway *gatewayConfig `json:"gateway,omitempty"`
 	observe func(string)
@@ -36,6 +40,12 @@ type gatewayConfig struct {
 	Prefix    string `json:"prefix"`
 }
 
+// fixedModel is the operator's named model, or empty when none is configured.
+// Whitespace alone is not a model id, so it reads as no fixed model at all.
+func (s selectionConfig) fixedModel() string {
+	return strings.TrimSpace(s.Fixed)
+}
+
 // invocationPrefix is prepended when reaching the chosen model, and nowhere
 // else: eligibility, the judge's choices and the recorded model keep the
 // catalog id. An empty prefix leaves invocation exactly as configured.
@@ -47,9 +57,16 @@ func (s selectionConfig) invocationPrefix() string {
 }
 
 // A half-configured gateway would silently invoke the bare id on the account
-// the operator is moving away from. Refuse it before any request is accepted.
-func (s *selectionConfig) validateGateway() error {
-	if s == nil || s.Gateway == nil {
+// the operator is moving away from, and an unusable fixed id would only fail
+// at launch. Refuse both before any request is accepted.
+func (s *selectionConfig) validate() error {
+	if s == nil {
+		return nil
+	}
+	if fixed := s.fixedModel(); fixed != "" && !strings.Contains(fixed, "/") {
+		return errors.New("model_selection.fixed must be a full publisher/model endpoint id")
+	}
+	if s.Gateway == nil {
 		return nil
 	}
 	switch {
@@ -86,6 +103,9 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 	chat.Service.Model = endpoint
 	if r.selection.observe != nil {
 		notice := "routing with freshly selected model: " + model
+		if r.selection.fixedModel() != "" {
+			notice = "routing with the configured fixed model: " + model
+		}
 		if endpoint != model {
 			notice += "; invoked through the configured gateway as " + endpoint
 		}
@@ -99,6 +119,12 @@ func (r selectedChatRouter) Next(ctx context.Context, state chain.State) (chain.
 }
 
 func (s selectionConfig) choose(ctx context.Context, role chain.Role, process chain.Process, state chain.State, selected []string) (string, error) {
+	// The operator named the model, so there is nothing to look up or judge:
+	// no catalog, no gateway list and no selector call. Peer separation cannot
+	// exclude a fixed model, so a parallel review group runs the same one.
+	if fixed := s.fixedModel(); fixed != "" {
+		return fixed, nil
+	}
 	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {
 		return model, err

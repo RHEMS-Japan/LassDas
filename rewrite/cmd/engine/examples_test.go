@@ -124,7 +124,7 @@ func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
 		t.Fatal("example gained or lost its invocation gateway")
 	}
 	if gateway {
-		if err := cfg.ModelSelection.validateGateway(); err != nil {
+		if err := cfg.ModelSelection.validate(); err != nil {
 			t.Fatal(err)
 		}
 		if cfg.ModelSelection.Gateway.Prefix != "openrouter/" || cfg.ModelSelection.Gateway.KeyEnv != workerKey {

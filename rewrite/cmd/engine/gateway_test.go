@@ -395,7 +395,11 @@ func TestGatewayConfigurationIsRefusedBeforeIntake(t *testing.T) {
 			}
 			root := filepath.Join(dir, "must-not-be-created")
 			var log bytes.Buffer
-			err = run(context.Background(), []string{"--config", configPath, "--watch", "--run-dir", root}, io.Discard, &log)
+			// Bound the run: an accepted configuration would poll for intake
+			// until the whole suite times out, which reports nothing useful.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			err = run(ctx, []string{"--config", configPath, "--watch", "--run-dir", root}, io.Discard, &log)
 			if err == nil || !strings.Contains(err.Error(), broken.want) {
 				t.Fatalf("half-configured gateway was accepted: %v", err)
 			}
@@ -406,5 +410,204 @@ func TestGatewayConfigurationIsRefusedBeforeIntake(t *testing.T) {
 				t.Fatal("refused configuration created the queue")
 			}
 		})
+	}
+}
+
+// The alternative selector chooses from the same gateway-served set: an
+// unavailable primary selector must not widen what this account can invoke.
+func TestGatewayNarrowsTheAlternativeSelectorToo(t *testing.T) {
+	selector := gatewaySelector(t)
+	selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+	lists, primary, alternative := 0, 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("a/x"), selectionModel("a/z")}}), nil
+		case "gateway.example":
+			lists++
+			return selectionReply(request, 200, map[string]any{"data": []any{gatewayEntry("openrouter/a/z")}}), nil
+		case "selection.example":
+			primary++
+			return catalogReply(request, 503, "primary selector unavailable"), nil
+		case "chat-selection.example":
+			alternative++
+			var input struct {
+				Tools []struct {
+					Function struct {
+						Parameters struct {
+							Properties map[string]struct{ Enum []string }
+						}
+					}
+				}
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				return nil, err
+			}
+			if got := input.Tools[0].Function.Parameters.Properties["role"].Enum; !reflect.DeepEqual(got, []string{"a/z"}) {
+				t.Errorf("alternative selector was offered %v, not only what the gateway serves", got)
+			}
+			return selectionReply(request, 200, map[string]any{"choices": []any{map[string]any{"message": map[string]any{
+				"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": `{"role":"a/z"}`}}},
+			}}}}), nil
+		}
+		return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+	})
+	model, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+	if err != nil || model != "a/z" || lists != 2 || primary != 1 || alternative != 1 {
+		t.Fatalf("model=%q err=%v gateway lists=%d primary=%d alternative=%d", model, err, lists, primary, alternative)
+	}
+}
+
+// model_selection.fixed names one model for every launch. It is an experiment
+// switch for comparing a single strong model against per-launch selection.
+func TestFixedModelSkipsEveryLookupAndInvokesThroughTheGateway(t *testing.T) {
+	for _, through := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gateway=%t", through), func(t *testing.T) {
+			selector := gatewaySelector(t)
+			selector.Fixed = "publisher/one-strong-model"
+			if !through {
+				selector.Gateway = nil
+			}
+			routes := 0
+			useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Host {
+				case "openrouter.ai", "gateway.example":
+					t.Errorf("a named model still fetched a list from %s", request.URL.Host)
+					return nil, fmt.Errorf("unexpected list request")
+				case "selection.example":
+					t.Error("a named model still asked the selector to choose")
+					return nil, fmt.Errorf("unexpected selection request")
+				case "routing.example":
+					routes++
+					choice := "review"
+					if routes == 2 {
+						choice = "done"
+					} else if routes > 2 {
+						return nil, fmt.Errorf("unexpected additional routing")
+					}
+					return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+				}
+				return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+			})
+			var cfg config
+			cfg.Router.Mode = "jev"
+			cfg.Router.Decision = chain.Jev{URL: "https://routing.example/decisions", Model: "router", KeyEnv: "SELECTION_TEST_KEY"}
+			cfg.ModelSelection = &selector
+			// Two peers in one group: a named model cannot be excluded, so both
+			// receive it. The operator is choosing that, not losing separation.
+			worker := chain.Process{ModelEnv: "CHOSEN_MODEL", Command: []string{"/bin/sh", "-c", `printf '%s' "$CHOSEN_MODEL"`}}
+			first, second := worker, worker
+			first.Name, second.Name = "reviewer-a", "reviewer-b"
+			cfg.Roles = []chain.Role{{Name: "review", Purpose: "independent review", Processes: []chain.Process{first, second}}}
+			dir := t.TempDir()
+			configPath, requestPath := filepath.Join(dir, "operator.json"), filepath.Join(dir, "request.txt")
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(requestPath, []byte("original request"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var log bytes.Buffer
+			runDir := filepath.Join(dir, "run")
+			if err := run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", runDir}, io.Discard, &log); err != nil {
+				t.Fatalf("%v\n%s", err, &log)
+			}
+			wantEndpoint, wantPrefix := "publisher/one-strong-model", ""
+			if through {
+				wantEndpoint, wantPrefix = "openrouter/publisher/one-strong-model", "openrouter/"
+			}
+			raw, err := os.ReadFile(filepath.Join(runDir, "history.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state chain.State
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.History) != 2 {
+				t.Fatalf("both peers did not run: %+v", state.History)
+			}
+			for _, record := range state.History {
+				if record.Output != wantEndpoint {
+					t.Fatalf("%s was invoked with %q, want %q", record.Speaker, record.Output, wantEndpoint)
+				}
+				if record.Model != "publisher/one-strong-model" || record.ModelPrefix != wantPrefix {
+					t.Fatalf("history recorded model=%q prefix=%q", record.Model, record.ModelPrefix)
+				}
+			}
+		})
+	}
+}
+
+// A named model wins over configured publishers, and whitespace alone is not
+// a name: it must leave per-launch selection exactly as it was.
+func TestFixedModelOverridesPublishersAndBlankReadsAsAbsent(t *testing.T) {
+	for name, fixed := range map[string]string{"named": "publisher/one-strong-model", "blank": "   "} {
+		t.Run(name, func(t *testing.T) {
+			selector := gatewaySelector(t)
+			selector.Gateway, selector.Fixed = nil, fixed
+			selector.Authors = []string{"a"}
+			catalogs, selections := 0, 0
+			useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Host {
+				case "openrouter.ai":
+					catalogs++
+					return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("a/x")}}), nil
+				case "selection.example":
+					selections++
+					return selectionReply(request, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "a/x"}}}), nil
+				}
+				return nil, fmt.Errorf("unexpected host %s", request.URL.Host)
+			})
+			model, err := selector.choose(context.Background(), chain.Role{Name: "implement"}, chain.Process{}, chain.State{Request: "original request"}, nil)
+			wantModel, wantCalls := "publisher/one-strong-model", 0
+			if name == "blank" {
+				wantModel, wantCalls = "a/x", 1
+			}
+			if err != nil || model != wantModel || catalogs != wantCalls || selections != wantCalls {
+				t.Fatalf("model=%q err=%v catalogs=%d selections=%d", model, err, catalogs, selections)
+			}
+		})
+	}
+}
+
+// A name that is not a full endpoint id would only fail at launch, so it is
+// refused with the rest of the configuration.
+func TestFixedModelWithoutAPublisherIsRefusedBeforeIntake(t *testing.T) {
+	cfg := gatewayExample(t)
+	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
+	cfg.ModelSelection.Fixed = "one-strong-model"
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		t.Errorf("refused configuration still reached %s", request.URL.Host)
+		return nil, fmt.Errorf("unconfigured")
+	})
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "operator.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "must-not-be-created")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var log bytes.Buffer
+	err = run(ctx, []string{"--config", configPath, "--watch", "--run-dir", root}, io.Discard, &log)
+	if err == nil || !strings.Contains(err.Error(), "model_selection.fixed") {
+		t.Fatalf("an endpoint id without a publisher was accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), ". ") {
+		t.Fatalf("refusal is not one sentence: %q", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("refused configuration created the queue")
 	}
 }

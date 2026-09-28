@@ -421,6 +421,25 @@ repeated in the final report; its description and tested artifact were the
 search task. This is a limited local observation, not production delivery,
 restart recovery or a resolution of the earlier CSV counterexamples.
 
+### Naming one model instead of selecting
+
+`model_selection.fixed` names a single endpoint id, such as
+`publisher/model-name`. Every process with a `model_env` then receives that id
+for every launch: no catalog is fetched, no gateway list is fetched and the
+selector is never asked. Configured `authors` stay in the file and are ignored
+while it is set; an empty or blank value reads as no fixed model at all, and an
+id without a publisher is refused with the rest of the configuration. Routing
+uses the same named model when a routing LLM is selected.
+
+A named model cannot be excluded from its own group, so the peer separation
+that gives a parallel review group two publishers does not apply: both
+reviewers run that one model, and their reports are no longer independent in
+that sense. This is an experiment switch for comparing one strong model against
+per-launch selection among the configured publishers. It is not a
+recommendation, and neither arrangement is established here as the better one.
+With a gateway configured, the named id is invoked through it exactly as a
+selected one is.
+
 ### Invoking through a gateway
 
 Selection and invocation can use different accounts. The optional

@@ -90,7 +90,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
-	if err := cfg.ModelSelection.validateGateway(); err != nil {
+	if err := cfg.ModelSelection.validate(); err != nil {
 		return err
 	}
 	roles, purposes := map[string]chain.Role{}, map[string]string{}
