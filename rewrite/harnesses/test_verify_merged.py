@@ -11,6 +11,17 @@ import unittest
 SCRIPT = Path(__file__).with_name("verify_merged.py").resolve()
 TOKEN = "fixture-delivery-credential-7c4d2b"
 
+IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid")
+
+
+def git_environment():
+    """No personal configuration, and no guessed identity either: a runtime
+    with neither is exactly where these programs have to work."""
+    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+            "GIT_CONFIG_VALUE_0": "true"}
+
 
 @unittest.skipUnless(shutil.which("git"), "requires Git")
 class VerificationTests(unittest.TestCase):
@@ -42,11 +53,8 @@ class VerificationTests(unittest.TestCase):
         self.git(source, "clone", "--bare", str(source), str(self.remote))
 
     def git(self, directory, *arguments):
-        return subprocess.run(["git", "-C", str(directory), "-c", "user.name=Fixture",
-                               "-c", "user.email=fixture@example.invalid", *arguments],
-                              check=True, capture_output=True, text=True,
-                              env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
-                                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"})
+        return subprocess.run(["git", "-C", str(directory), *IDENTITY, *arguments],
+                              check=True, capture_output=True, text=True, env=git_environment())
 
     def receipt(self, **fields):
         record = {"issue": "TICKET-41", "repository": "owner/project", "base_branch": "master",
@@ -56,11 +64,12 @@ class VerificationTests(unittest.TestCase):
         (self.workspace / ".git/ticket-engine/delivery.json").write_text(json.dumps(record))
 
     def verify(self, commands, *arguments, **extra):
-        environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+        environment = dict(git_environment(), PYTHONDONTWRITEBYTECODE="1")
+        environment.update({
                        "HOME": str(self.home), "TASK_WORKSPACE": str(self.workspace),
                        "TASK_HOME": str(self.home), "GITHUB_TOKEN": TOKEN,
                        "DELIVERY_REPOSITORY": "owner/project", "DELIVERY_BASE_BRANCH": "master",
-                       "DELIVERY_REMOTE_URL": str(self.remote), "VERIFY_COMMANDS": commands}
+                       "DELIVERY_REMOTE_URL": str(self.remote), "VERIFY_COMMANDS": commands})
         environment.update(extra)
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *arguments], input="the role prompt",
                               cwd=str(self.workspace), env=environment, capture_output=True,

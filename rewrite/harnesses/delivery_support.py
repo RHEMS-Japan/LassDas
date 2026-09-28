@@ -6,6 +6,7 @@ reaches a command line, a remote URL or the printed report: Git asks for it
 through the credential helper below, which answers one configured host.
 """
 import datetime
+import http.client
 import json
 import os
 from pathlib import Path
@@ -194,8 +195,11 @@ def api(method, path, *, payload=None, timeout=None):
     except urllib.error.URLError as error:
         # Not reaching the service at all is the clearest transient failure.
         raise TransientError("the delivery service was unreachable: " + scrub(str(error.reason)))
-    except TimeoutError as error:
-        raise TransientError("the delivery service did not answer in time: " + scrub(str(error)))
+    except (http.client.HTTPException, OSError) as error:
+        # The connection dropped, timed out, or the answer could not be read.
+        # Nothing was refused here, so this waits and asks again.
+        raise TransientError("the connection to the delivery service did not complete: "
+                             + scrub("%s: %s" % (type(error).__name__, error)))
     text = scrub(text).strip()
     if not text:
         return status, {}
