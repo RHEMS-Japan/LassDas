@@ -95,6 +95,9 @@
         "done"
       ]
     },
+    "launch_limit": {
+      "draft_report": 2
+    },
     "recover": {
       "elicit": [
         "elicit"

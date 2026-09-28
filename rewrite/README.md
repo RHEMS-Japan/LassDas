@@ -229,6 +229,38 @@ Production packaging and real tracker-to-production operation are not
 implemented by this collector. Its tests use fixture APIs and actual local child
 processes, not live-model judgments or a production tracker.
 
+### A cap on how often a role runs
+
+A reviewer that keeps sending the work back and a router that keeps following
+it would run all night. `workflow.launch_limit` names roles and how many times
+each may be launched for one request (a reply from the requester starts the
+count over):
+
+```json
+"launch_limit": {"draft_report": 2}
+```
+
+At its cap a role is left out of the choices offered at the next decision, and
+the runtime writes one note into the history saying so in its own words. When
+every role connected after a step is at its cap they all stay offered: the cap
+changes what is offered and never ends a request. Nothing here reads what a
+role wrote; it counts launches: a run of consecutive records for one role is
+one launch, and a launch that ended in an error and recovered into the same
+role counts again.
+
+Cap a role only where the decision that sends work back to it also offers a
+way forward that is not the delivery itself. The shipped example caps
+`draft_report`, because after `review_report` the run can still go on to
+`post_report`. It does not cap `implement`: after `review` the only other
+connection is `deliver`, and a cap there would force a delivery over the
+reviewer's unmet objection. A cap on a role no connection leads to is refused.
+A request that was already running keeps the workflow saved with it, so a cap
+added later applies to requests accepted afterwards. An ordered run
+(`router.mode: "stages"`) takes no cap, because its progress is decided by
+observed results. A live run without a cap, routed by a chat model, sent the
+report back and forth between its writer and its reviewer until the harness's
+limit; the cap is what bounds that.
+
 ### Settling the request at the entrance
 
 The shipped example starts at `elicit`, which settles what a request asks for
