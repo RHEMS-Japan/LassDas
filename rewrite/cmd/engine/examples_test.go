@@ -589,15 +589,19 @@ func TestEveryExampleCarriesTheEntranceStandard(t *testing.T) {
 	}
 }
 
-// The roles the work is sent back to are capped in every connected-role
-// example, so a review that keeps objecting cannot run all night.
-func TestOperatorExampleCapsTheRolesWorkIsSentBackTo(t *testing.T) {
+// The report writer is capped in every connected-role example, so a report
+// review that keeps objecting cannot run all night: the decision after
+// review_report still has post_report as a way forward. implement is not
+// capped: after review the only other connection is deliver, and a cap there
+// would force an unreviewed delivery.
+func TestOperatorExampleCapsTheReportWriterAndNotTheImplementer(t *testing.T) {
 	for _, example := range operatorExamples {
 		cfg := loadExample(t, example.path)
-		for _, role := range []string{"implement", "draft_report"} {
-			if cfg.Workflow == nil || cfg.Workflow.LaunchLimit[role] < 1 {
-				t.Fatalf("%s: %s has no launch limit", example.path, role)
-			}
+		if cfg.Workflow == nil || cfg.Workflow.LaunchLimit["draft_report"] < 1 {
+			t.Fatalf("%s: draft_report has no launch limit", example.path)
+		}
+		if _, capped := cfg.Workflow.LaunchLimit["implement"]; capped {
+			t.Fatalf("%s: implement is capped, which would force delivery over a reviewer's objection", example.path)
 		}
 	}
 }

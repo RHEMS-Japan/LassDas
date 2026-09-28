@@ -93,7 +93,6 @@
       ]
     },
     "launch_limit": {
-      "implement": 4,
       "draft_report": 2
     },
     "recover": {

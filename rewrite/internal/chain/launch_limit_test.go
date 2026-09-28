@@ -199,3 +199,135 @@ func (w *Workflow) atLaunchLimitFor(role string, launches int) bool {
 	}
 	return s.atLaunchLimit(role)
 }
+
+// On the shipped graph's shape the capped role is connected after two later
+// decisions (review_report and confirm_report); the runtime's note about it is
+// written at the first and not again at the second.
+func TestTheLaunchLimitNoteIsWrittenOnceAcrossLaterDecisions(t *testing.T) {
+	workflow := &Workflow{
+		Start: []string{"draft_report"},
+		After: map[string][]string{"draft_report": {"review_report"}, "review_report": {"draft_report", "post_report"},
+			"post_report": {"confirm_report"}, "confirm_report": {"draft_report", "post_report", "done"}},
+		Recover: map[string][]string{"draft_report": {"draft_report"}, "review_report": {"review_report"},
+			"post_report": {"post_report"}, "confirm_report": {"confirm_report"}},
+		LaunchLimit: map[string]int{"draft_report": 2},
+	}
+	roles := map[string]string{"draft_report": "", "review_report": "", "post_report": "", "confirm_report": ""}
+	if err := workflow.Validate(roles); err != nil {
+		t.Fatal(err)
+	}
+	judge := testJudge(func(_ context.Context, s State, _ string, choices map[string]string) (string, error) {
+		switch s.Step {
+		case "":
+			return "draft_report", nil
+		case "draft_report":
+			return "review_report", nil
+		case "review_report":
+			if _, ok := choices["draft_report"]; ok {
+				return "draft_report", nil
+			}
+			return "post_report", nil
+		case "post_report":
+			return "confirm_report", nil
+		}
+		return "done", nil
+	})
+	store := &memoryStore{state: State{Request: "post the report"}}
+	engine := Chain{Store: store, Workflow: workflow, RetryDelay: time.Millisecond,
+		Router: DecisionRouter{Roles: roles, Judge: judge},
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			return []Result{{Role: a.Role, Output: "ordinary prose"}}
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var launched []string
+	notes := 0
+	for _, r := range store.state.History {
+		if r.Speaker == "runtime" {
+			if strings.Contains(r.Output, "launch limit") {
+				notes++
+			}
+			continue
+		}
+		launched = append(launched, r.Role)
+	}
+	want := []string{"draft_report", "review_report", "draft_report", "review_report", "post_report", "confirm_report"}
+	if !slices.Equal(launched, want) || !store.state.Done {
+		t.Fatalf("launched %v (done=%v), want %v", launched, store.state.Done, want)
+	}
+	if notes != 1 {
+		t.Fatalf("launch-limit notes: %d, want exactly 1 across both later decisions", notes)
+	}
+}
+
+// A launch that ended in an error and recovered into the same role is a new
+// launch. With a cap of 2 and a recovery that also connects investigate, the
+// third attempt is not offered and the run goes on through investigate.
+func TestAFailedLaunchThatRecoversIntoItselfCountsAgain(t *testing.T) {
+	workflow := &Workflow{
+		Start:       []string{"draft"},
+		After:       map[string][]string{"draft": {"post"}, "investigate": {"post"}, "post": {"done"}},
+		Recover:     map[string][]string{"draft": {"draft", "investigate"}, "investigate": {"investigate"}, "post": {"post"}},
+		LaunchLimit: map[string]int{"draft": 2},
+	}
+	roles := map[string]string{"draft": "", "investigate": "", "post": ""}
+	if err := workflow.Validate(roles); err != nil {
+		t.Fatal(err)
+	}
+	judge := testJudge(func(_ context.Context, s State, _ string, choices map[string]string) (string, error) {
+		switch {
+		case s.Step == "":
+			return "draft", nil
+		case s.Recovering:
+			if _, ok := choices["draft"]; ok {
+				return "draft", nil
+			}
+			return "investigate", nil
+		case s.Step == "post":
+			return "done", nil
+		}
+		return "post", nil
+	})
+	store := &memoryStore{state: State{Request: "draft it"}}
+	engine := Chain{Store: store, Workflow: workflow, RetryDelay: time.Millisecond,
+		Router: DecisionRouter{Roles: roles, Judge: judge},
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			if a.Role == "draft" {
+				return []Result{{Role: "draft", Error: "exit status 1"}}
+			}
+			return []Result{{Role: a.Role, Output: "ordinary prose"}}
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var launched []string
+	for _, r := range store.state.History {
+		if r.Speaker != "runtime" {
+			launched = append(launched, r.Role)
+		}
+	}
+	if want := []string{"draft", "draft", "investigate", "post"}; !slices.Equal(launched, want) || !store.state.Done {
+		t.Fatalf("launched %v (done=%v), want %v", launched, store.state.Done, want)
+	}
+	if got := store.state.launches("draft"); got != 2 {
+		t.Fatalf("draft launches counted: %d, want 2", got)
+	}
+}
+
+func TestALaunchLimitOnARoleNoConnectionLeadsToIsRefused(t *testing.T) {
+	w := &Workflow{Start: []string{"draft"},
+		After:       map[string][]string{"draft": {"review"}, "review": {"draft", "done"}},
+		Recover:     map[string][]string{"draft": {"draft"}, "review": {"review"}},
+		LaunchLimit: map[string]int{"orphan": 1}}
+	err := w.Validate(map[string]string{"draft": "", "review": "", "orphan": ""})
+	if err == nil || !strings.Contains(err.Error(), "no after or recover connection") {
+		t.Fatalf("a cap on an unconnected role was accepted: %v", err)
+	}
+}

@@ -25,11 +25,13 @@ type Workflow struct {
 	// says by itself where a person may be asked; it is not a stage.
 	Question string `json:"question,omitempty"`
 	// LaunchLimit caps how many times a named role may be launched for one
-	// request between two answers from the requester. A role at its cap is
-	// not offered at the next decision, so a review that keeps sending the
-	// work back cannot go on all night; the roles to cap are the ones work is
-	// sent back to. When every connected role is at its cap they all stay
-	// offered, because a cap changes what is offered and never ends a request.
+	// request (a reply from the requester starts the count over). A role at
+	// its cap is not offered at the next decision, so a review that keeps
+	// sending the work back cannot go on all night. Cap a role only where the
+	// decision that sends work back to it also offers a way forward that is
+	// not the delivery itself; when every connected role is at its cap they
+	// all stay offered, because a cap changes what is offered and never ends
+	// a request.
 	LaunchLimit map[string]int `json:"launch_limit,omitempty"`
 }
 
@@ -49,6 +51,15 @@ func (w *Workflow) Validate(roles map[string]string) error {
 		}
 		if limit < 1 {
 			return fmt.Errorf("workflow launch_limit for %q must be at least 1", role)
+		}
+		connected := false
+		for _, section := range []map[string][]string{w.After, w.Recover} {
+			for _, targets := range section {
+				connected = connected || slices.Contains(targets, role)
+			}
+		}
+		if !connected {
+			return fmt.Errorf("workflow launch_limit names %q, which no after or recover connection leads to", role)
 		}
 	}
 	if w.Question != "" {
@@ -128,30 +139,36 @@ func (s State) permits(role string) bool {
 	return s.Workflow == nil || slices.Contains(s.nextActions(), role)
 }
 
-// launches counts how many times a role was launched for this request since
-// the requester last answered. The records one launch returns sit together in
-// the history, so a run of consecutive records for one role is one launch;
-// the runtime's own notes are not launches.
+// launches counts how many times a role was launched for this request. The
+// records one launch returns sit together in the history, so a run of
+// consecutive records for one role is one launch, except that a record after
+// one that ended in an error is a new launch (a role that fails and recovers
+// into itself is launched again each time), and the runtime's own note about
+// an interrupted launch ends the run too. The runtime's notes are not
+// launches, and a reply from the requester starts the count over.
 func (s State) launches(role string) int {
-	count, previous := 0, ""
+	count, previous, failed := 0, "", false
 	for _, result := range s.History {
 		if result.Speaker == "requester" {
-			count, previous = 0, ""
+			count, previous, failed = 0, "", false
 			continue
 		}
 		if result.Speaker == "runtime" {
+			if result.Role == role {
+				previous = ""
+			}
 			continue
 		}
-		if result.Role == role && previous != role {
+		if result.Role == role && (previous != role || failed) {
 			count++
 		}
-		previous = result.Role
+		previous, failed = result.Role, result.Error != ""
 	}
 	return count
 }
 
 func (s State) atLaunchLimit(role string) bool {
-	if s.Workflow == nil {
+	if s.Workflow == nil || len(s.Workflow.Stages) > 0 {
 		return false
 	}
 	limit, capped := s.Workflow.LaunchLimit[role]
@@ -201,7 +218,7 @@ func (s State) launchLimitNotes() []Result {
 			continue
 		}
 		notes = append(notes, Result{Role: role, Speaker: "runtime", FinishedAt: time.Now().UTC(),
-			Output: fmt.Sprintf("%s has run %d times for this request, the operator's launch limit; it is not offered again until the requester answers. Choose among the other connected actions.", role, s.launches(role))})
+			Output: fmt.Sprintf("%s has run %d times for this request, the operator's launch limit; it is not offered again for the rest of this request (a reply from the requester starts the count over). Choose among the other connected actions.", role, s.launches(role))})
 	}
 	return notes
 }
