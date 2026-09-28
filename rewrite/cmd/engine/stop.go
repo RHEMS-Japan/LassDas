@@ -10,7 +10,21 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"ticket-runner/internal/chain"
 )
+
+// An instruction is read from the first nonblank line only, so a quotation, an
+// example or a later mention of the word is not one.
+func firstInstructionLine(content string) string {
+	first := ""
+	for _, line := range strings.Split(content, "\n") {
+		if first = strings.TrimSpace(line); first != "" {
+			break
+		}
+	}
+	return first
+}
 
 // A stop is an instruction from the requester or an explicitly configured
 // operator. It is never inferred from a role report or approved by a model.
@@ -24,13 +38,7 @@ func stopInstruction(rows []json.RawMessage, issue sourceIssue, operators []int6
 		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 || comment.IssueID != issue.ID || comment.ProjectID != issue.ProjectID {
 			return nil, errors.New("stop comments could not be read for the assigned issue")
 		}
-		first := ""
-		for _, line := range strings.Split(comment.Content, "\n") {
-			if first = strings.TrimSpace(line); first != "" {
-				break
-			}
-		}
-		if first != "停止" {
+		if firstInstructionLine(comment.Content) != "停止" {
 			continue
 		}
 		authorized := comment.CreatedUser.ID > 0 && comment.CreatedUser.ID == issue.Creator.ID
@@ -80,6 +88,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	}
 	defer stopChild()
 	var instruction json.RawMessage
+	var rows []json.RawMessage
+	waiting := false
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -89,7 +99,6 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// Bound an unresponsive read independently of an executing role. A
 			// missing control channel pauses work, not the request's goal.
 			readCtx, release := context.WithTimeout(ctx, interval)
-			var rows []json.RawMessage
 			rows, err = cfg.Backlog.Comments(readCtx, issue.Key, 0)
 			release()
 			if err == nil {
@@ -110,6 +119,16 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 		} else if err != nil {
 			stopChild()
 			observe("work paused while stop instructions are unavailable: " + err.Error())
+		} else if waiting {
+			// The engine put a question to the requester and stopped there.
+			// Record how far the comments had gone, then leave the request to
+			// the collector, which starts it again when the answer arrives.
+			if err := recordQuestion(directory, rows, issue); err != nil {
+				observe("waiting to record the question put to the requester: " + err.Error())
+			} else {
+				observe("waiting for the requester's answer at the assigned issue")
+				return nil
+			}
 		} else if result == nil {
 			select {
 			case slots <- struct{}{}:
@@ -134,7 +153,10 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			cancel()
 			<-slots
 			cancel, result = nil, nil
-			return err
+			if !errors.Is(err, chain.ErrWaiting) {
+				return err
+			}
+			waiting = true
 		case <-tick.C:
 		}
 	}

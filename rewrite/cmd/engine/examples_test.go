@@ -49,10 +49,10 @@ func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
 					t.Fatal("account tracker credential assigned to worker")
 				}
 			}
-			if process.TrackerAccess == "comment" && role.Name != "post_report" && role.Name != "stop_report" {
+			if process.TrackerAccess == "comment" && !slices.Contains([]string{"post_report", "stop_report", "ask_requester"}, role.Name) {
 				t.Fatal("posting granted outside posting role")
 			}
-			if slices.Contains([]string{"review", "review_report", "post_report", "confirm_report", "stop_report"}, role.Name) && slices.Contains(process.Command, "--write") {
+			if slices.Contains([]string{"elicit", "ask_requester", "review", "review_report", "post_report", "confirm_report", "stop_report"}, role.Name) && slices.Contains(process.Command, "--write") {
 				t.Fatal("read-only example role can write workspace")
 			}
 			if !slices.Contains(process.Command, "/opt/ticket-automation/bundle/harnesses/linux_role.py") {
@@ -79,6 +79,9 @@ func TestOperatorExampleHasExplicitBoundariesAndNoActiveIntake(t *testing.T) {
 	}
 	if err := validateStopReporter(cfg); err != nil || cfg.Intake.StopReportRole != "stop_report" {
 		t.Fatal("missing bounded stopped-report role", err)
+	}
+	if err := validateQuestionRole(cfg); err != nil || cfg.Intake.QuestionRole != "ask_requester" {
+		t.Fatal("missing the configured question role", err)
 	}
 	for _, choices := range cfg.Workflow.After {
 		if slices.Contains(choices, "stop_report") {
@@ -110,6 +113,8 @@ const exampleRequest = "Create and deliver Hello 日本語, independently review
 const exampleArtifact = "Hello 日本語\n"
 const exampleReport = "できるようになったこと\n試験用の納品先からHello 日本語を読み戻せます。これは本番ではありません。\n"
 const exampleStoppedReport = "停止指示に従って作業を止めました。成果物は納品していません。\n"
+const exampleQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
+const exampleAnswer = "(a) release/ でお願いします。\n"
 
 // Actual subprocess fixture, not a native SDK/model or permission-sandbox test.
 func TestExampleRoleHelper(t *testing.T) {
@@ -138,7 +143,36 @@ func TestExampleRoleHelper(t *testing.T) {
 			t.Fatalf("actual %s=%q err=%v", path, text, err)
 		}
 	}
+	emptyWorkspace := func() {
+		entries, err := os.ReadDir(".")
+		if err != nil || len(entries) != 0 {
+			t.Fatal("the entrance prepared or changed project work", err)
+		}
+	}
 	switch action {
+	case "elicit":
+		emptyWorkspace()
+	case "ask_requester":
+		emptyWorkspace()
+		client, err := tracker.CertificateClient(os.Getenv("TASK_TRACKER_CERT"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.CloseIdleConnections()
+		b := tracker.Backlog{BaseURL: os.Getenv("TASK_TRACKER_URL"), KeyEnv: "TASK_TRACKER_KEY", Client: client}
+		issue := os.Getenv("TASK_TRACKER_ISSUE")
+		if _, err := b.AddComment(context.Background(), issue, exampleQuestion); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := b.Comments(context.Background(), issue, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatal("stored question missing", err)
+		}
+		var row struct{ Content string }
+		if json.Unmarshal(rows[len(rows)-1], &row) != nil || row.Content != exampleQuestion {
+			t.Fatal("stored question differs from the actual question")
+		}
+		fmt.Print(row.Content)
 	case "implement":
 		write("src/greeting.txt", exampleArtifact)
 	case "review":
@@ -155,9 +189,9 @@ func TestExampleRoleHelper(t *testing.T) {
 		read("report/result.md", exampleReport)
 		read("release/greeting.txt", exampleArtifact)
 	case "post_report", "confirm_report", "stop_report":
-		wantReport, wantRows := exampleReport, 1
+		wantReport := exampleReport
 		if action == "stop_report" {
-			wantReport, wantRows = exampleStoppedReport, 2
+			wantReport = exampleStoppedReport
 			entries, err := os.ReadDir(".")
 			if err != nil || len(entries) != 0 {
 				t.Fatal("stopped report prepared project work", err)
@@ -177,15 +211,26 @@ func TestExampleRoleHelper(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		// Read the actual stored text, not a position: the entrance may have
+		// left its own question and the requester's answer on the same issue.
 		rows, err := b.Comments(context.Background(), issue, 0)
-		if err != nil || len(rows) != wantRows {
-			t.Fatal("stored comment missing", err)
+		if err != nil {
+			t.Fatal("stored comments unavailable", err)
 		}
-		var row struct{ Content string }
-		if json.Unmarshal(rows[len(rows)-1], &row) != nil || row.Content != wantReport {
-			t.Fatal("stored comment differs from actual report")
+		stored := 0
+		for _, raw := range rows {
+			var row struct{ Content string }
+			if json.Unmarshal(raw, &row) != nil {
+				t.Fatal("stored comment could not be read")
+			}
+			if row.Content == wantReport {
+				stored++
+			}
 		}
-		fmt.Print(row.Content)
+		if stored != 1 {
+			t.Fatalf("the actual report is stored %d times among %d comments", stored, len(rows))
+		}
+		fmt.Print(wantReport)
 	}
 	fmt.Print("\nActual fixture operation observed; ordinary prose, no approval object.\n")
 	os.Exit(0)
@@ -292,7 +337,7 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 	var mu sync.Mutex
 	var comments []any
 	catalogs, selections, routes, posts := 0, 0, 0, 0
-	want := []string{"investigate", "design", "implement", "review", "deliver", "verify", "draft_report", "review_report", "post_report", "confirm_report", "done"}
+	want := []string{"elicit", "investigate", "design", "implement", "review", "deliver", "verify", "draft_report", "review_report", "post_report", "confirm_report", "done"}
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -391,5 +436,191 @@ func TestOperatorExampleIntakeToActualArtifactAndStoredComment(t *testing.T) {
 	if posts != 1 || len(comments) != 1 || routes != len(want) || catalogs != selections || selections != routes+workingModels {
 		t.Fatalf("posts=%d routes=%d selections=%d catalogs=%d working=%d", posts, routes, selections, catalogs, workingModels)
 	}
-	t.Logf("10 actions, 2 independent review groups, %d fresh selections, actual artifact and one stored/read-back comment", selections)
+	t.Logf("11 actions, 2 independent review groups, %d fresh selections, actual artifact and one stored/read-back comment", selections)
+}
+
+// The shipped example asks the requester only at the entrance: the request is
+// settled before anything is built, the question is reachable only from there,
+// and neither of those two actions can finish the work or change the checkout.
+func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
+	cfg := operatorExample(t)
+	if !slices.Equal(cfg.Workflow.Start, []string{"elicit"}) {
+		t.Fatalf("the example does not settle the request first: %v", cfg.Workflow.Start)
+	}
+	if strings.Contains(cfg.Instructions, "after acceptance") || !strings.Contains(cfg.Instructions, "configured question role") {
+		t.Fatal("the example instructions do not say who may ask the requester")
+	}
+	if !slices.Equal(cfg.Workflow.After["ask_requester"], []string{"elicit"}) ||
+		!slices.Equal(cfg.Workflow.Recover["ask_requester"], []string{"elicit"}) {
+		t.Fatalf("an answer does not return to the entrance: %v %v", cfg.Workflow.After["ask_requester"], cfg.Workflow.Recover["ask_requester"])
+	}
+	for source, targets := range cfg.Workflow.After {
+		if slices.Contains(targets, "ask_requester") && source != "elicit" {
+			t.Fatalf("the requester is also asked from %q", source)
+		}
+	}
+	for _, source := range []string{"elicit", "ask_requester"} {
+		for _, section := range []map[string][]string{cfg.Workflow.After, cfg.Workflow.Recover} {
+			if slices.Contains(section[source], "done") {
+				t.Fatalf("%s can end the request at a person", source)
+			}
+		}
+	}
+	roles := map[string]chain.Role{}
+	for _, role := range cfg.Roles {
+		roles[role.Name] = role
+	}
+	for name, access := range map[string]string{"elicit": "read", "ask_requester": "comment"} {
+		role, configured := roles[name]
+		if !configured || len(role.Processes) != 1 {
+			t.Fatalf("%s is not one configured action: %+v", name, role)
+		}
+		if role.Processes[0].TrackerAccess != access {
+			t.Fatalf("%s tracker access is %q", name, role.Processes[0].TrackerAccess)
+		}
+		if slices.Contains(role.Processes[0].Command, "--write") {
+			t.Fatalf("%s can change the checkout", name)
+		}
+	}
+}
+
+// The other path through the same shipped example: the entrance decides it
+// cannot settle a point by itself, the requester answers at the issue, and the
+// work carries on to the actual artifact without a second question.
+func TestOperatorExampleCarriesTheRequestersAnswerOnToDelivery(t *testing.T) {
+	cfg := operatorExample(t)
+	t.Setenv("MODEL_API_KEY", "synthetic-example-model")
+	t.Setenv("TRACKER_API_KEY", "synthetic-example-tracker")
+	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cfg.Roles {
+		for j := range cfg.Roles[i].Processes {
+			p := &cfg.Roles[i].Processes[j]
+			p.Command = []string{binary, "-test.run=^TestExampleRoleHelper$"}
+			p.Env = map[string]string{"EXAMPLE_TEST_ACTION": cfg.Roles[i].Name}
+		}
+	}
+	root := t.TempDir()
+	var mu sync.Mutex
+	var comments []any
+	stored, posts, catalogs, selections, routes := 0, 0, 0, 0, 0
+	answered := false
+	add := func(user int, content string) map[string]any {
+		stored++
+		row := map[string]any{"id": stored, "issueId": 42, "projectId": 17, "content": content, "createdUser": map[string]any{"id": user}}
+		comments = append(comments, row)
+		return row
+	}
+	want := []string{"elicit", "ask_requester", "elicit", "investigate", "design", "implement", "review", "deliver", "verify", "draft_report", "review_report", "post_report", "confirm_report", "done"}
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host == "tracker.example.invalid" {
+			switch r.Method + " " + r.URL.Path {
+			case "GET /api/v2/issues":
+				return selectionReply(r, 200, []any{watchedIssue(42, exampleRequest, "2026-01-03T00:00:00Z")}), nil
+			case "GET /api/v2/issues/EXAMPLE-42/comments":
+				// The requester replies only once the question has actually been
+				// asked and the queue has recorded where the comments stood.
+				if _, err := os.Stat(filepath.Join(root, "jobs", "42", "question.json")); err == nil && !answered {
+					answered = true
+					add(55, exampleAnswer)
+				}
+				return selectionReply(r, 200, append([]any{}, comments...)), nil
+			case "POST /api/v2/issues/EXAMPLE-42/comments":
+				if err := r.ParseForm(); err != nil {
+					return nil, err
+				}
+				posts++
+				return selectionReply(r, 201, add(99, r.Form.Get("content"))), nil
+			}
+		}
+		if r.URL.Host == "openrouter.ai" {
+			switch r.URL.Path {
+			case "/api/v1/models":
+				catalogs++
+				return selectionReply(r, 200, map[string]any{"data": []any{selectionModel(fmt.Sprintf("qwen/fixture-%d", catalogs)), selectionModel(fmt.Sprintf("z-ai/fixture-%d", catalogs))}}), nil
+			case "/api/alpha/decisions":
+				selections++
+				var input struct {
+					Questions map[string]struct{ Criteria map[string]string }
+				}
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+					return nil, err
+				}
+				choice := fmt.Sprintf("qwen/fixture-%d", catalogs)
+				if _, ok := input.Questions["next"].Criteria[choice]; !ok {
+					choice = fmt.Sprintf("z-ai/fixture-%d", catalogs)
+				}
+				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+			case "/api/v1/chat/completions":
+				if routes >= len(want) {
+					return nil, fmt.Errorf("unexpected extra route")
+				}
+				choice := want[routes]
+				routes++
+				return routingSelectionReply(r, chain.Assignment{Role: choice}), nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
+	})
+	var log bytes.Buffer
+	finish := startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		state, err := loadWatchState(root, 42)
+		if err == nil && state.Done {
+			break
+		}
+		if time.Now().After(deadline) {
+			finish()
+			t.Fatalf("the answered request did not reach completion: step=%s waiting=%t pending=%v error=%v\n%s", state.Step, state.Waiting, state.Pending, err, log.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	finish()
+	state, err := loadWatchState(root, 42)
+	if err != nil || state.Waiting || state.Pending != nil {
+		t.Fatal("bad completion state", err)
+	}
+	actual, err := os.ReadFile(filepath.Join(root, "jobs", "42", "workspace", "release", "greeting.txt"))
+	if err != nil || string(actual) != exampleArtifact {
+		t.Fatal("actual delivery missing", err)
+	}
+	answers, workingModels := 0, 0
+	for _, result := range state.History {
+		if result.Error != "" {
+			t.Fatalf("fixture role failed: %+v", result)
+		}
+		if result.Model != "" {
+			workingModels++
+		}
+		if result.Speaker == "requester" {
+			answers++
+			if result.Role != "ask_requester" || result.Output != exampleAnswer {
+				t.Fatalf("the requester's own words did not reach the history unchanged: %+v", result)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "jobs", "42", "answer-2.json")); err != nil {
+		t.Fatal("the answered question was not kept", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	questions := 0
+	for _, row := range comments {
+		if row.(map[string]any)["content"] == exampleQuestion {
+			questions++
+		}
+	}
+	if answers != 1 || questions != 1 || posts != 2 || len(comments) != 3 {
+		t.Fatalf("answers=%d questions=%d posts=%d comments=%d", answers, questions, posts, len(comments))
+	}
+	if routes != len(want) || catalogs != selections || selections != routes+workingModels {
+		t.Fatalf("routes=%d selections=%d catalogs=%d working=%d", routes, selections, catalogs, workingModels)
+	}
+	t.Logf("one question asked, one answer carried on, %d actions, actual artifact and one stored/read-back report", routes-1)
 }

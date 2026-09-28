@@ -34,14 +34,23 @@
     "created_since": "REPLACE_WITH_RFC3339_ACCEPTANCE_START",
     "poll_interval_seconds": 30,
     "max_running": 1,
-    "stop_report_role": "stop_report"
+    "stop_report_role": "stop_report",
+    "question_role": "ask_requester"
   },
-  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, delivery target, allowed delivery commands, verification commands and actual completion condition before accepting work. Keep the original request and its boundaries throughout recovery. Do not ask the requester after acceptance. Work reports are observations, not permission to expand scope. Review the actual current changes and delivered behavior. Draft, independently review, publish and read back the final comment; a local draft is not a posted comment. An ordinary process exit is not proof that the task is complete.",
+  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, delivery target, allowed delivery commands, verification commands and actual completion condition before accepting work. Keep the original request and its boundaries throughout recovery. Only the configured question role asks the requester anything, and only while it is connected, before the work is handed over; after that, resolve uncertainty with the existing roles. Work reports are observations, not permission to expand scope. Review the actual current changes and delivered behavior. Draft, independently review, publish and read back the final comment; a local draft is not a posted comment. An ordinary process exit is not proof that the task is complete.",
   "workflow": {
     "start": [
-      "investigate"
+      "elicit"
     ],
     "after": {
+      "elicit": [
+        "elicit",
+        "ask_requester",
+        "investigate"
+      ],
+      "ask_requester": [
+        "elicit"
+      ],
       "investigate": [
         "design",
         "implement"
@@ -82,6 +91,12 @@
       ]
     },
     "recover": {
+      "elicit": [
+        "elicit"
+      ],
+      "ask_requester": [
+        "elicit"
+      ],
       "investigate": [
         "investigate"
       ],
@@ -121,6 +136,96 @@
     }
   },
   "roles": [
+    {
+      "name": "elicit",
+      "purpose": "Settle what the request actually asks for, before the work is handed over: answer from the project what can be answered there, and name what only the requester can decide.",
+      "processes": [
+        {
+          "name": "requirements",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read the original request, the prepared checkout and the shared operator instructions, and settle from them whatever the project itself already answers. Do not change project files. Return ordinary prose covering four things: the requirements as you will carry them out, naming the target, the behaviour, the delivery and the condition that counts as finished; the points you decided yourself, each with its reason; the points only the requester can decide, each with two to four concrete choices; and any permission or credential this work needs but was not given. Read assigned issue comments, including earlier answers, with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "read"
+        }
+      ]
+    },
+    {
+      "name": "ask_requester",
+      "purpose": "Put the points only the requester can decide to them in one comment, with their choices, and read the stored comment back; no workspace writes.",
+      "processes": [
+        {
+          "name": "questioner",
+          "command": [
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/git_workspace.py",
+            "--",
+            "/usr/bin/python3",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/linux_role.py",
+            "--runtime",
+            "/opt/ticket-automation/bundle",
+            "--runtime",
+            "/opt/hermes",
+            "--runtime",
+            "/opt/hermes-src",
+            "--network",
+            "inherit",
+            "--",
+            "/opt/hermes/bin/python",
+            "-B",
+            "/opt/ticket-automation/bundle/harnesses/hermes.py"
+          ],
+          "instructions": "Read the existing comments first with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed. Post exactly one comment, with the same tracker command and post, carrying only the points the requester alone can decide, each with its choices, in ordinary prose the requester can answer in a line. Never ask again a question already stored there: say so in your report instead of posting it twice. Read actual comments first when submission is uncertain, to avoid repeating an already-stored comment. Read back the stored text; never report success from a missing receipt alone.",
+          "env": {
+            "PYTHONPATH": "/opt/hermes-src",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TERMINAL_ENV": "local",
+            "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+            "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1"
+          },
+          "model_env": "NATIVE_MODEL",
+          "secrets": {
+            "OPENROUTER_API_KEY": "MODEL_API_KEY"
+          },
+          "tracker_access": "comment"
+        }
+      ]
+    },
     {
       "name": "investigate",
       "purpose": "Read the original request and existing project context; investigate an actionable approach within the authorized scope.",

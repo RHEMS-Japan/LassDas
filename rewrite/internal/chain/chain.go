@@ -29,14 +29,22 @@ type Result struct {
 // fields to validate. Pending records a started action whose result may have
 // been lost; it is not permission to repeat an external write after a crash.
 type State struct {
-	Request    string      `json:"request"`
-	History    []Result    `json:"history"`
-	Pending    *Assignment `json:"pending,omitempty"`
-	Done       bool        `json:"done"`
-	Workflow   *Workflow   `json:"workflow,omitempty"`
-	Step       string      `json:"step,omitempty"`
-	Recovering bool        `json:"recovering,omitempty"`
+	Request  string      `json:"request"`
+	History  []Result    `json:"history"`
+	Pending  *Assignment `json:"pending,omitempty"`
+	Done     bool        `json:"done"`
+	Workflow *Workflow   `json:"workflow,omitempty"`
+	Step     string      `json:"step,omitempty"`
+	// Waiting records that the configured question role has handed the request
+	// to a person. It is not a failure, a completion, or a judgment about any
+	// answer; only the caller that owns the conversation can clear it.
+	Waiting    bool `json:"waiting,omitempty"`
+	Recovering bool `json:"recovering,omitempty"`
 }
+
+// ErrWaiting reports that the request is held for a person's reply. The chain
+// knows nothing about where that reply arrives or what it has to say.
+var ErrWaiting = errors.New("the request is waiting for an answer to the question it asked")
 
 // Assignment is a dispatch instruction, not a certificate of output quality.
 type Assignment struct {
@@ -65,6 +73,10 @@ type Chain struct {
 	// RetryDelay spaces unavailable-router calls. It does not limit attempts
 	// or turn an outage into a completed delivery.
 	RetryDelay time.Duration
+	// WaitAfter names the configured role whose successful run hands the
+	// request to a person. The chain only stops there and reports it; the
+	// caller decides what counts as a reply and appends it to the history.
+	WaitAfter string
 	// Observe shows progress/errors without making the observer a judge.
 	Observe func(string)
 }
@@ -90,6 +102,9 @@ func (c Chain) Run(ctx context.Context) error {
 	}
 	if state.Done {
 		return nil
+	}
+	if state.Waiting {
+		return ErrWaiting
 	}
 	if state.Workflow == nil && c.Workflow != nil {
 		if len(state.History) != 0 || state.Pending != nil || state.Step != "" {
@@ -176,6 +191,17 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// A successful question hands the request to a person, so there is
+		// nothing to route until the reply is in the history. An errored or
+		// missing answer is ordinary recovery, not a question that was asked.
+		if c.WaitAfter != "" && next.Role == c.WaitAfter && !state.Recovering {
+			state.Waiting = true
+			if err := c.save(ctx, state); err != nil {
+				return err
+			}
+			c.observe("waiting for an answer to " + next.Role)
+			return ErrWaiting
 		}
 	}
 }

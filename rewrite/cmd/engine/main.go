@@ -117,6 +117,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if err := cfg.Workflow.Validate(purposes); err != nil {
 		return err
 	}
+	if err := validateQuestionRole(cfg); err != nil {
+		return err
+	}
 	observe := func(message string) { fmt.Fprintln(log, message) }
 	var router chain.Router
 	chatService := chain.ChatRouter{Service: cfg.Router.LLM, Roles: purposes, Instructions: cfg.Instructions}
@@ -178,5 +181,17 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		Workflow: cfg.Workflow,
 		Observe:  observe,
 	}
-	return engine.Run(ctx)
+	if cfg.Intake != nil {
+		engine.WaitAfter = cfg.Intake.QuestionRole
+	}
+	// A question put to the requester is not a failure and not a completion.
+	// A single run has nobody watching the issue for the answer, so say which
+	// mode carries the request on instead of reporting it as finished.
+	if err := engine.Run(ctx); err != nil {
+		if errors.Is(err, chain.ErrWaiting) {
+			return fmt.Errorf("%w; --watch resumes the request when the answer arrives", err)
+		}
+		return err
+	}
+	return nil
 }

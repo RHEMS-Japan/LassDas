@@ -26,6 +26,7 @@ type intakeConfig struct {
 	MaxRunning          int     `json:"max_running,omitempty"`
 	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
+	QuestionRole        string  `json:"question_role,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
 }
 
@@ -53,6 +54,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 		return errors.New("watch requires an explicit intake.project_id")
 	}
 	if err := validateStopReporter(cfg); err != nil {
+		return err
+	}
+	if err := validateQuestionRole(cfg); err != nil {
 		return err
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
@@ -206,6 +210,19 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 			if state.Done {
 				continue
+			}
+			if state.Waiting {
+				// This request put a question to the person who filed it. Only
+				// an authorized stop, or their reply after that question, makes
+				// it runnable again; anything else leaves it untouched.
+				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
+				if err != nil {
+					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
+					continue
+				}
+				if !resume {
+					continue
+				}
 			}
 			bound, err := bindRequestConfig(cfg, directory, issue.Key)
 			if err != nil {
