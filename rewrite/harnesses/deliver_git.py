@@ -129,20 +129,23 @@ def stage_and_commit(workspace, issue, allowed, receipt):
 
 def push_branch(workspace, url, branch, commit):
     """Push once. An already-published commit is not pushed again."""
-    _, listing, _ = support.run(support.git("-C", str(workspace), "ls-remote", "--heads", url,
-                                            "refs/heads/" + branch, url=url),
-                                timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+    listing = support.run_git(support.git("-C", str(workspace), "ls-remote", "--heads", url,
+                                          "refs/heads/" + branch, url=url),
+                              describe="read the delivery branch",
+                              timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
     published = listing.split("\t")[0].strip() if listing.strip() else ""
     if published == commit:
         return False
-    support.run(support.git("-C", str(workspace), "push", url, commit + ":refs/heads/" + branch, url=url),
-                timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+    support.run_git(support.git("-C", str(workspace), "push", url, commit + ":refs/heads/" + branch, url=url),
+                    describe="push the delivery branch",
+                    timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
     return True
 
 
 def find_pull_request(owner, name, branch, base):
-    status, payload = support.api("GET", "/repos/%s/%s/pulls?head=%s&base=%s&state=open&per_page=100"
-                                  % (owner, name, owner + ":" + branch, base))
+    status, payload = support.api_retried("GET", "/repos/%s/%s/pulls?head=%s&base=%s&state=open&per_page=100"
+                                          % (owner, name, owner + ":" + branch, base),
+                                          describe="reading existing pull requests")
     if status != 200 or not isinstance(payload, list):
         raise DeliveryError("Could not read existing pull requests (status %d): %s" % (status, payload))
     return payload[0] if payload else None
@@ -152,7 +155,8 @@ def open_pull_request(owner, name, branch, base, issue):
     existing = find_pull_request(owner, name, branch, base)
     if existing:
         return existing
-    status, payload = support.api("POST", "/repos/%s/%s/pulls" % (owner, name), payload={
+    status, payload = support.api_retried("POST", "/repos/%s/%s/pulls" % (owner, name),
+                                          describe="opening the pull request", payload={
         "title": "Deliver " + issue, "head": branch, "base": base,
         "body": "Prepared by the configured ticket engine for %s. Only the operator's allowed "
                 "paths are included. Review the change itself; this description is not a result." % issue})
@@ -169,7 +173,8 @@ def open_pull_request(owner, name, branch, base, issue):
 
 
 def read_pull_request(owner, name, number):
-    status, payload = support.api("GET", "/repos/%s/%s/pulls/%d" % (owner, name, number))
+    status, payload = support.api_retried("GET", "/repos/%s/%s/pulls/%d" % (owner, name, number),
+                                          describe="reading pull request %d" % number)
     if status != 200 or not isinstance(payload, dict):
         raise DeliveryError("Could not read pull request %d (status %d)" % (number, status))
     return payload
@@ -179,7 +184,8 @@ def merge_pull_request(owner, name, number, method, issue):
     """Merge once, then confirm from the service that it is actually merged."""
     current = read_pull_request(owner, name, number)
     if not current.get("merged"):
-        status, payload = support.api("PUT", "/repos/%s/%s/pulls/%d/merge" % (owner, name, number), payload={
+        status, payload = support.api_retried("PUT", "/repos/%s/%s/pulls/%d/merge" % (owner, name, number),
+                                              describe="merging pull request %d" % number, payload={
             "merge_method": method, "commit_title": "Deliver %s (#%d)" % (issue, number)})
         if status not in (200, 405, 409):
             raise DeliveryError("Could not merge pull request %d (status %d): %s" % (number, status, payload))
@@ -219,7 +225,7 @@ def check_only(workspace, owner, name, base, branch, url, allowed):
     lines = ["Checked the delivery settings; nothing was committed, pushed, opened or merged.",
              "Target %s/%s, integration branch %s, ticket branch %s." % (owner, name, base, branch),
              "Changed paths inside the operator's grant: %s." % (", ".join(sorted(paths)) or "none")]
-    status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))
+    status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
     lines.append("Reading the repository answered status %d%s." %
                  (status, "" if status != 200 else "; its default branch is %s" % payload.get("default_branch", "?")))
     status, _ = support.api("GET", "/repos/%s/%s/branches/%s" % (owner, name, base))
@@ -234,6 +240,15 @@ def check_only(workspace, owner, name, base, branch, url, allowed):
     lines.append("This was a check, so it ends non-zero on purpose.")
     print("\n".join(lines))
     return 3
+
+
+def refusal(issue, owner, name, base, branch, error):
+    return "\n".join([
+        "Nothing was delivered for %s." % issue,
+        "Target %s/%s, integration branch %s, ticket branch %s." % (owner, name, base, branch),
+        "What stopped it: %s" % error,
+        "This is the delivery service's own answer or this process's own refusal, not a judgement "
+        "about the work. Nothing was merged, so nothing needs undoing."])
 
 
 def deliver(arguments):
@@ -253,6 +268,14 @@ def deliver(arguments):
     url = support.remote_url(owner, name)
     if dry:
         return check_only(workspace, owner, name, base, branch, url, allowed)
+    try:
+        return carry_out(workspace, issue, owner, name, base, branch, method, url, allowed)
+    except DeliveryError as error:
+        print(refusal(issue, owner, name, base, branch, error), flush=True)
+        raise
+
+
+def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed):
     path = support.receipt_path(workspace)
     receipt = support.read_receipt(path)
     previous = receipt.pop("previous", [])

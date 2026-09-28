@@ -64,6 +64,9 @@ def service_handler(state):
             self.record()
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if state["post_failures"] > 0:
+                state["post_failures"] -= 1
+                return self.answer(503, {"message": "the service is busy"})
             number = len(state["pulls"]) + 1
             pull = {"number": number, "html_url": "http://service.invalid/pulls/%d" % number,
                     "head": payload["head"], "base": payload["base"], "merged": False,
@@ -75,6 +78,9 @@ def service_handler(state):
             self.record()
             length = int(self.headers.get("Content-Length", "0"))
             json.loads(self.rfile.read(length) or b"{}")
+            if state["merge_refusal"]:
+                status, message = state["merge_refusal"]
+                return self.answer(status, {"message": message})
             pull = state["pulls"][int(self.path.split("/")[-2]) - 1]
             # An actual merge commit in the actual target, so a later check of
             # "is this delivery contained in the branch" has something to read.
@@ -111,7 +117,8 @@ class DeliveryTests(unittest.TestCase):
         self.git(source, "clone", "--bare", str(source), str(self.remote))
         self.git(self.root, "clone", "--no-local", str(self.remote), str(self.workspace))
         self.git(self.workspace, "checkout", "--detach", "HEAD")
-        self.state = {"repository": str(self.remote), "pulls": [], "requests": [], "authorization": set()}
+        self.state = {"repository": str(self.remote), "pulls": [], "requests": [], "authorization": set(),
+                      "post_failures": 0, "merge_refusal": None}
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), service_handler(self.state))
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -149,7 +156,8 @@ class DeliveryTests(unittest.TestCase):
                        "GITHUB_TOKEN": TOKEN, "DELIVERY_REPOSITORY": "owner/project",
                        "DELIVERY_BASE_BRANCH": "master", "DELIVERY_REMOTE_URL": str(self.remote),
                        "DELIVERY_API_BASE": address, "DELIVERY_POLL_SECONDS": "0.1",
-                       "DELIVERY_MERGE_TIMEOUT_SECONDS": "20",
+                       "DELIVERY_MERGE_TIMEOUT_SECONDS": "20", "DELIVERY_RETRY_SECONDS": "0.05",
+                       "DELIVERY_RETRY_CAP_SECONDS": "0.1",
                        "DELIVERY_ALLOWED_PATHS": "main.go:go.mod:library/"}
         environment.update(extra)
         return environment
@@ -249,6 +257,27 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn(TOKEN, self.git_log.read_text())
         self.assertNotIn(TOKEN, (self.workspace / ".git/ticket-engine/delivery.json").read_text())
         self.assertEqual(self.state["authorization"], {"Bearer " + TOKEN})
+
+    def test_waits_out_a_service_answer_that_may_pass(self):
+        self.state["post_failures"] = 2
+        self.change("main.go", "package main // delivered\n")
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("may pass", result.stdout)
+        self.assertEqual(self.methods().count("POST"), 3)
+        self.assertEqual(len(self.state["pulls"]), 1)
+        self.assertRegex(self.receipt()["merge_sha"], r"\A[0-9a-f]{40}\Z")
+
+    def test_a_refusal_ends_at_once_and_carries_the_service_message(self):
+        self.state["merge_refusal"] = (405, 'Required status check "build" is expected.')
+        self.change("main.go", "package main // delivered\n")
+        result = self.deliver()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Required status check", result.stdout)
+        self.assertIn("Nothing was delivered for TICKET-41.", result.stdout)
+        self.assertEqual(self.methods().count("PUT"), 1)
+        self.assertNotIn("merge_sha", self.receipt())
+        self.assertIn("refs/heads/ticket/TICKET-41", self.remote_branches())
 
     def test_check_mode_changes_nothing_and_ends_non_zero(self):
         self.change("main.go", "package main // proposed\n")

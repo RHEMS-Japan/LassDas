@@ -10,9 +10,15 @@ Environment (all from the operator, never from a role):
   DELIVERY_REPOSITORY        owner/name of the repository to mirror
   GITHUB_TOKEN               read credential, through the credential helper
   MIRROR_INTERVAL_SECONDS    seconds between fetches (default 60)
-  MIRROR_FAILURE_LIMIT       consecutive failures before exiting (default 10)
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   MIRROR_FETCH_TIMEOUT_SECONDS: optional
+
+A failure that may pass on its own (the network, a timeout, the service
+answering 5xx) never ends this loop: it says so and tries again at the next
+interval, because the roles can keep working from the copy already here. A
+refusal (a credential that is not accepted, a repository that is not there)
+ends the process instead, so the runtime's restart policy and its restart
+count make it visible rather than leaving an ever staler copy behind.
 """
 import os
 from pathlib import Path
@@ -34,27 +40,30 @@ def report(message):
 def create(path, url):
     """First run only: a bare mirror, with no working tree to write into."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    support.run(support.git("clone", "--mirror", "--", url, str(path), url=url),
-                timeout=support.number("MIRROR_FETCH_TIMEOUT_SECONDS", 900))
+    # This loop is the retry, so a single attempt is enough here.
+    support.run_git(support.git("clone", "--mirror", "--", url, str(path), url=url),
+                    describe="copy the repository", retry=False,
+                    timeout=support.number("MIRROR_FETCH_TIMEOUT_SECONDS", 900))
     report("Created the mirror at " + str(path))
 
 
 def refresh(path, url):
-    support.run(support.git("--git-dir", str(path), "fetch", "--prune", "--quiet", url=url),
-                timeout=support.number("MIRROR_FETCH_TIMEOUT_SECONDS", 900))
+    support.run_git(support.git("--git-dir", str(path), "fetch", "--prune", "--quiet", url=url),
+                    describe="refresh the copy", retry=False,
+                    timeout=support.number("MIRROR_FETCH_TIMEOUT_SECONDS", 900))
 
 
-def cycle(path, url, state):
+def cycle(path, url):
+    """Return True when the copy is fresh, False when it may become fresh
+    later. A refusal is raised: this loop is not the place to wait it out."""
     try:
         if not Path(path).is_dir():
             create(path, url)
         else:
             refresh(path, url)
-    except DeliveryError as error:
-        state["failures"] += 1
-        report("The mirror was not updated (%d in a row): %s" % (state["failures"], error))
+    except support.TransientError as error:
+        report("The mirror was not updated, in a way that may pass on its own: %s" % error)
         return False
-    state["failures"] = 0
     return True
 
 
@@ -66,18 +75,17 @@ def mirror(arguments):
     owner, name = support.repository()
     url = support.remote_url(owner, name)
     interval = support.number("MIRROR_INTERVAL_SECONDS", 60)
-    limit = int(support.number("MIRROR_FAILURE_LIMIT", 10))
-    state = {"failures": 0}
     report("Mirroring %s/%s into %s every %g seconds" % (owner, name, path, interval))
     while not stopping.is_set():
-        fresh = cycle(path, url, state)
+        try:
+            fresh = cycle(path, url)
+        except DeliveryError as error:
+            # A refusal will not pass by waiting. End, so the restart count and
+            # this line say so, instead of serving a copy that quietly ages.
+            report("The mirror was refused and this process is ending: %s" % error)
+            return 1
         if once:
             return 0 if fresh else 1
-        if state["failures"] >= limit:
-            # Exiting hands the problem to the runtime's restart policy instead
-            # of letting roles clone an increasingly stale source unnoticed.
-            report("Exiting after %d consecutive failures; the mirror is stale" % state["failures"])
-            return 1
         stopping.wait(interval)
     report("Stopped on request; the mirror was left as it is")
     return 0

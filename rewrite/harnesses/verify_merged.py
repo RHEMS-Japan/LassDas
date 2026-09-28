@@ -52,8 +52,9 @@ def fetch_branch(home, url, base):
     Path(home).mkdir(parents=True, exist_ok=True)
     clone = tempfile.mkdtemp(prefix="verify-", dir=home)
     target = Path(clone) / "source"
-    support.run(support.git("clone", "--no-tags", "--branch", base, "--", url, str(target), url=url),
-                timeout=support.number("VERIFY_CLONE_TIMEOUT_SECONDS", 900))
+    support.run_git(support.git("clone", "--no-tags", "--branch", base, "--", url, str(target), url=url),
+                    describe="fetch the integration branch",
+                    timeout=support.number("VERIFY_CLONE_TIMEOUT_SECONDS", 900))
     return target
 
 
@@ -114,7 +115,16 @@ def verify(arguments):
     base = support.setting("DELIVERY_BASE_BRANCH")
     url = support.remote_url(owner, name)
     commands = verify_commands()
-    source = fetch_branch(home, url, base)
+    try:
+        source = fetch_branch(home, url, base)
+    except DeliveryError as error:
+        # The next role needs this in the report, not only in diagnostics.
+        print("\n\n".join([
+            "Could not read %s of %s/%s, so nothing was verified." % (base, owner, name),
+            "What stopped it: %s" % error,
+            "This says nothing about whether the delivery is correct; it says the branch could not "
+            "be read from here."]), flush=True)
+        raise
     _, tip, _ = support.run(support.git("-C", str(source), "rev-parse", "HEAD"))
     report = ["Fetched %s of %s/%s at commit %s." % (base, owner, name, tip.strip())]
     if dry:

@@ -105,6 +105,17 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("credential=unset", result.stdout)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
+    def test_a_branch_that_cannot_be_reached_is_waited_out_then_reported(self):
+        self.receipt()
+        result = self.verify("/bin/sh -c 'echo unreachable'",
+                             DELIVERY_REMOTE_URL="https://127.0.0.1:1/absent.git",
+                             DELIVERY_RETRY_ATTEMPTS="2", DELIVERY_RETRY_SECONDS="0.05")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("may pass", result.stdout)
+        self.assertIn("did not go through in 2 attempts", result.stdout)
+        self.assertIn("so nothing was verified", result.stdout)
+        self.assertNotIn("unreachable", result.stdout)
+
     def test_check_mode_runs_the_commands_without_a_delivery_and_ends_non_zero(self):
         result = self.verify("/bin/sh -c 'echo checked'", "--dry-run")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)

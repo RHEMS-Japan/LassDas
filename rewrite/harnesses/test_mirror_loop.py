@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPT = Path(__file__).with_name("mirror_loop.py").resolve()
@@ -32,13 +33,32 @@ class MirrorTests(unittest.TestCase):
                               env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
                                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"})
 
-    def cycle(self, **extra):
+    def loop(self, **extra):
+        """Start the real loop, not a single cycle, and let it run."""
+        child = subprocess.Popen([sys.executable, "-B", str(SCRIPT)], env=self.environment(**extra),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, child)
+        return child
+
+    @staticmethod
+    def stop(child):
+        if child.poll() is None:
+            child.terminate()
+        try:
+            child.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            child.kill()
+
+    def environment(self, **extra):
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
                        "HOME": str(self.root), "GITHUB_TOKEN": TOKEN,
                        "DELIVERY_REPOSITORY": "owner/project", "MIRROR_PATH": str(self.mirror),
-                       "DELIVERY_REMOTE_URL": str(self.source)}
+                       "DELIVERY_REMOTE_URL": str(self.source), "MIRROR_INTERVAL_SECONDS": "0.2"}
         environment.update(extra)
-        return subprocess.run([sys.executable, "-B", str(SCRIPT), "--once"], env=environment,
+        return environment
+
+    def cycle(self, **extra):
+        return subprocess.run([sys.executable, "-B", str(SCRIPT), "--once"], env=self.environment(**extra),
                               capture_output=True, text=True, timeout=120)
 
     def test_creates_a_bare_mirror_and_then_carries_new_work_into_it(self):
@@ -58,12 +78,31 @@ class MirrorTests(unittest.TestCase):
         self.git(self.root, "clone", "--no-local", str(self.mirror), str(workspace))
         self.assertIn("later", (workspace / "main.go").read_text())
 
-    def test_an_unreachable_source_is_reported_without_the_credential(self):
-        result = self.cycle(DELIVERY_REMOTE_URL=str(self.root / "absent.git"))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("The mirror was not updated", result.stdout)
-        self.assertNotIn(TOKEN, result.stdout + result.stderr)
+    def test_a_refused_source_ends_the_loop_and_says_so(self):
+        child = self.loop(DELIVERY_REMOTE_URL=str(self.root / "absent.git"))
+        out, err = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 1, out + err)
+        self.assertIn("The mirror was refused and this process is ending", out)
+        self.assertNotIn(TOKEN, out + err)
         self.assertFalse(self.mirror.exists())
+
+    def test_a_source_that_cannot_be_reached_keeps_the_loop_alive(self):
+        child = self.loop(DELIVERY_REMOTE_URL="https://127.0.0.1:1/absent.git")
+        deadline = time.monotonic() + 25
+        lines = []
+        while time.monotonic() < deadline and len(lines) < 2:
+            line = child.stdout.readline()
+            if not line:
+                break
+            if "may pass on its own" in line:
+                lines.append(line)
+        self.assertEqual(len(lines), 2, "".join(lines))
+        self.assertIsNone(child.poll(), "a failure that may pass must not end the loop")
+        child.terminate()
+        out, err = child.communicate(timeout=20)
+        self.assertEqual(child.returncode, 0, out + err)
+        self.assertIn("Stopped on request", out)
+        self.assertNotIn(TOKEN, "".join(lines) + out + err)
 
 
 if __name__ == "__main__":

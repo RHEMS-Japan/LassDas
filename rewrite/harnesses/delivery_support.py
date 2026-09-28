@@ -12,6 +12,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,57 @@ RECEIPT = Path(".git/ticket-engine/delivery.json")
 
 class DeliveryError(RuntimeError):
     """A refusal or a failed operation. The process exits non-zero."""
+
+
+class TransientError(DeliveryError):
+    """A failure that may pass on its own, so the operation is retried.
+
+    Everything else is treated as a refusal and ends the process at once:
+    waiting out a protected branch, a missing permission or a conflicting
+    merge only delays the report that a person has to read anyway.
+    """
+
+
+# What the service says when the answer may differ later.
+TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+# What Git's transport says for the same kind of failure. A refusal marker
+# wins over a transient one, and anything unrecognized is a refusal.
+TRANSIENT_GIT = ("could not resolve host", "temporary failure in name resolution",
+                 "failed to connect", "connection refused", "connection reset",
+                 "connection timed out", "operation timed out", "timed out",
+                 "the remote end hung up unexpectedly", "rpc failed", "early eof",
+                 "ssl_read", "gnutls", "returned error: 429", "returned error: 500",
+                 "returned error: 502", "returned error: 503", "returned error: 504",
+                 "remote end hung up", "unexpected disconnect")
+REFUSAL_GIT = ("authentication failed", "invalid username or password", "permission denied",
+               "repository not found", "returned error: 401", "returned error: 403",
+               "returned error: 404", "protected branch", "non-fast-forward",
+               "does not exist", "could not read from remote repository")
+
+
+def transient_git(text):
+    lowered = text.lower()
+    if any(marker in lowered for marker in REFUSAL_GIT):
+        return False
+    return any(marker in lowered for marker in TRANSIENT_GIT)
+
+
+def with_retry(operation, describe):
+    """Run an operation, waiting out failures that may pass on their own."""
+    attempts = max(1, int(number("DELIVERY_RETRY_ATTEMPTS", 5)))
+    delay = number("DELIVERY_RETRY_SECONDS", 30)
+    cap = number("DELIVERY_RETRY_CAP_SECONDS", 240)
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except TransientError as error:
+            if attempt >= attempts:
+                raise DeliveryError("%s did not go through in %d attempts, and the last failure was one "
+                                    "that can pass on its own: %s" % (describe, attempts, error))
+            print("%s failed in a way that may pass (attempt %d of %d); waiting %gs. %s"
+                  % (describe, attempt, attempts, delay, error), flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, cap)
 
 
 def setting(name, default=None):
@@ -140,7 +192,10 @@ def api(method, path, *, payload=None, timeout=None):
     except urllib.error.HTTPError as error:
         text, status = error.read().decode("utf-8", "replace"), error.code
     except urllib.error.URLError as error:
-        raise DeliveryError("Delivery service unreachable: " + scrub(str(error.reason)))
+        # Not reaching the service at all is the clearest transient failure.
+        raise TransientError("the delivery service was unreachable: " + scrub(str(error.reason)))
+    except TimeoutError as error:
+        raise TransientError("the delivery service did not answer in time: " + scrub(str(error)))
     text = scrub(text).strip()
     if not text:
         return status, {}
@@ -149,6 +204,32 @@ def api(method, path, *, payload=None, timeout=None):
     except ValueError:
         # An unparsed body is still evidence of what the service answered.
         return status, {"message": text[:500]}
+
+
+def api_retried(method, path, *, payload=None, describe=None):
+    """One REST call, waiting out an answer that may differ later."""
+    def attempt():
+        status, body = api(method, path, payload=payload)
+        if status in TRANSIENT_STATUS:
+            raise TransientError("the service answered %d" % status)
+        return status, body
+    return with_retry(attempt, describe or ("%s %s" % (method, path.split("?")[0])))
+
+
+def run_git(command, *, describe, timeout=None, retry=True, cwd=None):
+    """One Git command, separating a failure that may pass from a refusal."""
+    def attempt():
+        try:
+            status, output, diagnostics = run(command, check=False, timeout=timeout, cwd=cwd)
+        except subprocess.TimeoutExpired:
+            raise TransientError("it did not finish within the configured time")
+        if status != 0:
+            text = (diagnostics + "\n" + output).strip()
+            if transient_git(text):
+                raise TransientError(text.splitlines()[0] if text else "no message")
+            raise DeliveryError("Git could not %s: %s" % (describe, text[:800] or "no message"))
+        return output
+    return with_retry(attempt, describe) if retry else attempt()
 
 
 def timestamp():
