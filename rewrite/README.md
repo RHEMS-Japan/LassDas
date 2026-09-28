@@ -184,6 +184,13 @@ to 30 seconds and one running request. The explicit starting time prevents
 silently executing every historical ticket. Do not activate this on a real
 project without authority for the chosen scope and the configured actions.
 
+Optional `intake.issue_ids` narrows new discovery to the listed positive native
+issue IDs, still within the same project and starting time. Omitted or empty
+means all new issues in that project. This operator setting permits a scoped
+rollout without starting unrelated tickets; it is not an input format or an
+assessment of a request. Removing an ID does not abandon already accepted work:
+those queue records continue to resume and the existing stop mechanism applies.
+
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
 the original request. Its title and complete description go directly to the

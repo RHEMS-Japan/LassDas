@@ -26,6 +26,7 @@ type intakeConfig struct {
 	MaxRunning          int     `json:"max_running,omitempty"`
 	StopUserIDs         []int64 `json:"stop_user_ids,omitempty"`
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
+	IssueIDs            []int64 `json:"issue_ids,omitempty"`
 }
 
 type sourceIssue struct {
@@ -65,6 +66,11 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	for _, id := range cfg.Intake.StopUserIDs {
 		if id <= 0 {
 			return errors.New("intake.stop_user_ids must contain positive user ids")
+		}
+	}
+	for _, id := range cfg.Intake.IssueIDs {
+		if id <= 0 {
+			return errors.New("intake.issue_ids must contain positive issue ids")
 		}
 	}
 	if delay == 0 {
@@ -264,6 +270,17 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				}
 				if issue.Created.Before(since) {
 					continue
+				}
+				// An optional operator allowlist narrows discovery only. Already
+				// accepted requests still resume from their durable queue records.
+				if len(cfg.Intake.IssueIDs) > 0 {
+					allowed := false
+					for _, id := range cfg.Intake.IssueIDs {
+						allowed = allowed || issue.ID == id
+					}
+					if !allowed {
+						continue
+					}
 				}
 				directory := filepath.Join(jobs, strconv.FormatInt(issue.ID, 10))
 				path := filepath.Join(directory, "issue.json")
