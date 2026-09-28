@@ -372,6 +372,91 @@ while reporting finished. Recorded child PIDs and scoped access disappeared.
 Model answers and the tracker were synthetic; this validates wiring and the
 observed access boundary, not real-model judgment or production isolation.
 
+### What the requester is told at night
+
+A request filed at eleven and stopped at two by an outage used to say nothing
+at all: the chain kept retrying, and the only trace was a log nobody was
+reading. Three fixed notices close that silence. The controller writes every
+one of them, always in the same words. No model composes them, none of them
+judges a role's answer, and none of them ends a request: the work carries on or
+resumes by itself in every case.
+
+Each notice is recorded in `queue/jobs/<id>/notices.json` before it is
+submitted and marked afterwards, with the same atomic write the other runtime
+files use. A submission that fails is retried on later ticks. Because the
+wording is fixed and the controller's own, a retry first reads the issue's
+comments back and matches that exact text, so an ambiguous answer from the
+tracker cannot turn into two identical comments.
+
+**After a restart.** When the queue picks up a request whose history holds an
+interrupted action or an unfinished recovery, it posts:
+
+> 自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。
+
+A clean start says nothing. The same request does not say it again inside 30
+minutes, even across further restarts, so a crash loop cannot fill the issue
+with one sentence.
+
+**When the shared model key runs out.** This is the one failure no role can
+recover from: no investigation, redesign or handoff puts money back on a key.
+
+```json
+"intake": {
+  "min_model_credit": 5,
+  "model_credit_url": "https://openrouter.ai/api/v1/key"
+}
+```
+
+`min_model_credit` is a US dollar floor. Absent or zero asks the provider
+nothing, which is what the shipped example does until an operator chooses a
+figure. When it is set, the remaining balance on the key named by
+`router.decision.key_env` is read before a request is launched and on every
+tick of a running one. `model_credit_url` defaults to the OpenRouter key
+endpoint above and may point at a gateway instead; it must be an HTTPS URL
+without credentials or a query. The answer's `limit_remaining` is read as the
+balance, and a null there means the key has no limit, which never pauses
+anything. Below the floor, the running role is stopped exactly as an authorized
+stop stops it, nothing new is launched, and the requester is told once:
+
+> 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（人の操作は不要です）。
+
+The balance keeps being read each tick. When it is back above the floor the
+request is launched again and says so once:
+
+> モデル利用枠が回復したため、自動処理を再開しました。
+
+The pause and the recovery alternate, so each episode gets one line of each. An
+endpoint that cannot be read is not evidence of an empty budget: it never
+pauses work and never posts, and the reason goes to the log with the
+credential value removed.
+
+**When nothing has completed for a long time.** `intake.stall_notice_minutes`
+is how long a running request may go without a completed step before the
+requester hears about it. Absent means 90 minutes and zero switches it off. The
+window is measured from the last history entry that finished without an error,
+so any successful role output inside it keeps the request quiet. Past the
+window:
+
+> 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。復旧を試し続けており、人の操作は不要です。
+
+The quoted failure is the first nonblank line of the most recent error, with
+every configured credential value replaced by `[credential]` and the result cut
+to 200 characters. The notice repeats at most once per six hours per request.
+It is a notice and nothing else: routing, recovery and the request's goal are
+untouched by it.
+
+All three go out through the controller's own tracker credential, the same one
+the stop report uses. No role is given the means to post them.
+
+What this does not do: these notices say that the machinery is still trying,
+not that it will succeed. They are posted from the collector loop, so a slow
+tracker delays that loop while one is being submitted. A request that is
+waiting for the requester's answer is not stalled and says nothing further.
+Nothing here notices a crash loop that never reaches the collector at all, a
+full disk, or a provider that answers quickly and uselessly. The budget reader
+has been exercised against a local fixture of the documented response shape,
+not against a live provider key.
+
 ### Current model list
 
 `--list-models` makes a new credential-free OpenRouter catalog request on every
