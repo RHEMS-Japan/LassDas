@@ -229,6 +229,60 @@ Production packaging and real tracker-to-production operation are not
 implemented by this collector. Its tests use fixture APIs and actual local child
 processes, not live-model judgments or a production tracker.
 
+### Settling the request at the entrance
+
+The shipped example starts at `elicit`, which settles what a request asks for
+before the work is handed over. It reads the original request, the prepared
+checkout and the operator instructions, then writes in ordinary prose the
+requirements as it will carry them out, the points it decided itself with their
+reasons, the points only the requester can decide with two to four choices
+each, and any permission or credential the work needs but was not given. Its
+connected actions are `elicit`, `ask_requester` and `investigate`, so settling
+further, putting the open points to the requester and proceeding are ordinary
+choices among connected role names. There is no new decision mechanism and no
+check of what the role wrote.
+
+`ask_requester` posts one comment carrying the requester-only points and reads
+the stored text back. It has comment access and no workspace write permission,
+and neither it nor `elicit` is connected to `done`: the entrance cannot end a
+request at a person.
+
+```json
+"intake": {
+  "question_role": "ask_requester"
+}
+```
+
+`intake.question_role` names the configured role whose successful run waits for
+a person. It must name an existing role with a comment-capable process, which
+is checked before any work is accepted. Without the setting nothing waits.
+
+A successful run of that role holds the request. The run history records that
+it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
+far that issue's comments had gone at the moment of the question. The request
+is then skipped until the issue's creator, or an operator listed in
+`intake.stop_user_ids`, posts a comment after that point. That comment's text
+is appended to the history as the requester's own words, exactly as posted, the
+hold is cleared, and the record is kept as `answer-<comment id>.json` so the
+same comment cannot be read as a second answer. The next decision sees the
+answer and only the actions connected after the question, which in the example
+returns to `elicit`.
+
+The stop check runs first, so a comment whose first nonblank line is `停止` is
+a stop, never an answer. An unsuccessful question recovers through the
+configured `recover` connections instead of waiting for a reply to a question
+that was never asked. A `--issue`/`--request` run has nobody watching the issue
+for an answer, so it exits non-zero saying that `--watch` resumes the request.
+
+What this does not do: the text of an answer is never checked, so a reply that
+does not actually answer the question simply reaches the next decision like any
+other report. Only the first comment after the recorded point becomes the
+answer; further comments are not appended, and a later question moves the point
+past them. While a request waits, each poll reads that issue's comments inside
+the collector loop, so a slow tracker delays the loop by up to one interval for
+every waiting request. Nothing notifies the requester beyond the posted comment
+itself, and an unanswered question waits indefinitely unless someone stops it.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a
@@ -1165,6 +1219,13 @@ sandbox are not packaged as a supported deployment. No existing production
 entry point was replaced.
 
 ## Still missing before production use
+
+The entrance described above has never run with a live model or a real
+tracker. Its tests use fixture APIs, fixture role programs and an actual local
+collector: they establish that the hold, the boundary, the stop precedence and
+the resume behave as described, not that a model actually settles a request,
+asks a useful question, or stops asking once it has an answer. Whether a real
+requester's reply is enough to carry a request through unattended is unmeasured.
 
 A separate JSON-configuration merge task reached delivery and one final fixture
 comment with exact readback after a manual resume. Its first 30-minute observation
