@@ -95,6 +95,47 @@ namespaces. Its detached local children die when that role exits. Remote jobs
 and prior external effects are not undone. Long-lived delivery services belong
 in the authorized delivery runtime, not the agent's temporary process tree.
 
+## Check the target runtime before accepting work
+
+An installed `bwrap` and an enabled user-namespace sysctl do not establish that
+the outer container permits a private `/proc`. An actual prepared Kubernetes
+runtime rejected even `/bin/true` with `Can't mount proc ... Operation not
+permitted`. Copying the executable into that runtime would not fix the problem.
+
+Run the **shipped launcher** in the intended execution environment, without
+credentials or task data. Adjust the bundle path to its installed location:
+
+```sh
+(
+  runtime_probe_dir=$(mktemp -d /tmp/ticket-runtime-check.XXXXXXXX) || exit
+  mkdir "$runtime_probe_dir/work" "$runtime_probe_dir/home" || exit
+  runtime_probe_status=0
+  env -i PATH=/usr/bin:/bin \
+    TASK_WORKSPACE="$runtime_probe_dir/work" TASK_HOME="$runtime_probe_dir/home" \
+    python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py \
+      --network none -- /bin/true || runtime_probe_status=$?
+  rmdir "$runtime_probe_dir/home" "$runtime_probe_dir/work" "$runtime_probe_dir"
+  exit "$runtime_probe_status"
+)
+```
+
+This checks namespace/path launch only, not SDK compatibility, model access,
+network policy or delivery. A failure must be resolved in the runtime before
+enabling intake; do not remove PID isolation or bind the controller's `/proc`
+as an implicit fallback.
+
+For Kubernetes nested runtimes, [unmasked proc mounts](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#managing-proc-mounts)
+require a [Pod user namespace](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)
+(`hostUsers: false`). The node/runtime and volume filesystems must support it.
+In a short-lived, credential-free diagnostic Pod, `procMount: Unmasked` with
+the default seccomp profile still rejected nested namespace creation; the same
+no-op launch succeeded with diagnostic `seccompProfile: Unconfined`, while
+retaining non-root execution, dropped capabilities, no-new-privileges, a
+read-only root and the Pod's user namespace. Both probe Pods were removed.
+This identifies a runtime requirement, **not** a production security-profile
+recommendation. Select and validate the deployment's allowed syscall/network
+policy explicitly; do not enable untrusted work by copying diagnostic relaxations.
+
 ## Network and supervision are operator prerequisites
 
 Default `--network none` cannot reach the controller's loopback or the provider.
