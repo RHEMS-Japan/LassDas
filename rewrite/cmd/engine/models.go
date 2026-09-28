@@ -100,10 +100,14 @@ func fetchModelCatalog(ctx context.Context, name, address, key string) ([]json.R
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
 	if response.StatusCode != http.StatusOK {
-		detail := strings.TrimSpace(string(body[:min(len(body), 1024)]))
+		// Scrub before truncating: a credential straddling the cut would
+		// otherwise survive in part and travel into the history and the
+		// tracker as an operator-facing error.
+		detail := string(body)
 		if key != "" {
 			detail = strings.ReplaceAll(detail, key, "[credential]")
 		}
+		detail = strings.TrimSpace(detail[:min(len(detail), 1024)])
 		return nil, fmt.Errorf("%s HTTP %d: %s", name, response.StatusCode, detail)
 	}
 	if len(body) > maxCatalogBytes {

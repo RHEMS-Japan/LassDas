@@ -45,7 +45,14 @@ func (r StageRouter) Next(ctx context.Context, state State) (Assignment, error) 
 		if r.Entrance == nil {
 			return Assignment{}, errors.New("asking the requester at the entrance needs a configured decision router")
 		}
-		return r.Entrance.Next(ctx, state)
+		next, err := r.Entrance.Next(ctx, state)
+		if err != nil {
+			return Assignment{}, err
+		}
+		// The entrance router only chooses which stage runs; what the stage
+		// is told comes from the runtime, never from the model's own words.
+		next.Instruction = state.stageInstruction(next.Role)
+		return next, nil
 	}
 	if len(actions) != 1 || actions[0] == "" {
 		return Assignment{}, fmt.Errorf("the ordered run has no stage after %q", state.Step)

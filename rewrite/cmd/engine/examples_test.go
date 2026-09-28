@@ -176,6 +176,8 @@ const exampleQuestion = "依頼者にしか決められない点があります�
 // The same two sentences the decision model is given in the chain package. The
 // example is where an operator sees them, so pin them here as well.
 const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
+const askWithChoices = "each with two to four concrete choices, in ordinary prose the requester can answer in a single reply"
+const notAGeneralPlea = "A general request for clarification is not a question: name the undecided points and their choices."
 const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
 const exampleAnswer = "(a) release/ でお願いします。\n"
 
@@ -601,6 +603,14 @@ func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 	}
 	if !strings.Contains(routingRoleDescription(roles["elicit"]), byMorningStandard) {
 		t.Fatal("the entrance does not say what standard it settles the request against")
+	}
+	// A question is a list of undecided points with concrete choices the
+	// requester answers in one reply; a general plea for clarification would
+	// cost the second round trip this entrance exists to avoid.
+	for _, sentence := range []string{askWithChoices, notAGeneralPlea} {
+		if !strings.Contains(routingRoleDescription(roles["ask_requester"]), sentence) {
+			t.Fatalf("ask_requester no longer says: %s", sentence)
+		}
 	}
 	for name, access := range map[string]string{"elicit": "read", "ask_requester": "comment"} {
 		role, configured := roles[name]
