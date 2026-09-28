@@ -101,6 +101,9 @@ def command(args, environment):
                 descriptor = os.open(path, os.O_PATH)
                 descriptors.append(descriptor)
                 result += ["--ro-bind-fd", str(descriptor), str(path)]
+        # Mount the private base first: a later /tmp would hide explicitly
+        # granted work, home or SDK paths beneath it (including the preflight).
+        result += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
         for path in runtimes:
             result += mount(path)
         result += mount(workspace, directory=True)
@@ -109,8 +112,7 @@ def command(args, environment):
             # Grant an existing parent, or prepare an output directory first.
             result += mount(path, read_only=False)
         result += mount(home, read_only=False, directory=True, create=True)
-        result += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                   "--chdir", str(workspace), "--", *program]
+        result += ["--chdir", str(workspace), "--", *program]
         child_environment = dict(environment)
         child_environment.update(HOME=str(home), HERMES_HOME=str(home), TMPDIR="/tmp")
         return result, child_environment, descriptors

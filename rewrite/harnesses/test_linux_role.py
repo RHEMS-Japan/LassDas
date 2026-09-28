@@ -44,6 +44,27 @@ class ConfigurationTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux O_PATH directory handles")
 class DescriptorTests(unittest.TestCase):
+    def test_private_mounts_do_not_hide_explicit_temporary_paths(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = Path(root)
+            work, home, runtime = base / "work", base / "home", base / "sdk"
+            for directory in (work, home, runtime):
+                directory.mkdir()
+            args = argparse.Namespace(program=["--", "/bin/true"], write=[],
+                                      runtime=[str(runtime)], network="none")
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
+                argv, _, descriptors = launcher.command(args, {
+                    "TASK_WORKSPACE": str(work), "TASK_HOME": str(home),
+                })
+            try:
+                for private_mount in ("--proc", "--dev", "--tmpfs"):
+                    for explicit_path in (work, home, runtime):
+                        self.assertLess(argv.index(private_mount), argv.index(str(explicit_path)),
+                                        "private mounts must precede explicit task/runtime mounts")
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
     def test_intermediate_and_final_symlinks_are_not_followed(self):
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
