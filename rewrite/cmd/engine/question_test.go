@@ -233,7 +233,11 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 				return nil, fmt.Errorf("unconfigured")
 			})
 			root := filepath.Join(t.TempDir(), "must-not-be-created")
-			err := watchRequests(context.Background(), cfg, root, &lockedLog{})
+			// The refusal comes before intake, so a configuration that is
+			// accepted here starts polling and is reported as the timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := watchRequests(ctx, cfg, root, &lockedLog{})
 			if err == nil || !strings.Contains(err.Error(), "intake.question_role") {
 				t.Fatalf("unusable question role accepted: %v", err)
 			}
