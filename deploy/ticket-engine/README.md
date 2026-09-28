@@ -61,7 +61,15 @@ Proposed, or simply not measured. Check each one before trusting it:
 - Protection rules on the delivery target and the real scope of the delivery
   credential. Neither can be read from inside this repository.
 - Cost. The engine has no spending limit of its own; the provider account's
-  limits are the only bound, and they are outside this manifest.
+  limits are the only bound, and they are outside this manifest. There is also
+  no balance check and no "work paused" notice: if the provider refuses on
+  credit, the chain waits for it to come back and says nothing meanwhile.
+- Disk. The volume is 20Gi and nothing prunes it. Each role launch keeps a
+  private home, and a language toolchain's cache grows inside it, so a long
+  night of work is the case that fills it. A full volume stops progress
+  quietly, because saving history is retried rather than abandoned. Record
+  `df` and the number of role homes before going live, and look again after
+  the first real request.
 - Progress reporting. There is none while work runs. The tracker sees the
   final comment, a stop report and any question. A role's launch is bounded
   at one hour.
@@ -82,7 +90,12 @@ answered is a blocker, not something to note and pass.
    did not add an `envFrom`, and accepted the sidecar entry.
 4. **Apply the StatefulSet** (an approval point). Read back `hostUsers`,
    `automountServiceAccountToken`, the container security contexts, a restart
-   count of zero, and init container logs with no error.
+   count of zero, and init container logs with no error. Confirm three things
+   that only bite on a replacement node: the init containers name the cluster
+   network DaemonSet's own image reference with `imagePullPolicy: IfNotPresent`
+   and never `Never`; the engine image can be pulled without a node's cache,
+   or an imagePullSecret is named here; and the temporary volume carries no
+   `sizeLimit`.
 5. **Run the launcher check** from `rewrite/RUNTIME.md` ("Check the target
    runtime before accepting work") inside the running Pod: no credential, no
    task data, exit status 0. Then check a role's actual policy: seccomp mode
@@ -95,7 +108,8 @@ answered is a blocker, not something to note and pass.
 8. **Connect with no work to do**: the model catalogue, the tracker's issue
    list for the configured project, and a listing of the mirror.
 9. **Delete the Pod once.** The same volume must come back with the queue's
-   records intact.
+   records intact. Record the volume's usage and the number of role homes at
+   the same time, so a later reading means something.
 10. **Run delivery and verification in check mode** (`--dry-run` on both).
     They end non-zero on purpose. A real push, pull request and merge is an
     approval point of its own.
