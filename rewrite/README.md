@@ -242,6 +242,26 @@ further, putting the open points to the requester and proceeding are ordinary
 choices among connected role names. There is no new decision mechanism and no
 check of what the role wrote.
 
+The standard it settles against, in the words the decision model and the
+entrance actions are both given: can this request be carried to a delivered,
+verified result by morning with nobody available to answer? Points the roles
+can settle from the request, the repository or the operator instructions are
+settled and written down with their reason. Whatever is left goes to the
+requester straight away, before anything is investigated or built, in one
+comment listing each undecided point with two to four choices so it can be
+answered in a single reply. A general request for clarification is not a
+question.
+
+The choice at the entrance is deliberately one-sided. Proceeding with an open
+point costs a night's work while asking costs one reply, so `investigate` is
+expected only when every point that only the requester could decide is absent
+or already answered and the settled requirements state the completion condition
+to be held to; when in doubt the expected choice is `ask_requester`, and
+`investigate` is never a way to find out what was wanted. That is wording and
+connections only. Nothing measures a confidence level, counts open points or
+inspects what the role wrote, so a model that ignores the standard still
+proceeds and no test here can tell you it will not.
+
 `ask_requester` posts one comment carrying the requester-only points and reads
 the stored text back. It has comment access and no workspace write permission,
 and neither it nor `elicit` is connected to `done`: the entrance cannot end a

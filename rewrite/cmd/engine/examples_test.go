@@ -114,6 +114,11 @@ const exampleArtifact = "Hello 日本語\n"
 const exampleReport = "できるようになったこと\n試験用の納品先からHello 日本語を読み戻せます。これは本番ではありません。\n"
 const exampleStoppedReport = "停止指示に従って作業を止めました。成果物は納品していません。\n"
 const exampleQuestion = "依頼者にしか決められない点があります。納品先は (a) release/ か (b) dist/ のどちらにしますか。\n"
+
+// The same two sentences the decision model is given in the chain package. The
+// example is where an operator sees them, so pin them here as well.
+const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
+const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
 const exampleAnswer = "(a) release/ でお願いします。\n"
 
 // Actual subprocess fixture, not a native SDK/model or permission-sandbox test.
@@ -470,6 +475,17 @@ func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 	for _, role := range cfg.Roles {
 		roles[role.Name] = role
 	}
+	// The decision at the entrance is one-sided: guessing costs a night, asking
+	// costs one reply. Every action the router can choose there says so, in the
+	// same words, and the entrance says which standard it settles against.
+	for _, name := range []string{"elicit", "ask_requester", "investigate"} {
+		if !strings.Contains(routingRoleDescription(roles[name]), askWhenInDoubt) {
+			t.Fatalf("%s does not tell the decision which way to err", name)
+		}
+	}
+	if !strings.Contains(routingRoleDescription(roles["elicit"]), byMorningStandard) {
+		t.Fatal("the entrance does not say what standard it settles the request against")
+	}
 	for name, access := range map[string]string{"elicit": "read", "ask_requester": "comment"} {
 		role, configured := roles[name]
 		if !configured || len(role.Processes) != 1 {
@@ -589,6 +605,12 @@ func TestOperatorExampleCarriesTheRequestersAnswerOnToDelivery(t *testing.T) {
 	actual, err := os.ReadFile(filepath.Join(root, "jobs", "42", "workspace", "release", "greeting.txt"))
 	if err != nil || string(actual) != exampleArtifact {
 		t.Fatal("actual delivery missing", err)
+	}
+	// The open point went back to the requester at once: the entrance ran
+	// first, and the very next action asked them, with nothing investigated
+	// or built in between.
+	if len(state.History) < 2 || state.History[0].Role != "elicit" || state.History[1].Role != "ask_requester" {
+		t.Fatalf("the open point was not put to the requester first: %+v", state.History)
 	}
 	answers, workingModels := 0, 0
 	for _, result := range state.History {

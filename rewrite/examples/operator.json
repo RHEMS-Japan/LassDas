@@ -138,7 +138,7 @@
   "roles": [
     {
       "name": "elicit",
-      "purpose": "Settle what the request actually asks for, before the work is handed over: answer from the project what can be answered there, and name what only the requester can decide.",
+      "purpose": "Settle what the request actually asks for, before the work is handed over: answer from the project what can be answered there, and name what only the requester can decide. The standard is: can this request be carried to a delivered, verified result by morning with nobody available to answer? Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out.",
       "processes": [
         {
           "name": "requirements",
@@ -163,7 +163,7 @@
             "-B",
             "/opt/ticket-automation/bundle/harnesses/hermes.py"
           ],
-          "instructions": "Read the original request, the prepared checkout and the shared operator instructions, and settle from them whatever the project itself already answers. Do not change project files. Return ordinary prose covering four things: the requirements as you will carry them out, naming the target, the behaviour, the delivery and the condition that counts as finished; the points you decided yourself, each with its reason; the points only the requester can decide, each with two to four concrete choices; and any permission or credential this work needs but was not given. Read assigned issue comments, including earlier answers, with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
+          "instructions": "You are the first action on every request, and you run before anything is investigated or built. The standard is: can this request be carried to a delivered, verified result by morning with nobody available to answer? Read the original request, the prepared checkout and the shared operator instructions, and settle from them whatever the project itself already answers. Do not change project files. Return ordinary prose covering four things: the requirements as you will carry them out, naming the target, the behaviour, the delivery and the condition that counts as finished; the points you decided yourself, each with its reason; the points only the requester can decide, each with two to four concrete choices; and any permission or credential this work needs but was not given. If anything is left that only the requester can decide, say so plainly: it goes to them at once, not after an investigation. Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out. Read assigned issue comments, including earlier answers, with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed.",
           "env": {
             "PYTHONPATH": "/opt/hermes-src",
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -183,7 +183,7 @@
     },
     {
       "name": "ask_requester",
-      "purpose": "Put the points only the requester can decide to them in one comment, with their choices, and read the stored comment back; no workspace writes.",
+      "purpose": "Put the points only the requester can decide to them in one comment, with their choices, and read the stored comment back; no workspace writes. Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out.",
       "processes": [
         {
           "name": "questioner",
@@ -208,7 +208,7 @@
             "-B",
             "/opt/ticket-automation/bundle/harnesses/hermes.py"
           ],
-          "instructions": "Read the existing comments first with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed. Post exactly one comment, with the same tracker command and post, carrying only the points the requester alone can decide, each with its choices, in ordinary prose the requester can answer in a line. Never ask again a question already stored there: say so in your report instead of posting it twice. Read actual comments first when submission is uncertain, to avoid repeating an already-stored comment. Read back the stored text; never report success from a missing receipt alone.",
+          "instructions": "Read the existing comments first with /opt/ticket-automation/bundle/bin/ticket-tracker --base-url \"$TASK_TRACKER_URL\" --key-env TASK_TRACKER_KEY --cert-env TASK_TRACKER_CERT --issue \"$TASK_TRACKER_ISSUE\" comments. The scoped key value must never be printed. Post exactly one comment, with the same tracker command and post, carrying only the points the requester alone can decide, each with two to four concrete choices, in ordinary prose the requester can answer in a single reply. A general request for clarification is not a question: name the undecided points and their choices. Never ask again a question already stored there: say so in your report instead of posting it twice. Read actual comments first when submission is uncertain, to avoid repeating an already-stored comment. Read back the stored text; never report success from a missing receipt alone.",
           "env": {
             "PYTHONPATH": "/opt/hermes-src",
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -228,7 +228,7 @@
     },
     {
       "name": "investigate",
-      "purpose": "Read the original request and existing project context; investigate an actionable approach within the authorized scope.",
+      "purpose": "Read the original request and existing project context; investigate an actionable approach within the authorized scope. This action is for a request whose requirements are already settled; it is not a way to find out what the requester wanted. Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out.",
       "processes": [
         {
           "name": "investigator",

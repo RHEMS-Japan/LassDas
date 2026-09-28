@@ -526,3 +526,18 @@ func TestTheQuestionRoleReplacesSilenceAfterAcceptance(t *testing.T) {
 		}
 	}
 }
+
+// What the entrance is held to, in the words every decision receives. A vague
+// request is bounced back at once instead of being guessed at: proceeding with
+// an open point loses a night, asking costs one reply. This is wording and
+// connections; nothing here inspects or scores what a role wrote.
+const byMorningStandard = "can this request be carried to a delivered, verified result by morning with nobody available to answer?"
+const askWhenInDoubt = "Proceeding with an open point costs a night's work and asking costs one reply, so proceed only when every point that only the requester could decide is absent or already answered and the settled requirements state the completion condition to be held to; when in doubt, ask the requester, and never proceed in order to find out."
+
+func TestTheEntranceStandardReachesEveryDecision(t *testing.T) {
+	for _, sentence := range []string{byMorningStandard, askWhenInDoubt} {
+		if !strings.Contains(routingInstructions, sentence) {
+			t.Fatalf("the routing instructions do not carry the entrance standard: %q", sentence)
+		}
+	}
+}
