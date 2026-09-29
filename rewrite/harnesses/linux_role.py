@@ -44,6 +44,24 @@ def open_path(path, *, directory=False, create=False):
         raise
 
 
+def create_path(workspace, relative):
+    """Make the directory under the workspace one component at a time, never
+    following a symbolic link: a link a role planted in the way refuses the
+    launch instead of leading the new directory outside the workspace."""
+    descriptor = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in relative.parts:
+            try:
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+    finally:
+        os.close(descriptor)
+
+
 def command(args, environment):
     if sys.platform != "linux":
         raise RuntimeError("This launcher requires Linux namespaces and bubblewrap")
@@ -73,10 +91,8 @@ def command(args, environment):
         relative = PurePosixPath(value)
         if not value or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("Created paths must be relative to the workspace without '..'")
-        target = workspace / relative
-        if not target.is_symlink() and not target.exists():
-            os.makedirs(target, mode=0o700, exist_ok=True)
-        writable.append(target)
+        create_path(workspace, relative)
+        writable.append(workspace / relative)
     runtimes = [absolute(value) for value in args.runtime]
     for path in runtimes:
         if any(path == grant or path.is_relative_to(grant) or grant.is_relative_to(path)

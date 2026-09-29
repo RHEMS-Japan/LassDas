@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -296,22 +297,48 @@ func TestAPromptCollapsesRepeatedFailuresAndCapsTheRecords(t *testing.T) {
 	var history []Result
 	history = append(history, Result{Role: "elicit", Speaker: "p", Output: "settled"})
 	for i := 0; i < 150; i++ {
-		history = append(history, Result{Role: "draft_report", Speaker: "p", Error: "exit status 1\nTraceback " + strings.Repeat("x", i%3)})
+		history = append(history, Result{Role: "draft_report", Speaker: "p", Error: "exit status 1\nTraceback: the same"})
 		history = append(history, Result{Role: "draft_report", Speaker: "runtime", Output: "Runtime record"})
 	}
 	carried := promptHistory(history)
-	if len(carried) > promptRecords+1 {
-		t.Fatalf("%d records carried; at most %d plus a note", len(carried), promptRecords)
+	if len(carried) != 3 {
+		t.Fatalf("a staged run of one failure must carry the elicit record, the newest failure and its stage record: %d", len(carried))
 	}
-	if !strings.Contains(carried[0].Output, "earlier records are in the request's history") {
-		t.Fatalf("the omission is not said: %+v", carried[0])
+	if !strings.HasPrefix(carried[1].Error, "(this failure repeated 150 times in a row; this is the latest)") {
+		t.Fatalf("the count is missing: %q", carried[1].Error)
+	}
+	if history[1].Error != "exit status 1\nTraceback: the same" {
+		t.Fatal("the record on disk must not change")
+	}
+	different := []Result{
+		{Role: "r", Speaker: "p", Error: "exit status 1\nbwrap: no such path", Diagnostics: "d1"},
+		{Role: "r", Speaker: "runtime", Output: "stage"},
+		{Role: "r", Speaker: "p", Error: "exit status 1\nKeyError: HOME", Diagnostics: "d2"},
+		{Role: "r", Speaker: "runtime", Output: "stage"},
+	}
+	if got := promptHistory(different); len(got) != 4 || got[2].Error != "exit status 1\nKeyError: HOME" {
+		t.Fatalf("two different failures must both travel: %+v", got)
+	}
+	newest := []Result{
+		{Role: "r", Speaker: "p", Error: "same", Output: "first attempt", Diagnostics: "old"},
+		{Role: "r", Speaker: "p", Error: "same", Output: "second attempt", Diagnostics: "new"},
+		{Role: "r", Speaker: "p", Output: "worked"},
+		{Role: "r", Speaker: "p", Error: "same"},
+	}
+	got := promptHistory(newest)
+	if len(got) != 3 || got[0].Diagnostics != "new" || got[0].Output != "second attempt" || !strings.HasPrefix(got[0].Error, "(this failure repeated 2 times") || got[2].Error != "same" {
+		t.Fatalf("the newest failure of a run travels and a success ends the run: %+v", got)
+	}
+	var long []Result
+	for i := 0; i < 100; i++ {
+		long = append(long, Result{Role: "r", Speaker: "p", Output: fmt.Sprintf("work %d", i)})
+	}
+	capped := promptHistory(long)
+	if len(capped) != promptRecords+1 || !strings.Contains(capped[0].Output, "40 earlier records are in the request's history") {
+		t.Fatalf("the cap and its note: %d %q", len(capped), capped[0].Output)
 	}
 	prompt := processPrompt(Role{Name: "confirm"}, Process{Name: "c"}, Assignment{Role: "confirm"}, State{History: history})
-	if strings.Count(prompt, "Traceback") > promptRecords {
-		t.Fatalf("the prompt still repeats the failure %d times", strings.Count(prompt, "Traceback"))
-	}
-	same := []Result{{Role: "r", Speaker: "p", Error: "exit status 1\nfirst"}, {Role: "r", Speaker: "p", Error: "exit status 1\nsecond"}, {Role: "r", Speaker: "p", Error: "other\n"}}
-	if got := promptHistory(same); len(got) != 2 || !strings.HasPrefix(got[0].Error, "(this failure repeated 2 times in a row)") {
-		t.Fatalf("a run of the same failure must be one entry with its count: %+v", got)
+	if strings.Count(prompt, "Traceback: the same") != 1 {
+		t.Fatalf("the prompt repeats the failure %d times", strings.Count(prompt, "Traceback: the same"))
 	}
 }

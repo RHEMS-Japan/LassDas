@@ -2,7 +2,7 @@
 import argparse
 import importlib.util
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import unittest
@@ -40,6 +40,24 @@ class ConfigurationTests(unittest.TestCase):
                 args.write = [write]
                 with self.assertRaises(ValueError):
                     launcher.command(args, {"TASK_WORKSPACE":"/work", "TASK_HOME":"/home/role"})
+
+
+class CreatePathTests(unittest.TestCase):
+    def test_a_created_directory_never_follows_a_link_in_any_component(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            work, outside = base / "work", base / "outside"
+            work.mkdir()
+            outside.mkdir()
+            launcher.create_path(work, PurePosixPath("report/out"))
+            self.assertTrue((work / "report" / "out").is_dir())
+            os.symlink(outside, work / "linked")
+            with self.assertRaises(OSError):
+                launcher.create_path(work, PurePosixPath("linked/out"))
+            self.assertEqual(os.listdir(outside), [])
+            with self.assertRaises(OSError):
+                launcher.create_path(work, PurePosixPath("linked"))
+            launcher.create_path(work, PurePosixPath("report/out"))  # existing directories are used as they are
 
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux O_PATH directory handles")

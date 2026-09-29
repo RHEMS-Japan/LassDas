@@ -328,25 +328,37 @@ func promptTail(text string) string {
 // promptRecords bounds how many records a prompt carries.
 const promptRecords = 60
 
-// promptHistory is the history as a prompt carries it: a run of launches of
-// the same role that failed the same way is one entry saying how often, and
-// only the most recent records travel, with a note of how many came before.
-// The record itself keeps everything.
+// promptHistory is the history as a prompt carries it. A run of launches of
+// the same role that failed with the same text, with nothing but the
+// runtime's own stage records in between, is carried as its newest failure
+// with a note of how often it repeated, so the next role reads the current
+// state of the failure and not the first of many identical copies; only the
+// most recent records travel, with a note of how many came before. The
+// record itself keeps everything.
 func promptHistory(history []Result) []Result {
 	var collapsed []Result
 	counts := map[int]int{}
+	run := -1 // index in collapsed of the failure a run is being collapsed into
 	for _, result := range history {
-		if n := len(collapsed); n > 0 && result.Error != "" {
-			previous := collapsed[n-1]
-			if previous.Role == result.Role && previous.Speaker == result.Speaker && firstLine(previous.Error) == firstLine(result.Error) {
-				counts[n-1]++
-				continue
-			}
+		failure := result.Error != "" && result.Speaker != "runtime"
+		if failure && run >= 0 && collapsed[run].Role == result.Role && collapsed[run].Speaker == result.Speaker && collapsed[run].Error == result.Error {
+			collapsed = collapsed[:run]
+			collapsed = append(collapsed, result)
+			counts[run]++
+			continue
+		}
+		if result.Speaker == "runtime" && run >= 0 && result.Role == collapsed[run].Role && result.Error == "" {
+			collapsed = append(collapsed, result)
+			continue
 		}
 		collapsed = append(collapsed, result)
+		run = -1
+		if failure {
+			run = len(collapsed) - 1
+		}
 	}
 	for i, count := range counts {
-		collapsed[i].Error = fmt.Sprintf("(this failure repeated %d times in a row)\n%s", count+1, collapsed[i].Error)
+		collapsed[i].Error = fmt.Sprintf("(this failure repeated %d times in a row; this is the latest)\n%s", count+1, collapsed[i].Error)
 	}
 	if len(collapsed) > promptRecords {
 		omitted := len(collapsed) - promptRecords
