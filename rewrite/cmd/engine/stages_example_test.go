@@ -44,6 +44,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 		{Name: "elicit", Kind: chain.ModelStage},
 		{Name: "work", Kind: chain.ModelStage},
 		{Name: "verify", Kind: chain.CommandStage, OnFailure: "work"},
+		{Name: "review", Kind: chain.CommandStage, OnFailure: "work"},
 		{Name: "deliver", Kind: chain.CommandStage, OnFailure: "work"},
 		{Name: "verify_merged", Kind: chain.CommandStage, OnFailure: "work"},
 		{Name: "report", Kind: chain.ModelStage},

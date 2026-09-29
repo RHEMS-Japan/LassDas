@@ -16,7 +16,7 @@ for command in engine tracker; do
     go -C "$source_dir" build -p 1 -trimpath \
       -o "$output_dir/bin/ticket-$command" "./cmd/$command"
 done
-for harness in git_workspace hermes linux_role; do
+for harness in git_workspace hermes linux_role adversarial_review; do
   cp "$source_dir/harnesses/$harness.py" "$output_dir/harnesses/$harness.py"
 done
 for guide in START RUNTIME README; do

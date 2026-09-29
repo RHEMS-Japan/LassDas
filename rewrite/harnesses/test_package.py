@@ -24,7 +24,7 @@ class PackageTests(unittest.TestCase):
                         "examples/operator-gateway.json",
                         "examples/operator-stages.json",
                         "harnesses/hermes.py", "harnesses/git_workspace.py",
-                        "harnesses/linux_role.py"]
+                        "harnesses/linux_role.py", "harnesses/adversarial_review.py"]
             self.assertEqual(sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*") if p.is_file()), sorted(expected))
             for relative in expected:
                 if not relative.startswith("bin/"):

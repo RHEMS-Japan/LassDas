@@ -1,0 +1,171 @@
+"""A real Git checkout, real test commands, and a local service standing in for
+the model: what the review command sends, what it writes, and how it ends."""
+import http.server
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+
+SCRIPT = Path(__file__).with_name("adversarial_review.py").resolve()
+KEY = "fixture-review-credential-9e1f3a"
+IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid")
+
+
+def git_environment():
+    return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly", "GIT_CONFIG_VALUE_0": "true"}
+
+
+class ModelStandIn:
+    """Answers chat completions with scripted verdicts and records every request."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.requests = []
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                owner.requests.append({"path": self.path, "authorization": self.headers.get("Authorization", ""),
+                                       "body": body})
+                reply = owner.replies.pop(0) if owner.replies else {"status": 200, "verdict": (False, "")}
+                if reply.get("status", 200) != 200:
+                    payload = json.dumps({"error": reply.get("error", "service error")}).encode()
+                    self.send_response(reply["status"])
+                elif reply.get("verdict") is None:
+                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
+                    self.send_response(200)
+                else:
+                    blocking, findings = reply["verdict"]
+                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
+                        {"id": "call-1", "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
+                            {"blocking": blocking, "findings": findings})}}]}}]}).encode()
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *arguments):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d/v1/chat/completions" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@unittest.skipUnless(shutil.which("git"), "requires Git")
+class AdversarialReviewTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="review-test-")
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name).resolve() / "workspace"
+        self.workspace.mkdir()
+        self.home = Path(temporary.name).resolve() / "home"
+        self.home.mkdir()
+        self.git("init", "--initial-branch=master")
+        (self.workspace / "src").mkdir()
+        (self.workspace / "src" / "tool.py").write_text("def run():\n    return 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-m", "Codex: initial")
+        # The change under review: one edit and one new test file.
+        (self.workspace / "src" / "tool.py").write_text("def run():\n    return 2  # changed\n")
+        (self.workspace / "tests").mkdir()
+        (self.workspace / "tests" / "test_tool.py").write_text("print('new test file')\n")
+
+    def git(self, *arguments):
+        return subprocess.run(["git", "-C", str(self.workspace), *IDENTITY, *arguments],
+                              check=True, capture_output=True, text=True, env=git_environment())
+
+    def run_review(self, service, stdin_text="Current assignment:\nStage 4 of 8\n\nOriginal request:\nadd a thing\n", **extra):
+        environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+                       "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "REVIEW_MODEL_URL": service.url,
+                       "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY", "REVIEW_API_KEY": KEY,
+                       "REVIEW_TEST_COMMANDS": sys.executable + " -c \"print('tests ran fine')\"",
+                       "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ROUNDS": "2", "REVIEW_ATTEMPTS": "2",
+                       "REVIEW_TIMEOUT_SECONDS": "30"}
+        environment.update(extra)
+        return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
+                              text=True, env=environment, timeout=120)
+
+    def review_log(self):
+        path = self.home / "review.md"
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def test_a_blocking_verdict_sends_the_work_back_and_records_the_findings(self):
+        service = ModelStandIn([{"verdict": (True, "src/tool.py returns 2 but the request asked for 3")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 1, finished.stderr)
+        self.assertIn("SEND BACK", self.review_log())
+        self.assertIn("asked for 3", self.review_log())
+        self.assertEqual((self.home / "review-rounds").read_text(), "1")
+        self.assertIn("SENT BACK", finished.stdout)
+        self.assertIn("asked for 3", finished.stdout)
+        self.assertFalse((self.workspace / "report").exists(), "the review must not write into the workspace")
+
+    def test_the_reviewer_receives_the_runtime_text_the_diff_and_the_test_output(self):
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, stdin_text="Current assignment:\nStage 4 of 8: review\n\nOriginal request:\nreturn two\n")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        sent = service.requests[0]["body"]
+        text = sent["messages"][1]["content"]
+        self.assertIn("return two", text)
+        self.assertIn("+    return 2  # changed", text)
+        self.assertIn("new file tests/test_tool.py", text)
+        self.assertIn("tests ran fine", text)
+        self.assertEqual(sent["tool_choice"]["function"]["name"], "verdict")
+        self.assertIn("PASS", self.review_log())
+
+    def test_the_operators_round_cap_lets_the_work_through_with_the_objections_recorded(self):
+        (self.home / "review-rounds").write_text("2")
+        service = ModelStandIn([{"verdict": (True, "still wrong")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("UNRESOLVED after 2 review rounds", self.review_log())
+        self.assertIn("still wrong", self.review_log())
+        self.assertEqual((self.home / "review-rounds").read_text(), "3")
+
+    def test_no_verdict_or_a_failing_service_lets_the_work_through_with_a_note(self):
+        service = ModelStandIn([{"status": 500}, {"verdict": None}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("no verdict could be obtained", self.review_log())
+        self.assertEqual(len(service.requests), 2)
+
+    def test_the_credential_reaches_only_the_model_service_and_never_the_output(self):
+        service = ModelStandIn([{"status": 502, "error": "bad key " + KEY}, {"status": 502, "error": "bad key " + KEY}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(service.requests[0]["authorization"], "Bearer " + KEY)
+        for text in (finished.stdout, finished.stderr, self.review_log()):
+            self.assertNotIn(KEY, text)
+
+    def test_missing_configuration_ends_with_status_two_and_calls_nothing(self):
+        service = ModelStandIn([{"verdict": (True, "x")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_MODEL_URL="")
+        self.assertEqual(finished.returncode, 2)
+        self.assertIn("REVIEW_MODEL_URL", finished.stderr)
+        self.assertEqual(service.requests, [])
+        self.assertEqual(self.review_log(), "")
+
+
+if __name__ == "__main__":
+    unittest.main()
