@@ -16,6 +16,18 @@ RUN test -n "$ENGINE_SHA" && \
     CGO_ENABLED=0 go build -trimpath -o /out/agentexec ./cmd/agentexec && \
     (cd /out && sha256sum worker controller browsercheck > tool-pins.txt)
 
+# ---- Stage 1b: the role-chain bundle -------------------------------------
+# The same image serves both engines. This stage builds the standalone
+# rewrite/ module with that module's own packaging script, natively for the
+# image's architecture (the release script and the workflow both build
+# linux/arm64), so the engine, the tracker helper, the harnesses and the
+# guides an operator reads ship together. Nothing here fetches an SDK, a
+# model catalogue or a credential.
+FROM golang:1.26-bookworm AS bundle
+WORKDIR /src
+COPY rewrite /src/rewrite
+RUN mkdir -p /out && GOMAXPROCS=2 sh /src/rewrite/package.sh /out/bundle
+
 # ---- Stage 2: runtime ----------------------------------------------------
 FROM debian:bookworm-slim
 
@@ -27,6 +39,11 @@ ARG KUBECTL_VERSION=v1.35.8
 ARG KUBECTL_SHA256=cc749967b62f4422260bc9c0aa7a7c55f45175ae38cb8d95767b5d2b7e04c1fd
 ARG AWSCLI_VERSION=2.36.40
 ARG AWSCLI_SHA256=f26e08d0d64d9f35f304a9df94d63cbd11ffe8881c8b4bf60be934cf9e4d13a9
+# The role syscall profile is upstream Moby's, pinned by commit and checksum
+# like the tools above. It is policy input for the runtime's compile step,
+# not a profile this image applies to anything.
+ARG MOBY_SECCOMP_REF=85e237f1fe229a0c61c9c7d8e743fa780d3b97ca
+ARG MOBY_SECCOMP_SHA256=785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ca-certificates curl git tmux python3 python3-pip python3-venv \
@@ -92,6 +109,29 @@ RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
 # anything).
 COPY --from=engine /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
+
+# The role-chain bundle, its fixed delivery processes and the role syscall
+# policy. All three stay outside every model-writable directory: a role
+# receives them as explicit read-only runtime paths (rewrite/RUNTIME.md,
+# "Linux role launch"), and the operator's configuration decides which role
+# may run which of them.
+COPY --from=bundle /out/bundle /opt/ticket-automation/bundle
+COPY rewrite/harnesses/delivery_support.py rewrite/harnesses/deliver_git.py \
+     rewrite/harnesses/verify_merged.py rewrite/harnesses/mirror_loop.py \
+     /opt/ticket-automation/scripts/
+COPY rewrite/runtime-policy/compile_role_seccomp.py \
+     rewrite/runtime-policy/role_bwrap_policy.py \
+     /opt/ticket-automation/runtime-policy/
+# The pinned profile is fetched and checked here, like the tools above, so
+# the diagnostic copy used during measurement never becomes the source of
+# truth. The last line runs the packaged engine: a bundle built for another
+# machine cannot answer, so the build fails here instead of in the cluster.
+RUN curl -fsSL -o /opt/ticket-automation/runtime-policy/moby-seccomp.json \
+      "https://raw.githubusercontent.com/moby/profiles/${MOBY_SECCOMP_REF}/seccomp/default.json" \
+    && echo "${MOBY_SECCOMP_SHA256}  /opt/ticket-automation/runtime-policy/moby-seccomp.json" | sha256sum -c - \
+    && python3 -B -c 'import json,sys; json.load(open(sys.argv[1]))' /opt/ticket-automation/runtime-policy/moby-seccomp.json \
+    && chmod 0755 /opt/ticket-automation/runtime-policy/role_bwrap_policy.py \
+    && /opt/ticket-automation/bundle/bin/ticket-engine --help 2>&1 | grep -q 'run-dir'
 
 COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /out/agentexec /usr/local/bin/
 COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
