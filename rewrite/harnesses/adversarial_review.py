@@ -143,10 +143,12 @@ def gather(workspace, paths, test_commands, timeout):
     tracked = git(workspace, "diff", "HEAD", *scope)
     status = git(workspace, "status", "--short", "--untracked-files=all", *scope)
     if paths and not tracked.strip() and not status.strip():
-        elsewhere = git(workspace, "status", "--short", "--untracked-files=all").strip()
+        # Not stripped as a whole: the first status line starts with a space
+        # for a change in the working tree, and that space is part of the format.
+        elsewhere = [line for line in git(workspace, "status", "--short", "--untracked-files=all").splitlines() if line.strip()]
         if elsewhere:
             raise ReviewError("REVIEW_DIFF_PATHS (%s) matched no change, but the checkout has changes under: %s"
-                              % (" ".join(paths), ", ".join(sorted({status_path(line).split("/")[0] for line in elsewhere.splitlines()}))))
+                              % (" ".join(paths), ", ".join(sorted({status_path(line).split("/")[0] for line in elsewhere}))))
     # New files come first, so their names survive a cut of a long diff: new
     # code is where untested code most often is.
     new_files = ""
