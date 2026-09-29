@@ -103,7 +103,7 @@ class DescriptorTests(unittest.TestCase):
                 os.close(descriptor)
             self.assertTrue((work / "report").is_dir())
             self.assertIn(("--bind-fd", str(work / "report")), [(argv[i], argv[i + 2]) for i, item in enumerate(argv) if item == "--bind-fd"])
-            with self.assertRaises(ValueError):
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), self.assertRaises(ValueError):
                 launcher.command(argparse.Namespace(program=["--", "/bin/true"], write=[], create=["../out"], runtime=[], network="none"),
                                  {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)})
 
