@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,11 @@ type Process struct {
 	// runtime record. It is the operator's own file: nothing requires it to
 	// exist, and nothing here decodes or checks what it contains.
 	Receipt string `json:"receipt,omitempty"`
+	// Live names a directory the runtime owns for this request. While the
+	// process runs, its output is copied there as it arrives, with every
+	// configured credential replaced, so an operator can read what is
+	// happening now; the copy is removed once the record is complete.
+	Live string `json:"-"`
 }
 
 type Role struct {
@@ -185,6 +191,11 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	}
 	var output, diagnostics bytes.Buffer
 	command.Stdout, command.Stderr = &output, &diagnostics
+	live, liveNote := openLive(p, role, assignment, env, secrets)
+	if live != nil {
+		command.Stdout, command.Stderr = io.MultiWriter(&output, live.stdout), io.MultiWriter(&diagnostics, live.stderr)
+		defer live.close()
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	finished := make(chan struct{})
 	var stopping sync.WaitGroup
@@ -223,6 +234,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	stopping.Wait()
 	result.Output = output.String()
 	result.Diagnostics = diagnostics.String()
+	if liveNote != "" {
+		result.Diagnostics += "\n(runtime) " + liveNote + "\n"
+	}
 	if p.Receipt != "" {
 		// An absent or unreadable receipt is an observation like any other. It
 		// is never turned into a failure or into proof that a delivery landed.

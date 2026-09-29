@@ -11,7 +11,7 @@ source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 mkdir -- "$1"
 output_dir=$(CDPATH= cd -- "$1" && pwd -P)
 mkdir "$output_dir/bin" "$output_dir/harnesses" "$output_dir/examples"
-for command in engine tracker; do
+for command in engine tracker status; do
   GOMAXPROCS="${GOMAXPROCS:-2}" CGO_ENABLED="${CGO_ENABLED:-0}" \
     go -C "$source_dir" build -p 1 -trimpath \
       -o "$output_dir/bin/ticket-$command" "./cmd/$command"
