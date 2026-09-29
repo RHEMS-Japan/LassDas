@@ -1,5 +1,7 @@
 """Bridge tests use a native SDK stand-in, not an LLM-judgment claim."""
 import contextlib
+import pathlib
+import json
 import importlib.util
 import io
 import os
@@ -256,6 +258,35 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("Interrupted by caller", err)
         self.assertEqual(events[-1], ("closed", True))
 
+
+
+class LiveAndTranscriptTests(BridgeTests):
+    def test_tool_steps_are_shown_live_and_the_conversation_is_kept_without_credentials(self):
+        with tempfile.TemporaryDirectory() as home:
+            conversation = [{"role": "user", "content": "task"},
+                            {"role": "assistant", "tool_calls": [{"function": {"name": "terminal", "arguments": "{\"command\": \"ls\"}"}}]},
+                            {"role": "tool", "content": "the key synthetic-test-only must not be kept"}]
+            events, out, err, code, failure = self.run_bridge(
+                {"final_response": "plain report", "messages": conversation}, task_home=home)
+            self.assertIsNone(failure)
+            self.assertEqual((code, out), (0, "plain report"))
+            configuration = dict(next(kwargs for name, kwargs in events if name == "configuration"))
+            self.assertEqual((configuration["quiet_mode"], configuration["tool_progress_mode"], configuration["log_prefix_chars"]),
+                             (False, "all", 2000))
+            saved = json.loads((pathlib.Path(home) / "transcript.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved[1]["tool_calls"][0]["function"]["name"], "terminal")
+            self.assertEqual(saved[2]["content"], "the key [credential] must not be kept")
+            self.assertNotIn("synthetic-test-only", (pathlib.Path(home) / "transcript.json").read_text(encoding="utf-8"))
+
+    def test_a_result_without_a_conversation_or_an_unwritable_home_keeps_the_report(self):
+        events, out, err, code, failure = self.run_bridge({"final_response": "report only"})
+        self.assertEqual((code, out, failure), (0, "report only", None))
+        with tempfile.TemporaryDirectory() as home:
+            (pathlib.Path(home) / "transcript.json").mkdir()  # the path cannot be written as a file
+            events, out, err, code, failure = self.run_bridge(
+                {"final_response": "report kept", "messages": [{"role": "assistant", "content": "x"}]}, task_home=home)
+            self.assertEqual((code, out, failure), (0, "report kept", None))
+            self.assertIn("Transcript not saved", err)
 
 if __name__ == "__main__":
     unittest.main()

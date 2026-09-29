@@ -111,6 +111,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 	}
 	s.templates = template.Must(template.New("").Funcs(template.FuncMap{
 		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON,
+		"head": func(title string, refresh int) headData { return headData{Title: title, Refresh: refresh} },
 	}).Parse(pageTemplates))
 	return s, nil
 }
@@ -134,6 +135,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/workspace", s.auth(s.workspacePage))
 	mux.HandleFunc("GET /config", s.auth(s.configPage))
 	mux.HandleFunc("GET /log", s.auth(s.logPage))
+	mux.HandleFunc("GET /files", s.auth(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/files/", http.StatusMovedPermanently)
+	}))
+	mux.HandleFunc("GET /files/{path...}", s.auth(s.filesPage))
 	return mux
 }
 
@@ -179,6 +184,34 @@ type job struct {
 	Updated   time.Time
 	Elapsed   string
 	Workspace *workspace
+	Receipt   string
+	Homes     []homeLogs
+	Stages    []stageTime
+	Refresh   int
+}
+
+// stageTime is the review view of one stage or role: how often it ran, how
+// long it took in all, and when it first started and last finished.
+type stageTime struct {
+	Name     string
+	Launches int
+	Failures int
+	Total    string
+	First    time.Time
+	Last     time.Time
+}
+
+// homeLogs is what a role's own private directory holds of its native agent's
+// log: the steps it took, as the agent itself wrote them.
+type homeLogs struct {
+	Name       string
+	AgentLog   string
+	ErrorsLog  string
+	Files      []string
+	Calls      int
+	TokensIn   int
+	TokensOut  int
+	Transcript string
 }
 
 type record struct {
@@ -195,6 +228,7 @@ type record struct {
 	Error       string
 	Runtime     bool
 	Person      bool
+	Gap         string
 }
 
 type namedText struct {
@@ -210,6 +244,8 @@ type liveEntry struct {
 	Started     time.Time
 	Stdout      string
 	Stderr      string
+	Home        string
+	AgentLog    string
 }
 
 func (s *server) jobs(now time.Time) ([]*job, error) {
@@ -280,12 +316,20 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			note("run/history.json could not be decoded: %v", err)
 		} else {
 			j.State = &state
+			var previous time.Time
 			for i, result := range state.History {
-				j.Records = append(j.Records, record{Index: i + 1, Role: result.Role, Speaker: result.Speaker,
+				entry := record{Index: i + 1, Role: result.Role, Speaker: result.Speaker,
 					Model: result.ModelPrefix + result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
 					Duration: humanDuration(result.FinishedAt.Sub(result.StartedAt)), Output: result.Output,
 					Diagnostics: result.Diagnostics, Instruction: result.Instruction, Error: result.Error,
-					Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
+					Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
+				if !previous.IsZero() && result.StartedAt.Sub(previous) >= time.Second {
+					entry.Gap = humanDuration(result.StartedAt.Sub(previous))
+				}
+				if result.FinishedAt.After(previous) {
+					previous = result.FinishedAt
+				}
+				j.Records = append(j.Records, entry)
 			}
 		}
 		touch(historyPath)
@@ -315,6 +359,7 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 				Model       string    `json:"model"`
 				Instruction string    `json:"instruction"`
 				StartedAt   time.Time `json:"started_at"`
+				Home        string    `json:"home"`
 			}
 			if err := json.Unmarshal(raw, &entry); err != nil {
 				note("%s could not be decoded: %v", filepath.Base(name), err)
@@ -323,8 +368,17 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			base := strings.TrimSuffix(name, ".json")
 			stdout, _ := os.ReadFile(base + ".stdout")
 			stderr, _ := os.ReadFile(base + ".stderr")
-			j.Live = append(j.Live, liveEntry{Role: entry.Role, Speaker: entry.Speaker, Model: entry.Model,
-				Instruction: entry.Instruction, Started: entry.StartedAt, Stdout: string(stdout), Stderr: string(stderr)})
+			live := liveEntry{Role: entry.Role, Speaker: entry.Speaker, Model: entry.Model,
+				Instruction: entry.Instruction, Started: entry.StartedAt, Stdout: string(stdout), Stderr: string(stderr)}
+			if entry.Home != "" {
+				if rel, err := filepath.Rel(s.runDir, entry.Home); err == nil && filepath.IsLocal(rel) {
+					live.Home = filepath.ToSlash(rel)
+					if log, err := tail(filepath.Join(entry.Home, "logs", "agent.log"), 20000); err == nil {
+						live.AgentLog = log
+					}
+				}
+			}
+			j.Live = append(j.Live, live)
 			touch(base + ".stdout")
 			touch(base + ".stderr")
 		}
@@ -351,6 +405,45 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			if raw, err := os.ReadFile(name); err == nil {
 				j.Reviews = append(j.Reviews, namedText{Name: filepath.Base(filepath.Dir(name)), Text: string(raw)})
 			}
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+		j.Receipt = string(raw)
+	}
+	if homes, err := os.ReadDir(filepath.Join(dir, "homes")); err == nil {
+		for _, home := range homes {
+			if !home.IsDir() {
+				continue
+			}
+			logs := homeLogs{Name: home.Name()}
+			if raw, err := os.ReadFile(filepath.Join(dir, "homes", home.Name(), "logs", "agent.log")); err == nil {
+				logs.Calls, logs.TokensIn, logs.TokensOut = agentUsage(string(raw))
+				if len(raw) > 20000 {
+					logs.AgentLog = fmt.Sprintf("[%d earlier bytes not shown; the whole file is under files]\n", len(raw)-20000) + string(raw[len(raw)-20000:])
+				} else {
+					logs.AgentLog = string(raw)
+				}
+			}
+			if raw, err := os.ReadFile(filepath.Join(dir, "homes", home.Name(), "transcript.json")); err == nil {
+				var indented bytes.Buffer
+				if json.Indent(&indented, raw, "", "  ") == nil {
+					logs.Transcript = indented.String()
+				} else {
+					logs.Transcript = string(raw)
+				}
+			}
+			if text, err := tail(filepath.Join(dir, "homes", home.Name(), "logs", "errors.log"), 20000); err == nil {
+				logs.ErrorsLog = text
+			}
+			filepath.WalkDir(filepath.Join(dir, "homes", home.Name()), func(path string, entry os.DirEntry, err error) error {
+				if err == nil && !entry.IsDir() {
+					if rel, err := filepath.Rel(filepath.Join(dir, "homes", home.Name()), path); err == nil {
+						logs.Files = append(logs.Files, filepath.ToSlash(rel))
+					}
+				}
+				return nil
+			})
+			j.Homes = append(j.Homes, logs)
 		}
 	}
 	j.derive(now)
@@ -413,6 +506,48 @@ func (j *job) derive(now time.Time) {
 	if !j.Started.IsZero() {
 		j.Elapsed = humanDuration(end.Sub(j.Started))
 	}
+	j.Refresh = 30
+	if len(j.Live) > 0 {
+		j.Refresh = 10
+	}
+	if j.State != nil {
+		totals := map[string]*stageTime{}
+		var order []string
+		if j.State.Workflow != nil {
+			for _, stage := range j.State.Workflow.Stages {
+				order = append(order, stage.Name)
+				totals[stage.Name] = &stageTime{Name: stage.Name}
+			}
+		}
+		var durations = map[string]time.Duration{}
+		for _, result := range j.State.History {
+			if result.Speaker == "runtime" || result.Speaker == "requester" {
+				continue
+			}
+			entry, known := totals[result.Role]
+			if !known {
+				entry = &stageTime{Name: result.Role}
+				totals[result.Role] = entry
+				order = append(order, result.Role)
+			}
+			entry.Launches++
+			if result.Error != "" {
+				entry.Failures++
+			}
+			durations[result.Role] += result.FinishedAt.Sub(result.StartedAt)
+			if entry.First.IsZero() || result.StartedAt.Before(entry.First) {
+				entry.First = result.StartedAt
+			}
+			if result.FinishedAt.After(entry.Last) {
+				entry.Last = result.FinishedAt
+			}
+		}
+		for _, name := range order {
+			entry := totals[name]
+			entry.Total = humanDuration(durations[name])
+			j.Stages = append(j.Stages, *entry)
+		}
+	}
 }
 
 // workspace is what the roles have changed so far in the request's checkout,
@@ -421,6 +556,7 @@ type workspace struct {
 	Status    string
 	Diff      string
 	Untracked []namedText
+	Log       string
 	Note      string
 }
 
@@ -455,6 +591,9 @@ func readWorkspace(dir string) *workspace {
 		return w
 	}
 	w.Status = status
+	if log, err := gitRead(dir, "log", "--no-color", "-5", "--format=%H %ci %s"); err == nil {
+		w.Log = log
+	}
 	if diff, err := gitRead(dir, "diff", "--no-color"); err != nil {
 		w.Note = "git diff could not be read: " + err.Error()
 	} else {
@@ -477,6 +616,21 @@ func readWorkspace(dir string) *workspace {
 		w.Untracked = append(w.Untracked, namedText{Name: name, Text: text})
 	}
 	return w
+}
+
+var apiCallLine = regexp.MustCompile(`API call #[0-9]+:.*\bin=([0-9]+) out=([0-9]+)`)
+
+// agentUsage sums what the native agent logged about its own model calls:
+// the count and the input and output tokens, as the agent wrote them.
+func agentUsage(log string) (calls, in, out int) {
+	for _, match := range apiCallLine.FindAllStringSubmatch(log, -1) {
+		calls++
+		var i, o int
+		fmt.Sscan(match[1], &i)
+		fmt.Sscan(match[2], &o)
+		in, out = in+i, out+o
+	}
+	return calls, in, out
 }
 
 func humanDuration(d time.Duration) string {
@@ -530,6 +684,9 @@ func tail(path string, limit int) (string, error) {
 type page struct {
 	Now       string
 	RunDir    string
+	Path      string
+	Base      string
+	Files     []fileEntry
 	Jobs      []*job
 	Job       *job
 	Intake    any
@@ -667,16 +824,81 @@ func (s *server) configPage(w http.ResponseWriter, r *http.Request) {
 func (s *server) logPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	log, err := tail(filepath.Join(s.runDir, "engine.log"), 200000)
+	file, err := os.Open(filepath.Join(s.runDir, "engine.log"))
 	if err != nil {
 		fmt.Fprintf(w, "engine.log could not be read: %v\n", err)
 		return
 	}
-	io.WriteString(w, log)
+	defer file.Close()
+	io.Copy(w, file)
+}
+
+// filesPage serves every file under the queue directory as it is, and lists
+// every directory, so nothing the runtime wrote is out of reach of the page.
+// The root refuses any path that leaves the queue, symbolic links included.
+func (s *server) filesPage(w http.ResponseWriter, r *http.Request) {
+	rel := strings.Trim(r.PathValue("path"), "/")
+	if rel == "" {
+		rel = "."
+	}
+	root, err := os.OpenRoot(s.runDir)
+	if err != nil {
+		http.Error(w, "the queue directory could not be opened: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer root.Close()
+	file, err := root.Open(rel)
+	if err != nil {
+		http.Error(w, "could not be read: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.Error(w, "could not be read: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if !info.IsDir() {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.Copy(w, file)
+		return
+	}
+	entries, err := file.ReadDir(-1)
+	if err != nil {
+		http.Error(w, "could not be listed: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var listing []fileEntry
+	for _, entry := range entries {
+		item := fileEntry{Name: entry.Name(), Dir: entry.IsDir()}
+		if info, err := entry.Info(); err == nil {
+			item.Size, item.Modified = info.Size(), info.ModTime()
+		}
+		listing = append(listing, item)
+	}
+	base := "/files/"
+	if rel != "." {
+		base += rel + "/"
+	}
+	s.render(w, "files", page{Now: s.formatTime(time.Now()), RunDir: s.runDir, Path: rel, Base: base, Files: listing})
+}
+
+type headData struct {
+	Title   string
+	Refresh int
+}
+
+type fileEntry struct {
+	Name     string
+	Dir      bool
+	Size     int64
+	Modified time.Time
 }
 
 const pageTemplates = `
-{{define "head"}}<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="30"><title>{{.}}</title>
+{{define "head"}}<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="{{.Refresh}}"><title>{{.Title}}</title>
 <style>
 body{font-family:system-ui,sans-serif;margin:1.2em;color:#222;background:#fafafa}
 h1,h2,h3{margin:.8em 0 .3em}
@@ -696,10 +918,10 @@ a{color:#246}
 nav a{margin-right:1em}
 </style></head><body>{{end}}
 
-{{define "foot"}}<p class="meta">Rendered {{.Now}}; this page reloads every 30 seconds and shows the queue as it is on disk. Read only.</p></body></html>{{end}}
+{{define "foot"}}<p class="meta">Rendered {{.Now}}; this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.</p></body></html>{{end}}
 
-{{define "overview"}}{{template "head" "ticket engine status"}}
-<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a></nav>
+{{define "overview"}}{{template "head" (head "ticket engine status" 30)}}
+<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/">every file of the queue</a></nav>
 <h1>Requests</h1>
 <p class="meta">Queue {{.RunDir}}, read at {{.Now}}.</p>
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
@@ -709,25 +931,39 @@ nav a{margin-right:1em}
 {{if .Config}}<h2>Intake, as configured</h2><pre>{{pretty .Intake}}</pre>
 {{if .Stages}}<h2>Stages of the run</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
 <h2>Decision and models</h2><pre>{{pretty .Router}}</pre><pre>{{pretty .Selection}}</pre>{{end}}
-<h2>Runtime log (tail)</h2>{{if .Log}}<pre>{{.Log}}</pre><p class="meta"><a href="/log">whole tail</a></p>{{else}}<p class="meta">(nothing yet)</p>{{end}}
+<h2>Runtime log (tail)</h2>{{if .Log}}<pre>{{.Log}}</pre><p class="meta"><a href="/log">the whole log</a></p>{{else}}<p class="meta">(nothing yet)</p>{{end}}
 {{template "foot" .}}{{end}}
 
-{{define "job"}}{{with .Job}}{{template "head" (printf "%s status" .Key)}}
-<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a></nav>
+{{define "files"}}{{template "head" (head (printf "files: %s" .Path) 30)}}
+<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/">every file of the queue</a></nav>
+<h1>{{.RunDir}}{{if ne .Path "."}}/{{.Path}}{{end}}</h1>
+<table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+{{if ne .Path "."}}<tr><td><a href="{{.Base}}../">../</a></td><td></td><td></td></tr>{{end}}
+{{range .Files}}<tr><td><a href="{{$.Base}}{{.Name}}{{if .Dir}}/{{end}}">{{.Name}}{{if .Dir}}/{{end}}</a></td><td>{{if not .Dir}}{{.Size}}{{end}}</td><td>{{time .Modified}}</td></tr>{{end}}
+</table>
+{{template "foot" .}}{{end}}
+
+{{define "job"}}{{with .Job}}{{template "head" (head (printf "%s status" .Key) .Refresh)}}
+<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/jobs/{{.ID}}/">every file of this request</a></nav>
 <h1>{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}} {{.Title}}</h1>
 <p><span class="status">{{.Status}}</span>{{if .Position}} &middot; {{.Position}}{{end}} &middot; elapsed {{.Elapsed}}</p>
 <p class="meta">Requested by {{.Requester}} at {{.Created}}{{if .Link}} &middot; <a href="{{.Link}}">open the issue</a>{{end}} &middot; started {{time .Started}} &middot; last change {{time .Updated}} ({{ago .Updated}})
 {{if .State}}{{if .State.Recovering}} &middot; <b>recovering</b>{{end}}{{if .State.Waiting}} &middot; <b>waiting for the requester</b>{{end}}{{if .State.Pending}} &middot; pending: {{.State.Pending.Role}}{{end}}{{end}}</p>
+{{if .State}}{{if .State.Pending}}{{if .State.Pending.Instruction}}<details><summary>instruction of the pending action ({{.State.Pending.Role}})</summary><pre>{{.State.Pending.Instruction}}</pre></details>{{end}}{{end}}{{end}}
 <p class="meta">Raw files: <a href="/jobs/{{.ID}}/raw/issue.json">issue.json</a> <a href="/jobs/{{.ID}}/raw/request.txt">request.txt</a> <a href="/jobs/{{.ID}}/raw/history.json">history.json</a> <a href="/jobs/{{.ID}}/raw/engine.json">engine.json</a> <a href="/jobs/{{.ID}}/raw/notices.json">notices.json</a> <a href="/jobs/{{.ID}}/workspace">workspace changes as text</a></p>
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 {{range .Live}}<div class="live"><h2>Running now: {{.Role}} ({{.Speaker}}{{if .Model}}, {{.Model}}{{end}}) since {{time .Started}}, {{ago .Started}}</h2>
 <details><summary>instruction handed to it</summary><pre>{{.Instruction}}</pre></details>
-<h3>output so far</h3><pre>{{.Stdout}}</pre>{{if .Stderr}}<h3>diagnostics so far</h3><pre>{{.Stderr}}</pre>{{end}}</div>{{end}}
+<h3>output so far</h3><pre>{{.Stdout}}</pre>{{if .Stderr}}<h3>diagnostics so far</h3><pre>{{.Stderr}}</pre>{{end}}
+{{if .AgentLog}}<h3>the native agent's own log so far{{if .Home}} (<a href="/files/{{.Home}}/logs/agent.log">whole file</a>){{end}}</h3><pre>{{.AgentLog}}</pre>{{end}}</div>{{end}}
 {{if .State}}{{if .State.Workflow}}{{if .State.Workflow.Stages}}<p class="meta">Stages: {{range $i, $s := .State.Workflow.Stages}}{{if $i}} &rarr; {{end}}{{if eq $s.Name $.Job.State.Step}}<b>{{$s.Name}}</b>{{else}}{{$s.Name}}{{end}}{{end}}</p>{{end}}{{end}}{{end}}
+{{if .State}}{{if .State.Workflow}}<details><summary>workflow as recorded for this request</summary><pre>{{pretty .State.Workflow}}</pre></details>{{end}}{{end}}
+{{if .Stages}}<h2>Time by stage</h2><table><tr><th>Stage</th><th>Launches</th><th>Failed</th><th>Total time</th><th>First started</th><th>Last finished</th></tr>
+{{range .Stages}}<tr><td>{{.Name}}</td><td>{{.Launches}}</td><td>{{.Failures}}</td><td>{{.Total}}</td><td>{{time .First}}</td><td>{{time .Last}}</td></tr>{{end}}</table>{{end}}
 <h2>Request</h2><pre>{{.Request}}</pre>
 {{if .Notices}}<h2>Notices posted by the runtime</h2>{{range .Notices}}<pre>{{pretty .}}</pre>{{end}}{{end}}
 <h2>Record ({{len .Records}} entries)</h2>
-{{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}})</p>
+{{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}}){{if .Gap}} &middot; <span class="meta">{{.Gap}} after the previous record</span>{{end}}</p>
 {{if .Error}}<p class="err">Error</p><pre>{{.Error}}</pre>{{end}}
 <details><summary>instruction</summary><pre>{{.Instruction}}</pre></details>
 <p>Output</p><pre>{{.Output}}</pre>
@@ -735,8 +971,14 @@ nav a{margin-right:1em}
 {{if .Answers}}<h2>Requester answers consumed</h2>{{range .Answers}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
 {{if .Reviews}}<h2>Review findings kept by the review command</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
 {{if .Report}}<h2>Report written in the workspace</h2><pre>{{.Report}}</pre>{{end}}
+{{if .Receipt}}<h2>Delivery receipt written by the delivery program</h2><pre>{{.Receipt}}</pre>{{end}}
+{{if .Homes}}<h2>What each role's native agent logged in its own directory</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>home {{$h.Name}}</b> &middot; files: {{range $i, $f := $h.Files}}{{if $i}}, {{end}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f}}">{{$f}}</a>{{end}}</p>
+{{if $h.Calls}}<p class="meta">as the agent logged it: {{$h.Calls}} model calls, {{$h.TokensIn}} input tokens, {{$h.TokensOut}} output tokens</p>{{end}}
+{{if $h.AgentLog}}<details><summary>agent.log (tail)</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>errors.log (tail)</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
+{{if $h.Transcript}}<details><summary>the whole conversation the agent had (messages, tool calls and their results)</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
 <h2>Workspace changes</h2>{{with .Workspace}}{{if .Note}}<p class="meta">{{.Note}}</p>{{end}}
 {{if .Status}}<pre>{{.Status}}</pre>{{else}}{{if not .Note}}<p class="meta">no change in the checkout</p>{{end}}{{end}}
+{{if .Log}}<details><summary>recent commits in the checkout</summary><pre>{{.Log}}</pre></details>{{end}}
 {{if .Diff}}<details open><summary>diff of tracked files</summary><pre>{{.Diff}}</pre></details>{{end}}
 {{range .Untracked}}<details><summary>new file: {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{end}}
 {{template "foot" $}}{{end}}{{end}}

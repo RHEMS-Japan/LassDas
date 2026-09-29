@@ -5,11 +5,32 @@ Run this inside the role's filesystem/network isolation. Make the installed
 or model shortlist belongs here.
 """
 import contextlib
+import json
 import os
 from pathlib import Path
 import signal
 import sys
 import threading
+
+
+def save_transcript(result):
+    """Keep the whole conversation the native agent had, for reading afterwards.
+
+    The report has already been published; nothing here can take it back. The
+    credentials this process was given are replaced before the text is written.
+    """
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if not isinstance(messages, list):
+        return
+    try:
+        text = json.dumps(messages, ensure_ascii=False, indent=1, default=str)
+        for name in ("OPENROUTER_API_KEY", "TASK_TRACKER_KEY"):
+            value = os.environ.get(name)
+            if value:
+                text = text.replace(value, "[credential]")
+        (Path(os.environ["HERMES_HOME"]) / "transcript.json").write_text(text, encoding="utf-8")
+    except Exception as error:
+        print(f"Transcript not saved: {error}", file=sys.stderr)
 
 
 def main():
@@ -47,8 +68,13 @@ def main():
             base_url=os.environ["OPENROUTER_BASE_URL"],
             api_key=os.environ["OPENROUTER_API_KEY"],
             provider="openrouter", model=os.environ["NATIVE_MODEL"],
-            enabled_toolsets=["terminal", "file"], quiet_mode=True,
-            tool_progress_mode="off",
+            enabled_toolsets=["terminal", "file"],
+            # Each tool call and result preview is printed as it happens; with
+            # stdout redirected they reach stderr, where the runtime's live
+            # copy shows them while the role works. The report alone goes to
+            # stdout. The preview length is the operator's setting.
+            quiet_mode=False, tool_progress_mode="all",
+            log_prefix_chars=int(os.environ.get("NATIVE_LOG_PREFIX_CHARS", "2000")),
             reasoning_config=reasoning,
             # This bridge targets OpenRouter, including an explicitly supplied
             # relay. Native URL heuristics can omit reasoning for a relay host;
@@ -95,6 +121,7 @@ def main():
         sys.stdout.flush()
         if result.get("error"):
             print(result["error"], file=sys.stderr)
+        save_transcript(result)
         return 128 + stop_signal if stop_signal else (1 if result.get("failed") else 0)
     finally:
         finished.set()

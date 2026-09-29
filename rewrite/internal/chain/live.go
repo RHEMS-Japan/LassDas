@@ -31,7 +31,7 @@ func openLive(p Process, role Role, assignment Assignment, env map[string]string
 	name := strings.NewReplacer("/", "_", string(filepath.Separator), "_", "..", "_").Replace(role.Name + "-" + p.Name)
 	base := filepath.Join(p.Live, name)
 	record := map[string]any{"role": role.Name, "speaker": p.Name, "started_at": time.Now().UTC(),
-		"instruction": assignment.Instruction}
+		"instruction": assignment.Instruction, "home": env["TASK_HOME"], "workspace": env["TASK_WORKSPACE"]}
 	if p.ModelEnv != "" {
 		record["model"] = env[p.ModelEnv]
 	}

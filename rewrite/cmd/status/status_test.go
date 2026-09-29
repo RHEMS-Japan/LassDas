@@ -266,3 +266,94 @@ func TestIssueLinksComeFromTheTrackerBase(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryFileOfTheQueueIsReachableAndNothingOutsideIt(t *testing.T) {
+	root := fixtureQueue(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("OUTSIDE-SECRET"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "jobs", "7", "escape")); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	response, body := get(t, ts, "/files/")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("%d: %s", response.StatusCode, body)
+	}
+	expectAll(t, body, `href="/files/jobs/"`, "engine.log")
+	_, body = get(t, ts, "/files/jobs/7/")
+	expectAll(t, body, `href="/files/jobs/7/issue.json"`, `href="/files/jobs/7/run/"`, `href="/files/jobs/7/homes/"`, `href="/files/jobs/7/../"`)
+	response, body = get(t, ts, "/files/jobs/7/run/history.json")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "OUTPUT-ELICIT") ||
+		!strings.HasPrefix(response.Header.Get("Content-Type"), "text/plain") {
+		t.Fatalf("%d %s: %s", response.StatusCode, response.Header.Get("Content-Type"), body)
+	}
+	if _, body = get(t, ts, "/files/jobs/7/homes/1-0/review.md"); !strings.Contains(body, "REVIEW-FINDING") {
+		t.Fatalf("home file: %s", body)
+	}
+	if _, body = get(t, ts, "/files"); !strings.Contains(body, `href="/files/jobs/"`) {
+		t.Fatalf("/files did not lead to the listing: %s", body)
+	}
+	for _, path := range []string{"/files/jobs/7/escape/secret.txt", "/files/jobs/7/escape/", "/files/../etc/passwd", "/files/..%2F..%2Fetc%2Fpasswd"} {
+		response, body := get(t, ts, path)
+		if response.StatusCode == http.StatusOK || strings.Contains(body, "OUTSIDE-SECRET") || strings.Contains(body, "root:") {
+			t.Errorf("%s answered %d: %.80s", path, response.StatusCode, body)
+		}
+	}
+}
+
+func TestReviewViewsShowTimeByStageGapsUsageAndTranscript(t *testing.T) {
+	root := fixtureQueue(t)
+	job := filepath.Join(root, "jobs", "7")
+	raw, err := os.ReadFile(filepath.Join(job, "run", "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Pending.Instruction = "PENDING-INSTRUCTION"
+	if raw, err = json.Marshal(state); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(job, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(job, name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join("run", "history.json"), string(raw))
+	write(filepath.Join("homes", "1-0", "logs", "agent.log"),
+		"2026-01-02 00:15:01 INFO agent.conversation_loop: API call #1: model=x provider=y in=100 out=20 total=120 latency=1.0s\n"+
+			"2026-01-02 00:15:05 INFO agent.tool_executor: tool terminal completed (0.1s, 50 chars)\n"+
+			"2026-01-02 00:15:09 INFO agent.conversation_loop: API call #2: model=x provider=y in=250 out=30 total=280 latency=2.0s\n")
+	write(filepath.Join("homes", "1-0", "transcript.json"), `[{"role":"assistant","content":"TRANSCRIPT-TEXT"}]`)
+	write(filepath.Join("workspace", ".git", "ticket-engine", "delivery.json"), `{"pull_request": 41, "merge_sha": "RECEIPT-SHA"}`)
+	write(filepath.Join("live", "implement-implement-process.json"),
+		`{"role":"implement","speaker":"implement-process","model":"vendor/worker","instruction":"LIVE-INSTRUCTION","started_at":"2026-01-02T00:15:00Z","home":"`+filepath.Join(job, "homes", "1-0")+`"}`)
+	big := strings.Repeat("LOG-LINE\n", 40000)
+	if err := os.WriteFile(filepath.Join(root, "engine.log"), []byte(big), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	response, body := get(t, ts, "/jobs/7")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("%d: %s", response.StatusCode, body)
+	}
+	expectAll(t, body, "PENDING-INSTRUCTION", "Time by stage",
+		"<td>elicit</td><td>1</td><td>0</td><td>1m00s</td>", "<td>verify</td><td>1</td><td>1</td><td>1m00s</td>", "<td>implement</td><td>0</td>",
+		"1m00s after the previous record", "2 model calls, 350 input tokens, 50 output tokens", "TRANSCRIPT-TEXT",
+		"RECEIPT-SHA", "tool terminal completed", `content="10"`, "/files/jobs/7/homes/1-0/logs/agent.log", "the native agent's own log so far")
+	response, body = get(t, ts, "/log")
+	if response.StatusCode != http.StatusOK || len(body) != len(big) || strings.Contains(body, "not shown") {
+		t.Fatalf("/log: %d, %d of %d bytes", response.StatusCode, len(body), len(big))
+	}
+	if _, body = get(t, ts, "/"); !strings.Contains(body, `content="30"`) {
+		t.Error("the overview should reload every 30 seconds")
+	}
+}
