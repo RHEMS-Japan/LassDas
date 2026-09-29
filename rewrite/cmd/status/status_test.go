@@ -110,6 +110,28 @@ func get(t *testing.T, ts *httptest.Server, path string, credentials ...string) 
 	return response, string(body)
 }
 
+// inColumn returns the board column of one stage.
+func inColumn(body, stage string) string {
+	start := strings.Index(body, `<section class="col`)
+	for start >= 0 {
+		end := strings.Index(body[start+1:], `<section class="col`)
+		var section string
+		if end < 0 {
+			section = body[start:]
+		} else {
+			section = body[start : start+1+end]
+		}
+		if strings.Contains(section, `data-stage="`+stage+`"`) {
+			return section
+		}
+		if end < 0 {
+			break
+		}
+		start = start + 1 + end
+	}
+	return ""
+}
+
 func expectAll(t *testing.T, body string, wants ...string) {
 	t.Helper()
 	for _, want := range wants {
@@ -126,9 +148,11 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 		t.Fatalf("%d: %s", response.StatusCode, body)
 	}
 	expectAll(t, body, "EXAMPLE-7", "Add a docstring", "running implement", "step 2 of 3: implement",
-		"LOG-LINE-2", "issue_ids", "project_id", "elicit &rarr; implement &rarr; verify", "&#34;mode&#34;: &#34;stages&#34;",
-		`<div class="lane running"><h2>Running (1)</h2>`, `<h2>Awaiting answer (0)</h2>`, `<h2>Needs attention (0)</h2>`, `<h2>Delivered (0)</h2>`,
-		`<span class="passed">elicit</span> &rarr; <span class="current">implement</span> &rarr; <span class="ahead">verify</span>`, "fixture requester")
+		"LOG-LINE-2", "issue_ids", "project_id", `<span class="chip">elicit<small>elicit</small></span>`, "&#34;mode&#34;: &#34;stages&#34;",
+		`Running <b>1</b>`, `Awaiting answer <b>0</b>`, `Needs attention <b>0</b>`, `Delivered <b>0</b>`, "fixture requester")
+	if !strings.Contains(inColumn(body, "implement"), `data-key="EXAMPLE-7"`) {
+		t.Error("the running request must sit in the column of its stage")
+	}
 	if strings.Contains(body, "engine.log is not present") {
 		t.Error("the log tail was present but reported missing")
 	}
@@ -143,7 +167,7 @@ func TestRequestPageShowsEverythingOnDisk(t *testing.T) {
 	expectAll(t, body, "REQUEST-TEXT", "OUTPUT-ELICIT", "INSTRUCTION-ELICIT", "RUNTIME-NOTE", "ANSWER-TEXT",
 		"exit status 1", "DIAG-TEXT", "gateway/vendor/model", "Running now: implement", "vendor/worker",
 		"LIVE-INSTRUCTION", "LIVE-OUT-SO-FAR", "LIVE-ERR-SO-FAR", "NOTICE-TEXT", "REVIEW-FINDING", "REPORT-TEXT",
-		"answer-3.json", "https://space.example/view/EXAMPLE-7", "fixture requester", "<b>implement</b>",
+		"answer-3.json", "https://space.example/view/EXAMPLE-7", "fixture requester", `<span class="chip current">implement<small>implement</small></span>`,
 		"/jobs/7/raw/history.json", "no checkout yet")
 }
 
@@ -182,7 +206,7 @@ func TestDamagedRecordsAreReportedNotHidden(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "no run record yet") {
 		t.Fatalf("%d: %s", response.StatusCode, body)
 	}
-	expectAll(t, body, `<h2>Needs attention (1)</h2>`, "history.json could not be decoded")
+	expectAll(t, body, `Needs attention <b>1</b>`, "history.json could not be decoded")
 }
 
 func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
@@ -218,17 +242,15 @@ func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
 		`{"notices":[{"kind":"resume","text":"RESUMED","written_at":"2026-01-02T00:20:00Z"}]}`)
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `<h2>Running (2)</h2>`, `<h2>Awaiting answer (1)</h2>`, `<h2>Needs attention (2)</h2>`, `<h2>Delivered (1)</h2>`,
-		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT", `<span class="passed">elicit</span> &rarr; <span class="passed">confirm_report</span>`)
-	for _, section := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"}} {
-		start := strings.Index(body, `<div class="lane `+section.lane+`">`)
-		end := strings.Index(body[start+1:], `<div class="lane `)
-		if end < 0 {
-			end = len(body) - start - 1
+	expectAll(t, body, `Running <b>2</b>`, `Awaiting answer <b>1</b>`, `Needs attention <b>2</b>`, `Delivered <b>1</b>`,
+		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT")
+	for _, want := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"}} {
+		if !strings.Contains(body, `<article class="card `+want.lane+`" data-key="`+want.key+`">`) {
+			t.Errorf("%s is not a %s card", want.key, want.lane)
 		}
-		if !strings.Contains(body[start:start+1+end], section.key) {
-			t.Errorf("%s is not in the %s lane", section.key, section.lane)
-		}
+	}
+	if !strings.Contains(inColumn(body, "done"), `data-key="EXAMPLE-8"`) {
+		t.Error("a delivered request must sit in the last column")
 	}
 }
 
@@ -397,7 +419,7 @@ func TestReviewViewsShowTimeByStageGapsUsageAndTranscript(t *testing.T) {
 		t.Fatalf("%d: %s", response.StatusCode, body)
 	}
 	expectAll(t, body, "PENDING-INSTRUCTION", "Time by stage",
-		"<td>elicit</td><td>1</td><td>0</td><td>1m00s</td>", "<td>verify</td><td>1</td><td>1</td><td>1m00s</td>", "<td>implement</td><td>0</td>",
+		`<td>elicit <small class="meta">elicit</small></td><td>1</td><td>0</td><td>1m00s</td>`, `<td>verify <small class="meta">verify</small></td><td>1</td><td>1</td><td>1m00s</td>`, `<td>implement <small class="meta">implement</small></td><td>0</td>`,
 		"1m00s after the previous record", "2 model calls, 350 input tokens, 50 output tokens", "TRANSCRIPT-TEXT",
 		"RECEIPT-SHA", "tool terminal completed", `content="10"`, "/files/jobs/7/homes/1-0/logs/agent.log", "the native agent&#39;s own log so far")
 	response, body = get(t, ts, "/log")
@@ -528,9 +550,9 @@ func TestLabelsSwitchToJapaneseAndBack(t *testing.T) {
 		body, _ := io.ReadAll(response.Body)
 		return string(body)
 	}
-	expectAll(t, fetch("/"), "<h1>依頼</h1>", "<h2>実行中 (1)</h2>", "<h2>返事待ち (0)</h2>", "<h2>要対応 (0)</h2>", "<h2>納品済み (0)</h2>",
-		"実行中: implement", "工程 2/3: implement", "受付の設定", `<a href="/lang/en">English</a>`, " 前")
-	expectAll(t, fetch("/jobs/7"), "工程別の時間", "依頼の原文", "記録 (4 件)", "実行中: implement", "渡した指示", "<title>EXAMPLE-7 状態</title>")
+	expectAll(t, fetch("/"), "<h1>依頼</h1>", "実行中 <b>1</b>", "返事待ち <b>0</b>", "要対応 <b>0</b>", "納品済み <b>0</b>",
+		"実行中: 実装", "工程 2/3: 実装", "受付の設定", `<a href="/lang/en">English</a>`, " 前", "要件確定<small>elicit</small>")
+	expectAll(t, fetch("/jobs/7"), "工程別の時間", "依頼の原文", "記録 (4 件)", "実行中: 実装", "渡した指示", "<title>EXAMPLE-7 状態</title>", "<b>検証</b>")
 	expectAll(t, fetch("/files/jobs/7/"), "<th>名前</th>")
 	if body := fetch("/jobs/7"); strings.Contains(body, "OUTPUT-ELICIT") == false || strings.Contains(body, "REQUEST-TEXT") == false {
 		t.Error("the content must stay as it is in Japanese")
@@ -694,7 +716,7 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 	}
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `<h2>Running (1)</h2>`, `<h2>Needs attention (0)</h2>`, "recovering after a restart; assigned to implement")
+	expectAll(t, body, `Running <b>1</b>`, `Needs attention <b>0</b>`, "recovering after a restart; assigned to implement")
 	if strings.Contains(body, "elapsed 0s") || !strings.Contains(body, "elapsed ") {
 		t.Errorf("the elapsed time must count from the first record: %s", body[strings.Index(body, "elapsed"):][:40])
 	}
@@ -702,7 +724,7 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 	if want := started.In(time.Local).Format("2006-01-02 15:04:05"); !strings.Contains(page, want) {
 		t.Errorf("the request page must show the first record's start (%s) as the start", want)
 	}
-	expectAll(t, body, `<span class="passed">elicit</span> &rarr; <span class="current">implement</span>`)
+	expectAll(t, page, `<span class="chip passed">elicit<small>elicit</small></span>`, `<span class="chip current">implement<small>implement</small></span>`)
 }
 
 func TestTheCardNamesTheStageRunningNowNotTheLastRecorded(t *testing.T) {
@@ -725,9 +747,12 @@ func TestTheCardNamesTheStageRunningNowNotTheLastRecorded(t *testing.T) {
 	}
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, "step 2 of 3: implement", `<span class="passed">elicit</span> &rarr; <span class="current">implement</span>`)
+	expectAll(t, body, "step 2 of 3: implement")
 	if strings.Contains(body, "step 1 of 3") {
 		t.Error("the card named the stage before the one running")
+	}
+	if !strings.Contains(inColumn(body, "implement"), `data-key="EXAMPLE-7"`) || strings.Contains(inColumn(body, "elicit"), `data-key="EXAMPLE-7"`) {
+		t.Error("the card must sit in the column of the stage running now")
 	}
 }
 
