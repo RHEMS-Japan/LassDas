@@ -271,8 +271,11 @@ def reviewed(stdin_text, model):
 
 
 def main():
-    stdin_text = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
+        # Read as bytes and decode leniently: a stray byte in the runtime's
+        # text must not become a traceback, which an ordered run would read
+        # as a send-back for ever.
+        stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
         return review(stdin_text)
     except Exception as error:  # never a traceback and never exit 1: that would be read as a send-back for ever
         print("Review: NOT REVIEWED. Unexpected %s: %s. The work goes on unreviewed this time."

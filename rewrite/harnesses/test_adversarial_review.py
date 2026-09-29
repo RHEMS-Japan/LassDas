@@ -222,6 +222,28 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("[test output cut here:", text)
         self.assertIn("TAIL-OF-OUTPUT", text)
 
+    def test_an_unexpected_error_and_a_stray_byte_never_end_with_a_traceback_or_status_one(self):
+        service = ModelStandIn([{"verdict": (True, "x")}, {"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        # An unexpected exception (urlsplit refuses this URL) is caught at the top.
+        finished = self.run_review(service, REVIEW_MODEL_URL="https://[oops/v1/chat/completions")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("NOT REVIEWED", finished.stdout)
+        self.assertIn("Unexpected", finished.stdout)
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertEqual(service.requests, [])
+        # A stray byte in the runtime's text is decoded leniently under a strict locale too.
+        environment = {"PATH": os.environ["PATH"], "LANG": "en_US.UTF-8", "PYTHONIOENCODING": "utf-8",
+                       "PYTHONDONTWRITEBYTECODE": "1", "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home),
+                       "REVIEW_MODEL_URL": service.url, "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY",
+                       "REVIEW_API_KEY": KEY, "REVIEW_TEST_COMMANDS": "", "REVIEW_DIFF_PATHS": "src tests",
+                       "REVIEW_ROUNDS": "2", "REVIEW_ATTEMPTS": "1", "REVIEW_TIMEOUT_SECONDS": "30"}
+        finished = subprocess.run([sys.executable, "-B", str(SCRIPT)], input=b"Original request:\nfix \xff\xfe it\n",
+                                  capture_output=True, env=environment, timeout=120)
+        self.assertEqual(finished.returncode, 0, finished.stderr.decode(errors="replace"))
+        self.assertNotIn(b"Traceback", finished.stderr)
+        self.assertIn("PASSED", finished.stdout.decode(errors="replace"))
+
     def test_the_credential_is_sent_only_over_https_or_loopback(self):
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
