@@ -401,11 +401,10 @@ the work back to the `work` stage, and 0 otherwise; the findings are printed,
 so they join the history as an observation the worker and the report writer
 read, and the command writes nothing into the workspace (its send-back counter
 and log live in the process's own directory, `TASK_HOME`). The runtime reads
-the exit status and nothing else. Two settings keep the review from ending or
-stalling a request. `REVIEW_ROUNDS` caps the send-backs, counting only the
-times the work was actually sent back; once the cap is reached the next
-blocking verdict lets the work through with the objections recorded as
-unresolved. And only a real blocking verdict exits 1: everything that keeps a
+the exit status and nothing else. There is no cap on send-backs: the review
+sends the work back for as long as it finds a blocking defect, the count so far
+is printed with each verdict, and a run that will not converge is ended by the
+requester's stop comment, not by a limit. Only a real blocking verdict exits 1: everything that keeps a
 verdict from being obtained, a mistyped setting, a test command that cannot
 start, an endpoint that is not HTTPS, a change that cannot be read, diff
 paths that match no change, a model service that is down or returns none,

@@ -94,7 +94,7 @@ class AdversarialReviewTests(unittest.TestCase):
                        "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "REVIEW_MODEL_URL": service.url,
                        "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY", "REVIEW_API_KEY": KEY,
                        "REVIEW_TEST_COMMANDS": sys.executable + " -c \"print('tests ran fine')\"",
-                       "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ROUNDS": "2", "REVIEW_ATTEMPTS": "2",
+                       "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ATTEMPTS": "2",
                        "REVIEW_TIMEOUT_SECONDS": "30"}
         environment.update(extra)
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
@@ -131,18 +131,6 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(sent["tool_choice"]["function"]["name"], "verdict")
         self.assertIn("PASS", self.review_log())
 
-    def test_the_operators_cap_counts_send_backs_and_then_lets_the_work_through_with_the_objections(self):
-        (self.home / "review-send-backs").write_text("2")
-        service = ModelStandIn([{"verdict": (True, "still wrong")}])
-        self.addCleanup(service.close)
-        finished = self.run_review(service)
-        self.assertEqual(finished.returncode, 0, finished.stderr)
-        self.assertIn("UNRESOLVED after 2 send-backs", self.review_log())
-        self.assertIn("LET THROUGH AT THE OPERATOR'S LIMIT", finished.stdout)
-        self.assertNotIn("PASSED", finished.stdout)
-        self.assertIn("still wrong", self.review_log())
-        self.assertEqual((self.home / "review-send-backs").read_text(), "2", "the cap does not consume a send-back")
-
     def test_a_pass_or_a_missing_verdict_does_not_consume_the_send_back_budget(self):
         service = ModelStandIn([{"status": 500}, {"verdict": None}, {"verdict": (False, "")}, {"verdict": (True, "a real defect")}])
         self.addCleanup(service.close)
@@ -177,7 +165,7 @@ class AdversarialReviewTests(unittest.TestCase):
         # which in an ordered run would otherwise repeat for ever.
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
-        for name, value in (("REVIEW_MODEL_URL", ""), ("REVIEW_ROUNDS", "two"), ("REVIEW_ROUNDS", "-1"),
+        for name, value in (("REVIEW_MODEL_URL", ""),
                             ("REVIEW_ATTEMPTS", "many"), ("TASK_HOME", ""), ("TASK_HOME", str(self.workspace / "src" / "tool.py" / "x")),
                             ("REVIEW_TEST_COMMANDS", "echo 'unterminated"), ("REVIEW_DIFF_PATHS", "app lib")):
             finished = self.run_review(service, **{name: value})
@@ -237,7 +225,7 @@ class AdversarialReviewTests(unittest.TestCase):
                        "PYTHONDONTWRITEBYTECODE": "1", "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home),
                        "REVIEW_MODEL_URL": service.url, "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY",
                        "REVIEW_API_KEY": KEY, "REVIEW_TEST_COMMANDS": "", "REVIEW_DIFF_PATHS": "src tests",
-                       "REVIEW_ROUNDS": "2", "REVIEW_ATTEMPTS": "1", "REVIEW_TIMEOUT_SECONDS": "30"}
+                       "REVIEW_ATTEMPTS": "1", "REVIEW_TIMEOUT_SECONDS": "30"}
         finished = subprocess.run([sys.executable, "-B", str(SCRIPT)], input=b"Original request:\nfix \xff\xfe it\n",
                                   capture_output=True, env=environment, timeout=120)
         self.assertEqual(finished.returncode, 0, finished.stderr.decode(errors="replace"))
