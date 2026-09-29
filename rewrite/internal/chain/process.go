@@ -45,8 +45,10 @@ type Process struct {
 	// Live names a directory the runtime owns for this request. While the
 	// process runs, its output is copied there as it arrives, with every
 	// configured credential replaced, so an operator can read what is
-	// happening now; the copy is removed once the record is complete.
-	Live string `json:"-"`
+	// happening now; the copy is removed once the record is complete. The
+	// watch mode sets it for each accepted request and it travels with the
+	// request's own configuration file, so the run made from that file has it.
+	Live string `json:"live_directory,omitempty"`
 }
 
 type Role struct {

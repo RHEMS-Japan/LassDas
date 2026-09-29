@@ -200,6 +200,13 @@ type job struct {
 	Lane      string
 	Dots      string
 	Attention string
+	Trail     []stageMark
+}
+
+// stageMark is one stage on a card: passed, current or ahead.
+type stageMark struct {
+	Name  string
+	State string
 }
 
 // lane is one column of the board: the requests in one of four situations
@@ -254,7 +261,12 @@ type homeLogs struct {
 	TokensOut  int
 	UsageNote  string
 	Transcript string
+	MoreFiles  int
 }
+
+// homeFileLimit bounds how many of a role's files the request page names; a
+// toolchain cache in a role's directory holds thousands, all under files.
+const homeFileLimit = 200
 
 type record struct {
 	Index       int
@@ -516,6 +528,10 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 			filepath.WalkDir(filepath.Join(dir, "homes", home.Name()), func(path string, entry os.DirEntry, err error) error {
 				if err == nil && !entry.IsDir() {
+					if len(logs.Files) >= homeFileLimit {
+						logs.MoreFiles++
+						return nil
+					}
 					if rel, err := filepath.Rel(filepath.Join(dir, "homes", home.Name()), path); err == nil {
 						logs.Files = append(logs.Files, homeFile{Name: filepath.ToSlash(rel), Link: entry.Type()&fs.ModeSymlink != 0})
 					}
@@ -535,8 +551,12 @@ func (j *job) derive(now time.Time) {
 	if state := j.State; state != nil {
 		var last time.Time
 		for _, result := range state.History {
-			if j.Started.IsZero() || result.StartedAt.Before(j.Started) {
-				j.Started = result.StartedAt
+			started := result.StartedAt
+			if started.IsZero() {
+				started = result.FinishedAt
+			}
+			if !started.IsZero() && (j.Started.IsZero() || started.Before(j.Started)) {
+				j.Started = started
 			}
 			if result.FinishedAt.After(last) {
 				last = result.FinishedAt
@@ -599,7 +619,12 @@ func (j *job) derive(now time.Time) {
 		var last time.Time
 		if n := len(state.History); n > 0 {
 			last = state.History[n-1].FinishedAt
-			if record := state.History[n-1]; record.Speaker == "runtime" && record.Error != "" && len(j.Live) == 0 {
+			record := state.History[n-1]
+			// The runtime's own failure (a router it could not reach) needs a
+			// person; its note that a stopped action is being taken up again
+			// after a restart is the run going on, not a call for attention.
+			if record.Speaker == "runtime" && record.Error != "" && len(j.Live) == 0 &&
+				!strings.HasPrefix(record.Error, "The process stopped while this action was pending") {
 				j.Lane, j.Attention = "attention", record.Error
 			}
 		}
@@ -619,11 +644,14 @@ func (j *job) derive(now time.Time) {
 				switch {
 				case stage.Name == state.Step:
 					dots.WriteString("◉")
+					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "current"})
 					reached = true
 				case reached:
 					dots.WriteString("○")
+					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "ahead"})
 				default:
 					dots.WriteString("●")
+					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
 				}
 			}
 			j.Dots = dots.String()
@@ -1180,7 +1208,8 @@ var japanese = map[string]string{
 	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
 	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
 	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
-	"no checkout yet": "checkout はまだない", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
+	"no checkout yet": "checkout はまだない", "more under files": "件は files 配下",
+	"The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.": "この工程の実行中に本体が止まりました。報告は途中までの可能性があり、操作は既に反映されているかもしれません。作業場所と外部の状態を確認してから繰り返します。", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
 }
 
 func translate(lang, text string) string {
@@ -1253,6 +1282,7 @@ nav a{margin-right:1em}
 .lane.running .card{border-color:#2a7}.lane.awaiting .card{border-color:#d90}.lane.attention .card{border-color:#c33}.lane.delivered .card{border-color:#46a}
 .card .key{font-weight:bold}.card .title{margin:.2em 0 .4em}.card .line{color:#444;font-size:.92em;margin:.15em 0}.card .dots{letter-spacing:.15em;color:#357}
 .card .attn{color:#a00;font-size:.9em;white-space:pre-wrap}
+.card .trail{font-size:.85em;line-height:1.6}.trail .passed{color:#888}.trail .current{font-weight:bold;color:#146;background:#e6f0ff;padding:0 .3em;border-radius:3px}.trail .ahead{color:#aaa}
 .empty{color:#888;font-size:.9em;padding:.4em}
 </style></head><body>{{end}}
 
@@ -1266,8 +1296,8 @@ nav a{margin-right:1em}
 {{if not .Jobs}}<p>{{t .Lang "No request has been accepted into this queue yet."}}</p>{{end}}
 <div class="board">{{range .Lanes}}<div class="lane {{.Key}}"><h2>{{t $.Lang .Title}} ({{len .Jobs}})</h2>
 {{range .Jobs}}<div class="card"><div class="key"><a href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a></div><div class="title">{{.Title}}</div>
-<div class="line status">{{st $.Lang .Status}}</div>{{if .Position}}<div class="line">{{st $.Lang .Position}} <span class="dots">{{.Dots}}</span></div>{{end}}
-{{if .Attention}}<div class="attn">{{.Attention}}</div>{{end}}
+<div class="line status">{{st $.Lang .Status}}</div>{{if .Position}}<div class="line">{{st $.Lang .Position}}</div>{{end}}{{if .Trail}}<div class="line trail">{{range $i, $s := .Trail}}{{if $i}} &rarr; {{end}}<span class="{{$s.State}}">{{$s.Name}}</span>{{end}}</div>{{end}}
+{{if .Attention}}<div class="attn">{{t $.Lang .Attention}}</div>{{end}}
 <div class="line meta">{{t $.Lang "elapsed"}} {{.Elapsed}} &middot; {{t $.Lang "last change"}} {{ago $.Lang .Updated}}{{if .Requester}} &middot; {{.Requester}}{{end}}</div></div>{{else}}<div class="empty">{{t $.Lang "none"}}</div>{{end}}</div>{{end}}</div>
 {{if .Config}}<h2>{{t .Lang "Intake, as configured"}}</h2><pre>{{pretty .Intake}}</pre>
 {{if .Stages}}<h2>{{t .Lang "Stages of the run"}}</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
@@ -1305,7 +1335,7 @@ nav a{margin-right:1em}
 {{if .Notices}}<h2>{{t $.Lang "Notices posted by the runtime"}}</h2>{{range .Notices}}<pre>{{pretty .}}</pre>{{end}}{{end}}
 <h2>{{t $.Lang "Record"}} ({{len .Records}} {{t $.Lang "entries"}})</h2>
 {{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}}){{if .Gap}} &middot; <span class="meta">{{.Gap}} {{t $.Lang "after the previous record"}}</span>{{end}}</p>
-{{if .Error}}<p class="err">{{t $.Lang "Error"}}</p><pre>{{.Error}}</pre>{{end}}
+{{if .Error}}<p class="err">{{t $.Lang "Error"}}</p><pre>{{if .Runtime}}{{t $.Lang .Error}}{{else}}{{.Error}}{{end}}</pre>{{end}}
 <details><summary>{{t $.Lang "instruction"}}</summary><pre>{{.Instruction}}</pre></details>
 <p>{{t $.Lang "Output"}}</p><pre>{{.Output}}</pre>
 {{if .Diagnostics}}<details><summary>{{t $.Lang "diagnostics (stderr)"}}</summary><pre>{{.Diagnostics}}</pre></details>{{end}}</div>{{end}}
@@ -1313,7 +1343,7 @@ nav a{margin-right:1em}
 {{if .Reviews}}<h2>{{t $.Lang "Review findings kept by the review command"}}</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
 {{if .Report}}<h2>{{t $.Lang "Report written in the workspace"}}</h2><pre>{{.Report}}</pre>{{end}}
 {{if .Receipt}}<h2>{{t $.Lang "Delivery receipt written by the delivery program"}}</h2><pre>{{.Receipt}}</pre>{{end}}
-{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}{{if $f.Link}}{{$f.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f.Name}}">{{$f.Name}}</a>{{end}}{{end}}</p>
+{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}{{if $f.Link}}{{$f.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f.Name}}">{{$f.Name}}</a>{{end}}{{end}}{{if $h.MoreFiles}} <span class="meta">(+{{$h.MoreFiles}} {{t $.Lang "more under files"}}: <a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/">{{$h.Name}}/</a>)</span>{{end}}</p>
 {{if $h.Calls}}<p class="meta">{{t $.Lang "as the agent logged it:"}} {{$h.Calls}} {{t $.Lang "model calls"}}, {{$h.TokensIn}} {{t $.Lang "input tokens"}}, {{$h.TokensOut}} {{t $.Lang "output tokens"}}</p>{{end}}{{if $h.UsageNote}}<p class="meta">{{$h.UsageNote}}</p>{{end}}
 {{if $h.AgentLog}}<details><summary>{{t $.Lang "agent.log (tail)"}}</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>{{t $.Lang "errors.log (tail)"}}</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
 {{if $h.Transcript}}<details><summary>{{t $.Lang "the whole conversation the agent had (messages, tool calls and their results)"}}</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
