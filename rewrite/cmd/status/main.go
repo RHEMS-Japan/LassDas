@@ -113,9 +113,20 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		}
 	}
 	s.templates = template.Must(template.New("").Funcs(template.FuncMap{
-		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON, "t": translate, "st": localize,
+		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON, "t": translate, "st": localize, "sn": stageName,
+		"pct": func(index, count int) int {
+			if count <= 0 {
+				return 0
+			}
+			return index * 100 / count
+		},
 		"head": func(lang, title string, refresh int) headData {
 			return headData{Title: translate(lang, title), Refresh: refresh, Lang: lang}
+		},
+		"card": func(p page, j *job) cardData {
+			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
+				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention,
+				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester}
 		},
 	}).Parse(pageTemplates))
 	return s, nil
@@ -172,35 +183,39 @@ var answerName = regexp.MustCompile(`^answer-[0-9]+\.json$`)
 // job is everything on disk about one accepted request, read as it is. Every
 // file that cannot be read or decoded is reported in Notes instead of hidden.
 type job struct {
-	ID        string
-	Key       string
-	Title     string
-	Requester string
-	Created   string
-	Link      string
-	Request   string
-	State     *chain.State
-	Records   []record
-	Answers   []namedText
-	Live      []liveEntry
-	Notices   []map[string]any
-	Report    string
-	Reviews   []namedText
-	Notes     []string
-	Status    string
-	Position  string
-	Started   time.Time
-	Updated   time.Time
-	Elapsed   string
-	Workspace *workspace
-	Receipt   string
-	Homes     []homeLogs
-	Stages    []stageTime
-	Refresh   int
-	Lane      string
-	Dots      string
-	Attention string
-	Trail     []stageMark
+	ID         string
+	Key        string
+	Title      string
+	Requester  string
+	Created    string
+	Link       string
+	Request    string
+	State      *chain.State
+	Records    []record
+	Answers    []namedText
+	Live       []liveEntry
+	Notices    []map[string]any
+	Report     string
+	Reviews    []namedText
+	Notes      []string
+	Status     string
+	Position   string
+	Started    time.Time
+	Updated    time.Time
+	Elapsed    string
+	Workspace  *workspace
+	Receipt    string
+	Homes      []homeLogs
+	Stages     []stageTime
+	Refresh    int
+	Lane       string
+	Dots       string
+	Attention  string
+	Trail      []stageMark
+	Current    string
+	StageIndex int
+	StageCount int
+	Model      string
 }
 
 // stageMark is one stage on a card: passed, current or ahead.
@@ -211,10 +226,12 @@ type stageMark struct {
 
 // lane is one column of the board: the requests in one of four situations
 // the operator reads at a glance, in the order the old board used.
+// lane is one of the four situations a request can be in; the board shows it
+// as the colour and badge of a card, and the summary strip counts them.
 type lane struct {
 	Key   string
 	Title string
-	Jobs  []*job
+	Count int
 }
 
 var laneOrder = []lane{{Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
@@ -226,11 +243,50 @@ func lanes(jobs []*job) []lane {
 	for _, j := range jobs {
 		for i := range result {
 			if result[i].Key == j.Lane {
-				result[i].Jobs = append(result[i].Jobs, j)
+				result[i].Count++
 			}
 		}
 	}
 	return result
+}
+
+// column is one stage of the configured run on the board, holding the
+// requests that are at that stage now; the last column holds the delivered.
+type column struct {
+	Key  string
+	Jobs []*job
+	Done bool
+}
+
+func columns(stages []string, jobs []*job) []column {
+	result := make([]column, 0, len(stages)+2)
+	index := map[string]int{}
+	for _, name := range stages {
+		index[name] = len(result)
+		result = append(result, column{Key: name})
+	}
+	other := -1
+	for _, j := range jobs {
+		switch {
+		case j.State != nil && j.State.Done:
+			continue
+		case index[j.Current] > 0 || (len(stages) > 0 && j.Current == stages[0]):
+			result[index[j.Current]].Jobs = append(result[index[j.Current]].Jobs, j)
+		default:
+			if other < 0 {
+				other = len(result)
+				result = append(result, column{Key: "other"})
+			}
+			result[other].Jobs = append(result[other].Jobs, j)
+		}
+	}
+	done := column{Key: "done", Done: true}
+	for _, j := range jobs {
+		if j.State != nil && j.State.Done {
+			done.Jobs = append(done.Jobs, j)
+		}
+	}
+	return append(result, done)
 }
 
 // stageTime is the review view of one stage or role: how often it ran, how
@@ -594,15 +650,34 @@ func (j *job) derive(now time.Time) {
 		} else if state.Pending != nil && !state.Done {
 			current = state.Pending.Role
 		}
+		j.Current = current
 		if state.Workflow != nil && len(state.Workflow.Stages) > 0 && current != "" {
 			j.Position = current
+			j.StageCount = len(state.Workflow.Stages)
 			for i, stage := range state.Workflow.Stages {
 				if stage.Name == current {
+					j.StageIndex = i + 1
 					j.Position = fmt.Sprintf("step %d of %d: %s", i+1, len(state.Workflow.Stages), current)
 				}
 			}
+			if state.Done {
+				j.StageIndex = j.StageCount
+			}
 		} else if current != "" {
 			j.Position = current
+		}
+		for _, entry := range j.Live {
+			if entry.Model != "" {
+				j.Model = entry.Model
+			}
+		}
+		if j.Model == "" {
+			for i := len(state.History) - 1; i >= 0; i-- {
+				if state.History[i].Model != "" {
+					j.Model = state.History[i].ModelPrefix + state.History[i].Model
+					break
+				}
+			}
 		}
 	} else {
 		j.Status = "no run record yet"
@@ -971,6 +1046,7 @@ type page struct {
 	Files     []fileEntry
 	Jobs      []*job
 	Lanes     []lane
+	Columns   []column
 	Job       *job
 	Intake    any
 	Stages    []string
@@ -1015,6 +1091,18 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	} else if s.configRaw != nil {
 		data.Notes = append(data.Notes, "the configuration file is not valid JSON; see /config")
 	}
+	if len(data.Stages) == 0 {
+		// Without a configuration, the stages a request recorded for itself.
+		for _, j := range jobs {
+			if j.State != nil && j.State.Workflow != nil && len(j.State.Workflow.Stages) > 0 {
+				for _, stage := range j.State.Workflow.Stages {
+					data.Stages = append(data.Stages, stage.Name)
+				}
+				break
+			}
+		}
+	}
+	data.Columns = columns(data.Stages, jobs)
 	if log, err := s.readIn("engine.log", 20000); err == nil {
 		data.Log = log
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1175,6 +1263,24 @@ func (s *server) filesPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "files", page{Lang: language(r), Now: s.formatTime(time.Now()), RunDir: s.runDir, Path: rel, Base: base, Files: listing})
 }
 
+// cardData is one request as a card on the board, with the viewer's language.
+type cardData struct {
+	Lang       string
+	ID         string
+	Key        string
+	Title      string
+	Lane       string
+	Status     string
+	Position   string
+	StageIndex int
+	StageCount int
+	Model      string
+	Attention  string
+	Elapsed    string
+	Updated    time.Time
+	Requester  string
+}
+
 type headData struct {
 	Title   string
 	Refresh int
@@ -1229,8 +1335,31 @@ var japanese = map[string]string{
 	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
 	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
 	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
-	"no checkout yet": "checkout はまだない", "more under files": "件は files 配下",
+	"no checkout yet": "checkout はまだない", "more under files": "件は files 配下", "Position": "工程の位置", "model": "モデル", "links": "リンク",
 	"The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.": "この工程の実行中に本体が止まりました。報告は途中までの可能性があり、操作は既に反映されているかもしれません。作業場所と外部の状態を確認してから繰り返します。", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
+}
+
+// stageLabels are the names of the stages of the shipped runs in Japanese; a
+// stage an operator named differently is shown as named.
+var stageLabels = map[string]string{
+	"elicit": "要件確定", "implement": "実装", "work": "作業", "verify": "検証", "review": "レビュー", "deliver": "納品",
+	"verify_merged": "マージ後検証", "draft_report": "報告", "report": "報告", "post_report": "報告の投稿", "review_report": "報告のレビュー",
+	"confirm_report": "報告の照合", "ask_requester": "依頼者への質問", "stop_report": "停止の報告", "done": "完了", "other": "その他", "router": "本体の判断",
+}
+
+func stageName(lang, name string) string {
+	if lang == "ja" {
+		if label, known := stageLabels[name]; known {
+			return label
+		}
+	}
+	if name == "done" {
+		return "Done"
+	}
+	if name == "other" {
+		return "Other"
+	}
+	return name
 }
 
 func translate(lang, text string) string {
@@ -1254,14 +1383,14 @@ func localize(lang, status string) string {
 	}
 	switch {
 	case strings.HasPrefix(status, "running "):
-		return prefix + "実行中: " + strings.TrimPrefix(status, "running ")
+		return prefix + "実行中: " + stageName(lang, strings.TrimPrefix(status, "running "))
 	case strings.HasPrefix(status, "assigned to ") && strings.HasSuffix(status, ", no process output yet"):
-		return prefix + "割り当て済み (出力はまだ): " + strings.TrimSuffix(strings.TrimPrefix(status, "assigned to "), ", no process output yet")
+		return prefix + "割り当て済み (出力はまだ): " + stageName(lang, strings.TrimSuffix(strings.TrimPrefix(status, "assigned to "), ", no process output yet"))
 	case strings.HasPrefix(status, "step "):
 		var i, n int
 		var name string
 		if _, err := fmt.Sscanf(status, "step %d of %d: %s", &i, &n, &name); err == nil {
-			return prefix + fmt.Sprintf("工程 %d/%d: %s", i, n, name)
+			return prefix + fmt.Sprintf("工程 %d/%d: %s", i, n, stageName(lang, name))
 		}
 	}
 	return prefix + translate(lang, status)
@@ -1275,103 +1404,3 @@ type fileEntry struct {
 	Size     int64
 	Modified time.Time
 }
-
-const pageTemplates = `
-{{define "head"}}<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="{{.Refresh}}"><title>{{.Title}}</title>
-<style>
-body{font-family:system-ui,sans-serif;margin:1.2em;color:#222;background:#fafafa}
-h1,h2,h3{margin:.8em 0 .3em}
-table{border-collapse:collapse;width:100%;background:#fff}
-th,td{border:1px solid #ccc;padding:.3em .5em;text-align:left;vertical-align:top;font-size:.95em}
-pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #ddd;padding:.6em;margin:.3em 0;font-size:.9em}
-.rec{border:1px solid #bbb;background:#fff;padding:.5em .8em;margin:.6em 0}
-.rec.runtime{background:#f3f3f3;border-style:dashed}
-.rec.person{background:#fff8e6;border-color:#c90}
-.rec.error{border-color:#c33}
-.err{color:#a00;font-weight:bold}
-.live{border:2px solid #2a7;background:#f4fff8;padding:.5em .8em;margin:.6em 0}
-.meta{color:#555;font-size:.9em}
-details>summary{cursor:pointer;color:#246}
-a{color:#246}
-.status{font-weight:bold}
-nav a{margin-right:1em}
-.board{display:flex;flex-wrap:wrap;gap:1em;align-items:flex-start;padding-bottom:.5em}
-.lane{flex:1 1 15em;min-width:15em;background:#eceff3;border-radius:8px;padding:.5em .6em}
-.lane h2{margin:.2em 0 .5em;font-size:1em;padding-left:.4em;border-left:6px solid #888}
-.lane.running h2{border-color:#2a7}.lane.awaiting h2{border-color:#d90}.lane.attention h2{border-color:#c33}.lane.delivered h2{border-color:#46a}
-.card{background:#fff;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.18);padding:.6em .8em;margin:.5em 0;border-left:5px solid #888}
-.lane.running .card{border-color:#2a7}.lane.awaiting .card{border-color:#d90}.lane.attention .card{border-color:#c33}.lane.delivered .card{border-color:#46a}
-.card .key{font-weight:bold}.card .title{margin:.2em 0 .4em}.card .line{color:#444;font-size:.92em;margin:.15em 0}.card .dots{letter-spacing:.15em;color:#357}
-.card .attn{color:#a00;font-size:.9em;white-space:pre-wrap}
-.card .trail{font-size:.85em;line-height:1.6}.trail .passed{color:#888}.trail .current{font-weight:bold;color:#146;background:#e6f0ff;padding:0 .3em;border-radius:3px}.trail .ahead{color:#aaa}
-.empty{color:#888;font-size:.9em;padding:.4em}
-</style></head><body>{{end}}
-
-{{define "foot"}}<p class="meta">{{t .Lang "Rendered"}} {{.Now}}; {{t .Lang "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only."}}</p></body></html>{{end}}
-
-{{define "overview"}}{{template "head" (head .Lang "ticket engine status" 30)}}
-<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/">{{t $.Lang "every file of the queue"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
-<h1>{{t .Lang "Requests"}}</h1>
-<p class="meta">{{t .Lang "Queue"}} {{.RunDir}}, {{t .Lang "read at"}} {{.Now}}.</p>
-{{range .Notes}}<p class="err">{{.}}</p>{{end}}
-{{if not .Jobs}}<p>{{t .Lang "No request has been accepted into this queue yet."}}</p>{{end}}
-<div class="board">{{range .Lanes}}<div class="lane {{.Key}}"><h2>{{t $.Lang .Title}} ({{len .Jobs}})</h2>
-{{range .Jobs}}<div class="card"><div class="key"><a href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a></div><div class="title">{{.Title}}</div>
-<div class="line status">{{st $.Lang .Status}}</div>{{if .Position}}<div class="line">{{st $.Lang .Position}}</div>{{end}}{{if .Trail}}<div class="line trail">{{range $i, $s := .Trail}}{{if $i}} &rarr; {{end}}<span class="{{$s.State}}">{{$s.Name}}</span>{{end}}</div>{{end}}
-{{if .Attention}}<div class="attn">{{t $.Lang .Attention}}</div>{{end}}
-<div class="line meta">{{t $.Lang "elapsed"}} {{.Elapsed}} &middot; {{t $.Lang "last change"}} {{ago $.Lang .Updated}}{{if .Requester}} &middot; {{.Requester}}{{end}}</div></div>{{else}}<div class="empty">{{t $.Lang "none"}}</div>{{end}}</div>{{end}}</div>
-{{if .Config}}<h2>{{t .Lang "Intake, as configured"}}</h2><pre>{{pretty .Intake}}</pre>
-{{if .Stages}}<h2>{{t .Lang "Stages of the run"}}</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
-<h2>{{t .Lang "Decision and models"}}</h2><pre>{{pretty .Router}}</pre><pre>{{pretty .Selection}}</pre>{{end}}
-<h2>{{t .Lang "Runtime log (tail)"}}</h2>{{if .Log}}<pre>{{.Log}}</pre><p class="meta"><a href="/log">{{t .Lang "the whole log"}}</a></p>{{else}}<p class="meta">{{t .Lang "(nothing yet)"}}</p>{{end}}
-{{template "foot" .}}{{end}}
-
-{{define "files"}}{{template "head" (head .Lang (printf "%s: %s" (t .Lang "files") .Path) 30)}}
-<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/">{{t $.Lang "every file of the queue"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
-<h1>{{.RunDir}}{{if ne .Path "."}}/{{.Path}}{{end}}</h1>
-<table><tr><th>{{t .Lang "Name"}}</th><th>{{t .Lang "Size"}}</th><th>{{t .Lang "Modified"}}</th></tr>
-{{if ne .Path "."}}<tr><td><a href="{{.Base}}../">../</a></td><td></td><td></td></tr>{{end}}
-{{range .Files}}<tr><td>{{if .Link}}{{.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="{{$.Base}}{{.Href}}{{if .Dir}}/{{end}}">{{.Name}}{{if .Dir}}/{{end}}</a>{{end}}</td><td>{{if not .Dir}}{{.Size}}{{end}}</td><td>{{time .Modified}}</td></tr>{{end}}
-</table>
-{{template "foot" .}}{{end}}
-
-{{define "job"}}{{with .Job}}{{template "head" (head $.Lang (printf "%s %s" .Key (t $.Lang "status")) .Refresh)}}
-<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/jobs/{{.ID}}/">{{t $.Lang "every file of this request"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
-<h1>{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}} {{.Title}}</h1>
-<p><span class="status">{{st $.Lang .Status}}</span>{{if .Position}} &middot; {{st $.Lang .Position}}{{end}} &middot; {{t $.Lang "elapsed"}} {{.Elapsed}}</p>
-<p class="meta">{{t $.Lang "Requested by"}} {{.Requester}} {{t $.Lang "at"}} {{.Created}}{{if .Link}} &middot; <a href="{{.Link}}">{{t $.Lang "open the issue"}}</a>{{end}} &middot; {{t $.Lang "started"}} {{time .Started}} &middot; {{t $.Lang "last change"}} {{time .Updated}} ({{ago $.Lang .Updated}})
-{{if .State}}{{if .State.Recovering}} &middot; <b>{{t $.Lang "recovering"}}</b>{{end}}{{if .State.Waiting}} &middot; <b>{{t $.Lang "waiting for the requester"}}</b>{{end}}{{if .State.Pending}} &middot; {{t $.Lang "pending:"}} {{.State.Pending.Role}}{{end}}{{end}}</p>
-{{if .State}}{{if .State.Pending}}{{if .State.Pending.Instruction}}<details><summary>{{t $.Lang "instruction of the pending action"}} ({{.State.Pending.Role}})</summary><pre>{{.State.Pending.Instruction}}</pre></details>{{end}}{{end}}{{end}}
-<p class="meta">{{t $.Lang "Raw files:"}} <a href="/jobs/{{.ID}}/raw/issue.json">issue.json</a> <a href="/jobs/{{.ID}}/raw/request.txt">request.txt</a> <a href="/jobs/{{.ID}}/raw/history.json">history.json</a> <a href="/jobs/{{.ID}}/raw/engine.json">engine.json</a> <a href="/jobs/{{.ID}}/raw/notices.json">notices.json</a> <a href="/jobs/{{.ID}}/workspace">{{t $.Lang "workspace changes as text"}}</a></p>
-{{range .Notes}}<p class="err">{{.}}</p>{{end}}
-{{range .Live}}<div class="live"><h2>{{t $.Lang "Running now:"}} {{.Role}} ({{.Speaker}}{{if .Model}}, {{.Model}}{{end}}) {{t $.Lang "since"}} {{time .Started}}, {{ago $.Lang .Started}}</h2>
-<details><summary>{{t $.Lang "instruction handed to it"}}</summary><pre>{{.Instruction}}</pre></details>
-<h3>{{t $.Lang "output so far"}}</h3><pre>{{.Stdout}}</pre>{{if .Stderr}}<h3>{{t $.Lang "diagnostics so far"}}</h3><pre>{{.Stderr}}</pre>{{end}}
-{{if .AgentLog}}<h3>{{t $.Lang "the native agent's own log so far"}}{{if .Home}} (<a href="/files/{{.Home}}/logs/agent.log">{{t $.Lang "whole file"}}</a>){{end}}</h3><pre>{{.AgentLog}}</pre>{{end}}</div>{{end}}
-{{if .State}}{{if .State.Workflow}}{{if .State.Workflow.Stages}}<p class="meta">{{t $.Lang "Stages:"}} {{range $i, $s := .State.Workflow.Stages}}{{if $i}} &rarr; {{end}}{{if eq $s.Name $.Job.State.Step}}<b>{{$s.Name}}</b>{{else}}{{$s.Name}}{{end}}{{end}}</p>{{end}}{{end}}{{end}}
-{{if .State}}{{if .State.Workflow}}<details><summary>{{t $.Lang "workflow as recorded for this request"}}</summary><pre>{{pretty .State.Workflow}}</pre></details>{{end}}{{end}}
-{{if .Stages}}<h2>{{t $.Lang "Time by stage"}}</h2><table><tr><th>{{t $.Lang "Stage"}}</th><th>{{t $.Lang "Launches"}}</th><th>{{t $.Lang "Failed"}}</th><th>{{t $.Lang "Total time (sum over process runs; parallel processes add up)"}}</th><th>{{t $.Lang "First started"}}</th><th>{{t $.Lang "Last finished"}}</th></tr>
-{{range .Stages}}<tr><td>{{.Name}}</td><td>{{.Launches}}</td><td>{{.Failures}}</td><td>{{.Total}}</td><td>{{time .First}}</td><td>{{time .Last}}</td></tr>{{end}}</table>{{end}}
-<h2>{{t $.Lang "Request"}}</h2><pre>{{.Request}}</pre>
-{{if .Notices}}<h2>{{t $.Lang "Notices posted by the runtime"}}</h2>{{range .Notices}}<pre>{{pretty .}}</pre>{{end}}{{end}}
-<h2>{{t $.Lang "Record"}} ({{len .Records}} {{t $.Lang "entries"}})</h2>
-{{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}}){{if .Gap}} &middot; <span class="meta">{{.Gap}} {{t $.Lang "after the previous record"}}</span>{{end}}</p>
-{{if .Error}}<p class="err">{{t $.Lang "Error"}}</p><pre>{{if .Runtime}}{{t $.Lang .Error}}{{else}}{{.Error}}{{end}}</pre>{{end}}
-<details><summary>{{t $.Lang "instruction"}}</summary><pre>{{.Instruction}}</pre></details>
-<p>{{t $.Lang "Output"}}</p><pre>{{.Output}}</pre>
-{{if .Diagnostics}}<details><summary>{{t $.Lang "diagnostics (stderr)"}}</summary><pre>{{.Diagnostics}}</pre></details>{{end}}</div>{{end}}
-{{if .Answers}}<h2>{{t $.Lang "Requester answers consumed"}}</h2>{{range .Answers}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
-{{if .Reviews}}<h2>{{t $.Lang "Review findings kept by the review command"}}</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
-{{if .Report}}<h2>{{t $.Lang "Report written in the workspace"}}</h2><pre>{{.Report}}</pre>{{end}}
-{{if .Receipt}}<h2>{{t $.Lang "Delivery receipt written by the delivery program"}}</h2><pre>{{.Receipt}}</pre>{{end}}
-{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}{{if $f.Link}}{{$f.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f.Name}}">{{$f.Name}}</a>{{end}}{{end}}{{if $h.MoreFiles}} <span class="meta">(+{{$h.MoreFiles}} {{t $.Lang "more under files"}}: <a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/">{{$h.Name}}/</a>)</span>{{end}}</p>
-{{if $h.Calls}}<p class="meta">{{t $.Lang "as the agent logged it:"}} {{$h.Calls}} {{t $.Lang "model calls"}}, {{$h.TokensIn}} {{t $.Lang "input tokens"}}, {{$h.TokensOut}} {{t $.Lang "output tokens"}}</p>{{end}}{{if $h.UsageNote}}<p class="meta">{{$h.UsageNote}}</p>{{end}}
-{{if $h.AgentLog}}<details><summary>{{t $.Lang "agent.log (tail)"}}</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>{{t $.Lang "errors.log (tail)"}}</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
-{{if $h.Transcript}}<details><summary>{{t $.Lang "the whole conversation the agent had (messages, tool calls and their results)"}}</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
-<h2>{{t $.Lang "Workspace changes"}}</h2>{{with .Workspace}}{{if .Note}}<p class="meta">{{t $.Lang .Note}}</p>{{end}}
-{{if .Status}}<pre>{{.Status}}</pre>{{else}}{{if not .Note}}<p class="meta">{{t $.Lang "no change in the checkout"}}</p>{{end}}{{end}}
-{{if .Log}}<details><summary>{{t $.Lang "recent commits in the checkout"}}</summary><pre>{{.Log}}</pre></details>{{end}}
-{{if .Diff}}<details open><summary>{{t $.Lang "diff of tracked files"}}</summary><pre>{{.Diff}}</pre></details>{{end}}
-{{range .Untracked}}<details><summary>{{t $.Lang "new file:"}} {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{if .NotShown}}<p class="meta">{{.NotShown}} {{t $.Lang "more new files are not shown here; they are under files"}}</p>{{end}}{{end}}
-{{template "foot" $}}{{end}}{{end}}
-`
