@@ -5,11 +5,52 @@ Run this inside the role's filesystem/network isolation. Make the installed
 or model shortlist belongs here.
 """
 import contextlib
+import json
 import os
 from pathlib import Path
 import signal
 import sys
 import threading
+
+
+def credentials():
+    """The values this process must never leave on disk: every credential the
+    runtime handed it (named in TASK_CREDENTIAL_NAMES) and the two this bridge
+    knows by itself."""
+    names = set(os.environ.get("TASK_CREDENTIAL_NAMES", "").split(":")) | {"OPENROUTER_API_KEY", "TASK_TRACKER_KEY"}
+    return [os.environ[name] for name in sorted(names) if name and os.environ.get(name)]
+
+
+def scrub(text, values):
+    for value in values:
+        text = text.replace(value, "[credential]")
+    return text
+
+
+def save_transcript(result):
+    """Keep the whole conversation the native agent had, for reading afterwards,
+    and take the credentials out of what the native agent logged by itself.
+
+    The report has already been published; nothing here can take it back.
+    """
+    values = credentials()
+    home = Path(os.environ["HERMES_HOME"])
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if isinstance(messages, list):
+        try:
+            text = scrub(json.dumps(messages, ensure_ascii=False, indent=1, default=str), values)
+            (home / "transcript.json").write_text(text, encoding="utf-8")
+        except Exception as error:
+            print(f"Transcript not saved: {error}", file=sys.stderr)
+    for name in ("agent.log", "errors.log"):
+        path = home / "logs" / name
+        try:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if any(value in text for value in values):
+                    path.write_text(scrub(text, values), encoding="utf-8")
+        except Exception as error:
+            print(f"{name} not scrubbed: {error}", file=sys.stderr)
 
 
 def main():
@@ -47,8 +88,13 @@ def main():
             base_url=os.environ["OPENROUTER_BASE_URL"],
             api_key=os.environ["OPENROUTER_API_KEY"],
             provider="openrouter", model=os.environ["NATIVE_MODEL"],
-            enabled_toolsets=["terminal", "file"], quiet_mode=True,
-            tool_progress_mode="off",
+            enabled_toolsets=["terminal", "file"],
+            # Each tool call and result preview is printed as it happens; with
+            # stdout redirected they reach stderr, where the runtime's live
+            # copy shows them while the role works. The report alone goes to
+            # stdout. The preview length is the operator's setting.
+            quiet_mode=False, tool_progress_mode="all",
+            log_prefix_chars=int(os.environ.get("NATIVE_LOG_PREFIX_CHARS", "2000")),
             reasoning_config=reasoning,
             # This bridge targets OpenRouter, including an explicitly supplied
             # relay. Native URL heuristics can omit reasoning for a relay host;
@@ -86,6 +132,11 @@ def main():
     try:
         with contextlib.redirect_stdout(sys.stderr):
             result = agent.run_conversation(user_message=prompt)
+        # The conversation is over, so no tool is left to interrupt; retire the
+        # interrupter before the report is written, so nothing it might print
+        # can follow the report on stdout.
+        finished.set()
+        interrupter.join(timeout=1)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.
@@ -95,6 +146,7 @@ def main():
         sys.stdout.flush()
         if result.get("error"):
             print(result["error"], file=sys.stderr)
+        save_transcript(result)
         return 128 + stop_signal if stop_signal else (1 if result.get("failed") else 0)
     finally:
         finished.set()

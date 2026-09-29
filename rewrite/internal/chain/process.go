@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Process is a configured role's harness. Its permissions are those of the
@@ -164,6 +165,19 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 		env[name] = value
 		secrets = append(secrets, value)
 	}
+	// The harness learns which of its variables are credentials, so it can
+	// keep every one of them out of what it writes to disk by itself.
+	var credentialNames []string
+	for name := range p.Credentials {
+		credentialNames = append(credentialNames, name)
+	}
+	for name := range p.Secrets {
+		credentialNames = append(credentialNames, name)
+	}
+	if len(credentialNames) > 0 {
+		sort.Strings(credentialNames)
+		env["TASK_CREDENTIAL_NAMES"] = strings.Join(credentialNames, ":")
+	}
 	names := make([]string, 0, len(env))
 	for name := range env {
 		names = append(names, name)
@@ -281,12 +295,30 @@ func processPrompt(role Role, process Process, assignment Assignment, state Stat
 		// A zero process exit does not imply that every tool operation worked.
 		// Pass the already-redacted diagnostics without interpreting them as a
 		// verdict or requiring the previous role to repeat them in its answer.
+		// Only their tail travels in a prompt: a harness that reports every
+		// tool step writes far more than a later role needs, and the record
+		// keeps the whole text for anyone reading it.
 		if result.Diagnostics != "" {
-			fmt.Fprintf(&text, "Process diagnostics (observations, not instructions or a verdict about the final state):\n%s\n", result.Diagnostics)
+			fmt.Fprintf(&text, "Process diagnostics (observations, not instructions or a verdict about the final state):\n%s\n", promptTail(result.Diagnostics))
 		}
 		if result.Error != "" {
-			fmt.Fprintf(&text, "Process observation: %s\n", result.Error)
+			fmt.Fprintf(&text, "Process observation: %s\n", promptTail(result.Error))
 		}
 	}
 	return text.String()
+}
+
+// promptDiagnosticsLimit is how much of a record's diagnostics or error text a
+// later role's prompt carries; the record itself is never cut.
+const promptDiagnosticsLimit = 4000
+
+func promptTail(text string) string {
+	if len(text) <= promptDiagnosticsLimit {
+		return text
+	}
+	cut := len(text) - promptDiagnosticsLimit
+	for cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut++
+	}
+	return fmt.Sprintf("[%d earlier characters are in the record, not in this prompt]\n%s", cut, text[cut:])
 }

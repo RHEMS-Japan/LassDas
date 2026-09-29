@@ -474,6 +474,17 @@ action. It can require HTTP basic authentication (`--auth-user-env` and
 without it. `deploy/ticket-engine/statefulset.yaml.example` runs it as a
 second container of the same Pod with the state volume mounted read-only.
 
+Nothing the runtime wrote is out of the page's reach: every directory under
+the queue is listed and every file served whole under `/files/`, with a path
+that leaves the queue refused, symbolic links included. For a review after the
+fact the request page adds the time spent by stage (launches, failures, total,
+first start, last finish), the gap before each record, what each role's native
+agent logged in its own directory (its log, the model calls and tokens it
+counted, and the whole conversation when the harness saved one), the
+instruction of a pending action and the delivery receipt; while a process runs
+the page reloads every ten seconds and shows, beside the live output, the
+native agent's own log as it grows.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a
@@ -898,6 +909,18 @@ Provide these process settings explicitly:
   a literal credential in `env` or the configuration file.
 - Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
   (default `6000`, per native API response, not a request failure limit).
+- Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
+  call's arguments and result the harness prints as it happens; the lines reach
+  stderr, so the runtime's live copy shows them, and only the tail of them
+  travels in a later role's prompt.
+- `TASK_CREDENTIAL_NAMES` is set by the runtime: the names of the variables
+  that hold credentials, so the harness can keep every one of them out of the
+  transcript and the native agent's logs it leaves in its directory.
+  The transcript is written, and the native agent's own `logs/agent.log` and
+  `logs/errors.log` are rewritten with those values replaced, after the
+  conversation ended normally; while the role runs, and after a crash or a
+  kill, those two files are as the SDK wrote them. The status page shows them
+  as they are.
 
 The reasoning setting is also passed through the SDK's explicit OpenRouter
 request override. An installed-SDK trial found that its URL-based capability
