@@ -546,3 +546,46 @@ func TestTheLiveDirectorySurvivesTheRequestConfigurationFile(t *testing.T) {
 		}
 	}
 }
+
+func TestAQueueWrittenWithTheIntakeWindowInItsIdentityIsAdoptedOnce(t *testing.T) {
+	root := t.TempDir()
+	identity := "Issue intake: https://tracker.example/api/v2\nProject: 17"
+	write := func(request string, history []chain.Result) {
+		t.Helper()
+		raw, err := json.Marshal(chain.State{Request: request, History: history})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "history.json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(identity+"\nCreated since: 2099-01-01T00:00:00Z", []chain.Result{})
+	if err := adoptEarlierIdentity(root, identity); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Request != identity {
+		t.Fatalf("identity after adoption: %q", state.Request)
+	}
+	write("Issue intake: https://other.example/api/v2\nProject: 99\nCreated since: 2099-01-01T00:00:00Z", []chain.Result{})
+	if err := adoptEarlierIdentity(root, identity); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ = os.ReadFile(filepath.Join(root, "history.json")); !strings.Contains(string(raw), "other.example") {
+		t.Fatal("a queue of another tracker or project must not be adopted")
+	}
+	if err := os.Remove(filepath.Join(root, "history.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := adoptEarlierIdentity(root, identity); err != nil {
+		t.Fatalf("a missing identity file is not an error: %v", err)
+	}
+}

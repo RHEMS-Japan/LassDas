@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	owner, err := acquireRequest(ctx, root, func(context.Context) (string, error) {
 		if err := os.MkdirAll(jobs, 0700); err != nil {
 			return "", err
+		}
+		if err := adoptEarlierIdentity(root, identity); err != nil {
+			observe("the queue's earlier identity was not adopted: " + err.Error())
 		}
 		return identity, nil
 	}, 10*time.Second, observe)
@@ -448,4 +452,33 @@ func writeRuntimeFile(path string, data []byte) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+// adoptEarlierIdentity rewrites the queue's identity file when it was written
+// by a runtime that still counted the intake window as part of the identity,
+// so an operator who opens the window is not locked out of the queue. Only a
+// file that holds no history and names the same tracker and project is
+// rewritten; anything else is left for the ordinary check to refuse.
+func adoptEarlierIdentity(root, identity string) error {
+	path := filepath.Join(root, "history.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+	if state.Request == identity || len(state.History) > 0 || state.Done || !strings.HasPrefix(state.Request, identity+"\nCreated since: ") {
+		return nil
+	}
+	state.Request = identity
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return writeRuntimeFile(path, data)
 }

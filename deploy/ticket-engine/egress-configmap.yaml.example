@@ -49,6 +49,7 @@ data:
     *filter
     :TICKET_EGRESS - [0:0]
     -A TICKET_EGRESS -o lo -j ACCEPT
+    -A TICKET_EGRESS -p tcp --sport 9200 ! --syn -j ACCEPT
     -A TICKET_EGRESS -j REJECT
     -I OUTPUT 1 -j TICKET_EGRESS
     COMMIT
