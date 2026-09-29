@@ -637,25 +637,30 @@ func (j *job) derive(now time.Time) {
 				j.Lane, j.Attention = "attention", stringOf(notice["text"])
 			}
 		}
-		if state.Workflow != nil && len(state.Workflow.Stages) > 0 {
-			var dots strings.Builder
-			reached := false
-			for _, stage := range state.Workflow.Stages {
-				switch {
-				case stage.Name == state.Step:
-					dots.WriteString("◉")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "current"})
-					reached = true
-				case reached:
-					dots.WriteString("○")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "ahead"})
-				default:
-					dots.WriteString("●")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
-				}
+	}
+	// The trail of stages on the card: passed, current and ahead; a finished
+	// request has passed them all, a waiting one is still at its stage.
+	if state := j.State; state != nil && state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+		var dots strings.Builder
+		reached := false
+		for _, stage := range state.Workflow.Stages {
+			switch {
+			case state.Done:
+				dots.WriteString("●")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
+			case stage.Name == state.Step:
+				dots.WriteString("◉")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "current"})
+				reached = true
+			case reached:
+				dots.WriteString("○")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "ahead"})
+			default:
+				dots.WriteString("●")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
 			}
-			j.Dots = dots.String()
 		}
+		j.Dots = dots.String()
 	}
 	j.Refresh = 30
 	if len(j.Live) > 0 {

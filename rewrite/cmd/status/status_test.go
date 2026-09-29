@@ -208,7 +208,8 @@ func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
 			}
 		}
 	}
-	add("8", chain.State{Done: true, History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
+	add("8", chain.State{Done: true, Step: "confirm_report", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "confirm_report"}}},
+		History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
 	add("9", chain.State{Waiting: true, History: []chain.Result{{Role: "ask_requester", Speaker: "ask-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
 	add("10", chain.State{History: []chain.Result{{Role: "router", Speaker: "runtime", Error: "routing unavailable: ROUTER-ERROR", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
 	add("11", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
@@ -218,7 +219,7 @@ func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
 	expectAll(t, body, `<h2>Running (2)</h2>`, `<h2>Awaiting answer (1)</h2>`, `<h2>Needs attention (2)</h2>`, `<h2>Delivered (1)</h2>`,
-		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT")
+		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT", `<span class="passed">elicit</span> &rarr; <span class="passed">confirm_report</span>`)
 	for _, section := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"}} {
 		start := strings.Index(body, `<div class="lane `+section.lane+`">`)
 		end := strings.Index(body[start+1:], `<div class="lane `)
