@@ -705,6 +705,32 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 	expectAll(t, body, `<span class="passed">elicit</span> &rarr; <span class="current">implement</span>`)
 }
 
+func TestTheCardNamesTheStageRunningNowNotTheLastRecorded(t *testing.T) {
+	root := fixtureQueue(t)
+	job := filepath.Join(root, "jobs", "7")
+	raw, err := os.ReadFile(filepath.Join(job, "run", "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state.Step = "elicit" // the record's step moves only after the launch returns
+	if raw, err = json.Marshal(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(job, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, "step 2 of 3: implement", `<span class="passed">elicit</span> &rarr; <span class="current">implement</span>`)
+	if strings.Contains(body, "step 1 of 3") {
+		t.Error("the card named the stage before the one running")
+	}
+}
+
 func TestARolesFileListIsCapped(t *testing.T) {
 	root := fixtureQueue(t)
 	cache := filepath.Join(root, "jobs", "7", "homes", "1-0", "cache")
