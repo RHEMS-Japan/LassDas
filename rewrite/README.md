@@ -402,16 +402,20 @@ so they join the history as an observation the worker and the report writer
 read, and the command writes nothing into the workspace (its send-back counter
 and log live in the process's own directory, `TASK_HOME`). The runtime reads
 the exit status and nothing else. Two settings keep the review from ending or
-stalling a request: `REVIEW_ROUNDS` caps the send-backs, counting only the
-times the work was actually sent back, and once the cap is reached the next
+stalling a request. `REVIEW_ROUNDS` caps the send-backs, counting only the
+times the work was actually sent back; once the cap is reached the next
 blocking verdict lets the work through with the objections recorded as
-unresolved; and a verdict that cannot be obtained, because the model service
-is down, returned none, or the change could not be read, lets the work through
-with a note and does not count. A diff longer than the configured limit is cut
-with a visible marker, never silently. The credential named by
-`REVIEW_KEY_ENV` is sent only to `REVIEW_MODEL_URL`, over HTTPS, and is
-scrubbed from everything the command prints or writes. A mistyped setting ends
-the command with status 2 and a plain message.
+unresolved. And only a real blocking verdict exits 1: everything that keeps a
+verdict from being obtained, a mistyped setting, a test command that cannot
+start, an endpoint that is not HTTPS, a change that cannot be read, diff
+paths that match no change, a model service that is down or returns none,
+ends 0 and prints `NOT REVIEWED` with the reason, which joins the history for
+the worker and the report writer. A review that could not be performed is not
+a defect in the change, and an ordered run would otherwise send the work
+round for ever. A diff or test output longer than its limit is cut with a
+visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
+the command prints or writes.
 
 After every stage the engine appends its own record of what it observed: how
 each process ended, and the content of the file named by that process's

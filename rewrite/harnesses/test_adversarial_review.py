@@ -170,28 +170,65 @@ class AdversarialReviewTests(unittest.TestCase):
         for text in (finished.stdout, finished.stderr, self.review_log()):
             self.assertNotIn(KEY, text)
 
-    def test_missing_or_broken_configuration_ends_with_status_two_and_calls_nothing(self):
+    def test_a_setting_that_cannot_be_used_never_sends_the_work_round_and_says_so(self):
+        # A mistyped setting is not a defect in the change: the command ends 0,
+        # prints NOT REVIEWED with the setting's name, calls nothing and writes
+        # nothing into the workspace. Exit 1 is reserved for a real send-back,
+        # which in an ordered run would otherwise repeat for ever.
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
-        for name, value in (("REVIEW_MODEL_URL", ""), ("REVIEW_ROUNDS", "two"), ("REVIEW_ATTEMPTS", "many"), ("TASK_HOME", ""),
-                            ("REVIEW_TEST_COMMANDS", "echo 'unterminated")):
+        for name, value in (("REVIEW_MODEL_URL", ""), ("REVIEW_ROUNDS", "two"), ("REVIEW_ROUNDS", "-1"),
+                            ("REVIEW_ATTEMPTS", "many"), ("TASK_HOME", ""), ("TASK_HOME", str(self.workspace / "src" / "tool.py" / "x")),
+                            ("REVIEW_TEST_COMMANDS", "echo 'unterminated"), ("REVIEW_DIFF_PATHS", "app lib")):
             finished = self.run_review(service, **{name: value})
-            self.assertEqual(finished.returncode, 2, (name, finished.stdout, finished.stderr))
-            self.assertIn(name, finished.stderr)
-            self.assertNotIn("Traceback", finished.stderr)
+            self.assertEqual(finished.returncode, 0, (name, finished.stdout, finished.stderr))
+            self.assertIn("NOT REVIEWED", finished.stdout, name)
+            self.assertIn(name, finished.stdout, name)
+            self.assertNotIn("Traceback", finished.stderr, name)
         (self.home / "review-send-backs").write_text("not a number")
         finished = self.run_review(service)
-        self.assertEqual(finished.returncode, 2, finished.stderr)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("NOT REVIEWED", finished.stdout)
         self.assertNotIn("Traceback", finished.stderr)
         self.assertEqual(service.requests, [])
         self.assertFalse((self.workspace / "report").exists())
+
+    def test_paths_that_match_no_change_are_said_so_instead_of_passing_blind(self):
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_DIFF_PATHS="app lib")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("matched no change", finished.stdout)
+        self.assertIn("src", finished.stdout)
+        self.assertNotIn("PASSED", finished.stdout)
+        self.assertEqual(service.requests, [])
+
+    def test_a_test_command_that_cannot_start_is_shown_and_the_review_still_happens(self):
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_TEST_COMMANDS="/nonexistent/operator/test")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertIn("could not start", service.requests[0]["body"]["messages"][1]["content"])
+        self.assertIn("PASSED", finished.stdout)
+
+    def test_long_test_output_is_cut_with_a_visible_marker(self):
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        noisy = sys.executable + " -c \"print('HEAD-OF-OUTPUT'); print('x' * 9000); print('TAIL-OF-OUTPUT')\""
+        finished = self.run_review(service, REVIEW_TEST_COMMANDS=noisy)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("[test output cut here:", text)
+        self.assertIn("TAIL-OF-OUTPUT", text)
 
     def test_the_credential_is_sent_only_over_https_or_loopback(self):
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
         finished = self.run_review(service, REVIEW_MODEL_URL="http://model.example.invalid/v1/chat/completions")
         self.assertEqual(finished.returncode, 0, finished.stderr)
-        self.assertIn("must be https", self.review_log())
+        self.assertIn("must be https", finished.stdout)
+        self.assertIn("NOT REVIEWED", finished.stdout)
         self.assertEqual(service.requests, [])
 
     def test_a_large_change_reaches_the_reviewer_whole_and_a_cut_is_visible(self):
@@ -214,7 +251,8 @@ class AdversarialReviewTests(unittest.TestCase):
         finished = self.run_review(service)
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertNotIn("Traceback", finished.stderr)
-        self.assertIn("could not be read", self.review_log())
+        self.assertIn("could not be read", finished.stdout)
+        self.assertIn("NOT REVIEWED", finished.stdout)
         self.assertEqual(service.requests, [])
 
 

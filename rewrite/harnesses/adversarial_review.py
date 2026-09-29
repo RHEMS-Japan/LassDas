@@ -12,12 +12,16 @@ are printed, so they join the history for the worker and the report writer;
 the send-back counter and a log stay in the process's own directory (TASK_HOME);
 a change that cannot be read (no Git checkout) lets the work through with a note.
 
-Two things keep this from ending or stalling a request. A verdict that
-cannot be obtained (the model service down, no verdict returned) lets the
-work through with a note, because a review that is unavailable is not a
-defect in the change. And the operator's round cap: once the review has sent
-the work back that many times, the next blocking verdict lets the work
-through with the objections recorded as unresolved.
+Two things keep this from ending or stalling a request. Only a real blocking
+verdict exits 1. Everything that keeps a verdict from being obtained (a
+mistyped setting, a test command that cannot start, an endpoint that is not
+HTTPS, a change that cannot be read, paths that match no change, a model
+service that is down or returns no verdict) ends 0 and prints NOT REVIEWED
+with the reason, which joins the history for the worker and the report
+writer: a review that could not be performed is not a defect in the change,
+and must never send the work round for ever. And the operator's cap: once
+the review has sent the work back that many times, the next blocking verdict
+lets the work through with the objections recorded as unresolved.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -26,7 +30,7 @@ Environment (all from the operator, never from a role):
   REVIEW_KEY_ENV          name of the variable holding the credential (default REVIEW_API_KEY)
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
-  REVIEW_ROUNDS           send-backs allowed; the next blocking verdict lets the work through with the objections recorded (default 2)
+  REVIEW_ROUNDS           send-backs allowed, 0 or more; the next blocking verdict lets the work through with the objections recorded (default 2)
   TASK_HOME               the process's own directory, where the send-back counter and the log live
   REVIEW_TIMEOUT_SECONDS, REVIEW_ATTEMPTS: optional (default 300, 3)
 
@@ -83,12 +87,15 @@ def setting(name, default=None):
     return value if value != "" else default
 
 
-def number(name, default):
+def number(name, default, least=0):
     value = setting(name, default)
     try:
-        return int(value)
+        parsed = int(value)
     except ValueError:
         raise ReviewError("%s must be a whole number, not %r" % (name, value))
+    if parsed < least:
+        raise ReviewError("%s must be at least %d, not %d" % (name, least, parsed))
+    return parsed
 
 
 def scrub(text, secret):
@@ -98,12 +105,18 @@ def scrub(text, secret):
 
 
 def run(command, cwd, timeout):
+    """One operator command: what it printed, its exit status, or why it
+    could not start. None of it is a verdict."""
     try:
         finished = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "$ %s\n(timed out after %d seconds)" % (" ".join(command), timeout)
+    except OSError as error:
+        return "$ %s\n(could not start: %s)" % (" ".join(command), error)
     output = (finished.stdout + finished.stderr).strip()
-    return "$ %s -> exit %d\n%s" % (" ".join(command), finished.returncode, output[-4000:])
+    if len(output) > 4000:
+        output = "[test output cut here: the last 4000 of %d characters shown]\n" % len(output) + output[-4000:]
+    return "$ %s -> exit %d\n%s" % (" ".join(command), finished.returncode, output)
 
 
 def cut(text, limit, what):
@@ -113,7 +126,10 @@ def cut(text, limit, what):
 
 
 def git(workspace, *arguments):
-    finished = subprocess.run(["git", "-C", str(workspace), *arguments], capture_output=True, text=True, timeout=60)
+    try:
+        finished = subprocess.run(["git", "-C", str(workspace), *arguments], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error))
     if finished.returncode != 0:
         raise ReviewError("the change could not be read: git %s exited %d: %s"
                           % (arguments[0], finished.returncode, finished.stderr.strip()[:200]))
@@ -125,7 +141,13 @@ def gather(workspace, paths, test_commands, timeout):
     operator's test commands, each with its exit status and output."""
     scope = ["--", *paths] if paths else []
     diff = git(workspace, "diff", "HEAD", *scope)
-    for line in git(workspace, "status", "--short", "--untracked-files=all", *scope).splitlines():
+    status = git(workspace, "status", "--short", "--untracked-files=all", *scope)
+    if paths and not diff.strip() and not status.strip():
+        elsewhere = git(workspace, "status", "--short", "--untracked-files=all").strip()
+        if elsewhere:
+            raise ReviewError("REVIEW_DIFF_PATHS (%s) matched no change, but the checkout has changes under: %s"
+                              % (" ".join(paths), ", ".join(sorted({line.split()[-1].split("/")[0] for line in elsewhere.splitlines() if line.split()}))))
+    for line in status.splitlines():
         if line.startswith("?? "):
             path = workspace / line[3:].strip()
             if path.is_file():
@@ -176,17 +198,28 @@ def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
 
 
 def review(stdin_text):
+    """Exit 1 only on a real blocking verdict; 0 otherwise."""
+    model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
+    try:
+        return reviewed(stdin_text, model)
+    except ReviewError as error:
+        print("Review by %s: NOT REVIEWED. %s. The work goes on unreviewed this time; nothing here is a verdict on the change."
+              % (model, scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))))
+        return 0
+
+
+def reviewed(stdin_text, model):
     workspace = Path(setting("TASK_WORKSPACE"))
     if not workspace.is_dir():
         raise ReviewError("TASK_WORKSPACE is not a directory")
     url = setting("REVIEW_MODEL_URL")
-    model = setting("REVIEW_MODEL")
+    setting("REVIEW_MODEL")
     key = os.environ.get(setting("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
     if not key:
         raise ReviewError("the review credential is not set")
     limit = number("REVIEW_ROUNDS", "2")
-    timeout = number("REVIEW_TIMEOUT_SECONDS", "300")
-    attempts = number("REVIEW_ATTEMPTS", "3")
+    timeout = number("REVIEW_TIMEOUT_SECONDS", "300", 1)
+    attempts = number("REVIEW_ATTEMPTS", "3", 1)
     paths = setting("REVIEW_DIFF_PATHS", "").split()
     try:
         tests = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
@@ -202,21 +235,21 @@ def review(stdin_text):
     if not home:
         raise ReviewError("TASK_HOME is not set; this command keeps its state there and writes nothing into the workspace")
     state = Path(home)
-    state.mkdir(parents=True, exist_ok=True)
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ReviewError("TASK_HOME cannot be used: %s" % error)
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
     except ValueError:
         raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
-    try:
-        diff, test_output = gather(workspace, paths, tests, timeout)
-        blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, limit, timeout, attempts)
-    except ReviewError as error:
-        # The change could not be read: not a verdict, and not a defect in the change.
-        blocking, findings = None, str(error)
+    diff, test_output = gather(workspace, paths, tests, timeout)
+    blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, limit, timeout, attempts)
     outcome = "PASSED"
     if blocking is None:
+        outcome = "NOT REVIEWED"
         findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
         blocking = False
     elif blocking and sent_back >= limit:
@@ -241,9 +274,10 @@ def main():
     stdin_text = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
         return review(stdin_text)
-    except ReviewError as error:
-        print("adversarial review: " + str(error), file=sys.stderr)
-        return 2
+    except Exception as error:  # never a traceback and never exit 1: that would be read as a send-back for ever
+        print("Review: NOT REVIEWED. Unexpected %s: %s. The work goes on unreviewed this time."
+              % (type(error).__name__, scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))[:300]))
+        return 0
 
 
 if __name__ == "__main__":
