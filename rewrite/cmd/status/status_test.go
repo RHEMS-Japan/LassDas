@@ -646,6 +646,16 @@ func TestTheWorkspaceViewRunsNothingFromTheCheckoutAndStaysInsideTheQueue(t *tes
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("a program named by the checkout's configuration ran")
 	}
+	big := make([]byte, 3<<20)
+	copy(big, "HEAD-OF-BIG-FILE ")
+	copy(big[len(big)-16:], "TAIL-OF-BIG-FILE")
+	if err := os.WriteFile(filepath.Join(workspace, "big.bin"), big, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, text := get(t, ts, "/jobs/7/workspace", "operator", "the-status-password")
+	if !strings.Contains(text, "HEAD-OF-BIG-FILE") || strings.Contains(text, "TAIL-OF-BIG-FILE") || !strings.Contains(text, fmt.Sprintf("[cut here: %d more bytes on disk]", 3<<20-untrackedLimit)) {
+		t.Error("a large new file must show its head, be cut at the limit and say how much lies beyond")
+	}
 	_, body := get(t, ts, "/jobs/7", "operator", "the-status-password")
 	if !strings.Contains(body, "-old line") || !strings.Contains(body, "&#43;new line") {
 		t.Error("the tracked change is missing from the diff")

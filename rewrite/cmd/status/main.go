@@ -757,13 +757,10 @@ func (s *server) readWorkspace(id string) *workspace {
 			w.Untracked = append(w.Untracked, namedText{Name: name, Text: "(symbolic link; not followed, the page stays inside the queue)"})
 			continue
 		}
-		text, err := s.readIn(filepath.Join(rel, filepath.FromSlash(name)), 0)
+		text, err := s.headIn(filepath.Join(rel, filepath.FromSlash(name)), untrackedLimit)
 		if err != nil {
 			w.Untracked = append(w.Untracked, namedText{Name: name, Text: "could not be read: " + err.Error()})
 			continue
-		}
-		if len(text) > untrackedLimit {
-			text = text[:untrackedLimit] + fmt.Sprintf("\n[cut here: %d more bytes on disk]\n", len(text)-untrackedLimit)
 		}
 		w.Untracked = append(w.Untracked, namedText{Name: name, Text: text})
 		shown++
@@ -870,6 +867,37 @@ func (s *server) readIn(rel string, limit int64) (string, error) {
 // call and token counts, and how large a transcript is shown inline; a larger
 // file is left to the file browser and the page says so.
 const usageLimit = 8 << 20
+
+// headIn reads at most limit bytes from the start of a file through the
+// queue's root, and says how much of the file lies beyond them, without ever
+// loading the rest.
+func (s *server) headIn(rel string, limit int64) (string, error) {
+	root, err := os.OpenRoot(s.runDir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.ToSlash(rel))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", rel)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return "", err
+	}
+	if info.Size() > limit {
+		return string(raw) + fmt.Sprintf("\n[cut here: %d more bytes on disk]\n", info.Size()-limit), nil
+	}
+	return string(raw), nil
+}
 
 // sizeIn reports a file's size through the queue's root without reading it.
 func (s *server) sizeIn(rel string) (int64, error) {
