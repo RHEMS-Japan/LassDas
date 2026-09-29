@@ -450,6 +450,30 @@ long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
 
+### A read-only status page
+
+`bin/ticket-status` serves what the queue directory holds, as it is, over
+HTTP: every accepted request with its state (done, waiting for the requester,
+running a named stage, recovering after a restart), its position in the
+configured stages and its elapsed time; and for each request the original
+issue and request text, every record of the run with the instruction handed to
+the role, the model requested, the full output, the diagnostics and the error,
+the answers consumed from the requester, the notices the runtime posted, the
+findings the review command kept, the report written in the workspace, and
+what the checkout contains right now (`git status`, the diff of tracked files
+and the content of new files, read with `--no-optional-locks` so nothing is
+written). While a process runs, the engine copies its output as it arrives
+into `queue/jobs/<id>/live/`, with every configured credential replaced before
+it reaches the disk, and the page shows that copy under "Running now"; the copy
+is removed when the record is complete. The engine's own observations go to a
+file as well with `--log-file`, and the page shows its tail. Raw files are
+served under `/jobs/<id>/raw/` and the configuration as read under `/config`.
+The page holds no credential, writes nothing under the queue and takes no
+action. It can require HTTP basic authentication (`--auth-user-env` and
+`--auth-password-env` name environment variables) and answers `/healthz`
+without it. `deploy/ticket-engine/statefulset.yaml.example` runs it as a
+second container of the same Pod with the state volume mounted read-only.
+
 ### Requester stop in watch mode
 
 The issue's original creator can stop its queued or running work by posting a

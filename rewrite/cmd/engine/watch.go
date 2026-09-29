@@ -354,6 +354,7 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				if err := writeRuntimeFile(path, raw); err != nil {
 					observe("saving original issue: " + err.Error())
 				} else {
+					observe("accepted " + issue.Key + " as request " + strconv.FormatInt(issue.ID, 10))
 					changed = true
 				}
 			}
@@ -390,6 +391,8 @@ func bindRequestConfig(cfg config, directory, issue string) (config, error) {
 				return config{}, errors.New("watch role directories must be relative to each request workspace")
 			}
 			process.Directory = filepath.Join(workspace, process.Directory)
+			// The running copy of each process's output, shown by the status page.
+			process.Live = filepath.Join(directory, "live")
 			process.Env = make(map[string]string, len(role.Processes[j].Env)+3)
 			for key, value := range role.Processes[j].Env {
 				process.Env[key] = value

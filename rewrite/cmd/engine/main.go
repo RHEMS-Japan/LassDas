@@ -68,8 +68,17 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	showModels := flags.Bool("list-models", false, "fetch the current OpenRouter catalog; no request is run")
 	watch := flags.Bool("watch", false, "poll the explicitly configured intake into separate request directories")
 	directory := flags.String("run-dir", "", "private directory for this request's history")
+	logFile := flags.String("log-file", "", "also append the runtime's own observations to this file (the status page reads it)")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *logFile != "" {
+		file, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return fmt.Errorf("opening --log-file: %w", err)
+		}
+		defer file.Close()
+		log = io.MultiWriter(log, file)
 	}
 	if *showModels {
 		if *configPath != "" || *requestPath != "" || *issue != "" || *directory != "" || *watch || flags.NArg() != 0 {
