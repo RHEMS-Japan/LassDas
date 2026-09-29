@@ -452,6 +452,12 @@ func TestARolesOwnDirectoryCannotLeadThePageOutsideTheQueue(t *testing.T) {
 	if response, body := get(t, ts, "/files/jobs/7/homes/2-0/transcript.json"); response.StatusCode == http.StatusOK || strings.Contains(body, "OUTSIDE") {
 		t.Errorf("a file symbolic link was followed: %d %s", response.StatusCode, body)
 	}
+	if strings.Contains(body, `href="/files/jobs/7/homes/2-0/transcript.json"`) || strings.Contains(body, `href="/files/jobs/7/homes/2-0/logs`) {
+		t.Error("a symbolic link inside a home was offered as a link")
+	}
+	if !strings.Contains(body, "transcript.json <span class=\"meta\">(symbolic link") {
+		t.Error("a symbolic link inside a home should be named as one")
+	}
 }
 
 func TestListingLinksSurviveAwkwardFileNames(t *testing.T) {
@@ -536,6 +542,18 @@ func TestLabelsSwitchToJapaneseAndBack(t *testing.T) {
 	response.Body.Close()
 	if response.Header.Get("Location") != "/somewhere" && response.Header.Get("Location") != "/" {
 		t.Fatalf("a foreign referer must not become an open redirect: %q", response.Header.Get("Location"))
+	}
+	for _, referer := range []string{`/\\evil.example`, `/\\/evil.example`, `https://evil.example/\\@evil`, "//evil.example", "https://evil.example//foo"} {
+		request, _ = http.NewRequest("GET", ts.URL+"/lang/en", nil)
+		request.Header.Set("Referer", referer)
+		response, err = client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.Header.Get("Location") != "/" {
+			t.Errorf("referer %q led to %q", referer, response.Header.Get("Location"))
+		}
 	}
 	if response, _ := get(t, ts, "/lang/xx"); response.StatusCode != http.StatusNotFound {
 		t.Errorf("an unknown language answered %d", response.StatusCode)

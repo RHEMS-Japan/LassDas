@@ -233,13 +233,18 @@ type stageTime struct {
 	Last     time.Time
 }
 
+type homeFile struct {
+	Name string
+	Link bool
+}
+
 // homeLogs is what a role's own private directory holds of its native agent's
 // log: the steps it took, as the agent itself wrote them.
 type homeLogs struct {
 	Name       string
 	AgentLog   string
 	ErrorsLog  string
-	Files      []string
+	Files      []homeFile
 	Calls      int
 	TokensIn   int
 	TokensOut  int
@@ -452,18 +457,26 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			homeRel := filepath.Join("jobs", id, "homes", home.Name())
 			if text, err := s.readIn(filepath.Join(homeRel, "logs", "agent.log"), 20000); err == nil {
 				logs.AgentLog = text
-				if whole, err := s.readIn(filepath.Join(homeRel, "logs", "agent.log"), 0); err == nil && len(whole) <= usageLimit {
-					logs.Calls, logs.TokensIn, logs.TokensOut = agentUsage(whole)
+				if size, err := s.sizeIn(filepath.Join(homeRel, "logs", "agent.log")); err == nil && size <= usageLimit {
+					if whole, err := s.readIn(filepath.Join(homeRel, "logs", "agent.log"), 0); err == nil {
+						logs.Calls, logs.TokensIn, logs.TokensOut = agentUsage(whole)
+					}
 				} else {
 					logs.UsageNote = "the agent's log is larger than the page scans for its counts"
 				}
 			}
-			if text, err := s.readIn(filepath.Join(homeRel, "transcript.json"), 0); err == nil {
-				var indented bytes.Buffer
-				if len(text) <= usageLimit && json.Indent(&indented, []byte(text), "", "  ") == nil {
-					logs.Transcript = indented.String()
+			if size, err := s.sizeIn(filepath.Join(homeRel, "transcript.json")); err == nil {
+				if size <= usageLimit {
+					if text, err := s.readIn(filepath.Join(homeRel, "transcript.json"), 0); err == nil {
+						var indented bytes.Buffer
+						if json.Indent(&indented, []byte(text), "", "  ") == nil {
+							logs.Transcript = indented.String()
+						} else {
+							logs.Transcript = text
+						}
+					}
 				} else {
-					logs.Transcript = text
+					logs.UsageNote += " the transcript is larger than the page shows inline; it is under files"
 				}
 			}
 			if text, err := s.readIn(filepath.Join(homeRel, "logs", "errors.log"), 20000); err == nil {
@@ -472,7 +485,7 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			filepath.WalkDir(filepath.Join(dir, "homes", home.Name()), func(path string, entry os.DirEntry, err error) error {
 				if err == nil && !entry.IsDir() {
 					if rel, err := filepath.Rel(filepath.Join(dir, "homes", home.Name()), path); err == nil {
-						logs.Files = append(logs.Files, filepath.ToSlash(rel))
+						logs.Files = append(logs.Files, homeFile{Name: filepath.ToSlash(rel), Link: entry.Type()&fs.ModeSymlink != 0})
 					}
 				}
 				return nil
@@ -793,8 +806,23 @@ func (s *server) readIn(rel string, limit int64) (string, error) {
 }
 
 // usageLimit bounds how much of a native agent's log is scanned for its own
-// call and token counts; a larger log is not scanned and the page says so.
+// call and token counts, and how large a transcript is shown inline; a larger
+// file is left to the file browser and the page says so.
 const usageLimit = 8 << 20
+
+// sizeIn reports a file's size through the queue's root without reading it.
+func (s *server) sizeIn(rel string) (int64, error) {
+	root, err := os.OpenRoot(s.runDir)
+	if err != nil {
+		return 0, err
+	}
+	defer root.Close()
+	info, err := root.Stat(filepath.ToSlash(rel))
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
 
 type page struct {
 	Lang      string
@@ -1029,7 +1057,8 @@ func (s *server) languagePage(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "lang", Value: lang, Path: "/", MaxAge: 365 * 24 * 3600, SameSite: http.SameSiteLaxMode})
 	back := "/"
-	if referer, err := url.Parse(r.Referer()); err == nil && strings.HasPrefix(referer.Path, "/") && !strings.HasPrefix(referer.Path, "//") {
+	if referer, err := url.Parse(r.Referer()); err == nil && strings.HasPrefix(referer.Path, "/") &&
+		!strings.HasPrefix(referer.Path, "//") && !strings.HasPrefix(referer.Path, "/\\") && !strings.ContainsAny(referer.Path, "\\") {
 		back = referer.Path
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
@@ -1192,7 +1221,7 @@ nav a{margin-right:1em}
 {{if .Reviews}}<h2>{{t $.Lang "Review findings kept by the review command"}}</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
 {{if .Report}}<h2>{{t $.Lang "Report written in the workspace"}}</h2><pre>{{.Report}}</pre>{{end}}
 {{if .Receipt}}<h2>{{t $.Lang "Delivery receipt written by the delivery program"}}</h2><pre>{{.Receipt}}</pre>{{end}}
-{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f}}">{{$f}}</a>{{end}}</p>
+{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}{{if $f.Link}}{{$f.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f.Name}}">{{$f.Name}}</a>{{end}}{{end}}</p>
 {{if $h.Calls}}<p class="meta">{{t $.Lang "as the agent logged it:"}} {{$h.Calls}} {{t $.Lang "model calls"}}, {{$h.TokensIn}} {{t $.Lang "input tokens"}}, {{$h.TokensOut}} {{t $.Lang "output tokens"}}</p>{{end}}{{if $h.UsageNote}}<p class="meta">{{$h.UsageNote}}</p>{{end}}
 {{if $h.AgentLog}}<details><summary>{{t $.Lang "agent.log (tail)"}}</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>{{t $.Lang "errors.log (tail)"}}</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
 {{if $h.Transcript}}<details><summary>{{t $.Lang "the whole conversation the agent had (messages, tool calls and their results)"}}</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
