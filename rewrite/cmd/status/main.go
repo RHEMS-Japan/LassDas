@@ -991,8 +991,8 @@ details>summary{cursor:pointer;color:#246}
 a{color:#246}
 .status{font-weight:bold}
 nav a{margin-right:1em}
-.board{display:flex;gap:1em;align-items:flex-start;overflow-x:auto;padding-bottom:.5em}
-.lane{flex:1 1 0;min-width:17em;background:#eceff3;border-radius:8px;padding:.5em .6em}
+.board{display:flex;flex-wrap:wrap;gap:1em;align-items:flex-start;padding-bottom:.5em}
+.lane{flex:1 1 15em;min-width:15em;background:#eceff3;border-radius:8px;padding:.5em .6em}
 .lane h2{margin:.2em 0 .5em;font-size:1em;padding-left:.4em;border-left:6px solid #888}
 .lane.running h2{border-color:#2a7}.lane.awaiting h2{border-color:#d90}.lane.attention h2{border-color:#c33}.lane.delivered h2{border-color:#46a}
 .card{background:#fff;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.18);padding:.6em .8em;margin:.5em 0;border-left:5px solid #888}
