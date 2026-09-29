@@ -363,6 +363,7 @@ runtime, not a model, decides what runs next.
     { "name": "elicit", "kind": "model" },
     { "name": "work", "kind": "model" },
     { "name": "verify", "kind": "command", "on_failure": "work" },
+    { "name": "review", "kind": "command", "on_failure": "work" },
     { "name": "deliver", "kind": "command", "on_failure": "work" },
     { "name": "verify_merged", "kind": "command", "on_failure": "work" },
     { "name": "report", "kind": "model" },
@@ -388,6 +389,33 @@ The next assignment is the first stage that is not yet satisfied.
 - `on_failure` must name a model stage, and a model stage takes none: a process
   error or an interrupted launch simply runs that stage again, with the
   runtime's usual note about the interruption in the record.
+
+The shipped example's `review` stage is an adversarial review run as the
+operator's own command, `harnesses/adversarial_review.py`. A model the operator
+names, normally from a different publisher than the worker, is handed the
+runtime's text for the stage (where it sits, the original request, the settled
+requirements, the previous reports), the diff of the change and the output of
+the operator's test commands, and returns one structured verdict: blocking or
+not, with its findings. The command exits 1 on a blocking verdict, which sends
+the work back to the `work` stage, and 0 otherwise; the findings are printed,
+so they join the history as an observation the worker and the report writer
+read, and the command writes nothing into the workspace (its send-back counter
+and log live in the process's own directory, `TASK_HOME`). The runtime reads
+the exit status and nothing else. Two settings keep the review from ending or
+stalling a request. `REVIEW_ROUNDS` caps the send-backs, counting only the
+times the work was actually sent back; once the cap is reached the next
+blocking verdict lets the work through with the objections recorded as
+unresolved. And only a real blocking verdict exits 1: everything that keeps a
+verdict from being obtained, a mistyped setting, a test command that cannot
+start, an endpoint that is not HTTPS, a change that cannot be read, diff
+paths that match no change, a model service that is down or returns none,
+ends 0 and prints `NOT REVIEWED` with the reason, which joins the history for
+the worker and the report writer. A review that could not be performed is not
+a defect in the change, and an ordered run would otherwise send the work
+round for ever. A diff or test output longer than its limit is cut with a
+visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
+the command prints or writes.
 
 After every stage the engine appends its own record of what it observed: how
 each process ended, and the content of the file named by that process's
