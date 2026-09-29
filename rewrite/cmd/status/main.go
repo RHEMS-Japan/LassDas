@@ -584,15 +584,25 @@ func (j *job) derive(now time.Time) {
 		if state.Recovering {
 			j.Status = "recovering after a restart; " + j.Status
 		}
-		if state.Workflow != nil && len(state.Workflow.Stages) > 0 && state.Step != "" {
-			j.Position = state.Step
+		// The position is the stage running now when one is, else the last
+		// stage the record reached: the record's step moves only after a
+		// launch returns, and a card must not name the previous stage while
+		// the next one visibly runs.
+		current := state.Step
+		if len(j.Live) > 0 {
+			current = j.Live[0].Role
+		} else if state.Pending != nil && !state.Done {
+			current = state.Pending.Role
+		}
+		if state.Workflow != nil && len(state.Workflow.Stages) > 0 && current != "" {
+			j.Position = current
 			for i, stage := range state.Workflow.Stages {
-				if stage.Name == state.Step {
-					j.Position = fmt.Sprintf("step %d of %d: %s", i+1, len(state.Workflow.Stages), state.Step)
+				if stage.Name == current {
+					j.Position = fmt.Sprintf("step %d of %d: %s", i+1, len(state.Workflow.Stages), current)
 				}
 			}
-		} else if state.Step != "" {
-			j.Position = state.Step
+		} else if current != "" {
+			j.Position = current
 		}
 	} else {
 		j.Status = "no run record yet"
@@ -637,25 +647,36 @@ func (j *job) derive(now time.Time) {
 				j.Lane, j.Attention = "attention", stringOf(notice["text"])
 			}
 		}
-		if state.Workflow != nil && len(state.Workflow.Stages) > 0 {
-			var dots strings.Builder
-			reached := false
-			for _, stage := range state.Workflow.Stages {
-				switch {
-				case stage.Name == state.Step:
-					dots.WriteString("◉")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "current"})
-					reached = true
-				case reached:
-					dots.WriteString("○")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "ahead"})
-				default:
-					dots.WriteString("●")
-					j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
-				}
-			}
-			j.Dots = dots.String()
+	}
+	// The trail of stages on the card: passed, current and ahead; a finished
+	// request has passed them all, a waiting one is still at its stage.
+	if state := j.State; state != nil && state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+		current := state.Step
+		if len(j.Live) > 0 {
+			current = j.Live[0].Role
+		} else if state.Pending != nil && !state.Done {
+			current = state.Pending.Role
 		}
+		var dots strings.Builder
+		reached := false
+		for _, stage := range state.Workflow.Stages {
+			switch {
+			case state.Done:
+				dots.WriteString("●")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
+			case stage.Name == current:
+				dots.WriteString("◉")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "current"})
+				reached = true
+			case reached:
+				dots.WriteString("○")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "ahead"})
+			default:
+				dots.WriteString("●")
+				j.Trail = append(j.Trail, stageMark{Name: stage.Name, State: "passed"})
+			}
+		}
+		j.Dots = dots.String()
 	}
 	j.Refresh = 30
 	if len(j.Live) > 0 {

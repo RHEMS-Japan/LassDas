@@ -44,6 +44,7 @@ class BridgeTests(unittest.TestCase):
             def run_conversation(self, user_message):
                 events.append(("request", user_message))
                 print("native tool trace")
+                print("🔑 Using API key: sy-nt...only")
                 if stop_signal:
                     signal.getsignal(stop_signal)(stop_signal, None)
                     if not interrupted.wait(1):
@@ -276,6 +277,8 @@ class LiveAndTranscriptTests(BridgeTests):
                 extra_env={"TASK_CREDENTIAL_NAMES": "OPENROUTER_API_KEY:TASK_TRACKER_KEY", "TASK_TRACKER_KEY": "issued-9f2a"})
             self.assertIsNone(failure)
             self.assertEqual((code, out), (0, "plain report"))
+            self.assertIn("native tool trace", err)
+            self.assertNotIn("Using API key", err)
             self.assertEqual((logs / "agent.log").read_text(encoding="utf-8"), "tool env printed [credential] and [credential]\n")
             configuration = dict(next(kwargs for name, kwargs in events if name == "configuration"))
             self.assertEqual((configuration["quiet_mode"], configuration["tool_progress_mode"], configuration["log_prefix_chars"]),

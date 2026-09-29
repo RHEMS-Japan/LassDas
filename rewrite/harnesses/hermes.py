@@ -13,6 +13,34 @@ import sys
 import threading
 
 
+class WithoutKeyLines:
+    """The SDK's own display prints a masked form of the key it was given
+    ("sk-…" with the ends visible). Even the ends are a credential's, so the
+    lines that name a key are dropped before anything reaches stderr; every
+    other line passes through untouched."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.pending = ""
+
+    def write(self, text):
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            if "API key" not in line and "api_key" not in line:
+                self.stream.write(line + "\n")
+        return len(text)
+
+    def flush(self):
+        if self.pending and "API key" not in self.pending and "api_key" not in self.pending:
+            self.stream.write(self.pending)
+            self.pending = ""
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def credentials():
     """The values this process must never leave on disk: every credential the
     runtime handed it (named in TASK_CREDENTIAL_NAMES) and the two this bridge
@@ -83,6 +111,7 @@ def main():
 
     prompt = sys.stdin.read()
     reasoning = {"effort": os.environ.get("NATIVE_REASONING_EFFORT", "low")}
+    sys.stderr = WithoutKeyLines(sys.stderr)
     with contextlib.redirect_stdout(sys.stderr):
         agent = AIAgent(
             base_url=os.environ["OPENROUTER_BASE_URL"],
