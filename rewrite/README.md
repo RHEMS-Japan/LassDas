@@ -909,6 +909,13 @@ Provide these process settings explicitly:
   a literal credential in `env` or the configuration file.
 - Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
   (default `6000`, per native API response, not a request failure limit).
+- Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
+  call's arguments and result the harness prints as it happens; the lines reach
+  stderr, so the runtime's live copy shows them, and only the tail of them
+  travels in a later role's prompt.
+- `TASK_CREDENTIAL_NAMES` is set by the runtime: the names of the variables
+  that hold credentials, so the harness can keep every one of them out of the
+  transcript and the native agent's logs it leaves in its directory.
 
 The reasoning setting is also passed through the SDK's explicit OpenRouter
 request override. An installed-SDK trial found that its URL-based capability

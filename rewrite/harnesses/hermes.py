@@ -13,24 +13,44 @@ import sys
 import threading
 
 
-def save_transcript(result):
-    """Keep the whole conversation the native agent had, for reading afterwards.
+def credentials():
+    """The values this process must never leave on disk: every credential the
+    runtime handed it (named in TASK_CREDENTIAL_NAMES) and the two this bridge
+    knows by itself."""
+    names = set(os.environ.get("TASK_CREDENTIAL_NAMES", "").split(":")) | {"OPENROUTER_API_KEY", "TASK_TRACKER_KEY"}
+    return [os.environ[name] for name in sorted(names) if name and os.environ.get(name)]
 
-    The report has already been published; nothing here can take it back. The
-    credentials this process was given are replaced before the text is written.
+
+def scrub(text, values):
+    for value in values:
+        text = text.replace(value, "[credential]")
+    return text
+
+
+def save_transcript(result):
+    """Keep the whole conversation the native agent had, for reading afterwards,
+    and take the credentials out of what the native agent logged by itself.
+
+    The report has already been published; nothing here can take it back.
     """
+    values = credentials()
+    home = Path(os.environ["HERMES_HOME"])
     messages = result.get("messages") if isinstance(result, dict) else None
-    if not isinstance(messages, list):
-        return
-    try:
-        text = json.dumps(messages, ensure_ascii=False, indent=1, default=str)
-        for name in ("OPENROUTER_API_KEY", "TASK_TRACKER_KEY"):
-            value = os.environ.get(name)
-            if value:
-                text = text.replace(value, "[credential]")
-        (Path(os.environ["HERMES_HOME"]) / "transcript.json").write_text(text, encoding="utf-8")
-    except Exception as error:
-        print(f"Transcript not saved: {error}", file=sys.stderr)
+    if isinstance(messages, list):
+        try:
+            text = scrub(json.dumps(messages, ensure_ascii=False, indent=1, default=str), values)
+            (home / "transcript.json").write_text(text, encoding="utf-8")
+        except Exception as error:
+            print(f"Transcript not saved: {error}", file=sys.stderr)
+    for name in ("agent.log", "errors.log"):
+        path = home / "logs" / name
+        try:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if any(value in text for value in values):
+                    path.write_text(scrub(text, values), encoding="utf-8")
+        except Exception as error:
+            print(f"{name} not scrubbed: {error}", file=sys.stderr)
 
 
 def main():
@@ -112,6 +132,11 @@ def main():
     try:
         with contextlib.redirect_stdout(sys.stderr):
             result = agent.run_conversation(user_message=prompt)
+        # The conversation is over, so no tool is left to interrupt; retire the
+        # interrupter before the report is written, so nothing it might print
+        # can follow the report on stdout.
+        finished.set()
+        interrupter.join(timeout=1)
         # No stripping, clipping, classification, JSON parsing or approval test.
         # Preserve partial work even when the native run failed, and publish the
         # report before cleanup so a cleanup error cannot erase it.

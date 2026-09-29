@@ -259,3 +259,35 @@ func TestIndependentProcessesReceiveNoPeerAnswer(t *testing.T) {
 		}
 	}
 }
+
+func TestALaterRolesPromptCarriesOnlyTheTailOfLongDiagnostics(t *testing.T) {
+	long := strings.Repeat("step line\n", 1000) + "LAST-LINE"
+	state := State{Request: "r", History: []Result{{Role: "implement", Speaker: "p", Output: "done", Diagnostics: long, Error: "exit status 1\n" + long}}}
+	prompt := processPrompt(Role{Name: "verify"}, Process{Name: "v"}, Assignment{Role: "verify"}, state)
+	if strings.Count(prompt, "step line") >= 1000 {
+		t.Fatal("the whole diagnostics travelled in the prompt")
+	}
+	if !strings.Contains(prompt, "LAST-LINE") || !strings.Contains(prompt, "earlier characters are in the record, not in this prompt") {
+		t.Fatalf("the tail and the marker are missing: %.300s", prompt)
+	}
+	if strings.Count(prompt, "earlier characters are in the record") != 2 {
+		t.Fatalf("both the diagnostics and the error should be cut once each: %d", strings.Count(prompt, "earlier characters are in the record"))
+	}
+	if promptTail("short") != "short" {
+		t.Fatal("a short text must pass unchanged")
+	}
+}
+
+func TestAProcessIsToldWhichOfItsVariablesAreCredentials(t *testing.T) {
+	t.Setenv("PROCESS_TEST_SOURCE", "source-value-1")
+	process := Process{Name: "p", Command: []string{"/bin/sh", "-c", "printf %s \"$TASK_CREDENTIAL_NAMES\""},
+		Secrets: map[string]string{"ROLE_KEY": "PROCESS_TEST_SOURCE"}, Credentials: map[string]string{"TASK_TRACKER_KEY": "issued-value"}}
+	result := process.run(context.Background(), Role{Name: "r"}, Assignment{Role: "r"}, State{})
+	if result.Error != "" || result.Output != "ROLE_KEY:TASK_TRACKER_KEY" {
+		t.Fatalf("%+v", result)
+	}
+	plain := Process{Name: "p", Command: []string{"/bin/sh", "-c", "printf %s \"${TASK_CREDENTIAL_NAMES-unset}\""}}
+	if result := plain.run(context.Background(), Role{Name: "r"}, Assignment{Role: "r"}, State{}); result.Output != "unset" {
+		t.Fatalf("a process without credentials got %q", result.Output)
+	}
+}

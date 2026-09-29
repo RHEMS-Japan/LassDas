@@ -20,7 +20,7 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
-    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high", mutation_verifier=None, failed_file_attempts=None, task_workspace=None, terminal_cwd=None):
+    def run_bridge(self, result=None, error=None, cleanup_error=None, home=True, task_home=None, stop_signal=None, interrupt_error=None, background_cleanup_error=None, reasoning_effort="high", mutation_verifier=None, failed_file_attempts=None, task_workspace=None, terminal_cwd=None, extra_env=None):
         events, stdout, stderr = [], io.StringIO(), io.StringIO()
         interrupted = threading.Event()
 
@@ -81,6 +81,8 @@ class BridgeTests(unittest.TestCase):
             env["TASK_WORKSPACE"] = task_workspace
         if terminal_cwd is not None:
             env["TERMINAL_CWD"] = terminal_cwd
+        if extra_env:
+            env.update(extra_env)
         failure, code = None, None
         with patch.dict(sys.modules, {"run_agent": types.SimpleNamespace(AIAgent=NativeAgent),
                                      "tools.process_registry": types.SimpleNamespace(process_registry=NativeRegistry())}), \
@@ -266,10 +268,15 @@ class LiveAndTranscriptTests(BridgeTests):
             conversation = [{"role": "user", "content": "task"},
                             {"role": "assistant", "tool_calls": [{"function": {"name": "terminal", "arguments": "{\"command\": \"ls\"}"}}]},
                             {"role": "tool", "content": "the key synthetic-test-only must not be kept"}]
+            logs = pathlib.Path(home) / "logs"
+            logs.mkdir()
+            (logs / "agent.log").write_text("tool env printed synthetic-test-only and issued-9f2a\n", encoding="utf-8")
             events, out, err, code, failure = self.run_bridge(
-                {"final_response": "plain report", "messages": conversation}, task_home=home)
+                {"final_response": "plain report", "messages": conversation}, task_home=home,
+                extra_env={"TASK_CREDENTIAL_NAMES": "OPENROUTER_API_KEY:TASK_TRACKER_KEY", "TASK_TRACKER_KEY": "issued-9f2a"})
             self.assertIsNone(failure)
             self.assertEqual((code, out), (0, "plain report"))
+            self.assertEqual((logs / "agent.log").read_text(encoding="utf-8"), "tool env printed [credential] and [credential]\n")
             configuration = dict(next(kwargs for name, kwargs in events if name == "configuration"))
             self.assertEqual((configuration["quiet_mode"], configuration["tool_progress_mode"], configuration["log_prefix_chars"]),
                              (False, "all", 2000))

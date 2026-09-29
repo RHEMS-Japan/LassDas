@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -110,8 +112,10 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		}
 	}
 	s.templates = template.Must(template.New("").Funcs(template.FuncMap{
-		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON,
-		"head": func(title string, refresh int) headData { return headData{Title: title, Refresh: refresh} },
+		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON, "t": translate, "st": localize,
+		"head": func(lang, title string, refresh int) headData {
+			return headData{Title: translate(lang, title), Refresh: refresh, Lang: lang}
+		},
 	}).Parse(pageTemplates))
 	return s, nil
 }
@@ -139,6 +143,7 @@ func (s *server) handler() http.Handler {
 		http.Redirect(w, r, "/files/", http.StatusMovedPermanently)
 	}))
 	mux.HandleFunc("GET /files/{path...}", s.auth(s.filesPage))
+	mux.HandleFunc("GET /lang/{lang}", s.auth(s.languagePage))
 	return mux
 }
 
@@ -238,6 +243,7 @@ type homeLogs struct {
 	Calls      int
 	TokensIn   int
 	TokensOut  int
+	UsageNote  string
 	Transcript string
 }
 
@@ -400,7 +406,7 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			if entry.Home != "" {
 				if rel, err := filepath.Rel(s.runDir, entry.Home); err == nil && filepath.IsLocal(rel) {
 					live.Home = filepath.ToSlash(rel)
-					if log, err := tail(filepath.Join(entry.Home, "logs", "agent.log"), 20000); err == nil {
+					if log, err := s.readIn(filepath.Join(rel, "logs", "agent.log"), 20000); err == nil {
 						live.AgentLog = log
 					}
 				}
@@ -443,23 +449,24 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 				continue
 			}
 			logs := homeLogs{Name: home.Name()}
-			if raw, err := os.ReadFile(filepath.Join(dir, "homes", home.Name(), "logs", "agent.log")); err == nil {
-				logs.Calls, logs.TokensIn, logs.TokensOut = agentUsage(string(raw))
-				if len(raw) > 20000 {
-					logs.AgentLog = fmt.Sprintf("[%d earlier bytes not shown; the whole file is under files]\n", len(raw)-20000) + string(raw[len(raw)-20000:])
+			homeRel := filepath.Join("jobs", id, "homes", home.Name())
+			if text, err := s.readIn(filepath.Join(homeRel, "logs", "agent.log"), 20000); err == nil {
+				logs.AgentLog = text
+				if whole, err := s.readIn(filepath.Join(homeRel, "logs", "agent.log"), 0); err == nil && len(whole) <= usageLimit {
+					logs.Calls, logs.TokensIn, logs.TokensOut = agentUsage(whole)
 				} else {
-					logs.AgentLog = string(raw)
+					logs.UsageNote = "the agent's log is larger than the page scans for its counts"
 				}
 			}
-			if raw, err := os.ReadFile(filepath.Join(dir, "homes", home.Name(), "transcript.json")); err == nil {
+			if text, err := s.readIn(filepath.Join(homeRel, "transcript.json"), 0); err == nil {
 				var indented bytes.Buffer
-				if json.Indent(&indented, raw, "", "  ") == nil {
+				if len(text) <= usageLimit && json.Indent(&indented, []byte(text), "", "  ") == nil {
 					logs.Transcript = indented.String()
 				} else {
-					logs.Transcript = string(raw)
+					logs.Transcript = text
 				}
 			}
-			if text, err := tail(filepath.Join(dir, "homes", home.Name(), "logs", "errors.log"), 20000); err == nil {
+			if text, err := s.readIn(filepath.Join(homeRel, "logs", "errors.log"), 20000); err == nil {
 				logs.ErrorsLog = text
 			}
 			filepath.WalkDir(filepath.Join(dir, "homes", home.Name()), func(path string, entry os.DirEntry, err error) error {
@@ -728,9 +735,12 @@ func (s *server) formatTime(t time.Time) string {
 	return t.In(s.location).Format("2006-01-02 15:04:05 MST")
 }
 
-func (s *server) ago(t time.Time) string {
+func (s *server) ago(lang string, t time.Time) string {
 	if t.IsZero() {
 		return ""
+	}
+	if lang == "ja" {
+		return humanDuration(time.Since(t)) + " 前"
 	}
 	return humanDuration(time.Since(t)) + " ago"
 }
@@ -743,18 +753,51 @@ func prettyJSON(value any) string {
 	return string(data)
 }
 
-func tail(path string, limit int) (string, error) {
-	raw, err := os.ReadFile(path)
+// readIn reads a file by its path relative to the queue through the queue's
+// root, so a symbolic link a role planted in its own directory cannot lead the
+// page outside the queue. With a limit, only the last limit bytes are read
+// (seeking, not loading the file) and a marker says how much lies before them.
+func (s *server) readIn(rel string, limit int64) (string, error) {
+	root, err := os.OpenRoot(s.runDir)
 	if err != nil {
 		return "", err
 	}
-	if len(raw) > limit {
-		return fmt.Sprintf("[%d earlier bytes not shown; the whole file is on disk]\n", len(raw)-limit) + string(raw[len(raw)-limit:]), nil
+	defer root.Close()
+	file, err := root.Open(filepath.ToSlash(rel))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", rel)
+	}
+	if limit > 0 && info.Size() > limit {
+		if _, err := file.Seek(info.Size()-limit, io.SeekStart); err != nil {
+			return "", err
+		}
+		raw, err := io.ReadAll(io.LimitReader(file, limit))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("[%d earlier bytes not shown; the whole file is under files]\n", info.Size()-limit) + string(raw), nil
+	}
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return "", err
 	}
 	return string(raw), nil
 }
 
+// usageLimit bounds how much of a native agent's log is scanned for its own
+// call and token counts; a larger log is not scanned and the page says so.
+const usageLimit = 8 << 20
+
 type page struct {
+	Lang      string
 	Now       string
 	RunDir    string
 	Path      string
@@ -785,7 +828,7 @@ func (s *server) render(w http.ResponseWriter, name string, data page) {
 
 func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	data := page{Now: s.formatTime(now), RunDir: s.runDir, Config: s.configRaw != nil}
+	data := page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Config: s.configRaw != nil}
 	jobs, err := s.jobs(now)
 	if err != nil {
 		data.Notes = append(data.Notes, "the jobs directory could not be listed: "+err.Error())
@@ -806,7 +849,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	} else if s.configRaw != nil {
 		data.Notes = append(data.Notes, "the configuration file is not valid JSON; see /config")
 	}
-	if log, err := tail(filepath.Join(s.runDir, "engine.log"), 20000); err == nil {
+	if log, err := s.readIn("engine.log", 20000); err == nil {
 		data.Log = log
 	} else if !errors.Is(err, os.ErrNotExist) {
 		data.Notes = append(data.Notes, "engine.log could not be read: "+err.Error())
@@ -835,7 +878,7 @@ func (s *server) jobPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	s.render(w, "job", page{Now: s.formatTime(now), RunDir: s.runDir, Job: s.loadJob(id, now, true), Config: s.configRaw != nil})
+	s.render(w, "job", page{Lang: language(r), Now: s.formatTime(now), RunDir: s.runDir, Job: s.loadJob(id, now, true), Config: s.configRaw != nil})
 }
 
 func (s *server) rawFile(w http.ResponseWriter, r *http.Request) {
@@ -947,7 +990,8 @@ func (s *server) filesPage(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var listing []fileEntry
 	for _, entry := range entries {
-		item := fileEntry{Name: entry.Name(), Dir: entry.IsDir()}
+		item := fileEntry{Name: entry.Name(), Dir: entry.IsDir(), Link: entry.Type()&fs.ModeSymlink != 0,
+			Href: url.PathEscape(entry.Name())}
 		if info, err := entry.Info(); err == nil {
 			item.Size, item.Modified = info.Size(), info.ModTime()
 		}
@@ -955,19 +999,108 @@ func (s *server) filesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	base := "/files/"
 	if rel != "." {
-		base += rel + "/"
+		for _, segment := range strings.Split(rel, "/") {
+			base += url.PathEscape(segment) + "/"
+		}
 	}
-	s.render(w, "files", page{Now: s.formatTime(time.Now()), RunDir: s.runDir, Path: rel, Base: base, Files: listing})
+	s.render(w, "files", page{Lang: language(r), Now: s.formatTime(time.Now()), RunDir: s.runDir, Path: rel, Base: base, Files: listing})
 }
 
 type headData struct {
 	Title   string
 	Refresh int
+	Lang    string
+}
+
+// language is the viewer's choice of labels, kept in a cookie; the content of
+// the queue is shown as it is in either language.
+func language(r *http.Request) string {
+	if cookie, err := r.Cookie("lang"); err == nil && cookie.Value == "ja" {
+		return "ja"
+	}
+	return "en"
+}
+
+func (s *server) languagePage(w http.ResponseWriter, r *http.Request) {
+	lang := r.PathValue("lang")
+	if lang != "ja" && lang != "en" {
+		http.NotFound(w, r)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "lang", Value: lang, Path: "/", MaxAge: 365 * 24 * 3600, SameSite: http.SameSiteLaxMode})
+	back := "/"
+	if referer, err := url.Parse(r.Referer()); err == nil && strings.HasPrefix(referer.Path, "/") && !strings.HasPrefix(referer.Path, "//") {
+		back = referer.Path
+	}
+	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+var japanese = map[string]string{
+	"ticket engine status": "自動処理の状態", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
+	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
+	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
+	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "none": "なし",
+	"elapsed": "経過", "last change": "最終更新", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
+	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
+	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
+	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "started": "開始", "recovering": "再起動後の復帰中",
+	"waiting for the requester": "依頼者の返事待ち", "pending:": "実行待ち:", "instruction of the pending action": "実行待ちの工程への指示", "Raw files:": "生のファイル:",
+	"workspace changes as text": "作業場所の変更 (テキスト)", "Running now:": "実行中:", "since": "開始", "instruction handed to it": "渡した指示",
+	"output so far": "ここまでの出力", "diagnostics so far": "ここまでの stderr", "the native agent's own log so far": "agent 自身のログ (ここまで)", "whole file": "全文",
+	"Stages:": "工程:", "workflow as recorded for this request": "この依頼に記録された工程定義", "Time by stage": "工程別の時間", "Stage": "工程", "Launches": "回数",
+	"Failed": "失敗", "Total time (sum over process runs; parallel processes add up)": "合計時間 (プロセスごとの合算。並列は足し合わせ)", "First started": "最初の開始", "Last finished": "最後の終了",
+	"Request": "依頼の原文", "Notices posted by the runtime": "本体が投稿した通知", "Record": "記録", "entries": "件", "after the previous record": "前の記録から",
+	"Error": "失敗", "instruction": "指示", "Output": "出力", "diagnostics (stderr)": "stderr", "Requester answers consumed": "取り込んだ依頼者の回答",
+	"Review findings kept by the review command": "レビューコマンドが残した指摘", "Report written in the workspace": "作業場所に書かれた報告",
+	"Delivery receipt written by the delivery program": "納品プログラムが書いた receipt", "What each role's native agent logged in its own directory": "各役の agent が自分のディレクトリに残したもの",
+	"home": "home", "files:": "ファイル:", "as the agent logged it:": "agent の記録では:", "model calls": "回のモデル呼び出し", "input tokens": "入力トークン", "output tokens": "出力トークン",
+	"agent.log (tail)": "agent.log (末尾)", "errors.log (tail)": "errors.log (末尾)", "the whole conversation the agent had (messages, tool calls and their results)": "agent の会話の全記録 (メッセージ、ツール呼び出しと結果)",
+	"Workspace changes": "作業場所の変更", "no change in the checkout": "checkout に変更なし", "recent commits in the checkout": "checkout の直近の commit", "diff of tracked files": "追跡ファイルの差分",
+	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
+	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
+	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
+	"no checkout yet": "checkout はまだない",
+}
+
+func translate(lang, text string) string {
+	if lang == "ja" {
+		if ja, known := japanese[text]; known {
+			return ja
+		}
+	}
+	return text
+}
+
+// localize renders the runtime's own status phrases, which name roles and
+// stages, in the viewer's language.
+func localize(lang, status string) string {
+	if lang != "ja" {
+		return status
+	}
+	prefix := ""
+	if rest, found := strings.CutPrefix(status, "recovering after a restart; "); found {
+		prefix, status = "再起動後の復帰中。", rest
+	}
+	switch {
+	case strings.HasPrefix(status, "running "):
+		return prefix + "実行中: " + strings.TrimPrefix(status, "running ")
+	case strings.HasPrefix(status, "assigned to ") && strings.HasSuffix(status, ", no process output yet"):
+		return prefix + "割り当て済み (出力はまだ): " + strings.TrimSuffix(strings.TrimPrefix(status, "assigned to "), ", no process output yet")
+	case strings.HasPrefix(status, "step "):
+		var i, n int
+		var name string
+		if _, err := fmt.Sscanf(status, "step %d of %d: %s", &i, &n, &name); err == nil {
+			return prefix + fmt.Sprintf("工程 %d/%d: %s", i, n, name)
+		}
+	}
+	return prefix + translate(lang, status)
 }
 
 type fileEntry struct {
 	Name     string
 	Dir      bool
+	Link     bool
+	Href     string
 	Size     int64
 	Modified time.Time
 }
@@ -1002,71 +1135,71 @@ nav a{margin-right:1em}
 .empty{color:#888;font-size:.9em;padding:.4em}
 </style></head><body>{{end}}
 
-{{define "foot"}}<p class="meta">Rendered {{.Now}}; this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.</p></body></html>{{end}}
+{{define "foot"}}<p class="meta">{{t .Lang "Rendered"}} {{.Now}}; {{t .Lang "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only."}}</p></body></html>{{end}}
 
-{{define "overview"}}{{template "head" (head "ticket engine status" 30)}}
-<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/">every file of the queue</a></nav>
-<h1>Requests</h1>
-<p class="meta">Queue {{.RunDir}}, read at {{.Now}}.</p>
+{{define "overview"}}{{template "head" (head .Lang "ticket engine status" 30)}}
+<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/">{{t $.Lang "every file of the queue"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
+<h1>{{t .Lang "Requests"}}</h1>
+<p class="meta">{{t .Lang "Queue"}} {{.RunDir}}, {{t .Lang "read at"}} {{.Now}}.</p>
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
-{{if not .Jobs}}<p>No request has been accepted into this queue yet.</p>{{end}}
-<div class="board">{{range .Lanes}}<div class="lane {{.Key}}"><h2>{{.Title}} ({{len .Jobs}})</h2>
+{{if not .Jobs}}<p>{{t .Lang "No request has been accepted into this queue yet."}}</p>{{end}}
+<div class="board">{{range .Lanes}}<div class="lane {{.Key}}"><h2>{{t $.Lang .Title}} ({{len .Jobs}})</h2>
 {{range .Jobs}}<div class="card"><div class="key"><a href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a></div><div class="title">{{.Title}}</div>
-<div class="line status">{{.Status}}</div>{{if .Position}}<div class="line">{{.Position}} <span class="dots">{{.Dots}}</span></div>{{end}}
+<div class="line status">{{st $.Lang .Status}}</div>{{if .Position}}<div class="line">{{st $.Lang .Position}} <span class="dots">{{.Dots}}</span></div>{{end}}
 {{if .Attention}}<div class="attn">{{.Attention}}</div>{{end}}
-<div class="line meta">elapsed {{.Elapsed}} &middot; last change {{ago .Updated}}{{if .Requester}} &middot; {{.Requester}}{{end}}</div></div>{{else}}<div class="empty">none</div>{{end}}</div>{{end}}</div>
-{{if .Config}}<h2>Intake, as configured</h2><pre>{{pretty .Intake}}</pre>
-{{if .Stages}}<h2>Stages of the run</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
-<h2>Decision and models</h2><pre>{{pretty .Router}}</pre><pre>{{pretty .Selection}}</pre>{{end}}
-<h2>Runtime log (tail)</h2>{{if .Log}}<pre>{{.Log}}</pre><p class="meta"><a href="/log">the whole log</a></p>{{else}}<p class="meta">(nothing yet)</p>{{end}}
+<div class="line meta">{{t $.Lang "elapsed"}} {{.Elapsed}} &middot; {{t $.Lang "last change"}} {{ago $.Lang .Updated}}{{if .Requester}} &middot; {{.Requester}}{{end}}</div></div>{{else}}<div class="empty">{{t $.Lang "none"}}</div>{{end}}</div>{{end}}</div>
+{{if .Config}}<h2>{{t .Lang "Intake, as configured"}}</h2><pre>{{pretty .Intake}}</pre>
+{{if .Stages}}<h2>{{t .Lang "Stages of the run"}}</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
+<h2>{{t .Lang "Decision and models"}}</h2><pre>{{pretty .Router}}</pre><pre>{{pretty .Selection}}</pre>{{end}}
+<h2>{{t .Lang "Runtime log (tail)"}}</h2>{{if .Log}}<pre>{{.Log}}</pre><p class="meta"><a href="/log">{{t .Lang "the whole log"}}</a></p>{{else}}<p class="meta">{{t .Lang "(nothing yet)"}}</p>{{end}}
 {{template "foot" .}}{{end}}
 
-{{define "files"}}{{template "head" (head (printf "files: %s" .Path) 30)}}
-<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/">every file of the queue</a></nav>
+{{define "files"}}{{template "head" (head .Lang (printf "%s: %s" (t .Lang "files") .Path) 30)}}
+<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/">{{t $.Lang "every file of the queue"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
 <h1>{{.RunDir}}{{if ne .Path "."}}/{{.Path}}{{end}}</h1>
-<table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+<table><tr><th>{{t .Lang "Name"}}</th><th>{{t .Lang "Size"}}</th><th>{{t .Lang "Modified"}}</th></tr>
 {{if ne .Path "."}}<tr><td><a href="{{.Base}}../">../</a></td><td></td><td></td></tr>{{end}}
-{{range .Files}}<tr><td><a href="{{$.Base}}{{.Name}}{{if .Dir}}/{{end}}">{{.Name}}{{if .Dir}}/{{end}}</a></td><td>{{if not .Dir}}{{.Size}}{{end}}</td><td>{{time .Modified}}</td></tr>{{end}}
+{{range .Files}}<tr><td>{{if .Link}}{{.Name}} <span class="meta">{{t $.Lang "(symbolic link; not followed, the page stays inside the queue)"}}</span>{{else}}<a href="{{$.Base}}{{.Href}}{{if .Dir}}/{{end}}">{{.Name}}{{if .Dir}}/{{end}}</a>{{end}}</td><td>{{if not .Dir}}{{.Size}}{{end}}</td><td>{{time .Modified}}</td></tr>{{end}}
 </table>
 {{template "foot" .}}{{end}}
 
-{{define "job"}}{{with .Job}}{{template "head" (head (printf "%s status" .Key) .Refresh)}}
-<nav><a href="/">overview</a><a href="/config">configuration as read</a><a href="/log">runtime log</a><a href="/files/jobs/{{.ID}}/">every file of this request</a></nav>
+{{define "job"}}{{with .Job}}{{template "head" (head $.Lang (printf "%s %s" .Key (t $.Lang "status")) .Refresh)}}
+<nav><a href="/">{{t $.Lang "overview"}}</a><a href="/config">{{t $.Lang "configuration as read"}}</a><a href="/log">{{t $.Lang "runtime log"}}</a><a href="/files/jobs/{{.ID}}/">{{t $.Lang "every file of this request"}}</a>{{if eq $.Lang "ja"}}<a href="/lang/en">English</a>{{else}}<a href="/lang/ja">日本語</a>{{end}}</nav>
 <h1>{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}} {{.Title}}</h1>
-<p><span class="status">{{.Status}}</span>{{if .Position}} &middot; {{.Position}}{{end}} &middot; elapsed {{.Elapsed}}</p>
-<p class="meta">Requested by {{.Requester}} at {{.Created}}{{if .Link}} &middot; <a href="{{.Link}}">open the issue</a>{{end}} &middot; started {{time .Started}} &middot; last change {{time .Updated}} ({{ago .Updated}})
-{{if .State}}{{if .State.Recovering}} &middot; <b>recovering</b>{{end}}{{if .State.Waiting}} &middot; <b>waiting for the requester</b>{{end}}{{if .State.Pending}} &middot; pending: {{.State.Pending.Role}}{{end}}{{end}}</p>
-{{if .State}}{{if .State.Pending}}{{if .State.Pending.Instruction}}<details><summary>instruction of the pending action ({{.State.Pending.Role}})</summary><pre>{{.State.Pending.Instruction}}</pre></details>{{end}}{{end}}{{end}}
-<p class="meta">Raw files: <a href="/jobs/{{.ID}}/raw/issue.json">issue.json</a> <a href="/jobs/{{.ID}}/raw/request.txt">request.txt</a> <a href="/jobs/{{.ID}}/raw/history.json">history.json</a> <a href="/jobs/{{.ID}}/raw/engine.json">engine.json</a> <a href="/jobs/{{.ID}}/raw/notices.json">notices.json</a> <a href="/jobs/{{.ID}}/workspace">workspace changes as text</a></p>
+<p><span class="status">{{st $.Lang .Status}}</span>{{if .Position}} &middot; {{st $.Lang .Position}}{{end}} &middot; {{t $.Lang "elapsed"}} {{.Elapsed}}</p>
+<p class="meta">{{t $.Lang "Requested by"}} {{.Requester}} {{t $.Lang "at"}} {{.Created}}{{if .Link}} &middot; <a href="{{.Link}}">{{t $.Lang "open the issue"}}</a>{{end}} &middot; {{t $.Lang "started"}} {{time .Started}} &middot; {{t $.Lang "last change"}} {{time .Updated}} ({{ago $.Lang .Updated}})
+{{if .State}}{{if .State.Recovering}} &middot; <b>{{t $.Lang "recovering"}}</b>{{end}}{{if .State.Waiting}} &middot; <b>{{t $.Lang "waiting for the requester"}}</b>{{end}}{{if .State.Pending}} &middot; {{t $.Lang "pending:"}} {{.State.Pending.Role}}{{end}}{{end}}</p>
+{{if .State}}{{if .State.Pending}}{{if .State.Pending.Instruction}}<details><summary>{{t $.Lang "instruction of the pending action"}} ({{.State.Pending.Role}})</summary><pre>{{.State.Pending.Instruction}}</pre></details>{{end}}{{end}}{{end}}
+<p class="meta">{{t $.Lang "Raw files:"}} <a href="/jobs/{{.ID}}/raw/issue.json">issue.json</a> <a href="/jobs/{{.ID}}/raw/request.txt">request.txt</a> <a href="/jobs/{{.ID}}/raw/history.json">history.json</a> <a href="/jobs/{{.ID}}/raw/engine.json">engine.json</a> <a href="/jobs/{{.ID}}/raw/notices.json">notices.json</a> <a href="/jobs/{{.ID}}/workspace">{{t $.Lang "workspace changes as text"}}</a></p>
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
-{{range .Live}}<div class="live"><h2>Running now: {{.Role}} ({{.Speaker}}{{if .Model}}, {{.Model}}{{end}}) since {{time .Started}}, {{ago .Started}}</h2>
-<details><summary>instruction handed to it</summary><pre>{{.Instruction}}</pre></details>
-<h3>output so far</h3><pre>{{.Stdout}}</pre>{{if .Stderr}}<h3>diagnostics so far</h3><pre>{{.Stderr}}</pre>{{end}}
-{{if .AgentLog}}<h3>the native agent's own log so far{{if .Home}} (<a href="/files/{{.Home}}/logs/agent.log">whole file</a>){{end}}</h3><pre>{{.AgentLog}}</pre>{{end}}</div>{{end}}
-{{if .State}}{{if .State.Workflow}}{{if .State.Workflow.Stages}}<p class="meta">Stages: {{range $i, $s := .State.Workflow.Stages}}{{if $i}} &rarr; {{end}}{{if eq $s.Name $.Job.State.Step}}<b>{{$s.Name}}</b>{{else}}{{$s.Name}}{{end}}{{end}}</p>{{end}}{{end}}{{end}}
-{{if .State}}{{if .State.Workflow}}<details><summary>workflow as recorded for this request</summary><pre>{{pretty .State.Workflow}}</pre></details>{{end}}{{end}}
-{{if .Stages}}<h2>Time by stage</h2><table><tr><th>Stage</th><th>Launches</th><th>Failed</th><th>Total time</th><th>First started</th><th>Last finished</th></tr>
+{{range .Live}}<div class="live"><h2>{{t $.Lang "Running now:"}} {{.Role}} ({{.Speaker}}{{if .Model}}, {{.Model}}{{end}}) {{t $.Lang "since"}} {{time .Started}}, {{ago $.Lang .Started}}</h2>
+<details><summary>{{t $.Lang "instruction handed to it"}}</summary><pre>{{.Instruction}}</pre></details>
+<h3>{{t $.Lang "output so far"}}</h3><pre>{{.Stdout}}</pre>{{if .Stderr}}<h3>{{t $.Lang "diagnostics so far"}}</h3><pre>{{.Stderr}}</pre>{{end}}
+{{if .AgentLog}}<h3>{{t $.Lang "the native agent's own log so far"}}{{if .Home}} (<a href="/files/{{.Home}}/logs/agent.log">{{t $.Lang "whole file"}}</a>){{end}}</h3><pre>{{.AgentLog}}</pre>{{end}}</div>{{end}}
+{{if .State}}{{if .State.Workflow}}{{if .State.Workflow.Stages}}<p class="meta">{{t $.Lang "Stages:"}} {{range $i, $s := .State.Workflow.Stages}}{{if $i}} &rarr; {{end}}{{if eq $s.Name $.Job.State.Step}}<b>{{$s.Name}}</b>{{else}}{{$s.Name}}{{end}}{{end}}</p>{{end}}{{end}}{{end}}
+{{if .State}}{{if .State.Workflow}}<details><summary>{{t $.Lang "workflow as recorded for this request"}}</summary><pre>{{pretty .State.Workflow}}</pre></details>{{end}}{{end}}
+{{if .Stages}}<h2>{{t $.Lang "Time by stage"}}</h2><table><tr><th>{{t $.Lang "Stage"}}</th><th>{{t $.Lang "Launches"}}</th><th>{{t $.Lang "Failed"}}</th><th>{{t $.Lang "Total time (sum over process runs; parallel processes add up)"}}</th><th>{{t $.Lang "First started"}}</th><th>{{t $.Lang "Last finished"}}</th></tr>
 {{range .Stages}}<tr><td>{{.Name}}</td><td>{{.Launches}}</td><td>{{.Failures}}</td><td>{{.Total}}</td><td>{{time .First}}</td><td>{{time .Last}}</td></tr>{{end}}</table>{{end}}
-<h2>Request</h2><pre>{{.Request}}</pre>
-{{if .Notices}}<h2>Notices posted by the runtime</h2>{{range .Notices}}<pre>{{pretty .}}</pre>{{end}}{{end}}
-<h2>Record ({{len .Records}} entries)</h2>
-{{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}}){{if .Gap}} &middot; <span class="meta">{{.Gap}} after the previous record</span>{{end}}</p>
-{{if .Error}}<p class="err">Error</p><pre>{{.Error}}</pre>{{end}}
-<details><summary>instruction</summary><pre>{{.Instruction}}</pre></details>
-<p>Output</p><pre>{{.Output}}</pre>
-{{if .Diagnostics}}<details><summary>diagnostics (stderr)</summary><pre>{{.Diagnostics}}</pre></details>{{end}}</div>{{end}}
-{{if .Answers}}<h2>Requester answers consumed</h2>{{range .Answers}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
-{{if .Reviews}}<h2>Review findings kept by the review command</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
-{{if .Report}}<h2>Report written in the workspace</h2><pre>{{.Report}}</pre>{{end}}
-{{if .Receipt}}<h2>Delivery receipt written by the delivery program</h2><pre>{{.Receipt}}</pre>{{end}}
-{{if .Homes}}<h2>What each role's native agent logged in its own directory</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>home {{$h.Name}}</b> &middot; files: {{range $i, $f := $h.Files}}{{if $i}}, {{end}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f}}">{{$f}}</a>{{end}}</p>
-{{if $h.Calls}}<p class="meta">as the agent logged it: {{$h.Calls}} model calls, {{$h.TokensIn}} input tokens, {{$h.TokensOut}} output tokens</p>{{end}}
-{{if $h.AgentLog}}<details><summary>agent.log (tail)</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>errors.log (tail)</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
-{{if $h.Transcript}}<details><summary>the whole conversation the agent had (messages, tool calls and their results)</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
-<h2>Workspace changes</h2>{{with .Workspace}}{{if .Note}}<p class="meta">{{.Note}}</p>{{end}}
-{{if .Status}}<pre>{{.Status}}</pre>{{else}}{{if not .Note}}<p class="meta">no change in the checkout</p>{{end}}{{end}}
-{{if .Log}}<details><summary>recent commits in the checkout</summary><pre>{{.Log}}</pre></details>{{end}}
-{{if .Diff}}<details open><summary>diff of tracked files</summary><pre>{{.Diff}}</pre></details>{{end}}
-{{range .Untracked}}<details><summary>new file: {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{end}}
+<h2>{{t $.Lang "Request"}}</h2><pre>{{.Request}}</pre>
+{{if .Notices}}<h2>{{t $.Lang "Notices posted by the runtime"}}</h2>{{range .Notices}}<pre>{{pretty .}}</pre>{{end}}{{end}}
+<h2>{{t $.Lang "Record"}} ({{len .Records}} {{t $.Lang "entries"}})</h2>
+{{range .Records}}<div class="rec{{if .Runtime}} runtime{{end}}{{if .Person}} person{{end}}{{if .Error}} error{{end}}"><p><b>{{.Index}}. {{.Role}}</b> &middot; {{.Speaker}}{{if .Model}} &middot; {{.Model}}{{end}} &middot; {{time .Started}} &rarr; {{time .Finished}} ({{.Duration}}){{if .Gap}} &middot; <span class="meta">{{.Gap}} {{t $.Lang "after the previous record"}}</span>{{end}}</p>
+{{if .Error}}<p class="err">{{t $.Lang "Error"}}</p><pre>{{.Error}}</pre>{{end}}
+<details><summary>{{t $.Lang "instruction"}}</summary><pre>{{.Instruction}}</pre></details>
+<p>{{t $.Lang "Output"}}</p><pre>{{.Output}}</pre>
+{{if .Diagnostics}}<details><summary>{{t $.Lang "diagnostics (stderr)"}}</summary><pre>{{.Diagnostics}}</pre></details>{{end}}</div>{{end}}
+{{if .Answers}}<h2>{{t $.Lang "Requester answers consumed"}}</h2>{{range .Answers}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
+{{if .Reviews}}<h2>{{t $.Lang "Review findings kept by the review command"}}</h2>{{range .Reviews}}<p class="meta">{{.Name}}</p><pre>{{.Text}}</pre>{{end}}{{end}}
+{{if .Report}}<h2>{{t $.Lang "Report written in the workspace"}}</h2><pre>{{.Report}}</pre>{{end}}
+{{if .Receipt}}<h2>{{t $.Lang "Delivery receipt written by the delivery program"}}</h2><pre>{{.Receipt}}</pre>{{end}}
+{{if .Homes}}<h2>{{t $.Lang "What each role's native agent logged in its own directory"}}</h2>{{range .Homes}}{{$h := .}}<div class="rec"><p><b>{{t $.Lang "home"}} {{$h.Name}}</b> &middot; {{t $.Lang "files:"}} {{range $i, $f := $h.Files}}{{if $i}}, {{end}}<a href="/files/jobs/{{$.Job.ID}}/homes/{{$h.Name}}/{{$f}}">{{$f}}</a>{{end}}</p>
+{{if $h.Calls}}<p class="meta">{{t $.Lang "as the agent logged it:"}} {{$h.Calls}} {{t $.Lang "model calls"}}, {{$h.TokensIn}} {{t $.Lang "input tokens"}}, {{$h.TokensOut}} {{t $.Lang "output tokens"}}</p>{{end}}{{if $h.UsageNote}}<p class="meta">{{$h.UsageNote}}</p>{{end}}
+{{if $h.AgentLog}}<details><summary>{{t $.Lang "agent.log (tail)"}}</summary><pre>{{$h.AgentLog}}</pre></details>{{end}}{{if $h.ErrorsLog}}<details><summary>{{t $.Lang "errors.log (tail)"}}</summary><pre>{{$h.ErrorsLog}}</pre></details>{{end}}
+{{if $h.Transcript}}<details><summary>{{t $.Lang "the whole conversation the agent had (messages, tool calls and their results)"}}</summary><pre>{{$h.Transcript}}</pre></details>{{end}}</div>{{end}}{{end}}
+<h2>{{t $.Lang "Workspace changes"}}</h2>{{with .Workspace}}{{if .Note}}<p class="meta">{{t $.Lang .Note}}</p>{{end}}
+{{if .Status}}<pre>{{.Status}}</pre>{{else}}{{if not .Note}}<p class="meta">{{t $.Lang "no change in the checkout"}}</p>{{end}}{{end}}
+{{if .Log}}<details><summary>{{t $.Lang "recent commits in the checkout"}}</summary><pre>{{.Log}}</pre></details>{{end}}
+{{if .Diff}}<details open><summary>{{t $.Lang "diff of tracked files"}}</summary><pre>{{.Diff}}</pre></details>{{end}}
+{{range .Untracked}}<details><summary>{{t $.Lang "new file:"}} {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{end}}
 {{template "foot" $}}{{end}}{{end}}
 `

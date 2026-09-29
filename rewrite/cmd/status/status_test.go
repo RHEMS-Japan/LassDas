@@ -397,12 +397,153 @@ func TestReviewViewsShowTimeByStageGapsUsageAndTranscript(t *testing.T) {
 	expectAll(t, body, "PENDING-INSTRUCTION", "Time by stage",
 		"<td>elicit</td><td>1</td><td>0</td><td>1m00s</td>", "<td>verify</td><td>1</td><td>1</td><td>1m00s</td>", "<td>implement</td><td>0</td>",
 		"1m00s after the previous record", "2 model calls, 350 input tokens, 50 output tokens", "TRANSCRIPT-TEXT",
-		"RECEIPT-SHA", "tool terminal completed", `content="10"`, "/files/jobs/7/homes/1-0/logs/agent.log", "the native agent's own log so far")
+		"RECEIPT-SHA", "tool terminal completed", `content="10"`, "/files/jobs/7/homes/1-0/logs/agent.log", "the native agent&#39;s own log so far")
 	response, body = get(t, ts, "/log")
 	if response.StatusCode != http.StatusOK || len(body) != len(big) || strings.Contains(body, "not shown") {
 		t.Fatalf("/log: %d, %d of %d bytes", response.StatusCode, len(body), len(big))
 	}
 	if _, body = get(t, ts, "/"); !strings.Contains(body, `content="30"`) {
 		t.Error("the overview should reload every 30 seconds")
+	}
+}
+
+func TestARolesOwnDirectoryCannotLeadThePageOutsideTheQueue(t *testing.T) {
+	root := fixtureQueue(t)
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "logs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{filepath.Join("logs", "agent.log"): "OUTSIDE-AGENT-LOG", "secret.txt": "OUTSIDE-SECRET"} {
+		if err := os.WriteFile(filepath.Join(outside, name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home := filepath.Join(root, "jobs", "7", "homes", "2-0")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "logs"), filepath.Join(home, "logs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(home, "transcript.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "jobs", "7", "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "jobs", "7", "live", "implement-implement-process.json"),
+		[]byte(`{"role":"implement","speaker":"implement-process","started_at":"2026-01-02T00:15:00Z","home":"`+filepath.Join(root, "jobs", "7", "escape")+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	response, body := get(t, ts, "/jobs/7")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("%d: %s", response.StatusCode, body)
+	}
+	for _, leaked := range []string{"OUTSIDE-AGENT-LOG", "OUTSIDE-SECRET"} {
+		if strings.Contains(body, leaked) {
+			t.Errorf("the page showed %s from outside the queue", leaked)
+		}
+	}
+	_, listing := get(t, ts, "/files/jobs/7/")
+	if !strings.Contains(listing, "symbolic link; not followed") || strings.Contains(listing, `href="/files/jobs/7/escape/"`) {
+		t.Errorf("a symbolic link should be named and not linked: %s", listing)
+	}
+	if response, body := get(t, ts, "/files/jobs/7/homes/2-0/transcript.json"); response.StatusCode == http.StatusOK || strings.Contains(body, "OUTSIDE") {
+		t.Errorf("a file symbolic link was followed: %d %s", response.StatusCode, body)
+	}
+}
+
+func TestListingLinksSurviveAwkwardFileNames(t *testing.T) {
+	root := fixtureQueue(t)
+	for name, text := range map[string]string{"a#b.txt": "HASH-NAME", "pct%41.txt": "PERCENT-NAME", "<x>&y.txt": "ANGLE-NAME"} {
+		if err := os.WriteFile(filepath.Join(root, "jobs", "7", name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := serve(t, root, "", "", "")
+	_, listing := get(t, ts, "/files/jobs/7/")
+	for _, href := range []string{`href="/files/jobs/7/a%23b.txt"`, `href="/files/jobs/7/pct%2541.txt"`, `href="/files/jobs/7/%3Cx%3E&amp;y.txt"`} {
+		if !strings.Contains(listing, href) {
+			t.Errorf("listing lacks %s", href)
+		}
+	}
+	if strings.Contains(listing, "<x>&y.txt") {
+		t.Error("a file name reached the page unescaped")
+	}
+	for path, want := range map[string]string{"/files/jobs/7/a%23b.txt": "HASH-NAME", "/files/jobs/7/pct%2541.txt": "PERCENT-NAME", "/files/jobs/7/%3Cx%3E&y.txt": "ANGLE-NAME"} {
+		if response, body := get(t, ts, path); response.StatusCode != http.StatusOK || body != want {
+			t.Errorf("%s: %d %q", path, response.StatusCode, body)
+		}
+	}
+}
+
+func TestUsageCountsNeedMatchingLines(t *testing.T) {
+	if calls, in, out := agentUsage("nothing about calls here\n"); calls != 0 || in != 0 || out != 0 {
+		t.Fatalf("%d %d %d", calls, in, out)
+	}
+	if calls, in, out := agentUsage("x API call #3: model=m in=5 out=7 total=12\nx API call #4: model=m in=1 out=1 total=2\n"); calls != 2 || in != 6 || out != 8 {
+		t.Fatalf("%d %d %d", calls, in, out)
+	}
+}
+
+func TestLabelsSwitchToJapaneseAndBack(t *testing.T) {
+	ts := serve(t, fixtureQueue(t), fixtureConfig(t), "", "")
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, _ := http.NewRequest("GET", ts.URL+"/lang/ja", nil)
+	request.Header.Set("Referer", ts.URL+"/jobs/7")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/jobs/7" {
+		t.Fatalf("%d -> %q", response.StatusCode, response.Header.Get("Location"))
+	}
+	var cookie *http.Cookie
+	for _, c := range response.Cookies() {
+		if c.Name == "lang" && c.Value == "ja" {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no lang cookie was set")
+	}
+	fetch := func(path string) string {
+		request, _ := http.NewRequest("GET", ts.URL+path, nil)
+		request.AddCookie(cookie)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	expectAll(t, fetch("/"), "<h1>依頼</h1>", "<h2>実行中 (1)</h2>", "<h2>返事待ち (0)</h2>", "<h2>要対応 (0)</h2>", "<h2>納品済み (0)</h2>",
+		"実行中: implement", "工程 2/3: implement", "受付の設定", `<a href="/lang/en">English</a>`, " 前")
+	expectAll(t, fetch("/jobs/7"), "工程別の時間", "依頼の原文", "記録 (4 件)", "実行中: implement", "渡した指示", "<title>EXAMPLE-7 状態</title>")
+	expectAll(t, fetch("/files/jobs/7/"), "<th>名前</th>")
+	if body := fetch("/jobs/7"); strings.Contains(body, "OUTPUT-ELICIT") == false || strings.Contains(body, "REQUEST-TEXT") == false {
+		t.Error("the content must stay as it is in Japanese")
+	}
+	request, _ = http.NewRequest("GET", ts.URL+"/lang/en", nil)
+	request.Header.Set("Referer", "https://evil.example/somewhere")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.Header.Get("Location") != "/somewhere" && response.Header.Get("Location") != "/" {
+		t.Fatalf("a foreign referer must not become an open redirect: %q", response.Header.Get("Location"))
+	}
+	if response, _ := get(t, ts, "/lang/xx"); response.StatusCode != http.StatusNotFound {
+		t.Errorf("an unknown language answered %d", response.StatusCode)
+	}
+	if body := fetch("/jobs/7"); !strings.Contains(body, "工程別の時間") {
+		t.Error("the cookie must keep the choice")
+	}
+	if _, body := get(t, ts, "/"); !strings.Contains(body, "<h1>Requests</h1>") || !strings.Contains(body, `<a href="/lang/ja">日本語</a>`) {
+		t.Error("without the cookie the labels are English with a link to Japanese")
 	}
 }
