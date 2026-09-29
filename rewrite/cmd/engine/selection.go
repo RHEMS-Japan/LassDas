@@ -215,12 +215,7 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 	// Runtime failures inform recovery without copying every previous work
 	// report into the model-selection query. Those reports remain unchanged
 	// in the actual role and routing prompts.
-	input := chain.State{Request: state.Request}
-	for _, result := range state.History {
-		if result.Error != "" && (result.Model != "" || (result.Role == "router" && result.Speaker == "runtime")) {
-			input.History = append(input.History, chain.Result{Role: result.Role, Speaker: result.Speaker, Model: result.Model, Error: result.Error})
-		}
-	}
+	input := selectionInput(state)
 	instructions := "Select one current frontier/value tool-using model for the assigned responsibility. Restrict the choice to a publisher's latest frontier generation suitable for the task. Being available in today's catalog does not make an old generation current. Do not choose a superseded generation merely because it is cheap or has a coding-specific name. Use the fresh catalog's descriptions, listed_at dates, canonical versions and prices, not a memorized version shortlist. Within the current frontier generation, choose strong task-completion value. A newly listed accelerated SKU is not automatically more capable: throughput alone does not justify its premium. Prices are USD per token. Earlier runtime failures are observations for choosing a useful recovery, not permission to weaken the request or declare completion. Only the listed endpoints can be invoked. This chooses a worker, not a certificate of the eventual answer.\n" +
 		"Responsibility: " + role.Purpose + "\nProcess: " + process.Name + "\nCatalog observation: " + snapshot.FetchedAt.String() + "\n" + s.Instructions
 	model, err := judge.Choose(ctx, input, instructions, choices)
@@ -231,4 +226,31 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 		return "", errors.New("model selector did not choose an eligible endpoint from the current catalog")
 	}
 	return model, nil
+}
+
+// selectionFailures and selectionErrorLimit bound what the judge reads of
+// earlier failures: the most recent ones, each cut to its head. A run that
+// failed to launch many times in a row must not grow the query until the
+// decision service refuses it.
+const selectionFailures, selectionErrorLimit = 12, 300
+
+func selectionInput(state chain.State) chain.State {
+	input := chain.State{Request: state.Request}
+	var failures []chain.Result
+	for _, result := range state.History {
+		if result.Error != "" && (result.Model != "" || (result.Role == "router" && result.Speaker == "runtime")) {
+			text := result.Error
+			if len(text) > selectionErrorLimit {
+				text = text[:selectionErrorLimit] + "…"
+			}
+			failures = append(failures, chain.Result{Role: result.Role, Speaker: result.Speaker, Model: result.Model, Error: text})
+		}
+	}
+	if len(failures) > selectionFailures {
+		omitted := len(failures) - selectionFailures
+		failures = append([]chain.Result{{Role: "runtime", Speaker: "runtime",
+			Error: fmt.Sprintf("%d earlier failures are in the record and not repeated here", omitted)}}, failures[omitted:]...)
+	}
+	input.History = failures
+	return input
 }

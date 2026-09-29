@@ -543,3 +543,18 @@ func TestTheEntranceStandardReachesEveryDecision(t *testing.T) {
 		}
 	}
 }
+
+func TestALaunchThatFailsWithinSecondsIsPacedBeforeTheNextAttempt(t *testing.T) {
+	quick := []Result{{Speaker: "p", Error: "boom", StartedAt: time.Now(), FinishedAt: time.Now().Add(time.Second)}}
+	slow := []Result{{Speaker: "p", Error: "boom", StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now()}}
+	fine := []Result{{Speaker: "p", Output: "ok", StartedAt: time.Now(), FinishedAt: time.Now().Add(time.Second)}}
+	note := []Result{{Speaker: "runtime", Error: "note", StartedAt: time.Now(), FinishedAt: time.Now()}}
+	if !failedFast(quick) || failedFast(slow) || failedFast(fine) || failedFast(note) {
+		t.Fatalf("quick=%t slow=%t fine=%t note=%t", failedFast(quick), failedFast(slow), failedFast(fine), failedFast(note))
+	}
+	before := append(append([]Result{}, quick...), note...)
+	before[0].Role = "report"
+	if !failedFastBefore(before, "report") || failedFastBefore(before, "other") || failedFastBefore(append(append([]Result{}, slow...), note...), "") {
+		t.Fatal("only a second quick failure of the same role is paced")
+	}
+}

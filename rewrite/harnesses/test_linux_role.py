@@ -2,7 +2,7 @@
 import argparse
 import importlib.util
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import unittest
@@ -31,7 +31,7 @@ class ConfigurationTests(unittest.TestCase):
                 launcher.command(None, {})
 
     def test_rejects_overlapping_home_and_escaping_write(self):
-        args = argparse.Namespace(program=["--", "/bin/true"], write=[], runtime=[], network="none")
+        args = argparse.Namespace(program=["--", "/bin/true"], write=[], create=[], runtime=[], network="none")
         with patch.object(sys, "platform", "linux"), patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
             for home in ("/work", "/work/role", "/"):
                 with self.assertRaises(ValueError):
@@ -42,6 +42,24 @@ class ConfigurationTests(unittest.TestCase):
                     launcher.command(args, {"TASK_WORKSPACE":"/work", "TASK_HOME":"/home/role"})
 
 
+class CreatePathTests(unittest.TestCase):
+    def test_a_created_directory_never_follows_a_link_in_any_component(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            work, outside = base / "work", base / "outside"
+            work.mkdir()
+            outside.mkdir()
+            launcher.create_path(work, PurePosixPath("report/out"))
+            self.assertTrue((work / "report" / "out").is_dir())
+            os.symlink(outside, work / "linked")
+            with self.assertRaises(OSError):
+                launcher.create_path(work, PurePosixPath("linked/out"))
+            self.assertEqual(os.listdir(outside), [])
+            with self.assertRaises(OSError):
+                launcher.create_path(work, PurePosixPath("linked"))
+            launcher.create_path(work, PurePosixPath("report/out"))  # existing directories are used as they are
+
+
 @unittest.skipUnless(sys.platform == "linux", "requires Linux O_PATH directory handles")
 class DescriptorTests(unittest.TestCase):
     def test_private_mounts_do_not_hide_explicit_temporary_paths(self):
@@ -50,7 +68,7 @@ class DescriptorTests(unittest.TestCase):
             work, home, runtime = base / "work", base / "home", base / "sdk"
             for directory in (work, home, runtime):
                 directory.mkdir()
-            args = argparse.Namespace(program=["--", "/bin/true"], write=[],
+            args = argparse.Namespace(program=["--", "/bin/true"], write=[], create=[],
                                       runtime=[str(runtime)], network="none")
             with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
                 argv, _, descriptors = launcher.command(args, {
@@ -73,7 +91,7 @@ class DescriptorTests(unittest.TestCase):
                 directory.mkdir()
 
             def mounts(write):
-                args = argparse.Namespace(program=["--", "/bin/true"], write=write, runtime=[], network="none")
+                args = argparse.Namespace(program=["--", "/bin/true"], write=write, create=[], runtime=[], network="none")
                 with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
                     argv, _, descriptors = launcher.command(args, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)})
                 for descriptor in descriptors:
@@ -89,6 +107,23 @@ class DescriptorTests(unittest.TestCase):
             self.assertIn(("--bind-fd", str(work / ".git")), named)
             self.assertNotIn(("--ro-bind-fd", str(work / ".git")), named)
             self.assertNotIn(("--ro-bind-fd", str(work / ".git")), mounts(["src"]))
+
+    def test_a_created_output_directory_is_made_inside_the_workspace_and_granted(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = Path(root)
+            work, home = base / "work", base / "home"
+            for directory in (work, home):
+                directory.mkdir()
+            args = argparse.Namespace(program=["--", "/bin/true"], write=[], create=["report"], runtime=[], network="none")
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
+                argv, _, descriptors = launcher.command(args, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)})
+            for descriptor in descriptors:
+                os.close(descriptor)
+            self.assertTrue((work / "report").is_dir())
+            self.assertIn(("--bind-fd", str(work / "report")), [(argv[i], argv[i + 2]) for i, item in enumerate(argv) if item == "--bind-fd"])
+            with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), self.assertRaises(ValueError):
+                launcher.command(argparse.Namespace(program=["--", "/bin/true"], write=[], create=["../out"], runtime=[], network="none"),
+                                 {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)})
 
     def test_intermediate_and_final_symlinks_are_not_followed(self):
         with tempfile.TemporaryDirectory() as root:
