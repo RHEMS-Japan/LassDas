@@ -9,7 +9,8 @@ commands, and asks for one structured verdict: blocking or not, and the
 findings. The exit status is the only thing the runtime reads: 1 sends the
 work back to the stage the operator named, 0 lets it through. The findings
 are printed, so they join the history for the worker and the report writer;
-the round counter and a log stay in the process's own directory (TASK_HOME).
+the send-back counter and a log stay in the process's own directory (TASK_HOME);
+a change that cannot be read (no Git checkout) lets the work through with a note.
 
 Two things keep this from ending or stalling a request. A verdict that
 cannot be obtained (the model service down, no verdict returned) lets the
@@ -25,7 +26,8 @@ Environment (all from the operator, never from a role):
   REVIEW_KEY_ENV          name of the variable holding the credential (default REVIEW_API_KEY)
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
-  REVIEW_ROUNDS           send-backs allowed before objections are recorded and the work goes on (default 2)
+  REVIEW_ROUNDS           send-backs allowed; the next blocking verdict lets the work through with the objections recorded (default 2)
+  TASK_HOME               the process's own directory, where the send-back counter and the log live
   REVIEW_TIMEOUT_SECONDS, REVIEW_ATTEMPTS: optional (default 300, 3)
 
 The credential is sent only to REVIEW_MODEL_URL, in the Authorization header,
@@ -43,8 +45,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-LIMIT = 20000
-HEAD, TAIL = 7000, 7000
+LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visible marker
+NEW_FILE_LIMIT = 6000
+HEAD, TAIL = 12000, 6000  # the runtime's text: its start (assignment, request, settled requirements) and its end (latest reports)
 
 TOOL = {"type": "function", "function": {
     "name": "verdict",
@@ -64,9 +67,9 @@ SYSTEM = ("You are an adversarial reviewer of one code change. Your job is to fi
           " and the report to the requester are later stages of this run, done by the runtime's own"
           " commands after your verdict: their absence now is not a defect and must not block. Decide"
           " blocking only when a defect in the change itself must be fixed before delivery; say exactly"
-          " where each defect is and why it matters, so the implementer can act on it. This is review"
-          " round %d of at most %d; an objection already raised and addressed is not raised again."
-          " Answer with the verdict tool.")
+          " where each defect is and why it matters, so the implementer can act on it. The work has"
+          " been sent back %d times so far, of at most %d; an objection already raised and addressed"
+          " is not raised again. Answer with the verdict tool.")
 
 
 class ReviewError(Exception):
@@ -80,8 +83,16 @@ def setting(name, default=None):
     return value if value != "" else default
 
 
+def number(name, default):
+    value = setting(name, default)
+    try:
+        return int(value)
+    except ValueError:
+        raise ReviewError("%s must be a whole number, not %r" % (name, value))
+
+
 def scrub(text, secret):
-    if not secret:
+    if not secret or len(secret) < 8:
         return text
     return text.replace(secret, "[credential]").replace(urllib.parse.quote(secret, safe=""), "[credential]")
 
@@ -95,21 +106,36 @@ def run(command, cwd, timeout):
     return "$ %s -> exit %d\n%s" % (" ".join(command), finished.returncode, output[-4000:])
 
 
+def cut(text, limit, what):
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[%s cut here: %d of %d characters shown]\n" % (what, limit, len(text))
+
+
+def git(workspace, *arguments):
+    finished = subprocess.run(["git", "-C", str(workspace), *arguments], capture_output=True, text=True, timeout=60)
+    if finished.returncode != 0:
+        raise ReviewError("the change could not be read: git %s exited %d: %s"
+                          % (arguments[0], finished.returncode, finished.stderr.strip()[:200]))
+    return finished.stdout
+
+
 def gather(workspace, paths, test_commands, timeout):
-    diff = run(["git", "-C", str(workspace), "diff", "HEAD", "--", *paths] if paths else
-               ["git", "-C", str(workspace), "diff", "HEAD"], workspace, 60)
-    status = run(["git", "-C", str(workspace), "status", "--short", "--untracked-files=all", "--", *paths] if paths else
-                 ["git", "-C", str(workspace), "status", "--short", "--untracked-files=all"], workspace, 60)
-    for line in status.splitlines():
+    """The diff, whole, cut only at LIMIT with a visible marker; then the
+    operator's test commands, each with its exit status and output."""
+    scope = ["--", *paths] if paths else []
+    diff = git(workspace, "diff", "HEAD", *scope)
+    for line in git(workspace, "status", "--short", "--untracked-files=all", *scope).splitlines():
         if line.startswith("?? "):
             path = workspace / line[3:].strip()
             if path.is_file():
                 try:
-                    diff += "\n--- new file %s ---\n%s" % (line[3:].strip(), path.read_text(encoding="utf-8", errors="replace")[:6000])
+                    content = path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
-                    pass
+                    continue
+                diff += "\n--- new file %s ---\n%s" % (line[3:].strip(), cut(content, NEW_FILE_LIMIT, "new file"))
     tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
-    return diff[:LIMIT], tests[:LIMIT]
+    return cut(diff, LIMIT, "diff"), cut(tests, LIMIT, "test output")
 
 
 def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
@@ -117,7 +143,7 @@ def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
     request = {"model": model, "temperature": 0.2, "tools": [TOOL],
                "tool_choice": {"type": "function", "function": {"name": "verdict"}},
                "messages": [
-                   {"role": "system", "content": SYSTEM % (rounds + 1, limit)},
+                   {"role": "system", "content": SYSTEM % (rounds, limit)},
                    {"role": "user", "content": (
                        "Where this stage sits, the original request and the settled requirements (from the runtime):\n%s"
                        "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
@@ -144,7 +170,8 @@ def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
             last = "HTTP %d from the model service" % error.code
         except Exception as error:  # a model service hiccup is not a defect in the change
             last = type(error).__name__ + ": " + scrub(str(error), key)[:200]
-        time.sleep(min(5 * (attempt + 1), 20))
+        if attempt + 1 < attempts:
+            time.sleep(min(5 * (attempt + 1), 20))
     return None, last
 
 
@@ -157,36 +184,56 @@ def review(stdin_text):
     key = os.environ.get(setting("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
     if not key:
         raise ReviewError("the review credential is not set")
-    limit = int(setting("REVIEW_ROUNDS", "2"))
-    timeout = int(setting("REVIEW_TIMEOUT_SECONDS", "300"))
-    attempts = int(setting("REVIEW_ATTEMPTS", "3"))
+    limit = number("REVIEW_ROUNDS", "2")
+    timeout = number("REVIEW_TIMEOUT_SECONDS", "300")
+    attempts = number("REVIEW_ATTEMPTS", "3")
     paths = setting("REVIEW_DIFF_PATHS", "").split()
-    tests = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
+    try:
+        tests = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
+        for line in tests:
+            shlex.split(line)
+    except ValueError as error:
+        raise ReviewError("REVIEW_TEST_COMMANDS could not be read: %s" % error)
 
-    # The process's own directory keeps the round counter and the log; the
-    # workspace is not written, the findings reach the worker through the
-    # history because this command prints them.
-    report = Path(os.environ.get("TASK_HOME") or (workspace / "report"))
-    report.mkdir(parents=True, exist_ok=True)
-    rounds_file = report / "review-rounds"
-    rounds = int(rounds_file.read_text()) if rounds_file.is_file() else 0
+    # The process's own directory (TASK_HOME) keeps the send-back counter and
+    # the log. The workspace is never written; the findings reach the worker
+    # through the history because this command prints them.
+    home = os.environ.get("TASK_HOME", "")
+    if not home:
+        raise ReviewError("TASK_HOME is not set; this command keeps its state there and writes nothing into the workspace")
+    state = Path(home)
+    state.mkdir(parents=True, exist_ok=True)
+    counter = state / "review-send-backs"
+    try:
+        sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
+    except ValueError:
+        raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
-    diff, test_output = gather(workspace, paths, tests, timeout)
-    blocking, findings = ask(url, model, key, stdin_text, diff, test_output, rounds, limit, timeout, attempts)
+    try:
+        diff, test_output = gather(workspace, paths, tests, timeout)
+        blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, limit, timeout, attempts)
+    except ReviewError as error:
+        # The change could not be read: not a verdict, and not a defect in the change.
+        blocking, findings = None, str(error)
+    outcome = "PASSED"
     if blocking is None:
-        findings = "no verdict could be obtained (%s); the work goes on unreviewed this round" % findings
+        findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
         blocking = False
-    if blocking and rounds >= limit:
-        findings = ("UNRESOLVED after %d review rounds, the operator's limit; the work goes on with these"
-                    " objections recorded:\n%s" % (rounds, findings))
+    elif blocking and sent_back >= limit:
+        outcome = "LET THROUGH AT THE OPERATOR'S LIMIT"
+        findings = ("UNRESOLVED after %d send-backs, the operator's limit; the work goes on with these"
+                    " objections recorded:\n%s" % (sent_back, findings))
         blocking = False
+    elif blocking:
+        outcome = "SENT BACK to the worker"
+        sent_back += 1
+        counter.write_text(str(sent_back))
     findings = scrub(findings, key)
-    rounds_file.write_text(str(rounds + 1))
-    with (report / "review.md").open("a", encoding="utf-8") as log:
-        log.write("## Review round %d (%s): %s\n\n%s\n\n" % (
-            rounds + 1, model, "SEND BACK" if blocking else "PASS", findings or "(no findings)"))
-    print(("Review round %d by %s: SENT BACK to the worker.\n" if blocking else "Review round %d by %s: PASSED.\n")
-          % (rounds + 1, model) + (findings or "(no findings)")[:6000])
+    with (state / "review.md").open("a", encoding="utf-8") as log:
+        log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
+            model, sent_back, outcome, findings or "(no findings)"))
+    print("Review by %s: %s. Send-backs so far: %d of at most %d.\n%s"
+          % (model, outcome, sent_back, limit, (findings or "(no findings)")[:6000]))
     return 1 if blocking else 0
 
 

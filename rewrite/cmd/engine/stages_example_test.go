@@ -268,6 +268,17 @@ func TestStagesRoleHelper(t *testing.T) {
 				os.Exit(1)
 			}
 		}
+	case "review":
+		read("src/greeting.txt", stagesArtifact)
+		// The adversarial review objects once, so the work stage runs again
+		// on its objection and the review is observed a second time.
+		marker, err := os.OpenFile(".fixture-review", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			marker.Close()
+			fmt.Print("Review by fixture/reviewer: SENT BACK to the worker. Send-backs so far: 1 of at most 2.\nthe greeting lacks a trailing newline\n")
+			os.Exit(1)
+		}
+		fmt.Print("Review by fixture/reviewer: PASSED. Send-backs so far: 1 of at most 2.\n(no findings)\n")
 	case "deliver":
 		read("src/greeting.txt", stagesArtifact)
 		write("release/greeting.txt", stagesArtifact)
@@ -481,8 +492,8 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 			}
 			// The repair stage ran because a configured command did not exit 0,
 			// and the run carried on only once that command was observed again.
-			if launches["work"] != 2 || failures != 1 || receipts != 1 {
-				t.Fatalf("work=%d failures=%d receipts=%d", launches["work"], failures, receipts)
+			if launches["work"] != 3 || launches["review"] != 2 || failures != 2 || receipts != 1 {
+				t.Fatalf("work=%d review=%d failures=%d receipts=%d", launches["work"], launches["review"], failures, receipts)
 			}
 			if launches["confirm_report"] != 1 || launches["verify_merged"] != 1 {
 				t.Fatalf("the closing stages ran %d and %d times", launches["confirm_report"], launches["verify_merged"])

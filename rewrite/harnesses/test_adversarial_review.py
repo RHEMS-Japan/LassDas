@@ -109,12 +109,13 @@ class AdversarialReviewTests(unittest.TestCase):
         self.addCleanup(service.close)
         finished = self.run_review(service)
         self.assertEqual(finished.returncode, 1, finished.stderr)
-        self.assertIn("SEND BACK", self.review_log())
+        self.assertIn("SENT BACK", self.review_log())
         self.assertIn("asked for 3", self.review_log())
-        self.assertEqual((self.home / "review-rounds").read_text(), "1")
+        self.assertEqual((self.home / "review-send-backs").read_text(), "1")
         self.assertIn("SENT BACK", finished.stdout)
         self.assertIn("asked for 3", finished.stdout)
         self.assertFalse((self.workspace / "report").exists(), "the review must not write into the workspace")
+        self.assertIn("sent back 0 times so far", service.requests[0]["body"]["messages"][0]["content"])
 
     def test_the_reviewer_receives_the_runtime_text_the_diff_and_the_test_output(self):
         service = ModelStandIn([{"verdict": (False, "")}])
@@ -130,15 +131,27 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(sent["tool_choice"]["function"]["name"], "verdict")
         self.assertIn("PASS", self.review_log())
 
-    def test_the_operators_round_cap_lets_the_work_through_with_the_objections_recorded(self):
-        (self.home / "review-rounds").write_text("2")
+    def test_the_operators_cap_counts_send_backs_and_then_lets_the_work_through_with_the_objections(self):
+        (self.home / "review-send-backs").write_text("2")
         service = ModelStandIn([{"verdict": (True, "still wrong")}])
         self.addCleanup(service.close)
         finished = self.run_review(service)
         self.assertEqual(finished.returncode, 0, finished.stderr)
-        self.assertIn("UNRESOLVED after 2 review rounds", self.review_log())
+        self.assertIn("UNRESOLVED after 2 send-backs", self.review_log())
+        self.assertIn("LET THROUGH AT THE OPERATOR'S LIMIT", finished.stdout)
+        self.assertNotIn("PASSED", finished.stdout)
         self.assertIn("still wrong", self.review_log())
-        self.assertEqual((self.home / "review-rounds").read_text(), "3")
+        self.assertEqual((self.home / "review-send-backs").read_text(), "2", "the cap does not consume a send-back")
+
+    def test_a_pass_or_a_missing_verdict_does_not_consume_the_send_back_budget(self):
+        service = ModelStandIn([{"status": 500}, {"verdict": None}, {"verdict": (False, "")}, {"verdict": (True, "a real defect")}])
+        self.addCleanup(service.close)
+        self.assertEqual(self.run_review(service).returncode, 0)   # no verdict: through, not counted
+        self.assertEqual(self.run_review(service).returncode, 0)   # a pass: not counted
+        self.assertFalse((self.home / "review-send-backs").exists())
+        finished = self.run_review(service)                          # the first real objection still sends back
+        self.assertEqual(finished.returncode, 1, finished.stdout)
+        self.assertEqual((self.home / "review-send-backs").read_text(), "1")
 
     def test_no_verdict_or_a_failing_service_lets_the_work_through_with_a_note(self):
         service = ModelStandIn([{"status": 500}, {"verdict": None}])
@@ -157,14 +170,52 @@ class AdversarialReviewTests(unittest.TestCase):
         for text in (finished.stdout, finished.stderr, self.review_log()):
             self.assertNotIn(KEY, text)
 
-    def test_missing_configuration_ends_with_status_two_and_calls_nothing(self):
+    def test_missing_or_broken_configuration_ends_with_status_two_and_calls_nothing(self):
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
-        finished = self.run_review(service, REVIEW_MODEL_URL="")
-        self.assertEqual(finished.returncode, 2)
-        self.assertIn("REVIEW_MODEL_URL", finished.stderr)
+        for name, value in (("REVIEW_MODEL_URL", ""), ("REVIEW_ROUNDS", "two"), ("REVIEW_ATTEMPTS", "many"), ("TASK_HOME", ""),
+                            ("REVIEW_TEST_COMMANDS", "echo 'unterminated")):
+            finished = self.run_review(service, **{name: value})
+            self.assertEqual(finished.returncode, 2, (name, finished.stdout, finished.stderr))
+            self.assertIn(name, finished.stderr)
+            self.assertNotIn("Traceback", finished.stderr)
+        (self.home / "review-send-backs").write_text("not a number")
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 2, finished.stderr)
+        self.assertNotIn("Traceback", finished.stderr)
         self.assertEqual(service.requests, [])
-        self.assertEqual(self.review_log(), "")
+        self.assertFalse((self.workspace / "report").exists())
+
+    def test_the_credential_is_sent_only_over_https_or_loopback(self):
+        service = ModelStandIn([{"verdict": (True, "x")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_MODEL_URL="http://model.example.invalid/v1/chat/completions")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("must be https", self.review_log())
+        self.assertEqual(service.requests, [])
+
+    def test_a_large_change_reaches_the_reviewer_whole_and_a_cut_is_visible(self):
+        big = "".join("line %04d of a long file that the reviewer must see\n" % i for i in range(700))
+        (self.workspace / "src" / "big.py").write_text(big)
+        (self.workspace / "src" / "tool.py").write_text("def run():\n    return 3\n" + "".join("# padding %d\n" % i for i in range(300)))
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("+# padding 299", text, "the whole diff of an edited file must reach the reviewer")
+        self.assertIn("new file src/big.py", text)
+        self.assertIn("[new file cut here:", text)
+
+    def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
+        shutil.rmtree(self.workspace / ".git")
+        service = ModelStandIn([{"verdict": (True, "x")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertIn("could not be read", self.review_log())
+        self.assertEqual(service.requests, [])
 
 
 if __name__ == "__main__":
