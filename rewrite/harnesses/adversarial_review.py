@@ -140,24 +140,37 @@ def gather(workspace, paths, test_commands, timeout):
     """The diff, whole, cut only at LIMIT with a visible marker; then the
     operator's test commands, each with its exit status and output."""
     scope = ["--", *paths] if paths else []
-    diff = git(workspace, "diff", "HEAD", *scope)
+    tracked = git(workspace, "diff", "HEAD", *scope)
     status = git(workspace, "status", "--short", "--untracked-files=all", *scope)
-    if paths and not diff.strip() and not status.strip():
+    if paths and not tracked.strip() and not status.strip():
         elsewhere = git(workspace, "status", "--short", "--untracked-files=all").strip()
         if elsewhere:
             raise ReviewError("REVIEW_DIFF_PATHS (%s) matched no change, but the checkout has changes under: %s"
-                              % (" ".join(paths), ", ".join(sorted({line.split()[-1].split("/")[0] for line in elsewhere.splitlines() if line.split()}))))
+                              % (" ".join(paths), ", ".join(sorted({status_path(line).split("/")[0] for line in elsewhere.splitlines()}))))
+    # New files come first, so their names survive a cut of a long diff: new
+    # code is where untested code most often is.
+    new_files = ""
     for line in status.splitlines():
         if line.startswith("?? "):
-            path = workspace / line[3:].strip()
+            name = status_path(line)
+            path = workspace / name
             if path.is_file():
                 try:
                     content = path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
-                diff += "\n--- new file %s ---\n%s" % (line[3:].strip(), cut(content, NEW_FILE_LIMIT, "new file"))
+                new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
     tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
-    return cut(diff, LIMIT, "diff"), cut(tests, LIMIT, "test output")
+    return cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output")
+
+
+def status_path(line):
+    """The path in one `git status --short` line: after the two status
+    letters and a space; a rename shows the new name; quotes are stripped."""
+    path = line[3:] if len(line) > 3 else line
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"')
 
 
 def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
@@ -214,9 +227,10 @@ def reviewed(stdin_text, model):
         raise ReviewError("TASK_WORKSPACE is not a directory")
     url = setting("REVIEW_MODEL_URL")
     setting("REVIEW_MODEL")
-    key = os.environ.get(setting("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
+    key_env = setting("REVIEW_KEY_ENV", "REVIEW_API_KEY")
+    key = os.environ.get(key_env, "")
     if not key:
-        raise ReviewError("the review credential is not set")
+        raise ReviewError("the review credential is not set (%s, named by REVIEW_KEY_ENV)" % key_env)
     limit = number("REVIEW_ROUNDS", "2")
     timeout = number("REVIEW_TIMEOUT_SECONDS", "300", 1)
     attempts = number("REVIEW_ATTEMPTS", "3", 1)
@@ -260,13 +274,21 @@ def reviewed(stdin_text, model):
     elif blocking:
         outcome = "SENT BACK to the worker"
         sent_back += 1
-        counter.write_text(str(sent_back))
     findings = scrub(findings, key)
-    with (state / "review.md").open("a", encoding="utf-8") as log:
-        log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
-            model, sent_back, outcome, findings or "(no findings)"))
     print("Review by %s: %s. Send-backs so far: %d of at most %d.\n%s"
           % (model, outcome, sent_back, limit, (findings or "(no findings)")[:6000]))
+    try:
+        if blocking:
+            counter.write_text(str(sent_back))
+        with (state / "review.md").open("a", encoding="utf-8") as log:
+            log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
+                model, sent_back, outcome, findings or "(no findings)"))
+    except OSError as error:
+        # Without its state the cap cannot be kept, so this verdict cannot
+        # send the work back; the findings above are already in the record.
+        print("Review by %s: NOT REVIEWED. The send-back state could not be saved (%s), so the verdict above"
+              " does not send the work back this time." % (model, scrub(str(error), key)))
+        return 0
     return 1 if blocking else 0
 
 
@@ -278,8 +300,9 @@ def main():
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
         return review(stdin_text)
     except Exception as error:  # never a traceback and never exit 1: that would be read as a send-back for ever
-        print("Review: NOT REVIEWED. Unexpected %s: %s. The work goes on unreviewed this time."
-              % (type(error).__name__, scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))[:300]))
+        print("Review by %s: NOT REVIEWED. Unexpected %s: %s. The work goes on unreviewed this time."
+              % (os.environ.get("REVIEW_MODEL", "") or "(no model named)", type(error).__name__,
+                 scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))[:300]))
         return 0
 
 

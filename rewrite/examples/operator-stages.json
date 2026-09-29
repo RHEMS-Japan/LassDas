@@ -269,7 +269,7 @@
     },
     {
       "name": "review",
-      "purpose": "Adversarial review of the change by a model from a different publisher than the worker, run as the operator's own command: its structured verdict decides the exit status, and only that is read.",
+      "purpose": "Adversarial review of the change by a model from a different publisher than the worker, run as the operator's own command: its structured verdict decides the exit status, only a real blocking verdict sends the work back, and only that is read.",
       "processes": [
         {
           "name": "adversarial-review",
@@ -292,7 +292,7 @@
             "-B",
             "/opt/ticket-automation/bundle/harnesses/adversarial_review.py"
           ],
-          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, at most REVIEW_ROUNDS times; a verdict that cannot be obtained lets the work through with a note. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
+          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, at most REVIEW_ROUNDS times; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
             "REVIEW_MODEL_URL": "https://openrouter.ai/api/v1/chat/completions",

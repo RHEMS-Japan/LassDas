@@ -223,9 +223,9 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("TAIL-OF-OUTPUT", text)
 
     def test_an_unexpected_error_and_a_stray_byte_never_end_with_a_traceback_or_status_one(self):
-        service = ModelStandIn([{"verdict": (True, "x")}, {"verdict": (False, "")}])
+        service = ModelStandIn([{"verdict": (False, "")}])
         self.addCleanup(service.close)
-        # An unexpected exception (urlsplit refuses this URL) is caught at the top.
+        # An unexpected exception (urlsplit refuses this URL) is caught at the top; it makes no request.
         finished = self.run_review(service, REVIEW_MODEL_URL="https://[oops/v1/chat/completions")
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertIn("NOT REVIEWED", finished.stdout)
@@ -265,6 +265,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("+# padding 299", text, "the whole diff of an edited file must reach the reviewer")
         self.assertIn("new file src/big.py", text)
         self.assertIn("[new file cut here:", text)
+        self.assertLess(text.index("new file src/big.py"), text.index("+# padding 299"), "new files come first")
 
     def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
         shutil.rmtree(self.workspace / ".git")
