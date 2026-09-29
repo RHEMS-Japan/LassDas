@@ -65,6 +65,18 @@ def command(args, environment):
         if not value or relative.is_absolute() or ".." in relative.parts:
             raise ValueError("Writable paths must be relative to the workspace without '..'")
         writable.append(workspace / relative)
+    for value in args.create:
+        # An output directory of the runtime's own (a report, a receipt): made
+        # inside the workspace when the checkout does not have it, then
+        # granted like any other writable path. A path that exists already
+        # is used as it is; a symbolic link there fails at the mount.
+        relative = PurePosixPath(value)
+        if not value or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Created paths must be relative to the workspace without '..'")
+        target = workspace / relative
+        if not target.is_symlink() and not target.exists():
+            os.makedirs(target, mode=0o700, exist_ok=True)
+        writable.append(target)
     runtimes = [absolute(value) for value in args.runtime]
     for path in runtimes:
         if any(path == grant or path.is_relative_to(grant) or grant.is_relative_to(path)
@@ -134,6 +146,7 @@ def command(args, environment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="append", default=[], help="existing workspace-relative writable path; '.' grants the whole workspace")
+    parser.add_argument("--create", action="append", default=[], help="workspace-relative output directory, created when missing, then writable")
     parser.add_argument("--runtime", action="append", default=[], help="additional absolute read-only tool/runtime path")
     parser.add_argument("--network", choices=("none", "inherit"), default="none")
     parser.add_argument("program", nargs=argparse.REMAINDER)

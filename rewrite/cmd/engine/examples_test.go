@@ -84,7 +84,7 @@ func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
 			if process.TrackerAccess == "comment" && !slices.Contains([]string{"post_report", "stop_report", "ask_requester"}, role.Name) {
 				t.Fatal("posting granted outside posting role")
 			}
-			if slices.Contains([]string{"elicit", "ask_requester", "review", "review_report", "post_report", "confirm_report", "stop_report"}, role.Name) && slices.Contains(process.Command, "--write") {
+			if slices.Contains([]string{"elicit", "ask_requester", "review", "review_report", "post_report", "confirm_report", "stop_report"}, role.Name) && (slices.Contains(process.Command, "--write") || slices.Contains(process.Command, "--create")) {
 				t.Fatal("read-only example role can write workspace")
 			}
 			if !slices.Contains(process.Command, "/opt/ticket-automation/bundle/harnesses/linux_role.py") {
@@ -663,7 +663,7 @@ func TestOperatorExampleAsksTheRequesterOnlyAtTheEntrance(t *testing.T) {
 		if role.Processes[0].TrackerAccess != access {
 			t.Fatalf("%s tracker access is %q", name, role.Processes[0].TrackerAccess)
 		}
-		if slices.Contains(role.Processes[0].Command, "--write") {
+		if slices.Contains(role.Processes[0].Command, "--write") || slices.Contains(role.Processes[0].Command, "--create") {
 			t.Fatalf("%s can change the checkout", name)
 		}
 	}

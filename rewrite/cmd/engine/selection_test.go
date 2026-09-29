@@ -373,3 +373,23 @@ func TestExecutableWiresConfiguredSelectionFallbackAndLogsRecovery(t *testing.T)
 		t.Fatalf("recovery missing: catalogs=%d routes=%d primary=%d alternative=%d log=%s", catalogs, routes, primary, alternative, &log)
 	}
 }
+
+func TestTheJudgeReadsOnlyRecentFailuresCutToTheirHead(t *testing.T) {
+	var history []chain.Result
+	for i := 0; i < 40; i++ {
+		history = append(history, chain.Result{Role: "draft_report", Speaker: "p", Model: "m", Error: strings.Repeat("e", 1000)})
+		history = append(history, chain.Result{Role: "draft_report", Speaker: "runtime", Output: "record"})
+	}
+	input := selectionInput(chain.State{Request: "r", History: history})
+	if len(input.History) != selectionFailures+1 {
+		t.Fatalf("%d entries carried; want %d and a note", len(input.History), selectionFailures+1)
+	}
+	if !strings.Contains(input.History[0].Error, "28 earlier failures are in the record") {
+		t.Fatalf("the omission is not said: %q", input.History[0].Error)
+	}
+	for _, entry := range input.History[1:] {
+		if len(entry.Error) > selectionErrorLimit+3 {
+			t.Fatalf("an error was not cut: %d", len(entry.Error))
+		}
+	}
+}

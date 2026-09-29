@@ -292,7 +292,7 @@ func processPrompt(role Role, process Process, assignment Assignment, state Stat
 	text.WriteString("\n\nOriginal request:\n")
 	text.WriteString(state.Request)
 	text.WriteString("\n\nPrevious work:\n")
-	for _, result := range state.History {
+	for _, result := range promptHistory(state.History) {
 		fmt.Fprintf(&text, "\nRole %s, speaker %s\n%s\n", result.Role, result.Speaker, result.Output)
 		// A zero process exit does not imply that every tool operation worked.
 		// Pass the already-redacted diagnostics without interpreting them as a
@@ -323,4 +323,35 @@ func promptTail(text string) string {
 		cut++
 	}
 	return fmt.Sprintf("[%d earlier characters are in the record, not in this prompt]\n%s", cut, text[cut:])
+}
+
+// promptRecords bounds how many records a prompt carries.
+const promptRecords = 60
+
+// promptHistory is the history as a prompt carries it: a run of launches of
+// the same role that failed the same way is one entry saying how often, and
+// only the most recent records travel, with a note of how many came before.
+// The record itself keeps everything.
+func promptHistory(history []Result) []Result {
+	var collapsed []Result
+	counts := map[int]int{}
+	for _, result := range history {
+		if n := len(collapsed); n > 0 && result.Error != "" {
+			previous := collapsed[n-1]
+			if previous.Role == result.Role && previous.Speaker == result.Speaker && firstLine(previous.Error) == firstLine(result.Error) {
+				counts[n-1]++
+				continue
+			}
+		}
+		collapsed = append(collapsed, result)
+	}
+	for i, count := range counts {
+		collapsed[i].Error = fmt.Sprintf("(this failure repeated %d times in a row)\n%s", count+1, collapsed[i].Error)
+	}
+	if len(collapsed) > promptRecords {
+		omitted := len(collapsed) - promptRecords
+		collapsed = append([]Result{{Role: "runtime", Speaker: "runtime",
+			Output: fmt.Sprintf("%d earlier records are in the request's history and not repeated here.", omitted)}}, collapsed[omitted:]...)
+	}
+	return collapsed
 }

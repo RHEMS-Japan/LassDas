@@ -291,3 +291,27 @@ func TestAProcessIsToldWhichOfItsVariablesAreCredentials(t *testing.T) {
 		t.Fatalf("a process without credentials got %q", result.Output)
 	}
 }
+
+func TestAPromptCollapsesRepeatedFailuresAndCapsTheRecords(t *testing.T) {
+	var history []Result
+	history = append(history, Result{Role: "elicit", Speaker: "p", Output: "settled"})
+	for i := 0; i < 150; i++ {
+		history = append(history, Result{Role: "draft_report", Speaker: "p", Error: "exit status 1\nTraceback " + strings.Repeat("x", i%3)})
+		history = append(history, Result{Role: "draft_report", Speaker: "runtime", Output: "Runtime record"})
+	}
+	carried := promptHistory(history)
+	if len(carried) > promptRecords+1 {
+		t.Fatalf("%d records carried; at most %d plus a note", len(carried), promptRecords)
+	}
+	if !strings.Contains(carried[0].Output, "earlier records are in the request's history") {
+		t.Fatalf("the omission is not said: %+v", carried[0])
+	}
+	prompt := processPrompt(Role{Name: "confirm"}, Process{Name: "c"}, Assignment{Role: "confirm"}, State{History: history})
+	if strings.Count(prompt, "Traceback") > promptRecords {
+		t.Fatalf("the prompt still repeats the failure %d times", strings.Count(prompt, "Traceback"))
+	}
+	same := []Result{{Role: "r", Speaker: "p", Error: "exit status 1\nfirst"}, {Role: "r", Speaker: "p", Error: "exit status 1\nsecond"}, {Role: "r", Speaker: "p", Error: "other\n"}}
+	if got := promptHistory(same); len(got) != 2 || !strings.HasPrefix(got[0].Error, "(this failure repeated 2 times in a row)") {
+		t.Fatalf("a run of the same failure must be one entry with its count: %+v", got)
+	}
+}

@@ -192,6 +192,7 @@ func (c Chain) Run(ctx context.Context) error {
 		if record, staged := state.stageRecord(next, results); staged {
 			results = append(results, record)
 		}
+		paced := failedFast(results) && failedFastBefore(state.History, next.Role)
 		state.History = append(state.History, results...)
 		state.Pending = nil
 		if err := c.save(ctx, state); err != nil {
@@ -212,6 +213,15 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if paced {
+			// A role that could not even start would be launched again at
+			// once and fill the record with the same failure; space the
+			// attempts as router outages are spaced.
+			c.observe("the launch of " + next.Role + " failed within seconds; waiting before the next attempt")
+			if err := c.wait(ctx); err != nil {
+				return err
+			}
 		}
 		// A successful question hands the request to a person, so there is
 		// nothing to route until the reply is in the history. An errored or
@@ -264,4 +274,29 @@ func (c Chain) wait(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// failedFast reports a launch that ended in error within seconds of starting.
+func failedFast(results []Result) bool {
+	for _, result := range results {
+		if result.Error != "" && result.Speaker != "runtime" && result.FinishedAt.Sub(result.StartedAt) < 10*time.Second {
+			return true
+		}
+	}
+	return false
+}
+
+// failedFastBefore reports that the previous launch of the same role, the
+// latest process record in the history, also failed within seconds. One
+// quick failure is retried at once, as an outage another role repairs would
+// be; the second in a row is spaced, so a role that cannot start does not
+// fill the record.
+func failedFastBefore(history []Result, role string) bool {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Speaker == "runtime" {
+			continue
+		}
+		return history[i].Role == role && failedFast(history[i:i+1])
+	}
+	return false
 }

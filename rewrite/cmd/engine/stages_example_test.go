@@ -67,7 +67,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 			if process.TrackerAccess == "comment" && !slices.Contains([]string{"ask_requester", "report", "stop_report"}, role.Name) {
 				t.Fatalf("posting granted to %s", role.Name)
 			}
-			writes := slices.Contains(process.Command, "--write")
+			writes := slices.Contains(process.Command, "--write") || slices.Contains(process.Command, "--create")
 			if writes != slices.Contains([]string{"work", "deliver", "report"}, role.Name) {
 				t.Fatalf("%s workspace write permission is %t", role.Name, writes)
 			}
