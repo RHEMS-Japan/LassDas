@@ -14,3 +14,6 @@ lassdas-setup.state.json
 # console: the local binary and the frontend toolchain stay out of the tree
 /console
 cmd/console/web/node_modules/
+
+# Python bytecode from the harness suites
+__pycache__/
