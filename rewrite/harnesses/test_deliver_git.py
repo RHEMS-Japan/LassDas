@@ -220,6 +220,14 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.receipt(), {})
         self.assertNotIn("POST", self.methods())
 
+    def test_a_dot_grant_delivers_every_changed_path(self):
+        self.change("main.go", "package main // delivered\n")
+        self.change("notes.md", "a new file nobody named in advance\n")
+        result = self.deliver(DELIVERY_ALLOWED_PATHS=".")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        delivered = self.git(self.remote, "show", "--name-only", "--format=", self.receipt()["head"]).stdout.split()
+        self.assertEqual(sorted(delivered), ["main.go", "notes.md"])
+
     def test_refuses_configured_forbidden_text(self):
         self.change("main.go", "package main // internal-project-codename\n")
         result = self.deliver(DELIVERY_FORBIDDEN_TEXT="Internal-Project-Codename\n")

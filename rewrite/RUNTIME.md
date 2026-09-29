@@ -66,7 +66,7 @@ and the SDK at the illustrated paths:
     "--runtime", "/opt/engine/harnesses",
     "--runtime", "/opt/hermes",
     "--runtime", "/opt/hermes-src",
-    "--write", "src", "--write", "tests",
+    "--write", ".",
     "--network", "inherit", "--",
     "/opt/hermes/bin/python", "/opt/engine/harnesses/hermes.py"
   ],
@@ -79,10 +79,15 @@ and the SDK at the illustrated paths:
 This fragment is not a complete engine configuration: configure the model
 selection, endpoint and workflow as described in the module README. Do not put
 credentials in literal environment settings. The paths and writable directories
-are operator choices, not hardcoded project conventions. An empty project can
-use `--write .`; this also grants its Git metadata, tests and every existing or
-future workspace file. Narrower grants must already exist. Review processes can
-omit `--write`; delivery/reporting processes get only their required outputs.
+are operator choices, not hardcoded project conventions. Which files a change
+needs is not known before the work, so the examples grant the implementation
+`--write .`: every existing or future workspace file. The checkout's own `.git`
+stays read-only under a grant that covers it unless `.git` is named, because
+hooks and configuration there run as whatever process opens the repository
+next, and the delivery process opens it holding the credential no role may
+have; only the delivery process names `.git`. Narrower grants must already
+exist. Review processes can omit `--write`; delivery/reporting processes get
+only their required outputs.
 Optional `git_workspace.py -- ...` goes before this launcher, in the trusted
 controller context, to prepare an empty checkout. Do not run it as a model tool.
 
