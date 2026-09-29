@@ -188,6 +188,33 @@ type job struct {
 	Homes     []homeLogs
 	Stages    []stageTime
 	Refresh   int
+	Lane      string
+	Dots      string
+	Attention string
+}
+
+// lane is one column of the board: the requests in one of four situations
+// the operator reads at a glance, in the order the old board used.
+type lane struct {
+	Key   string
+	Title string
+	Jobs  []*job
+}
+
+var laneOrder = []lane{{Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
+	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}}
+
+func lanes(jobs []*job) []lane {
+	result := make([]lane, len(laneOrder))
+	copy(result, laneOrder)
+	for _, j := range jobs {
+		for i := range result {
+			if result[i].Key == j.Lane {
+				result[i].Jobs = append(result[i].Jobs, j)
+			}
+		}
+	}
+	return result
 }
 
 // stageTime is the review view of one stage or role: how often it ran, how
@@ -506,6 +533,52 @@ func (j *job) derive(now time.Time) {
 	if !j.Started.IsZero() {
 		j.Elapsed = humanDuration(end.Sub(j.Started))
 	}
+	j.Lane = "running"
+	switch state := j.State; {
+	case state == nil:
+		for _, note := range j.Notes {
+			if strings.Contains(note, "history.json could not be decoded") {
+				j.Lane, j.Attention = "attention", note
+			}
+		}
+	case state.Done:
+		j.Lane = "delivered"
+	case state.Waiting:
+		j.Lane = "awaiting"
+	default:
+		var last time.Time
+		if n := len(state.History); n > 0 {
+			last = state.History[n-1].FinishedAt
+			if record := state.History[n-1]; record.Speaker == "runtime" && record.Error != "" && len(j.Live) == 0 {
+				j.Lane, j.Attention = "attention", record.Error
+			}
+		}
+		for _, notice := range j.Notices {
+			kind := stringOf(notice["kind"])
+			if kind != "budget-paused" && kind != "stall" {
+				continue
+			}
+			if written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"])); err == nil && written.After(last) {
+				j.Lane, j.Attention = "attention", stringOf(notice["text"])
+			}
+		}
+		if state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+			var dots strings.Builder
+			reached := false
+			for _, stage := range state.Workflow.Stages {
+				switch {
+				case stage.Name == state.Step:
+					dots.WriteString("◉")
+					reached = true
+				case reached:
+					dots.WriteString("○")
+				default:
+					dots.WriteString("●")
+				}
+			}
+			j.Dots = dots.String()
+		}
+	}
 	j.Refresh = 30
 	if len(j.Live) > 0 {
 		j.Refresh = 10
@@ -688,6 +761,7 @@ type page struct {
 	Base      string
 	Files     []fileEntry
 	Jobs      []*job
+	Lanes     []lane
 	Job       *job
 	Intake    any
 	Stages    []string
@@ -717,6 +791,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		data.Notes = append(data.Notes, "the jobs directory could not be listed: "+err.Error())
 	}
 	data.Jobs = jobs
+	data.Lanes = lanes(jobs)
 	if s.config != nil {
 		data.Intake, data.Router, data.Selection = s.config["intake"], s.config["router"], s.config["model_selection"]
 		if workflow, ok := s.config["workflow"].(map[string]any); ok {
@@ -916,6 +991,15 @@ details>summary{cursor:pointer;color:#246}
 a{color:#246}
 .status{font-weight:bold}
 nav a{margin-right:1em}
+.board{display:flex;gap:1em;align-items:flex-start;overflow-x:auto;padding-bottom:.5em}
+.lane{flex:1 1 0;min-width:17em;background:#eceff3;border-radius:8px;padding:.5em .6em}
+.lane h2{margin:.2em 0 .5em;font-size:1em;padding-left:.4em;border-left:6px solid #888}
+.lane.running h2{border-color:#2a7}.lane.awaiting h2{border-color:#d90}.lane.attention h2{border-color:#c33}.lane.delivered h2{border-color:#46a}
+.card{background:#fff;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.18);padding:.6em .8em;margin:.5em 0;border-left:5px solid #888}
+.lane.running .card{border-color:#2a7}.lane.awaiting .card{border-color:#d90}.lane.attention .card{border-color:#c33}.lane.delivered .card{border-color:#46a}
+.card .key{font-weight:bold}.card .title{margin:.2em 0 .4em}.card .line{color:#444;font-size:.92em;margin:.15em 0}.card .dots{letter-spacing:.15em;color:#357}
+.card .attn{color:#a00;font-size:.9em;white-space:pre-wrap}
+.empty{color:#888;font-size:.9em;padding:.4em}
 </style></head><body>{{end}}
 
 {{define "foot"}}<p class="meta">Rendered {{.Now}}; this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.</p></body></html>{{end}}
@@ -925,9 +1009,12 @@ nav a{margin-right:1em}
 <h1>Requests</h1>
 <p class="meta">Queue {{.RunDir}}, read at {{.Now}}.</p>
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
-{{if .Jobs}}<table><tr><th>Issue</th><th>Title</th><th>Status</th><th>Position</th><th>Started</th><th>Last change</th><th>Elapsed</th></tr>
-{{range .Jobs}}<tr><td><a href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a></td><td>{{.Title}}</td><td class="status">{{.Status}}</td><td>{{.Position}}</td><td>{{time .Started}}</td><td>{{time .Updated}}<br><span class="meta">{{ago .Updated}}</span></td><td>{{.Elapsed}}</td></tr>{{end}}
-</table>{{else}}<p>No request has been accepted into this queue yet.</p>{{end}}
+{{if not .Jobs}}<p>No request has been accepted into this queue yet.</p>{{end}}
+<div class="board">{{range .Lanes}}<div class="lane {{.Key}}"><h2>{{.Title}} ({{len .Jobs}})</h2>
+{{range .Jobs}}<div class="card"><div class="key"><a href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a></div><div class="title">{{.Title}}</div>
+<div class="line status">{{.Status}}</div>{{if .Position}}<div class="line">{{.Position}} <span class="dots">{{.Dots}}</span></div>{{end}}
+{{if .Attention}}<div class="attn">{{.Attention}}</div>{{end}}
+<div class="line meta">elapsed {{.Elapsed}} &middot; last change {{ago .Updated}}{{if .Requester}} &middot; {{.Requester}}{{end}}</div></div>{{else}}<div class="empty">none</div>{{end}}</div>{{end}}</div>
 {{if .Config}}<h2>Intake, as configured</h2><pre>{{pretty .Intake}}</pre>
 {{if .Stages}}<h2>Stages of the run</h2><p>{{range $i, $s := .Stages}}{{if $i}} &rarr; {{end}}{{$s}}{{end}}</p>{{end}}
 <h2>Decision and models</h2><pre>{{pretty .Router}}</pre><pre>{{pretty .Selection}}</pre>{{end}}

@@ -125,7 +125,9 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 		t.Fatalf("%d: %s", response.StatusCode, body)
 	}
 	expectAll(t, body, "EXAMPLE-7", "Add a docstring", "running implement", "step 2 of 3: implement",
-		"LOG-LINE-2", "issue_ids", "project_id", "elicit &rarr; implement &rarr; verify", "&#34;mode&#34;: &#34;stages&#34;")
+		"LOG-LINE-2", "issue_ids", "project_id", "elicit &rarr; implement &rarr; verify", "&#34;mode&#34;: &#34;stages&#34;",
+		`<div class="lane running"><h2>Running (1)</h2>`, `<h2>Awaiting answer (0)</h2>`, `<h2>Needs attention (0)</h2>`, `<h2>Delivered (0)</h2>`,
+		`<span class="dots">●◉○</span>`, "fixture requester")
 	if strings.Contains(body, "engine.log is not present") {
 		t.Error("the log tail was present but reported missing")
 	}
@@ -178,6 +180,53 @@ func TestDamagedRecordsAreReportedNotHidden(t *testing.T) {
 	response, body = get(t, ts, "/")
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "no run record yet") {
 		t.Fatalf("%d: %s", response.StatusCode, body)
+	}
+	expectAll(t, body, `<h2>Needs attention (1)</h2>`, "history.json could not be decoded")
+}
+
+func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	add := func(id string, state chain.State, notices string) {
+		t.Helper()
+		dir := filepath.Join(root, "jobs", id)
+		if err := os.MkdirAll(filepath.Join(dir, "run"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, text := range map[string]string{"issue.json": `{"id":` + id + `,"issueKey":"EXAMPLE-` + id + `","summary":"request ` + id + `"}`,
+			filepath.Join("run", "history.json"): string(raw), "notices.json": notices} {
+			if text == "" {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add("8", chain.State{Done: true, History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
+	add("9", chain.State{Waiting: true, History: []chain.Result{{Role: "ask_requester", Speaker: "ask-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
+	add("10", chain.State{History: []chain.Result{{Role: "router", Speaker: "runtime", Error: "routing unavailable: ROUTER-ERROR", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}, "")
+	add("11", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
+		`{"notices":[{"kind":"budget-paused","text":"BUDGET-PAUSED-TEXT","written_at":"2026-01-02T00:20:00Z"}]}`)
+	add("12", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
+		`{"notices":[{"kind":"resume","text":"RESUMED","written_at":"2026-01-02T00:20:00Z"}]}`)
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `<h2>Running (2)</h2>`, `<h2>Awaiting answer (1)</h2>`, `<h2>Needs attention (2)</h2>`, `<h2>Delivered (1)</h2>`,
+		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT")
+	for _, section := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"}} {
+		start := strings.Index(body, `<div class="lane `+section.lane+`">`)
+		end := strings.Index(body[start+1:], `<div class="lane `)
+		if end < 0 {
+			end = len(body) - start - 1
+		}
+		if !strings.Contains(body[start:start+1+end], section.key) {
+			t.Errorf("%s is not in the %s lane", section.key, section.lane)
+		}
 	}
 }
 
