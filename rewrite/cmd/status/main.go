@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -149,10 +150,13 @@ func (s *server) handler() http.Handler {
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if s.user != "" {
 			user, password, ok := r.BasicAuth()
-			if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(s.user)) != 1 ||
-				subtle.ConstantTimeCompare([]byte(password), []byte(s.password)) != 1 {
+			userHash, wantUser := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(s.user))
+			passwordHash, wantPassword := sha256.Sum256([]byte(password)), sha256.Sum256([]byte(s.password))
+			matched := subtle.ConstantTimeCompare(userHash[:], wantUser[:]) & subtle.ConstantTimeCompare(passwordHash[:], wantPassword[:])
+			if !ok || matched != 1 {
 				w.Header().Set("WWW-Authenticate", `Basic realm="ticket engine status"`)
 				http.Error(w, "authentication required", http.StatusUnauthorized)
 				return
@@ -314,7 +318,10 @@ func stringOf(value any) string {
 	return fmt.Sprint(value)
 }
 
-func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
+// loadJob reads one request. With detail, everything on disk about it is
+// read; without, only what a card on the board needs (the issue, the run
+// record, the live copy and the notices), so the overview stays cheap.
+func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	dir := filepath.Join(s.runDir, "jobs", id)
 	j := &job{ID: id}
 	note := func(format string, args ...any) { j.Notes = append(j.Notes, fmt.Sprintf(format, args...)) }
@@ -371,6 +378,31 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 			}
 		}
 		touch(historyPath)
+	}
+	if !detail {
+		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
+			var log struct {
+				Notices []map[string]any `json:"notices"`
+			}
+			if json.Unmarshal(raw, &log) == nil {
+				j.Notices = log.Notices
+			}
+		}
+		if names, _ := filepath.Glob(filepath.Join(dir, "live", "*.json")); len(names) > 0 {
+			for _, name := range names {
+				if raw, err := os.ReadFile(name); err == nil {
+					var entry struct {
+						Role string `json:"role"`
+					}
+					if json.Unmarshal(raw, &entry) == nil {
+						j.Live = append(j.Live, liveEntry{Role: entry.Role})
+					}
+				}
+				touch(name)
+			}
+		}
+		j.derive(now)
+		return j
 	}
 	if names, _ := filepath.Glob(filepath.Join(dir, "answer-*.json")); len(names) > 0 {
 		sort.Strings(names)
@@ -494,9 +526,7 @@ func (s *server) loadJob(id string, now time.Time, withWorkspace bool) *job {
 		}
 	}
 	j.derive(now)
-	if withWorkspace {
-		j.Workspace = readWorkspace(filepath.Join(dir, "workspace"))
-	}
+	j.Workspace = s.readWorkspace(id)
 	return j
 }
 
@@ -649,18 +679,30 @@ type workspace struct {
 	Status    string
 	Diff      string
 	Untracked []namedText
+	NotShown  int
 	Log       string
 	Note      string
 }
 
 const untrackedLimit = 200000
 
+// untrackedFiles and untrackedTotal bound what the request page shows of new
+// files inline; the rest is named and left to the file browser.
+const untrackedFiles, untrackedTotal = 50, 2 << 20
+
+// gitRead runs one git query in a checkout the roles write. Nothing the
+// checkout's own configuration names is executed (hooks, the file monitor,
+// external diff and textconv drivers are all switched off), and the process
+// receives none of the page's environment, so a credential the page holds
+// cannot reach a program named there.
 func gitRead(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "--no-optional-locks",
-		"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false"}, args...)...)
-	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_TERMINAL_PROMPT=0")
+		"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "diff.external=",
+		"-c", "core.quotePath=false", "-c", "core.pager=cat"}, args...)...)
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.TempDir(), "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LANG=C.UTF-8"}
 	var out, errs bytes.Buffer
 	command.Stdout, command.Stderr = &out, &errs
 	if err := command.Run(); err != nil {
@@ -673,7 +715,9 @@ func gitRead(dir string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
-func readWorkspace(dir string) *workspace {
+func (s *server) readWorkspace(id string) *workspace {
+	rel := filepath.Join("jobs", id, "workspace")
+	dir := filepath.Join(s.runDir, rel)
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		return &workspace{Note: "no checkout yet"}
 	}
@@ -687,26 +731,43 @@ func readWorkspace(dir string) *workspace {
 	if log, err := gitRead(dir, "log", "--no-color", "-5", "--format=%H %ci %s"); err == nil {
 		w.Log = log
 	}
-	if diff, err := gitRead(dir, "diff", "--no-color"); err != nil {
+	// Staged and unstaged changes alike: the delivery program stages before
+	// it commits, and a page read between the two must not show a name with
+	// no content. A checkout without a commit yet has no HEAD to diff against.
+	diff, err := gitRead(dir, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD")
+	if err != nil {
+		diff, err = gitRead(dir, "diff", "--no-color", "--no-ext-diff", "--no-textconv")
+	}
+	if err != nil {
 		w.Note = "git diff could not be read: " + err.Error()
 	} else {
 		w.Diff = diff
 	}
+	shown, total := 0, 0
 	for _, line := range strings.Split(status, "\n") {
 		if !strings.HasPrefix(line, "?? ") {
 			continue
 		}
 		name := strings.TrimPrefix(line, "?? ")
-		raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		if shown >= untrackedFiles || total >= untrackedTotal {
+			w.NotShown++
+			continue
+		}
+		if info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(name))); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			w.Untracked = append(w.Untracked, namedText{Name: name, Text: "(symbolic link; not followed, the page stays inside the queue)"})
+			continue
+		}
+		text, err := s.readIn(filepath.Join(rel, filepath.FromSlash(name)), 0)
 		if err != nil {
 			w.Untracked = append(w.Untracked, namedText{Name: name, Text: "could not be read: " + err.Error()})
 			continue
 		}
-		text := string(raw)
 		if len(text) > untrackedLimit {
-			text = text[:untrackedLimit] + fmt.Sprintf("\n[cut here: %d more bytes on disk]\n", len(raw)-untrackedLimit)
+			text = text[:untrackedLimit] + fmt.Sprintf("\n[cut here: %d more bytes on disk]\n", len(text)-untrackedLimit)
 		}
 		w.Untracked = append(w.Untracked, namedText{Name: name, Text: text})
+		shown++
+		total += len(text)
 	}
 	return w
 }
@@ -940,7 +1001,7 @@ func (s *server) workspacePage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	workspace := readWorkspace(filepath.Join(s.runDir, "jobs", id, "workspace"))
+	workspace := s.readWorkspace(id)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	if workspace.Note != "" {
@@ -949,6 +1010,9 @@ func (s *server) workspacePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "== git status --porcelain --untracked-files=all\n%s\n== git diff\n%s", workspace.Status, workspace.Diff)
 	for _, file := range workspace.Untracked {
 		fmt.Fprintf(w, "\n== untracked: %s\n%s", file.Name, file.Text)
+	}
+	if workspace.NotShown > 0 {
+		fmt.Fprintf(w, "\n== %d more new files are not shown here; they are under /files/\n", workspace.NotShown)
 	}
 }
 
@@ -1088,7 +1152,7 @@ var japanese = map[string]string{
 	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
 	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
 	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
-	"no checkout yet": "checkout はまだない",
+	"no checkout yet": "checkout はまだない", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
 }
 
 func translate(lang, text string) string {
@@ -1229,6 +1293,6 @@ nav a{margin-right:1em}
 {{if .Status}}<pre>{{.Status}}</pre>{{else}}{{if not .Note}}<p class="meta">{{t $.Lang "no change in the checkout"}}</p>{{end}}{{end}}
 {{if .Log}}<details><summary>{{t $.Lang "recent commits in the checkout"}}</summary><pre>{{.Log}}</pre></details>{{end}}
 {{if .Diff}}<details open><summary>{{t $.Lang "diff of tracked files"}}</summary><pre>{{.Diff}}</pre></details>{{end}}
-{{range .Untracked}}<details><summary>{{t $.Lang "new file:"}} {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{end}}
+{{range .Untracked}}<details><summary>{{t $.Lang "new file:"}} {{.Name}}</summary><pre>{{.Text}}</pre></details>{{end}}{{if .NotShown}}<p class="meta">{{.NotShown}} {{t $.Lang "more new files are not shown here; they are under files"}}</p>{{end}}{{end}}
 {{template "foot" $}}{{end}}{{end}}
 `

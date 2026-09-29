@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -563,5 +564,98 @@ func TestLabelsSwitchToJapaneseAndBack(t *testing.T) {
 	}
 	if _, body := get(t, ts, "/"); !strings.Contains(body, "<h1>Requests</h1>") || !strings.Contains(body, `<a href="/lang/ja">日本語</a>`) {
 		t.Error("without the cookie the labels are English with a link to Japanese")
+	}
+}
+
+func TestTheWorkspaceViewRunsNothingFromTheCheckoutAndStaysInsideTheQueue(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("STATUS_USER", "operator")
+	t.Setenv("STATUS_PASSWORD", "the-status-password")
+	root := fixtureQueue(t)
+	workspace := filepath.Join(root, "jobs", "7", "workspace")
+	git(t, workspace, "init", "-q")
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("old line\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, workspace, "add", "tracked.txt")
+	git(t, workspace, "commit", "-q", "-m", "base")
+	if err := os.WriteFile(filepath.Join(workspace, "tracked.txt"), []byte("new line\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "executed")
+	script := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'EXECUTED %s' \"$STATUS_PASSWORD\" > "+marker+"\ncat \"$2\" 2>/dev/null; exit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(workspace, ".git", "config")
+	extra := "\n[diff]\n\texternal = " + script + "\n[diff \"marked\"]\n\ttextconv = " + script + "\n"
+	raw, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, append(raw, extra...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".gitattributes"), []byte("*.txt diff=marked\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("OUTSIDE-SECRET"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workspace, "escape.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "staged.txt"), []byte("STAGED-CONTENT\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, workspace, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(workspace, "caf\u00e9.txt"), []byte("ACCENT-CONTENT\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 60; i++ {
+		if err := os.WriteFile(filepath.Join(workspace, fmt.Sprintf("many-%02d.txt", i)), []byte("MANY-CONTENT\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := serve(t, root, "", "STATUS_USER", "STATUS_PASSWORD")
+	for _, path := range []string{"/jobs/7/workspace", "/jobs/7"} {
+		response, body := get(t, ts, path, "operator", "the-status-password")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: %d", path, response.StatusCode)
+		}
+		if response.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s served without nosniff", path)
+		}
+		if strings.Contains(body, "OUTSIDE-SECRET") {
+			t.Errorf("%s followed a symbolic link out of the queue", path)
+		}
+		if strings.Contains(body, "the-status-password") {
+			t.Errorf("%s leaked the page's password", path)
+		}
+		expectAll(t, body, "STAGED-CONTENT", "ACCENT-CONTENT", "escape.txt", "symbolic link")
+		if strings.Count(body, "MANY-CONTENT") > 50 {
+			t.Errorf("%s showed %d new files inline; at most 50", path, strings.Count(body, "MANY-CONTENT"))
+		}
+		if !strings.Contains(body, "more new files are not shown") {
+			t.Errorf("%s did not say how many new files were left out", path)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a program named by the checkout's configuration ran")
+	}
+	_, body := get(t, ts, "/jobs/7", "operator", "the-status-password")
+	if !strings.Contains(body, "-old line") || !strings.Contains(body, "&#43;new line") {
+		t.Error("the tracked change is missing from the diff")
+	}
+}
+
+func TestARequesterRecordIsStyledAsAPerson(t *testing.T) {
+	ts := serve(t, fixtureQueue(t), "", "", "")
+	_, body := get(t, ts, "/jobs/7")
+	if !strings.Contains(body, `class="rec person"`) {
+		t.Error("the requester's answer is not styled as a person's record")
 	}
 }

@@ -287,6 +287,11 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
 				}
 			}
+			// No process of this request can be running before it is launched
+			// here, so a live copy left by a hard stop is stale by definition.
+			if err := os.RemoveAll(filepath.Join(directory, "live")); err != nil {
+				observe("request " + entry.Name() + ": stale live copy not removed: " + err.Error())
+			}
 			launch(entry.Name(), func() error {
 				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log)
 			})
