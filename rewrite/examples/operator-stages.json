@@ -290,15 +290,14 @@
             "-B",
             "/opt/ticket-automation/bundle/harnesses/adversarial_review.py"
           ],
-          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, at most REVIEW_ROUNDS times; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
+          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, as often as a blocking defect is found; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git",
             "REVIEW_MODEL_URL": "https://openrouter.ai/api/v1/chat/completions",
             "REVIEW_MODEL": "moonshotai/kimi-k3",
             "REVIEW_KEY_ENV": "REVIEW_API_KEY",
             "REVIEW_TEST_COMMANDS": "/opt/ticket-automation/operator/test",
-            "REVIEW_DIFF_PATHS": "src tests",
-            "REVIEW_ROUNDS": "2"
+            "REVIEW_DIFF_PATHS": "src tests"
           },
           "secrets": {
             "REVIEW_API_KEY": "MODEL_API_KEY"

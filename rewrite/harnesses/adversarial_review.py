@@ -30,7 +30,6 @@ Environment (all from the operator, never from a role):
   REVIEW_KEY_ENV          name of the variable holding the credential (default REVIEW_API_KEY)
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
-  REVIEW_ROUNDS           send-backs allowed, 0 or more; the next blocking verdict lets the work through with the objections recorded (default 2)
   TASK_HOME               the process's own directory, where the send-back counter and the log live
   REVIEW_TIMEOUT_SECONDS, REVIEW_ATTEMPTS: optional (default 300, 3)
 
@@ -72,8 +71,8 @@ SYSTEM = ("You are an adversarial reviewer of one code change. Your job is to fi
           " commands after your verdict: their absence now is not a defect and must not block. Decide"
           " blocking only when a defect in the change itself must be fixed before delivery; say exactly"
           " where each defect is and why it matters, so the implementer can act on it. The work has"
-          " been sent back %d times so far, of at most %d; an objection already raised and addressed"
-          " is not raised again. Answer with the verdict tool.")
+          " been sent back %d times so far; an objection already raised and addressed is not raised"
+          " again. Answer with the verdict tool.")
 
 
 class ReviewError(Exception):
@@ -175,12 +174,12 @@ def status_path(line):
     return path.strip().strip('"')
 
 
-def ask(url, model, key, prompt, diff, tests, rounds, limit, timeout, attempts):
+def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
     """One structured verdict, or None when none could be obtained."""
     request = {"model": model, "temperature": 0.2, "tools": [TOOL],
                "tool_choice": {"type": "function", "function": {"name": "verdict"}},
                "messages": [
-                   {"role": "system", "content": SYSTEM % (rounds, limit)},
+                   {"role": "system", "content": SYSTEM % rounds},
                    {"role": "user", "content": (
                        "Where this stage sits, the original request and the settled requirements (from the runtime):\n%s"
                        "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
@@ -233,7 +232,6 @@ def reviewed(stdin_text, model):
     key = os.environ.get(key_env, "")
     if not key:
         raise ReviewError("the review credential is not set (%s, named by REVIEW_KEY_ENV)" % key_env)
-    limit = number("REVIEW_ROUNDS", "2")
     timeout = number("REVIEW_TIMEOUT_SECONDS", "300", 1)
     attempts = number("REVIEW_ATTEMPTS", "3", 1)
     paths = setting("REVIEW_DIFF_PATHS", "").split()
@@ -262,23 +260,18 @@ def reviewed(stdin_text, model):
         raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
     diff, test_output = gather(workspace, paths, tests, timeout)
-    blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, limit, timeout, attempts)
+    blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)
     outcome = "PASSED"
     if blocking is None:
         outcome = "NOT REVIEWED"
         findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
         blocking = False
-    elif blocking and sent_back >= limit:
-        outcome = "LET THROUGH AT THE OPERATOR'S LIMIT"
-        findings = ("UNRESOLVED after %d send-backs, the operator's limit; the work goes on with these"
-                    " objections recorded:\n%s" % (sent_back, findings))
-        blocking = False
     elif blocking:
         outcome = "SENT BACK to the worker"
         sent_back += 1
     findings = scrub(findings, key)
-    print("Review by %s: %s. Send-backs so far: %d of at most %d.\n%s"
-          % (model, outcome, sent_back, limit, (findings or "(no findings)")[:6000]))
+    print("Review by %s: %s. Send-backs so far: %d.\n%s"
+          % (model, outcome, sent_back, (findings or "(no findings)")[:6000]))
     try:
         if blocking:
             counter.write_text(str(sent_back))
