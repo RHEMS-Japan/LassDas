@@ -25,6 +25,9 @@ data:
     *filter
     :TICKET_EGRESS - [0:0]
     -A TICKET_EGRESS -o lo -j ACCEPT
+    # Replies of the status page on 9200 (never a new connection: no SYN), so a
+    # load balancer or health check on a private address can be answered.
+    -A TICKET_EGRESS -p tcp --sport 9200 ! --syn -j ACCEPT
     -A TICKET_EGRESS -d <dns-cluster-ip> -p udp --dport 53 -j ACCEPT
     -A TICKET_EGRESS -d <dns-cluster-ip> -p tcp --dport 53 -j ACCEPT
     -A TICKET_EGRESS -d 0.0.0.0/8 -j REJECT

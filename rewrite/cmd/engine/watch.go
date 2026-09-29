@@ -110,7 +110,10 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	}
 	w := &serialLog{writer: log}
 	observe := func(message string) { fmt.Fprintln(w, message) }
-	identity := fmt.Sprintf("Issue intake: %s\nProject: %d\nCreated since: %s", cfg.Backlog.BaseURL, cfg.Intake.ProjectID, since.UTC().Format(time.RFC3339))
+	// The queue belongs to one tracker and one project. The intake window
+	// and the issue allowlist are filters an operator changes while the
+	// queue lives on, so they are not part of its identity.
+	identity := fmt.Sprintf("Issue intake: %s\nProject: %d", cfg.Backlog.BaseURL, cfg.Intake.ProjectID)
 	// Reuse the existing exclusive, durable runtime store for ownership of this
 	// queue. Its identity is not a verdict or completion mark for any issue.
 	jobs := filepath.Join(root, "jobs")

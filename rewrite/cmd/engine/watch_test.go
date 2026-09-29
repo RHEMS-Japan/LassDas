@@ -520,3 +520,29 @@ func TestWatchHonorsCapacityAndStartsWaitingRequestsAfterAChildReturns(t *testin
 		t.Fatalf("configured capacity was not respected: running=%d peak=%d", running, peak)
 	}
 }
+
+// The request runs from the configuration file the watch mode wrote, so the
+// live directory it assigns must survive that file, or no running output is
+// ever shown for a watched request.
+func TestTheLiveDirectorySurvivesTheRequestConfigurationFile(t *testing.T) {
+	cfg := operatorExample(t)
+	bound, err := bindRequestConfig(cfg, "/queue/jobs/7", "EXAMPLE-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reloaded config
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range reloaded.Roles {
+		for _, process := range role.Processes {
+			if process.Live != "/queue/jobs/7/live" {
+				t.Fatalf("%s/%s live directory after the round trip: %q", role.Name, process.Name, process.Live)
+			}
+		}
+	}
+}

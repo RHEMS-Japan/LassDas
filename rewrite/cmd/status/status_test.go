@@ -128,7 +128,7 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 	expectAll(t, body, "EXAMPLE-7", "Add a docstring", "running implement", "step 2 of 3: implement",
 		"LOG-LINE-2", "issue_ids", "project_id", "elicit &rarr; implement &rarr; verify", "&#34;mode&#34;: &#34;stages&#34;",
 		`<div class="lane running"><h2>Running (1)</h2>`, `<h2>Awaiting answer (0)</h2>`, `<h2>Needs attention (0)</h2>`, `<h2>Delivered (0)</h2>`,
-		`<span class="dots">●◉○</span>`, "fixture requester")
+		`<span class="passed">elicit</span> &rarr; <span class="current">implement</span> &rarr; <span class="ahead">verify</span>`, "fixture requester")
 	if strings.Contains(body, "engine.log is not present") {
 		t.Error("the log tail was present but reported missing")
 	}
@@ -667,5 +667,60 @@ func TestARequesterRecordIsStyledAsAPerson(t *testing.T) {
 	_, body := get(t, ts, "/jobs/7")
 	if !strings.Contains(body, `class="rec person"`) {
 		t.Error("the requester's answer is not styled as a person's record")
+	}
+}
+
+func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	state := chain.State{Step: "implement", Recovering: true, Pending: &chain.Assignment{Role: "implement"},
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
+		History: []chain.Result{
+			{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started.Add(2 * time.Minute)},
+			{Role: "implement", Speaker: "implement-process", Error: "context canceled", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
+			{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(5 * time.Minute)},
+		}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "jobs", "7")
+	if err := os.WriteFile(filepath.Join(dir, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "live")); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `<h2>Running (1)</h2>`, `<h2>Needs attention (0)</h2>`, "recovering after a restart; assigned to implement")
+	if strings.Contains(body, "elapsed 0s") || !strings.Contains(body, "elapsed ") {
+		t.Errorf("the elapsed time must count from the first record: %s", body[strings.Index(body, "elapsed"):][:40])
+	}
+	_, page := get(t, ts, "/jobs/7")
+	if want := started.In(time.Local).Format("2006-01-02 15:04:05"); !strings.Contains(page, want) {
+		t.Errorf("the request page must show the first record's start (%s) as the start", want)
+	}
+	expectAll(t, body, `<span class="passed">elicit</span> &rarr; <span class="current">implement</span>`)
+}
+
+func TestARolesFileListIsCapped(t *testing.T) {
+	root := fixtureQueue(t)
+	cache := filepath.Join(root, "jobs", "7", "homes", "1-0", "cache")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 250; i++ {
+		if err := os.WriteFile(filepath.Join(cache, fmt.Sprintf("entry-%03d", i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/jobs/7")
+	if strings.Count(body, "/files/jobs/7/homes/1-0/cache/entry-") > homeFileLimit {
+		t.Errorf("%d file links; at most %d", strings.Count(body, "/files/jobs/7/homes/1-0/cache/entry-"), homeFileLimit)
+	}
+	if !strings.Contains(body, "more under files") {
+		t.Error("the page must say that more files are under the browser")
 	}
 }
