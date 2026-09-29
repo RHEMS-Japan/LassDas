@@ -111,6 +111,15 @@ def command(args, environment):
             # Missing write targets are not silently created in the project.
             # Grant an existing parent, or prepare an output directory first.
             result += mount(path, read_only=False)
+        for path in writable:
+            # A checkout's own metadata stays read-only under a grant that
+            # covers it: hooks and configuration inside .git run as whatever
+            # process opens the repository next, and the delivery process
+            # opens it holding the credential no role may have. Only a grant
+            # that names .git itself opens it (the delivery process's own).
+            metadata = path / ".git"
+            if metadata.is_dir() and not metadata.is_symlink() and metadata not in writable:
+                result += mount(metadata, directory=True)
         result += mount(home, read_only=False, directory=True, create=True)
         result += ["--chdir", str(workspace), "--", *program]
         child_environment = dict(environment)

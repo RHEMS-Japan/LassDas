@@ -13,7 +13,7 @@ Environment (all from the operator, never from a role):
   GITHUB_TOKEN               delivery credential, through the credential helper
   DELIVERY_REPOSITORY        owner/name of the delivery target
   DELIVERY_BASE_BRANCH       integration branch the pull request targets
-  DELIVERY_ALLOWED_PATHS     colon-separated paths that may change
+  DELIVERY_ALLOWED_PATHS     colon-separated paths that may change; '.' is the whole tree
   DELIVERY_FORBIDDEN_TEXT    optional newline-separated text refused in a diff
   DELIVERY_MERGE_METHOD      merge (default), squash or rebase
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)

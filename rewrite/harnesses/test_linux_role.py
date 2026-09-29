@@ -65,6 +65,31 @@ class DescriptorTests(unittest.TestCase):
                 for descriptor in descriptors:
                     os.close(descriptor)
 
+    def test_a_whole_workspace_grant_keeps_the_checkout_metadata_read_only(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            base = Path(root)
+            work, home = base / "work", base / "home"
+            for directory in (work, home, work / ".git", work / "src"):
+                directory.mkdir()
+
+            def mounts(write):
+                args = argparse.Namespace(program=["--", "/bin/true"], write=write, runtime=[], network="none")
+                with patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"):
+                    argv, _, descriptors = launcher.command(args, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home)})
+                for descriptor in descriptors:
+                    os.close(descriptor)
+                return [(argv[i], argv[i + 2]) for i, item in enumerate(argv) if item in ("--bind-fd", "--ro-bind-fd")]
+
+            whole = mounts(["."])
+            self.assertIn(("--bind-fd", str(work)), whole)
+            self.assertIn(("--ro-bind-fd", str(work / ".git")), whole)
+            self.assertGreater(whole.index(("--ro-bind-fd", str(work / ".git"))), whole.index(("--bind-fd", str(work))),
+                               "the read-only metadata mount must follow the writable workspace mount to take effect")
+            named = mounts([".git"])
+            self.assertIn(("--bind-fd", str(work / ".git")), named)
+            self.assertNotIn(("--ro-bind-fd", str(work / ".git")), named)
+            self.assertNotIn(("--ro-bind-fd", str(work / ".git")), mounts(["src"]))
+
     def test_intermediate_and_final_symlinks_are_not_followed(self):
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
