@@ -65,6 +65,10 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 		return false
 	})
 	waiting := 51 + 52 - working
+	// Give the other request a few ticks to ask for the slot and be refused;
+	// stopped too early, it would find the slot free at its first attempt
+	// and, rightly, have nothing to announce.
+	time.Sleep(300 * time.Millisecond)
 	// The working request is stopped; the waiting one takes the slot.
 	stopped.Store(int64(working))
 	waitFor(t, func() bool { return started(waiting) })
