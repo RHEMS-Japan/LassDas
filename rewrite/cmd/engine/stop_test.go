@@ -211,8 +211,8 @@ func TestStopQueuedRequestDoesNotNeedAnExecutionSlot(t *testing.T) {
 		models.Add(1)
 		return nil, errors.New("queued stopped work must never reach a model")
 	})
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{} // A different request owns the only execution slot.
+	slots := newTurnstile(1)
+	slots.slots <- struct{}{} // A different request owns the only execution slot.
 	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
 	issue.Creator.ID = 55
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -220,7 +220,7 @@ func TestStopQueuedRequestDoesNotNeedAnExecutionSlot(t *testing.T) {
 	if err := runWatchedRequest(ctx, cfg, issue, root, "unused-config", "unused-request", 40*time.Millisecond, slots, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := savedStop(root, issue, nil); err != nil || !stopped || models.Load() != 0 || len(slots) != 1 {
+	if stopped, err := savedStop(root, issue, nil); err != nil || !stopped || models.Load() != 0 || len(slots.slots) != 1 {
 		t.Fatalf("queued stop consumed a work slot: stopped=%v error=%v models=%d", stopped, err, models.Load())
 	}
 }
@@ -370,7 +370,7 @@ func TestStopKeepsObservedInstructionInMemoryWhenSavingFails(t *testing.T) {
 		return len(p), nil
 	})
 	go func() {
-		result <- runWatchedRequest(ctx, cfg, issue, directory, "unused", "unused", 30*time.Millisecond, make(chan struct{}, 1), log)
+		result <- runWatchedRequest(ctx, cfg, issue, directory, "unused", "unused", 30*time.Millisecond, newTurnstile(1), log)
 	}()
 	select {
 	case <-failedSave:
@@ -415,7 +415,7 @@ func TestStopUnreadableControlNeverLaunchesWork(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 			defer cancel()
 			var log bytes.Buffer
-			if err := runWatchedRequest(ctx, cfg, issue, t.TempDir(), "unused", "unused", 20*time.Millisecond, make(chan struct{}, 1), &log); !errors.Is(err, context.DeadlineExceeded) {
+			if err := runWatchedRequest(ctx, cfg, issue, t.TempDir(), "unused", "unused", 20*time.Millisecond, newTurnstile(1), &log); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatal(err)
 			}
 			if strings.Contains(log.String(), "starting accepted request") || !strings.Contains(log.String(), "stop comments could not be read") {
@@ -434,7 +434,7 @@ func TestStopMissingRequesterIdentityHoldsWorkUnlessAnOperatorIsConfigured(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 	var log bytes.Buffer
-	if err := runWatchedRequest(ctx, cfg, issue, t.TempDir(), "unused", "unused", 20*time.Millisecond, make(chan struct{}, 1), &log); !errors.Is(err, context.DeadlineExceeded) {
+	if err := runWatchedRequest(ctx, cfg, issue, t.TempDir(), "unused", "unused", 20*time.Millisecond, newTurnstile(1), &log); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(log.String(), "requester identity is unavailable") || strings.Contains(log.String(), "starting accepted request") {
@@ -442,7 +442,7 @@ func TestStopMissingRequesterIdentityHoldsWorkUnlessAnOperatorIsConfigured(t *te
 	}
 	cfg.Intake.StopUserIDs = []int64{77}
 	directory := t.TempDir()
-	if err := runWatchedRequest(context.Background(), cfg, issue, directory, "unused", "unused", 20*time.Millisecond, make(chan struct{}, 1), io.Discard); err != nil {
+	if err := runWatchedRequest(context.Background(), cfg, issue, directory, "unused", "unused", 20*time.Millisecond, newTurnstile(1), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if stopped, err := savedStop(directory, issue, []int64{77}); err != nil || !stopped {
