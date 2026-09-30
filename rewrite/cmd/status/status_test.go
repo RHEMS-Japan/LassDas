@@ -922,3 +922,73 @@ func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
 		t.Errorf("localized interrupted status: %q", got)
 	}
 }
+
+func TestAStoppedRequestSaysSoAndWhetherItsReportWentOut(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}}
+	failing := []chain.Result{
+		{Role: "elicit", Speaker: "elicit-process", Error: "fork/exec /usr/bin/elicit: no such file or directory", StartedAt: started, FinishedAt: started},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", StartedAt: started, FinishedAt: started},
+	}
+	for _, id := range []string{"40", "41"} {
+		writeJob(t, root, id, chain.State{Step: "elicit", Recovering: true, Pending: &chain.Assignment{Role: "elicit"}, Workflow: flow, History: failing})
+		if err := os.WriteFile(filepath.Join(root, "jobs", id, "stop-request.json"), []byte(`{"id":55,"content":"停止"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "40", "stop-report"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := json.Marshal(chain.State{Request: "report", Done: true, History: []chain.Result{{Role: "stop_report", Speaker: "reporter", Output: "posted"}}})
+	if err := os.WriteFile(filepath.Join(root, "jobs", "40", "stop-report", "history.json"), report, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `Stopped <b>2</b>`, `Running <b>1</b>`, `Needs attention <b>0</b>`,
+		`<article class="card stopped" data-key="EXAMPLE-40">`, `<article class="card stopped" data-key="EXAMPLE-41">`,
+		"stopped by the requester; report posted", "stopped by the requester; report pending")
+	if strings.Contains(body, "retrying after a failure") {
+		t.Error("a stopped request is still shown as retrying")
+	}
+	if !strings.Contains(inColumn(body, "elicit"), `data-key="EXAMPLE-40"`) {
+		t.Error("a stopped request left the stage it stopped at")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/40", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(japanese), "依頼者が停止。報告済み") {
+		t.Error("the Japanese request page does not say the request was stopped and reported")
+	}
+	// Stopped while waiting on a question: the page does not also say it
+	// waits. Stopped after delivery: delivered stands. A stop record the
+	// runtime cannot read holds the work and needs a person.
+	writeJob(t, root, "42", chain.State{Waiting: true, Step: "ask_requester", Workflow: flow,
+		History: []chain.Result{{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started}, {Role: "ask_requester", Speaker: "ask-process", StartedAt: started, FinishedAt: started}}})
+	writeJob(t, root, "43", chain.State{Done: true, Step: "implement", Workflow: flow,
+		History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started}}})
+	writeJob(t, root, "44", chain.State{Step: "elicit", Workflow: flow, History: failing})
+	for _, id := range []string{"42", "43"} {
+		if err := os.WriteFile(filepath.Join(root, "jobs", id, "stop-request.json"), []byte(`{"id":56,"content":"停止"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "jobs", "44", "stop-request.json"), []byte(`{"id":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, page := get(t, ts, "/jobs/42")
+	if strings.Count(page, `class="badge awaiting"`) != 0 || !strings.Contains(page, "stopped by the requester; report pending") {
+		t.Error("a request stopped while waiting still says it waits for the requester")
+	}
+	_, board := get(t, ts, "/")
+	expectAll(t, board, `<article class="card delivered" data-key="EXAMPLE-43">`, `<article class="card attention" data-key="EXAMPLE-44">`, "the saved stop instruction is unreadable; the work is held")
+	if !strings.Contains(inColumn(board, "done"), `data-key="EXAMPLE-43"`) {
+		t.Error("a request delivered before its stop left the delivered column")
+	}
+}

@@ -23,7 +23,7 @@ h3{font-size:.95em;margin:.8em 0 .3em}
 .strip{display:flex;flex-wrap:wrap;gap:.6em;margin:.4em 0 1em}
 .badge{display:inline-block;font-size:.8em;line-height:1.7;padding:0 .7em;border-radius:999px;color:#fff;background:var(--muted);white-space:nowrap}
 .badge b{font-weight:700}
-.badge.running{background:var(--run)}.badge.awaiting{background:var(--wait)}.badge.attention{background:var(--attn)}.badge.delivered{background:var(--done)}
+.badge.running{background:var(--run)}.badge.awaiting{background:var(--wait)}.badge.attention{background:var(--attn)}.badge.delivered{background:var(--done)}.badge.stopped{background:var(--muted)}
 .board{display:grid;grid-template-columns:repeat(auto-fit,minmax(12.5em,1fr));gap:.7em;padding:.2em 0 .8em}
 .col{background:#e9ecf1;border-radius:10px;padding:.55em .6em;min-height:9em}
 .col.done{background:#e3ebfa}
@@ -32,7 +32,7 @@ h3{font-size:.95em;margin:.8em 0 .3em}
 .col .count{background:#fff;border-radius:999px;padding:0 .55em;font-size:.8em;color:var(--muted)}
 .col .empty{color:#9ca3af;font-size:.85em;padding:.3em .2em}
 .card{background:#fff;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.12);padding:.7em .8em .6em;margin:.5em 0;border-left:4px solid var(--muted)}
-.card.running{border-color:var(--run)}.card.awaiting{border-color:var(--wait)}.card.attention{border-color:var(--attn)}.card.delivered{border-color:var(--done)}
+.card.running{border-color:var(--run)}.card.awaiting{border-color:var(--wait)}.card.attention{border-color:var(--attn)}.card.delivered{border-color:var(--done)}.card.stopped{border-color:var(--muted);opacity:.85}
 .card .key{font-weight:700;text-decoration:none}
 .card .title{margin:.25em 0 .5em;line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .card .line{font-size:.85em;color:var(--muted);margin:.2em 0}
@@ -100,7 +100,7 @@ details{margin:.3em 0}details summary{cursor:pointer;color:var(--accent);font-si
 
 {{define "job"}}{{with .Job}}{{template "head" (head $.Lang (printf "%s %s" .Key (t $.Lang "status")) .Refresh)}}{{template "top" $}}<main>
 <h1><a class="key" href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a> {{.Title}}</h1>
-<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting")}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
+<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting") (not .Stopped)}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
 {{if .Failure}}<p class="fail">{{t $.Lang "last failure"}}: {{.Failure}}</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="panel"><dl class="grid">
