@@ -737,7 +737,10 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 	}
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Running <b>1</b>`, `Needs attention <b>0</b>`, "recovering after a restart; assigned to implement")
+	expectAll(t, body, `Running <b>1</b>`, `Needs attention <b>0</b>`, "taking up an interrupted step; assigned to implement")
+	if strings.Contains(body, "last failure") {
+		t.Error("an interrupted step is shown as a failure being retried")
+	}
 	if strings.Contains(body, "elapsed 0s") || !strings.Contains(body, "elapsed ") {
 		t.Errorf("the elapsed time must count from the first record: %s", body[strings.Index(body, "elapsed"):][:40])
 	}
@@ -859,5 +862,33 @@ func TestADeliveredRequestIsListedOnlyInTheLastColumn(t *testing.T) {
 	}
 	if got := strings.Count(body, `data-key="EXAMPLE-22"`); got != 1 {
 		t.Errorf("a delivered request appears %d times on the board", got)
+	}
+}
+
+func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	writeJob(t, root, "30", chain.State{Step: "elicit", Recovering: true, Pending: &chain.Assignment{Role: "elicit"},
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
+		History: []chain.Result{
+			{Role: "elicit", Speaker: "elicit-process", Error: "fork/exec /usr/bin/elicit: no such file or directory\nmore detail", StartedAt: started, FinishedAt: started},
+			{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", StartedAt: started, FinishedAt: started},
+		}})
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, "retrying after a failure; assigned to elicit, no process output yet", "last failure: fork/exec /usr/bin/elicit: no such file or directory")
+	if strings.Contains(body, "more detail") || strings.Contains(body, "recovering after a restart") {
+		t.Error("the card shows more than the failure's first line, or the old wording")
+	}
+	if !strings.Contains(body, `<article class="card running" data-key="EXAMPLE-30">`) {
+		t.Error("a step retrying by itself is not a running card")
+	}
+	_, japanese := get(t, ts, "/jobs/30?lang=ja")
+	_ = japanese
+	if got := localize("ja", "retrying after a failure; assigned to elicit, no process output yet"); got != "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定" {
+		t.Errorf("localized status: %q", got)
+	}
+	if got := localize("ja", "taking up an interrupted step; between steps"); got != "中断した工程の再開中。工程の切れ目" {
+		t.Errorf("localized interrupted status: %q", got)
 	}
 }

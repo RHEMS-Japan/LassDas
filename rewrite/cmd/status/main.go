@@ -125,7 +125,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		},
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
-				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention,
+				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
 				Elapsed: j.Elapsed, Updated: j.Updated, Requester: j.Requester}
 		},
 	}).Parse(pageTemplates))
@@ -214,6 +214,7 @@ type job struct {
 	Trail      []stageMark
 	Current    string
 	Stage      string
+	Failure    string
 	StageIndex int
 	StageCount int
 	Model      string
@@ -292,6 +293,15 @@ func columns(stages []string, jobs []*job) []column {
 		}
 	}
 	return append(result, done)
+}
+
+func firstLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func isStage(stages []chain.Stage, name string) bool {
@@ -651,8 +661,24 @@ func (j *job) derive(now time.Time) {
 		default:
 			j.Status = "between steps"
 		}
+		// The runtime marks a step it takes up again: after a launch that
+		// failed, or after its own process was interrupted with the action
+		// pending. The card says which, and names the failure it retries.
 		if state.Recovering {
-			j.Status = "recovering after a restart; " + j.Status
+			prefix := "retrying after a failure; "
+			if n := len(state.History); n > 0 && strings.HasPrefix(state.History[n-1].Error, "The process stopped while this action was pending") {
+				prefix = "taking up an interrupted step; "
+			} else {
+				for i := len(state.History) - 1; i >= 0; i-- {
+					if state.History[i].Speaker != "runtime" {
+						if state.History[i].Error != "" {
+							j.Failure = firstLine(state.History[i].Error)
+						}
+						break
+					}
+				}
+			}
+			j.Status = prefix + j.Status
 		}
 		// The position is the stage running now when one is, else the last
 		// stage the record reached: the record's step moves only after a
@@ -1319,6 +1345,7 @@ type cardData struct {
 	StageCount int
 	Model      string
 	Attention  string
+	Failure    string
 	Elapsed    string
 	Updated    time.Time
 	Requester  string
@@ -1359,7 +1386,7 @@ var japanese = map[string]string{
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "none": "なし",
-	"elapsed": "経過", "last change": "最終更新", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
+	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
 	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "started": "開始", "recovering": "再起動後の復帰中",
@@ -1421,8 +1448,10 @@ func localize(lang, status string) string {
 		return status
 	}
 	prefix := ""
-	if rest, found := strings.CutPrefix(status, "recovering after a restart; "); found {
-		prefix, status = "再起動後の復帰中。", rest
+	if rest, found := strings.CutPrefix(status, "retrying after a failure; "); found {
+		prefix, status = "失敗後の再試行中。", rest
+	} else if rest, found := strings.CutPrefix(status, "taking up an interrupted step; "); found {
+		prefix, status = "中断した工程の再開中。", rest
 	}
 	switch {
 	case strings.HasPrefix(status, "running "):
