@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -71,19 +72,17 @@ func (b Backlog) SetStatus(ctx context.Context, issue string, statusID int64) er
 	}
 	form := url.Values{}
 	form.Set("statusId", strconv.FormatInt(statusID, 10))
-	data, err := b.patchIssue(ctx, issue, form)
-	if err != nil {
-		return err
-	}
-	var updated struct {
-		Status struct {
-			ID int64 `json:"id"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(data, &updated); err != nil || updated.Status.ID != statusID {
-		return errors.New("tracker did not confirm the status change")
-	}
-	return nil
+	return b.patchIssue(ctx, issue, form, func(data []byte) error {
+		var updated struct {
+			Status struct {
+				ID int64 `json:"id"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(data, &updated); err != nil || updated.Status.ID != statusID {
+			return errors.New("tracker did not confirm the status change")
+		}
+		return nil
+	})
 }
 
 // SetCategories replaces the issue's categories with the given ids. The
@@ -99,28 +98,26 @@ func (b Backlog) SetCategories(ctx context.Context, issue string, ids []int64) e
 	if len(ids) == 0 {
 		form.Set("categoryId[]", "")
 	}
-	data, err := b.patchIssue(ctx, issue, form)
-	if err != nil {
-		return err
-	}
-	var updated struct {
-		Category []struct {
-			ID int64 `json:"id"`
-		} `json:"category"`
-	}
-	if err := json.Unmarshal(data, &updated); err != nil {
-		return errors.New("tracker did not confirm the category change")
-	}
-	for _, id := range ids {
-		found := false
-		for _, c := range updated.Category {
-			found = found || c.ID == id
+	return b.patchIssue(ctx, issue, form, func(data []byte) error {
+		var updated struct {
+			Category []struct {
+				ID int64 `json:"id"`
+			} `json:"category"`
 		}
-		if !found {
+		if err := json.Unmarshal(data, &updated); err != nil {
 			return errors.New("tracker did not confirm the category change")
 		}
-	}
-	return nil
+		for _, id := range ids {
+			found := false
+			for _, c := range updated.Category {
+				found = found || c.ID == id
+			}
+			if !found {
+				return errors.New("tracker did not confirm the category change")
+			}
+		}
+		return nil
+	})
 }
 
 // Myself returns the id of the account the credential belongs to, so the
@@ -148,19 +145,17 @@ func (b Backlog) SetAssignee(ctx context.Context, issue string, userID int64) er
 	}
 	form := url.Values{}
 	form.Set("assigneeId", strconv.FormatInt(userID, 10))
-	data, err := b.patchIssue(ctx, issue, form)
-	if err != nil {
-		return err
-	}
-	var updated struct {
-		Assignee *struct {
-			ID int64 `json:"id"`
-		} `json:"assignee"`
-	}
-	if err := json.Unmarshal(data, &updated); err != nil || updated.Assignee == nil || updated.Assignee.ID != userID {
-		return errors.New("tracker did not confirm the assignee change")
-	}
-	return nil
+	return b.patchIssue(ctx, issue, form, func(data []byte) error {
+		var updated struct {
+			Assignee *struct {
+				ID int64 `json:"id"`
+			} `json:"assignee"`
+		}
+		if err := json.Unmarshal(data, &updated); err != nil || updated.Assignee == nil || updated.Assignee.ID != userID {
+			return errors.New("tracker did not confirm the assignee change")
+		}
+		return nil
+	})
 }
 
 // SetActualHours records how long the work took on the issue.
@@ -170,10 +165,16 @@ func (b Backlog) SetActualHours(ctx context.Context, issue string, hours float64
 	}
 	form := url.Values{}
 	form.Set("actualHours", strconv.FormatFloat(hours, 'f', 2, 64))
-	if _, err := b.patchIssue(ctx, issue, form); err != nil {
-		return err
-	}
-	return nil
+	sent, _ := strconv.ParseFloat(form.Get("actualHours"), 64)
+	return b.patchIssue(ctx, issue, form, func(data []byte) error {
+		var updated struct {
+			ActualHours *float64 `json:"actualHours"`
+		}
+		if err := json.Unmarshal(data, &updated); err != nil || updated.ActualHours == nil || math.Abs(*updated.ActualHours-sent) > 1e-9 {
+			return errors.New("tracker did not confirm the hours")
+		}
+		return nil
+	})
 }
 
 // Comments reads all pages after the supplied API comment id in ascending order.
@@ -299,16 +300,29 @@ func (e *trackerError) Error() string {
 	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
 }
 
-// patchIssue changes fields of one issue. Asked to set a field to what it
-// already holds, the tracker refuses the whole request as though nothing in
-// it could be changed ("No comment content."); the issue is then as asked,
-// so that refusal is read as done and the issue read back for the caller to
-// confirm.
-func (b Backlog) patchIssue(ctx context.Context, issue string, form url.Values) ([]byte, error) {
-	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+// patchIssue changes fields of one issue and has confirm read the answer.
+// Asked to set a field to what the issue already holds, the tracker refuses
+// the whole request as though nothing in it could be changed ("No comment
+// content."); the issue is then as asked, so that one refusal is read as
+// done and the issue read back for confirm to check. Any other refusal, a
+// read-back that fails, or one that does not confirm, fails with the
+// tracker's own words kept.
+func (b Backlog) patchIssue(ctx context.Context, issue string, form url.Values, confirm func([]byte) error) error {
+	path := "/issues/" + url.PathEscape(issue)
+	data, err := b.call(ctx, http.MethodPatch, path, nil, form, http.StatusOK)
 	var refusal *trackerError
-	if errors.As(err, &refusal) && refusal.Status == http.StatusBadRequest && strings.Contains(refusal.Body, "No comment content.") {
-		return b.call(ctx, http.MethodGet, "/issues/"+url.PathEscape(issue), nil, nil, http.StatusOK)
+	if !errors.As(err, &refusal) || refusal.Status != http.StatusBadRequest || !strings.Contains(refusal.Body, "No comment content.") {
+		if err != nil {
+			return err
+		}
+		return confirm(data)
 	}
-	return data, err
+	data, err = b.call(ctx, http.MethodGet, path, nil, nil, http.StatusOK)
+	if err != nil {
+		return fmt.Errorf("%w; then the issue could not be read back: %v", refusal, err)
+	}
+	if err := confirm(data); err != nil {
+		return fmt.Errorf("%v after the tracker refused the change: %w", err, refusal)
+	}
+	return nil
 }

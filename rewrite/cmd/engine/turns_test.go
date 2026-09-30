@@ -1,61 +1,87 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func TestTheStartIsWorthACommentOnlyAfterAWait(t *testing.T) {
+func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 	cfg := watchConfiguration(t)
+	cfg.Intake.MaxRunning = 1
 	cfg.Intake.Announce = true
+	cfg.Intake.StopReportRole = ""
+	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `printf '%s' "$$" > child-pid; exec sleep 60`}
+	root := t.TempDir()
+	var stopped atomic.Int64
 	var mu sync.Mutex
 	var comments []string
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host != "watch-tracker.example" {
-			return nil, http.ErrNotSupported
+			return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "implement"}}}), nil
 		}
-		mu.Lock()
-		defer mu.Unlock()
+		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/issues/"), "/comments")
 		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
-			return selectionReply(r, 200, []any{}), nil
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
 			if err := r.ParseForm(); err != nil {
 				return nil, err
 			}
-			comments = append(comments, r.PostForm.Get("content"))
-			return selectionReply(r, 201, map[string]any{"id": 700 + len(comments), "content": r.PostForm.Get("content")}), nil
+			mu.Lock()
+			comments = append(comments, key+": "+r.PostForm.Get("content"))
+			n := len(comments)
+			mu.Unlock()
+			return selectionReply(r, 201, map[string]any{"id": 700 + n, "content": r.PostForm.Get("content")}), nil
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			if id := stopped.Load(); id > 0 && key == fmt.Sprintf("EXAMPLE-%d", id) {
+				return selectionReply(r, 200, []json.RawMessage{stopComment(id, 55, "停止")}), nil
+			}
+			return selectionReply(r, 200, []any{}), nil
+		case strings.Contains(r.URL.Path, "/comments/"):
+			return selectionReply(r, 200, map[string]any{"id": 701, "content": "x"}), nil
 		}
-		return catalogReply(r, 503, "not under test"), nil
+		return selectionReply(r, 200, []any{watchedIssue(51, "one", "2026-01-03T00:00:00Z"), watchedIssue(52, "two", "2026-01-03T00:00:00Z")}), nil
 	})
-	var log bytes.Buffer
-	observe := func(message string) { log.WriteString(message + "\n") }
-	// Told the work starts at once, the requester hears no second comment.
-	atOnce := t.TempDir()
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
-	acceptTurn(context.Background(), cfg, issue, atOnce, 0, observe)
-	acceptTurn(context.Background(), cfg, issue, atOnce, 3, observe)
-	if startDeservesNotice(cfg, issue, atOnce) {
-		t.Fatal("a request accepted with nothing ahead of it was to hear that it started")
+	finish := startStopQueue(t, cfg, root, 30*time.Millisecond, io.Discard)
+	started := func(id int) bool {
+		_, err := os.Stat(filepath.Join(root, "jobs", fmt.Sprint(id), "workspace", "child-pid"))
+		return err == nil
 	}
-	// Told to wait, the requester hears when the work starts.
-	waited := t.TempDir()
-	acceptTurn(context.Background(), cfg, issue, waited, 2, observe)
-	acceptTurn(context.Background(), cfg, issue, waited, 0, observe)
-	if !startDeservesNotice(cfg, issue, waited) {
-		t.Fatal("a request accepted behind others was not to hear that it started")
-	}
-	// An acceptance that was never announced leaves the start to be said.
-	if !startDeservesNotice(cfg, issue, t.TempDir()) {
-		t.Fatal("a request whose acceptance was never announced was to stay silent")
-	}
+	working := 0
+	waitFor(t, func() bool {
+		for _, id := range []int{51, 52} {
+			if started(id) {
+				working = id
+				return true
+			}
+		}
+		return false
+	})
+	waiting := 51 + 52 - working
+	// The working request is stopped; the waiting one takes the slot.
+	stopped.Store(int64(working))
+	waitFor(t, func() bool { return started(waiting) })
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Contains(strings.Join(comments, "\n"), fmt.Sprintf("EXAMPLE-%d: %s", waiting, startedNoticeText))
+	})
+	time.Sleep(150 * time.Millisecond)
+	finish()
 	mu.Lock()
 	defer mu.Unlock()
-	if len(comments) != 2 || !strings.HasPrefix(comments[0], "受け付けました。すぐに") || !strings.HasPrefix(comments[1], "受け付けました。前に 2 件あり") || log.Len() != 0 {
-		t.Fatalf("acceptances announced: %q log: %s", comments, log.String())
+	joined := strings.Join(comments, "\n")
+	if strings.Contains(joined, fmt.Sprintf("EXAMPLE-%d: %s", working, startedNoticeText)) {
+		t.Fatalf("a request that started at once heard that it started: %q", comments)
+	}
+	if strings.Count(joined, fmt.Sprintf("EXAMPLE-%d: %s", waiting, startedNoticeText)) != 1 || strings.Count(joined, "受け付けました。") != 2 {
+		t.Fatalf("announcements: %q", comments)
 	}
 }

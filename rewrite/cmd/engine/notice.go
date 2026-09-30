@@ -135,20 +135,6 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	return true
 }
 
-// has says whether a notice of this kind was recorded, confirmed or not.
-func (n notices) has(kind string) bool {
-	log, err := n.load()
-	if err != nil {
-		return false
-	}
-	for _, record := range log.Notices {
-		if record.Kind == kind {
-			return true
-		}
-	}
-	return false
-}
-
 // post records the notice first and submits it after. An earlier notice whose
 // submission was never confirmed is settled before a new condition speaks.
 func (n notices) post(ctx context.Context, kind, text string) error {

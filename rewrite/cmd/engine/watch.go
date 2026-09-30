@@ -276,9 +276,13 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
 				if err := trimFinished(directory); err != nil {
-					if trimTrouble[entry.Name()] != err.Error() {
-						say("finished caches not removed, retried each tick: " + err.Error())
-						trimTrouble[entry.Name()] = err.Error()
+					reason := err.Error()
+					if reason == "" {
+						reason = "(no reason given)"
+					}
+					if trimTrouble[entry.Name()] != reason {
+						say("finished caches not removed, retried each tick: " + reason)
+						trimTrouble[entry.Name()] = reason
 					}
 				} else if trimTrouble[entry.Name()] != "" {
 					say("finished caches removed")
