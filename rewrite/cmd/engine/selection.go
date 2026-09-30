@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
 )
@@ -241,8 +242,8 @@ const selectionRequestLimit = 3000
 
 func selectionInput(state chain.State) chain.State {
 	input := chain.State{Request: state.Request}
-	if len(input.Request) > selectionRequestLimit {
-		input.Request = input.Request[:selectionRequestLimit] + "…"
+	if utf8.RuneCountInString(input.Request) > selectionRequestLimit {
+		input.Request = limitRunes(input.Request, selectionRequestLimit) + "…"
 	}
 	var failures []chain.Result
 	for _, result := range state.History {
