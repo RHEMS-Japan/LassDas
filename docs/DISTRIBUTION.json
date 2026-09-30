@@ -1,6 +1,6 @@
 {
   "engine_repository": "RHEMS-Japan/LassDas",
-  "image": "ghcr.io/rhems-japan/lassdas/runtime@sha256:f6fdd91da94ef1d33097358e90aead3b8c886bfc6daa1f7bb869cb0dcf59ee19",
-  "engine_sha": "851d91cc7a289402ef5c62df40f8344c30b85e61",
-  "build_record": "https://github.com/RHEMS-Japan/LassDas/actions/runs/36667437026"
+  "image": "ghcr.io/rhems-japan/lassdas/runtime@sha256:0cf7281b90674081b95447ad89925e1bcaa86bfc933f44a42e7065ccf0690ddd",
+  "engine_sha": "07743b96e7a13774bfa2724c9143afb365c34e03",
+  "build_record": "https://github.com/RHEMS-Japan/LassDas/actions/runs/36675747816"
 }
