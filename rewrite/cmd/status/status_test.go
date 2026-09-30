@@ -737,7 +737,10 @@ func TestAResumeAfterARestartIsRunningNotAttentionAndKeepsItsStart(t *testing.T)
 	}
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Running <b>1</b>`, `Needs attention <b>0</b>`, "recovering after a restart; assigned to implement")
+	expectAll(t, body, `Running <b>1</b>`, `Needs attention <b>0</b>`, "taking up an interrupted step; assigned to implement")
+	if strings.Contains(body, "last failure") {
+		t.Error("an interrupted step is shown as a failure being retried")
+	}
 	if strings.Contains(body, "elapsed 0s") || !strings.Contains(body, "elapsed ") {
 		t.Errorf("the elapsed time must count from the first record: %s", body[strings.Index(body, "elapsed"):][:40])
 	}
@@ -859,5 +862,63 @@ func TestADeliveredRequestIsListedOnlyInTheLastColumn(t *testing.T) {
 	}
 	if got := strings.Count(body, `data-key="EXAMPLE-22"`); got != 1 {
 		t.Errorf("a delivered request appears %d times on the board", got)
+	}
+}
+
+func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	writeJob(t, root, "30", chain.State{Step: "elicit", Recovering: true, Pending: &chain.Assignment{Role: "elicit"},
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
+		History: []chain.Result{
+			{Role: "elicit", Speaker: "elicit-process", Error: "fork/exec /usr/bin/elicit: no such file or directory\nmore detail", StartedAt: started, FinishedAt: started},
+			{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", StartedAt: started, FinishedAt: started},
+		}})
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, "retrying after a failure; assigned to elicit, no process output yet", "last failure: fork/exec /usr/bin/elicit: no such file or directory")
+	if strings.Contains(body, "more detail") || strings.Contains(body, "recovering after a restart") {
+		t.Error("the card shows more than the failure's first line, or the old wording")
+	}
+	if !strings.Contains(body, `<article class="card running" data-key="EXAMPLE-30">`) {
+		t.Error("a step retrying by itself is not a running card")
+	}
+	_, page := get(t, ts, "/jobs/30")
+	if strings.Count(page, "retrying after a failure") != 1 || !strings.Contains(page, "last failure: fork/exec /usr/bin/elicit: no such file or directory") || strings.Contains(page, `<span class="badge">recovering</span>`) {
+		t.Error("the request page does not say the same as the card, or still shows the generic recovering badge")
+	}
+	// In Japanese, chosen by the cookie the language page sets, the request
+	// page says the same and the old wording is gone.
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/30", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(japanese), "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定") || !strings.Contains(string(japanese), "直近の失敗: fork/exec /usr/bin/elicit") || strings.Contains(string(japanese), "再起動後の復帰中") {
+		t.Error("the Japanese request page does not say the same as the card, or still says 再起動後の復帰中")
+	}
+	// A role with two processes: the one that failed may be recorded before
+	// the one that returned, and it is still the failure named.
+	writeJob(t, root, "31", chain.State{Step: "verify", Recovering: true, Pending: &chain.Assignment{Role: "verify"},
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "implement"}, {Name: "verify"}}},
+		History: []chain.Result{
+			{Role: "implement", Speaker: "implement-process", Output: "done", StartedAt: started, FinishedAt: started},
+			{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "project-tests", Error: "exit status 1: TestX failed", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "project-build", Output: "ok", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", StartedAt: started, FinishedAt: started},
+		}})
+	_, again := get(t, ts, "/")
+	if !strings.Contains(again, "last failure: exit status 1: TestX failed") {
+		t.Error("the failed process of a two-process launch is not named when its sibling returned after it")
+	}
+	if got := localize("ja", "retrying after a failure; assigned to elicit, no process output yet"); got != "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定" {
+		t.Errorf("localized status: %q", got)
+	}
+	if got := localize("ja", "taking up an interrupted step; between steps"); got != "中断した工程の再開中。工程の切れ目" {
+		t.Errorf("localized interrupted status: %q", got)
 	}
 }

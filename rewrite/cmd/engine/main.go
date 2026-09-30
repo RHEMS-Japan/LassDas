@@ -166,6 +166,13 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 			entrance = decision()
 		}
 		router = chain.StageRouter{Entrance: entrance}
+	case "single":
+		// One role, run until it returns: the report about a stopped request
+		// runs this way, so no decision service reads a stopped record.
+		if len(cfg.Roles) != 1 {
+			return errors.New("router.mode single runs exactly one configured role")
+		}
+		router = chain.OneRoleRouter{Role: cfg.Roles[0].Name}
 	default:
 		return errors.New("choose router.mode jev, llm or stages")
 	}

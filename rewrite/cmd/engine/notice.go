@@ -331,26 +331,64 @@ func savedHistory(directory string) (chain.State, error) {
 }
 
 // stalledFor measures how long the request has gone without a completed step.
-// It looks only at the trailing run of errored entries, so any successful role
-// output inside the window means the work is still getting somewhere.
+// It walks the record launch by launch from the newest, and the trailing run
+// of failed launches is the stall, measured from the last launch that
+// completed. In an ordered run a launch is one role's process records and the
+// runtime's own note after them, and it completed only when none of them
+// failed; the note is what tells one launch of a role from the next. A run
+// without those notes has no such boundary, so there each process record is
+// read as a launch of its own. A runtime note without an error and without
+// processes, a step taken up again, is neither, and is read through.
 func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) {
-	last := len(state.History)
-	for last > 0 && state.History[last-1].Error != "" {
-		last--
+	history := state.History
+	delimited := state.Workflow != nil && len(state.Workflow.Stages) > 0
+	failure := ""
+	i := len(history)
+	for i > 0 {
+		end := i
+		launchFailed := false
+		for i > 0 && history[i-1].Speaker == "runtime" {
+			if history[i-1].Error != "" {
+				launchFailed = true
+				if failure == "" {
+					failure = history[i-1].Error
+				}
+			}
+			i--
+		}
+		processes := 0
+		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || (delimited && history[i-1].Role == role)); processes++ {
+			role = history[i-1].Role
+			if history[i-1].Error != "" {
+				launchFailed = true
+				if failure == "" {
+					failure = history[i-1].Error
+				}
+			}
+			i--
+		}
+		if processes > 0 && !launchFailed {
+			if failure == "" {
+				return 0, "", false
+			}
+			since := history[end-1].FinishedAt
+			if since.IsZero() {
+				return 0, "", false
+			}
+			return now.Sub(since), failure, true
+		}
 	}
-	if last == len(state.History) {
+	if failure == "" || len(history) == 0 {
 		return 0, "", false
 	}
-	var since time.Time
-	if last > 0 {
-		since = state.History[last-1].FinishedAt
-	} else if since = state.History[0].StartedAt; since.IsZero() {
-		since = state.History[0].FinishedAt
+	since := history[0].StartedAt
+	if since.IsZero() {
+		since = history[0].FinishedAt
 	}
 	if since.IsZero() {
 		return 0, "", false
 	}
-	return now.Sub(since), state.History[len(state.History)-1].Error, true
+	return now.Sub(since), failure, true
 }
 
 func stallWindow(cfg config) time.Duration {

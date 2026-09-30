@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
 )
@@ -391,5 +392,14 @@ func TestTheJudgeReadsOnlyRecentFailuresCutToTheirHead(t *testing.T) {
 		if len(entry.Error) > selectionErrorLimit+3 {
 			t.Fatalf("an error was not cut: %d", len(entry.Error))
 		}
+	}
+	// A report-only request carries the stopped request's whole record as its
+	// text; the judge reads its head, not the record.
+	long := selectionInput(chain.State{Request: strings.Repeat("依頼", 15000)})
+	if utf8.RuneCountInString(long.Request) != selectionRequestLimit+1 || !strings.HasSuffix(long.Request, "依頼…") || !utf8.ValidString(long.Request) {
+		t.Fatalf("the request was not cut for the judge at a character boundary: %d runes, valid=%t", utf8.RuneCountInString(long.Request), utf8.ValidString(long.Request))
+	}
+	if short := selectionInput(chain.State{Request: "brief"}); short.Request != "brief" {
+		t.Fatalf("a short request was altered: %q", short.Request)
 	}
 }

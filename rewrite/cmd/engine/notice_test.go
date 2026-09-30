@@ -408,6 +408,76 @@ func TestNoProgressNoticeWindowRepetitionAndOffSwitch(t *testing.T) {
 	if _, _, stalled := stalledFor(completed, now); stalled {
 		t.Fatal("a completed step inside the window was read as no progress")
 	}
+	// The runtime writes its own note after every launch, with no error of
+	// its own; the failures behind those notes still count, and a completed
+	// step behind one still ends the run.
+	ordered := &chain.Workflow{Stages: []chain.Stage{{Name: "implement", Kind: "model"}, {Name: "verify", Kind: "command", OnFailure: "implement"}}}
+	interleaved := chain.State{Workflow: ordered, History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Output: "a completed step", FinishedAt: now.Add(-10 * time.Minute)},
+		{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", FinishedAt: now.Add(-10 * time.Minute)},
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory", FinishedAt: now.Add(-2 * time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0: fork/exec verify: no such file or directory", FinishedAt: now.Add(-2 * time.Minute)},
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory (again)", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0: fork/exec verify: no such file or directory", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, failure, stalled = stalledFor(interleaved, now)
+	if !stalled || failure != "fork/exec verify: no such file or directory (again)" || elapsed < 9*time.Minute || elapsed > 11*time.Minute {
+		t.Fatalf("failures behind the runtime's own notes were not read as no progress: %v %q %t", elapsed, failure, stalled)
+	}
+	settled := chain.State{Workflow: ordered, History: []chain.Result{
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory", FinishedAt: now.Add(-3 * time.Hour)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0.", FinishedAt: now.Add(-3 * time.Hour)},
+		{Role: "verify", Speaker: "verify-process", Output: "ok", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process exited 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	if _, _, stalled := stalledFor(settled, now); stalled {
+		t.Fatal("a completed step followed by the runtime's note was read as no progress")
+	}
+	notes := chain.State{History: []chain.Result{{Role: "elicit", Speaker: "runtime", Output: "taken up again", FinishedAt: now.Add(-time.Hour)}}}
+	if _, _, stalled := stalledFor(notes, now); stalled {
+		t.Fatal("the runtime's notes alone were read as failures")
+	}
+	// A role with two processes completes a step only when both return; one
+	// succeeding at every launch does not move the last completed step.
+	// Without the ordered run's notes there is no boundary between launches
+	// of one role, so each process record is a launch of its own: a role that
+	// completed and then failed to start twice stalls only since it completed.
+	free := chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Output: "done", StartedAt: now.Add(-3*time.Hour - 10*time.Minute), FinishedAt: now.Add(-10 * time.Minute)},
+		{Role: "implement", Speaker: "implement-process", Error: "fork/exec implement: no such file", StartedAt: now.Add(-5 * time.Minute), FinishedAt: now.Add(-5 * time.Minute)},
+		{Role: "implement", Speaker: "implement-process", Error: "fork/exec implement: no such file", StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, _, stalled = stalledFor(free, now)
+	if !stalled || elapsed < 9*time.Minute || elapsed > 11*time.Minute {
+		t.Fatalf("without notes, launches of one role were fused: %v %t", elapsed, stalled)
+	}
+	twoProcesses := chain.State{Workflow: ordered, History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Output: "done", FinishedAt: now.Add(-30 * time.Minute)},
+		{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", FinishedAt: now.Add(-30 * time.Minute)},
+		{Role: "verify", Speaker: "project-build", Output: "ok", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "project-tests", Error: "exit status 1", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "project-build", Output: "ok", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "project-tests", Error: "exit status 1 (again)", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, failure, stalled = stalledFor(twoProcesses, now)
+	if !stalled || failure != "exit status 1 (again)" || elapsed < 29*time.Minute || elapsed > 31*time.Minute {
+		t.Fatalf("a launch with one process succeeding was read as a completed step: %v %q %t", elapsed, failure, stalled)
+	}
+	// A note without error between failed launches, such as a step taken up
+	// again after a restart, does not end the run of failures.
+	takenUp := chain.State{Workflow: ordered, History: []chain.Result{
+		{Role: "elicit", Speaker: "elicit-process", Error: "exit status 1", StartedAt: now.Add(-40 * time.Minute), FinishedAt: now.Add(-40 * time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", FinishedAt: now.Add(-40 * time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "taken up again", FinishedAt: now.Add(-5 * time.Minute)},
+		{Role: "elicit", Speaker: "elicit-process", Error: "exit status 1", FinishedAt: now.Add(-time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, _, stalled = stalledFor(takenUp, now)
+	if !stalled || elapsed < 39*time.Minute || elapsed > 41*time.Minute {
+		t.Fatalf("a note between failed launches ended the run: %v %t", elapsed, stalled)
+	}
 	posted := now.Add(-5 * time.Hour)
 	log := noticeLog{Notices: []noticeRecord{{Kind: stallNotice, Text: "…", WrittenAt: posted, PostedAt: &posted}}}
 	if noticeDue(log, stallNotice, now) {

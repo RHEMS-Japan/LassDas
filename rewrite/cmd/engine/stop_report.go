@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/tracker"
@@ -50,6 +51,96 @@ func stoppedReportDone(directory string) (bool, error) {
 // executable. The original run and saved stop are never cleared or marked done.
 // OS/tool permissions still belong to the configured reporting harness; prose
 // instructions do not make a privileged command a read-only sandbox.
+// reportRecords bounds how many records the stopped request's reporter reads,
+// and reportFieldRunes how much of each record's text: a report reads the
+// opening of what a role wrote and the end of what failed, as a role's own
+// prompt does, and the whole record stays on disk for anyone who needs it.
+const reportRecords, reportFieldRunes = 60, 4000
+
+// stopObservations renders the stopped request's record for its reporter. A
+// launch that failed the same way over and over becomes one entry that says
+// how often it repeated, but every runtime note that says something new, such
+// as a receipt read back from a process that still had an effect, is kept:
+// the report exists to name effects that may already exist.
+func stopObservations(state chain.State) ([]byte, error) {
+	history, counts := reportHistory(state.History)
+	for i := range history {
+		record := &history[i]
+		record.Output = headRunes(record.Output, reportFieldRunes)
+		record.Instruction = headRunes(record.Instruction, reportFieldRunes/4)
+		record.Diagnostics = tailRunes(record.Diagnostics, reportFieldRunes)
+		record.Error = tailRunes(record.Error, reportFieldRunes)
+		if count := counts[i]; count > 0 {
+			record.Error = fmt.Sprintf("(this failure repeated %d times in a row; this is the latest)\n%s", count+1, record.Error)
+		}
+	}
+	state.History = history
+	return json.MarshalIndent(state, "", "  ")
+}
+
+func headRunes(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return limitRunes(text, limit) + fmt.Sprintf("\n[%d more characters are in the record, not here]", utf8.RuneCountInString(text)-limit)
+}
+
+func tailRunes(text string, limit int) string {
+	count := utf8.RuneCountInString(text)
+	if count <= limit {
+		return text
+	}
+	cut := 0
+	for skipped := 0; skipped < count-limit; skipped++ {
+		_, size := utf8.DecodeRuneInString(text[cut:])
+		cut += size
+	}
+	return fmt.Sprintf("[%d earlier characters are in the record, not here]\n%s", count-limit, text[cut:])
+}
+
+// reportHistory collapses the record and says, per kept index, how many
+// earlier repetitions each collapsed failure stands for.
+func reportHistory(history []chain.Result) ([]chain.Result, map[int]int) {
+	var kept []chain.Result
+	counts := map[int]int{}
+	run, lastNote := -1, ""
+	for _, result := range history {
+		failure := result.Error != "" && result.Speaker != "runtime"
+		if failure && run >= 0 && kept[run].Role == result.Role && kept[run].Speaker == result.Speaker && kept[run].Error == result.Error {
+			kept[run] = result
+			counts[run]++
+			continue
+		}
+		if result.Speaker == "runtime" && run >= 0 && result.Role == kept[run].Role && result.Error == "" {
+			if note := result.Output; note == lastNote {
+				continue
+			} else {
+				lastNote = note
+			}
+			kept = append(kept, result)
+			continue
+		}
+		kept = append(kept, result)
+		run, lastNote = -1, ""
+		if failure {
+			run = len(kept) - 1
+		}
+	}
+	if len(kept) > reportRecords {
+		omitted := len(kept) - reportRecords
+		kept = append([]chain.Result{{Role: "runtime", Speaker: "runtime",
+			Output: fmt.Sprintf("%d earlier records are in the request's history and not repeated here.", omitted)}}, kept[omitted:]...)
+		shifted := map[int]int{}
+		for index, count := range counts {
+			if index >= omitted {
+				shifted[index-omitted+1] = count
+			}
+		}
+		counts = shifted
+	}
+	return kept, counts
+}
+
 func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, slots chan struct{}, log io.Writer) error {
 	if cfg.Intake == nil || cfg.Intake.StopReportRole == "" {
 		return nil
@@ -97,7 +188,7 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if closeErr != nil {
 		return closeErr
 	}
-	observations, err := json.MarshalIndent(state, "", "  ")
+	observations, err := stopObservations(state)
 	if err != nil {
 		return err
 	}
@@ -118,14 +209,12 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	// This is a separate report-only task after the user's stop, not another
 	// step in the stopped delivery workflow. Keep only the reporting role and
 	// its existing recovery loop; never restart the original connections. An
-	// ordered run has no connections to keep either, so the report falls back
-	// to the same decision service that run would have asked at its entrance.
+	// ordered run has no connections to keep either; its report runs the one
+	// role until it returns, and no decision service reads the record, whose
+	// size is whatever the stopped work left behind.
 	bound.Workflow = nil
 	if bound.Router.Mode == "stages" {
-		bound.Router.Mode = "llm"
-		if bound.Router.Decision.Model != "" {
-			bound.Router.Mode = "jev"
-		}
+		bound.Router.Mode = "single"
 	}
 	bound.Instructions = stopReportingInstructions
 	encoded, err := json.Marshal(bound)

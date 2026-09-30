@@ -38,6 +38,8 @@ h3{font-size:.95em;margin:.8em 0 .3em}
 .card .line{font-size:.85em;color:var(--muted);margin:.2em 0}
 .bar{height:4px;background:#e5e7eb;border-radius:2px;margin:.5em 0 .4em}.bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .attn{color:var(--attn);font-size:.85em;white-space:pre-wrap;margin:.3em 0}
+.fail{color:var(--wait);font-size:.85em;white-space:pre-wrap;word-break:break-word;margin:.3em 0}
+.card .badge{white-space:normal;line-height:1.5;padding:.1em .7em}
 .meta{color:var(--muted);font-size:.85em}
 .err{color:var(--attn)}
 pre{background:#f8f9fb;border:1px solid var(--line);border-radius:6px;padding:.7em .8em;margin:.4em 0;font-size:.85em;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:30em;overflow:auto}
@@ -71,6 +73,7 @@ details{margin:.3em 0}details summary{cursor:pointer;color:var(--accent);font-si
 {{if .StageCount}}<div class="bar"><i style="width:{{pct .StageIndex .StageCount}}%"></i></div><div class="line">{{st .Lang .Position}}</div>{{else}}{{if .Position}}<div class="line">{{st .Lang .Position}}</div>{{end}}{{end}}
 {{if .Model}}<div class="line">{{.Model}}</div>{{end}}
 {{if .Attention}}<div class="attn">{{t .Lang .Attention}}</div>{{end}}
+{{if .Failure}}<div class="fail">{{t .Lang "last failure"}}: {{.Failure}}</div>{{end}}
 <div class="line">{{t .Lang "elapsed"}} {{.Elapsed}} · {{t .Lang "last change"}} {{ago .Lang .Updated}}{{if .Requester}} · {{.Requester}}{{end}}</div></article>{{end}}
 
 {{define "overview"}}{{template "head" (head .Lang "ticket engine status" 30)}}{{template "top" .}}<main>
@@ -97,7 +100,8 @@ details{margin:.3em 0}details summary{cursor:pointer;color:var(--accent);font-si
 
 {{define "job"}}{{with .Job}}{{template "head" (head $.Lang (printf "%s %s" .Key (t $.Lang "status")) .Refresh)}}{{template "top" $}}<main>
 <h1><a class="key" href="/jobs/{{.ID}}">{{if .Key}}{{.Key}}{{else}}job {{.ID}}{{end}}</a> {{.Title}}</h1>
-<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if .State.Recovering}}<span class="badge">{{t $.Lang "recovering"}}</span>{{end}}{{if and .State.Waiting (ne .Lane "awaiting")}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
+<div class="strip"><span class="badge {{.Lane}}">{{st $.Lang .Status}}</span>{{if .State}}{{if and .State.Waiting (ne .Lane "awaiting")}}<span class="badge awaiting">{{t $.Lang "waiting for the requester"}}</span>{{end}}{{end}}</div>
+{{if .Failure}}<p class="fail">{{t $.Lang "last failure"}}: {{.Failure}}</p>{{end}}
 {{range .Notes}}<p class="err">{{.}}</p>{{end}}
 <div class="panel"><dl class="grid">
 <dt>{{t $.Lang "Position"}}</dt><dd>{{if .Position}}{{st $.Lang .Position}}{{else}}—{{end}}</dd>
