@@ -240,11 +240,22 @@ func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
 		`{"notices":[{"kind":"budget-paused","text":"BUDGET-PAUSED-TEXT","written_at":"2026-01-02T00:20:00Z"}]}`)
 	add("12", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
 		`{"notices":[{"kind":"resume","text":"RESUMED","written_at":"2026-01-02T00:20:00Z"}]}`)
+	// A pause the runtime has since lifted is over; a pause after that holds again; a no-progress line outlives the budget's return.
+	add("13", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
+		`{"notices":[{"kind":"budget-paused","text":"OLD-PAUSE-TEXT","written_at":"2026-01-02T00:20:00Z"},{"kind":"budget-restored","text":"BUDGET-BACK-TEXT","written_at":"2026-01-02T00:25:00Z"}]}`)
+	add("14", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
+		`{"notices":[{"kind":"budget-paused","text":"FIRST-PAUSE","written_at":"2026-01-02T00:20:00Z"},{"kind":"budget-restored","text":"BACK","written_at":"2026-01-02T00:25:00Z"},{"kind":"budget-paused","text":"SECOND-PAUSE-TEXT","written_at":"2026-01-02T00:30:00Z"}]}`)
+	add("15", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
+		`{"notices":[{"kind":"stall","text":"STALL-TEXT","written_at":"2026-01-02T00:20:00Z"},{"kind":"budget-restored","text":"BACK","written_at":"2026-01-02T00:25:00Z"}]}`)
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Running <b>2</b>`, `Awaiting answer <b>1</b>`, `Needs attention <b>2</b>`, `Delivered <b>1</b>`,
-		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT")
-	for _, want := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"}} {
+	expectAll(t, body, `Running <b>3</b>`, `Awaiting answer <b>1</b>`, `Needs attention <b>4</b>`, `Delivered <b>1</b>`,
+		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT", "SECOND-PAUSE-TEXT", "STALL-TEXT")
+	if strings.Contains(body, "OLD-PAUSE-TEXT") {
+		t.Error("a pause the runtime has lifted is still shown on the card")
+	}
+	for _, want := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"},
+		{"running", "EXAMPLE-13"}, {"attention", "EXAMPLE-14"}, {"attention", "EXAMPLE-15"}} {
 		if !strings.Contains(body, `<article class="card `+want.lane+`" data-key="`+want.key+`">`) {
 			t.Errorf("%s is not a %s card", want.key, want.lane)
 		}

@@ -713,14 +713,28 @@ func (j *job) derive(now time.Time) {
 				j.Lane, j.Attention = "attention", record.Error
 			}
 		}
+		// A budget pause holds the request until the runtime says the budget
+		// is back, so the later of the two lines is the one that stands; a
+		// no-progress notice stands until a step completes after it.
+		var pause, stall string
 		for _, notice := range j.Notices {
-			kind := stringOf(notice["kind"])
-			if kind != "budget-paused" && kind != "stall" {
+			written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"]))
+			if err != nil || !written.After(last) {
 				continue
 			}
-			if written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"])); err == nil && written.After(last) {
-				j.Lane, j.Attention = "attention", stringOf(notice["text"])
+			switch stringOf(notice["kind"]) {
+			case "budget-paused":
+				pause = stringOf(notice["text"])
+			case "budget-restored":
+				pause = ""
+			case "stall":
+				stall = stringOf(notice["text"])
 			}
+		}
+		if pause != "" {
+			j.Lane, j.Attention = "attention", pause
+		} else if stall != "" {
+			j.Lane, j.Attention = "attention", stall
 		}
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
