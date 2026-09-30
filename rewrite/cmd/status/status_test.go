@@ -1035,6 +1035,8 @@ func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testin
 	ts := serve(t, root, "", "", "")
 	_, page := get(t, ts, "/jobs/60")
 	expectAll(t, page,
+		"written by: the requester", "what the requester wrote", "written by: the operator&#39;s settings", "the role&#39;s purpose and the operator&#39;s instructions",
+		"the runtime (how it ended), then the worker&#39;s stderr", "at most the latest sixty",
 		"What happened, launch by launch", "(5 launches, 4 entries)",
 		"launch 1–3", "could not start", "the same failure, repeated 3 times", "no output: the process could not start",
 		"why it ended so", "fork/exec /usr/bin/elicit: no such file or directory",
@@ -1046,6 +1048,20 @@ func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testin
 	if strings.Count(page, `<div class="launch `) != 4 {
 		t.Errorf("expected four launch entries, got %d", strings.Count(page, `<div class="launch `))
 	}
+	if strings.Contains(page, "written by: the command requester") {
+		t.Error("the requester's answer is labelled as a command")
+	}
+	// A process that returned with nothing on stdout says "no output" and
+	// nothing more; text a role wrote is escaped.
+	writeJob(t, root, "61", chain.State{Step: "verify", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "verify"}}}, History: []chain.Result{
+		{Role: "verify", Speaker: "verify-process", Output: "", StartedAt: started, FinishedAt: started.Add(time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess verify-process exited 0.", StartedAt: started.Add(time.Minute), FinishedAt: started.Add(time.Minute)},
+		{Role: "implement", Speaker: "implement-process", Model: "m", Output: "<script>alert(1)</script>", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(3 * time.Minute)},
+	}})
+	_, quiet := get(t, ts, "/jobs/61")
+	if !strings.Contains(quiet, `<p class="empty">no output</p>`) || strings.Contains(quiet, "could not start") || strings.Contains(quiet, "<script>alert(1)</script>") || !strings.Contains(quiet, "&lt;script&gt;") {
+		t.Error("an empty output is called a start failure, or a role's text reached the page unescaped")
+	}
 	request, _ := http.NewRequest("GET", ts.URL+"/jobs/60", nil)
 	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
 	response, err := http.DefaultClient.Do(request)
@@ -1054,7 +1070,7 @@ func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testin
 	}
 	japanese, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	expectAll(t, string(japanese), "起きたこと (起動ごと)", "起動できず", "同じ失敗の繰り返し 3 回", "出力なし: 起動できず", "書いた者: 本体", "書いた者: 担当 maker/model-a", "依頼者の返答", "担当 (LLM) に渡したもの", "あなたが Backlog に書いた本文")
+	expectAll(t, string(japanese), "起きたこと (起動ごと)", "5 回の起動", "起動できず", "同じ失敗の繰り返し 3 回", "出力なし: 起動できず", "書いた者: 本体", "書いた者: 担当 maker/model-a", "依頼者の返答", "依頼者が書いたこと", "書いた者: 依頼者", "担当 (LLM) に渡したもの", "あなたが Backlog に書いた本文", "役の説明と運用者の指示", "本体 (終了状態)、続く行は担当の stderr")
 	if strings.Contains(string(japanese), ">指示<") {
 		t.Error("the page still calls what the runtime hands over an instruction")
 	}
