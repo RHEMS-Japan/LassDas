@@ -548,7 +548,7 @@ func TestAnUnfinishedReportContinuesUnderTheRequestTextThisRuntimeRenders(t *tes
 	other := chain.State{Request: "some other request entirely"}
 	raw, _ = json.Marshal(other)
 	os.WriteFile(filepath.Join(directory, "history.json"), raw, 0600)
-	if err := adoptReportRequest(directory, current); err == nil || !strings.Contains(err.Error(), "another request's text") {
+	if err := adoptReportRequest(directory, current); err == nil || !strings.Contains(err.Error(), "another request's text, or instructions that changed with the runtime") {
 		t.Fatalf("a directory with another request's text was adopted: %v", err)
 	}
 	if err := adoptReportRequest(filepath.Join(t.TempDir(), "missing"), current); err != nil {

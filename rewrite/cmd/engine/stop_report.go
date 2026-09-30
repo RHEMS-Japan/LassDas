@@ -257,9 +257,11 @@ func adoptReportRequest(directory, request string) error {
 		return nil
 	}
 	// Only a report's own directory is adopted: its text always opens with
-	// the reporting instructions. Anything else is not this runtime's to take.
+	// the reporting instructions. Anything else is not this runtime's to
+	// take; either the directory holds some other text, or the instructions
+	// themselves changed with the runtime, which the same words cover.
 	if !strings.HasPrefix(saved.Request, stopReportingInstructions) {
-		return errors.New("the report directory holds another request's text; not adopted")
+		return errors.New("the report directory's text does not open with this runtime's reporting instructions (another request's text, or instructions that changed with the runtime); not adopted")
 	}
 	// The rewrite happens under the directory's own lock, taken with the
 	// saved text, so a runtime still writing there is not written over. While
