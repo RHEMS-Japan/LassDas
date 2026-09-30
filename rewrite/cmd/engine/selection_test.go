@@ -275,6 +275,39 @@ func TestSelectionFallbackRefreshesCatalogKeepsIndependenceAndShowsPrimaryReason
 	}
 }
 
+func TestWithoutADecisionServiceTheChatAlternativeChoosesAlone(t *testing.T) {
+	selector := testSelector(t)
+	selector.Judge = chain.Jev{}
+	selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+	var observed []string
+	selector.observe = func(message string) { observed = append(observed, message) }
+	catalogs, chats := 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			catalogs++
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("maker-two/current"), selectionModel("maker-one/also-current")}}), nil
+		case "chat-selection.example":
+			chats++
+			return selectionReply(request, 200, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": `{"role":"maker-two/current"}`}}}}}}}), nil
+		}
+		return nil, fmt.Errorf("a decision service was asked although none is configured: %s", request.URL.Host)
+	})
+	model, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
+	if err != nil || model != "maker-two/current" || catalogs != 1 || chats != 1 || len(observed) != 0 {
+		t.Fatalf("model=%q error=%v catalogs=%d chats=%d observed=%v", model, err, catalogs, chats, observed)
+	}
+	// A selection with nothing to choose with is refused before any request.
+	none := selectionConfig{Authors: []string{"maker-one"}}
+	if err := none.validate(); err == nil || !strings.Contains(err.Error(), "judge") {
+		t.Fatalf("a selection with no judge, no chat alternative and no fixed model was accepted: %v", err)
+	}
+	only := selectionConfig{Authors: []string{"maker-one"}, Fallback: selector.Fallback}
+	if err := only.validate(); err != nil {
+		t.Fatalf("a selection choosing with the chat alternative alone was refused: %v", err)
+	}
+}
+
 func TestSelectionFallbackRetainsBothReasonsAndDoesNotRetryOnStop(t *testing.T) {
 	for _, stopped := range []bool{false, true} {
 		t.Run(fmt.Sprint(stopped), func(t *testing.T) {

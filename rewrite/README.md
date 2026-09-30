@@ -772,6 +772,9 @@ its only choices are model endpoints. If both services fail, both reasons return
 to the chain without starting a stale worker. Cancellation does not start the
 alternative. A long-lasting outage of every configured selector still needs
 recovery; this is not a guarantee that every external failure can be resolved.
+With `judge` omitted, this chat service makes every choice by itself: nothing
+is tried first and nothing is logged as a failure. A `model_selection` with no
+judge, no fallback and no fixed model is refused before any request is accepted.
 
 Processes without `model_env` use their explicitly configured command as before
 (including non-LLM tools); the presence of `model_selection` alone does not
@@ -850,10 +853,14 @@ the gateway account instead of the catalog account. Point each process's
 `examples/operator-gateway.json` differs from `examples/operator.json` in
 exactly those places and in nothing else.
 
-The decision service stays on OpenRouter. The gateway measured here answers
-chat completions but not the decisions API (HTTP 405), so
-`model_selection.judge` and `router.decision` keep their OpenRouter URL and
-`MODEL_API_KEY`, and their spend stays on that account.
+The gateway measured here answers chat completions but not the decisions API
+(HTTP 405). An operator who keeps `model_selection.judge` and `router.decision`
+on OpenRouter keeps that spend, and the decision service's judgement, on that
+account. An operator who wants every model call on the gateway omits both and
+names the gateway's chat endpoint in `model_selection.fallback` and
+`router.llm`: every choice, the entrance question included, is then made by
+that chat model through the gateway, and `intake.min_model_credit` has no
+OpenRouter key to read, so the budget is the gateway's own.
 
 Selection also keeps reading the public OpenRouter catalog. The gateway list
 publishes ids, dates and an owner, without prices or `supported_parameters`,
