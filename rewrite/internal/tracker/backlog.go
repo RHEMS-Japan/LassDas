@@ -65,6 +65,119 @@ func (b Backlog) AddComment(ctx context.Context, issue, content string) (json.Ra
 
 // Comments reads all pages after the supplied API comment id in ascending order.
 // API metadata remains intact; the content is not decoded as a model verdict.
+// SetStatus moves the issue to the given status. Which status means what is
+// the operator's, configured by id; nothing here reads or names a status.
+func (b Backlog) SetStatus(ctx context.Context, issue string, statusID int64) error {
+	if statusID <= 0 {
+		return errors.New("provide a positive status id")
+	}
+	form := url.Values{}
+	form.Set("statusId", strconv.FormatInt(statusID, 10))
+	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	var updated struct {
+		Status struct {
+			ID int64 `json:"id"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(data, &updated); err != nil || updated.Status.ID != statusID {
+		return errors.New("tracker did not confirm the status change")
+	}
+	return nil
+}
+
+// SetCategories replaces the issue's categories with the given ids. The
+// caller passes the whole list, so a category the requester set stays.
+func (b Backlog) SetCategories(ctx context.Context, issue string, ids []int64) error {
+	form := url.Values{}
+	for _, id := range ids {
+		if id <= 0 {
+			return errors.New("provide positive category ids")
+		}
+		form.Add("categoryId[]", strconv.FormatInt(id, 10))
+	}
+	if len(ids) == 0 {
+		form.Set("categoryId[]", "")
+	}
+	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	var updated struct {
+		Category []struct {
+			ID int64 `json:"id"`
+		} `json:"category"`
+	}
+	if err := json.Unmarshal(data, &updated); err != nil {
+		return errors.New("tracker did not confirm the category change")
+	}
+	for _, id := range ids {
+		found := false
+		for _, c := range updated.Category {
+			found = found || c.ID == id
+		}
+		if !found {
+			return errors.New("tracker did not confirm the category change")
+		}
+	}
+	return nil
+}
+
+// Myself returns the id of the account the credential belongs to, so the
+// runtime can hand an issue back to itself after the requester's turn.
+func (b Backlog) Myself(ctx context.Context) (int64, error) {
+	data, err := b.call(ctx, http.MethodGet, "/users/myself", nil, nil, http.StatusOK)
+	if err != nil {
+		return 0, err
+	}
+	var me struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &me); err != nil || me.ID <= 0 {
+		return 0, errors.New("tracker did not identify the credential's account")
+	}
+	return me.ID, nil
+}
+
+// SetAssignee hands the issue to one account: the requester while a question
+// waits for them or the result waits for their check, the runtime's own
+// account while it works.
+func (b Backlog) SetAssignee(ctx context.Context, issue string, userID int64) error {
+	if userID <= 0 {
+		return errors.New("provide a positive user id")
+	}
+	form := url.Values{}
+	form.Set("assigneeId", strconv.FormatInt(userID, 10))
+	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	var updated struct {
+		Assignee *struct {
+			ID int64 `json:"id"`
+		} `json:"assignee"`
+	}
+	if err := json.Unmarshal(data, &updated); err != nil || updated.Assignee == nil || updated.Assignee.ID != userID {
+		return errors.New("tracker did not confirm the assignee change")
+	}
+	return nil
+}
+
+// SetActualHours records how long the work took on the issue.
+func (b Backlog) SetActualHours(ctx context.Context, issue string, hours float64) error {
+	if hours < 0 {
+		return errors.New("actual hours must not be negative")
+	}
+	form := url.Values{}
+	form.Set("actualHours", strconv.FormatFloat(hours, 'f', 2, 64))
+	if _, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (b Backlog) Comments(ctx context.Context, issue string, after int64) ([]json.RawMessage, error) {
 	if after < 0 {
 		return nil, errors.New("comment cursor must not be negative")

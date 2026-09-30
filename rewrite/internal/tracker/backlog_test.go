@@ -238,3 +238,90 @@ func TestCommentTransportBoundsWithoutLeakingOrTruncating(t *testing.T) {
 		})
 	}
 }
+
+func TestSetStatusAsksForOneStatusAndReadsTheConfirmationBack(t *testing.T) {
+	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
+	patches := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "PATCH /api/v2/issues/EXAMPLE-1" || r.URL.Query().Get("apiKey") != "synthetic-token" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil || r.PostForm.Get("statusId") != "451069" || len(r.PostForm) != 1 {
+			t.Errorf("more than the status was changed: %q %v", r.PostForm, err)
+		}
+		patches++
+		if patches == 2 {
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 2}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 451069, "name": "anything"}})
+	}))
+	defer server.Close()
+	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 451069); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 451069); err == nil {
+		t.Fatal("a status the tracker did not confirm was reported as set")
+	}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 0); err == nil || patches != 2 {
+		t.Fatalf("a missing status id was sent: patches=%d err=%v", patches, err)
+	}
+}
+
+func TestSetCategoriesSendsTheWholeListAndReadsTheConfirmationBack(t *testing.T) {
+	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "PATCH /api/v2/issues/EXAMPLE-1" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil || strings.Join(r.PostForm["categoryId[]"], ",") != "7,2514855" || len(r.PostForm) != 1 {
+			t.Errorf("more or less than the categories was changed: %q %v", r.PostForm, err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": 1, "category": []map[string]any{{"id": 7}, {"id": 2514855}}})
+	}))
+	defer server.Close()
+	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
+	if err := b.SetCategories(context.Background(), "EXAMPLE-1", []int64{7, 2514855}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetCategories(context.Background(), "EXAMPLE-1", []int64{0}); err == nil {
+		t.Fatal("a zero category id was sent")
+	}
+}
+
+func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
+	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
+	var seen []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.PostForm.Encode())
+		switch {
+		case r.URL.Path == "/api/v2/users/myself":
+			json.NewEncoder(w).Encode(map[string]any{"id": 1797983, "name": "runtime"})
+		case r.PostForm.Get("assigneeId") != "":
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "assignee": map[string]any{"id": json.Number(r.PostForm.Get("assigneeId"))}})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"id": 1})
+		}
+	}))
+	defer server.Close()
+	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
+	me, err := b.Myself(context.Background())
+	if err != nil || me != 1797983 {
+		t.Fatalf("myself: %d %v", me, err)
+	}
+	if err := b.SetAssignee(context.Background(), "EXAMPLE-1", 55); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0.25); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetAssignee(context.Background(), "EXAMPLE-1", 0); err == nil {
+		t.Fatal("a missing user id was sent")
+	}
+	want := []string{"GET /api/v2/users/myself ", "PATCH /api/v2/issues/EXAMPLE-1 assigneeId=55", "PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.25"}
+	if strings.Join(seen, "|") != strings.Join(want, "|") {
+		t.Fatalf("requests: %q", seen)
+	}
+}
