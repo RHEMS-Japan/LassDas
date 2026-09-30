@@ -26,7 +26,11 @@ type launch struct {
 	Count       int
 	Records     []int
 	Gap         string
-	signature   string
+	// RuntimeFailure marks a failure the runtime wrote itself, which the
+	// page may render in the viewer's language; a worker's own words are
+	// shown as written.
+	RuntimeFailure bool
+	signature      string
 }
 
 type worker struct {
@@ -49,9 +53,11 @@ const (
 // stageNotePrefix opens the runtime's own note about one launch of a stage;
 // that note is the only record that closes a launch. Any other note of the
 // runtime, an interruption, a routing failure, a limit reached, stands on its
-// own. A process record joins the open launch of its role only when it began
-// no later than that launch's latest end: processes of one launch start
-// together, and a later launch starts after the earlier one ended.
+// own. A process record joins the open launch of its role unless that launch
+// already holds a record from the same process: the runtime runs each
+// configured process once per launch, so the same name again is the next
+// launch. Clocks do not decide this; a process may start after its sibling
+// has already failed.
 const stageNotePrefix = "Runtime record for stage "
 
 func groupLaunches(records []record) []launch {
@@ -72,19 +78,20 @@ func groupLaunches(records []record) []launch {
 			}
 			open = -1
 		case entry.Runtime:
-			note := launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap}
+			note := launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap, RuntimeFailure: true}
 			switch {
 			case strings.HasPrefix(entry.Error, "The process stopped while this action was pending"):
 				note.Outcome, note.Failure, note.Notes = interrupted, firstLine(entry.Error), []string{entry.Error}
 			case entry.Error != "":
 				note.Outcome, note.Failure, note.Notes = failed, firstLine(entry.Error), []string{entry.Error}
+				note.signature = note.Role + "\x00" + note.Outcome + "\x00" + entry.Error
 			default:
 				note.Notes = []string{entry.Output}
 			}
 			launches = append(launches, note)
 			open = -1
 		default:
-			if open < 0 || launches[open].Role != entry.Role || (!entry.Started.IsZero() && entry.Started.After(launches[open].Finished)) {
+			if open < 0 || launches[open].Role != entry.Role || hasWorker(launches[open], entry.Speaker) {
 				launches = append(launches, launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: returned,
 					Instruction: entry.Instruction, Gap: entry.Gap})
 				open = len(launches) - 1
@@ -127,6 +134,15 @@ func groupLaunches(records []record) []launch {
 		}
 	}
 	return foldLaunches(launches)
+}
+
+func hasWorker(current launch, speaker string) bool {
+	for _, w := range current.Workers {
+		if w.Speaker == speaker {
+			return true
+		}
+	}
+	return false
 }
 
 // startFailure recognises a launch that never ran: the runtime could not

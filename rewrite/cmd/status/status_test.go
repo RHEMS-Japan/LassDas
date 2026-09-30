@@ -1126,4 +1126,38 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 	if len(mixed) != 3 || mixed[0].Outcome != failed || mixed[1].Count != 1 || mixed[2].Count != 2 || mixed[2].Workers[0].Output != "ran once more" || mixed[2].Index != 3 || mixed[2].Last != 4 {
 		t.Fatalf("a mixed launch, two different failures, or the folded text were read wrongly: %+v", mixed)
 	}
+	// One launch of two processes where the first fell at once and the
+	// second started afterwards is still one launch: the boundary is the
+	// same process appearing again, not the clock. Identical routing
+	// failures fold like any other; a worker's own failure text is shown as
+	// written, not translated.
+	late := groupLaunches(entries(
+		chain.Result{Role: "verify", Speaker: "project-build", Error: "fork/exec /usr/bin/build: no such file or directory", StartedAt: started, FinishedAt: started},
+		chain.Result{Role: "verify", Speaker: "project-tests", Output: "TESTS-OK", StartedAt: started.Add(3 * time.Second), FinishedAt: started.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-build did not exit 0.", FinishedAt: started.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-build", Output: "built", StartedAt: started.Add(6 * time.Minute), FinishedAt: started.Add(7 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Output: "TESTS-OK", StartedAt: started.Add(6 * time.Minute), FinishedAt: started.Add(7 * time.Minute)},
+		chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable: HTTP 502", FinishedAt: started.Add(8 * time.Minute)},
+		chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable: HTTP 502", FinishedAt: started.Add(9 * time.Minute)},
+		chain.Result{Role: "implement", Speaker: "implement-process", Model: "m", Error: "Error", StartedAt: started.Add(10 * time.Minute), FinishedAt: started.Add(10 * time.Minute)},
+	))
+	if len(late) != 4 || late[0].Outcome != failed || len(late[0].Workers) != 2 || late[1].Outcome != returned || late[2].Count != 2 || late[2].Outcome != failed || late[2].RuntimeFailure != true || late[3].RuntimeFailure != false {
+		t.Fatalf("a launch whose second process started late was split, or routing failures were not folded: %+v", late)
+	}
+	root := fixtureQueue(t)
+	writeJob(t, root, "62", chain.State{Step: "implement", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "implement"}}}, History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Model: "m", Error: "Error", Output: "wrote", StartedAt: started, FinishedAt: started.Add(time.Minute)},
+	}})
+	ts := serve(t, root, "", "", "")
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/62", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(japanese), "<br>Error</p>") {
+		t.Error("a worker's own failure text was replaced by a dictionary word on the Japanese page")
+	}
 }
