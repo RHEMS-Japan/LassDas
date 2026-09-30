@@ -1161,3 +1161,31 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 		t.Error("a worker's own failure text was replaced by a dictionary word on the Japanese page")
 	}
 }
+
+func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testing.T) {
+	root := fixtureQueue(t)
+	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}}
+	writeJob(t, root, "70", chain.State{Workflow: flow})
+	writeJob(t, root, "71", chain.State{Workflow: flow})
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `Queued <b>2</b>`, `Running <b>1</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, "queued: waiting for a free execution slot")
+	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) {
+		t.Error("a queued request is not shown at the first stage")
+	}
+	if strings.Contains(body, `data-stage="other"`) {
+		t.Error("a queued request fell into the other column")
+	}
+	if strings.Contains(inColumn(body, "elicit"), "between steps") {
+		t.Error("a queued request is called between steps")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "順番待ち <b>2</b>", "順番待ち (実行枠が空くのを待っています)")
+}

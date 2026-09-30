@@ -241,7 +241,7 @@ type lane struct {
 	Count int
 }
 
-var laneOrder = []lane{{Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
+var laneOrder = []lane{{Key: "queued", Title: "Queued"}, {Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
 	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}, {Key: "stopped", Title: "Stopped"}}
 
 func lanes(jobs []*job) []lane {
@@ -803,6 +803,13 @@ func (j *job) derive(now time.Time) {
 		j.Lane = "delivered"
 	case state.Waiting:
 		j.Lane = "awaiting"
+	case state.Step == "" && len(state.History) == 0 && state.Pending == nil && len(j.Live) == 0:
+		// Accepted, nothing launched yet: the request waits for a free
+		// execution slot, at the first stage of the run.
+		j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
+		if state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+			j.Stage = state.Workflow.Stages[0].Name
+		}
 	default:
 		var last time.Time
 		if n := len(state.History); n > 0 {
@@ -1450,8 +1457,9 @@ var japanese = map[string]string{
 	"ticket engine status": "自動処理の状態", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
-	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "none": "なし",
-	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
+	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "Queued": "順番待ち", "none": "なし",
+	"queued: waiting for a free execution slot": "順番待ち (実行枠が空くのを待っています)",
+	"stopped by the requester; report posted":   "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
 	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
 	"held: the saved stop instruction is unreadable":             "保留中: 保存された停止指示が読めません",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
