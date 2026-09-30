@@ -71,7 +71,7 @@ func (b Backlog) SetStatus(ctx context.Context, issue string, statusID int64) er
 	}
 	form := url.Values{}
 	form.Set("statusId", strconv.FormatInt(statusID, 10))
-	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	data, err := b.patchIssue(ctx, issue, form)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (b Backlog) SetCategories(ctx context.Context, issue string, ids []int64) e
 	if len(ids) == 0 {
 		form.Set("categoryId[]", "")
 	}
-	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	data, err := b.patchIssue(ctx, issue, form)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (b Backlog) SetAssignee(ctx context.Context, issue string, userID int64) er
 	}
 	form := url.Values{}
 	form.Set("assigneeId", strconv.FormatInt(userID, 10))
-	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	data, err := b.patchIssue(ctx, issue, form)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (b Backlog) SetActualHours(ctx context.Context, issue string, hours float64
 	}
 	form := url.Values{}
 	form.Set("actualHours", strconv.FormatFloat(hours, 'f', 2, 64))
-	if _, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK); err != nil {
+	if _, err := b.patchIssue(ctx, issue, form); err != nil {
 		return err
 	}
 	return nil
@@ -283,7 +283,32 @@ func (b Backlog) call(ctx context.Context, method, path string, query, form url.
 		return nil, fmt.Errorf("tracker returned HTTP %d; response exceeds 4 MiB; no truncated response returned", response.StatusCode)
 	}
 	if response.StatusCode != expected {
-		return nil, fmt.Errorf("tracker returned HTTP %d: %s", response.StatusCode, redact(string(data)))
+		return nil, &trackerError{Status: response.StatusCode, Body: redact(string(data))}
 	}
 	return data, nil
+}
+
+// trackerError is an answer with a status other than the one expected, kept
+// whole so a caller can tell one refusal from another.
+type trackerError struct {
+	Status int
+	Body   string
+}
+
+func (e *trackerError) Error() string {
+	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
+}
+
+// patchIssue changes fields of one issue. Asked to set a field to what it
+// already holds, the tracker refuses the whole request as though nothing in
+// it could be changed ("No comment content."); the issue is then as asked,
+// so that refusal is read as done and the issue read back for the caller to
+// confirm.
+func (b Backlog) patchIssue(ctx context.Context, issue string, form url.Values) ([]byte, error) {
+	data, err := b.call(ctx, http.MethodPatch, "/issues/"+url.PathEscape(issue), nil, form, http.StatusOK)
+	var refusal *trackerError
+	if errors.As(err, &refusal) && refusal.Status == http.StatusBadRequest && strings.Contains(refusal.Body, "No comment content.") {
+		return b.call(ctx, http.MethodGet, "/issues/"+url.PathEscape(issue), nil, nil, http.StatusOK)
+	}
+	return data, err
 }

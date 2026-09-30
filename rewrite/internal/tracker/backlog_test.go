@@ -325,3 +325,46 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 		t.Fatalf("requests: %q", seen)
 	}
 }
+
+func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
+	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
+	var seen []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.PostForm.Encode())
+		switch {
+		case r.Method == http.MethodPatch && r.PostForm.Get("statusId") == "4":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errors":[{"message":"Invalid statusId.","code":7,"moreInfo":""}]}`))
+		case r.Method == http.MethodPatch:
+			// The tracker's answer to a change that changes nothing.
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errors":[{"message":"No comment content.","code":7,"moreInfo":""}]}`))
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 1001}, "assignee": map[string]any{"id": 55}})
+		}
+	}))
+	defer server.Close()
+	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err != nil {
+		t.Fatalf("a status the issue already holds was refused: %v", err)
+	}
+	if err := b.SetAssignee(context.Background(), "EXAMPLE-1", 55); err != nil {
+		t.Fatalf("an assignee the issue already has was refused: %v", err)
+	}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1002); err == nil {
+		t.Fatal("a status the issue does not hold was reported as set")
+	}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 4); err == nil || !strings.Contains(err.Error(), "Invalid statusId") {
+		t.Fatalf("another refusal was read as done: %v", err)
+	}
+	want := []string{
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1001", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 assigneeId=55", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1002", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=4",
+	}
+	if strings.Join(seen, "|") != strings.Join(want, "|") {
+		t.Fatalf("requests: %q", seen)
+	}
+}

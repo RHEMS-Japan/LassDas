@@ -48,6 +48,9 @@ type turnRecord struct {
 	Category bool   `json:"category,omitempty"`
 	Assignee string `json:"assignee,omitempty"`
 	Hours    bool   `json:"hours,omitempty"`
+	// Waited says the acceptance comment told the requester to wait their
+	// turn, so the start of the work is worth a comment of its own.
+	Waited bool `json:"waited,omitempty"`
 	// Refused counts, per turn, the tracker's refusals; after turnAttempts
 	// of them the turn is left alone, so a field the project does not have
 	// is not asked for on every tick for as long as the queue lives.
@@ -98,6 +101,13 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 	}
 	if cfg.Intake.Announce {
 		notice := requestNotices(cfg, issue, directory)
+		if !notice.has(acceptedNotice) {
+			record := loadTurns(directory)
+			record.Waited = ahead > 0
+			if err := saveTurns(directory, record); err != nil {
+				observe("place in line not recorded: " + err.Error())
+			}
+		}
 		if err := notice.post(ctx, acceptedNotice, acceptedNoticeText(ahead, requestPage(cfg, issue))); err != nil {
 			observe("acceptance not announced: " + err.Error())
 		}
@@ -125,6 +135,17 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 		}
 	}
 	assignTurn(ctx, cfg, issue, directory, "runtime", observe)
+}
+
+// startDeservesNotice says whether the start of the work is worth a comment
+// of its own: it is when the requester was told to wait their turn, or when
+// the acceptance was never announced. A requester told the work starts at
+// once hears nothing more until a stage the operator chose to announce begins.
+func startDeservesNotice(cfg config, issue sourceIssue, directory string) bool {
+	if !requestNotices(cfg, issue, directory).has(acceptedNotice) {
+		return true
+	}
+	return loadTurns(directory).Waited
 }
 
 // assignTurn hands the issue to the requester or back to the runtime.

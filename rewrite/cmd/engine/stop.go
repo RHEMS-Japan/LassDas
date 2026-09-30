@@ -188,7 +188,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				result = make(chan error, 1)
 				outcome := result
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
-				if cfg.Intake != nil && cfg.Intake.Announce {
+				if cfg.Intake != nil && cfg.Intake.Announce && startDeservesNotice(cfg, issue, directory) {
 					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText); noticeErr != nil {
 						observe("start not announced: " + noticeErr.Error())
 					}
