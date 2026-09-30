@@ -494,3 +494,42 @@ func TestTheStoppedReporterReadsTheCollapsedRecord(t *testing.T) {
 		t.Fatalf("the count was cut away with the failure's head, or the cut is wrong: %d characters, starts %q", utf8.RuneCountInString(e), e[:80])
 	}
 }
+
+func TestAnUnfinishedReportContinuesUnderTheRequestTextThisRuntimeRenders(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "stop-report")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	earlier := chain.State{Request: "the previous runtime's rendering", History: []chain.Result{{Role: "stop_report", Speaker: "reporter", Error: "exit status 1"}}}
+	raw, _ := json.Marshal(earlier)
+	if err := os.WriteFile(filepath.Join(directory, "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := adoptReportRequest(directory, "this runtime's rendering"); err != nil {
+		t.Fatal(err)
+	}
+	var adopted chain.State
+	raw, _ = os.ReadFile(filepath.Join(directory, "history.json"))
+	if err := json.Unmarshal(raw, &adopted); err != nil || adopted.Request != "this runtime's rendering" || len(adopted.History) != 1 {
+		t.Fatalf("the report directory was not adopted with its record kept: %+v %v", adopted, err)
+	}
+	store, err := chain.Open(directory, "this runtime's rendering")
+	if err != nil {
+		t.Fatalf("the adopted directory still reads as another request's: %v", err)
+	}
+	store.Close()
+	// A finished report is left alone, and a directory that does not exist yet needs nothing.
+	done := chain.State{Request: "the previous runtime's rendering", Done: true}
+	raw, _ = json.Marshal(done)
+	os.WriteFile(filepath.Join(directory, "history.json"), raw, 0600)
+	if err := adoptReportRequest(directory, "this runtime's rendering"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(filepath.Join(directory, "history.json"))
+	if !strings.Contains(string(raw), "the previous runtime's rendering") {
+		t.Fatal("a finished report was rewritten")
+	}
+	if err := adoptReportRequest(filepath.Join(t.TempDir(), "missing"), "x"); err != nil {
+		t.Fatal(err)
+	}
+}

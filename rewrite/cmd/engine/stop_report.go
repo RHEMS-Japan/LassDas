@@ -228,6 +228,38 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err := writeRuntimeFile(requestPath, []byte(request)); err != nil {
 		return err
 	}
+	if err := adoptReportRequest(filepath.Join(directory, "stop-report"), request); err != nil {
+		return err
+	}
 	fmt.Fprintf(log, "request %d: reporting the authorized stop without resuming the original work\n", issue.ID)
 	return run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "stop-report")}, io.Discard, log)
+}
+
+// adoptReportRequest lets an unfinished report continue under the request
+// text this runtime renders. The text is the runtime's own rendering of the
+// stopped request's record, so a runtime that renders it differently, after
+// an upgrade, must not read its predecessor's report directory as another
+// request's and wait forever; the record of earlier attempts is kept.
+func adoptReportRequest(directory, request string) error {
+	path := filepath.Join(directory, "history.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state chain.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+	if state.Request == request || state.Done {
+		return nil
+	}
+	state.Request = request
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return writeRuntimeFile(path, data)
 }
