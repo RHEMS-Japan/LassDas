@@ -75,9 +75,14 @@ func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, 
 	path := filepath.Join(directory, "status.json")
 	var last statusRecord
 	if raw, err := os.ReadFile(path); err == nil {
-		if json.Unmarshal(raw, &last) == nil && last.Kind == kind && last.ID == id {
+		if json.Unmarshal(raw, &last) == nil && last.Kind == kind && last.ID == id && last.Refused == 0 {
 			return
 		}
+	}
+	// Refusals are counted per turn: a new turn starts from zero, so a
+	// tracker that was down for a while does not freeze the issue for good.
+	if last.Kind != kind || last.ID != id {
+		last = statusRecord{Kind: kind, ID: id}
 	}
 	if last.Refused >= turnAttempts {
 		return

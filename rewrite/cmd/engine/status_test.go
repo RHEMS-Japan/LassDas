@@ -19,7 +19,7 @@ import (
 
 func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	cfg := watchConfiguration(t)
-	cfg.Intake.Statuses = &statusConfig{Processing: 451069, AwaitingRequester: 451070, Delivered: 3, Stopped: 1}
+	cfg.Intake.Statuses = &statusConfig{Processing: 1001, AwaitingRequester: 1002, Delivered: 3, Stopped: 1}
 	var mu sync.Mutex
 	var set []string
 	refuse := true
@@ -49,7 +49,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	// makes it and records it; the same turn again asks nothing.
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	var recorded statusRecord
-	if raw, err := os.ReadFile(filepath.Join(directory, "status.json")); err != nil || json.Unmarshal(raw, &recorded) != nil || recorded.Kind != "" || recorded.Refused != 1 || !strings.Contains(log.String(), "status not set to processing") {
+	if raw, err := os.ReadFile(filepath.Join(directory, "status.json")); err != nil || json.Unmarshal(raw, &recorded) != nil || recorded.Kind != processingStatus || recorded.Refused != 1 || !strings.Contains(log.String(), "status not set to processing") {
 		t.Fatalf("a refused move was recorded as made, or not counted, or not logged: %+v %v", recorded, err)
 	}
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
@@ -61,9 +61,28 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	mu.Lock()
 	got := strings.Join(set, " ")
 	mu.Unlock()
-	if got != "EXAMPLE-51=451069 EXAMPLE-51=451070 EXAMPLE-51=451069 EXAMPLE-51=3" {
+	if got != "EXAMPLE-51=1001 EXAMPLE-51=1002 EXAMPLE-51=1001 EXAMPLE-51=3" {
 		t.Fatalf("moves made: %s", got)
 	}
+	// Refusals are counted per turn: five on one turn do not freeze the next.
+	refuse = true
+	refusals := 0
+	for i := 0; i < turnAttempts+2; i++ {
+		refuse = true
+		applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
+		refusals++
+	}
+	mu.Lock()
+	before := len(set)
+	mu.Unlock()
+	refuse = false
+	applyStatus(context.Background(), cfg, issue, directory, awaitingStatus, observe)
+	mu.Lock()
+	if len(set) != before+1 || set[len(set)-1] != "EXAMPLE-51=1002" {
+		mu.Unlock()
+		t.Fatalf("a turn refused five times froze the next turn: %v", set)
+	}
+	mu.Unlock()
 	// A turn without a configured id changes nothing, as does no configuration.
 	cfg.Intake.Statuses.Stopped = 0
 	applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
@@ -71,17 +90,17 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	mu.Lock()
 	defer mu.Unlock()
-	if len(set) != 4 {
+	if len(set) != 5 {
 		t.Fatalf("an unconfigured turn moved the issue: %v", set)
 	}
 }
 
 func TestTheQueueMovesDeliveredAndStoppedRequestsOnItsTicks(t *testing.T) {
 	cfg := watchConfiguration(t)
-	cfg.Intake.Statuses = &statusConfig{Processing: 451069, Delivered: 3, Stopped: 1}
+	cfg.Intake.Statuses = &statusConfig{Processing: 1001, Delivered: 3, Stopped: 1}
 	cfg.Intake.StopReportRole = ""
 	cfg.Intake.Assign = true
-	cfg.Intake.CategoryOnAccept = 2514855
+	cfg.Intake.CategoryOnAccept = 2001
 	cfg.Intake.StatusPage = "https://board.example/jobs/"
 	cfg.Intake.Announce = true
 	var mu sync.Mutex
@@ -195,7 +214,7 @@ func TestTheQueueMovesDeliveredAndStoppedRequestsOnItsTicks(t *testing.T) {
 	if strings.Count(set["EXAMPLE-61"], "statusId=1") != 1 || !strings.Contains(set["EXAMPLE-61"], "assigneeId=55") {
 		t.Fatalf("the stopped request was not handed to the requester once: %q", set["EXAMPLE-61"])
 	}
-	if strings.Count(set["EXAMPLE-62"], "categoryId%5B%5D=2514855") != 1 || !strings.Contains(set["EXAMPLE-62"], "assigneeId=900") || !strings.Contains(set["EXAMPLE-62"], "statusId=451069") {
+	if strings.Count(set["EXAMPLE-62"], "categoryId%5B%5D=2001") != 1 || !strings.Contains(set["EXAMPLE-62"], "assigneeId=900") || !strings.Contains(set["EXAMPLE-62"], "statusId=1001") {
 		t.Fatalf("the accepted request was not categorised, handed to the runtime and moved once: %q", set["EXAMPLE-62"])
 	}
 	joined := strings.Join(comments, "\n")

@@ -246,7 +246,7 @@ func TestSetStatusAsksForOneStatusAndReadsTheConfirmationBack(t *testing.T) {
 		if r.Method+" "+r.URL.Path != "PATCH /api/v2/issues/EXAMPLE-1" || r.URL.Query().Get("apiKey") != "synthetic-token" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		if err := r.ParseForm(); err != nil || r.PostForm.Get("statusId") != "451069" || len(r.PostForm) != 1 {
+		if err := r.ParseForm(); err != nil || r.PostForm.Get("statusId") != "1001" || len(r.PostForm) != 1 {
 			t.Errorf("more than the status was changed: %q %v", r.PostForm, err)
 		}
 		patches++
@@ -254,14 +254,14 @@ func TestSetStatusAsksForOneStatusAndReadsTheConfirmationBack(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 2}})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 451069, "name": "anything"}})
+		json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 1001, "name": "anything"}})
 	}))
 	defer server.Close()
 	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
-	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 451069); err != nil {
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 451069); err == nil {
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err == nil {
 		t.Fatal("a status the tracker did not confirm was reported as set")
 	}
 	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 0); err == nil || patches != 2 {
@@ -275,14 +275,14 @@ func TestSetCategoriesSendsTheWholeListAndReadsTheConfirmationBack(t *testing.T)
 		if r.Method+" "+r.URL.Path != "PATCH /api/v2/issues/EXAMPLE-1" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		if err := r.ParseForm(); err != nil || strings.Join(r.PostForm["categoryId[]"], ",") != "7,2514855" || len(r.PostForm) != 1 {
+		if err := r.ParseForm(); err != nil || strings.Join(r.PostForm["categoryId[]"], ",") != "7,2001" || len(r.PostForm) != 1 {
 			t.Errorf("more or less than the categories was changed: %q %v", r.PostForm, err)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"id": 1, "category": []map[string]any{{"id": 7}, {"id": 2514855}}})
+		json.NewEncoder(w).Encode(map[string]any{"id": 1, "category": []map[string]any{{"id": 7}, {"id": 2001}}})
 	}))
 	defer server.Close()
 	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
-	if err := b.SetCategories(context.Background(), "EXAMPLE-1", []int64{7, 2514855}); err != nil {
+	if err := b.SetCategories(context.Background(), "EXAMPLE-1", []int64{7, 2001}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SetCategories(context.Background(), "EXAMPLE-1", []int64{0}); err == nil {
