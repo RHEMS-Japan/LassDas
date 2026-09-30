@@ -113,7 +113,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		}
 	}
 	s.templates = template.Must(template.New("").Funcs(template.FuncMap{
-		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON, "t": translate, "st": localize, "sn": stageName,
+		"time": s.formatTime, "ago": s.ago, "pretty": prettyJSON, "t": translate, "st": localize, "sn": stageName, "cls": cssClass,
 		"pct": func(index, count int) int {
 			if count <= 0 {
 				return 0
@@ -183,44 +183,46 @@ var answerName = regexp.MustCompile(`^answer-[0-9]+\.json$`)
 // job is everything on disk about one accepted request, read as it is. Every
 // file that cannot be read or decoded is reported in Notes instead of hidden.
 type job struct {
-	ID         string
-	Key        string
-	Title      string
-	Requester  string
-	Created    string
-	Link       string
-	Request    string
-	State      *chain.State
-	Records    []record
-	Answers    []namedText
-	Live       []liveEntry
-	Notices    []map[string]any
-	Report     string
-	Reviews    []namedText
-	Notes      []string
-	Status     string
-	Position   string
-	Started    time.Time
-	Updated    time.Time
-	Elapsed    string
-	Workspace  *workspace
-	Receipt    string
-	Homes      []homeLogs
-	Stages     []stageTime
-	Refresh    int
-	Lane       string
-	Dots       string
-	Attention  string
-	Trail      []stageMark
-	Current    string
-	Stage      string
-	Failure    string
-	Stopped    bool
-	Reported   bool
-	StopBroken bool
-	StageIndex int
-	StageCount int
-	Model      string
+	ID          string
+	Key         string
+	Title       string
+	Requester   string
+	Created     string
+	Link        string
+	Request     string
+	State       *chain.State
+	Records     []record
+	Launches    []launch
+	LaunchCount int
+	Answers     []namedText
+	Live        []liveEntry
+	Notices     []map[string]any
+	Report      string
+	Reviews     []namedText
+	Notes       []string
+	Status      string
+	Position    string
+	Started     time.Time
+	Updated     time.Time
+	Elapsed     string
+	Workspace   *workspace
+	Receipt     string
+	Homes       []homeLogs
+	Stages      []stageTime
+	Refresh     int
+	Lane        string
+	Dots        string
+	Attention   string
+	Trail       []stageMark
+	Current     string
+	Stage       string
+	Failure     string
+	Stopped     bool
+	Reported    bool
+	StopBroken  bool
+	StageIndex  int
+	StageCount  int
+	Model       string
 }
 
 // stageMark is one stage on a card: passed, current or ahead.
@@ -318,6 +320,11 @@ func stopState(dir string) (stopped, reported, broken bool) {
 		Done bool `json:"done"`
 	}
 	return true, json.Unmarshal(raw, &report) == nil && report.Done, false
+}
+
+// cssClass turns an outcome's words into one class name.
+func cssClass(text string) string {
+	return strings.ReplaceAll(strings.ToLower(text), " ", "-")
 }
 
 func firstLine(text string) string {
@@ -492,6 +499,12 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 					previous = result.FinishedAt
 				}
 				j.Records = append(j.Records, entry)
+			}
+			j.Launches = groupLaunches(j.Records)
+			for _, entry := range j.Launches {
+				if len(entry.Workers) > 0 && entry.Outcome != answered {
+					j.LaunchCount += entry.Count
+				}
 			}
 		}
 		touch(historyPath)
@@ -1451,7 +1464,17 @@ var japanese = map[string]string{
 	"Stages:": "工程:", "workflow as recorded for this request": "この依頼に記録された工程定義", "Time by stage": "工程別の時間", "Stage": "工程", "Launches": "回数",
 	"Failed": "失敗", "Total time (sum over process runs; parallel processes add up)": "合計時間 (プロセスごとの合算。並列は足し合わせ)", "First started": "最初の開始", "Last finished": "最後の終了",
 	"Request": "依頼の原文", "Notices posted by the runtime": "本体が投稿した通知", "Record": "記録", "entries": "件", "after the previous record": "前の記録から",
-	"Error": "失敗", "instruction": "指示", "Output": "出力", "diagnostics (stderr)": "stderr", "Requester answers consumed": "取り込んだ依頼者の回答",
+	"Error": "失敗", "instruction": "本体が担当に渡した説明", "Output": "出力", "diagnostics (stderr)": "stderr", "Requester answers consumed": "取り込んだ依頼者の回答",
+	"What happened, launch by launch": "起きたこと (起動ごと)", "launch": "起動", "launches": "回の起動", "raw records": "生の記録", "the same failure, repeated": "同じ失敗の繰り返し", "times": "回",
+	"returned": "完了", "failed": "失敗", "could not start": "起動できず", "interrupted": "中断", "answer from the requester": "依頼者の返答", "note by the runtime": "本体の記録",
+	"why it ended so": "理由", "what the worker was handed": "担当 (LLM) に渡したもの", "what the worker wrote": "担当がしたこと・書いたこと", "what the runtime observed": "本体が観察したこと",
+	"written by": "書いた者", "the requester": "依頼者", "the runtime": "本体", "the worker": "担当", "the command": "コマンド", "the operator's settings": "運用者の設定",
+	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
+	"the record up to this launch, as shown on this page": "それまでの記録 (このページの前の起動)", "no output: the process could not start": "出力なし: 起動できず", "the worker's own stderr": "担当の stderr",
+	"the process ended with an error": "プロセスが失敗で終わった",
+	"no output":                       "出力なし", "what the requester wrote": "依頼者が書いたこと",
+	"the runtime (how it ended), then the worker's stderr": "本体 (終了状態)、続く行は担当の stderr", "the worker, with the runtime's notes": "担当 (本体の注記を含む)",
+	"the role's purpose and the operator's instructions": "役の説明と運用者の指示", "the record up to this launch, collapsed: identical failures as one entry, at most the latest sixty": "それまでの記録 (同じ失敗は 1 件に畳み、直近 60 件まで)",
 	"Review findings kept by the review command": "レビューコマンドが残した指摘", "Report written in the workspace": "作業場所に書かれた報告",
 	"Delivery receipt written by the delivery program": "納品プログラムが書いた receipt", "What each role's native agent logged in its own directory": "各役の agent が自分のディレクトリに残したもの",
 	"home": "home", "files:": "ファイル:", "as the agent logged it:": "agent の記録では:", "model calls": "回のモデル呼び出し", "input tokens": "入力トークン", "output tokens": "出力トークン",
