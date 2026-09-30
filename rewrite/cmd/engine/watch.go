@@ -160,7 +160,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 		// The runtime's own account, to hand an issue back to itself. Without
 		// it the work still runs; only the hand-overs wait for a later start.
 		if me, err := cfg.Backlog.Myself(ctx); err != nil {
-			fmt.Fprintln(log, "the runtime's own tracker account is unknown; issues are not handed over: "+err.Error())
+			fmt.Fprintln(log, "the runtime's own tracker account is unknown; issues are not handed over either way: "+err.Error())
+			cfg.Intake.Assign = false
 		} else {
 			cfg.runtimeUser = me
 		}
@@ -214,7 +215,6 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 		// One shared model key serves the whole queue, so ask once per tick
 		// rather than once per waiting request.
 		creditLow, creditKnown := modelCreditHold(ctx, cfg, observe)
-		ahead := 0 // unfinished requests filed before the one at hand
 		for _, entry := range entries {
 			if ctx.Err() != nil {
 				break
@@ -285,18 +285,15 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
-					ahead++
 					continue
 				}
 				if !resume {
-					ahead++
 					continue
 				}
 				resumeTurn(ctx, cfg, issue, directory, observe)
 			}
 			applyStatus(ctx, cfg, issue, directory, processingStatus, observe)
-			acceptTurn(ctx, cfg, issue, directory, ahead, observe)
-			ahead++
+			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), observe)
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
@@ -528,4 +525,26 @@ func adoptEarlierIdentity(root, identity string) error {
 		return err
 	}
 	return writeRuntimeFile(path, data)
+}
+
+// unfinishedBefore counts the accepted requests filed before the given one
+// that are neither delivered nor stopped: the ones in line ahead of it,
+// whether their watchers are running or not, compared by id as the line is.
+func unfinishedBefore(jobs string, entries []os.DirEntry, id int64) int {
+	ahead := 0
+	for _, entry := range entries {
+		other, err := strconv.ParseInt(entry.Name(), 10, 64)
+		if err != nil || !entry.IsDir() || other >= id {
+			continue
+		}
+		directory := filepath.Join(jobs, entry.Name())
+		if _, err := os.Stat(filepath.Join(directory, "stop-request.json")); err == nil {
+			continue
+		}
+		if state, err := savedHistory(directory); err == nil && state.Done {
+			continue
+		}
+		ahead++
+	}
+	return ahead
 }

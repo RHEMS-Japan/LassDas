@@ -518,13 +518,17 @@ request in `status.json`; a refused change is asked again on the next tick.
 
 ```json
 "intake": {
-  "statuses": { "processing": 451069, "awaiting_requester": 451070, "delivered": 3, "stopped": 1 },
-  "category_on_accept": 2514855,
+  "statuses": { "processing": 1001, "awaiting_requester": 1002, "delivered": 3, "stopped": 1 },
+  "category_on_accept": 2001,
   "assign": true,
   "announce": true,
   "status_page": "https://status.example/jobs/"
 }
 ```
+
+The ids are the operator's own project's: custom statuses and categories have
+the ids the tracker gave them (1001, 1002 and 2001 above stand in for them),
+while 1 and 3 are the tracker's built-in open and resolved statuses.
 
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's

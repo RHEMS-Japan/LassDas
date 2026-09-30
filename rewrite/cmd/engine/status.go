@@ -59,8 +59,9 @@ func (s *statusConfig) validate() error {
 // statusRecord is what the runtime last set on the issue, kept beside the
 // request so a restart does not set it again and a failed call is retried.
 type statusRecord struct {
-	Kind string `json:"kind"`
-	ID   int64  `json:"id"`
+	Kind    string `json:"kind"`
+	ID      int64  `json:"id"`
+	Refused int    `json:"refused,omitempty"`
 }
 
 // applyStatus moves the issue to the status configured for this turn of the
@@ -78,8 +79,15 @@ func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, 
 			return
 		}
 	}
+	if last.Refused >= turnAttempts {
+		return
+	}
 	if err := cfg.Backlog.SetStatus(ctx, issue.Key, id); err != nil {
 		observe("status not set to " + kind + ": " + err.Error())
+		last.Refused++
+		if data, err := json.Marshal(last); err == nil {
+			writeRuntimeFile(path, data)
+		}
 		return
 	}
 	data, _ := json.Marshal(statusRecord{Kind: kind, ID: id})

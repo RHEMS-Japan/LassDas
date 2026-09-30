@@ -48,8 +48,9 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	// The first move is refused and left unrecorded; the next attempt
 	// makes it and records it; the same turn again asks nothing.
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
-	if _, err := os.Stat(filepath.Join(directory, "status.json")); err == nil || !strings.Contains(log.String(), "status not set to processing") {
-		t.Fatal("a refused move was recorded or not logged")
+	var recorded statusRecord
+	if raw, err := os.ReadFile(filepath.Join(directory, "status.json")); err != nil || json.Unmarshal(raw, &recorded) != nil || recorded.Kind != "" || recorded.Refused != 1 || !strings.Contains(log.String(), "status not set to processing") {
+		t.Fatalf("a refused move was recorded as made, or not counted, or not logged: %+v %v", recorded, err)
 	}
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
@@ -200,5 +201,32 @@ func TestTheQueueMovesDeliveredAndStoppedRequestsOnItsTicks(t *testing.T) {
 	joined := strings.Join(comments, "\n")
 	if strings.Count(joined, "EXAMPLE-62: 受け付けました。すぐに自動処理を始めます。\n進み具合はこちらで見られます: https://board.example/jobs/62") != 1 || strings.Contains(joined, "EXAMPLE-60:") || strings.Contains(joined, "EXAMPLE-61:") {
 		t.Fatalf("acceptance was announced wrongly: %q", comments)
+	}
+}
+
+func TestTheLineAheadCountsUnfinishedEarlierRequestsByNumber(t *testing.T) {
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	for _, id := range []string{"9", "51", "999", "1000", "1001"} {
+		if err := os.MkdirAll(filepath.Join(jobs, id, "run"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done, _ := json.Marshal(chain.State{Done: true})
+	os.WriteFile(filepath.Join(jobs, "9", "run", "history.json"), done, 0600)
+	os.WriteFile(filepath.Join(jobs, "999", "stop-request.json"), []byte(`{"id":1}`), 0600)
+	entries, err := os.ReadDir(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before 1001: 9 is delivered, 999 is stopped, 51 and 1000 wait.
+	if got := unfinishedBefore(jobs, entries, 1001); got != 2 {
+		t.Fatalf("ahead of 1001: %d, want 2", got)
+	}
+	if got := unfinishedBefore(jobs, entries, 51); got != 0 {
+		t.Fatalf("ahead of 51: %d, want 0", got)
+	}
+	if got := unfinishedBefore(jobs, entries, 1000); got != 1 {
+		t.Fatalf("ahead of 1000: %d, want 1", got)
 	}
 }

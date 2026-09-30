@@ -63,8 +63,6 @@ func (b Backlog) AddComment(ctx context.Context, issue, content string) (json.Ra
 	return data, nil
 }
 
-// Comments reads all pages after the supplied API comment id in ascending order.
-// API metadata remains intact; the content is not decoded as a model verdict.
 // SetStatus moves the issue to the given status. Which status means what is
 // the operator's, configured by id; nothing here reads or names a status.
 func (b Backlog) SetStatus(ctx context.Context, issue string, statusID int64) error {
@@ -178,6 +176,8 @@ func (b Backlog) SetActualHours(ctx context.Context, issue string, hours float64
 	return nil
 }
 
+// Comments reads all pages after the supplied API comment id in ascending order.
+// API metadata remains intact; the content is not decoded as a model verdict.
 func (b Backlog) Comments(ctx context.Context, issue string, after int64) ([]json.RawMessage, error) {
 	if after < 0 {
 		return nil, errors.New("comment cursor must not be negative")

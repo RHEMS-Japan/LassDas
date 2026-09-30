@@ -495,6 +495,11 @@ func validateNotices(cfg config) error {
 	if cfg.Intake.CategoryOnAccept < 0 {
 		return errors.New("intake.category_on_accept must not be negative")
 	}
+	if cfg.Intake.StatusPage != "" {
+		if err := validateEndpoint(cfg.Intake.StatusPage); err != nil {
+			return errors.New("intake.status_page must be an HTTPS URL without credentials or query parameters")
+		}
+	}
 	if cfg.Intake.StallNoticeMinutes != nil && *cfg.Intake.StallNoticeMinutes < 0 {
 		return errors.New("intake.stall_notice_minutes must not be negative")
 	}
