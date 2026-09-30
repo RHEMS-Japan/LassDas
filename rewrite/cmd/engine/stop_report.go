@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/tracker"
@@ -50,8 +51,11 @@ func stoppedReportDone(directory string) (bool, error) {
 // executable. The original run and saved stop are never cleared or marked done.
 // OS/tool permissions still belong to the configured reporting harness; prose
 // instructions do not make a privileged command a read-only sandbox.
-// reportRecords bounds how many records the stopped request's reporter reads.
-const reportRecords = 60
+// reportRecords bounds how many records the stopped request's reporter reads,
+// and reportFieldRunes how much of each record's text: a report reads the
+// opening of what a role wrote and the end of what failed, as a role's own
+// prompt does, and the whole record stays on disk for anyone who needs it.
+const reportRecords, reportFieldRunes = 60, 4000
 
 // stopObservations renders the stopped request's record for its reporter. A
 // launch that failed the same way over and over becomes one entry that says
@@ -60,7 +64,34 @@ const reportRecords = 60
 // the report exists to name effects that may already exist.
 func stopObservations(state chain.State) ([]byte, error) {
 	state.History = reportHistory(state.History)
+	for i := range state.History {
+		record := &state.History[i]
+		record.Output = headRunes(record.Output, reportFieldRunes)
+		record.Instruction = headRunes(record.Instruction, reportFieldRunes/4)
+		record.Diagnostics = tailRunes(record.Diagnostics, reportFieldRunes)
+		record.Error = tailRunes(record.Error, reportFieldRunes)
+	}
 	return json.MarshalIndent(state, "", "  ")
+}
+
+func headRunes(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return limitRunes(text, limit) + fmt.Sprintf("\n[%d more characters are in the record, not here]", utf8.RuneCountInString(text)-limit)
+}
+
+func tailRunes(text string, limit int) string {
+	count := utf8.RuneCountInString(text)
+	if count <= limit {
+		return text
+	}
+	cut := 0
+	for skipped := 0; skipped < count-limit; skipped++ {
+		_, size := utf8.DecodeRuneInString(text[cut:])
+		cut += size
+	}
+	return fmt.Sprintf("[%d earlier characters are in the record, not here]\n%s", count-limit, text[cut:])
 }
 
 func reportHistory(history []chain.Result) []chain.Result {

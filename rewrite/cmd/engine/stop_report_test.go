@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/tracker"
@@ -455,5 +456,26 @@ func TestTheStoppedReporterReadsTheCollapsedRecord(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &observed); err != nil || len(observed.History) > 6 {
 		t.Fatalf("the record with a receipt was not collapsed: %v, %d entries", err, len(observed.History))
+	}
+	// Each record's text is bounded the way a role's prompt bounds it: the
+	// opening of what was written, the end of what failed, at character
+	// boundaries; the whole record stays on disk.
+	raw, err = stopObservations(chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process",
+		Output: strings.Repeat("報", 5000), Diagnostics: strings.Repeat("診", 5000) + "END", Error: "exit status 1", Instruction: strings.Repeat("指", 2000)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &observed); err != nil {
+		t.Fatal(err)
+	}
+	record := observed.History[0]
+	if !strings.HasPrefix(record.Output, strings.Repeat("報", 4000)) || !strings.Contains(record.Output, "1000 more characters") || utf8.RuneCountInString(record.Output) > 4100 {
+		t.Fatalf("the output was not cut to its opening: %d characters", utf8.RuneCountInString(record.Output))
+	}
+	if !strings.HasSuffix(record.Diagnostics, "END") || !strings.HasPrefix(record.Diagnostics, "[1003 earlier characters") || !utf8.ValidString(record.Diagnostics) {
+		t.Fatalf("the diagnostics were not cut to their end: %q", record.Diagnostics[:60])
+	}
+	if record.Error != "exit status 1" || utf8.RuneCountInString(record.Instruction) > 1100 {
+		t.Fatalf("a short error was altered or the instruction was not cut: %q, %d", record.Error, utf8.RuneCountInString(record.Instruction))
 	}
 }
