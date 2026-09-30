@@ -172,6 +172,15 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out, prose)
 
+    def test_a_run_that_ends_without_a_report_is_a_failure(self):
+        for result in ({"final_response": ""}, {"final_response": "  \n"}, {"final_response": None}):
+            events, out, err, code, failure = self.run_bridge(result)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(out.strip(), "")
+            self.assertIn("ended without a report", err)
+            self.assertIn("NATIVE_MAX_TOKENS", err)
+            self.assertEqual(events[-1], ("closed", True))
+
     def test_native_failure_keeps_partial_report_and_reason(self):
         events, out, err, code, failure = self.run_bridge(
             {"final_response": "Only half completed", "failed": True, "error": "transport unavailable"})

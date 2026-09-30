@@ -175,8 +175,15 @@ def main():
         sys.stdout.flush()
         if result.get("error"):
             print(result["error"], file=sys.stderr)
+        # A run that ends without a report has not done the role's work: the
+        # native agent gives up, for one, on an answer that stays cut off at
+        # NATIVE_MAX_TOKENS after its continuations. Say so and fail, so the
+        # runtime retries the role instead of passing an empty result on.
+        empty = not stop_signal and not result.get("failed") and not (response or "").strip()
+        if empty:
+            print("Native agent ended without a report (an answer cut off at NATIVE_MAX_TOKENS is one cause)", file=sys.stderr)
         save_transcript(result)
-        return 128 + stop_signal if stop_signal else (1 if result.get("failed") else 0)
+        return 128 + stop_signal if stop_signal else (1 if result.get("failed") or empty else 0)
     finally:
         finished.set()
         interrupter.join(timeout=1)

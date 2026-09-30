@@ -955,7 +955,10 @@ Provide these process settings explicitly:
 - `OPENROUTER_API_KEY`: map a named credential source through `secrets`, not
   a literal credential in `env` or the configuration file.
 - Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
-  (default `6000`, per native API response, not a request failure limit).
+  (default `6000`, per native API response, not a request failure limit). An
+  answer that stays cut off at that limit after the agent's continuations
+  leaves no report; the bridge then exits 1, so the runtime retries the role
+  instead of passing an empty result to the next one.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them
