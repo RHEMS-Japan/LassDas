@@ -178,6 +178,9 @@ class BridgeTests(unittest.TestCase):
         config = dict(next(payload for name, payload in events if name == "configuration"))
         self.assertEqual(config["max_iterations"], 7)
         self.assertEqual(code, 0)
+        events, out, err, code, failure = self.run_bridge({"final_response": "report"}, extra_env={"NATIVE_MAX_TURNS": "-3"})
+        config = dict(next(payload for name, payload in events if name == "configuration"))
+        self.assertEqual(config["max_iterations"], 1_000_000_000)
 
     def test_a_run_that_ends_without_a_report_is_a_failure(self):
         for result in ({"final_response": ""}, {"final_response": "  \n"}, {"final_response": None}):

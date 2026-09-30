@@ -45,7 +45,29 @@ const (
 )
 
 func stallNoticeText(minutes int, detail string) string {
+	if detail == "" {
+		return fmt.Sprintf("自動処理は続いていますが、過去 %d 分間は工程が完了していません（失敗はなく、進行中の工程が長引いています）。人の操作は不要です。", minutes)
+	}
 	return fmt.Sprintf("自動処理は続いていますが、過去 %d 分間は工程が完了していません（直近の失敗: %s）。復旧を試し続けており、人の操作は不要です。", minutes, detail)
+}
+
+// quietFor is how long the request has gone without any record being
+// written: since its last record, or since it was accepted when there is
+// none. A launch has no time limit, so this is the only word the requester
+// gets about one that runs long without failing.
+func quietFor(state chain.State, accepted, now time.Time) time.Duration {
+	last := accepted
+	for _, record := range state.History {
+		for _, at := range []time.Time{record.StartedAt, record.FinishedAt} {
+			if at.After(last) {
+				last = at
+			}
+		}
+	}
+	if last.IsZero() {
+		return 0
+	}
+	return now.Sub(last)
 }
 
 // noticeRecord is written before the comment is submitted and marked after it
@@ -411,11 +433,19 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string) err
 	if err != nil {
 		return err
 	}
-	elapsed, failure, stalled := stalledFor(state, time.Now().UTC())
-	if !stalled || elapsed <= window {
-		return nil
+	now := time.Now().UTC()
+	elapsed, failure, stalled := stalledFor(state, now)
+	if stalled && elapsed > window {
+		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)))
 	}
-	return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)))
+	var accepted time.Time
+	if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil {
+		accepted = info.ModTime().UTC()
+	}
+	if quiet := quietFor(state, accepted, now); quiet > window {
+		return n.post(ctx, stallNotice, stallNoticeText(int(quiet.Minutes()), ""))
+	}
+	return nil
 }
 
 // noticeDetail renders one failure line for a comment a person will read: the

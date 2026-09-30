@@ -643,3 +643,21 @@ func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T
 		t.Fatal("the detail was cut inside a character")
 	}
 }
+
+func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := now.Add(-100 * time.Minute)
+	if quiet := quietFor(chain.State{}, accepted, now); quiet != 100*time.Minute {
+		t.Fatalf("a request with no record is measured from its acceptance: %v", quiet)
+	}
+	state := chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: now.Add(-90 * time.Minute), FinishedAt: now.Add(-30 * time.Minute)}}}
+	if quiet := quietFor(state, accepted, now); quiet != 30*time.Minute {
+		t.Fatalf("a request with a record is measured from that record: %v", quiet)
+	}
+	if quiet := quietFor(chain.State{}, time.Time{}, now); quiet != 0 {
+		t.Fatalf("a request with nothing to measure from was measured: %v", quiet)
+	}
+	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗はなく") || strings.Contains(text, "直近の失敗") {
+		t.Fatalf("the notice without a failure names one: %q", text)
+	}
+}

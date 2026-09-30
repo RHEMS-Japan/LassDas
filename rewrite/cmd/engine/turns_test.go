@@ -89,3 +89,35 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 		t.Fatalf("announcements: %q", comments)
 	}
 }
+
+func TestARefusedTurnIsAskedAgainWithGrowingSpacingAndNeverGivenUp(t *testing.T) {
+	now := time.Now()
+	turnClock = func() time.Time { return now }
+	defer func() { turnClock = time.Now }()
+	var record turnRecord
+	if !record.due("category") {
+		t.Fatal("a turn never refused was not due")
+	}
+	if !record.refuse("category", "not now") || record.refuse("category", "not now") || !record.refuse("category", "still not") {
+		t.Fatal("a reason's novelty was misjudged")
+	}
+	if record.Refused["category"] != 3 || record.due("category") {
+		t.Fatalf("after three refusals: %+v due=%v", record, record.due("category"))
+	}
+	for refused, want := range map[int]time.Duration{1: time.Minute, 2: 2 * time.Minute, 4: 8 * time.Minute, 7: time.Hour, 40: time.Hour} {
+		if got := retryDelay(refused); got != want {
+			t.Fatalf("delay after %d refusals: %v", refused, got)
+		}
+	}
+	now = now.Add(4 * time.Minute)
+	if !record.due("category") {
+		t.Fatal("the third refusal's four minutes had passed and the turn was still not due")
+	}
+	for i := 0; i < 50; i++ {
+		record.refuse("category", "never")
+		now = now.Add(2 * time.Hour)
+	}
+	if !record.due("category") || record.Refused["category"] != 53 {
+		t.Fatalf("a turn refused many times was given up or lost count: %+v", record.Refused)
+	}
+}

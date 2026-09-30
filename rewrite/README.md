@@ -77,8 +77,9 @@ not permission to narrow the request, and passing them alone does not establish
 completion. Configuring such a command does not solve discovering missing tests.
 
 Routing and model-selection inference share a request timeout of sixty minutes
-(`timeout_minutes` on the service names another), a guard against a connection
-that never answers rather than a limit on the work,
+(`timeout_minutes` on the service names another; zero means that default, unlike
+a process's `timeout_minutes`, where zero means none), a guard against a
+connection that never answers rather than a limit on the work,
 not a task deadline or attempt limit. The former thirty-second limit discarded
 valid completions taking 35–40 seconds and repeatedly selected the same work.
 A local TLS response delayed 31 seconds now reaches the caller. Earlier parent
@@ -518,8 +519,9 @@ it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
 the requester's stop. An id left out leaves that turn alone; the runtime never
 reads or names a status. Each change is made once and recorded beside the
-request in `status.json`; a refused change is asked again on every tick for as
-long as the request lives, and the same refusal is logged once.
+request in `status.json`; a refused change is asked again for as long as the
+request lives, a minute after the first refusal and up to an hour apart after
+repeated ones, never given up, and the same refusal is logged once.
 
 ```json
 "intake": {
@@ -689,7 +691,7 @@ is how long a running request may go without a completed step before the
 requester hears about it. Absent means 90 minutes and zero switches it off. The
 window is measured from the last history entry that finished without an error,
 so any successful role output inside it keeps the request quiet. Past the
-window:
+window: A launch that runs long without failing is said the same way once nothing has been recorded for that long: no time limit ends it, so this is the requester's only word about it.
 
 > 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。復旧を試し続けており、人の操作は不要です。
 

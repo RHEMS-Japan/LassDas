@@ -53,9 +53,29 @@ type turnRecord struct {
 	// as the request lives, and the same refusal is logged once.
 	Refused map[string]int    `json:"refused,omitempty"`
 	Reasons map[string]string `json:"reasons,omitempty"`
+	// Next is when each refused turn is asked again: the spacing grows with
+	// the refusals, a minute at first and an hour at most, so a turn the
+	// tracker keeps refusing is not asked on every tick, and never given up.
+	Next map[string]time.Time `json:"next,omitempty"`
 }
 
-// refuse records one refusal and says whether its reason is new.
+// turnClock is the time source for retry spacing; tests replace it.
+var turnClock = time.Now
+
+// retryDelay is how long a turn waits after its nth refusal.
+func retryDelay(refused int) time.Duration {
+	delay := time.Minute
+	for i := 1; i < refused && delay < time.Hour; i++ {
+		delay *= 2
+	}
+	if delay > time.Hour {
+		delay = time.Hour
+	}
+	return delay
+}
+
+// refuse records one refusal, sets when the turn is asked again, and says
+// whether its reason is new.
 func (r *turnRecord) refuse(turn, reason string) bool {
 	if r.Refused == nil {
 		r.Refused = map[string]int{}
@@ -63,10 +83,20 @@ func (r *turnRecord) refuse(turn, reason string) bool {
 	if r.Reasons == nil {
 		r.Reasons = map[string]string{}
 	}
+	if r.Next == nil {
+		r.Next = map[string]time.Time{}
+	}
 	r.Refused[turn]++
+	r.Next[turn] = turnClock().Add(retryDelay(r.Refused[turn]))
 	fresh := r.Reasons[turn] != reason
 	r.Reasons[turn] = reason
 	return fresh
+}
+
+// due says whether a turn may be asked now.
+func (r turnRecord) due(turn string) bool {
+	next, refused := r.Next[turn]
+	return !refused || !turnClock().Before(next)
 }
 
 func loadTurns(directory string) turnRecord {
@@ -114,6 +144,9 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 				ids = append(ids, c.ID)
 			}
 		}
+		if !record.due("category") {
+			return
+		}
 		if err := cfg.Backlog.SetCategories(ctx, issue.Key, append(ids, id)); err != nil {
 			if record.refuse("category", err.Error()) {
 				observe("category not set, asked again each tick: " + err.Error())
@@ -145,6 +178,9 @@ func assignTurn(ctx context.Context, cfg config, issue sourceIssue, directory, w
 	if user <= 0 {
 		return
 	}
+	if !record.due("assignee") {
+		return
+	}
 	if err := cfg.Backlog.SetAssignee(ctx, issue.Key, user); err != nil {
 		if record.refuse("assignee", err.Error()) {
 			observe("assignee not handed to the " + who + ", asked again each tick: " + err.Error())
@@ -169,6 +205,9 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 		return
 	}
 	hours := float64(finished.Sub(accepted).Round(time.Minute)) / float64(time.Hour)
+	if !record.due("hours") {
+		return
+	}
 	if err := cfg.Backlog.SetActualHours(ctx, issue.Key, hours); err != nil {
 		if record.refuse("hours", err.Error()) {
 			observe("hours not recorded on the issue, asked again each tick: " + err.Error())

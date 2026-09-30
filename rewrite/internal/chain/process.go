@@ -150,6 +150,42 @@ func (p Process) timeLimit() time.Duration {
 	return 0
 }
 
+// launchContext is the context one launch runs under: bounded by the
+// process's time limit when it has one, otherwise only by the caller's.
+func (p Process) launchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if limit := p.timeLimit(); limit > 0 {
+		return context.WithTimeout(ctx, limit)
+	}
+	return context.WithCancel(ctx)
+}
+
+// keptBytes is how much of one launch's output the runtime keeps in memory
+// and in the record. A launch has no limit on its work, so its output has
+// none either; what is kept is its tail, and the live copy on disk has all.
+const keptBytes = 8 << 20
+
+// boundedBuffer keeps the last keptBytes written to it and counts the rest.
+type boundedBuffer struct {
+	buf     bytes.Buffer
+	dropped int64
+}
+
+func (b *boundedBuffer) Write(data []byte) (int, error) {
+	b.buf.Write(data)
+	if over := b.buf.Len() - keptBytes; over > 0 {
+		b.buf.Next(over)
+		b.dropped += int64(over)
+	}
+	return len(data), nil
+}
+
+func (b *boundedBuffer) String() string {
+	if b.dropped == 0 {
+		return b.buf.String()
+	}
+	return fmt.Sprintf("[the first %d bytes of this stream are not kept in the record; the live copy had them]\n", b.dropped) + b.buf.String()
+}
+
 func (p Process) run(ctx context.Context, role Role, assignment Assignment, state State) Result {
 	result := Result{Role: role.Name, Speaker: p.Name, Instruction: assignment.Instruction, StartedAt: time.Now().UTC()}
 	if len(p.Command) == 0 {
@@ -206,11 +242,8 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	for _, name := range names {
 		environment = append(environment, name+"="+env[name])
 	}
-	if limit := p.timeLimit(); limit > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, limit)
-		defer cancel()
-	}
+	ctx, cancel := p.launchContext(ctx)
+	defer cancel()
 	prompt := processPrompt(role, p, assignment, state)
 	args := append([]string(nil), p.Command[1:]...)
 	if p.PromptArgument {
@@ -221,7 +254,7 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	if !p.PromptArgument {
 		command.Stdin = strings.NewReader(prompt)
 	}
-	var output, diagnostics bytes.Buffer
+	var output, diagnostics boundedBuffer
 	command.Stdout, command.Stderr = &output, &diagnostics
 	live, liveNote := openLive(p, role, assignment, env, secrets)
 	if live != nil {

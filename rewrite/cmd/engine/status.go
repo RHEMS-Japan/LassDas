@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // statusConfig names, by tracker status id, where the runtime moves an
@@ -63,6 +64,8 @@ type statusRecord struct {
 	ID      int64  `json:"id"`
 	Refused int    `json:"refused,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// Next is when the refused move is asked again; see turnRecord.Next.
+	Next time.Time `json:"next,omitempty"`
 }
 
 // applyStatus moves the issue to the status configured for this turn of the
@@ -85,12 +88,16 @@ func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, 
 	if last.Kind != kind || last.ID != id {
 		last = statusRecord{Kind: kind, ID: id}
 	}
+	if last.Refused > 0 && turnClock().Before(last.Next) {
+		return
+	}
 	if err := cfg.Backlog.SetStatus(ctx, issue.Key, id); err != nil {
 		if last.Reason != err.Error() {
-			observe("status not set to " + kind + ", asked again each tick: " + err.Error())
+			observe("status not set to " + kind + ", asked again later: " + err.Error())
 		}
 		last.Refused++
 		last.Reason = err.Error()
+		last.Next = turnClock().Add(retryDelay(last.Refused))
 		if data, err := json.Marshal(last); err == nil {
 			writeRuntimeFile(path, data)
 		}
