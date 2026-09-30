@@ -62,11 +62,13 @@ type statusRecord struct {
 	Kind    string `json:"kind"`
 	ID      int64  `json:"id"`
 	Refused int    `json:"refused,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // applyStatus moves the issue to the status configured for this turn of the
 // work, once per turn. A turn without a configured id changes nothing. A
-// tracker that refuses is logged and asked again on the next tick.
+// tracker that refuses is asked again on every tick for as long as the
+// request lives; the same refusal is logged once.
 func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, kind string, observe func(string)) {
 	id := cfg.Intake.Statuses.id(kind)
 	if id == 0 {
@@ -79,17 +81,16 @@ func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, 
 			return
 		}
 	}
-	// Refusals are counted per turn: a new turn starts from zero, so a
-	// tracker that was down for a while does not freeze the issue for good.
+	// Refusals are counted per turn: a new turn starts from zero.
 	if last.Kind != kind || last.ID != id {
 		last = statusRecord{Kind: kind, ID: id}
 	}
-	if last.Refused >= turnAttempts {
-		return
-	}
 	if err := cfg.Backlog.SetStatus(ctx, issue.Key, id); err != nil {
-		observe("status not set to " + kind + ": " + err.Error())
+		if last.Reason != err.Error() {
+			observe("status not set to " + kind + ", asked again each tick: " + err.Error())
+		}
 		last.Refused++
+		last.Reason = err.Error()
 		if data, err := json.Marshal(last); err == nil {
 			writeRuntimeFile(path, data)
 		}

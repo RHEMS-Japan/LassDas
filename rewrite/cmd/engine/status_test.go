@@ -64,13 +64,15 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	if got != "EXAMPLE-51=1001 EXAMPLE-51=1002 EXAMPLE-51=1001 EXAMPLE-51=3" {
 		t.Fatalf("moves made: %s", got)
 	}
-	// Refusals are counted per turn: five on one turn do not freeze the next.
-	refuse = true
-	refusals := 0
-	for i := 0; i < turnAttempts+2; i++ {
+	// A refused turn is asked again on every tick, and the same refusal is
+	// logged once; nothing freezes the next turn.
+	logged := strings.Count(log.String(), "status not set to stopped")
+	for i := 0; i < 7; i++ {
 		refuse = true
 		applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
-		refusals++
+	}
+	if strings.Count(log.String(), "status not set to stopped") != logged+1 {
+		t.Fatalf("the same refusal was logged more than once or not at all:\n%s", log.String())
 	}
 	mu.Lock()
 	before := len(set)
@@ -80,7 +82,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	mu.Lock()
 	if len(set) != before+1 || set[len(set)-1] != "EXAMPLE-51=1002" {
 		mu.Unlock()
-		t.Fatalf("a turn refused five times froze the next turn: %v", set)
+		t.Fatalf("a refused turn froze the next turn: %v", set)
 	}
 	mu.Unlock()
 	// A turn without a configured id changes nothing, as does no configuration.

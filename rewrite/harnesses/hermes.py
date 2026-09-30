@@ -129,7 +129,10 @@ def main():
             # relay. Native URL heuristics can omit reasoning for a relay host;
             # use the SDK's request override so the chosen setting reaches it.
             request_overrides={"extra_body": {"reasoning": reasoning}},
-            max_tokens=int(os.environ.get("NATIVE_MAX_TOKENS", "6000")),
+            max_tokens=int(os.environ.get("NATIVE_MAX_TOKENS", "32000")),
+            # The native agent stops after a number of model calls; the
+            # operator may set one, and none is set otherwise.
+            max_iterations=int(os.environ.get("NATIVE_MAX_TURNS", "0")) or 1_000_000_000,
             skip_context_files=True, skip_memory=True, skip_background_review=True,
         )
 

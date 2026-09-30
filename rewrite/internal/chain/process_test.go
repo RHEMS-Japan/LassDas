@@ -163,6 +163,22 @@ func TestProcessKeepsFailureReasonAndOnlyReceivesNamedCredentials(t *testing.T) 
 	}
 }
 
+func TestOnlyTheOperatorsMinutesBoundALaunch(t *testing.T) {
+	if got := (Process{}).timeLimit(); got != 0 {
+		t.Fatalf("a launch has a limit nobody configured: %v", got)
+	}
+	if got := (Process{TimeoutMinutes: 240}).timeLimit(); got != 4*time.Hour {
+		t.Fatalf("operator minutes ignored: %v", got)
+	}
+	if got := (Process{TimeoutMinutes: 240, Timeout: time.Second}).timeLimit(); got != time.Second {
+		t.Fatalf("a caller's duration lost to the operator's minutes: %v", got)
+	}
+	var decoded Process
+	if err := json.Unmarshal([]byte(`{"name":"p","command":["true"],"timeout_minutes":90}`), &decoded); err != nil || decoded.timeLimit() != 90*time.Minute {
+		t.Fatalf("timeout_minutes not read from configuration: %v %v", decoded.timeLimit(), err)
+	}
+}
+
 func TestProcessTimeoutReturnsAnObservationAndStopIsPrompt(t *testing.T) {
 	process := Process{Name: "worker", Command: []string{"/bin/sh", "-c", "sleep 60"}, Timeout: 30 * time.Millisecond}
 	started := time.Now()

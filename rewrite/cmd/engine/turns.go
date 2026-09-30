@@ -48,22 +48,26 @@ type turnRecord struct {
 	Category bool   `json:"category,omitempty"`
 	Assignee string `json:"assignee,omitempty"`
 	Hours    bool   `json:"hours,omitempty"`
-	// Refused counts, per turn, the tracker's refusals; after turnAttempts
-	// of them the turn is left alone, so a field the project does not have
-	// is not asked for on every tick for as long as the queue lives.
-	Refused map[string]int `json:"refused,omitempty"`
+	// Refused counts, per turn, the tracker's refusals, and Reasons keeps
+	// the last one: a refused turn is asked again on every tick for as long
+	// as the request lives, and the same refusal is logged once.
+	Refused map[string]int    `json:"refused,omitempty"`
+	Reasons map[string]string `json:"reasons,omitempty"`
 }
 
-const turnAttempts = 5
-
-func (r *turnRecord) refuse(turn string) {
+// refuse records one refusal and says whether its reason is new.
+func (r *turnRecord) refuse(turn, reason string) bool {
 	if r.Refused == nil {
 		r.Refused = map[string]int{}
 	}
+	if r.Reasons == nil {
+		r.Reasons = map[string]string{}
+	}
 	r.Refused[turn]++
+	fresh := r.Reasons[turn] != reason
+	r.Reasons[turn] = reason
+	return fresh
 }
-
-func (r turnRecord) givenUp(turn string) bool { return r.Refused[turn] >= turnAttempts }
 
 func loadTurns(directory string) turnRecord {
 	var record turnRecord
@@ -110,12 +114,10 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 				ids = append(ids, c.ID)
 			}
 		}
-		if record.givenUp("category") {
-			return
-		}
 		if err := cfg.Backlog.SetCategories(ctx, issue.Key, append(ids, id)); err != nil {
-			observe("category not set: " + err.Error())
-			record.refuse("category")
+			if record.refuse("category", err.Error()) {
+				observe("category not set, asked again each tick: " + err.Error())
+			}
 			saveTurns(directory, record)
 		} else {
 			record.Category = true
@@ -143,12 +145,10 @@ func assignTurn(ctx context.Context, cfg config, issue sourceIssue, directory, w
 	if user <= 0 {
 		return
 	}
-	if record.givenUp("assignee") {
-		return
-	}
 	if err := cfg.Backlog.SetAssignee(ctx, issue.Key, user); err != nil {
-		observe("assignee not handed to the " + who + ": " + err.Error())
-		record.refuse("assignee")
+		if record.refuse("assignee", err.Error()) {
+			observe("assignee not handed to the " + who + ", asked again each tick: " + err.Error())
+		}
 		saveTurns(directory, record)
 		return
 	}
@@ -169,12 +169,10 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 		return
 	}
 	hours := float64(finished.Sub(accepted).Round(time.Minute)) / float64(time.Hour)
-	if record.givenUp("hours") {
-		return
-	}
 	if err := cfg.Backlog.SetActualHours(ctx, issue.Key, hours); err != nil {
-		observe("hours not recorded on the issue: " + err.Error())
-		record.refuse("hours")
+		if record.refuse("hours", err.Error()) {
+			observe("hours not recorded on the issue, asked again each tick: " + err.Error())
+		}
 		saveTurns(directory, record)
 		return
 	}

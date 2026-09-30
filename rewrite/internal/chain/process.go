@@ -34,6 +34,11 @@ type Process struct {
 	// endpoint id to the existing harness via this environment variable.
 	ModelEnv string        `json:"model_env,omitempty"`
 	Timeout  time.Duration `json:"-"`
+	// TimeoutMinutes is the operator's limit for one launch of this process,
+	// in minutes. Unset, a launch runs until it returns or is stopped; a
+	// launch that reaches a configured limit is stopped and recorded as such,
+	// and the chain decides what follows as for any failure.
+	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
 	// PromptArgument is for harnesses taking their instruction as an argument.
 	// Otherwise stdin carries it. Neither path goes through a shell expansion.
 	PromptArgument bool `json:"prompt_argument,omitempty"`
@@ -133,6 +138,18 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	return results
 }
 
+// timeLimit is how long one launch of this process may run: the caller's
+// duration when set, else the operator's minutes, else without limit (zero).
+func (p Process) timeLimit() time.Duration {
+	if p.Timeout > 0 {
+		return p.Timeout
+	}
+	if p.TimeoutMinutes > 0 {
+		return time.Duration(p.TimeoutMinutes) * time.Minute
+	}
+	return 0
+}
+
 func (p Process) run(ctx context.Context, role Role, assignment Assignment, state State) Result {
 	result := Result{Role: role.Name, Speaker: p.Name, Instruction: assignment.Instruction, StartedAt: time.Now().UTC()}
 	if len(p.Command) == 0 {
@@ -189,12 +206,11 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	for _, name := range names {
 		environment = append(environment, name+"="+env[name])
 	}
-	timeout := p.Timeout
-	if timeout <= 0 {
-		timeout = time.Hour
+	if limit := p.timeLimit(); limit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	prompt := processPrompt(role, p, assignment, state)
 	args := append([]string(nil), p.Command[1:]...)
 	if p.PromptArgument {

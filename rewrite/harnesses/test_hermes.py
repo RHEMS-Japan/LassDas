@@ -112,6 +112,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(config["enabled_toolsets"], ["terminal", "file"])
         self.assertEqual(config["model"], "maker/test")
         self.assertEqual(config["max_tokens"], 7000)
+        self.assertEqual(config["max_iterations"], 1_000_000_000)
         self.assertEqual(config["reasoning_config"], {"effort": "high"})
         self.assertTrue(config["skip_background_review"])
 
@@ -171,6 +172,12 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertEqual(code, 0)
         self.assertEqual(out, prose)
+
+    def test_the_operator_may_cap_the_native_agents_model_calls(self):
+        events, out, err, code, failure = self.run_bridge({"final_response": "report"}, extra_env={"NATIVE_MAX_TURNS": "7"})
+        config = dict(next(payload for name, payload in events if name == "configuration"))
+        self.assertEqual(config["max_iterations"], 7)
+        self.assertEqual(code, 0)
 
     def test_a_run_that_ends_without_a_report_is_a_failure(self):
         for result in ({"final_response": ""}, {"final_response": "  \n"}, {"final_response": None}):

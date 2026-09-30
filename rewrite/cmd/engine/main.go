@@ -110,6 +110,11 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		if role.Name == "" || role.Name == "done" || len(role.Processes) == 0 {
 			return errors.New("a configured role needs a name and processes")
 		}
+		for _, process := range role.Processes {
+			if process.TimeoutMinutes < 0 {
+				return errors.New("a process's timeout_minutes must not be negative")
+			}
+		}
 		if _, exists := roles[role.Name]; exists {
 			return errors.New("two roles have the same name")
 		}
