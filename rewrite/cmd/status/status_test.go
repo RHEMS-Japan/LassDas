@@ -987,8 +987,27 @@ func TestAStoppedRequestSaysSoAndWhetherItsReportWentOut(t *testing.T) {
 		t.Error("a request stopped while waiting still says it waits for the requester")
 	}
 	_, board := get(t, ts, "/")
-	expectAll(t, board, `<article class="card delivered" data-key="EXAMPLE-43">`, `<article class="card attention" data-key="EXAMPLE-44">`, "the saved stop instruction is unreadable; the work is held")
+	expectAll(t, board, `<article class="card delivered" data-key="EXAMPLE-43">`, `<article class="card attention" data-key="EXAMPLE-44">`, "the saved stop instruction is unreadable; the work is held",
+		"held: the saved stop instruction is unreadable")
 	if !strings.Contains(inColumn(board, "done"), `data-key="EXAMPLE-43"`) {
 		t.Error("a request delivered before its stop left the delivered column")
+	}
+	if strings.Contains(inColumn(board, "elicit"), "retrying after a failure") {
+		t.Error("a held request still says it is retrying")
+	}
+	// The request page says the same as the card, and a delivered request
+	// with an unreadable stop record stays delivered.
+	_, held := get(t, ts, "/jobs/44")
+	if !strings.Contains(held, "the saved stop instruction is unreadable; the work is held") || strings.Contains(held, "retrying after a failure") {
+		t.Error("the request page does not say the work is held for an unreadable stop record")
+	}
+	writeJob(t, root, "45", chain.State{Done: true, Step: "implement", Workflow: flow,
+		History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started}}})
+	if err := os.WriteFile(filepath.Join(root, "jobs", "45", "stop-request.json"), []byte(`{"id":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, again := get(t, ts, "/")
+	if !strings.Contains(again, `<article class="card delivered" data-key="EXAMPLE-45">`) || strings.Contains(inColumn(again, "done"), "the work is held") {
+		t.Error("a delivered request with an unreadable stop record is not left delivered")
 	}
 }

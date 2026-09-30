@@ -834,8 +834,9 @@ func (j *job) derive(now time.Time) {
 	// A delivered request stays delivered: a stop after that changed nothing.
 	// A stop record the runtime cannot read holds the work, so it needs one.
 	switch {
-	case j.StopBroken:
+	case j.StopBroken && (j.State == nil || !j.State.Done):
 		j.Lane, j.Attention = "attention", "the saved stop instruction is unreadable; the work is held"
+		j.Status = "held: the saved stop instruction is unreadable"
 	case j.Stopped && (j.State == nil || !j.State.Done):
 		j.Lane, j.Attention = "stopped", ""
 		j.Status = "stopped by the requester; report pending"
@@ -1439,6 +1440,7 @@ var japanese = map[string]string{
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "none": "なし",
 	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
 	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
+	"held: the saved stop instruction is unreadable":             "保留中: 保存された停止指示が読めません",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
