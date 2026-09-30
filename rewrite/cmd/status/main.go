@@ -220,6 +220,7 @@ type job struct {
 	Stopped     bool
 	Reported    bool
 	StopBroken  bool
+	NoRecord    bool
 	StageIndex  int
 	StageCount  int
 	Model       string
@@ -241,7 +242,7 @@ type lane struct {
 	Count int
 }
 
-var laneOrder = []lane{{Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
+var laneOrder = []lane{{Key: "queued", Title: "Queued"}, {Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
 	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}, {Key: "stopped", Title: "Stopped"}}
 
 func lanes(jobs []*job) []lane {
@@ -277,6 +278,11 @@ func columns(stages []string, jobs []*job) []column {
 		place := j.Stage
 		if place == "" {
 			place = j.Current
+		}
+		// A queued request has no record of its own to place it by; it will
+		// begin at the board's first stage.
+		if place == "" && j.Lane == "queued" && len(stages) > 0 {
+			place = stages[0]
 		}
 		switch at, known := index[place]; {
 		case j.State != nil && j.State.Done:
@@ -477,7 +483,10 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		j.Request = string(raw)
 	}
 	historyPath := filepath.Join(dir, "run", "history.json")
-	if raw, err := os.ReadFile(historyPath); err != nil {
+	if raw, err := os.ReadFile(historyPath); errors.Is(err, os.ErrNotExist) {
+		// Accepted on this tick; the runtime writes the record on the next.
+		j.NoRecord = true
+	} else if err != nil {
 		note("run/history.json could not be read: %v", err)
 	} else {
 		var state chain.State
@@ -783,7 +792,9 @@ func (j *job) derive(now time.Time) {
 			}
 		}
 	} else {
-		j.Status = "no run record yet"
+		if !j.NoRecord || j.Key == "" {
+			j.Status = "no run record yet"
+		}
 	}
 	if j.Started.IsZero() {
 		j.Started = j.Updated
@@ -794,6 +805,11 @@ func (j *job) derive(now time.Time) {
 	j.Lane = "running"
 	switch state := j.State; {
 	case state == nil:
+		// Only a request the runtime accepted, with its issue on disk, is
+		// queued; a directory left by an interrupted acceptance is not.
+		if j.NoRecord && j.Key != "" {
+			j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
+		}
 		for _, note := range j.Notes {
 			if strings.Contains(note, "history.json could not be decoded") {
 				j.Lane, j.Attention = "attention", note
@@ -803,6 +819,19 @@ func (j *job) derive(now time.Time) {
 		j.Lane = "delivered"
 	case state.Waiting:
 		j.Lane = "awaiting"
+	case state.Step == "" && len(state.History) == 0 && state.Pending == nil && len(j.Live) == 0:
+		// Nothing has been launched. The record written at acceptance holds
+		// no run definition; the run writes it as it starts, before it
+		// chooses its first stage. So a record without one is a request
+		// waiting for a free execution slot, and a record with one is a
+		// request that has the slot and is choosing where to begin.
+		if state.Workflow == nil {
+			j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
+		} else if len(state.Workflow.Stages) > 0 {
+			j.Status, j.Stage = "starting: choosing the first stage", state.Workflow.Stages[0].Name
+		} else {
+			j.Status = "starting: choosing the first role"
+		}
 	default:
 		var last time.Time
 		if n := len(state.History); n > 0 {
@@ -1450,7 +1479,8 @@ var japanese = map[string]string{
 	"ticket engine status": "自動処理の状態", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
-	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "none": "なし",
+	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "Queued": "順番待ち", "none": "なし",
+	"queued: waiting for a free execution slot": "順番待ち (実行枠が空くのを待っています)", "starting: choosing the first stage": "開始中 (最初の工程を決めています)", "starting: choosing the first role": "開始中 (最初の担当を決めています)",
 	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
 	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
 	"held: the saved stop instruction is unreadable":             "保留中: 保存された停止指示が読めません",

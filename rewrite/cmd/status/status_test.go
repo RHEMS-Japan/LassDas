@@ -1161,3 +1161,64 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 		t.Error("a worker's own failure text was replaced by a dictionary word on the Japanese page")
 	}
 }
+
+func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testing.T) {
+	root := fixtureQueue(t)
+	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}}
+	// The record written at acceptance holds no run definition (70, 72);
+	// a run that has the slot writes its definition before choosing its
+	// first stage (71).
+	writeJob(t, root, "70", chain.State{})
+	writeJob(t, root, "71", chain.State{Workflow: flow})
+	writeJob(t, root, "72", chain.State{})
+	// A freely routed run saves a definition without stages as it starts:
+	// it holds the slot and is not queued, and has no first stage to sit at.
+	writeJob(t, root, "73", chain.State{Workflow: &chain.Workflow{Start: []string{"elicit"}, After: map[string][]string{"elicit": {"work"}}}})
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `Queued <b>2</b>`, `Running <b>3</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, `<article class="card running" data-key="EXAMPLE-71">`, `<article class="card running" data-key="EXAMPLE-73">`,
+		"queued: waiting for a free execution slot", "starting: choosing the first stage")
+	if !strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-73"`) || !strings.Contains(body, "starting: choosing the first role") {
+		t.Error("a freely routed run that is starting is not in the other column, or is said to choose a stage")
+	}
+	// Accepted on this tick, before the runtime has written any record:
+	// only issue.json exists. That is queued too, not "no run record yet".
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "74"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "jobs", "74", "issue.json"), []byte(`{"id":74,"issueKey":"EXAMPLE-74","summary":"request 74"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, fresh := get(t, ts, "/")
+	expectAll(t, fresh, `Queued <b>3</b>`, `<article class="card queued" data-key="EXAMPLE-74">`)
+	if strings.Contains(fresh, "no run record yet") || !strings.Contains(inColumn(fresh, "elicit"), `data-key="EXAMPLE-74"`) {
+		t.Error("a request accepted this tick is called \"no run record yet\" or left out of the first column")
+	}
+	// A directory left by an interrupted acceptance, with no issue in it, is
+	// not a queued request.
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "75"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, empty := get(t, ts, "/")
+	if strings.Contains(empty, `<article class="card queued" data-key="">`) || !strings.Contains(empty, `Queued <b>3</b>`) || strings.Contains(empty, `<span class="badge running"></span>`) {
+		t.Error("an empty request directory is shown as queued, or with an empty badge")
+	}
+	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
+		t.Error("a queued or starting request is not shown at the first stage")
+	}
+	if strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-70"`) || strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-72"`) {
+		t.Error("a queued request fell into the other column")
+	}
+	if strings.Contains(inColumn(body, "elicit"), "between steps") {
+		t.Error("a queued request is called between steps")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "順番待ち <b>3</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
+}
