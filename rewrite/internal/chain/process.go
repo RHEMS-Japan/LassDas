@@ -335,15 +335,6 @@ const promptRecords = 60
 // state of the failure and not the first of many identical copies; only the
 // most recent records travel, with a note of how many came before. The
 // record itself keeps everything.
-// CollapsedHistory is the record as a role is shown it: identical failures
-// in a row become one entry that says how often it repeated, and only the
-// latest records are kept. A report about a stopped request reads the same
-// shape, so a request that failed for hours does not hand its reporter every
-// repetition.
-func CollapsedHistory(history []Result) []Result {
-	return promptHistory(history)
-}
-
 func promptHistory(history []Result) []Result {
 	var collapsed []Result
 	counts := map[int]int{}

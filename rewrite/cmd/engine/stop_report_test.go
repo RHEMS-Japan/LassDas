@@ -440,4 +440,20 @@ func TestTheStoppedReporterReadsTheCollapsedRecord(t *testing.T) {
 	if !strings.Contains(string(raw), "repeated 40 times in a row") {
 		t.Fatalf("the repetition is not said: %s", raw)
 	}
+	// A runtime note that says something new inside the repetition, such as
+	// a receipt read back from a process that still had an effect, is kept.
+	withReceipt := append([]chain.Result{}, history[:20]...)
+	withReceipt = append(withReceipt, chain.Result{Role: "elicit", Speaker: "elicit-process", Model: "m", Error: "fork/exec elicit: no such file or directory"},
+		chain.Result{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.\nReceipt: pull request 12 opened at the destination"})
+	withReceipt = append(withReceipt, history[20:]...)
+	raw, err = stopObservations(chain.State{Request: "original", History: withReceipt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "pull request 12 opened") {
+		t.Fatalf("a receipt inside the repetition was dropped: %s", raw)
+	}
+	if err := json.Unmarshal(raw, &observed); err != nil || len(observed.History) > 6 {
+		t.Fatalf("the record with a receipt was not collapsed: %v, %d entries", err, len(observed.History))
+	}
 }

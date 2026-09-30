@@ -50,12 +50,54 @@ func stoppedReportDone(directory string) (bool, error) {
 // executable. The original run and saved stop are never cleared or marked done.
 // OS/tool permissions still belong to the configured reporting harness; prose
 // instructions do not make a privileged command a read-only sandbox.
-// stopObservations renders the stopped request's record for its reporter:
-// the same collapsed shape a role reads, so a request that failed the same
-// way for hours does not hand over every repetition.
+// reportRecords bounds how many records the stopped request's reporter reads.
+const reportRecords = 60
+
+// stopObservations renders the stopped request's record for its reporter. A
+// launch that failed the same way over and over becomes one entry that says
+// how often it repeated, but every runtime note that says something new, such
+// as a receipt read back from a process that still had an effect, is kept:
+// the report exists to name effects that may already exist.
 func stopObservations(state chain.State) ([]byte, error) {
-	state.History = chain.CollapsedHistory(state.History)
+	state.History = reportHistory(state.History)
 	return json.MarshalIndent(state, "", "  ")
+}
+
+func reportHistory(history []chain.Result) []chain.Result {
+	var kept []chain.Result
+	counts := map[int]int{}
+	run, lastNote := -1, ""
+	for _, result := range history {
+		failure := result.Error != "" && result.Speaker != "runtime"
+		if failure && run >= 0 && kept[run].Role == result.Role && kept[run].Speaker == result.Speaker && kept[run].Error == result.Error {
+			kept[run] = result
+			counts[run]++
+			continue
+		}
+		if result.Speaker == "runtime" && run >= 0 && result.Role == kept[run].Role && result.Error == "" {
+			if note := result.Output; note == lastNote {
+				continue
+			} else {
+				lastNote = note
+			}
+			kept = append(kept, result)
+			continue
+		}
+		kept = append(kept, result)
+		run, lastNote = -1, ""
+		if failure {
+			run = len(kept) - 1
+		}
+	}
+	for i, count := range counts {
+		kept[i].Error = fmt.Sprintf("(this failure repeated %d times in a row; this is the latest)\n%s", count+1, kept[i].Error)
+	}
+	if len(kept) > reportRecords {
+		omitted := len(kept) - reportRecords
+		kept = append([]chain.Result{{Role: "runtime", Speaker: "runtime",
+			Output: fmt.Sprintf("%d earlier records are in the request's history and not repeated here.", omitted)}}, kept[omitted:]...)
+	}
+	return kept
 }
 
 func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, slots chan struct{}, log io.Writer) error {
@@ -126,14 +168,12 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	// This is a separate report-only task after the user's stop, not another
 	// step in the stopped delivery workflow. Keep only the reporting role and
 	// its existing recovery loop; never restart the original connections. An
-	// ordered run has no connections to keep either, so the report falls back
-	// to the same decision service that run would have asked at its entrance.
+	// ordered run has no connections to keep either; its report runs the one
+	// role until it returns, and no decision service reads the record, whose
+	// size is whatever the stopped work left behind.
 	bound.Workflow = nil
 	if bound.Router.Mode == "stages" {
-		bound.Router.Mode = "llm"
-		if bound.Router.Decision.Model != "" {
-			bound.Router.Mode = "jev"
-		}
+		bound.Router.Mode = "single"
 	}
 	bound.Instructions = stopReportingInstructions
 	encoded, err := json.Marshal(bound)

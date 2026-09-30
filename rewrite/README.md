@@ -541,7 +541,11 @@ To send a stop report, set `intake.stop_report_role` to an existing configured
 reporting role. An unknown role is rejected before intake. The saved stop holds
 the original work first; then only that role is available to the existing
 router/engine. The full accepted request, native stop comment and stopped-work
-history reach it as context. No new model or working-answer format is required.
+history reach it as context; a launch that failed the same way over and over
+is one entry there, saying how often it repeated, so a long record stays
+readable. In an ordered run (`router.mode: "stages"`) the report runs that one
+role until it returns without a process error, and no decision service reads
+the stopped record. No new model or working-answer format is required.
 Without this operator setting, a stop is logged locally but not reported to the
 tracker. Use a reporting harness restricted to observation and the assigned
 issue's comments; merely naming a broadly privileged harness `report` does not

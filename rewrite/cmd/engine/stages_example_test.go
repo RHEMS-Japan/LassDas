@@ -527,8 +527,8 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 }
 
 // A stop from the requester still wins over an ordered run. The stopped report
-// is not a stage, so it runs on the configured decision service with no run to
-// walk, and the stopped request itself stays untouched and unfinished.
+// is not a stage and asks no decision service: it runs its one role until that
+// role returns, and the stopped request itself stays untouched and unfinished.
 func TestStoppedOrderedRunReportsWithoutWalkingItsStages(t *testing.T) {
 	cfg := stagesFixtureConfig(t)
 	var mu sync.Mutex
@@ -613,7 +613,7 @@ func TestStoppedOrderedRunReportsWithoutWalkingItsStages(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if posts != 1 || routes != 2 {
+	if posts != 1 || routes != 0 {
 		t.Fatalf("stopped-report posts=%d routes=%d", posts, routes)
 	}
 }
