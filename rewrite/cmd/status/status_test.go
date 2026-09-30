@@ -966,4 +966,29 @@ func TestAStoppedRequestSaysSoAndWhetherItsReportWentOut(t *testing.T) {
 	if !strings.Contains(string(japanese), "依頼者が停止。報告済み") {
 		t.Error("the Japanese request page does not say the request was stopped and reported")
 	}
+	// Stopped while waiting on a question: the page does not also say it
+	// waits. Stopped after delivery: delivered stands. A stop record the
+	// runtime cannot read holds the work and needs a person.
+	writeJob(t, root, "42", chain.State{Waiting: true, Step: "ask_requester", Workflow: flow,
+		History: []chain.Result{{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started}, {Role: "ask_requester", Speaker: "ask-process", StartedAt: started, FinishedAt: started}}})
+	writeJob(t, root, "43", chain.State{Done: true, Step: "implement", Workflow: flow,
+		History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started}}})
+	writeJob(t, root, "44", chain.State{Step: "elicit", Workflow: flow, History: failing})
+	for _, id := range []string{"42", "43"} {
+		if err := os.WriteFile(filepath.Join(root, "jobs", id, "stop-request.json"), []byte(`{"id":56,"content":"停止"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "jobs", "44", "stop-request.json"), []byte(`{"id":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, page := get(t, ts, "/jobs/42")
+	if strings.Count(page, `class="badge awaiting"`) != 0 || !strings.Contains(page, "stopped by the requester; report pending") {
+		t.Error("a request stopped while waiting still says it waits for the requester")
+	}
+	_, board := get(t, ts, "/")
+	expectAll(t, board, `<article class="card delivered" data-key="EXAMPLE-43">`, `<article class="card attention" data-key="EXAMPLE-44">`, "the saved stop instruction is unreadable; the work is held")
+	if !strings.Contains(inColumn(board, "done"), `data-key="EXAMPLE-43"`) {
+		t.Error("a request delivered before its stop left the delivered column")
+	}
 }

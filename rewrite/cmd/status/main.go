@@ -217,6 +217,7 @@ type job struct {
 	Failure    string
 	Stopped    bool
 	Reported   bool
+	StopBroken bool
 	StageIndex int
 	StageCount int
 	Model      string
@@ -300,18 +301,23 @@ func columns(stages []string, jobs []*job) []column {
 // stopState reads what the runtime leaves for a request the requester
 // stopped: the saved instruction, and the report's own record once the
 // report has been posted and read back.
-func stopState(dir string) (stopped, reported bool) {
-	if _, err := os.Stat(filepath.Join(dir, "stop-request.json")); err != nil {
-		return false, false
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "stop-report", "history.json"))
+func stopState(dir string) (stopped, reported, broken bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, "stop-request.json"))
 	if err != nil {
-		return true, false
+		return false, false, false
+	}
+	var instruction map[string]any
+	if json.Unmarshal(raw, &instruction) != nil || instruction == nil {
+		return false, false, true
+	}
+	raw, err = os.ReadFile(filepath.Join(dir, "stop-report", "history.json"))
+	if err != nil {
+		return true, false, false
 	}
 	var report struct {
 		Done bool `json:"done"`
 	}
-	return true, json.Unmarshal(raw, &report) == nil && report.Done
+	return true, json.Unmarshal(raw, &report) == nil && report.Done, false
 }
 
 func firstLine(text string) string {
@@ -490,7 +496,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		}
 		touch(historyPath)
 	}
-	j.Stopped, j.Reported = stopState(dir)
+	j.Stopped, j.Reported, j.StopBroken = stopState(dir)
 	if !detail {
 		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
 			var log struct {
@@ -825,7 +831,12 @@ func (j *job) derive(now time.Time) {
 	}
 	// A request the requester stopped is over: nothing runs, nothing needs a
 	// person, and the only thing left to say is whether its report went out.
-	if j.Stopped {
+	// A delivered request stays delivered: a stop after that changed nothing.
+	// A stop record the runtime cannot read holds the work, so it needs one.
+	switch {
+	case j.StopBroken:
+		j.Lane, j.Attention = "attention", "the saved stop instruction is unreadable; the work is held"
+	case j.Stopped && (j.State == nil || !j.State.Done):
 		j.Lane, j.Attention = "stopped", ""
 		j.Status = "stopped by the requester; report pending"
 		if j.Reported {
@@ -1427,6 +1438,7 @@ var japanese = map[string]string{
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "none": "なし",
 	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
+	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
