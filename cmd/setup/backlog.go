@@ -174,10 +174,10 @@ func provisionTracker(state *State) error {
 	if o.StatusRunning, err = ensureStatus("自動処理中", "#3b9dbd"); err != nil {
 		return err
 	}
-	if o.StatusWaiting, err = ensureStatus("回答待ち", "#eda62a"); err != nil {
+	if o.StatusWaiting, err = ensureStatus("要件定義中", "#eda62a"); err != nil {
 		return err
 	}
-	stepOK(fmt.Sprintf("ボード列「自動処理中」(%d)・「回答待ち」(%d)", o.StatusRunning, o.StatusWaiting))
+	stepOK(fmt.Sprintf("ボード列「自動処理中」(%d)・「要件定義中」(%d)", o.StatusRunning, o.StatusWaiting))
 
 	// The gate IDs reach the hook before the webhook starts feeding it, so
 	// not even a moment of uncategorized enqueue exists.

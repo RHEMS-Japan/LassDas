@@ -38,16 +38,34 @@ type intakeConfig struct {
 	ModelCreditURL string `json:"model_credit_url,omitempty"`
 	// StallNoticeMinutes is how long a request may go without completing a step
 	// before the requester is told. Absent means 90 minutes; zero says nothing.
-	StallNoticeMinutes *int         `json:"stall_notice_minutes,omitempty"`
-	Client             *http.Client `json:"-"`
+	StallNoticeMinutes *int `json:"stall_notice_minutes,omitempty"`
+	// Statuses names, by id, where the issue moves at each turn of the work.
+	Statuses *statusConfig `json:"statuses,omitempty"`
+	// CategoryOnAccept is added to an accepted issue, so the tracker's own
+	// board shows which requests the runtime handles.
+	CategoryOnAccept int64 `json:"category_on_accept,omitempty"`
+	// Assign hands the issue to the requester while a question or the result
+	// waits for them, and back to the runtime's own account while it works,
+	// and records the hours the work took.
+	Assign bool `json:"assign,omitempty"`
+	// StatusPage is where the status page serves request pages, so the
+	// acceptance comment can point at this request's own.
+	StatusPage string `json:"status_page,omitempty"`
+	// Announce posts the runtime's own fixed comments when a request is
+	// accepted, when its work starts and when it resumes after an answer, and
+	// the operator's sentence for a stage that announces itself. Off, the
+	// runtime posts only its notices.
+	Announce bool         `json:"announce,omitempty"`
+	Client   *http.Client `json:"-"`
 }
 
 type sourceIssue struct {
-	ID        int64              `json:"id"`
-	Key       string             `json:"issueKey"`
-	ProjectID int64              `json:"projectId"`
-	Created   time.Time          `json:"created"`
-	Creator   struct{ ID int64 } `json:"createdUser"`
+	ID        int64                `json:"id"`
+	Key       string               `json:"issueKey"`
+	ProjectID int64                `json:"projectId"`
+	Created   time.Time            `json:"created"`
+	Creator   struct{ ID int64 }   `json:"createdUser"`
+	Category  []struct{ ID int64 } `json:"category"`
 }
 
 type serialLog struct {
@@ -138,6 +156,16 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 // tell it which already-run engines chose done. Pending histories are resumed
 // by the same engine; the collector does not make a new completion judgment.
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
+	if cfg.Intake != nil && cfg.Intake.Assign {
+		// The runtime's own account, to hand an issue back to itself. Without
+		// it the work still runs; only the hand-overs wait for a later start.
+		if me, err := cfg.Backlog.Myself(ctx); err != nil {
+			fmt.Fprintln(log, "the runtime's own tracker account is unknown; issues are not handed over either way: "+err.Error())
+			cfg.Intake.Assign = false
+		} else {
+			cfg.runtimeUser = me
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	finished := make(chan string, capacity)
 	turns := newTurnstile(capacity)
@@ -210,6 +238,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
+				applyStatus(ctx, cfg, issue, directory, stoppedStatus, observe)
+				assignTurn(ctx, cfg, issue, directory, "requester", observe)
 				if cfg.Intake.StopReportRole != "" {
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
@@ -236,6 +266,11 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
+				applyStatus(ctx, cfg, issue, directory, deliveredStatus, observe)
+				assignTurn(ctx, cfg, issue, directory, "requester", observe)
+				if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil && len(state.History) > 0 {
+					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, observe)
+				}
 				if err := trimFinished(directory); err != nil {
 					observe("request " + entry.Name() + ": finished caches not removed: " + err.Error())
 				}
@@ -245,6 +280,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes
 				// it runnable again; anything else leaves it untouched.
+				applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
+				assignTurn(ctx, cfg, issue, directory, "requester", observe)
 				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
@@ -253,7 +290,10 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if !resume {
 					continue
 				}
+				resumeTurn(ctx, cfg, issue, directory, observe)
 			}
+			applyStatus(ctx, cfg, issue, directory, processingStatus, observe)
+			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), observe)
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
@@ -485,4 +525,26 @@ func adoptEarlierIdentity(root, identity string) error {
 		return err
 	}
 	return writeRuntimeFile(path, data)
+}
+
+// unfinishedBefore counts the accepted requests filed before the given one
+// that are neither delivered nor stopped: the ones in line ahead of it,
+// whether their watchers are running or not, compared by id as the line is.
+func unfinishedBefore(jobs string, entries []os.DirEntry, id int64) int {
+	ahead := 0
+	for _, entry := range entries {
+		other, err := strconv.ParseInt(entry.Name(), 10, 64)
+		if err != nil || !entry.IsDir() || other >= id {
+			continue
+		}
+		directory := filepath.Join(jobs, entry.Name())
+		if _, err := os.Stat(filepath.Join(directory, "stop-request.json")); err == nil {
+			continue
+		}
+		if state, err := savedHistory(directory); err == nil && state.Done {
+			continue
+		}
+		ahead++
+	}
+	return ahead
 }

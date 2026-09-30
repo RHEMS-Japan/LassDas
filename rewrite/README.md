@@ -507,6 +507,38 @@ A tracker that fails to answer one read is treated as slow, not as a lost
 control channel: the work goes on, and only three failed reads in a row pause
 it, so a stop filed meanwhile is still read as soon as the tracker answers.
 
+Optional `intake.statuses` moves the issue's status at each turn of the work,
+by status id, so a requester can see whose move it is on the tracker board:
+`processing` when the request is accepted and whenever the runtime works on
+it, `awaiting_requester` while a question waits for the requester,
+`delivered` once the result is merged and the report posted, `stopped` after
+the requester's stop. An id left out leaves that turn alone; the runtime never
+reads or names a status. Each change is made once and recorded beside the
+request in `status.json`; a refused change is asked again on the next tick.
+
+```json
+"intake": {
+  "statuses": { "processing": 1001, "awaiting_requester": 1002, "delivered": 3, "stopped": 1 },
+  "category_on_accept": 2001,
+  "assign": true,
+  "announce": true,
+  "status_page": "https://status.example/jobs/"
+}
+```
+
+The ids are the operator's own project's: custom statuses and categories have
+the ids the tracker gave them (1001, 1002 and 2001 above stand in for them),
+while 1 and 3 are the tracker's built-in open and resolved statuses.
+
+With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
+its place in line and, when `intake.status_page` is set, a link to the request's
+own page), when its work starts and when it resumes after the requester's answer; a stage whose `announce` sentence the
+operator wrote in `workflow.stages` is announced once when it first begins.
+`category_on_accept` adds that category to an accepted issue. `assign` hands
+the issue to the requester while a question or the delivered result waits for
+them, and back to the runtime's own account while it works, and records the
+hours from acceptance to the report in the issue's actual hours.
+
 Each accepted unfinished request reads its control comments before starting and
 on the configured polling interval, independently of occupied execution slots,
 other roles and issue discovery. It uses the native

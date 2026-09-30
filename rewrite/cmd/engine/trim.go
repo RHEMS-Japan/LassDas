@@ -36,10 +36,31 @@ func trimFinished(directory string) error {
 			if !item.IsDir() || item.Name() == "logs" || item.Type()&os.ModeSymlink != 0 {
 				continue
 			}
-			if err := os.RemoveAll(filepath.Join(homes, home.Name(), item.Name())); err != nil {
+			if err := removeTree(filepath.Join(homes, home.Name(), item.Name())); err != nil {
 				return err
 			}
 		}
 	}
 	return os.WriteFile(marker, []byte("caches removed after the request finished\n"), 0600)
+}
+
+// removeTree removes a directory a build tool may have left read-only, as a
+// Go module cache is: every directory is made writable first so its entries
+// can be unlinked. Symbolic links are removed as links, never followed.
+func removeTree(root string) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if err := os.Chmod(path, 0700); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(root)
 }
