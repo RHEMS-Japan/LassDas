@@ -1200,8 +1200,8 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 		t.Fatal(err)
 	}
 	_, empty := get(t, ts, "/")
-	if strings.Contains(empty, `<article class="card queued" data-key="">`) || !strings.Contains(empty, `Queued <b>3</b>`) {
-		t.Error("an empty request directory is shown as queued")
+	if strings.Contains(empty, `<article class="card queued" data-key="">`) || !strings.Contains(empty, `Queued <b>3</b>`) || strings.Contains(empty, `<span class="badge running"></span>`) {
+		t.Error("an empty request directory is shown as queued, or with an empty badge")
 	}
 	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
 		t.Error("a queued or starting request is not shown at the first stage")

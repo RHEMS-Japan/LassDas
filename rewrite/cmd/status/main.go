@@ -792,7 +792,7 @@ func (j *job) derive(now time.Time) {
 			}
 		}
 	} else {
-		if !j.NoRecord {
+		if !j.NoRecord || j.Key == "" {
 			j.Status = "no run record yet"
 		}
 	}
