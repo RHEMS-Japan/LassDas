@@ -123,6 +123,7 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 		"head": func(lang, title string, refresh int) headData {
 			return headData{Title: translate(lang, title), Refresh: refresh, Lang: lang}
 		},
+		"column": func(p page, c column) columnData { return columnData{Page: p, Lang: p.Lang, Col: c} },
 		"card": func(p page, j *job) cardData {
 			return cardData{Lang: p.Lang, ID: j.ID, Key: j.Key, Title: j.Title, Lane: j.Lane, Status: j.Status,
 				Position: j.Position, StageIndex: j.StageIndex, StageCount: j.StageCount, Model: j.Model, Attention: j.Attention, Failure: j.Failure,
@@ -1427,6 +1428,14 @@ func (s *server) filesPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // cardData is one request as a card on the board, with the viewer's language.
+// columnData is one column of the board with the page it belongs to, so
+// the column template can hand each card the page.
+type columnData struct {
+	Page page
+	Lang string
+	Col  column
+}
+
 type cardData struct {
 	Lang       string
 	ID         string
