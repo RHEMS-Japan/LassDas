@@ -30,6 +30,9 @@ type config struct {
 	Intake         *intakeConfig    `json:"intake,omitempty"`
 	AssignedIssue  string           `json:"assigned_issue,omitempty"`
 	Workflow       *chain.Workflow  `json:"workflow,omitempty"`
+	// runtimeUser is the tracker account the credential belongs to, read at
+	// start when issues are handed over.
+	runtimeUser int64
 }
 
 // Give the dispatcher the same configured work instructions as its workers.

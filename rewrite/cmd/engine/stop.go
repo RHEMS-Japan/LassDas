@@ -188,11 +188,19 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				result = make(chan error, 1)
 				outcome := result
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
+				if cfg.Intake != nil && cfg.Intake.Announce {
+					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText); noticeErr != nil {
+						observe("start not announced: " + noticeErr.Error())
+					}
+				}
 				go func() {
 					defer releaseWork()
 					outcome <- run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
 				}()
 			}
+		}
+		if result != nil {
+			announceStages(ctx, cfg, issue, directory, observe)
 		}
 		select {
 		case <-ctx.Done():

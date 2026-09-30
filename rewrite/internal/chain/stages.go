@@ -26,6 +26,9 @@ type Stage struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
 	OnFailure string `json:"on_failure,omitempty"`
+	// Announce is the operator's own sentence for the requester, posted once
+	// when this stage first begins; empty says nothing.
+	Announce string `json:"announce,omitempty"`
 }
 
 // StageRouter advances an ordered run on observed facts. It calls no model of
