@@ -1400,7 +1400,7 @@ var japanese = map[string]string{
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
-	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "started": "開始", "recovering": "再起動後の復帰中",
+	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "started": "開始",
 	"waiting for the requester": "依頼者の返事待ち", "pending:": "実行待ち:", "instruction of the pending action": "実行待ちの工程への指示", "Raw files:": "生のファイル:",
 	"workspace changes as text": "作業場所の変更 (テキスト)", "Running now:": "実行中:", "since": "開始", "instruction handed to it": "渡した指示",
 	"output so far": "ここまでの出力", "diagnostics so far": "ここまでの stderr", "the native agent's own log so far": "agent 自身のログ (ここまで)", "whole file": "全文",

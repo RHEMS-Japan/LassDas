@@ -174,7 +174,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		}
 		router = chain.OneRoleRouter{Role: cfg.Roles[0].Name}
 	default:
-		return errors.New("choose router.mode jev, llm, stages or single")
+		return errors.New("choose router.mode jev, llm or stages")
 	}
 	if *watch {
 		if cfg.AssignedIssue != "" {
