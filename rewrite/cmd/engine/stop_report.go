@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
@@ -228,6 +229,54 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err := writeRuntimeFile(requestPath, []byte(request)); err != nil {
 		return err
 	}
+	if err := adoptReportRequest(filepath.Join(directory, "stop-report"), request); err != nil {
+		return err
+	}
 	fmt.Fprintf(log, "request %d: reporting the authorized stop without resuming the original work\n", issue.ID)
 	return run(ctx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "stop-report")}, io.Discard, log)
+}
+
+// adoptReportRequest lets an unfinished report continue under the request
+// text this runtime renders. The text is the runtime's own rendering of the
+// stopped request's record, so a runtime that renders it differently, after
+// an upgrade, must not read its predecessor's report directory as another
+// request's and wait forever; the record of earlier attempts is kept.
+func adoptReportRequest(directory, request string) error {
+	raw, err := os.ReadFile(filepath.Join(directory, "history.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var saved chain.State
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return err
+	}
+	if saved.Request == request || saved.Done {
+		return nil
+	}
+	// Only a report's own directory is adopted: its text always opens with
+	// the reporting instructions. Anything else is not this runtime's to take.
+	if !strings.HasPrefix(saved.Request, stopReportingInstructions) {
+		return errors.New("the report directory holds another request's text; not adopted")
+	}
+	// The rewrite happens under the directory's own lock, taken with the
+	// saved text, so a runtime still writing there is not written over. While
+	// that runtime holds it, this tick leaves the report alone and a later
+	// tick returns to it.
+	store, err := chain.Open(directory, saved.Request)
+	if err != nil {
+		return fmt.Errorf("the report directory is in use; adopting its request text later: %w", err)
+	}
+	defer store.Close()
+	state, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if state.Request == request || state.Done {
+		return nil
+	}
+	state.Request = request
+	return store.Save(state)
 }
