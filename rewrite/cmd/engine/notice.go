@@ -331,14 +331,17 @@ func savedHistory(directory string) (chain.State, error) {
 }
 
 // stalledFor measures how long the request has gone without a completed step.
-// It walks the record launch by launch from the newest: a launch is the run
-// of one role's process records and the runtime's own notes after it, and it
-// completed only when none of them failed. The trailing run of failed
-// launches is the stall, measured from the last launch that completed; a
-// runtime note that carries no error and no processes (a step taken up
-// again) is neither, and is read through.
+// It walks the record launch by launch from the newest, and the trailing run
+// of failed launches is the stall, measured from the last launch that
+// completed. In an ordered run a launch is one role's process records and the
+// runtime's own note after them, and it completed only when none of them
+// failed; the note is what tells one launch of a role from the next. A run
+// without those notes has no such boundary, so there each process record is
+// read as a launch of its own. A runtime note without an error and without
+// processes, a step taken up again, is neither, and is read through.
 func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) {
 	history := state.History
+	delimited := state.Workflow != nil && len(state.Workflow.Stages) > 0
 	failure := ""
 	i := len(history)
 	for i > 0 {
@@ -354,7 +357,7 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 			i--
 		}
 		processes := 0
-		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || history[i-1].Role == role); processes++ {
+		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || (delimited && history[i-1].Role == role)); processes++ {
 			role = history[i-1].Role
 			if history[i-1].Error != "" {
 				launchFailed = true
