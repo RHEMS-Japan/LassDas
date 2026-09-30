@@ -742,7 +742,9 @@ func (j *job) derive(now time.Time) {
 		}
 		// A budget pause holds the request until the runtime says the budget
 		// is back, so the later of the two lines is the one that stands; a
-		// no-progress notice stands until a step completes after it.
+		// no-progress notice stands until a step completes after it. "Later"
+		// is the order in the file: the runtime only appends to notices.json,
+		// stamping each line as it is written.
 		var pause, stall string
 		for _, notice := range j.Notices {
 			written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"]))
