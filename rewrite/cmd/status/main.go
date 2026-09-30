@@ -213,6 +213,7 @@ type job struct {
 	Attention  string
 	Trail      []stageMark
 	Current    string
+	Stage      string
 	StageIndex int
 	StageCount int
 	Model      string
@@ -267,11 +268,15 @@ func columns(stages []string, jobs []*job) []column {
 	}
 	other := -1
 	for _, j := range jobs {
-		switch {
+		place := j.Stage
+		if place == "" {
+			place = j.Current
+		}
+		switch at, known := index[place]; {
 		case j.State != nil && j.State.Done:
 			continue
-		case index[j.Current] > 0 || (len(stages) > 0 && j.Current == stages[0]):
-			result[index[j.Current]].Jobs = append(result[index[j.Current]].Jobs, j)
+		case known:
+			result[at].Jobs = append(result[at].Jobs, j)
 		default:
 			if other < 0 {
 				other = len(result)
@@ -287,6 +292,15 @@ func columns(stages []string, jobs []*job) []column {
 		}
 	}
 	return append(result, done)
+}
+
+func isStage(stages []chain.Stage, name string) bool {
+	for _, stage := range stages {
+		if stage.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // stageTime is the review view of one stage or role: how often it ran, how
@@ -654,10 +668,23 @@ func (j *job) derive(now time.Time) {
 		if state.Workflow != nil && len(state.Workflow.Stages) > 0 && current != "" {
 			j.Position = current
 			j.StageCount = len(state.Workflow.Stages)
-			for i, stage := range state.Workflow.Stages {
-				if stage.Name == current {
+			// A role outside the sequence (a question to the requester, a
+			// stop report) is a side step of the stage that reached it, so the
+			// card keeps that stage's place and progress.
+			stage := current
+			if !isStage(state.Workflow.Stages, stage) {
+				for i := len(state.History) - 1; i >= 0; i-- {
+					if isStage(state.Workflow.Stages, state.History[i].Role) {
+						stage = state.History[i].Role
+						break
+					}
+				}
+			}
+			for i, candidate := range state.Workflow.Stages {
+				if candidate.Name == stage {
+					j.Stage = stage
 					j.StageIndex = i + 1
-					j.Position = fmt.Sprintf("step %d of %d: %s", i+1, len(state.Workflow.Stages), current)
+					j.Position = fmt.Sprintf("step %d of %d: %s", i+1, len(state.Workflow.Stages), stage)
 				}
 			}
 			if state.Done {
@@ -713,14 +740,30 @@ func (j *job) derive(now time.Time) {
 				j.Lane, j.Attention = "attention", record.Error
 			}
 		}
+		// A budget pause holds the request until the runtime says the budget
+		// is back, so the later of the two lines is the one that stands; a
+		// no-progress notice stands until a step completes after it. "Later"
+		// is the order in the file: the runtime only appends to notices.json,
+		// stamping each line as it is written.
+		var pause, stall string
 		for _, notice := range j.Notices {
-			kind := stringOf(notice["kind"])
-			if kind != "budget-paused" && kind != "stall" {
+			written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"]))
+			if err != nil || !written.After(last) {
 				continue
 			}
-			if written, err := time.Parse(time.RFC3339Nano, stringOf(notice["written_at"])); err == nil && written.After(last) {
-				j.Lane, j.Attention = "attention", stringOf(notice["text"])
+			switch stringOf(notice["kind"]) {
+			case "budget-paused":
+				pause = stringOf(notice["text"])
+			case "budget-restored":
+				pause = ""
+			case "stall":
+				stall = stringOf(notice["text"])
 			}
+		}
+		if pause != "" {
+			j.Lane, j.Attention = "attention", pause
+		} else if stall != "" {
+			j.Lane, j.Attention = "attention", stall
 		}
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
