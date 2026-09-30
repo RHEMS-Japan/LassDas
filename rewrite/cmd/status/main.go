@@ -1485,7 +1485,7 @@ func (s *server) languagePage(w http.ResponseWriter, r *http.Request) {
 }
 
 var japanese = map[string]string{
-	"ticket engine status": "自動処理の状態", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
+	"ticket engine status": "自動処理の状態", "skip to content": "本文へ", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "Queued": "順番待ち", "none": "なし",
