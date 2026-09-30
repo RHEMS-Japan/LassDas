@@ -29,6 +29,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -134,8 +135,8 @@ def main():
     })
     values = credentials()
     sweep_renders(state, values)
-    # --verbose mirrors the launcher's diagnostics to stderr as they happen,
-    # where the runtime's live copy shows them, scrubbed below.
+    # --verbose mirrors the launcher's diagnostics to stderr; relay() below
+    # passes them on as they arrive, scrubbed.
     argv = [python, str(launcher), "--prompt-file", str(state / "task.md"), "--workspace", str(workspace),
             "--job", job, "--config", str(config_path), "--timeout", "0", "--verbose"]
     started = time.time()
@@ -148,15 +149,24 @@ def main():
         except OSError:
             pass
     previous = {number: signal.signal(number, forward) for number in (signal.SIGTERM, signal.SIGINT)}
+
+    # The launcher's diagnostics are relayed line by line as they arrive, so
+    # the runtime's live copy shows a working role, not a finished one.
+    def relay():
+        for line in child.stderr:
+            print(scrub(line.rstrip("\n"), values), file=sys.stderr, flush=True)
+
+    relaying = threading.Thread(target=relay, daemon=True)
+    relaying.start()
     try:
-        out, err = child.communicate()
+        out = child.stdout.read()
+        child.wait()
     finally:
+        relaying.join(timeout=5)
         for number, handler in previous.items():
             signal.signal(number, handler)
         sweep_renders(state, values)
     elapsed = int(time.time() - started)
-    for line in (err or "").splitlines():
-        print(scrub(line, values), file=sys.stderr)
     answer = scrub(out or "", values)
     print(f"Raven bridge: launcher exited {child.returncode} after {elapsed}s (job {job})", file=sys.stderr)
     if child.returncode != 0:
@@ -164,6 +174,8 @@ def main():
         # role's report: it names its log by path and commits no answer.
         for line in answer.splitlines():
             print("Raven bridge: launcher said: " + line, file=sys.stderr)
+        if child.returncode < 0:
+            return 128 - child.returncode
         return child.returncode
     sys.stdout.write(answer)
     sys.stdout.flush()

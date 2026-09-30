@@ -3,9 +3,11 @@ is a stub script recorded by these tests."""
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,18 @@ open(os.path.join(workspace, "hello.txt"), "w").write("hello\n")
 record = {"args": args, "config": config, "task": task, "env": {k: os.environ.get(k) for k in ("CODE_API_KEY", "CODE_STATE_ROOT", "RAVEN_HOME", "HOME")}}
 open(os.environ["STUB_RECORD"], "w").write(json.dumps(record))
 mode = os.environ.get("STUB_MODE", "report")
+if mode == "slow":
+    import time
+    sys.stderr.write("early diagnostic\n"); sys.stderr.flush()
+    time.sleep(1.5)
+    sys.stdout.write("late report\n")
+    sys.exit(0)
+if mode == "signal":
+    import signal, time
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    sys.stderr.write("waiting to be stopped\n"); sys.stderr.flush()
+    time.sleep(10)
+    sys.exit(0)
 state = os.environ["CODE_STATE_ROOT"]
 os.makedirs(state, exist_ok=True)
 open(os.path.join(state, ".config.rendered.4242.json"), "w").write(json.dumps({"providers": {"custom": {"apiKey": os.environ["CODE_API_KEY"]}}}))
@@ -55,7 +69,7 @@ class RavenBridgeTests(unittest.TestCase):
         self.home = self.root / "home"
         self.record = self.root / "record.json"
 
-    def run_bridge(self, task="do the thing", mode="report", **extra):
+    def bridge_env(self, mode="report", **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("NATIVE_", "OPENROUTER_", "TASK_", "RAVEN_"))}
         env.update({
             "OPENROUTER_BASE_URL": "https://gateway.example/v1/", "OPENROUTER_API_KEY": "synthetic-gateway-token-1234",
@@ -66,7 +80,10 @@ class RavenBridgeTests(unittest.TestCase):
             "STUB_RECORD": str(self.record), "STUB_MODE": mode,
         })
         env.update(extra)
-        done = subprocess.run([sys.executable, str(BRIDGE)], input=task, capture_output=True, text=True, env=env)
+        return env
+
+    def run_bridge(self, task="do the thing", mode="report", **extra):
+        done = subprocess.run([sys.executable, str(BRIDGE)], input=task, capture_output=True, text=True, env=self.bridge_env(mode, **extra))
         return done.returncode, done.stdout, done.stderr
 
     def test_the_launcher_gets_the_task_the_workspace_the_endpoint_and_no_self_evolution(self):
@@ -116,6 +133,33 @@ class RavenBridgeTests(unittest.TestCase):
         leftover.write_text("{}")
         self.run_bridge()
         self.assertFalse(leftover.exists())
+
+    def test_diagnostics_reach_stderr_while_the_launcher_still_runs(self):
+        env = self.bridge_env(mode="slow")
+        child = subprocess.Popen([sys.executable, str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        child.stdin.write("do the thing"); child.stdin.close()
+        started = time.time()
+        first = child.stderr.readline()
+        seen_at = time.time() - started
+        out = child.stdout.read()
+        child.stderr.read()
+        child.wait(timeout=10)
+        self.assertEqual(first, "early diagnostic\n")
+        self.assertLess(seen_at, 1.2, "the first diagnostic waited for the launcher to end")
+        self.assertEqual(out, "late report\n")
+        self.assertEqual(child.returncode, 0)
+
+    def test_a_stop_reaches_the_launcher_and_the_bridge_exits_as_stopped(self):
+        env = self.bridge_env(mode="signal")
+        child = subprocess.Popen([sys.executable, str(BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        child.stdin.write("do the thing"); child.stdin.close()
+        self.assertEqual(child.stderr.readline(), "waiting to be stopped\n")
+        child.send_signal(signal.SIGTERM)
+        out = child.stdout.read()
+        err = child.stderr.read()
+        child.wait(timeout=10)
+        self.assertEqual(child.returncode, 143, err)
+        self.assertEqual(out, "")
 
     def test_a_short_credential_is_scrubbed_too(self):
         code, out, err = self.run_bridge(OPENROUTER_API_KEY="tiny")

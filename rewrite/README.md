@@ -986,6 +986,11 @@ Provide these process settings explicitly:
 - `TASK_CREDENTIAL_NAMES` is set by the runtime: the names of the variables
   that hold credentials, so the harness can keep every one of them out of the
   transcript and the native agent's logs it leaves in its directory.
+  The transcript is written, and the native agent's own `logs/agent.log` and
+  `logs/errors.log` are rewritten with those values replaced, after the
+  conversation ended normally; while the role runs, and after a crash or a
+  kill, those two files are as the SDK wrote them. The status page shows them
+  as they are.
 
 `harnesses/raven.py` is a second bridge, to Raven-Code's one-turn launcher,
 behind the same contract and the same `OPENROUTER_*`, `NATIVE_*` and `TASK_*`
@@ -1001,11 +1006,6 @@ Raven's state under `TASK_HOME`, removes the launcher's rendered
 configuration (which holds the key) and scrubs its log after every run, and
 treats a launcher that commits no report, or reports its own failure, as a
 failed role: what it said goes to stderr, not to the next role.
-  The transcript is written, and the native agent's own `logs/agent.log` and
-  `logs/errors.log` are rewritten with those values replaced, after the
-  conversation ended normally; while the role runs, and after a crash or a
-  kill, those two files are as the SDK wrote them. The status page shows them
-  as they are.
 
 The reasoning setting is also passed through the SDK's explicit OpenRouter
 request override. An installed-SDK trial found that its URL-based capability
