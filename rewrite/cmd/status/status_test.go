@@ -883,8 +883,10 @@ func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
 	if !strings.Contains(body, `<article class="card running" data-key="EXAMPLE-30">`) {
 		t.Error("a step retrying by itself is not a running card")
 	}
-	_, japanese := get(t, ts, "/jobs/30?lang=ja")
-	_ = japanese
+	_, page := get(t, ts, "/jobs/30")
+	if strings.Count(page, "retrying after a failure") != 1 || !strings.Contains(page, "last failure: fork/exec /usr/bin/elicit: no such file or directory") || strings.Contains(page, `<span class="badge">recovering</span>`) {
+		t.Error("the request page does not say the same as the card, or still shows the generic recovering badge")
+	}
 	if got := localize("ja", "retrying after a failure; assigned to elicit, no process output yet"); got != "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定" {
 		t.Errorf("localized status: %q", got)
 	}
