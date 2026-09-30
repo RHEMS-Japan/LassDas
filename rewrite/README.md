@@ -532,7 +532,8 @@ while 1 and 3 are the tracker's built-in open and resolved statuses.
 
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's
-own page), when its work starts and when it resumes after the requester's answer; a stage whose `announce` sentence the
+own page), when its work starts after waiting its turn (a request told it starts at once hears no
+second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for

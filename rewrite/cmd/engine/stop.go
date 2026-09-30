@@ -100,6 +100,10 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	// A tracker that does not answer for one tick is not a lost control
 	// channel; the work goes on, and only a read that keeps failing pauses it.
 	unreadable := 0
+	// The start of the work is worth a comment only when the requester had
+	// to wait for a slot; told the work starts at once, they hear nothing
+	// more until a stage the operator chose to announce begins.
+	waited := false
 	notice := requestNotices(cfg, issue, directory)
 	for {
 		if ctx.Err() != nil {
@@ -188,7 +192,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				result = make(chan error, 1)
 				outcome := result
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
-				if cfg.Intake != nil && cfg.Intake.Announce {
+				if cfg.Intake != nil && cfg.Intake.Announce && waited {
 					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText); noticeErr != nil {
 						observe("start not announced: " + noticeErr.Error())
 					}
@@ -197,6 +201,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 					defer releaseWork()
 					outcome <- run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
 				}()
+			} else {
+				waited = true
 			}
 		}
 		if result != nil {

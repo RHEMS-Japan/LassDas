@@ -301,6 +301,8 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"id": 1797983, "name": "runtime"})
 		case r.PostForm.Get("assigneeId") != "":
 			json.NewEncoder(w).Encode(map[string]any{"id": 1, "assignee": map[string]any{"id": json.Number(r.PostForm.Get("assigneeId"))}})
+		case r.PostForm.Get("actualHours") != "":
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "actualHours": json.Number(r.PostForm.Get("actualHours"))})
 		default:
 			json.NewEncoder(w).Encode(map[string]any{"id": 1})
 		}
@@ -321,6 +323,81 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 		t.Fatal("a missing user id was sent")
 	}
 	want := []string{"GET /api/v2/users/myself ", "PATCH /api/v2/issues/EXAMPLE-1 assigneeId=55", "PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.25"}
+	if strings.Join(seen, "|") != strings.Join(want, "|") {
+		t.Fatalf("requests: %q", seen)
+	}
+}
+
+func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
+	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
+	var seen []string
+	unreadable, noHours := false, false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.PostForm.Encode())
+		switch {
+		case r.Method == http.MethodPatch && r.PostForm.Get("statusId") == "4":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errors":[{"message":"Invalid statusId.","code":7,"moreInfo":""}]}`))
+		case r.Method == http.MethodPatch:
+			// The tracker's answer to a change that changes nothing.
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errors":[{"message":"No comment content.","code":7,"moreInfo":""}]}`))
+		case unreadable:
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("not now"))
+		case noHours:
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "actualHours": nil})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 1001}, "assignee": map[string]any{"id": 55}, "actualHours": 0.25})
+		}
+	}))
+	defer server.Close()
+	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err != nil {
+		t.Fatalf("a status the issue already holds was refused: %v", err)
+	}
+	if err := b.SetAssignee(context.Background(), "EXAMPLE-1", 55); err != nil {
+		t.Fatalf("an assignee the issue already has was refused: %v", err)
+	}
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0.25); err != nil {
+		t.Fatalf("hours the issue already holds were refused: %v", err)
+	}
+	// A read-back that does not match keeps the tracker's own words.
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1002); err == nil || !strings.Contains(err.Error(), "did not confirm the status change") || !strings.Contains(err.Error(), "No comment content.") {
+		t.Fatalf("a status the issue does not hold was reported as set, or the refusal was lost: %v", err)
+	}
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0.5); err == nil || !strings.Contains(err.Error(), "did not confirm the hours") {
+		t.Fatalf("hours the issue does not hold were reported as recorded: %v", err)
+	}
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 4); err == nil || !strings.Contains(err.Error(), "Invalid statusId") {
+		t.Fatalf("another refusal was read as done: %v", err)
+	}
+	// No hours on the issue confirm none sent, and nothing else.
+	noHours = true
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0); err != nil {
+		t.Fatalf("no hours recorded were not read as none: %v", err)
+	}
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0.25); err == nil {
+		t.Fatal("hours the issue does not hold were reported as recorded")
+	}
+	noHours = false
+	// A read-back that fails keeps both failures.
+	unreadable = true
+	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err == nil || !strings.Contains(err.Error(), "No comment content.") || !strings.Contains(err.Error(), "could not be read back") || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("a failed read-back was reported as done, or lost a failure: %v", err)
+	}
+	want := []string{
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1001", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 assigneeId=55", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.25", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1002", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.50", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=4",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.00", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.25", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1001", "GET /api/v2/issues/EXAMPLE-1 ",
+	}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {
 		t.Fatalf("requests: %q", seen)
 	}

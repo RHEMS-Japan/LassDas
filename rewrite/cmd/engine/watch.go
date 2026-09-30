@@ -174,6 +174,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	observe := func(message string) { fmt.Fprintln(log, message) }
+	// A finished request whose caches could not be removed is retried each
+	// tick and said once per reason, not once per tick.
+	trimTrouble := map[string]string{}
 	launch := func(name string, work func() error) {
 		active[name] = true
 		workers.Add(1)
@@ -224,6 +227,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			directory := filepath.Join(jobs, entry.Name())
+			say := func(message string) { observe("request " + entry.Name() + ": " + message) }
 			raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
 			if err != nil {
 				observe("reading accepted issue: " + err.Error())
@@ -238,8 +242,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
-				applyStatus(ctx, cfg, issue, directory, stoppedStatus, observe)
-				assignTurn(ctx, cfg, issue, directory, "requester", observe)
+				applyStatus(ctx, cfg, issue, directory, stoppedStatus, say)
+				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				if cfg.Intake.StopReportRole != "" {
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
@@ -266,13 +270,23 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
-				applyStatus(ctx, cfg, issue, directory, deliveredStatus, observe)
-				assignTurn(ctx, cfg, issue, directory, "requester", observe)
+				applyStatus(ctx, cfg, issue, directory, deliveredStatus, say)
+				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil && len(state.History) > 0 {
-					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, observe)
+					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
 				if err := trimFinished(directory); err != nil {
-					observe("request " + entry.Name() + ": finished caches not removed: " + err.Error())
+					reason := err.Error()
+					if reason == "" {
+						reason = "(no reason given)"
+					}
+					if trimTrouble[entry.Name()] != reason {
+						say("finished caches not removed, retried each tick: " + reason)
+						trimTrouble[entry.Name()] = reason
+					}
+				} else if trimTrouble[entry.Name()] != "" {
+					say("finished caches removed")
+					delete(trimTrouble, entry.Name())
 				}
 				continue
 			}
@@ -280,8 +294,8 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes
 				// it runnable again; anything else leaves it untouched.
-				applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
-				assignTurn(ctx, cfg, issue, directory, "requester", observe)
+				applyStatus(ctx, cfg, issue, directory, awaitingStatus, say)
+				assignTurn(ctx, cfg, issue, directory, "requester", say)
 				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
@@ -290,10 +304,10 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if !resume {
 					continue
 				}
-				resumeTurn(ctx, cfg, issue, directory, observe)
+				resumeTurn(ctx, cfg, issue, directory, say)
 			}
-			applyStatus(ctx, cfg, issue, directory, processingStatus, observe)
-			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), observe)
+			applyStatus(ctx, cfg, issue, directory, processingStatus, say)
+			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
