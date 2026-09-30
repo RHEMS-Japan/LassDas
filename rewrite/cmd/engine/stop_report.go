@@ -50,6 +50,14 @@ func stoppedReportDone(directory string) (bool, error) {
 // executable. The original run and saved stop are never cleared or marked done.
 // OS/tool permissions still belong to the configured reporting harness; prose
 // instructions do not make a privileged command a read-only sandbox.
+// stopObservations renders the stopped request's record for its reporter:
+// the same collapsed shape a role reads, so a request that failed the same
+// way for hours does not hand over every repetition.
+func stopObservations(state chain.State) ([]byte, error) {
+	state.History = chain.CollapsedHistory(state.History)
+	return json.MarshalIndent(state, "", "  ")
+}
+
 func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, slots chan struct{}, log io.Writer) error {
 	if cfg.Intake == nil || cfg.Intake.StopReportRole == "" {
 		return nil
@@ -97,7 +105,7 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if closeErr != nil {
 		return closeErr
 	}
-	observations, err := json.MarshalIndent(state, "", "  ")
+	observations, err := stopObservations(state)
 	if err != nil {
 		return err
 	}

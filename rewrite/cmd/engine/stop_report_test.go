@@ -419,3 +419,25 @@ func TestStoppedReportRequiresReadableSavedStopAndHistory(t *testing.T) {
 		t.Fatal("damaged reporting state treated as completed or fresh")
 	}
 }
+
+func TestTheStoppedReporterReadsTheCollapsedRecord(t *testing.T) {
+	var history []chain.Result
+	for i := 0; i < 40; i++ {
+		history = append(history, chain.Result{Role: "elicit", Speaker: "elicit-process", Model: "m", Error: "fork/exec elicit: no such file or directory"})
+		history = append(history, chain.Result{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0."})
+	}
+	raw, err := stopObservations(chain.State{Request: "original", History: history, Pending: &chain.Assignment{Role: "elicit"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed chain.State
+	if err := json.Unmarshal(raw, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.History) > 4 || observed.Request != "original" || observed.Pending == nil {
+		t.Fatalf("the record was handed over uncollapsed: %d entries, request %q, pending %v", len(observed.History), observed.Request, observed.Pending)
+	}
+	if !strings.Contains(string(raw), "repeated 40 times in a row") {
+		t.Fatalf("the repetition is not said: %s", raw)
+	}
+}

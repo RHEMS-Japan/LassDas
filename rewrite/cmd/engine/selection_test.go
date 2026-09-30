@@ -392,4 +392,13 @@ func TestTheJudgeReadsOnlyRecentFailuresCutToTheirHead(t *testing.T) {
 			t.Fatalf("an error was not cut: %d", len(entry.Error))
 		}
 	}
+	// A report-only request carries the stopped request's whole record as its
+	// text; the judge reads its head, not the record.
+	long := selectionInput(chain.State{Request: strings.Repeat("r", 30000)})
+	if len(long.Request) > selectionRequestLimit+3 || !strings.HasSuffix(long.Request, "…") {
+		t.Fatalf("the request was not cut for the judge: %d", len(long.Request))
+	}
+	if short := selectionInput(chain.State{Request: "brief"}); short.Request != "brief" {
+		t.Fatalf("a short request was altered: %q", short.Request)
+	}
 }

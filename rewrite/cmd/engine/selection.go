@@ -234,8 +234,16 @@ func (s selectionConfig) selectWith(ctx context.Context, judge chain.Judge, role
 // decision service refuses it.
 const selectionFailures, selectionErrorLimit = 12, 300
 
+// selectionRequestLimit bounds the request text the judge reads. Choosing a
+// model needs the shape of the work, not every observation a report-only
+// request carries with it, and the judge's own input is small.
+const selectionRequestLimit = 3000
+
 func selectionInput(state chain.State) chain.State {
 	input := chain.State{Request: state.Request}
+	if len(input.Request) > selectionRequestLimit {
+		input.Request = input.Request[:selectionRequestLimit] + "…"
+	}
 	var failures []chain.Result
 	for _, result := range state.History {
 		if result.Error != "" && (result.Model != "" || (result.Role == "router" && result.Speaker == "runtime")) {
