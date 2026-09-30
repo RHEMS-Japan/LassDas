@@ -201,6 +201,13 @@ histories whose router chose done. This is not an independent claim that the
 router's completion judgment was correct. Accepted work remains available for
 restart even if discovery is unavailable or the issue disappears remotely.
 
+Execution slots (`intake.max_running`) go to accepted requests in the order they
+were filed: a request runs only when no earlier request is waiting for a slot.
+Once a request has finished, the caches its roles' agents built in their home
+directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
+request's footprint and nobody reads them; the record, the request, the
+notices, the workspace and each home's logs and files stay.
+
 One process owns a queue directory. Graceful cancellation waits for its active
 children to stop before releasing ownership. Restarting the same queue reuses
 original requests, pending histories and workspaces; the existing engine tells
@@ -495,6 +502,10 @@ stop instructions. If the requester identity is unavailable and no operator is
 configured, work waits with the reason visible instead of running without an
 identified stop authority. A shared bot/requester account cannot distinguish
 machine posts from human instructions; use separately scoped service identities.
+
+A tracker that fails to answer one read is treated as slow, not as a lost
+control channel: the work goes on, and only three failed reads in a row pause
+it, so a stop filed meanwhile is still read as soon as the tracker answers.
 
 Each accepted unfinished request reads its control comments before starting and
 on the configured polling interval, independently of occupied execution slots,

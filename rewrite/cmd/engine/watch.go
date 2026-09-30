@@ -236,6 +236,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
+				if err := trimFinished(directory); err != nil {
+					observe("request " + entry.Name() + ": finished caches not removed: " + err.Error())
+				}
 				continue
 			}
 			if state.Waiting {
