@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -160,6 +161,55 @@ func TestProcessKeepsFailureReasonAndOnlyReceivesNamedCredentials(t *testing.T) 
 	}
 	if result.Output != "[credential]" {
 		t.Fatalf("output=%q", result.Output)
+	}
+}
+
+func TestOnlyTheOperatorsMinutesBoundALaunch(t *testing.T) {
+	if got := (Process{}).timeLimit(); got != 0 {
+		t.Fatalf("a launch has a limit nobody configured: %v", got)
+	}
+	if got := (Process{TimeoutMinutes: 240}).timeLimit(); got != 4*time.Hour {
+		t.Fatalf("operator minutes ignored: %v", got)
+	}
+	if got := (Process{TimeoutMinutes: 240, Timeout: time.Second}).timeLimit(); got != time.Second {
+		t.Fatalf("a caller's duration lost to the operator's minutes: %v", got)
+	}
+	var decoded Process
+	if err := json.Unmarshal([]byte(`{"name":"p","command":["true"],"timeout_minutes":90}`), &decoded); err != nil || decoded.timeLimit() != 90*time.Minute {
+		t.Fatalf("timeout_minutes not read from configuration: %v %v", decoded.timeLimit(), err)
+	}
+}
+
+func TestALaunchIsBoundedOnlyByAConfiguredLimit(t *testing.T) {
+	ctx, cancel := (Process{}).launchContext(context.Background())
+	defer cancel()
+	if _, bounded := ctx.Deadline(); bounded {
+		t.Fatal("a launch with no configured limit was given a deadline")
+	}
+	ctx, cancel = (Process{TimeoutMinutes: 2}).launchContext(context.Background())
+	defer cancel()
+	if deadline, bounded := ctx.Deadline(); !bounded || time.Until(deadline) > 2*time.Minute || time.Until(deadline) < time.Minute {
+		t.Fatalf("the configured limit was not applied: %v %v", deadline, bounded)
+	}
+}
+
+func TestOneLaunchKeepsOnlyTheTailOfAnEndlessStream(t *testing.T) {
+	var b boundedBuffer
+	chunk := bytes.Repeat([]byte("x"), 1<<20)
+	for i := 0; i < 10; i++ {
+		if n, err := b.Write(chunk); err != nil || n != len(chunk) {
+			t.Fatalf("write %d: %d %v", i, n, err)
+		}
+	}
+	b.Write([]byte("the end"))
+	kept := b.String()
+	if !strings.HasPrefix(kept, "[the first 2097159 bytes of this stream are not kept") || !strings.HasSuffix(kept, "the end") || len(kept) > keptBytes+200 {
+		t.Fatalf("kept %d bytes, head %q", len(kept), kept[:80])
+	}
+	var small boundedBuffer
+	small.Write([]byte("all of it"))
+	if small.String() != "all of it" {
+		t.Fatalf("a small stream was altered: %q", small.String())
 	}
 }
 

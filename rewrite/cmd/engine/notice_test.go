@@ -643,3 +643,84 @@ func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T
 		t.Fatal("the detail was cut inside a character")
 	}
 }
+
+func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := now.Add(-100 * time.Minute)
+	if quiet := quietFor(chain.State{}, accepted, now); quiet != 100*time.Minute {
+		t.Fatalf("a request with no record is measured from its acceptance: %v", quiet)
+	}
+	state := chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: now.Add(-90 * time.Minute), FinishedAt: now.Add(-30 * time.Minute)}}}
+	if quiet := quietFor(state, accepted, now); quiet != 30*time.Minute {
+		t.Fatalf("a request with a record is measured from that record: %v", quiet)
+	}
+	if quiet := quietFor(chain.State{}, time.Time{}, now); quiet != 0 {
+		t.Fatalf("a request with nothing to measure from was measured: %v", quiet)
+	}
+	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗はなく") || strings.Contains(text, "直近の失敗") {
+		t.Fatalf("the notice without a failure names one: %q", text)
+	}
+}
+
+func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
+	cfg := watchConfiguration(t)
+	window := 90
+	cfg.Intake.StallNoticeMinutes = &window
+	var mu sync.Mutex
+	posted := map[string][]string{}
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "watch-tracker.example" {
+			return nil, http.ErrNotSupported
+		}
+		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/issues/"), "/comments")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			posted[key] = append(posted[key], r.PostForm.Get("content"))
+			mu.Unlock()
+			return selectionReply(r, 201, map[string]any{"id": 700 + len(posted[key]), "content": r.PostForm.Get("content")}), nil
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			return selectionReply(r, 200, []any{}), nil
+		}
+		return selectionReply(r, 200, map[string]any{"id": 701, "content": "x"}), nil
+	})
+	root := t.TempDir()
+	accepted := time.Now().Add(-3 * time.Hour)
+	directories := map[int]string{}
+	for _, id := range []int{51, 52} {
+		directory := filepath.Join(root, "jobs", fmt.Sprint(id))
+		if err := os.MkdirAll(filepath.Join(directory, "run"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(watchedIssue(id, "Original conditions", "2026-01-03T00:00:00Z"))
+		if err := writeRuntimeFile(filepath.Join(directory, "issue.json"), raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(directory, "issue.json"), accepted, accepted); err != nil {
+			t.Fatal(err)
+		}
+		writeJobHistory(t, directory, chain.State{})
+		directories[id] = directory
+	}
+	// Accepted three hours ago with nothing recorded: the one waiting its
+	// turn says nothing, the one running says it is long but not failing.
+	waiting := sourceIssue{ID: 52, ProjectID: 17, Key: "EXAMPLE-52"}
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, waiting, directories[52]), directories[52], false); err != nil {
+		t.Fatal(err)
+	}
+	running := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, running, directories[51]), directories[51], true); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posted["EXAMPLE-52"]) != 0 {
+		t.Fatalf("a request waiting its turn was told its work is long: %q", posted["EXAMPLE-52"])
+	}
+	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗はなく") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
+		t.Fatalf("the running request was not told, or told wrongly: %q", posted["EXAMPLE-51"])
+	}
+}

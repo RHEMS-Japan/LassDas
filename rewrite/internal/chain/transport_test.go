@@ -20,16 +20,23 @@ const chatHandoff = `{"choices":[{"message":{"tool_calls":[{"function":{"name":"
 
 func TestModelTransportAllowsReasoningLatencyWithBoundedWait(t *testing.T) {
 	t.Setenv("ROUTER_TEST_TOKEN", "synthetic-router-token")
-	for _, api := range []string{"decision", "chat-router", "chat-selection"} {
+	for _, api := range []string{"decision", "chat-router", "chat-selection", "configured"} {
 		t.Run(api, func(t *testing.T) {
 			service := Jev{URL: "https://model.example/inference", KeyEnv: "ROUTER_TEST_TOKEN"}
+			// Sixty minutes unless the operator names another: a guard against
+			// a connection that never answers, wide enough for any completion.
+			low, high := 59*time.Minute, 60*time.Minute
+			if api == "configured" {
+				service.TimeoutMinutes = 3
+				low, high = 2*time.Minute, 3*time.Minute
+			}
 			service.Client = &http.Client{Transport: modelTransport(func(r *http.Request) (*http.Response, error) {
 				deadline, bounded := r.Context().Deadline()
-				if remaining := time.Until(deadline); !bounded || remaining < 4*time.Minute || remaining > 5*time.Minute {
+				if remaining := time.Until(deadline); !bounded || remaining < low || remaining > high {
 					t.Errorf("inference wait must allow slow completions and remain bounded: bounded=%v remaining=%s", bounded, remaining)
 				}
 				body := chatHandoff
-				if api == "decision" {
+				if api == "decision" || api == "configured" {
 					body = `{"answers":{"next":{"choice":"implement"}}}`
 				}
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
@@ -38,7 +45,7 @@ func TestModelTransportAllowsReasoningLatencyWithBoundedWait(t *testing.T) {
 			var choice string
 			var err error
 			switch api {
-			case "decision":
+			case "decision", "configured":
 				choice, err = service.Choose(context.Background(), State{}, "choose", choices)
 			case "chat-router":
 				var next Assignment

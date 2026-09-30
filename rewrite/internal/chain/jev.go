@@ -21,6 +21,10 @@ type Jev struct {
 	Model  string       `json:"model"`
 	KeyEnv string       `json:"key_env"`
 	Client *http.Client `json:"-"`
+	// TimeoutMinutes bounds one request to this service; sixty when unset.
+	// It is a guard against a connection that never answers, not a limit
+	// on the work: a slow answer within it is waited for.
+	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
 }
 
 func (j Jev) Choose(ctx context.Context, state State, instructions string, choices map[string]string) (string, error) {
@@ -61,9 +65,14 @@ func (j Jev) request(ctx context.Context, payload any) ([]byte, error) {
 	}
 	// This transport also carries ordinary reasoning-model routing/selection.
 	// A live completion took 35–40 seconds: a short RPC timeout discarded it
-	// and retried the same work. Bound a stalled inference, not normal latency.
-	// Parent cancellation (including requester stop) still interrupts at once.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// and retried the same work. Bound a connection that never answers, not
+	// normal latency. Parent cancellation (including requester stop) still
+	// interrupts at once.
+	limit := 60 * time.Minute
+	if j.TimeoutMinutes > 0 {
+		limit = time.Duration(j.TimeoutMinutes) * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, j.URL, bytes.NewReader(body))
 	if err != nil {

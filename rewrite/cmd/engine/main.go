@@ -110,6 +110,11 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		if role.Name == "" || role.Name == "done" || len(role.Processes) == 0 {
 			return errors.New("a configured role needs a name and processes")
 		}
+		for _, process := range role.Processes {
+			if process.TimeoutMinutes < 0 {
+				return errors.New("a process's timeout_minutes must not be negative")
+			}
+		}
 		if _, exists := roles[role.Name]; exists {
 			return errors.New("two roles have the same name")
 		}
@@ -156,6 +161,18 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	}
 	if strings.TrimSpace(cfg.Router.Decision.URL) == "" && (strings.TrimSpace(cfg.Router.Decision.Model) != "" || strings.TrimSpace(cfg.Router.Decision.KeyEnv) != "") {
 		return errors.New("router.decision needs url when model or key_env is given; omit it entirely to decide with the chat service")
+	}
+	services := []chain.Jev{cfg.Router.Decision, cfg.Router.LLM}
+	if cfg.ModelSelection != nil {
+		services = append(services, cfg.ModelSelection.Judge)
+		if cfg.ModelSelection.Fallback != nil {
+			services = append(services, *cfg.ModelSelection.Fallback)
+		}
+	}
+	for _, service := range services {
+		if service.TimeoutMinutes < 0 {
+			return errors.New("a model service's timeout_minutes must not be negative")
+		}
 	}
 	switch cfg.Router.Mode {
 	case "llm":

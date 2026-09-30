@@ -76,7 +76,10 @@ the command is not a new completion gate. Checks are fallible project inputs,
 not permission to narrow the request, and passing them alone does not establish
 completion. Configuring such a command does not solve discovering missing tests.
 
-Routing and model-selection inference share a five-minute request timeout,
+Routing and model-selection inference share a request timeout of sixty minutes
+(`timeout_minutes` on the service names another; zero means that default, unlike
+a process's `timeout_minutes`, where zero means none), a guard against a
+connection that never answers rather than a limit on the work,
 not a task deadline or attempt limit. The former thirty-second limit discarded
 valid completions taking 35–40 seconds and repeatedly selected the same work.
 A local TLS response delayed 31 seconds now reaches the caller. Earlier parent
@@ -428,6 +431,8 @@ each process ended, and the content of the file named by that process's
 `receipt` setting when there is one. It is plain text for the next stage to
 read, not a shape anything has to answer in, and it is also where one launch
 ends, so a repaired stage is never read as part of the launch that failed.
+One launch of a process has no time limit unless its `timeout_minutes` names
+one; a launch that reaches that limit is stopped and recorded like any failure.
 
 **What no model decides here**: which stage runs next, whether a stage is
 satisfied, whether a failure is recoverable, and when the request is complete.
@@ -514,7 +519,9 @@ it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
 the requester's stop. An id left out leaves that turn alone; the runtime never
 reads or names a status. Each change is made once and recorded beside the
-request in `status.json`; a refused change is asked again on the next tick.
+request in `status.json`; a refused change is asked again for as long as the
+request lives, a minute after the first refusal and up to an hour apart after
+repeated ones, never given up, and the same refusal is logged once.
 
 ```json
 "intake": {
@@ -684,7 +691,7 @@ is how long a running request may go without a completed step before the
 requester hears about it. Absent means 90 minutes and zero switches it off. The
 window is measured from the last history entry that finished without an error,
 so any successful role output inside it keeps the request quiet. Past the
-window:
+window: A launch that runs long without failing is said the same way once nothing has been recorded for that long: no time limit ends it, so this is the requester's only word about it.
 
 > 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。復旧を試し続けており、人の操作は不要です。
 
@@ -966,10 +973,12 @@ Provide these process settings explicitly:
 - `OPENROUTER_API_KEY`: map a named credential source through `secrets`, not
   a literal credential in `env` or the configuration file.
 - Optional `NATIVE_REASONING_EFFORT` (default `low`) and `NATIVE_MAX_TOKENS`
-  (default `6000`, per native API response, not a request failure limit). An
+  (default `32000`, per native API response, not a request failure limit). An
   answer that stays cut off at that limit after the agent's continuations
   leaves no report; the bridge then exits 1, so the runtime retries the role
   instead of passing an empty result to the next one.
+- Optional `NATIVE_MAX_TURNS`: the number of model calls after which the native
+  agent stops. None is set unless the operator names one.
 - Optional `NATIVE_LOG_PREFIX_CHARS` (default `2000`): how much of each tool
   call's arguments and result the harness prints as it happens; the lines reach
   stderr, so the runtime's live copy shows them, and only the tail of them

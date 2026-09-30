@@ -23,6 +23,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	var mu sync.Mutex
 	var set []string
 	refuse := true
+	refusedCalls := 0
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodPatch && r.URL.Host == "watch-tracker.example" {
 			mu.Lock()
@@ -32,6 +33,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 			}
 			if refuse {
 				refuse = false
+				refusedCalls++
 				return catalogReply(r, 503, "not now"), nil
 			}
 			id := r.PostForm.Get("statusId")
@@ -45,13 +47,18 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
 	var log bytes.Buffer
 	observe := func(message string) { log.WriteString(message + "\n") }
-	// The first move is refused and left unrecorded; the next attempt
-	// makes it and records it; the same turn again asks nothing.
+	now := time.Now()
+	turnClock = func() time.Time { return now }
+	defer func() { turnClock = time.Now }()
+	// The first move is refused and left unrecorded; the next attempt, once
+	// its minute has passed, makes it and records it; the same turn again
+	// asks nothing.
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	var recorded statusRecord
 	if raw, err := os.ReadFile(filepath.Join(directory, "status.json")); err != nil || json.Unmarshal(raw, &recorded) != nil || recorded.Kind != processingStatus || recorded.Refused != 1 || !strings.Contains(log.String(), "status not set to processing") {
 		t.Fatalf("a refused move was recorded as made, or not counted, or not logged: %+v %v", recorded, err)
 	}
+	now = now.Add(2 * time.Minute)
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	applyStatus(context.Background(), cfg, issue, directory, processingStatus, observe)
 	applyStatus(context.Background(), cfg, issue, directory, awaitingStatus, observe)
@@ -64,14 +71,44 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	if got != "EXAMPLE-51=1001 EXAMPLE-51=1002 EXAMPLE-51=1001 EXAMPLE-51=3" {
 		t.Fatalf("moves made: %s", got)
 	}
-	// Refusals are counted per turn: five on one turn do not freeze the next.
-	refuse = true
-	refusals := 0
-	for i := 0; i < turnAttempts+2; i++ {
+	// A refused turn is asked again with growing spacing and never given up;
+	// the same refusal is logged once, and nothing freezes the next turn.
+	logged := strings.Count(log.String(), "status not set to stopped")
+	asked := 0
+	for i := 0; i < 7; i++ {
 		refuse = true
+		mu.Lock()
+		beforeRefused := refusedCalls
+		mu.Unlock()
 		applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
-		refusals++
+		mu.Lock()
+		if refusedCalls > beforeRefused {
+			asked++
+		}
+		mu.Unlock()
+		now = now.Add(2 * time.Hour)
 	}
+	if asked != 7 {
+		t.Fatalf("a refused move was given up: asked %d of 7 times", asked)
+	}
+	if strings.Count(log.String(), "status not set to stopped") != logged+1 {
+		t.Fatalf("the same refusal was logged more than once or not at all:\n%s", log.String())
+	}
+	// Within the spacing the tracker is left alone.
+	refuse = true
+	mu.Lock()
+	beforeRefused := refusedCalls
+	mu.Unlock()
+	applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
+	now = now.Add(time.Second)
+	applyStatus(context.Background(), cfg, issue, directory, stoppedStatus, observe)
+	mu.Lock()
+	if refusedCalls != beforeRefused+1 {
+		mu.Unlock()
+		t.Fatalf("a refused move was asked again before its time: %d", refusedCalls-beforeRefused)
+	}
+	mu.Unlock()
+	now = now.Add(2 * time.Hour)
 	mu.Lock()
 	before := len(set)
 	mu.Unlock()
@@ -80,7 +117,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 	mu.Lock()
 	if len(set) != before+1 || set[len(set)-1] != "EXAMPLE-51=1002" {
 		mu.Unlock()
-		t.Fatalf("a turn refused five times froze the next turn: %v", set)
+		t.Fatalf("a refused turn froze the next turn: %v", set)
 	}
 	mu.Unlock()
 	// A turn without a configured id changes nothing, as does no configuration.
