@@ -859,8 +859,12 @@ on OpenRouter keeps that spend, and the decision service's judgement, on that
 account. An operator who wants every model call on the gateway omits both and
 names the gateway's chat endpoint in `model_selection.fallback` and
 `router.llm`: every choice, the entrance question included, is then made by
-that chat model through the gateway, and `intake.min_model_credit` has no
-OpenRouter key to read, so the budget is the gateway's own.
+that chat model through the gateway. Its `model` is the id the gateway
+invokes, prefix included (`openrouter/...` here), since the gateway prefix is
+added only to selected ids. Remove `intake.min_model_credit` as well: it reads
+the decision service's key, the queue refuses it without one, and there is
+then no model-balance check at all; whatever budget the gateway enforces is
+the only one.
 
 Selection also keeps reading the public OpenRouter catalog. The gateway list
 publishes ids, dates and an owner, without prices or `supported_parameters`,

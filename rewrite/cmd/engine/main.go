@@ -154,6 +154,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		}
 		return next
 	}
+	if strings.TrimSpace(cfg.Router.Decision.URL) == "" && (strings.TrimSpace(cfg.Router.Decision.Model) != "" || strings.TrimSpace(cfg.Router.Decision.KeyEnv) != "") {
+		return errors.New("router.decision needs url when model or key_env is given; omit it entirely to decide with the chat service")
+	}
 	switch cfg.Router.Mode {
 	case "llm":
 		router = chat

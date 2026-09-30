@@ -306,6 +306,31 @@ func TestWithoutADecisionServiceTheChatAlternativeChoosesAlone(t *testing.T) {
 	if err := only.validate(); err != nil {
 		t.Fatalf("a selection choosing with the chat alternative alone was refused: %v", err)
 	}
+	// A judge left half configured is refused rather than quietly bypassed.
+	half := selectionConfig{Authors: []string{"maker-one"}, Judge: chain.Jev{Model: "typesafe/decider", KeyEnv: "SELECTION_TEST_KEY"}, Fallback: selector.Fallback}
+	if err := half.validate(); err == nil || !strings.Contains(err.Error(), "judge needs url") {
+		t.Fatalf("a judge without a url but with a model was accepted: %v", err)
+	}
+	// A blank url is no judge either.
+	selector.Judge = chain.Jev{URL: "  "}
+	catalogs, chats = 0, 0
+	model, err = selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, nil)
+	if err != nil || model != "maker-two/current" || chats != 1 || len(observed) != 0 {
+		t.Fatalf("a blank judge url fell back to the decision path: model=%q error=%v chats=%d observed=%v", model, err, chats, observed)
+	}
+}
+
+func TestTheFallbackAndGatewayCredentialsAreScrubbedFromNotices(t *testing.T) {
+	cfg := watchConfiguration(t)
+	t.Setenv("SELECTION_TEST_FALLBACK_KEY", "synthetic-fallback-token")
+	t.Setenv("SELECTION_TEST_GATEWAY_KEY", "synthetic-gateway-token")
+	cfg.ModelSelection = &selectionConfig{Authors: []string{"maker-one"},
+		Fallback: &chain.Jev{URL: "https://chat-selection.example/chat", Model: "m", KeyEnv: "SELECTION_TEST_FALLBACK_KEY"},
+		Gateway:  &gatewayConfig{ModelsURL: "https://gateway.example/v1/models", KeyEnv: "SELECTION_TEST_GATEWAY_KEY", Prefix: "gw/"}}
+	detail := noticeDetail(cfg, "gateway refused synthetic-fallback-token and synthetic-gateway-token")
+	if strings.Contains(detail, "synthetic-fallback-token") || strings.Contains(detail, "synthetic-gateway-token") || strings.Count(detail, "[credential]") != 2 {
+		t.Fatalf("a selection credential reached a notice: %q", detail)
+	}
 }
 
 func TestSelectionFallbackRetainsBothReasonsAndDoesNotRetryOnStop(t *testing.T) {
