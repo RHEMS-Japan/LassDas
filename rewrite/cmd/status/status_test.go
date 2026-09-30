@@ -1011,3 +1011,51 @@ func TestAStoppedRequestSaysSoAndWhetherItsReportWentOut(t *testing.T) {
 		t.Error("a delivered request with an unreadable stop record is not left delivered")
 	}
 }
+
+func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	stage := "Stage 1 of 2 in the configured run: elicit."
+	var history []chain.Result
+	for i := 0; i < 3; i++ {
+		at := started.Add(time.Duration(i) * 10 * time.Second)
+		history = append(history,
+			chain.Result{Role: "elicit", Speaker: "elicit-process", Model: "maker/model-a", Instruction: stage, Error: "fork/exec /usr/bin/elicit: no such file or directory", StartedAt: at, FinishedAt: at},
+			chain.Result{Role: "elicit", Speaker: "runtime", Instruction: stage, Output: "Runtime record for stage elicit.\nProcess elicit-process did not exit 0: fork/exec /usr/bin/elicit: no such file or directory", StartedAt: at, FinishedAt: at})
+	}
+	at := started.Add(time.Minute)
+	history = append(history,
+		chain.Result{Role: "elicit", Speaker: "elicit-process", Model: "maker/model-a", Instruction: stage, Output: "REQUIREMENTS-SETTLED", StartedAt: at, FinishedAt: at.Add(2 * time.Minute)},
+		chain.Result{Role: "elicit", Speaker: "runtime", Instruction: stage, Output: "Runtime record for stage elicit.\nProcess elicit-process exited 0.", StartedAt: at.Add(2 * time.Minute), FinishedAt: at.Add(2 * time.Minute)},
+		chain.Result{Role: "ask_requester", Speaker: "requester", Output: "ANSWER-ONE", StartedAt: at.Add(3 * time.Minute), FinishedAt: at.Add(3 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-build", Output: "build ok", StartedAt: at.Add(4 * time.Minute), FinishedAt: at.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Error: "exit status 1\n--- FAIL: TestX", Output: "running tests", StartedAt: at.Add(4 * time.Minute), FinishedAt: at.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-tests did not exit 0.", StartedAt: at.Add(5 * time.Minute), FinishedAt: at.Add(5 * time.Minute)})
+	writeJob(t, root, "60", chain.State{Step: "verify", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "verify"}}}, History: history})
+	ts := serve(t, root, "", "", "")
+	_, page := get(t, ts, "/jobs/60")
+	expectAll(t, page,
+		"What happened, launch by launch", "(6 launches, 4 entries)",
+		"launch 1–3", "could not start", "the same failure, repeated 3 times", "no output: the process could not start",
+		"why it ended so", "fork/exec /usr/bin/elicit: no such file or directory",
+		"launch 4", "returned", "REQUIREMENTS-SETTLED", "written by: the worker maker/model-a",
+		"answer from the requester", "ANSWER-ONE",
+		"launch 6", "failed", "exit status 1", "written by: the command project-build", "written by: the command project-tests",
+		"what the runtime observed", "written by: the runtime", "what the worker was handed", "your ticket text",
+		"raw records (12 entries)")
+	if strings.Count(page, `<div class="launch `) != 4 {
+		t.Errorf("expected four launch entries, got %d", strings.Count(page, `<div class="launch `))
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/60", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "起きたこと (起動ごと)", "起動できず", "同じ失敗の繰り返し 3 回", "出力なし: 起動できず", "書いた者: 本体", "書いた者: 担当 maker/model-a", "依頼者の返答", "担当 (LLM) に渡したもの", "あなたが Backlog に書いた本文")
+	if strings.Contains(string(japanese), ">指示<") {
+		t.Error("the page still calls what the runtime hands over an instruction")
+	}
+}
