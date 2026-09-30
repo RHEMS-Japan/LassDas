@@ -24,7 +24,7 @@ a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:.15em}
 main{max-width:1520px;margin:0 auto;padding:1.6em 1.6em 4em}
 h1{font-size:2em;line-height:1.15;letter-spacing:-.025em;margin:.25em 0 .15em;font-weight:750}
 h1 .key{font-size:.5em;letter-spacing:.02em;color:var(--muted);text-decoration:none;display:block;margin-bottom:.35em;font-weight:600}
-.sub{color:var(--muted);font-size:.9em;margin:0 0 1.4em}
+.sub{color:var(--muted-2);font-size:.9em;margin:0 0 1.4em}
 h2{font-size:1.05em;margin:0 0 .7em;letter-spacing:-.01em}
 h3{font-size:.95em;margin:.8em 0 .3em}
 .panel{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:1.2em 1.4em;margin:1.2em 0;box-shadow:var(--shadow)}
@@ -47,7 +47,7 @@ h3{font-size:.95em;margin:.8em 0 .3em}
 .col{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--radius);padding:.8em .8em .6em;min-height:12em;scroll-snap-align:start;width:17em}
 .done-wrap{margin:.4em 0 0}.col.done{background:var(--done-soft);border-color:transparent;width:auto;min-height:0}.col.done .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(17em,1fr));gap:.7em}.col.done .card{margin:0}
 .col h3{margin:0 0 .7em;font-size:.9em;display:flex;justify-content:space-between;align-items:baseline;gap:.4em;letter-spacing:-.005em}
-.col h3 small{display:block;color:var(--muted);font-weight:500;font-size:.78em;letter-spacing:.02em;font-family:var(--mono)}
+.col h3 small{display:block;color:var(--muted-2);font-weight:500;font-size:.78em;letter-spacing:.02em;font-family:var(--mono)}
 .col .count{background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:0 .6em;font-size:.8em;color:var(--muted);font-weight:600;min-width:1.9em;text-align:center}
 .col .empty{color:var(--muted-2);font-size:.85em;padding:1.2em .4em;text-align:center;border:1px dashed var(--line-2);border-radius:10px}
 .card{display:flex;flex-wrap:wrap;align-items:center;gap:0 .5em;background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:.85em .95em .75em;margin:.6em 0;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;position:relative}
