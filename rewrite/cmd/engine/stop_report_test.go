@@ -402,7 +402,7 @@ func TestStoppedReportRequiresReadableSavedStopAndHistory(t *testing.T) {
 		if err := writeRuntimeFile(filepath.Join(dir, "stop-request.json"), raw); err != nil {
 			t.Fatal(err)
 		}
-		if err := reportStoppedRequest(context.Background(), cfg, issue, dir, make(chan struct{}, 1), io.Discard); err == nil {
+		if err := reportStoppedRequest(context.Background(), cfg, issue, dir, newTurnstile(1), io.Discard); err == nil {
 			t.Fatal("reported an unauthorized or unreadable stop")
 		}
 		if _, err := os.Stat(filepath.Join(dir, "stop-report")); !errors.Is(err, os.ErrNotExist) {

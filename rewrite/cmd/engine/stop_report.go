@@ -142,7 +142,7 @@ func reportHistory(history []chain.Result) ([]chain.Result, map[int]int) {
 	return kept, counts
 }
 
-func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, slots chan struct{}, log io.Writer) error {
+func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, turns *turnstile, log io.Writer) error {
 	if cfg.Intake == nil || cfg.Intake.StopReportRole == "" {
 		return nil
 	}
@@ -163,12 +163,10 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if done, err := stoppedReportDone(directory); err != nil || done {
 		return err
 	}
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := turns.acquire(ctx, issue.ID); err != nil {
+		return err
 	}
+	defer turns.release()
 	raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
 	if err != nil {
 		return err

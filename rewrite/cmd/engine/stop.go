@@ -72,7 +72,13 @@ func savedStop(directory string, issue sourceIssue, operators []int64) (bool, er
 
 // Monitor queued and running work independently of discovery and of the model.
 // Slots restrict actual engine executions, not observation of a queued stop.
-func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, configPath, requestPath string, interval time.Duration, slots chan struct{}, log io.Writer) error {
+// toleratedUnreadableTicks is how many ticks in a row the tracker may fail to
+// answer before the work is paused for want of its control channel. A single
+// slow answer used to end a role's launch mid-way and cost its work; a stop
+// filed during those ticks is still read as soon as the tracker answers.
+const toleratedUnreadableTicks = 3
+
+func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, configPath, requestPath string, interval time.Duration, turns *turnstile, log io.Writer) error {
 	observe := func(message string) { fmt.Fprintf(log, "request %d: %s\n", issue.ID, message) }
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -82,14 +88,18 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 		if cancel != nil {
 			cancel()
 			<-result
-			<-slots
+			turns.release()
 			cancel, result = nil, nil
 		}
 	}
 	defer stopChild()
+	defer turns.leave(issue.ID)
 	var instruction json.RawMessage
 	var rows []json.RawMessage
 	waiting := false
+	// A tracker that does not answer for one tick is not a lost control
+	// channel; the work goes on, and only a read that keeps failing pauses it.
+	unreadable := 0
 	notice := requestNotices(cfg, issue, directory)
 	for {
 		if ctx.Err() != nil {
@@ -112,6 +122,9 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 			if err == nil && issue.Creator.ID <= 0 && len(cfg.Intake.StopUserIDs) == 0 {
 				err = errors.New("requester identity is unavailable for stop instructions")
+			}
+			if err == nil {
+				unreadable = 0
 			}
 		}
 		// The shared model key running out is the one failure no role can
@@ -136,18 +149,26 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			stopChild()
 			if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), instruction); err == nil {
 				observe("stopped at an authorized user's request; earlier external effects have not been undone")
-				return reportStoppedRequest(ctx, cfg, issue, directory, slots, log)
+				return reportStoppedRequest(ctx, cfg, issue, directory, turns, log)
 			} else {
+				turns.leave(issue.ID)
 				observe("stopped; waiting to retain the original stop instruction: " + err.Error())
 			}
 		} else if err != nil {
-			stopChild()
-			observe("work paused while stop instructions are unavailable: " + err.Error())
+			unreadable++
+			if unreadable < toleratedUnreadableTicks {
+				observe(fmt.Sprintf("stop instructions could not be read (%d of %d before the work pauses): %s", unreadable, toleratedUnreadableTicks, err.Error()))
+			} else {
+				stopChild()
+				turns.leave(issue.ID)
+				observe("work paused while stop instructions are unavailable: " + err.Error())
+			}
 		} else if waiting {
 			// The engine put a question to the requester and stopped there.
 			// Record how far the comments had gone, then leave the request to
 			// the collector, which starts it again when the answer arrives.
 			if err := recordQuestion(directory, rows, issue); err != nil {
+				turns.leave(issue.ID)
 				observe("waiting to record the question put to the requester: " + err.Error())
 			} else {
 				observe("waiting for the requester's answer at the assigned issue")
@@ -157,9 +178,11 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// Stop the child the same way an authorized stop does, but keep the
 			// request: the next tick relaunches it once the budget is back.
 			stopChild()
+			turns.leave(issue.ID)
 		} else if result == nil {
-			select {
-			case slots <- struct{}{}:
+			// The slot goes to the earliest request in line; a later one keeps
+			// reading its control comments and asks again on the next tick.
+			if turns.try(issue.ID) {
 				workCtx, releaseWork := context.WithCancel(ctx)
 				cancel = releaseWork
 				result = make(chan error, 1)
@@ -169,9 +192,6 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 					defer releaseWork()
 					outcome <- run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
 				}()
-			default:
-				// Keep reading this queued request's control comments even while
-				// all execution slots are occupied by other work.
 			}
 		}
 		select {
@@ -179,7 +199,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			return ctx.Err()
 		case err := <-result:
 			cancel()
-			<-slots
+			turns.release()
 			cancel, result = nil, nil
 			if !errors.Is(err, chain.ErrWaiting) {
 				return err

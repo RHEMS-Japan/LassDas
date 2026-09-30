@@ -140,7 +140,7 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	finished := make(chan string, capacity)
-	slots := make(chan struct{}, capacity)
+	turns := newTurnstile(capacity)
 	collected := make(chan struct{}, 1)
 	active := map[string]bool{}
 	var workers sync.WaitGroup
@@ -214,7 +214,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 					if done, err := stoppedReportDone(directory); err != nil {
 						observe("reading stopped report: " + err.Error())
 					} else if !done {
-						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, slots, log) })
+						launch(entry.Name(), func() error { return reportStoppedRequest(ctx, cfg, issue, directory, turns, log) })
 					}
 				}
 				continue
@@ -236,6 +236,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				continue
 			}
 			if state.Done {
+				if err := trimFinished(directory); err != nil {
+					observe("request " + entry.Name() + ": finished caches not removed: " + err.Error())
+				}
 				continue
 			}
 			if state.Waiting {
@@ -299,8 +302,9 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if err := os.RemoveAll(filepath.Join(directory, "live")); err != nil {
 				observe("request " + entry.Name() + ": stale live copy not removed: " + err.Error())
 			}
+			turns.enter(id)
 			launch(entry.Name(), func() error {
-				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, slots, log)
+				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, turns, log)
 			})
 		}
 		// Launch failures are retried on the next tick, not in a busy loop.
