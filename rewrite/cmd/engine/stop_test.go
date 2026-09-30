@@ -319,7 +319,13 @@ func TestStopReadOutagePausesAndRecoversPendingWorkInsteadOfEndingIt(t *testing.
 			finish := startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
 			pid := waitTestPID(t, filepath.Join(root, "jobs", "51", "workspace", "child-pid"))
 			unavailable.Store(true)
-			waitFor(t, func() bool { return badReads.Load() >= 2 && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+			// Two failed reads in a row do not end the launch: the tracker may
+			// merely be slow. The third pauses the work.
+			waitFor(t, func() bool { return badReads.Load() >= toleratedUnreadableTicks-1 })
+			if err := syscall.Kill(pid, 0); err != nil {
+				t.Fatalf("a passing tracker outage ended the launch: %v", err)
+			}
+			waitFor(t, func() bool { return badReads.Load() > toleratedUnreadableTicks && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
 			state, err := loadWatchState(root, 51)
 			if err != nil || state.Done || state.Pending == nil || len(state.History) != 1 || state.History[0].Error != context.Canceled.Error() || models.Load() != 1 {
 				t.Fatalf("control outage lost pending work: %#v %v models=%d", state, err, models.Load())
