@@ -1171,14 +1171,20 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	writeJob(t, root, "70", chain.State{})
 	writeJob(t, root, "71", chain.State{Workflow: flow})
 	writeJob(t, root, "72", chain.State{})
+	// A freely routed run saves a definition without stages as it starts:
+	// it holds the slot and is not queued, and has no first stage to sit at.
+	writeJob(t, root, "73", chain.State{Workflow: &chain.Workflow{Start: []string{"elicit"}, After: map[string][]string{"elicit": {"work"}}}})
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Queued <b>2</b>`, `Running <b>2</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, `<article class="card running" data-key="EXAMPLE-71">`,
+	expectAll(t, body, `Queued <b>2</b>`, `Running <b>3</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, `<article class="card running" data-key="EXAMPLE-71">`, `<article class="card running" data-key="EXAMPLE-73">`,
 		"queued: waiting for a free execution slot", "starting: choosing the first stage")
+	if !strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-73"`) {
+		t.Error("a freely routed run that is starting is not in the other column")
+	}
 	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
 		t.Error("a queued or starting request is not shown at the first stage")
 	}
-	if strings.Contains(body, `data-stage="other"`) {
+	if strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-70"`) || strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-72"`) {
 		t.Error("a queued request fell into the other column")
 	}
 	if strings.Contains(inColumn(body, "elicit"), "between steps") {

@@ -814,11 +814,13 @@ func (j *job) derive(now time.Time) {
 		// chooses its first stage. So a record without one is a request
 		// waiting for a free execution slot, and a record with one is a
 		// request that has the slot and is choosing where to begin.
-		if state.Workflow == nil || len(state.Workflow.Stages) == 0 {
+		if state.Workflow == nil {
 			j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
 		} else {
 			j.Status = "starting: choosing the first stage"
-			j.Stage = state.Workflow.Stages[0].Name
+			if len(state.Workflow.Stages) > 0 {
+				j.Stage = state.Workflow.Stages[0].Name
+			}
 		}
 	default:
 		var last time.Time
