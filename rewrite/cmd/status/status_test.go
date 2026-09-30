@@ -1194,6 +1194,15 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	if strings.Contains(fresh, "no run record yet") || !strings.Contains(inColumn(fresh, "elicit"), `data-key="EXAMPLE-74"`) {
 		t.Error("a request accepted this tick is called \"no run record yet\" or left out of the first column")
 	}
+	// A directory left by an interrupted acceptance, with no issue in it, is
+	// not a queued request.
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "75"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, empty := get(t, ts, "/")
+	if strings.Contains(empty, `<article class="card queued" data-key="">`) || !strings.Contains(empty, `Queued <b>3</b>`) {
+		t.Error("an empty request directory is shown as queued")
+	}
 	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
 		t.Error("a queued or starting request is not shown at the first stage")
 	}

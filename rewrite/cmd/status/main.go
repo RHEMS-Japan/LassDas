@@ -805,7 +805,9 @@ func (j *job) derive(now time.Time) {
 	j.Lane = "running"
 	switch state := j.State; {
 	case state == nil:
-		if j.NoRecord {
+		// Only a request the runtime accepted, with its issue on disk, is
+		// queued; a directory left by an interrupted acceptance is not.
+		if j.NoRecord && j.Key != "" {
 			j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
 		}
 		for _, note := range j.Notes {
