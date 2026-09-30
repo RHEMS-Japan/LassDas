@@ -424,7 +424,7 @@ func stallWindow(cfg config) time.Duration {
 
 // noteStall says once that nothing has completed for a while. It changes no
 // routing and ends nothing: the request keeps trying to recover.
-func noteStall(ctx context.Context, cfg config, n notices, directory string) error {
+func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool) error {
 	window := stallWindow(cfg)
 	if window <= 0 {
 		return nil
@@ -437,6 +437,12 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string) err
 	elapsed, failure, stalled := stalledFor(state, now)
 	if stalled && elapsed > window {
 		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)))
+	}
+	// A long silence is worth a word only while the work runs: a request
+	// waiting its turn, or held for the model budget, is quiet for other
+	// reasons, and those have their own notices.
+	if !running {
+		return nil
 	}
 	var accepted time.Time
 	if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil {

@@ -149,7 +149,7 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 		}
 		if err := cfg.Backlog.SetCategories(ctx, issue.Key, append(ids, id)); err != nil {
 			if record.refuse("category", err.Error()) {
-				observe("category not set, asked again each tick: " + err.Error())
+				observe("category not set, asked again later: " + err.Error())
 			}
 			saveTurns(directory, record)
 		} else {
@@ -183,7 +183,7 @@ func assignTurn(ctx context.Context, cfg config, issue sourceIssue, directory, w
 	}
 	if err := cfg.Backlog.SetAssignee(ctx, issue.Key, user); err != nil {
 		if record.refuse("assignee", err.Error()) {
-			observe("assignee not handed to the " + who + ", asked again each tick: " + err.Error())
+			observe("assignee not handed to the " + who + ", asked again later: " + err.Error())
 		}
 		saveTurns(directory, record)
 		return
@@ -210,7 +210,7 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 	}
 	if err := cfg.Backlog.SetActualHours(ctx, issue.Key, hours); err != nil {
 		if record.refuse("hours", err.Error()) {
-			observe("hours not recorded on the issue, asked again each tick: " + err.Error())
+			observe("hours not recorded on the issue, asked again later: " + err.Error())
 		}
 		saveTurns(directory, record)
 		return
