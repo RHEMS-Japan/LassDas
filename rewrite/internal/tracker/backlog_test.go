@@ -331,7 +331,7 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
 	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
 	var seen []string
-	unreadable := false
+	unreadable, noHours := false, false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.PostForm.Encode())
@@ -346,6 +346,8 @@ func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
 		case unreadable:
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte("not now"))
+		case noHours:
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "actualHours": nil})
 		default:
 			json.NewEncoder(w).Encode(map[string]any{"id": 1, "status": map[string]any{"id": 1001}, "assignee": map[string]any{"id": 55}, "actualHours": 0.25})
 		}
@@ -371,6 +373,15 @@ func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
 	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 4); err == nil || !strings.Contains(err.Error(), "Invalid statusId") {
 		t.Fatalf("another refusal was read as done: %v", err)
 	}
+	// No hours on the issue confirm none sent, and nothing else.
+	noHours = true
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0); err != nil {
+		t.Fatalf("no hours recorded were not read as none: %v", err)
+	}
+	if err := b.SetActualHours(context.Background(), "EXAMPLE-1", 0.25); err == nil {
+		t.Fatal("hours the issue does not hold were reported as recorded")
+	}
+	noHours = false
 	// A read-back that fails keeps both failures.
 	unreadable = true
 	if err := b.SetStatus(context.Background(), "EXAMPLE-1", 1001); err == nil || !strings.Contains(err.Error(), "No comment content.") || !strings.Contains(err.Error(), "could not be read back") || !strings.Contains(err.Error(), "HTTP 500") {
@@ -383,6 +394,8 @@ func TestAChangeTheIssueAlreadyHoldsIsReadBackAsDone(t *testing.T) {
 		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1002", "GET /api/v2/issues/EXAMPLE-1 ",
 		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.50", "GET /api/v2/issues/EXAMPLE-1 ",
 		"PATCH /api/v2/issues/EXAMPLE-1 statusId=4",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.00", "GET /api/v2/issues/EXAMPLE-1 ",
+		"PATCH /api/v2/issues/EXAMPLE-1 actualHours=0.25", "GET /api/v2/issues/EXAMPLE-1 ",
 		"PATCH /api/v2/issues/EXAMPLE-1 statusId=1001", "GET /api/v2/issues/EXAMPLE-1 ",
 	}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {

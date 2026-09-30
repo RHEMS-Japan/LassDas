@@ -170,7 +170,8 @@ func (b Backlog) SetActualHours(ctx context.Context, issue string, hours float64
 		var updated struct {
 			ActualHours *float64 `json:"actualHours"`
 		}
-		if err := json.Unmarshal(data, &updated); err != nil || updated.ActualHours == nil || math.Abs(*updated.ActualHours-sent) > 1e-9 {
+		// A tracker may hand back no hours at all for none recorded.
+		if err := json.Unmarshal(data, &updated); err != nil || (updated.ActualHours == nil && sent != 0) || (updated.ActualHours != nil && math.Abs(*updated.ActualHours-sent) > 1e-9) {
 			return errors.New("tracker did not confirm the hours")
 		}
 		return nil
