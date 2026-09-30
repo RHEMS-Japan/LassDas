@@ -1178,8 +1178,21 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	_, body := get(t, ts, "/")
 	expectAll(t, body, `Queued <b>2</b>`, `Running <b>3</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, `<article class="card running" data-key="EXAMPLE-71">`, `<article class="card running" data-key="EXAMPLE-73">`,
 		"queued: waiting for a free execution slot", "starting: choosing the first stage")
-	if !strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-73"`) {
-		t.Error("a freely routed run that is starting is not in the other column")
+	if !strings.Contains(inColumn(body, "other"), `data-key="EXAMPLE-73"`) || !strings.Contains(body, "starting: choosing the first role") {
+		t.Error("a freely routed run that is starting is not in the other column, or is said to choose a stage")
+	}
+	// Accepted on this tick, before the runtime has written any record:
+	// only issue.json exists. That is queued too, not "no run record yet".
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "74"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "jobs", "74", "issue.json"), []byte(`{"id":74,"issueKey":"EXAMPLE-74","summary":"request 74"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, fresh := get(t, ts, "/")
+	expectAll(t, fresh, `Queued <b>3</b>`, `<article class="card queued" data-key="EXAMPLE-74">`)
+	if strings.Contains(fresh, "no run record yet") || !strings.Contains(inColumn(fresh, "elicit"), `data-key="EXAMPLE-74"`) {
+		t.Error("a request accepted this tick is called \"no run record yet\" or left out of the first column")
 	}
 	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
 		t.Error("a queued or starting request is not shown at the first stage")
@@ -1198,5 +1211,5 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	}
 	japanese, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	expectAll(t, string(japanese), "順番待ち <b>2</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
+	expectAll(t, string(japanese), "順番待ち <b>3</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
 }
