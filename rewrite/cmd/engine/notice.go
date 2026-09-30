@@ -126,9 +126,10 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
+	once := kind == acceptedNotice || kind == startedNotice || strings.HasPrefix(kind, stagePrefix)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
 		if log.Notices[i].Kind == kind {
-			return now.Sub(log.Notices[i].WrittenAt) >= interval
+			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval
 		}
 	}
 	return true
@@ -487,6 +488,12 @@ func validateNotices(cfg config) error {
 	}
 	if cfg.Intake.MinModelCredit < 0 {
 		return errors.New("intake.min_model_credit must not be negative")
+	}
+	if err := cfg.Intake.Statuses.validate(); err != nil {
+		return err
+	}
+	if cfg.Intake.CategoryOnAccept < 0 {
+		return errors.New("intake.category_on_accept must not be negative")
 	}
 	if cfg.Intake.StallNoticeMinutes != nil && *cfg.Intake.StallNoticeMinutes < 0 {
 		return errors.New("intake.stall_notice_minutes must not be negative")
