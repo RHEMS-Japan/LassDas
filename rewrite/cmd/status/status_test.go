@@ -797,3 +797,67 @@ func TestARolesFileListIsCapped(t *testing.T) {
 		t.Error("the page must say that more files are under the browser")
 	}
 }
+
+// writeJob lays down one accepted request with its saved history, the way
+// the runtime leaves it.
+func writeJob(t *testing.T, root, id string, state chain.State) {
+	t.Helper()
+	dir := filepath.Join(root, "jobs", id)
+	if err := os.MkdirAll(filepath.Join(dir, "run"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"issue.json": `{"id":` + id + `,"issueKey":"EXAMPLE-` + id + `","summary":"request ` + id + `"}`, filepath.Join("run", "history.json"): string(raw)} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestASideRoleWithNoStageBehindItStaysInTheOtherColumn(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}, {Name: "verify"}}}
+	writeJob(t, root, "20", chain.State{Waiting: true, Step: "ask_requester", Workflow: flow,
+		History: []chain.Result{{Role: "ask_requester", Speaker: "ask-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}})
+	writeJob(t, root, "21", chain.State{Step: "stop_report", Workflow: flow})
+	ts := serve(t, root, "", "", "")
+	response, body := get(t, ts, "/")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("the board answered HTTP %d", response.StatusCode)
+	}
+	other := inColumn(body, "other")
+	for _, key := range []string{"EXAMPLE-20", "EXAMPLE-21"} {
+		if !strings.Contains(other, `data-key="`+key+`"`) {
+			t.Errorf("%s is not in the other column", key)
+		}
+		for _, stage := range []string{"elicit", "implement", "verify"} {
+			if strings.Contains(inColumn(body, stage), `data-key="`+key+`"`) {
+				t.Errorf("%s was placed at stage %s with no stage in its history", key, stage)
+			}
+		}
+	}
+	for _, id := range []string{"20", "21"} {
+		if response, _ := get(t, ts, "/jobs/"+id); response.StatusCode != http.StatusOK {
+			t.Errorf("the job page for %s answered HTTP %d", id, response.StatusCode)
+		}
+	}
+}
+
+func TestADeliveredRequestIsListedOnlyInTheLastColumn(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	writeJob(t, root, "22", chain.State{Done: true, Step: "implement", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}, {Name: "verify"}}},
+		History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}})
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	if !strings.Contains(inColumn(body, "done"), `data-key="EXAMPLE-22"`) {
+		t.Error("a delivered request is not in the last column")
+	}
+	if got := strings.Count(body, `data-key="EXAMPLE-22"`); got != 1 {
+		t.Errorf("a delivered request appears %d times on the board", got)
+	}
+}
