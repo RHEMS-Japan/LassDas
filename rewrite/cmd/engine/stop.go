@@ -151,6 +151,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				observe("stopped at an authorized user's request; earlier external effects have not been undone")
 				return reportStoppedRequest(ctx, cfg, issue, directory, turns, log)
 			} else {
+				turns.leave(issue.ID)
 				observe("stopped; waiting to retain the original stop instruction: " + err.Error())
 			}
 		} else if err != nil {
@@ -167,6 +168,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// Record how far the comments had gone, then leave the request to
 			// the collector, which starts it again when the answer arrives.
 			if err := recordQuestion(directory, rows, issue); err != nil {
+				turns.leave(issue.ID)
 				observe("waiting to record the question put to the requester: " + err.Error())
 			} else {
 				observe("waiting for the requester's answer at the assigned issue")

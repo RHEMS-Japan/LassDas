@@ -23,6 +23,14 @@ func newTurnstile(capacity int) *turnstile {
 	return &turnstile{waiting: map[int64]bool{}, slots: make(chan struct{}, capacity)}
 }
 
+// enter puts the request in line without asking for a slot yet, so a request
+// found earlier keeps its place while its watcher starts.
+func (t *turnstile) enter(id int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.waiting[id] = true
+}
+
 // try puts the request in line and takes a slot when it is the earliest
 // request in line and a slot is free.
 func (t *turnstile) try(id int64) bool {

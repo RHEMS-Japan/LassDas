@@ -325,7 +325,9 @@ func TestStopReadOutagePausesAndRecoversPendingWorkInsteadOfEndingIt(t *testing.
 			if err := syscall.Kill(pid, 0); err != nil {
 				t.Fatalf("a passing tracker outage ended the launch: %v", err)
 			}
-			waitFor(t, func() bool { return badReads.Load() > toleratedUnreadableTicks && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+			waitFor(t, func() bool {
+				return badReads.Load() > toleratedUnreadableTicks && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+			})
 			state, err := loadWatchState(root, 51)
 			if err != nil || state.Done || state.Pending == nil || len(state.History) != 1 || state.History[0].Error != context.Canceled.Error() || models.Load() != 1 {
 				t.Fatalf("control outage lost pending work: %#v %v models=%d", state, err, models.Load())

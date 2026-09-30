@@ -42,6 +42,16 @@ func TestTheTurnstileHandsSlotsOutInFilingOrder(t *testing.T) {
 		t.Fatal("the last request in line did not get the slot after the earlier one left")
 	}
 	turns.release()
+	// A request entered at discovery holds its place before its watcher asks.
+	turns.enter(7)
+	if turns.try(8) {
+		t.Fatal("a later request took the slot ahead of one entered at discovery")
+	}
+	if !turns.try(7) {
+		t.Fatal("the request entered at discovery did not get the slot")
+	}
+	turns.release()
+	turns.leave(8)
 	// acquire waits its turn and gives up with the context.
 	if !turns.try(5) {
 		t.Fatal("a free slot was not taken")

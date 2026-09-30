@@ -302,6 +302,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			if err := os.RemoveAll(filepath.Join(directory, "live")); err != nil {
 				observe("request " + entry.Name() + ": stale live copy not removed: " + err.Error())
 			}
+			turns.enter(id)
 			launch(entry.Name(), func() error {
 				return runWatchedRequest(ctx, cfg, issue, directory, configPath, requestPath, interval, turns, log)
 			})
