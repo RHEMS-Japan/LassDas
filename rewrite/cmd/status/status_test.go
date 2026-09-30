@@ -1035,7 +1035,7 @@ func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testin
 	ts := serve(t, root, "", "", "")
 	_, page := get(t, ts, "/jobs/60")
 	expectAll(t, page,
-		"What happened, launch by launch", "(6 launches, 4 entries)",
+		"What happened, launch by launch", "(5 launches, 4 entries)",
 		"launch 1–3", "could not start", "the same failure, repeated 3 times", "no output: the process could not start",
 		"why it ended so", "fork/exec /usr/bin/elicit: no such file or directory",
 		"launch 4", "returned", "REQUIREMENTS-SETTLED", "written by: the worker maker/model-a",
@@ -1057,5 +1057,57 @@ func TestTheRequestPageReadsTheRecordLaunchByLaunchAndSaysWhoWroteWhat(t *testin
 	expectAll(t, string(japanese), "起きたこと (起動ごと)", "起動できず", "同じ失敗の繰り返し 3 回", "出力なし: 起動できず", "書いた者: 本体", "書いた者: 担当 maker/model-a", "依頼者の返答", "担当 (LLM) に渡したもの", "あなたが Backlog に書いた本文")
 	if strings.Contains(string(japanese), ">指示<") {
 		t.Error("the page still calls what the runtime hands over an instruction")
+	}
+}
+
+func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing.T) {
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	entries := func(results ...chain.Result) []record {
+		var records []record
+		for i, result := range results {
+			records = append(records, record{Index: i + 1, Role: result.Role, Speaker: result.Speaker, Model: result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
+				Output: result.Output, Error: result.Error, Diagnostics: result.Diagnostics, Instruction: result.Instruction, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"})
+		}
+		return records
+	}
+	// A role with no stage behind it writes no runtime note; its launches
+	// are told apart by time, and identical failures still fold.
+	var free []chain.Result
+	for i := 0; i < 3; i++ {
+		at := started.Add(time.Duration(i) * 10 * time.Second)
+		free = append(free, chain.Result{Role: "ask_requester", Speaker: "ask-process", Model: "m", Error: "fork/exec /usr/bin/ask: no such file or directory", StartedAt: at, FinishedAt: at})
+	}
+	free = append(free, chain.Result{Role: "ask_requester", Speaker: "ask-process", Model: "m", Output: "asked", StartedAt: started.Add(time.Minute), FinishedAt: started.Add(2 * time.Minute)})
+	launches := groupLaunches(entries(free...))
+	if len(launches) != 2 || launches[0].Count != 3 || launches[0].Outcome != couldNotStart || launches[1].Outcome != returned || launches[1].Index != 4 {
+		t.Fatalf("launches of a role without a stage note were fused or not folded: %+v", launches)
+	}
+	// An interruption note stands on its own as "interrupted"; it does not
+	// rewrite the launch before it. A routing failure is a failure, not a
+	// grey note, and a note without a start has no duration.
+	noted := groupLaunches(entries(
+		chain.Result{Role: "implement", Speaker: "implement-process", Model: "m", Output: "FIRST-RUN", StartedAt: started, FinishedAt: started.Add(time.Minute)},
+		chain.Result{Role: "implement", Speaker: "runtime", Error: "The process stopped while this action was pending. Available reports may be partial.", FinishedAt: started.Add(20 * time.Minute)},
+		chain.Result{Role: "router", Speaker: "runtime", Error: "routing unavailable: model service returned HTTP 502", FinishedAt: started.Add(21 * time.Minute)},
+	))
+	if len(noted) != 3 || noted[0].Outcome != returned || noted[0].Duration != "1m00s" || noted[1].Outcome != interrupted || noted[1].Duration != "" || noted[2].Outcome != failed || noted[2].Failure != "routing unavailable: model service returned HTTP 502" {
+		t.Fatalf("notes were attached to the launch before them or shown wrongly: %+v", noted)
+	}
+	// Two processes of which one could not start: the launch failed, it did
+	// not "not start". Two different failures never fold, and a folded entry
+	// keeps the latest launch's text.
+	mixed := groupLaunches(entries(
+		chain.Result{Role: "verify", Speaker: "project-build", Output: "BUILD-OK", StartedAt: started, FinishedAt: started.Add(time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Error: "fork/exec /usr/bin/tests: no such file or directory", StartedAt: started, FinishedAt: started},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-tests did not exit 0.", FinishedAt: started.Add(time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Error: "exit status 1\n--- FAIL: TestAlpha", Output: "ran", StartedAt: started.Add(2 * time.Minute), FinishedAt: started.Add(3 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-tests did not exit 0.", FinishedAt: started.Add(3 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Error: "exit status 1\n--- FAIL: TestBeta", Output: "ran again", StartedAt: started.Add(4 * time.Minute), FinishedAt: started.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-tests did not exit 0.", FinishedAt: started.Add(5 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "project-tests", Error: "exit status 1\n--- FAIL: TestBeta", Output: "ran once more", StartedAt: started.Add(6 * time.Minute), FinishedAt: started.Add(7 * time.Minute)},
+		chain.Result{Role: "verify", Speaker: "runtime", Output: "Runtime record for stage verify.\nProcess project-tests did not exit 0.", FinishedAt: started.Add(7 * time.Minute)},
+	))
+	if len(mixed) != 3 || mixed[0].Outcome != failed || mixed[1].Count != 1 || mixed[2].Count != 2 || mixed[2].Workers[0].Output != "ran once more" || mixed[2].Index != 3 || mixed[2].Last != 4 {
+		t.Fatalf("a mixed launch, two different failures, or the folded text were read wrongly: %+v", mixed)
 	}
 }

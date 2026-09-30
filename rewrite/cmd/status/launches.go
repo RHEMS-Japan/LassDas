@@ -26,6 +26,7 @@ type launch struct {
 	Count       int
 	Records     []int
 	Gap         string
+	signature   string
 }
 
 type worker struct {
@@ -45,6 +46,14 @@ const (
 	noted         = "note by the runtime"
 )
 
+// stageNotePrefix opens the runtime's own note about one launch of a stage;
+// that note is the only record that closes a launch. Any other note of the
+// runtime, an interruption, a routing failure, a limit reached, stands on its
+// own. A process record joins the open launch of its role only when it began
+// no later than that launch's latest end: processes of one launch start
+// together, and a later launch starts after the earlier one ended.
+const stageNotePrefix = "Runtime record for stage "
+
 func groupLaunches(records []record) []launch {
 	var launches []launch
 	open := -1 // index in launches of the launch still taking records
@@ -54,33 +63,28 @@ func groupLaunches(records []record) []launch {
 			launches = append(launches, launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: answered,
 				Workers: []worker{{Speaker: entry.Speaker, Output: entry.Output}}, Records: []int{entry.Index}, Gap: entry.Gap})
 			open = -1
+		case entry.Runtime && entry.Error == "" && strings.HasPrefix(entry.Output, stageNotePrefix) && open >= 0 && launches[open].Role == entry.Role:
+			current := &launches[open]
+			current.Records = append(current.Records, entry.Index)
+			current.Notes = append(current.Notes, entry.Output)
+			if entry.Finished.After(current.Finished) {
+				current.Finished = entry.Finished
+			}
+			open = -1
 		case entry.Runtime:
-			if open >= 0 && launches[open].Role == entry.Role {
-				current := &launches[open]
-				current.Records = append(current.Records, entry.Index)
-				if entry.Finished.After(current.Finished) {
-					current.Finished = entry.Finished
-				}
-				if entry.Error != "" {
-					current.Notes = append(current.Notes, entry.Error)
-					if strings.HasPrefix(entry.Error, "The process stopped while this action was pending") {
-						current.Outcome, current.Failure = interrupted, firstLine(entry.Error)
-					}
-				} else if entry.Output != "" {
-					current.Notes = append(current.Notes, entry.Output)
-				}
-				open = -1
-				continue
+			note := launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap}
+			switch {
+			case strings.HasPrefix(entry.Error, "The process stopped while this action was pending"):
+				note.Outcome, note.Failure, note.Notes = interrupted, firstLine(entry.Error), []string{entry.Error}
+			case entry.Error != "":
+				note.Outcome, note.Failure, note.Notes = failed, firstLine(entry.Error), []string{entry.Error}
+			default:
+				note.Notes = []string{entry.Output}
 			}
-			text := entry.Output
-			if entry.Error != "" {
-				text = entry.Error
-			}
-			launches = append(launches, launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: noted,
-				Failure: firstLine(entry.Error), Notes: []string{text}, Instruction: entry.Instruction, Records: []int{entry.Index}, Gap: entry.Gap})
+			launches = append(launches, note)
 			open = -1
 		default:
-			if open < 0 || launches[open].Role != entry.Role {
+			if open < 0 || launches[open].Role != entry.Role || (!entry.Started.IsZero() && entry.Started.After(launches[open].Finished)) {
 				launches = append(launches, launch{Role: entry.Role, Started: entry.Started, Finished: entry.Finished, Outcome: returned,
 					Instruction: entry.Instruction, Gap: entry.Gap})
 				open = len(launches) - 1
@@ -88,25 +92,39 @@ func groupLaunches(records []record) []launch {
 			current := &launches[open]
 			current.Records = append(current.Records, entry.Index)
 			current.Workers = append(current.Workers, worker{Speaker: entry.Speaker, Model: entry.Model, Output: entry.Output, Error: entry.Error, Diagnostics: entry.Diagnostics})
-			if entry.Started.Before(current.Started) || current.Started.IsZero() {
+			if current.Started.IsZero() || (!entry.Started.IsZero() && entry.Started.Before(current.Started)) {
 				current.Started = entry.Started
 			}
 			if entry.Finished.After(current.Finished) {
 				current.Finished = entry.Finished
 			}
-			if entry.Error != "" && current.Outcome == returned {
-				current.Outcome, current.Failure = failed, firstLine(entry.Error)
-				if entry.Output == "" && startFailure(entry.Error) {
-					current.Outcome = couldNotStart
-				}
-			}
 		}
 	}
 	for i := range launches {
-		launches[i].Index = i + 1
-		launches[i].Last = i + 1
-		launches[i].Count = 1
-		launches[i].Duration = humanDuration(launches[i].Finished.Sub(launches[i].Started))
+		current := &launches[i]
+		current.Index, current.Last, current.Count = i+1, i+1, 1
+		if len(current.Workers) > 0 && current.Outcome == returned {
+			var errors []string
+			started := 0
+			for _, w := range current.Workers {
+				if w.Error != "" {
+					errors = append(errors, w.Error)
+				}
+				if w.Output != "" || !startFailure(w.Error) {
+					started++
+				}
+			}
+			if len(errors) > 0 {
+				current.Outcome, current.Failure = failed, firstLine(errors[0])
+				if started == 0 {
+					current.Outcome = couldNotStart
+				}
+			}
+			current.signature = current.Role + "\x00" + current.Outcome + "\x00" + strings.Join(errors, "\x00")
+		}
+		if !current.Started.IsZero() && !current.Finished.IsZero() && !current.Finished.Before(current.Started) {
+			current.Duration = humanDuration(current.Finished.Sub(current.Started))
+		}
 	}
 	return foldLaunches(launches)
 }
@@ -114,24 +132,26 @@ func groupLaunches(records []record) []launch {
 // startFailure recognises a launch that never ran: the runtime could not
 // start the process, or could not prepare what it needed first.
 func startFailure(text string) bool {
-	return strings.Contains(text, "fork/exec") || strings.HasPrefix(text, "Preparing role access") || strings.Contains(text, "executable file not found")
+	return strings.HasPrefix(text, "fork/exec") || strings.HasPrefix(text, "Preparing role access") || strings.HasPrefix(text, "exec: ")
 }
 
 // foldLaunches joins consecutive launches of one role that ended the same way
-// with the same failure into one entry that keeps the first and last of them.
+// with the same failures, word for word, into one entry that keeps the latest
+// of them and says how many there were.
 func foldLaunches(launches []launch) []launch {
 	var folded []launch
 	for _, current := range launches {
 		if n := len(folded); n > 0 {
 			previous := &folded[n-1]
-			same := previous.Role == current.Role && previous.Outcome == current.Outcome && previous.Failure == current.Failure &&
-				(current.Outcome == failed || current.Outcome == couldNotStart)
+			same := previous.signature != "" && previous.signature == current.signature && (current.Outcome == failed || current.Outcome == couldNotStart)
 			if same {
-				previous.Count++
-				previous.Last = current.Index
-				previous.Finished = current.Finished
-				previous.Records = append(previous.Records, current.Records...)
-				previous.Duration = humanDuration(previous.Finished.Sub(previous.Started))
+				count, first, started := previous.Count+1, previous.Index, previous.Started
+				records := append(previous.Records, current.Records...)
+				*previous = current
+				previous.Count, previous.Index, previous.Started, previous.Records = count, first, started, records
+				if !previous.Started.IsZero() && !previous.Finished.IsZero() {
+					previous.Duration = humanDuration(previous.Finished.Sub(previous.Started))
+				}
 				continue
 			}
 		}

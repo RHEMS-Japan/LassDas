@@ -502,7 +502,9 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			}
 			j.Launches = groupLaunches(j.Records)
 			for _, entry := range j.Launches {
-				j.LaunchCount += entry.Count
+				if len(entry.Workers) > 0 && entry.Outcome != answered {
+					j.LaunchCount += entry.Count
+				}
 			}
 		}
 		touch(historyPath)
