@@ -887,6 +887,34 @@ func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
 	if strings.Count(page, "retrying after a failure") != 1 || !strings.Contains(page, "last failure: fork/exec /usr/bin/elicit: no such file or directory") || strings.Contains(page, `<span class="badge">recovering</span>`) {
 		t.Error("the request page does not say the same as the card, or still shows the generic recovering badge")
 	}
+	// In Japanese, chosen by the cookie the language page sets, the request
+	// page says the same and the old wording is gone.
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/30", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(japanese), "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定") || !strings.Contains(string(japanese), "直近の失敗: fork/exec /usr/bin/elicit") || strings.Contains(string(japanese), "再起動後の復帰中") {
+		t.Error("the Japanese request page does not say the same as the card, or still says 再起動後の復帰中")
+	}
+	// A role with two processes: the one that failed may be recorded before
+	// the one that returned, and it is still the failure named.
+	writeJob(t, root, "31", chain.State{Step: "verify", Recovering: true, Pending: &chain.Assignment{Role: "verify"},
+		Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "implement"}, {Name: "verify"}}},
+		History: []chain.Result{
+			{Role: "implement", Speaker: "implement-process", Output: "done", StartedAt: started, FinishedAt: started},
+			{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "project-tests", Error: "exit status 1: TestX failed", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "project-build", Output: "ok", StartedAt: started, FinishedAt: started},
+			{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", StartedAt: started, FinishedAt: started},
+		}})
+	_, again := get(t, ts, "/")
+	if !strings.Contains(again, "last failure: exit status 1: TestX failed") {
+		t.Error("the failed process of a two-process launch is not named when its sibling returned after it")
+	}
 	if got := localize("ja", "retrying after a failure; assigned to elicit, no process output yet"); got != "失敗後の再試行中。割り当て済み (出力はまだ): 要件確定" {
 		t.Errorf("localized status: %q", got)
 	}

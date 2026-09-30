@@ -669,12 +669,23 @@ func (j *job) derive(now time.Time) {
 			if n := len(state.History); n > 0 && strings.HasPrefix(state.History[n-1].Error, "The process stopped while this action was pending") {
 				prefix = "taking up an interrupted step; "
 			} else {
+				// The latest launch is one role's process records behind the
+				// runtime's notes; any of them may be the one that failed.
+				role := ""
 				for i := len(state.History) - 1; i >= 0; i-- {
-					if state.History[i].Speaker != "runtime" {
-						if state.History[i].Error != "" {
-							j.Failure = firstLine(state.History[i].Error)
+					record := state.History[i]
+					if record.Speaker == "runtime" {
+						if role != "" {
+							break
 						}
+						continue
+					}
+					if role != "" && record.Role != role {
 						break
+					}
+					role = record.Role
+					if record.Error != "" && j.Failure == "" {
+						j.Failure = firstLine(record.Error)
 					}
 				}
 			}
