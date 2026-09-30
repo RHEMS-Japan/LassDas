@@ -408,6 +408,34 @@ func TestNoProgressNoticeWindowRepetitionAndOffSwitch(t *testing.T) {
 	if _, _, stalled := stalledFor(completed, now); stalled {
 		t.Fatal("a completed step inside the window was read as no progress")
 	}
+	// The runtime writes its own note after every launch, with no error of
+	// its own; the failures behind those notes still count, and a completed
+	// step behind one still ends the run.
+	interleaved := chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Output: "a completed step", FinishedAt: now.Add(-10 * time.Minute)},
+		{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", FinishedAt: now.Add(-10 * time.Minute)},
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory", FinishedAt: now.Add(-2 * time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0: fork/exec verify: no such file or directory", FinishedAt: now.Add(-2 * time.Minute)},
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory (again)", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0: fork/exec verify: no such file or directory", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, failure, stalled = stalledFor(interleaved, now)
+	if !stalled || failure != "fork/exec verify: no such file or directory (again)" || elapsed < 9*time.Minute || elapsed > 11*time.Minute {
+		t.Fatalf("failures behind the runtime's own notes were not read as no progress: %v %q %t", elapsed, failure, stalled)
+	}
+	settled := chain.State{History: []chain.Result{
+		{Role: "verify", Speaker: "verify-process", Error: "fork/exec verify: no such file or directory", FinishedAt: now.Add(-3 * time.Hour)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process did not exit 0.", FinishedAt: now.Add(-3 * time.Hour)},
+		{Role: "verify", Speaker: "verify-process", Output: "ok", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process verify-process exited 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	if _, _, stalled := stalledFor(settled, now); stalled {
+		t.Fatal("a completed step followed by the runtime's note was read as no progress")
+	}
+	notes := chain.State{History: []chain.Result{{Role: "elicit", Speaker: "runtime", Output: "taken up again", FinishedAt: now.Add(-time.Hour)}}}
+	if _, _, stalled := stalledFor(notes, now); stalled {
+		t.Fatal("the runtime's notes alone were read as failures")
+	}
 	posted := now.Add(-5 * time.Hour)
 	log := noticeLog{Notices: []noticeRecord{{Kind: stallNotice, Text: "…", WrittenAt: posted, PostedAt: &posted}}}
 	if noticeDue(log, stallNotice, now) {

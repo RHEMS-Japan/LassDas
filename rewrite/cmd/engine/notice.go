@@ -332,13 +332,19 @@ func savedHistory(directory string) (chain.State, error) {
 
 // stalledFor measures how long the request has gone without a completed step.
 // It looks only at the trailing run of errored entries, so any successful role
-// output inside the window means the work is still getting somewhere.
+// output inside the window means the work is still getting somewhere. The
+// runtime's own note after each launch carries no error of its own, so it is
+// read through: the roles' records say whether a step completed.
 func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) {
 	last := len(state.History)
-	for last > 0 && state.History[last-1].Error != "" {
+	failure := ""
+	for last > 0 && (state.History[last-1].Error != "" || state.History[last-1].Speaker == "runtime") {
+		if failure == "" {
+			failure = state.History[last-1].Error
+		}
 		last--
 	}
-	if last == len(state.History) {
+	if failure == "" {
 		return 0, "", false
 	}
 	var since time.Time
@@ -350,7 +356,7 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 	if since.IsZero() {
 		return 0, "", false
 	}
-	return now.Sub(since), state.History[len(state.History)-1].Error, true
+	return now.Sub(since), failure, true
 }
 
 func stallWindow(cfg config) time.Duration {
