@@ -63,14 +63,18 @@ const reportRecords, reportFieldRunes = 60, 4000
 // as a receipt read back from a process that still had an effect, is kept:
 // the report exists to name effects that may already exist.
 func stopObservations(state chain.State) ([]byte, error) {
-	state.History = reportHistory(state.History)
-	for i := range state.History {
-		record := &state.History[i]
+	history, counts := reportHistory(state.History)
+	for i := range history {
+		record := &history[i]
 		record.Output = headRunes(record.Output, reportFieldRunes)
 		record.Instruction = headRunes(record.Instruction, reportFieldRunes/4)
 		record.Diagnostics = tailRunes(record.Diagnostics, reportFieldRunes)
 		record.Error = tailRunes(record.Error, reportFieldRunes)
+		if count := counts[i]; count > 0 {
+			record.Error = fmt.Sprintf("(this failure repeated %d times in a row; this is the latest)\n%s", count+1, record.Error)
+		}
 	}
+	state.History = history
 	return json.MarshalIndent(state, "", "  ")
 }
 
@@ -94,7 +98,9 @@ func tailRunes(text string, limit int) string {
 	return fmt.Sprintf("[%d earlier characters are in the record, not here]\n%s", count-limit, text[cut:])
 }
 
-func reportHistory(history []chain.Result) []chain.Result {
+// reportHistory collapses the record and says, per kept index, how many
+// earlier repetitions each collapsed failure stands for.
+func reportHistory(history []chain.Result) ([]chain.Result, map[int]int) {
 	var kept []chain.Result
 	counts := map[int]int{}
 	run, lastNote := -1, ""
@@ -120,15 +126,19 @@ func reportHistory(history []chain.Result) []chain.Result {
 			run = len(kept) - 1
 		}
 	}
-	for i, count := range counts {
-		kept[i].Error = fmt.Sprintf("(this failure repeated %d times in a row; this is the latest)\n%s", count+1, kept[i].Error)
-	}
 	if len(kept) > reportRecords {
 		omitted := len(kept) - reportRecords
 		kept = append([]chain.Result{{Role: "runtime", Speaker: "runtime",
 			Output: fmt.Sprintf("%d earlier records are in the request's history and not repeated here.", omitted)}}, kept[omitted:]...)
+		shifted := map[int]int{}
+		for index, count := range counts {
+			if index >= omitted {
+				shifted[index-omitted+1] = count
+			}
+		}
+		counts = shifted
 	}
-	return kept
+	return kept, counts
 }
 
 func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, directory string, slots chan struct{}, log io.Writer) error {

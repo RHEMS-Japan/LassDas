@@ -478,4 +478,19 @@ func TestTheStoppedReporterReadsTheCollapsedRecord(t *testing.T) {
 	if record.Error != "exit status 1" || utf8.RuneCountInString(record.Instruction) > 1100 {
 		t.Fatalf("a short error was altered or the instruction was not cut: %q, %d", record.Error, utf8.RuneCountInString(record.Instruction))
 	}
+	// A long failure repeated many times keeps its count after the cut.
+	var long []chain.Result
+	for i := 0; i < 7; i++ {
+		long = append(long, chain.Result{Role: "verify", Speaker: "verify-process", Error: "exit status 1\n" + strings.Repeat("診断", 3000) + "END"})
+	}
+	raw, err = stopObservations(chain.State{History: long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &observed); err != nil || len(observed.History) != 1 {
+		t.Fatalf("a long repeated failure was not collapsed: %v, %d entries", err, len(observed.History))
+	}
+	if e := observed.History[0].Error; !strings.HasPrefix(e, "(this failure repeated 7 times in a row; this is the latest)\n[") || !strings.HasSuffix(e, "END") || utf8.RuneCountInString(e) > 4200 {
+		t.Fatalf("the count was cut away with the failure's head, or the cut is wrong: %d characters, starts %q", utf8.RuneCountInString(e), e[:80])
+	}
 }
