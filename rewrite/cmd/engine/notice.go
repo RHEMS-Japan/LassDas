@@ -331,27 +331,56 @@ func savedHistory(directory string) (chain.State, error) {
 }
 
 // stalledFor measures how long the request has gone without a completed step.
-// It looks only at the trailing run of errored entries, so any successful role
-// output inside the window means the work is still getting somewhere. The
-// runtime's own note after each launch carries no error of its own, so it is
-// read through: the roles' records say whether a step completed.
+// It walks the record launch by launch from the newest: a launch is the run
+// of one role's process records and the runtime's own notes after it, and it
+// completed only when none of them failed. The trailing run of failed
+// launches is the stall, measured from the last launch that completed; a
+// runtime note that carries no error and no processes (a step taken up
+// again) is neither, and is read through.
 func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) {
-	last := len(state.History)
+	history := state.History
 	failure := ""
-	for last > 0 && (state.History[last-1].Error != "" || state.History[last-1].Speaker == "runtime") {
-		if failure == "" {
-			failure = state.History[last-1].Error
+	i := len(history)
+	for i > 0 {
+		end := i
+		launchFailed := false
+		for i > 0 && history[i-1].Speaker == "runtime" {
+			if history[i-1].Error != "" {
+				launchFailed = true
+				if failure == "" {
+					failure = history[i-1].Error
+				}
+			}
+			i--
 		}
-		last--
+		processes := 0
+		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || history[i-1].Role == role); processes++ {
+			role = history[i-1].Role
+			if history[i-1].Error != "" {
+				launchFailed = true
+				if failure == "" {
+					failure = history[i-1].Error
+				}
+			}
+			i--
+		}
+		if processes > 0 && !launchFailed {
+			if failure == "" {
+				return 0, "", false
+			}
+			since := history[end-1].FinishedAt
+			if since.IsZero() {
+				return 0, "", false
+			}
+			return now.Sub(since), failure, true
+		}
 	}
-	if failure == "" {
+	if failure == "" || len(history) == 0 {
 		return 0, "", false
 	}
-	var since time.Time
-	if last > 0 {
-		since = state.History[last-1].FinishedAt
-	} else if since = state.History[0].StartedAt; since.IsZero() {
-		since = state.History[0].FinishedAt
+	since := history[0].StartedAt
+	if since.IsZero() {
+		since = history[0].FinishedAt
 	}
 	if since.IsZero() {
 		return 0, "", false

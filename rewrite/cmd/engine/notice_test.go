@@ -436,6 +436,35 @@ func TestNoProgressNoticeWindowRepetitionAndOffSwitch(t *testing.T) {
 	if _, _, stalled := stalledFor(notes, now); stalled {
 		t.Fatal("the runtime's notes alone were read as failures")
 	}
+	// A role with two processes completes a step only when both return; one
+	// succeeding at every launch does not move the last completed step.
+	twoProcesses := chain.State{History: []chain.Result{
+		{Role: "implement", Speaker: "implement-process", Output: "done", FinishedAt: now.Add(-30 * time.Minute)},
+		{Role: "implement", Speaker: "runtime", Output: "Process implement-process exited 0.", FinishedAt: now.Add(-30 * time.Minute)},
+		{Role: "verify", Speaker: "project-build", Output: "ok", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "project-tests", Error: "exit status 1", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", FinishedAt: now.Add(-20 * time.Minute)},
+		{Role: "verify", Speaker: "project-build", Output: "ok", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "project-tests", Error: "exit status 1 (again)", FinishedAt: now.Add(-time.Minute)},
+		{Role: "verify", Speaker: "runtime", Output: "Process project-tests did not exit 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, failure, stalled = stalledFor(twoProcesses, now)
+	if !stalled || failure != "exit status 1 (again)" || elapsed < 29*time.Minute || elapsed > 31*time.Minute {
+		t.Fatalf("a launch with one process succeeding was read as a completed step: %v %q %t", elapsed, failure, stalled)
+	}
+	// A note without error between failed launches, such as a step taken up
+	// again after a restart, does not end the run of failures.
+	takenUp := chain.State{History: []chain.Result{
+		{Role: "elicit", Speaker: "elicit-process", Error: "exit status 1", StartedAt: now.Add(-40 * time.Minute), FinishedAt: now.Add(-40 * time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", FinishedAt: now.Add(-40 * time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "taken up again", FinishedAt: now.Add(-5 * time.Minute)},
+		{Role: "elicit", Speaker: "elicit-process", Error: "exit status 1", FinishedAt: now.Add(-time.Minute)},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", FinishedAt: now.Add(-time.Minute)},
+	}}
+	elapsed, _, stalled = stalledFor(takenUp, now)
+	if !stalled || elapsed < 39*time.Minute || elapsed > 41*time.Minute {
+		t.Fatalf("a note between failed launches ended the run: %v %t", elapsed, stalled)
+	}
 	posted := now.Add(-5 * time.Hour)
 	log := noticeLog{Notices: []noticeRecord{{Kind: stallNotice, Text: "…", WrittenAt: posted, PostedAt: &posted}}}
 	if noticeDue(log, stallNotice, now) {
