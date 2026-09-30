@@ -18,6 +18,13 @@ func TestAFinishedRequestLosesItsCachesAndKeepsWhatPeopleRead(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A module cache is left read-only by the build tool.
+	if err := os.Chmod(filepath.Join(directory, "homes/2-0/go/pkg/mod/y"), 0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(directory, "homes/2-0/go/pkg/mod"), 0500); err != nil {
+		t.Fatal(err)
+	}
 	if err := trimFinished(directory); err != nil {
 		t.Fatal(err)
 	}
