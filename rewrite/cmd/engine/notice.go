@@ -454,6 +454,12 @@ func credentialValues(cfg config) []string {
 	names := map[string]bool{cfg.Backlog.KeyEnv: true, cfg.Router.Decision.KeyEnv: true, cfg.Router.LLM.KeyEnv: true}
 	if cfg.ModelSelection != nil {
 		names[cfg.ModelSelection.Judge.KeyEnv] = true
+		if cfg.ModelSelection.Fallback != nil {
+			names[cfg.ModelSelection.Fallback.KeyEnv] = true
+		}
+		if cfg.ModelSelection.Gateway != nil {
+			names[cfg.ModelSelection.Gateway.KeyEnv] = true
+		}
 	}
 	for _, role := range cfg.Roles {
 		for _, process := range role.Processes {

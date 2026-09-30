@@ -67,6 +67,14 @@ func (s *selectionConfig) validate() error {
 	if fixed := s.fixedModel(); fixed != "" && !strings.Contains(fixed, "/") {
 		return errors.New("model_selection.fixed must be a full publisher/model endpoint id")
 	}
+	if s.fixedModel() == "" && strings.TrimSpace(s.Judge.URL) == "" && s.Fallback == nil {
+		return errors.New("model_selection needs a judge (decision service), a fallback chat service to choose with, or a fixed model")
+	}
+	// A judge left half configured would quietly hand every choice to the
+	// chat service; say so instead.
+	if strings.TrimSpace(s.Judge.URL) == "" && (strings.TrimSpace(s.Judge.Model) != "" || strings.TrimSpace(s.Judge.KeyEnv) != "") {
+		return errors.New("model_selection.judge needs url when model or key_env is given; omit the judge entirely to choose with the fallback chat service")
+	}
 	if s.Gateway == nil {
 		return nil
 	}
@@ -125,6 +133,13 @@ func (s selectionConfig) choose(ctx context.Context, role chain.Role, process ch
 	// exclude a fixed model, so a parallel review group runs the same one.
 	if fixed := s.fixedModel(); fixed != "" {
 		return fixed, nil
+	}
+	// With no decision service named, the chat service configured as the
+	// alternative makes every choice by itself: nothing is tried first and
+	// nothing is logged as a failure. That keeps every model call on one
+	// route, for an operator whose gateway answers chat but not decisions.
+	if strings.TrimSpace(s.Judge.URL) == "" && s.Fallback != nil {
+		return s.selectWith(ctx, chain.ChatJudge{Service: *s.Fallback}, role, process, state, selected)
 	}
 	model, err := s.selectWith(ctx, s.Judge, role, process, state, selected)
 	if err == nil || ctx.Err() != nil || s.Fallback == nil {

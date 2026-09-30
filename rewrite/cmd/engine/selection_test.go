@@ -275,6 +275,64 @@ func TestSelectionFallbackRefreshesCatalogKeepsIndependenceAndShowsPrimaryReason
 	}
 }
 
+func TestWithoutADecisionServiceTheChatAlternativeChoosesAlone(t *testing.T) {
+	selector := testSelector(t)
+	selector.Judge = chain.Jev{}
+	selector.Fallback = &chain.Jev{URL: "https://chat-selection.example/chat", Model: "configured-alternative", KeyEnv: "SELECTION_TEST_KEY"}
+	var observed []string
+	selector.observe = func(message string) { observed = append(observed, message) }
+	catalogs, chats := 0, 0
+	useCatalogTransport(t, func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "openrouter.ai":
+			catalogs++
+			return selectionReply(request, 200, map[string]any{"data": []any{selectionModel("maker-two/current"), selectionModel("maker-one/also-current")}}), nil
+		case "chat-selection.example":
+			chats++
+			return selectionReply(request, 200, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []any{map[string]any{"function": map[string]string{"name": "handoff", "arguments": `{"role":"maker-two/current"}`}}}}}}}), nil
+		}
+		return nil, fmt.Errorf("a decision service was asked although none is configured: %s", request.URL.Host)
+	})
+	model, err := selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, []string{"maker-one/already-selected"})
+	if err != nil || model != "maker-two/current" || catalogs != 1 || chats != 1 || len(observed) != 0 {
+		t.Fatalf("model=%q error=%v catalogs=%d chats=%d observed=%v", model, err, catalogs, chats, observed)
+	}
+	// A selection with nothing to choose with is refused before any request.
+	none := selectionConfig{Authors: []string{"maker-one"}}
+	if err := none.validate(); err == nil || !strings.Contains(err.Error(), "judge") {
+		t.Fatalf("a selection with no judge, no chat alternative and no fixed model was accepted: %v", err)
+	}
+	only := selectionConfig{Authors: []string{"maker-one"}, Fallback: selector.Fallback}
+	if err := only.validate(); err != nil {
+		t.Fatalf("a selection choosing with the chat alternative alone was refused: %v", err)
+	}
+	// A judge left half configured is refused rather than quietly bypassed.
+	half := selectionConfig{Authors: []string{"maker-one"}, Judge: chain.Jev{Model: "typesafe/decider", KeyEnv: "SELECTION_TEST_KEY"}, Fallback: selector.Fallback}
+	if err := half.validate(); err == nil || !strings.Contains(err.Error(), "judge needs url") {
+		t.Fatalf("a judge without a url but with a model was accepted: %v", err)
+	}
+	// A blank url is no judge either.
+	selector.Judge = chain.Jev{URL: "  "}
+	catalogs, chats = 0, 0
+	model, err = selector.choose(context.Background(), chain.Role{Name: "review", Purpose: "independent review"}, chain.Process{Name: "b"}, chain.State{Request: "original request"}, nil)
+	if err != nil || model != "maker-two/current" || chats != 1 || len(observed) != 0 {
+		t.Fatalf("a blank judge url fell back to the decision path: model=%q error=%v chats=%d observed=%v", model, err, chats, observed)
+	}
+}
+
+func TestTheFallbackAndGatewayCredentialsAreScrubbedFromNotices(t *testing.T) {
+	cfg := watchConfiguration(t)
+	t.Setenv("SELECTION_TEST_FALLBACK_KEY", "synthetic-fallback-token")
+	t.Setenv("SELECTION_TEST_GATEWAY_KEY", "synthetic-gateway-token")
+	cfg.ModelSelection = &selectionConfig{Authors: []string{"maker-one"},
+		Fallback: &chain.Jev{URL: "https://chat-selection.example/chat", Model: "m", KeyEnv: "SELECTION_TEST_FALLBACK_KEY"},
+		Gateway:  &gatewayConfig{ModelsURL: "https://gateway.example/v1/models", KeyEnv: "SELECTION_TEST_GATEWAY_KEY", Prefix: "gw/"}}
+	detail := noticeDetail(cfg, "gateway refused synthetic-fallback-token and synthetic-gateway-token")
+	if strings.Contains(detail, "synthetic-fallback-token") || strings.Contains(detail, "synthetic-gateway-token") || strings.Count(detail, "[credential]") != 2 {
+		t.Fatalf("a selection credential reached a notice: %q", detail)
+	}
+}
+
 func TestSelectionFallbackRetainsBothReasonsAndDoesNotRetryOnStop(t *testing.T) {
 	for _, stopped := range []bool{false, true} {
 		t.Run(fmt.Sprint(stopped), func(t *testing.T) {
