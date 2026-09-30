@@ -1165,13 +1165,18 @@ func TestLaunchesAreToldApartWithoutAStageNoteAndNotesStandOnTheirOwn(t *testing
 func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testing.T) {
 	root := fixtureQueue(t)
 	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}}
-	writeJob(t, root, "70", chain.State{Workflow: flow})
+	// The record written at acceptance holds no run definition (70, 72);
+	// a run that has the slot writes its definition before choosing its
+	// first stage (71).
+	writeJob(t, root, "70", chain.State{})
 	writeJob(t, root, "71", chain.State{Workflow: flow})
+	writeJob(t, root, "72", chain.State{})
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Queued <b>2</b>`, `Running <b>1</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, "queued: waiting for a free execution slot")
-	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) {
-		t.Error("a queued request is not shown at the first stage")
+	expectAll(t, body, `Queued <b>2</b>`, `Running <b>2</b>`, `<article class="card queued" data-key="EXAMPLE-70">`, `<article class="card running" data-key="EXAMPLE-71">`,
+		"queued: waiting for a free execution slot", "starting: choosing the first stage")
+	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-70"`) || !strings.Contains(column, `data-key="EXAMPLE-71"`) || !strings.Contains(column, `data-key="EXAMPLE-72"`) {
+		t.Error("a queued or starting request is not shown at the first stage")
 	}
 	if strings.Contains(body, `data-stage="other"`) {
 		t.Error("a queued request fell into the other column")
@@ -1187,5 +1192,5 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	}
 	japanese, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	expectAll(t, string(japanese), "順番待ち <b>2</b>", "順番待ち (実行枠が空くのを待っています)")
+	expectAll(t, string(japanese), "順番待ち <b>2</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
 }

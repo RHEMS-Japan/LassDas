@@ -278,6 +278,11 @@ func columns(stages []string, jobs []*job) []column {
 		if place == "" {
 			place = j.Current
 		}
+		// A queued request has no record of its own to place it by; it will
+		// begin at the board's first stage.
+		if place == "" && j.Lane == "queued" && len(stages) > 0 {
+			place = stages[0]
+		}
 		switch at, known := index[place]; {
 		case j.State != nil && j.State.Done:
 			continue
@@ -804,10 +809,15 @@ func (j *job) derive(now time.Time) {
 	case state.Waiting:
 		j.Lane = "awaiting"
 	case state.Step == "" && len(state.History) == 0 && state.Pending == nil && len(j.Live) == 0:
-		// Accepted, nothing launched yet: the request waits for a free
-		// execution slot, at the first stage of the run.
-		j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
-		if state.Workflow != nil && len(state.Workflow.Stages) > 0 {
+		// Nothing has been launched. The record written at acceptance holds
+		// no run definition; the run writes it as it starts, before it
+		// chooses its first stage. So a record without one is a request
+		// waiting for a free execution slot, and a record with one is a
+		// request that has the slot and is choosing where to begin.
+		if state.Workflow == nil || len(state.Workflow.Stages) == 0 {
+			j.Lane, j.Status = "queued", "queued: waiting for a free execution slot"
+		} else {
+			j.Status = "starting: choosing the first stage"
 			j.Stage = state.Workflow.Stages[0].Name
 		}
 	default:
@@ -1458,8 +1468,8 @@ var japanese = map[string]string{
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
 	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "Queued": "順番待ち", "none": "なし",
-	"queued: waiting for a free execution slot": "順番待ち (実行枠が空くのを待っています)",
-	"stopped by the requester; report posted":   "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
+	"queued: waiting for a free execution slot": "順番待ち (実行枠が空くのを待っています)", "starting: choosing the first stage": "開始中 (最初の工程を決めています)",
+	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
 	"the saved stop instruction is unreadable; the work is held": "保存された停止指示が読めないため、作業を保留中です",
 	"held: the saved stop instruction is unreadable":             "保留中: 保存された停止指示が読めません",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
