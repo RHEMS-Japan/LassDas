@@ -421,13 +421,31 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string) err
 // noticeDetail renders one failure line for a comment a person will read: the
 // first nonblank line, with every configured credential value removed, cut to
 // 200 characters. Scrubbing happens before the cut so no partial key survives.
+// A process that died says only "exit status N" first; its last line, where a
+// harness puts its reason, is added so the comment says why.
 func noticeDetail(cfg config, text string) string {
 	line := firstInstructionLine(text)
+	if strings.HasPrefix(line, "exit status ") || strings.HasPrefix(line, "signal: ") {
+		if last := lastInstructionLine(text); last != "" && last != line {
+			line += ": " + last
+		}
+	}
 	for _, value := range credentialValues(cfg) {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
 	return limitRunes(line, 200)
+}
+
+// lastInstructionLine is the last nonblank line of a text.
+func lastInstructionLine(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // credentialValues collects every credential value this controller can name,

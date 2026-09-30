@@ -181,6 +181,12 @@ class BridgeTests(unittest.TestCase):
             self.assertIn("NATIVE_MAX_TOKENS", err)
             self.assertEqual(events[-1], ("closed", True))
 
+    def test_a_failure_without_a_reason_is_still_explained(self):
+        events, out, err, code, failure = self.run_bridge({"final_response": "half", "failed": True})
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "half")
+        self.assertIn("reported failure without a reason", err)
+
     def test_native_failure_keeps_partial_report_and_reason(self):
         events, out, err, code, failure = self.run_bridge(
             {"final_response": "Only half completed", "failed": True, "error": "transport unavailable"})
