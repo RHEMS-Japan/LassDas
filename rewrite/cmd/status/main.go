@@ -215,6 +215,8 @@ type job struct {
 	Current    string
 	Stage      string
 	Failure    string
+	Stopped    bool
+	Reported   bool
 	StageIndex int
 	StageCount int
 	Model      string
@@ -237,7 +239,7 @@ type lane struct {
 }
 
 var laneOrder = []lane{{Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
-	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}}
+	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}, {Key: "stopped", Title: "Stopped"}}
 
 func lanes(jobs []*job) []lane {
 	result := make([]lane, len(laneOrder))
@@ -293,6 +295,23 @@ func columns(stages []string, jobs []*job) []column {
 		}
 	}
 	return append(result, done)
+}
+
+// stopState reads what the runtime leaves for a request the requester
+// stopped: the saved instruction, and the report's own record once the
+// report has been posted and read back.
+func stopState(dir string) (stopped, reported bool) {
+	if _, err := os.Stat(filepath.Join(dir, "stop-request.json")); err != nil {
+		return false, false
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "stop-report", "history.json"))
+	if err != nil {
+		return true, false
+	}
+	var report struct {
+		Done bool `json:"done"`
+	}
+	return true, json.Unmarshal(raw, &report) == nil && report.Done
 }
 
 func firstLine(text string) string {
@@ -471,6 +490,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		}
 		touch(historyPath)
 	}
+	j.Stopped, j.Reported = stopState(dir)
 	if !detail {
 		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
 			var log struct {
@@ -801,6 +821,15 @@ func (j *job) derive(now time.Time) {
 			j.Lane, j.Attention = "attention", pause
 		} else if stall != "" {
 			j.Lane, j.Attention = "attention", stall
+		}
+	}
+	// A request the requester stopped is over: nothing runs, nothing needs a
+	// person, and the only thing left to say is whether its report went out.
+	if j.Stopped {
+		j.Lane, j.Attention = "stopped", ""
+		j.Status = "stopped by the requester; report pending"
+		if j.Reported {
+			j.Status = "stopped by the requester; report posted"
 		}
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
@@ -1396,7 +1425,8 @@ var japanese = map[string]string{
 	"ticket engine status": "自動処理の状態", "overview": "一覧", "configuration as read": "読み込まれた設定", "runtime log": "本体のログ",
 	"every file of the queue": "queue の全ファイル", "every file of this request": "この依頼の全ファイル", "Requests": "依頼",
 	"Queue": "queue", "read at": "読み取り時刻", "No request has been accepted into this queue yet.": "この queue に受け付けた依頼はまだありません。",
-	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "none": "なし",
+	"Running": "実行中", "Awaiting answer": "返事待ち", "Needs attention": "要対応", "Delivered": "納品済み", "Stopped": "停止", "none": "なし",
+	"stopped by the requester; report posted": "依頼者が停止。報告済み", "stopped by the requester; report pending": "依頼者が停止。報告を準備中",
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",

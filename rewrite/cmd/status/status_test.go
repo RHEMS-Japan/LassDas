@@ -922,3 +922,48 @@ func TestAStepRetriedAfterAFailureSaysSoAndNamesTheFailure(t *testing.T) {
 		t.Errorf("localized interrupted status: %q", got)
 	}
 }
+
+func TestAStoppedRequestSaysSoAndWhetherItsReportWentOut(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	flow := &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}}
+	failing := []chain.Result{
+		{Role: "elicit", Speaker: "elicit-process", Error: "fork/exec /usr/bin/elicit: no such file or directory", StartedAt: started, FinishedAt: started},
+		{Role: "elicit", Speaker: "runtime", Output: "Process elicit-process did not exit 0.", StartedAt: started, FinishedAt: started},
+	}
+	for _, id := range []string{"40", "41"} {
+		writeJob(t, root, id, chain.State{Step: "elicit", Recovering: true, Pending: &chain.Assignment{Role: "elicit"}, Workflow: flow, History: failing})
+		if err := os.WriteFile(filepath.Join(root, "jobs", id, "stop-request.json"), []byte(`{"id":55,"content":"停止"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "40", "stop-report"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := json.Marshal(chain.State{Request: "report", Done: true, History: []chain.Result{{Role: "stop_report", Speaker: "reporter", Output: "posted"}}})
+	if err := os.WriteFile(filepath.Join(root, "jobs", "40", "stop-report", "history.json"), report, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `Stopped <b>2</b>`, `Running <b>1</b>`, `Needs attention <b>0</b>`,
+		`<article class="card stopped" data-key="EXAMPLE-40">`, `<article class="card stopped" data-key="EXAMPLE-41">`,
+		"stopped by the requester; report posted", "stopped by the requester; report pending")
+	if strings.Contains(body, "retrying after a failure") {
+		t.Error("a stopped request is still shown as retrying")
+	}
+	if !strings.Contains(inColumn(body, "elicit"), `data-key="EXAMPLE-40"`) {
+		t.Error("a stopped request left the stage it stopped at")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/40", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(japanese), "依頼者が停止。報告済み") {
+		t.Error("the Japanese request page does not say the request was stopped and reported")
+	}
+}
