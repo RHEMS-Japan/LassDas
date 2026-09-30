@@ -247,15 +247,25 @@ func TestTheBoardPutsEachRequestInItsLane(t *testing.T) {
 		`{"notices":[{"kind":"budget-paused","text":"FIRST-PAUSE","written_at":"2026-01-02T00:20:00Z"},{"kind":"budget-restored","text":"BACK","written_at":"2026-01-02T00:25:00Z"},{"kind":"budget-paused","text":"SECOND-PAUSE-TEXT","written_at":"2026-01-02T00:30:00Z"}]}`)
 	add("15", chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}},
 		`{"notices":[{"kind":"stall","text":"STALL-TEXT","written_at":"2026-01-02T00:20:00Z"},{"kind":"budget-restored","text":"BACK","written_at":"2026-01-02T00:25:00Z"}]}`)
+	// A question to the requester is a side step of the stage that asked it: the card keeps that stage's column and place.
+	add("16", chain.State{Waiting: true, Step: "ask_requester", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "implement"}}},
+		History: []chain.Result{{Role: "elicit", Speaker: "elicit-process", StartedAt: started, FinishedAt: started.Add(time.Minute)},
+			{Role: "ask_requester", Speaker: "ask-process", StartedAt: started.Add(time.Minute), FinishedAt: started.Add(2 * time.Minute)}}}, "")
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
-	expectAll(t, body, `Running <b>3</b>`, `Awaiting answer <b>1</b>`, `Needs attention <b>4</b>`, `Delivered <b>1</b>`,
+	expectAll(t, body, `Running <b>3</b>`, `Awaiting answer <b>2</b>`, `Needs attention <b>4</b>`, `Delivered <b>1</b>`,
 		"ROUTER-ERROR", "BUDGET-PAUSED-TEXT", "SECOND-PAUSE-TEXT", "STALL-TEXT")
+	if column := inColumn(body, "elicit"); !strings.Contains(column, `data-key="EXAMPLE-16"`) || !strings.Contains(column, "step 1 of 2: elicit") {
+		t.Error("a request waiting on a question is not placed at the stage that asked it")
+	}
+	if _, page := get(t, ts, "/jobs/16"); strings.Count(page, `class="badge awaiting"`) != 1 {
+		t.Errorf("the waiting badge is shown %d times on the job page", strings.Count(page, `class="badge awaiting"`))
+	}
 	if strings.Contains(body, "OLD-PAUSE-TEXT") {
 		t.Error("a pause the runtime has lifted is still shown on the card")
 	}
 	for _, want := range []struct{ lane, key string }{{"delivered", "EXAMPLE-8"}, {"awaiting", "EXAMPLE-9"}, {"attention", "EXAMPLE-10"}, {"attention", "EXAMPLE-11"}, {"running", "EXAMPLE-12"}, {"running", "EXAMPLE-7"},
-		{"running", "EXAMPLE-13"}, {"attention", "EXAMPLE-14"}, {"attention", "EXAMPLE-15"}} {
+		{"running", "EXAMPLE-13"}, {"attention", "EXAMPLE-14"}, {"attention", "EXAMPLE-15"}, {"awaiting", "EXAMPLE-16"}} {
 		if !strings.Contains(body, `<article class="card `+want.lane+`" data-key="`+want.key+`">`) {
 			t.Errorf("%s is not a %s card", want.key, want.lane)
 		}
