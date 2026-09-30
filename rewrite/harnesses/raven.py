@@ -26,6 +26,7 @@ night, and it must not write anywhere but its workspace and its state.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -43,7 +44,7 @@ def credentials():
     """Every credential value in this process's environment: the ones the
     runtime handed it (named in TASK_CREDENTIAL_NAMES) and the bridge's own."""
     names = set(os.environ.get("TASK_CREDENTIAL_NAMES", "").split(":")) | {"OPENROUTER_API_KEY", "CODE_API_KEY"}
-    return sorted({value for name in names if name for value in [os.environ.get(name, "")] if len(value) >= 8}, key=len, reverse=True)
+    return sorted({value for name in names if name for value in [os.environ.get(name, "")] if value}, key=len, reverse=True)
 
 
 def scrub(text, values):
@@ -64,7 +65,7 @@ def rendered_config(root, model, base_url):
         "model": model, "provider": "custom",
         "reasoningEffort": os.environ.get("NATIVE_REASONING_EFFORT", "low"),
         "maxTokens": int(os.environ.get("NATIVE_MAX_TOKENS", "32000")),
-        "maxToolIterations": int(os.environ.get("NATIVE_MAX_TURNS", "0")) or 1_000_000,
+        "maxToolIterations": max(0, int(os.environ.get("NATIVE_MAX_TURNS", "0"))) or 1_000_000,
         "llmCallTimeout": 3600,
     })
     tools = config.setdefault("tools", {})
@@ -75,6 +76,26 @@ def rendered_config(root, model, base_url):
     config["skillForge"] = {**config.get("skillForge", {}), "enabled": False, "autoDetect": False, "autoEvolve": False}
     config["memory"] = {**config.get("memory", {}), "backend": None}
     return config
+
+
+def sweep_renders(state, values):
+    """Remove the launcher's rendered configurations, which hold the key in
+    plain text: the launcher deletes its own when it ends, but a launcher
+    that was killed does not, and this directory is shown to people. The
+    launcher's log is scrubbed the same way."""
+    for rendered in state.rglob(".config.rendered.*.json"):
+        try:
+            rendered.unlink()
+        except OSError as error:
+            print(f"Raven bridge: rendered configuration not removed: {error}", file=sys.stderr)
+    for log in state.rglob("launcher.log"):
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+            cleaned = scrub(text, values)
+            if cleaned != text:
+                log.write_text(cleaned, encoding="utf-8")
+        except OSError as error:
+            print(f"Raven bridge: launcher log not scrubbed: {error}", file=sys.stderr)
 
 
 def main():
@@ -112,19 +133,40 @@ def main():
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     values = credentials()
+    sweep_renders(state, values)
+    # --verbose mirrors the launcher's diagnostics to stderr as they happen,
+    # where the runtime's live copy shows them, scrubbed below.
     argv = [python, str(launcher), "--prompt-file", str(state / "task.md"), "--workspace", str(workspace),
-            "--job", job, "--config", str(config_path), "--timeout", "0"]
+            "--job", job, "--config", str(config_path), "--timeout", "0", "--verbose"]
     started = time.time()
-    process = subprocess.run(argv, cwd=str(workspace), env=environment, capture_output=True, text=True)
+    # A stop from the runtime reaches the bridge first; hand it to the launcher
+    # and wait, so the launcher's own cleanup can run before the sweep below.
+    child = subprocess.Popen(argv, cwd=str(workspace), env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    def forward(number, _frame):
+        try:
+            child.send_signal(number)
+        except OSError:
+            pass
+    previous = {number: signal.signal(number, forward) for number in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        out, err = child.communicate()
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        sweep_renders(state, values)
     elapsed = int(time.time() - started)
-    for line in (process.stderr or "").splitlines():
+    for line in (err or "").splitlines():
         print(scrub(line, values), file=sys.stderr)
-    answer = scrub(process.stdout or "", values)
+    answer = scrub(out or "", values)
+    print(f"Raven bridge: launcher exited {child.returncode} after {elapsed}s (job {job})", file=sys.stderr)
+    if child.returncode != 0:
+        # What the launcher says about a failed turn is a diagnostic, not the
+        # role's report: it names its log by path and commits no answer.
+        for line in answer.splitlines():
+            print("Raven bridge: launcher said: " + line, file=sys.stderr)
+        return child.returncode
     sys.stdout.write(answer)
     sys.stdout.flush()
-    print(f"Raven bridge: launcher exited {process.returncode} after {elapsed}s (job {job})", file=sys.stderr)
-    if process.returncode != 0:
-        return process.returncode
     if not answer.strip():
         print("Raven bridge: the launcher committed no report", file=sys.stderr)
         return 1

@@ -23,7 +23,7 @@ class PackageTests(unittest.TestCase):
                         "RUNTIME.md", "README.md", "examples/operator.json",
                         "examples/operator-gateway.json",
                         "examples/operator-stages.json",
-                        "harnesses/hermes.py", "harnesses/git_workspace.py",
+                        "harnesses/hermes.py", "harnesses/raven.py", "harnesses/git_workspace.py",
                         "harnesses/linux_role.py", "harnesses/adversarial_review.py"]
             self.assertEqual(sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*") if p.is_file()), sorted(expected))
             for relative in expected:

@@ -21,12 +21,17 @@ open(os.path.join(workspace, "hello.txt"), "w").write("hello\n")
 record = {"args": args, "config": config, "task": task, "env": {k: os.environ.get(k) for k in ("CODE_API_KEY", "CODE_STATE_ROOT", "RAVEN_HOME", "HOME")}}
 open(os.environ["STUB_RECORD"], "w").write(json.dumps(record))
 mode = os.environ.get("STUB_MODE", "report")
+state = os.environ["CODE_STATE_ROOT"]
+os.makedirs(state, exist_ok=True)
+open(os.path.join(state, ".config.rendered.4242.json"), "w").write(json.dumps({"providers": {"custom": {"apiKey": os.environ["CODE_API_KEY"]}}}))
+open(os.path.join(state, "launcher.log"), "w").write("[run] key " + os.environ["CODE_API_KEY"] + " seen\n")
 if mode == "report":
     sys.stdout.write("Created hello.txt. The key was " + os.environ["CODE_API_KEY"] + "\n")
     sys.stderr.write("diagnostic mentioning " + os.environ["CODE_API_KEY"] + "\n")
     sys.exit(0)
 if mode == "empty":
     sys.exit(0)
+sys.stdout.write("FAILED: nothing committed. See /somewhere/launcher.log\n")
 sys.stderr.write("launcher failed\n")
 sys.exit(3)
 '''
@@ -71,6 +76,7 @@ class RavenBridgeTests(unittest.TestCase):
         self.assertEqual(record["task"], "do the thing")
         self.assertEqual(record["args"][record["args"].index("--workspace") + 1], str(self.workspace.resolve()))
         self.assertEqual(record["args"][record["args"].index("--timeout") + 1], "0")
+        self.assertIn("--verbose", record["args"])
         config = record["config"]
         self.assertEqual(config["providers"]["custom"], {"apiBase": "https://gateway.example/v1", "models": ["prefix/vendor/model"]})
         self.assertEqual(config["agents"]["defaults"]["model"], "prefix/vendor/model")
@@ -97,6 +103,24 @@ class RavenBridgeTests(unittest.TestCase):
     def test_a_turn_cap_from_the_operator_is_passed_on(self):
         self.run_bridge(NATIVE_MAX_TURNS="40")
         self.assertEqual(json.loads(self.record.read_text())["config"]["agents"]["defaults"]["maxToolIterations"], 40)
+        self.run_bridge(NATIVE_MAX_TURNS="-5")
+        self.assertEqual(json.loads(self.record.read_text())["config"]["agents"]["defaults"]["maxToolIterations"], 1_000_000)
+
+    def test_the_launchers_rendered_key_and_log_do_not_outlive_the_run(self):
+        self.run_bridge()
+        state = self.home / "raven" / "sessions"
+        self.assertEqual(list(state.rglob(".config.rendered.*.json")), [])
+        self.assertEqual((state / "launcher.log").read_text(), "[run] key [credential] seen\n")
+        # a rendered configuration left by an earlier, killed launcher goes at the next start
+        leftover = state / ".config.rendered.99.json"
+        leftover.write_text("{}")
+        self.run_bridge()
+        self.assertFalse(leftover.exists())
+
+    def test_a_short_credential_is_scrubbed_too(self):
+        code, out, err = self.run_bridge(OPENROUTER_API_KEY="tiny")
+        self.assertEqual(out, "Created hello.txt. The key was [credential]\n")
+        self.assertNotIn("tiny", err)
 
     def test_no_report_is_a_failure_and_a_failed_launcher_keeps_its_code(self):
         code, out, err = self.run_bridge(mode="empty")
@@ -106,6 +130,8 @@ class RavenBridgeTests(unittest.TestCase):
         code, out, err = self.run_bridge(mode="fail")
         self.assertEqual(code, 3)
         self.assertIn("launcher failed", err)
+        self.assertEqual(out, "")
+        self.assertIn("launcher said: FAILED: nothing committed", err)
 
     def test_missing_settings_are_refused_before_anything_runs(self):
         code, out, err = self.run_bridge(task="   ")
