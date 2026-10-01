@@ -139,12 +139,16 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	comments = append(comments, issueComment(702, 88, "別の人が上に書いた返事"))
 	mu.Unlock()
 	held("another user's comment above the boundary")
+	mu.Lock()
+	comments = append(comments, issueComment(703, 55, ""))
+	mu.Unlock()
+	held("a status change by the requester, which the tracker records as a comment without words")
 	finish()
 	restarted := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
 	defer restarted()
 	held("a collector restart while waiting")
 	mu.Lock()
-	comments = append(comments, issueComment(703, 55, requesterAnswer))
+	comments = append(comments, issueComment(704, 55, requesterAnswer))
 	mu.Unlock()
 	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
 	restarted()
@@ -162,7 +166,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	if _, ok := questionBoundaryAt(t, root); ok {
 		t.Fatal("the answered question is still open")
 	}
-	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-703.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-704.json")); err != nil {
 		t.Fatal("the answered question was not kept", err)
 	}
 	mu.Lock()
@@ -245,5 +249,30 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 				t.Fatal("refused configuration created a queue")
 			}
 		})
+	}
+}
+
+// The tracker records a status or field change as a comment with no words,
+// and the runtime makes such changes itself while it waits. Words from the
+// creator or an operator are the answer; a stop line is not.
+func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
+	issue := sourceIssue{ID: 51, ProjectID: 17}
+	issue.Creator.ID = 55
+	rows := []json.RawMessage{
+		issueComment(700, 55, "below the boundary"),
+		issueComment(701, 55, ""),
+		issueComment(702, 55, "  \n\t"),
+		issueComment(703, 88, "someone else's words"),
+		issueComment(704, 55, "停止\nnot an answer"),
+	}
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
+		t.Fatalf("a comment without words, a stranger's or a stop line was read as an answer: id=%d %q err=%v", id, answer, err)
+	}
+	rows = append(rows, issueComment(705, 90, "an operator's reply"), issueComment(706, 55, requesterAnswer))
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
+		t.Fatalf("operator's reply: id=%d %q err=%v", id, answer, err)
+	}
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
+		t.Fatalf("creator's reply: id=%d %q err=%v", id, answer, err)
 	}
 }

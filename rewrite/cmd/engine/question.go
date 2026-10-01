@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"ticket-runner/internal/chain"
@@ -71,6 +72,14 @@ func recordQuestion(directory string, rows []json.RawMessage, issue sourceIssue)
 // the issue's creator or a configured operator wrote. The account identity
 // comes from native tracker metadata, not from a name claimed in the text. A
 // stop instruction is never an answer, so stopped work stays stopped.
+//
+// A comment without words is not an answer either: the tracker records a
+// status or field change as a comment with empty content, and the runtime
+// itself makes such changes while it waits. Where the runtime's own account
+// filed the issue, that is what kept it from waiting at all. Comments by the
+// runtime's account are not set aside beyond that: an account that is
+// neither the creator nor an operator is already not authorized, and one
+// that is may be the only account the requester has.
 func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int64, after int64) (int64, string, error) {
 	for _, raw := range rows {
 		var comment struct {
@@ -89,7 +98,7 @@ func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int
 		for _, id := range operators {
 			authorized = authorized || id > 0 && comment.CreatedUser.ID == id
 		}
-		if !authorized || firstInstructionLine(comment.Content) == "停止" {
+		if !authorized || strings.TrimSpace(comment.Content) == "" || firstInstructionLine(comment.Content) == "停止" {
 			continue
 		}
 		return comment.ID, comment.Content, nil

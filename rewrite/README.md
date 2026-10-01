@@ -338,7 +338,10 @@ A successful run of that role holds the request. The run history records that
 it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
 far that issue's comments had gone at the moment of the question. The request
 is then skipped until the issue's creator, or an operator listed in
-`intake.stop_user_ids`, posts a comment after that point. That comment's text
+`intake.stop_user_ids`, posts a comment with words after that point. A status
+or field change, which the tracker records as a comment without words, is not
+an answer; the collector makes such changes itself while it waits. That
+comment's text
 is appended to the history as the requester's own words, exactly as posted, the
 hold is cleared, and the record is kept as `answer-<comment id>.json` so the
 same comment cannot be read as a second answer. The next decision sees the
@@ -351,7 +354,8 @@ configured `recover` connections instead of waiting for a reply to a question
 that was never asked. A `--issue`/`--request` run has nobody watching the issue
 for an answer, so it exits non-zero saying that `--watch` resumes the request.
 
-What this does not do: the text of an answer is never checked, so a reply that
+What this does not do: beyond having words, the text of an answer is never
+checked, so a reply that
 does not actually answer the question simply reaches the next decision like any
 other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
