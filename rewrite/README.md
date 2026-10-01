@@ -1000,7 +1000,9 @@ interpreter that can run it (Raven wants Python 3.12 or newer, which the
 bundle's own image may not carry). Under the sandbox, `RAVEN_ROOT` must also
 be given as a `--runtime` path, and it must not lie inside the queue or the
 workspace. The bridge renders the product's configuration with the launch's
-endpoint, model and limits, switches Raven's skill-evolution pipeline and
+endpoint, model and limits, names the wire protocol (chat completions, the
+one the other bridge speaks for every model) rather than leaving Raven to
+infer one from the model id, switches Raven's skill-evolution pipeline and
 memory backend off, so a role does tonight what it did last night, keeps
 Raven's state under `TASK_HOME`, removes the launcher's rendered
 configuration (which holds the key) and scrubs its log after every run, and

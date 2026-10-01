@@ -60,7 +60,12 @@ def rendered_config(root, model, base_url):
     source = root / "agents" / "raven-code" / "config.json"
     config = json.loads(source.read_text(encoding="utf-8"))
     providers = config.setdefault("providers", {})
-    providers["custom"] = {"apiBase": base_url, "models": [model]}
+    # The wire protocol is named rather than inferred: left to itself the product
+    # guesses one from the model id (the Responses API for some vendors, the
+    # Anthropic API for others), and through the gateway the Responses path
+    # fails as soon as a tool result goes back. Chat completions is the path
+    # the other bridge speaks for every model.
+    providers["custom"] = {"apiBase": base_url, "models": [model], "protocol": "chat"}
     defaults = config.setdefault("agents", {}).setdefault("defaults", {})
     defaults.update({
         "model": model, "provider": "custom",
