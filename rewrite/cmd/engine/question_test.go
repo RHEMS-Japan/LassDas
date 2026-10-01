@@ -139,12 +139,16 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	comments = append(comments, issueComment(702, 88, "別の人が上に書いた返事"))
 	mu.Unlock()
 	held("another user's comment above the boundary")
+	mu.Lock()
+	comments = append(comments, issueComment(703, 55, ""))
+	mu.Unlock()
+	held("a status change by the requester, which the tracker records as a comment without words")
 	finish()
 	restarted := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
 	defer restarted()
 	held("a collector restart while waiting")
 	mu.Lock()
-	comments = append(comments, issueComment(703, 55, requesterAnswer))
+	comments = append(comments, issueComment(704, 55, requesterAnswer))
 	mu.Unlock()
 	waitFor(t, func() bool { state, err := loadWatchState(root, 51); return err == nil && state.Done })
 	restarted()
@@ -162,7 +166,7 @@ func TestWaitingRequestResumesOnlyOnTheRequestersLaterAnswer(t *testing.T) {
 	if _, ok := questionBoundaryAt(t, root); ok {
 		t.Fatal("the answered question is still open")
 	}
-	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-703.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "jobs", "51", "answer-704.json")); err != nil {
 		t.Fatal("the answered question was not kept", err)
 	}
 	mu.Lock()
@@ -245,5 +249,37 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 				t.Fatal("refused configuration created a queue")
 			}
 		})
+	}
+}
+
+// The tracker records a status or field change as a comment with no words,
+// and the runtime makes such changes itself while it waits; where the
+// runtime's own account also filed the issue, its own comments are not the
+// requester's reply either.
+func TestAnswerToQuestionTakesOnlyWordsFromSomeoneElse(t *testing.T) {
+	issue := sourceIssue{ID: 51, ProjectID: 17}
+	issue.Creator.ID = 55
+	rows := []json.RawMessage{
+		issueComment(700, 55, "below the boundary"),
+		issueComment(701, 55, ""),
+		issueComment(702, 55, "  \n\t"),
+		issueComment(703, 88, "someone else's words"),
+		issueComment(704, 55, "停止\nnot an answer"),
+		issueComment(705, 55, requesterAnswer),
+	}
+	id, answer, err := answerToQuestion(rows, issue, []int64{90}, 0, 700)
+	if err != nil || id != 705 || answer != requesterAnswer {
+		t.Fatalf("answer: id=%d %q err=%v", id, answer, err)
+	}
+	// The runtime filed the issue itself: nothing it wrote is a reply, and an
+	// operator's words are.
+	id, answer, err = answerToQuestion(rows, issue, []int64{90}, 55, 700)
+	if err != nil || id != 0 || answer != "" {
+		t.Fatalf("the runtime's own comment was read as an answer: id=%d %q err=%v", id, answer, err)
+	}
+	rows = append(rows, issueComment(706, 90, "an operator's reply"))
+	id, answer, err = answerToQuestion(rows, issue, []int64{90}, 55, 700)
+	if err != nil || id != 706 || answer != "an operator's reply" {
+		t.Fatalf("operator's reply: id=%d %q err=%v", id, answer, err)
 	}
 }
