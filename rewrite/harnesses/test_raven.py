@@ -95,7 +95,7 @@ class RavenBridgeTests(unittest.TestCase):
         self.assertEqual(record["args"][record["args"].index("--timeout") + 1], "0")
         self.assertIn("--verbose", record["args"])
         config = record["config"]
-        self.assertEqual(config["providers"]["custom"], {"apiBase": "https://gateway.example/v1", "models": ["prefix/vendor/model"]})
+        self.assertEqual(config["providers"]["custom"], {"apiBase": "https://gateway.example/v1", "models": ["prefix/vendor/model"], "protocol": "chat"})
         self.assertEqual(config["agents"]["defaults"]["model"], "prefix/vendor/model")
         self.assertEqual(config["agents"]["defaults"]["maxTokens"], 7000)
         self.assertEqual(config["agents"]["defaults"]["maxToolIterations"], 1_000_000)
