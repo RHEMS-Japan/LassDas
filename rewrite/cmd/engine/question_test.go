@@ -253,10 +253,9 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 }
 
 // The tracker records a status or field change as a comment with no words,
-// and the runtime makes such changes itself while it waits; where the
-// runtime's own account also filed the issue, its own comments are not the
-// requester's reply either.
-func TestAnswerToQuestionTakesOnlyWordsFromSomeoneElse(t *testing.T) {
+// and the runtime makes such changes itself while it waits. Words from the
+// creator or an operator are the answer; a stop line is not.
+func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
 	issue := sourceIssue{ID: 51, ProjectID: 17}
 	issue.Creator.ID = 55
 	rows := []json.RawMessage{
@@ -265,21 +264,15 @@ func TestAnswerToQuestionTakesOnlyWordsFromSomeoneElse(t *testing.T) {
 		issueComment(702, 55, "  \n\t"),
 		issueComment(703, 88, "someone else's words"),
 		issueComment(704, 55, "停止\nnot an answer"),
-		issueComment(705, 55, requesterAnswer),
 	}
-	id, answer, err := answerToQuestion(rows, issue, []int64{90}, 0, 700)
-	if err != nil || id != 705 || answer != requesterAnswer {
-		t.Fatalf("answer: id=%d %q err=%v", id, answer, err)
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
+		t.Fatalf("a comment without words, a stranger's or a stop line was read as an answer: id=%d %q err=%v", id, answer, err)
 	}
-	// The runtime filed the issue itself: nothing it wrote is a reply, and an
-	// operator's words are.
-	id, answer, err = answerToQuestion(rows, issue, []int64{90}, 55, 700)
-	if err != nil || id != 0 || answer != "" {
-		t.Fatalf("the runtime's own comment was read as an answer: id=%d %q err=%v", id, answer, err)
-	}
-	rows = append(rows, issueComment(706, 90, "an operator's reply"))
-	id, answer, err = answerToQuestion(rows, issue, []int64{90}, 55, 700)
-	if err != nil || id != 706 || answer != "an operator's reply" {
+	rows = append(rows, issueComment(705, 90, "an operator's reply"), issueComment(706, 55, requesterAnswer))
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
 		t.Fatalf("operator's reply: id=%d %q err=%v", id, answer, err)
+	}
+	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
+		t.Fatalf("creator's reply: id=%d %q err=%v", id, answer, err)
 	}
 }

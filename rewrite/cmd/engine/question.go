@@ -75,9 +75,12 @@ func recordQuestion(directory string, rows []json.RawMessage, issue sourceIssue)
 //
 // A comment without words is not an answer either: the tracker records a
 // status or field change as a comment with empty content, and the runtime
-// itself makes such changes while it waits. Nor is anything the runtime's own
-// account wrote, which matters where that account also filed the issue.
-func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int64, self, after int64) (int64, string, error) {
+// itself makes such changes while it waits. Where the runtime's own account
+// filed the issue, that is what kept it from waiting at all. Comments by the
+// runtime's account are not set aside beyond that: an account that is
+// neither the creator nor an operator is already not authorized, and one
+// that is may be the only account the requester has.
+func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int64, after int64) (int64, string, error) {
 	for _, raw := range rows {
 		var comment struct {
 			ID, IssueID, ProjectID int64
@@ -95,8 +98,7 @@ func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int
 		for _, id := range operators {
 			authorized = authorized || id > 0 && comment.CreatedUser.ID == id
 		}
-		if !authorized || strings.TrimSpace(comment.Content) == "" || self > 0 && comment.CreatedUser.ID == self ||
-			firstInstructionLine(comment.Content) == "停止" {
+		if !authorized || strings.TrimSpace(comment.Content) == "" || firstInstructionLine(comment.Content) == "停止" {
 			continue
 		}
 		return comment.ID, comment.Content, nil
@@ -136,7 +138,7 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err := json.Unmarshal(raw, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
 		return false, errors.New("the recorded question is unreadable; the request keeps waiting for the requester's answer")
 	}
-	id, answer, err := answerToQuestion(rows, issue, cfg.Intake.StopUserIDs, cfg.runtimeUser, *boundary.After)
+	id, answer, err := answerToQuestion(rows, issue, cfg.Intake.StopUserIDs, *boundary.After)
 	if err != nil || id == 0 {
 		return false, err
 	}
