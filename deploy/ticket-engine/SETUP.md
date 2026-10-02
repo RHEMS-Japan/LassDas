@@ -303,7 +303,8 @@ scripts in `rewrite/harnesses/`:
   and reads pull requests, merges one (not when the merge is left to a
   person), and reads the repository and the integration branch in its check
   mode;
-- the merged check (`verify_merged.py`) clones the integration branch.
+- the merged check (`verify_merged.py`) clones the integration branch, or,
+  with the merge left to a person, the pull request's branch.
 
 That is read and write access to the repository's contents and to its pull
 requests. On GitHub, a fine-grained personal access token restricted to this
@@ -569,6 +570,10 @@ grep -n '"DELIVERY_MERGE_METHOD"' "$CONFIG"
 ```
 
 The `grep` must print one line, ending in `"DELIVERY_MERGE_METHOD": "none"`.
+This applies only to the copy section 4 makes from
+`rewrite/examples/operator-stages.json`: `operator.json` and
+`operator-gateway.json` have no such setting, and for a copy of either the
+`grep` prints nothing.
 The descriptions of the `deliver` and `verify_merged` roles in your copy still
 say that they merge. In this ordered configuration no model is given them;
 they show only on the status page, as what those two stages were handed.
@@ -606,7 +611,9 @@ differences:
   work goes into a new pull request; a close ends the request with nothing
   delivered, shown as `Done, the pull request closed unmerged`; a push to the
   branch is left alone, nothing is pushed over it, and the delivery names
-  what it did not put in.
+  what it did not put in. Those two endings, too, get the `delivered` status
+  and the hand-back to the requester, although nothing of that round was
+  delivered.
 
 The cases this does not cover, and leaving out the `verify_merged` stage, are
 in rewrite/README.md ("Stages instead of roles", from the paragraph that
@@ -836,10 +843,10 @@ kubectl -n "$NS" port-forward "pod/$POD" 9200:9200
 
 Open <http://127.0.0.1:9200/> in a browser. It asks for the user and password
 from the status Secret; without them it answers 401. Signed in, an empty queue
-shows the counters (Queued, Running, Awaiting answer, Needs attention,
-Delivered, Done without a change, Done with the pull request open, Done, the
-pull request closed unmerged, Stopped) at 0, "No request has been accepted
-into this queue yet.",
+shows nine counters at 0 (`Queued`, `Running`, `Awaiting answer`,
+`Needs attention`, `Delivered`, `Done without a change`,
+`Done with the pull request open`, `Done, the pull request closed unmerged`,
+`Stopped`), "No request has been accepted into this queue yet.",
 and one column per configured stage. <http://127.0.0.1:9200/healthz> answers
 `ok` without signing in. `/config` shows the configuration as the page read
 it, and `/log` the engine's log. The labels switch to Japanese from the link
@@ -1000,7 +1007,9 @@ the integration branch fails your own checks today
 ([section 3](#the-branch-must-pass-before-you-start)).
 
 **Your test script inside a role.** The verify stage runs it confined and
-with the checkout read-only, which is not how it ran in the check above:
+with the checkout read-only, which is not how it ran in the check above. The
+launcher passes its standard input on to the script, so it too is given
+`/dev/null`:
 
 ```sh
 kubectl -n "$NS" exec -i "$POD" -c engine -- /bin/sh -s <<'CHECK'
@@ -1010,7 +1019,7 @@ git -c core.hooksPath=/dev/null clone --quiet --no-local --branch <integration-b
 env -i PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
   TASK_WORKSPACE="$d/work" TASK_HOME="$d/home" \
   python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py \
-  --runtime /opt/ticket-automation/operator --network inherit -- /opt/ticket-automation/operator/test
+  --runtime /opt/ticket-automation/operator --network inherit -- /opt/ticket-automation/operator/test </dev/null
 echo "test inside a role exit: $?"
 rm -rf "$d"
 CHECK
