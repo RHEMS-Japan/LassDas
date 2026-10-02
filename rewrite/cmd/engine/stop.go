@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/tracker"
 )
 
 // An instruction is read from the first nonblank line only, so a quotation, an
@@ -28,22 +29,18 @@ func firstInstructionLine(content string) string {
 
 // A stop is an instruction from the requester or an explicitly configured
 // operator. It is never inferred from a role report or approved by a model.
-func stopInstruction(rows []json.RawMessage, issue sourceIssue, operators []int64) (json.RawMessage, error) {
+func stopInstruction(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue, operators []int64) (json.RawMessage, error) {
 	for _, raw := range rows {
-		var comment struct {
-			ID, IssueID, ProjectID int64
-			Content                string
-			CreatedUser            struct{ ID int64 }
-		}
-		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 || comment.IssueID != issue.ID || comment.ProjectID != issue.ProjectID {
+		comment, err := source.ReadComment(raw, issue)
+		if err != nil || !comment.OnIssue {
 			return nil, errors.New("stop comments could not be read for the assigned issue")
 		}
-		if firstInstructionLine(comment.Content) != "停止" {
+		if firstInstructionLine(comment.Body) != "停止" {
 			continue
 		}
-		authorized := comment.CreatedUser.ID > 0 && comment.CreatedUser.ID == issue.Creator.ID
+		authorized := comment.Author.ID > 0 && comment.Author.ID == issue.Creator.ID
 		for _, id := range operators {
-			authorized = authorized || id > 0 && comment.CreatedUser.ID == id
+			authorized = authorized || id > 0 && comment.Author.ID == id
 		}
 		if authorized {
 			return raw, nil
@@ -55,7 +52,7 @@ func stopInstruction(rows []json.RawMessage, issue sourceIssue, operators []int6
 // Preserve the actual user's native instruction, not a model completion mark.
 // Missing/deleted remote comments cannot silently resume stopped work. Damaged
 // local stop records hold the work; they are not permission to resume either.
-func savedStop(directory string, issue sourceIssue, operators []int64) (bool, error) {
+func savedStop(source tracker.Tracker, directory string, issue sourceIssue, operators []int64) (bool, error) {
 	raw, err := os.ReadFile(filepath.Join(directory, "stop-request.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -63,7 +60,7 @@ func savedStop(directory string, issue sourceIssue, operators []int64) (bool, er
 	if err != nil {
 		return false, err
 	}
-	stop, err := stopInstruction([]json.RawMessage{raw}, issue, operators)
+	stop, err := stopInstruction(source, []json.RawMessage{raw}, issue, operators)
 	if err != nil || stop == nil {
 		return false, errors.New("saved stop instruction is unreadable or no longer matches its source; work remains held")
 	}
@@ -133,6 +130,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	}
 	quiet := func(string) {}
 	notice := requestNotices(cfg, issue, directory)
+	source := cfg.source()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -147,10 +145,10 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// Bound an unresponsive read independently of an executing role. A
 			// missing control channel pauses work, not the request's goal.
 			readCtx, release := context.WithTimeout(ctx, interval)
-			rows, err = cfg.Backlog.Comments(readCtx, issue.Key, 0)
+			rows, err = source.Comments(readCtx, issue)
 			release()
 			if err == nil {
-				instruction, err = stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
+				instruction, err = stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
 			}
 			if err == nil && issue.Creator.ID <= 0 && len(cfg.Intake.StopUserIDs) == 0 {
 				err = errors.New("requester identity is unavailable for stop instructions")
@@ -199,7 +197,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			// The engine put a question to the requester and stopped there.
 			// Record how far the comments had gone, then leave the request to
 			// the collector, which starts it again when the answer arrives.
-			if err := recordQuestion(directory, rows, issue); err != nil {
+			if err := recordQuestion(source, directory, rows, issue); err != nil {
 				turns.leave(issue.ID)
 				observe("waiting to record the question put to the requester: " + err.Error())
 			} else {

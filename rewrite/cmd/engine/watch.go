@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,11 @@ type intakeConfig struct {
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
 	QuestionRole        string  `json:"question_role,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	// CategoryIDs narrows discovery to issues that carry one of these tracker
+	// categories, so a project shared with people's own tickets hands the
+	// runtime only what a requester marked for it. A category added to an
+	// issue later is accepted then. Absent, every issue in scope is accepted.
+	CategoryIDs []int64 `json:"category_ids,omitempty"`
 	// MinModelCredit is the USD balance below which the shared model key can no
 	// longer carry the work. Absent or zero asks the provider nothing.
 	MinModelCredit float64 `json:"min_model_credit,omitempty"`
@@ -66,14 +72,8 @@ type intakeConfig struct {
 	Client        *http.Client `json:"-"`
 }
 
-type sourceIssue struct {
-	ID        int64                `json:"id"`
-	Key       string               `json:"issueKey"`
-	ProjectID int64                `json:"projectId"`
-	Created   time.Time            `json:"created"`
-	Creator   struct{ ID int64 }   `json:"createdUser"`
-	Category  []struct{ ID int64 } `json:"category"`
-}
+// sourceIssue is an issue as the engine reads it from its tracker.
+type sourceIssue = tracker.Issue
 
 type serialLog struct {
 	mu     sync.Mutex
@@ -86,38 +86,47 @@ func (w *serialLog) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+// watchSettings checks everything about a watch that can be checked before
+// the queue is touched, and returns what the watch runs on: the queue's
+// directory, the starting time, the seconds between scans and the slots.
+func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
+	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
 	if cfg.Intake == nil || cfg.Intake.ProjectID <= 0 {
-		return errors.New("watch requires an explicit intake.project_id")
+		return fail(errors.New("watch requires an explicit intake.project_id"))
 	}
-	if err := validateStopReporter(cfg); err != nil {
-		return err
+	if err := validateStopReporter(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateQuestionRole(cfg); err != nil {
-		return err
+	if err := validateQuestionRole(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateNotices(cfg); err != nil {
-		return err
+	if err := validateNotices(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := prepareStages(&cfg); err != nil {
-		return err
+	if err := prepareStages(cfg); err != nil {
+		return fail(err)
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	if err != nil {
-		return errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp")
+		return fail(errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp"))
 	}
 	delay, capacity := cfg.Intake.PollIntervalSeconds, cfg.Intake.MaxRunning
 	if delay < 0 || time.Duration(delay) > time.Duration(1<<63-1)/time.Second || capacity < 0 {
-		return errors.New("intake interval and capacity must be positive")
+		return fail(errors.New("intake interval and capacity must be positive"))
 	}
 	for _, id := range cfg.Intake.StopUserIDs {
 		if id <= 0 {
-			return errors.New("intake.stop_user_ids must contain positive user ids")
+			return fail(errors.New("intake.stop_user_ids must contain positive user ids"))
 		}
 	}
 	for _, id := range cfg.Intake.IssueIDs {
 		if id <= 0 {
-			return errors.New("intake.issue_ids must contain positive issue ids")
+			return fail(errors.New("intake.issue_ids must contain positive issue ids"))
+		}
+	}
+	for _, id := range cfg.Intake.CategoryIDs {
+		if id <= 0 {
+			return fail(errors.New("intake.category_ids must contain positive category ids"))
 		}
 	}
 	if delay == 0 {
@@ -128,18 +137,84 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	}
 	root, err = filepath.Abs(root)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	// Validate binding before discovering/accepting any work.
-	if _, err := bindRequestConfig(cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+		return fail(err)
+	}
+	if left := examplePlaceholder(*cfg); left != "" {
+		return fail(errors.New(left))
+	}
+	return root, since, delay, capacity, nil
+}
+
+// The shipped examples name hosts that cannot exist, under example.invalid,
+// and open their instructions by saying the setup is incomplete. A watch on a
+// configuration that still holds one of those would start, take up requests
+// and fail each of them over and over at the model's price, so it is refused
+// here with the place of the first one found. Only a value that is a URL is
+// looked at, and only its host: an author's address under example.invalid, a
+// sentence that mentions the name and a real host that merely begins like it
+// are the operator's own. This reads the operator's own file for the
+// examples' own words; it is not a check of anything a role or a model wrote.
+func examplePlaceholder(cfg config) string {
+	if strings.HasPrefix(strings.TrimSpace(cfg.Instructions), "Operator setup is incomplete") {
+		return "instructions still holds the example's paragraph (\"Operator setup is incomplete\"); a watch needs the project's own guidance there"
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	var text any
+	if err := json.Unmarshal(data, &text); err != nil {
+		return ""
+	}
+	var find func(value any, place string) string
+	find = func(value any, place string) string {
+		switch value := value.(type) {
+		case string:
+			address, err := url.Parse(strings.TrimSpace(value))
+			if err != nil || address.Scheme == "" || address.Host == "" {
+				return ""
+			}
+			if host := strings.ToLower(address.Hostname()); host == "example.invalid" || strings.HasSuffix(host, ".example.invalid") {
+				return place + " still holds the example's placeholder host under example.invalid; a watch needs your own value there"
+			}
+		case []any:
+			for index, item := range value {
+				if left := find(item, fmt.Sprintf("%s[%d]", place, index)); left != "" {
+					return left
+				}
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(value))
+			for key := range value {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				if left := find(value[key], strings.TrimPrefix(place+"."+key, ".")); left != "" {
+					return left
+				}
+			}
+		}
+		return ""
+	}
+	return find(text, "")
+}
+
+func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+	root, since, delay, capacity, err := watchSettings(&cfg, root)
+	if err != nil {
 		return err
 	}
 	w := &serialLog{writer: log}
 	observe := func(message string) { fmt.Fprintln(w, message) }
-	// The queue belongs to one tracker and one project. The intake window
-	// and the issue allowlist are filters an operator changes while the
-	// queue lives on, so they are not part of its identity.
-	identity := fmt.Sprintf("Issue intake: %s\nProject: %d", cfg.Backlog.BaseURL, cfg.Intake.ProjectID)
+	// The queue belongs to one tracker and one project. The intake window,
+	// the issue allowlist and the categories are filters an operator changes
+	// while the queue lives on, so they are not part of its identity.
+	identity := cfg.source().Identity()
 	// Reuse the existing exclusive, durable runtime store for ownership of this
 	// queue. Its identity is not a verdict or completion mark for any issue.
 	jobs := filepath.Join(root, "jobs")
@@ -156,17 +231,36 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 		return err
 	}
 	defer owner.Close()
+	observe(intakeScope(cfg, since))
 	return pollRequests(ctx, cfg, jobs, since, time.Duration(delay)*time.Second, capacity, w)
+}
+
+// Said once at start, in the engine's own log: which new issues this queue
+// takes up. An operator who meant to narrow the intake reads here whether the
+// engine understood it that way before the first issue is accepted.
+func intakeScope(cfg config, since time.Time) string {
+	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	ids, categories := cfg.Intake.IssueIDs, cfg.Intake.CategoryIDs
+	switch {
+	case len(ids) > 0 && len(categories) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v, and of those only the ones carrying one of the categories %v", ids, categories)
+	case len(ids) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v", ids)
+	case len(categories) > 0:
+		return scope + fmt.Sprintf("; only issues carrying one of the categories %v", categories)
+	}
+	return scope + "; every such issue is accepted"
 }
 
 // One collector owns the queue. Job histories, not child exit codes or prose,
 // tell it which already-run engines chose done. Pending histories are resumed
 // by the same engine; the collector does not make a new completion judgment.
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
+	source := cfg.source()
 	if cfg.Intake != nil && cfg.Intake.Assign {
 		// The runtime's own account, to hand an issue back to itself. Without
 		// it the work still runs; only the hand-overs wait for a later start.
-		if me, err := cfg.Backlog.Myself(ctx); err != nil {
+		if me, err := source.Myself(ctx); err != nil {
 			fmt.Fprintln(log, "the runtime's own tracker account is unknown; issues are not handed over either way: "+err.Error())
 			cfg.Intake.Assign = false
 		} else {
@@ -246,12 +340,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("reading accepted issue: " + err.Error())
 				continue
 			}
-			var issue sourceIssue
-			if err := json.Unmarshal(raw, &issue); err != nil || issue.ID != id || issue.ProjectID != cfg.Intake.ProjectID || issue.Key == "" {
+			issue, err := source.ReadIssue(raw)
+			if err != nil || issue.ID != id {
 				observe("accepted issue record could not be read for its source; no replacement used")
 				continue
 			}
-			if stopped, err := savedStop(directory, issue, cfg.Intake.StopUserIDs); err != nil {
+			if stopped, err := savedStop(source, directory, issue, cfg.Intake.StopUserIDs); err != nil {
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
@@ -266,7 +360,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				continue
 			}
-			request, err := tracker.RequestText(raw)
+			request, err := source.RequestText(raw)
 			if err != nil {
 				observe(err.Error())
 				continue
@@ -304,13 +398,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				continue
 			}
+			stopping := false
 			if state.Waiting {
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes
 				// it runnable again; anything else leaves it untouched.
 				applyStatus(ctx, cfg, issue, directory, awaitingStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
-				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
+				resume, answered, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
 					continue
@@ -318,15 +413,35 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if !resume {
 					continue
 				}
-				resumeTurn(ctx, cfg, issue, directory, say)
+				// A stop is not an answer. The request runs again only for the
+				// stop to be recorded and reported, so the requester is not told
+				// that their reply was received and the work goes on, and the
+				// issue does not pass through the working status and the
+				// runtime's hands on its way to stopped.
+				stopping = !answered
+				if answered {
+					resumeTurn(ctx, cfg, issue, directory, say)
+				}
 			}
-			applyStatus(ctx, cfg, issue, directory, processingStatus, say)
-			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			if !stopping {
+				applyStatus(ctx, cfg, issue, directory, processingStatus, say)
+				acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			}
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
 			notice := requestNotices(cfg, issue, directory)
-			if creditKnown {
+			// Recording a stop launches no model, so it does not wait for the
+			// budget and is not told about it: the requester asked for the
+			// work to end, not to hear that it is paused and will carry on. A
+			// request held here has no watcher reading its comments, so the
+			// stop is looked for on its behalf. A configured stop report then
+			// runs at once and uses the key, as it does after the stop of a
+			// running request.
+			if creditKnown && creditLow && !stopping {
+				stopping = stopWritten(ctx, cfg, issue, interval)
+			}
+			if creditKnown && !stopping {
 				if err := applyBudgetNotice(ctx, notice, creditLow); err != nil {
 					observe("request " + entry.Name() + ": budget notice not confirmed: " + err.Error())
 				}
@@ -359,10 +474,17 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 			// An interrupted action or an unfinished recovery means the work is
 			// picked up again, not started afresh. Say so before it runs, so
-			// the requester is not left reading a silent gap in the night.
+			// the requester is not left reading a silent gap in the night. A
+			// request with a stop standing at its issue is launched only for
+			// the stop to be recorded, so it is not told that the same request
+			// carries on; the comments are read once here for that, when the
+			// queue has not found the stop already.
 			if state.Pending != nil || state.Recovering {
-				if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
-					observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+				stopping = stopping || stopWritten(ctx, cfg, issue, interval)
+				if !stopping {
+					if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
+						observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+					}
 				}
 			}
 			// No process of this request can be running before it is launched
@@ -391,11 +513,27 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	}
 }
 
+// stopWritten reports whether an authorized stop stands at the issue. A read
+// that fails says no: the request stays as it is and is asked again on the
+// next tick.
+func stopWritten(ctx context.Context, cfg config, issue sourceIssue, interval time.Duration) bool {
+	readCtx, release := context.WithTimeout(ctx, interval)
+	defer release()
+	source := cfg.source()
+	rows, err := source.Comments(readCtx, issue)
+	if err != nil {
+		return false
+	}
+	stop, err := stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
+	return err == nil && stop != nil
+}
+
 func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, collected chan<- struct{}, observe func(string)) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	source := cfg.source()
 	for ctx.Err() == nil {
-		rows, err := cfg.Backlog.Issues(ctx, cfg.Intake.ProjectID)
+		rows, err := source.Issues(ctx)
 		changed := false
 		if err != nil {
 			observe("issue discovery unavailable: " + err.Error())
@@ -404,8 +542,8 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				if ctx.Err() != nil {
 					return
 				}
-				var issue sourceIssue
-				if err := json.Unmarshal(raw, &issue); err != nil || issue.Created.IsZero() {
+				issue, err := source.ReadIssue(raw)
+				if err != nil || issue.Created.IsZero() {
 					observe("issue discovery returned no readable creation time; it was not accepted")
 					continue
 				}
@@ -422,6 +560,12 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 					if !allowed {
 						continue
 					}
+				}
+				// The same goes for the categories a requester marks an issue
+				// with: an issue without one of them is left for people, and
+				// is looked at again each tick in case it gains one.
+				if !source.Marked(issue) {
+					continue
 				}
 				directory := filepath.Join(jobs, strconv.FormatInt(issue.ID, 10))
 				path := filepath.Join(directory, "issue.json")
