@@ -49,12 +49,14 @@ const (
 // runs long may be working or may be waiting for its operator to correct a
 // setting, a failure that repeats may need a person, and a spent budget may
 // need someone to add to it. A stall is also said while the engine itself
-// holds the work for the budget, when nothing is being tried. So a notice says
-// what was recorded and nothing about who has to act: not that nobody does,
-// and not that no answer is awaited, since a question may be standing above it.
+// holds the work for the budget, when nothing is being tried, and the quiet
+// time of a request with no record yet counts from its acceptance, so it can
+// be all waiting before a first launch. So a notice says what was recorded
+// and gives no cause and no word on who has to act: not that nobody does, and
+// not that no answer is awaited, since a question may be standing above it.
 func stallNoticeText(minutes int, detail string) string {
 	if detail == "" {
-		return fmt.Sprintf("依頼はまだ終わっていませんが、過去 %d 分間は工程が完了していません。この間に工程の失敗は記録されていないため、工程が長引いているか、運用担当者の対応待ちのどちらかです。", minutes)
+		return fmt.Sprintf("依頼はまだ終わっていませんが、過去 %d 分間は工程が完了していません。この間に工程の失敗は記録されていません。", minutes)
 	}
 	return fmt.Sprintf("依頼はまだ終わっていませんが、過去 %d 分間は工程が完了していません（直近の失敗: %s）。", minutes, detail)
 }

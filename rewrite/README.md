@@ -877,16 +877,20 @@ window, a request whose steps keep failing is told:
 
 The quoted failure is the first nonblank line of the most recent error, with
 every configured credential value replaced by `[credential]` and the result cut
-to 200 characters. A launch that runs long without a recorded failure is said
-once nothing has been recorded for that long; no time limit ends it, so this is
-the requester's only word about it:
+to 200 characters. A request whose work is running, with no failure recorded,
+is told once nothing has been recorded for that long. The time counts from its
+last record or, when it has none yet, from its acceptance, so a wait before
+the first launch (for its turn, for the budget, for a stopped engine) counts
+too. No time limit ends a launch, so this is the requester's only word about
+a long one:
 
-> 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていないため、工程が長引いているか、運用担当者の対応待ちのどちらかです。
+> 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
 
-Neither form says who has to act, and the budget notice above does not either.
-The engine records what its steps did, and from there a launch that is working
-and one that waits for its operator look the same: a step held for a setting
-only the operator can correct has not failed and has not finished. A failure
+Neither form gives a cause or says who has to act, and the budget notice above
+does not either. The engine records what its steps did, and from there a
+launch that is working and one that waits for its operator look the same: a
+step held for a setting only the operator can correct has not failed and has
+not finished. A failure
 that repeats may need a person. A balance may come back by itself or only when
 someone adds to it. The failing form is also said while the engine itself
 holds the work for the budget; the failure it quotes then is the engine's own
