@@ -307,6 +307,86 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(self.run_review(service).returncode, 0)
         self.assertIn(self.NO_CHANGE, service.requests[1]["body"]["messages"][1]["content"])
 
+    GOES_BACK = "an ending with nothing delivered needs a verdict, so the work goes back this time"
+
+    def test_with_nothing_changed_no_verdict_sends_the_work_back(self):
+        # Let through, an unchanged checkout can end with nothing delivered,
+        # so only a verdict lets it through: a service that is down, a reply
+        # without a verdict, a setting that keeps the review from running and
+        # an unexpected error all send it back instead.
+        self.leave_unchanged()
+        for case, replies, extra in (
+                ("service down", [{"status": 503}, {"status": 503}], {}),
+                ("text only", [{"verdict": None}, {"verdict": None}], {}),
+                ("no credential", [], {"REVIEW_API_KEY": ""}),
+                ("no endpoint", [], {"REVIEW_MODEL_URL": ""}),
+                ("unexpected error", [], {"REVIEW_MODEL_URL": "https://[oops/v1/chat/completions"})):
+            service = ModelStandIn(replies)
+            self.addCleanup(service.close)
+            finished = self.run_review(service, **extra)
+            self.assertEqual(finished.returncode, 1, (case, finished.stdout, finished.stderr))
+            self.assertIn("NOT REVIEWED", finished.stdout, case)
+            self.assertIn(self.GOES_BACK, finished.stdout, case)
+            self.assertNotIn("Traceback", finished.stderr, case)
+        self.assertFalse((self.home / "review-send-backs").exists(), "no verdict was counted as a send-back")
+
+    def test_with_nothing_changed_the_verdict_decides_even_when_the_state_cannot_be_saved(self):
+        self.leave_unchanged()
+        self.home.chmod(0o500)
+        self.addCleanup(self.home.chmod, 0o700)
+        service = ModelStandIn([{"verdict": (True, "the request needs a new file and none was written")},
+                                {"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        sent_back = self.run_review(service)
+        self.assertEqual(sent_back.returncode, 1, sent_back.stdout)
+        self.assertIn("SENT BACK", sent_back.stdout)
+        self.assertIn("could not be saved", sent_back.stdout)
+        passed = self.run_review(service)
+        self.assertEqual(passed.returncode, 0, passed.stdout)
+        self.assertIn("PASSED", passed.stdout)
+
+    def test_with_a_change_or_a_committed_round_no_verdict_goes_on_as_before(self):
+        for case in ("a change", "a committed round"):
+            if case == "a committed round":
+                self.leave_unchanged()
+                receipt = self.workspace / ".git" / "ticket-engine" / "delivery.json"
+                receipt.parent.mkdir()
+                receipt.write_text(json.dumps({"head": self.git("rev-parse", "HEAD").stdout.strip()}))
+            service = ModelStandIn([{"status": 503}, {"status": 503}])
+            self.addCleanup(service.close)
+            finished = self.run_review(service)
+            self.assertEqual(finished.returncode, 0, (case, finished.stdout))
+            self.assertIn("the work goes on unreviewed this time", finished.stdout, case)
+
+    def test_a_new_file_with_a_japanese_name_reaches_the_reviewer(self):
+        self.leave_unchanged()
+        (self.workspace / "src" / "設定.txt").write_text("元の設定\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "Codex: a tracked file with a Japanese name")
+        (self.workspace / "src" / "設定.txt").write_text("変えた設定\n", encoding="utf-8")
+        (self.workspace / "src" / "メモ.md").write_text("日本語の覚え書き\n", encoding="utf-8")
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("--- new file src/メモ.md ---\n日本語の覚え書き", text)
+        self.assertIn("diff --git a/src/設定.txt b/src/設定.txt", text)
+        self.assertIn("+変えた設定", text)
+        self.assertNotIn("No file was changed", text)
+
+    def test_a_new_symbolic_link_is_named_not_called_no_change(self):
+        self.leave_unchanged()
+        os.symlink("nowhere", self.workspace / "src" / "link")
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("--- new symbolic link src/link -> nowhere ---", text)
+        self.assertNotIn("No file was changed", text)
+        # Something did change, so a missing verdict is no reason to hold it back here.
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+
     def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
         shutil.rmtree(self.workspace / ".git")
         service = ModelStandIn([{"verdict": (True, "x")}])

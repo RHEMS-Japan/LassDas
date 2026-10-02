@@ -12,21 +12,24 @@ are printed, so they join the history for the worker and the report writer;
 the send-back counter and a log stay in the process's own directory (TASK_HOME);
 a change that cannot be read (no Git checkout) lets the work through with a note.
 
-Two things keep this from ending or stalling a request. Only a real blocking
-verdict exits 1. Everything that keeps a verdict from being obtained (a
-mistyped setting, a test command that cannot start, an endpoint that is not
-HTTPS, a change that cannot be read, paths that match no change, a model
-service that is down or returns no verdict) ends 0 and prints NOT REVIEWED
-with the reason, which joins the history for the worker and the report
-writer: a review that could not be performed is not a defect in the change,
-and must never send the work round for ever. And the operator's cap: once
-the review has sent the work back that many times, the next blocking verdict
-lets the work through with the objections recorded as unresolved.
+Only a real blocking verdict exits 1, so a review that could not be
+performed does not send the work round for ever. Everything that keeps a
+verdict from being obtained (a mistyped setting, a test command that cannot
+start, an endpoint that is not HTTPS, a change that cannot be read, paths
+that match no change, a model service that is down or returns no verdict)
+ends 0 and prints NOT REVIEWED with the reason, which joins the history for
+the worker and the report writer: a review that could not be performed is not
+a defect in the change.
 
-When no file was changed at all, the reviewer is told so in plain words and
-asked whether the request is met by the repository exactly as it is: a
-request whose answer is that nothing needs to change reaches review this way,
-and so does work that was never done.
+One exception: when Git lists no changed path at all and no earlier delivery
+round committed one, the work let through here can end with nothing
+delivered, so it is let through only on a verdict that does not object.
+Without one (no verdict, a setting that keeps the review from running, an
+unexpected error), this ends 1 and the work goes back. The reviewer is told
+in plain words that no file was changed and asked whether the request is met
+by the repository exactly as it is: a request whose answer is that nothing
+needs to change reaches review this way, and so does work that was never
+done.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -138,8 +141,11 @@ def cut(text, limit, what):
 
 
 def git(workspace, *arguments):
+    # Names as they are, not as octal escapes: a diff header in Japanese is
+    # read by the reviewer as it was written.
     try:
-        finished = subprocess.run(["git", "-C", str(workspace), *arguments], capture_output=True, text=True, timeout=60)
+        finished = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(workspace), *arguments],
+                                  capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error))
     if finished.returncode != 0:
@@ -148,32 +154,45 @@ def git(workspace, *arguments):
     return finished.stdout
 
 
+def changed_entries(workspace, *scope):
+    """Every path Git lists as changed, staged or untracked, as "XY path".
+    Read separated by NUL, where Git quotes and escapes no name: read from the
+    ordinary listing, a name in Japanese or with a quote in it named no file."""
+    output = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *scope)
+    return [entry for entry in output.split("\0") if len(entry) > 3]
+
+
 def gather(workspace, paths, test_commands, timeout):
     """The diff, whole, cut only at LIMIT with a visible marker; then the
     operator's test commands, each with its exit status and output."""
     scope = ["--", *paths] if paths else []
     tracked = git(workspace, "diff", "HEAD", *scope)
-    status = git(workspace, "status", "--short", "--untracked-files=all", *scope)
-    if paths and not tracked.strip() and not status.strip():
-        # Not stripped as a whole: the first status line starts with a space
-        # for a change in the working tree, and that space is part of the format.
-        elsewhere = [line for line in git(workspace, "status", "--short", "--untracked-files=all").splitlines() if line.strip()]
+    entries = changed_entries(workspace, *scope)
+    if paths and not tracked.strip() and not entries:
+        elsewhere = changed_entries(workspace)
         if elsewhere:
             raise ReviewError("REVIEW_DIFF_PATHS (%s) matched no change, but the checkout has changes under: %s"
-                              % (" ".join(paths), ", ".join(sorted({status_path(line).split("/")[0] for line in elsewhere}))))
+                              % (" ".join(paths), ", ".join(sorted({entry[3:].split("/")[0] for entry in elsewhere}))))
     # New files come first, so their names survive a cut of a long diff: new
-    # code is where untested code most often is.
+    # code is where untested code most often is. A new path that is not a
+    # file the reviewer can read is still named, never left out silently.
     new_files = ""
-    for line in status.splitlines():
-        if line.startswith("?? "):
-            name = status_path(line)
-            path = workspace / name
-            if path.is_file():
-                try:
-                    content = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
+    for entry in entries:
+        if not entry.startswith("?? "):
+            continue
+        name = entry[3:]
+        path = workspace / name
+        if path.is_symlink():
+            new_files += "--- new symbolic link %s -> %s ---\n" % (name, os.readlink(path))
+        elif path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as error:
+                new_files += "--- new file %s, which could not be read: %s ---\n" % (name, error)
+                continue
+            new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
+        else:
+            new_files += "--- new path %s, which is not a regular file ---\n" % name
     tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
     return cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output")
 
@@ -191,13 +210,18 @@ def committed_earlier(workspace):
     return isinstance(receipt, dict) and bool(receipt.get("head"))
 
 
-def status_path(line):
-    """The path in one `git status --short` line: after the two status
-    letters and a space; a rename shows the new name; quotes are stripped."""
-    path = line[3:] if len(line) > 3 else line
-    if " -> " in path:
-        path = path.split(" -> ", 1)[1]
-    return path.strip().strip('"')
+def nothing_changed(workspace):
+    """Whether the checkout holds no change at all: Git lists no changed,
+    staged or untracked path, as the delivery reads it too, and no earlier
+    delivery round committed one. Work let through from here can end with
+    nothing delivered. False whenever that cannot be told."""
+    if not workspace:
+        return False
+    workspace = Path(workspace)
+    try:
+        return workspace.is_dir() and not changed_entries(workspace) and not committed_earlier(workspace)
+    except (ReviewError, OSError):
+        return False
 
 
 def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
@@ -237,18 +261,30 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
     return None, last
 
 
-def review(stdin_text):
-    """Exit 1 only on a real blocking verdict; 0 otherwise."""
-    model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
+def without_verdict(model, reason, unchanged, goes_on):
+    """No verdict was obtained. With nothing changed, letting the work through
+    could end it with nothing delivered and no one's judgement, so it goes
+    back; otherwise it goes on unreviewed, as goes_on says."""
+    if unchanged:
+        print("Review by %s: NOT REVIEWED. %s. No file was changed, and an ending with nothing delivered needs a"
+              " verdict, so the work goes back this time." % (model, reason))
+        return 1
+    print("Review by %s: NOT REVIEWED. %s. %s" % (model, reason, goes_on))
+    return 0
+
+
+def review(stdin_text, model, unchanged):
+    """Exit 1 on a real blocking verdict, or when nothing changed and no
+    verdict lets it through; 0 otherwise."""
     try:
-        return reviewed(stdin_text, model)
+        return reviewed(stdin_text, model, unchanged)
     except ReviewError as error:
-        print("Review by %s: NOT REVIEWED. %s. The work goes on unreviewed this time; nothing here is a verdict on the change."
-              % (model, scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))))
-        return 0
+        key = os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
+        return without_verdict(model, scrub(str(error), key), unchanged,
+                               "The work goes on unreviewed this time; nothing here is a verdict on the change.")
 
 
-def reviewed(stdin_text, model):
+def reviewed(stdin_text, model, unchanged):
     workspace = Path(setting("TASK_WORKSPACE"))
     if not workspace.is_dir():
         raise ReviewError("TASK_WORKSPACE is not a directory")
@@ -286,16 +322,21 @@ def reviewed(stdin_text, model):
         raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
     diff, test_output = gather(workspace, paths, tests, timeout)
-    if not diff and not committed_earlier(workspace):
+    if unchanged:
         diff = NO_CHANGE
     blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)
-    outcome = "PASSED"
+    outcome, status = "PASSED", 0
     if blocking is None:
         outcome = "NOT REVIEWED"
-        findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
+        if unchanged:
+            findings = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
+                        " needs a verdict, so the work goes back this time" % findings)
+            status = 1
+        else:
+            findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
         blocking = False
     elif blocking:
-        outcome = "SENT BACK to the worker"
+        outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
     findings = scrub(findings, key)
     print("Review by %s: %s. Send-backs so far: %d.\n%s"
@@ -307,26 +348,35 @@ def reviewed(stdin_text, model):
             log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
                 model, sent_back, outcome, findings or "(no findings)"))
     except OSError as error:
-        # Without its state the cap cannot be kept, so this verdict cannot
-        # send the work back; the findings above are already in the record.
+        if unchanged:
+            # Nothing was changed: only a verdict that lets the work through
+            # ends it here, whether or not the state was saved.
+            print("Review by %s: the send-back state could not be saved (%s). No file was changed, so the outcome"
+                  " above stands all the same." % (model, scrub(str(error), key)))
+            return status
+        # Without its state the send-backs are not counted, so this verdict
+        # does not send the work back; the findings above are in the record.
         print("Review by %s: NOT REVIEWED. The send-back state could not be saved (%s), so the verdict above"
               " does not send the work back this time." % (model, scrub(str(error), key)))
         return 0
-    return 1 if blocking else 0
+    return status
 
 
 def main():
+    model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
+    # Read before any setting: a setting that keeps the review from running
+    # must not let an unchanged checkout through either.
+    unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
     try:
         # Read as bytes and decode leniently: a stray byte in the runtime's
         # text must not become a traceback, which an ordered run would read
         # as a send-back for ever.
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
-        return review(stdin_text)
-    except Exception as error:  # never a traceback and never exit 1: that would be read as a send-back for ever
-        print("Review by %s: NOT REVIEWED. Unexpected %s: %s. The work goes on unreviewed this time."
-              % (os.environ.get("REVIEW_MODEL", "") or "(no model named)", type(error).__name__,
-                 scrub(str(error), os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), ""))[:300]))
-        return 0
+        return review(stdin_text, model, unchanged)
+    except Exception as error:  # never a traceback, and exit 1 only when nothing changed
+        key = os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
+        return without_verdict(model, "Unexpected %s: %s" % (type(error).__name__, scrub(str(error), key)[:300]),
+                               unchanged, "The work goes on unreviewed this time.")
 
 
 if __name__ == "__main__":
