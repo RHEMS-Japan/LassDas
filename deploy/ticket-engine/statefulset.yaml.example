@@ -157,7 +157,7 @@ spec:
           restartPolicy: Always
           command: ["/usr/bin/python3", "-B", "/opt/ticket-automation/scripts/mirror_loop.py"]
           env:
-            - { name: MIRROR_PATH, value: /var/lib/ticket-automation/mirror/<repository-name>.git }
+            - { name: MIRROR_PATH, value: /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git }
             - { name: DELIVERY_REPOSITORY, value: <owner>/<repository-name> }
             - { name: MIRROR_INTERVAL_SECONDS, value: "60" }
             # Only read here. A separate read-only token under another key
@@ -170,9 +170,13 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
             seccompProfile: { type: RuntimeDefault }
+          # Passes once the copy holds a branch. The mirror's directory exists
+          # from the moment the first clone starts, before any branch is in
+          # it, and a role cloning from it then would start from an empty
+          # repository. A repository with no commit at all never passes.
           startupProbe:
             exec:
-              command: ["/bin/sh", "-c", "test -d /var/lib/ticket-automation/mirror/<repository-name>.git"]
+              command: ["/bin/sh", "-c", "test -n \"$(git --git-dir=/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git for-each-ref --count=1 --format=x refs/heads)\""]
             periodSeconds: 5
             failureThreshold: 120
           resources:

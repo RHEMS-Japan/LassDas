@@ -8,12 +8,12 @@ issue. You need this directory, `rewrite/` and `docs/DISTRIBUTION.json`;
 nothing else.
 
 Read [README.md](README.md) in this directory first. It separates what has
-been measured from what is only proposed, and the difference matters for your
-cluster. The engine itself is described in [rewrite/README.md](../../rewrite/README.md)
-and its runtime requirements in [rewrite/RUNTIME.md](../../rewrite/RUNTIME.md).
-Where this guide says "the instance this guide comes from", it means one
-consumer's instance that has run from these templates since 2026-09-29; what
-it met is written here without its names.
+been measured from what is only proposed. The engine itself is described in
+[rewrite/README.md](../../rewrite/README.md) and its runtime requirements in
+[rewrite/RUNTIME.md](../../rewrite/RUNTIME.md). Where this guide says "one
+installation", it means one consumer's instance that has run from these
+templates since September 2026. What happened there is told without its
+names; it cannot be checked from this repository.
 
 **What it does not promise.** A request that reaches "delivered" has had its
 change merged, the configured checks pass on the merged branch, and a report
@@ -29,7 +29,7 @@ merged change.
 5. [The secrets](#5-the-secrets)
 6. [Applying the manifests, in order](#6-applying-the-manifests-in-order)
 7. [Checking that it is up](#7-checking-that-it-is-up)
-8. [Filing the first ticket](#8-filing-the-first-ticket)
+8. [Opening the intake and filing the first ticket](#8-opening-the-intake-and-filing-the-first-ticket)
 9. [Stopping a request](#9-stopping-a-request)
 10. [Upgrading to a new image](#10-upgrading-to-a-new-image)
 11. [Troubleshooting](#11-troubleshooting)
@@ -38,53 +38,63 @@ merged change.
 ## How a request moves
 
 The shipped ordered configuration, `rewrite/examples/operator-stages.json`,
-runs every request through these stages. A stage that runs a model is
-finished when its model process returns without an error; a stage that runs
-a command is finished only when the command exits 0. Nothing a model writes
-moves the request forward.
+runs every request through these stages. A stage that runs a command is
+finished only when the command exits 0; a stage that runs a model is finished
+when its model process returns without an error. Two decisions are a model's:
+at the entrance, whether to ask the requester before the work starts, and in
+the review, whether the change goes back to `work`. Beyond those two, nothing
+a model writes moves the request: writing "done" or "delivered" changes
+nothing.
 
 | Stage | Kind | What happens |
 | --- | --- | --- |
 | `elicit` | model | Settles what the request asks for, from the request, the checkout and your instructions. Points only the requester can decide are listed with choices. |
-| (`ask_requester`) | model | Only when such points are left: posts one comment with them and the request waits for the requester's reply. |
+| (`ask_requester`) | model | Only when such points are left: posts one comment with them, and the request waits for the requester's reply. |
 | `work` | model | Investigates, changes the checkout and runs the project's checks. |
 | `verify` | command | Your build and test commands, against the changed checkout. |
 | `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `work`. |
-| `deliver` | command | Commits, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it. |
-| `verify_merged` | command | Fetches the integration branch after the merge and runs your commands on it. |
+| `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it. |
+| `verify_merged` | command | Fetches the integration branch after the merge and runs your build and tests on it. |
 | `report` | model | Writes the report and posts it on the issue. |
 | `confirm_report` | command | Passes when one comment on the issue is exactly the report. |
 
 A command stage that fails sends the work back to the model stage named in its
 `on_failure`, and every stage after that one runs again. There is no counter
 and no failure ending: a command that can never pass keeps the request going
-round until someone fixes the cause or the requester posts a stop
-([section 9](#9-stopping-a-request)).
+round, with a model launch each time, until someone fixes the cause or the
+requester posts a stop ([section 9](#9-stopping-a-request)).
 
 ## 1. What you need before starting
 
 ### A Kubernetes cluster
 
 - **arm64 nodes.** The published image is built for arm64 only.
-- **Pod user namespaces.** The node, its container runtime and the volume's
-  filesystem must accept `hostUsers: false`. The Pod also sets
-  `procMount: Unmasked`, and the engine container runs with
-  `seccompProfile: Unconfined`. These are requirements found by running the
-  role launcher (README.md), not a recommended profile. Whether your cluster
-  accepts them is answered by the server-side dry run and the launcher check
-  in sections 6 and 7, not by this guide.
+- **Three Kubernetes features, turned on**: Pod user namespaces
+  (`hostUsers: false`, here together with a persistent volume), the
+  `procMount` field (`procMount: Unmasked`), and sidecar containers
+  (`restartPolicy: Always` on an init container). The engine container also
+  runs with `seccompProfile: Unconfined`. These are requirements found by
+  running the role launcher (README.md), not a recommended profile. This
+  repository names no minimum Kubernetes version: the version of the one
+  cluster that ran it was not recorded. Look up the feature gates
+  `UserNamespacesSupport`, `ProcMountType` and `SidecarContainers` for your
+  version; the nodes' operating system and container runtime must support
+  user namespaces as well. The server-side dry run in section 6 shows whether
+  the API server accepts the Pod, and only the Pod's events show whether a node
+  can run it ([section 11](#the-pod-does-not-become-ready)). One installation
+  runs this StatefulSet on arm64 nodes with a 20Gi ReadWriteOnce volume from
+  its cluster's block storage class.
 - **A namespace that admits this Pod.** Pod Security admission at `baseline`
-  or `restricted` refuses it: two init containers add `NET_ADMIN`, the engine
-  unmasks `/proc` and runs without the runtime's default seccomp profile, and
-  the `baseline` level forbids all three. Use a namespace whose enforced level
-  is `privileged`, or one without Pod Security labels, and keep other
-  workloads out of it.
+  or `restricted` refuses it: two init containers add `NET_ADMIN` and the
+  engine runs without the runtime's default seccomp profile, and `baseline`
+  forbids both. Use a namespace whose enforced level is `privileged`
+  (section 6 shows the label), and keep other workloads out of it.
 - **An image with the iptables tools for the egress rules.** The two network
   init containers run `/usr/sbin/xtables-nft-multi` from an image you name.
-  The instance this guide comes from used its network plugin's own DaemonSet
-  image, which carries that program and which every node already pulls. If
-  your network plugin's image does not carry it, any image that does and that
-  every node can pull will serve.
+  One installation used its network plugin's own DaemonSet image, which
+  carries that program and which every node already pulls. If your network
+  plugin's image does not carry it, any image that does and that every node
+  can pull will serve; this repository does not ship one.
 - **A storage class** that provides a 20Gi ReadWriteOnce volume.
 - **Room for the Pod.** The engine requests 1 CPU and 3Gi of memory (limit
   6Gi); the other containers are small. These figures are a starting point,
@@ -95,45 +105,79 @@ round until someone fixes the cause or the requester posts a stop
 
 The engine's tracker client speaks Backlog's API v2. You need a space, a
 project for the requests, and a separate account for the engine itself
-([section 2](#2-preparing-the-tracker)). A dedicated project is simplest; in
-an existing project, the acceptance start time keeps older issues out.
+([section 2](#2-preparing-the-tracker)). A dedicated project is simplest.
 
 ### A GitHub repository to deliver to
 
-The repository (`<owner>/<repository-name>`), its integration branch (the one
-pull requests merge into), and a token for the identity that delivers
-([section 3](#3-preparing-the-delivery-repository)). The delivery scripts also
-accept another Git host through `DELIVERY_REMOTE_URL` and `DELIVERY_API_BASE`,
-but only GitHub has been used.
+The repository (`<owner>/<repository-name>`) with at least one commit, its
+integration branch (the one pull requests merge into), and a token for the
+identity that delivers ([section 3](#3-preparing-the-delivery-repository)).
+The delivery scripts also accept another Git host through
+`DELIVERY_REMOTE_URL` and `DELIVERY_API_BASE`, but only GitHub has been used.
 
 ### A model endpoint and key
 
-The shipped configuration uses OpenRouter for everything: its chat completions
-API for the work, its public model catalogue and its decisions API for
-choosing a model at each launch, and its chat API for the one decision at the
-entrance. One OpenRouter API key covers all of it. An OpenAI-compatible
-gateway can stand in front of it instead ([section 4](#with-a-gateway-in-front-of-the-models));
-the instance this guide comes from sends every model call through one.
+The engine is written for OpenRouter. It chooses each launch's model from
+OpenRouter's public model catalogue, whose address is fixed in the code
+(`rewrite/cmd/engine/models.go`); it names models by OpenRouter's ids
+(`publisher/model`); and the bridge to the working agent talks to the endpoint
+as OpenRouter (`provider="openrouter"` in `rewrite/harnesses/hermes.py`).
+Two arrangements work today:
+
+- **OpenRouter itself**, with one OpenRouter API key for everything. This is
+  what the shipped configuration does: its chat completions API for the work
+  and the entrance decision, its decisions API (the model
+  `typesafe/jev-1.13`) for choosing a model at each launch.
+- **A gateway in front of OpenRouter** that serves the same models under ids
+  made of a prefix and the catalogue id (`openrouter/` + `qwen/...`), with its
+  own key ([section 4](#with-a-gateway-in-front-of-the-models)). The Pod must
+  still reach openrouter.ai, because the catalogue is read from there. One
+  installation sends every model call through such a gateway.
+
+Any other OpenAI-compatible endpoint cannot be used today.
 
 The engine has no spending limit of its own. Set a limit on the key or the
 account. `intake.min_model_credit` can also pause work when the key's
-remaining limit drops below a floor (rewrite/README.md, "When the shared model
-key runs out"); it reads the key that `router.decision` names, so it needs
-that setting, which the shipped ordered configuration does not have
-([section 4](#settings-the-requester-will-notice)).
+remaining limit drops below a floor; it needs a setting the shipped
+configuration lacks ([section 4](#settings-the-requester-will-notice)).
+
+### Who can make it act, and where the code goes
+
+Anyone who can create an issue in the project can make the engine read the
+repository, change it and merge the change: it takes every new issue in the
+project, whoever filed it, and its roles can reach any public address. So:
+
+1. Deliver to an integration branch that nothing deploys to production by
+   itself.
+2. Keep the tracker project's members to the people who may ask for changes.
+3. Make the engine's tracker account a member of this project only, so that a
+   mistyped project id cannot point it at another one.
+4. Give the delivery token no permission over the repository's workflows.
+
+With the shipped configuration, everything goes to OpenRouter and the models
+it serves: the working models, chosen for each launch among the publishers
+in `model_selection.authors` (deepseek, minimax, moonshotai, qwen and z-ai),
+read the checkout and receive the request and the run's records; the review
+model (`REVIEW_MODEL`, `moonshotai/kimi-k3`) receives the request, the diff and
+the test output; the decision model that picks each launch's model
+(`typesafe/jev-1.13`) receives the request; and the chat model that decides at
+the entrance receives the request and the earlier reports.
+`model_selection.authors` narrows the publishers, and `model_selection.fixed`
+names one model for every launch (rewrite/README.md, "Naming one model instead
+of selecting").
 
 ### On your workstation
 
-`kubectl` for the cluster and `python3`. Go 1.25 or later only if you build the
-engine yourself (section 10).
+`kubectl` for the cluster, `python3`, and `sed`. Go 1.25 or later to try each
+new image before it goes in (section 10).
 
 ## 2. Preparing the tracker
 
 ### The engine's own account
 
-1. Create an account for the engine and add it to the project as a member. In
-   the instance this guide comes from it is an ordinary member, not an
-   administrator.
+1. Create an account for the engine and add it to the project as a member,
+   and to no other project. In one installation it is an ordinary member, not
+   an administrator.
 2. Issue an API key for that account (Backlog: the account's personal
    settings, API). This is `TRACKER_API_KEY`. Everything the engine posts or
    changes appears under this account's name.
@@ -176,7 +220,8 @@ The configuration takes numeric ids. This reads them through Backlog's API v2
 ([developer.nulab.com/docs/backlog](https://developer.nulab.com/docs/backlog/):
 the project, its statuses, categories and users, and the key's own account)
 with the engine account's key, which it takes from an environment variable
-and never prints. Run it on your workstation:
+and never prints. Run it on your workstation; a space on backlog.jp has its
+API at `https://<space>.backlog.jp/api/v2` instead:
 
 ```sh
 read -rs TRACKER_API_KEY && export TRACKER_API_KEY   # paste the key; nothing is shown
@@ -204,7 +249,8 @@ unset TRACKER_API_KEY
 ```
 
 `<PROJECT_KEY>` is the prefix of the project's issue keys (`EXAMPLE` in
-`EXAMPLE-1`). The last line must name the engine's account, not yours.
+`EXAMPLE-1`). The last line must name the engine's account, not yours. This
+script was syntax-checked but not run against Backlog for this guide.
 
 | Id | Goes into |
 | --- | --- |
@@ -212,14 +258,15 @@ unset TRACKER_API_KEY
 | the statuses you chose | `intake.statuses` (`processing`, `awaiting_requester`, `delivered`, `stopped`) |
 | the category | `intake.category_on_accept` |
 | members who may stop or answer any request besides its requester | `intake.stop_user_ids` |
-| one issue, for the first ticket only | `intake.issue_ids` ([section 8](#8-filing-the-first-ticket)) |
+| one issue, for the first ticket only | `intake.issue_ids` ([section 8](#8-opening-the-intake-and-filing-the-first-ticket)) |
 
 ## 3. Preparing the delivery repository
 
 ### The token
 
-The token is `DELIVERY_GITHUB_TOKEN`. Limit it to the one repository. What
-uses it, from the scripts in `rewrite/harnesses/`:
+The token is `DELIVERY_GITHUB_TOKEN`. Limit it to the one repository, and give
+it no permission over the repository's workflows. What uses it, from the
+scripts in `rewrite/harnesses/`:
 
 - the mirror (`mirror_loop.py`) clones and fetches the repository;
 - the delivery (`deliver_git.py`) pushes `ticket/<ISSUE-KEY>`, lists, opens
@@ -230,26 +277,23 @@ uses it, from the scripts in `rewrite/harnesses/`:
 That is read and write access to the repository's contents and to its pull
 requests. On GitHub, a fine-grained personal access token restricted to this
 repository with Contents and Pull requests set to read and write covers those
-calls; a change under `.github/workflows/` would also need the Workflows
-permission to be pushed. The smallest working set has not been measured here.
-The check mode in [section 7](#7-checking-that-it-is-up) shows that the token
-can read the repository and list the branch; it cannot show that a merge will
-be accepted. A token with an expiry date stops the mirror on that date (the
-`mirror` container ends and restarts), so note the date.
+calls. Without the Workflows permission, a change under `.github/workflows/`
+cannot be pushed, which is the point. The smallest working set has not been
+measured here. The check mode in [section 7](#7-checking-that-it-is-up)
+shows that the token can read the repository and list the branch; it cannot
+show that a merge will be accepted. A token with an expiry date stops the
+mirror on that date (the `mirror` container ends and restarts), so note the
+date.
 
 ### Rules that would refuse the merge
 
-The delivery merges its own pull request through the API right after opening
-it, and it does not wait. Anything on the integration branch that the
-delivery identity cannot satisfy at that moment makes GitHub refuse the
-merge. The refusal is reported, the work goes back to `work`, and every
-later stage runs again, round after round, until the rule changes or the
-requester posts a stop.
-
-This was met: a rule requiring one approving review was added to an
-integration branch while requests were running. Each delivery was refused
-with HTTP 405 ("At least 1 approving review is required"), and one request
-went round 19 times before the rule was removed. Check the branch for:
+The shipped delivery merges its own pull request through the API right after
+opening it, and it does not wait. That is the only reason the integration
+branch's rules matter here: anything the delivery identity cannot satisfy at
+that moment makes GitHub refuse the merge, the work goes back to `work`, and
+every later stage runs again, round after round, until the rule changes or
+the requester posts a stop ([section 11](#a-delivery-is-refused-by-a-branch-rule)).
+Check the integration branch for:
 
 - required approving reviews;
 - required status checks (the merge is attempted right after the pull
@@ -258,156 +302,112 @@ went round 19 times before the rule was removed. Check the branch for:
 - required linear history, merge queues, or push restrictions that leave out
   the delivery identity;
 - the repository setting that allows merge commits, when the merge method is
-  `merge` (the default).
+  `merge` (the shipped one).
 
-Either keep such rules off the integration branch or let the delivery
-identity bypass them where your plan offers that. The delivery token often
-cannot read the protection settings itself (in the instance this guide comes
-from, reading them answered 403), so look at them as an administrator.
+If you keep such rules for people, let the delivery identity bypass them where
+your plan offers that, and keep the branch one that nothing deploys from by
+itself (section 1). The delivery token often cannot read the protection
+settings itself, so look at them as an administrator.
 
 ### The branch must pass before you start
 
-The merged check runs your commands against the integration branch after
-every merge. A branch that fails them already will fail them for every
+The merged check runs your build and tests against the integration branch
+after every merge. A branch that fails them already will fail them for every
 request. The check mode in section 7 runs them once against the branch as it
 is; resolve any failure before the first ticket.
 
 ### Requests running side by side
 
 With `intake.max_running` above 1, two requests can start from the same
-integration branch and the second to deliver finds the branch moved. Under
+integration branch, and the second to deliver finds the branch moved. Under
 the merge method the delivery first merges the integration branch into the
 ticket branch: a clean merge becomes a merge commit, and a conflict is left in
 the checkout between Git's conflict markers and the delivery is refused naming
 the paths, so the next `work` launch resolves them in place. With `squash` or
 `rebase` there is no such catch-up; keep `max_running` at 1 with those.
 
-For that, the delivery process's sandbox grant must cover the checkout as well
-as `.git`: `--write . --write .git` in its launcher arguments
-([section 4](#the-delivery-and-the-merged-check)). `.git` because the delivery
-commits and keeps its receipt at `.git/ticket-engine/delivery.json`; the
-checkout because the catch-up merge writes files. No model role is ever given
-`.git`: a role could otherwise leave hooks or configuration there that the
-delivery, which holds the token, would run.
-
 ## 4. Writing the operator configuration
 
-Copy `rewrite/examples/operator-stages.json` to a file outside any repository,
-for example `operator.json`. It becomes the ConfigMap the engine reads at
-`/etc/ticket-automation/operator.json`. Check the JSON after every edit:
+`rewrite/examples/operator-stages.json` is complete for the runtime of this
+directory: its delivery and merged check are the image's fixed processes
+under `/opt/ticket-automation/scripts`, its build, tests and report check are
+the operator scripts of section 6, and every checkout comes from the Pod's
+mirror. Every value you must change is one distinct string in it.
+
+### Make your copy with one command
+
+Run this from the repository's root, with your values in place of the
+`<...>` parts (none of them may contain `#` or `&`), and keep the result
+outside any repository:
+
+```sh
+sed -e 's#https://tracker.example.invalid/api/v2#https://<space>.backlog.com/api/v2#' \
+    -e 's#"project_id": 0,#"project_id": <project-id>,#' \
+    -e 's#REPLACE_WITH_RFC3339_ACCEPTANCE_START#2100-01-01T00:00:00Z#' \
+    -e 's#example-owner/example-repository#<owner>/<repository-name>#g' \
+    -e 's#example-integration-branch#<integration-branch>#g' \
+    rewrite/examples/operator-stages.json > operator.json
+```
+
+| What the command sets | Where it comes from |
+| --- | --- |
+| `backlog.base_url` | your space's API address (`.backlog.jp` for a space there) |
+| `intake.project_id` | section 2 |
+| `intake.created_since` | `2100-01-01T00:00:00Z` on purpose: the engine accepts nothing until section 8 opens the intake. The engine starts with this value; issues are taken only when they were created at or after it. |
+| `<owner>/<repository-name>` | the delivery repository (`DELIVERY_REPOSITORY`) and the mirror's path (every `TASK_REPOSITORY`, `/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`, the same as `MIRROR_PATH` in the StatefulSet) |
+| `<integration-branch>` | the branch every checkout starts from (`TASK_BRANCH`) and the delivery merges into (`DELIVERY_BASE_BRANCH`) |
+
+Then open `operator.json` and replace the first sentence of `instructions`
+("Operator setup is incomplete: ...") with your project's guidance: where the
+project's own knowledge is written (a path in the repository such as
+`CONTRIBUTING.md`), what the delivery target is, and anything the work must or
+must not touch. Keep the rest of the paragraph; it tells every role how
+progress is decided.
+
+### Check that no example value is left
+
+The engine checks only the configuration's structure when it starts (stage
+kinds, role names, the form of each setting). Values it cannot judge, such as
+the example's repository and branch, an unedited instruction or a model id
+that does not exist, are accepted. A request then fails where such a value is
+used (a checkout from a mirror that is not there, a push to a repository that
+does not exist) and goes round without end, with a model chosen, a paid call,
+on every launch; an unedited instruction misleads every role without failing
+anything. Before you go on:
 
 ```sh
 python3 -m json.tool operator.json > /dev/null && echo "valid JSON"
+grep -n -E 'example\.invalid|example-owner|example-repository|example-integration-branch|REPLACE_WITH|Operator setup is incomplete|"project_id": 0,|<[a-z-]+>' operator.json \
+  && echo "the lines above still carry example values" || echo "no example value left"
 ```
 
-The engine checks the rest when it starts and stops with one line naming what
-it refused ([section 11](#11-troubleshooting)). The changes below were applied
-to the shipped example and the result was started with the engine built from
-the same commit; it was accepted and began polling.
-
-### Settings you must change
-
-| Setting | What to put there |
-| --- | --- |
-| `backlog.base_url` | `https://<space>.backlog.com/api/v2` |
-| `intake.project_id` | the project id from section 2 |
-| `intake.created_since` | the moment from which issues are accepted, RFC3339 in UTC, for example `2026-10-05T00:00:00Z`. It is inclusive; issues created earlier are never taken. |
-| `instructions` | replace the first sentence ("Operator setup is incomplete: ...") with your project's guidance: where the project's own knowledge is written (a path in the repository such as `CONTRIBUTING.md`), what the delivery target is, and anything the work must or must not touch. Keep the rest of the paragraph; it tells every role how progress is decided. |
-| every `TASK_REPOSITORY` | `/var/lib/ticket-automation/mirror/<repository-name>.git`, the mirror's path from the StatefulSet's `MIRROR_PATH`. Roles clone from this local copy and never hold the delivery token. |
-| `review` process, `REVIEW_DIFF_PATHS` | delete it, so the review reads the whole diff, or set it to the paths your changes live in. The example's `src tests` matches nothing in most repositories, and a review whose paths match no change passes without reviewing (`NOT REVIEWED`). |
-| `deliver` and `verify_merged` processes | replace them with the shipped delivery processes below. |
-| `verify` | nothing in the file: its two processes run `build` and `test` from the operator-scripts ConfigMap, which you write in section 6. |
-
-If the integration branch is not the repository's default branch, add
-`"TASK_BRANCH": "<integration-branch>"` next to every `TASK_REPOSITORY`;
-without it the checkout starts from the default branch.
-
-### The delivery and the merged check
-
-The example's `deliver` and `verify_merged` stages call programs of your own
-under `/opt/ticket-automation/operator`. The image also ships fixed delivery
-processes under `/opt/ticket-automation/scripts`, and these are what the
-instance this guide comes from runs. Replace the single process of the
-`deliver` role with:
-
-```json
-{
-  "name": "delivery",
-  "command": [
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/git_workspace.py", "--",
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/linux_role.py",
-    "--runtime", "/opt/ticket-automation/bundle", "--runtime", "/opt/ticket-automation/scripts",
-    "--network", "inherit", "--write", ".", "--write", ".git", "--",
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/scripts/deliver_git.py"
-  ],
-  "instructions": "Run the fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, opens or reuses one pull request and merges it. Its exit status is the observation; a refusal says what stopped it.",
-  "env": {
-    "PYTHONDONTWRITEBYTECODE": "1",
-    "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/<repository-name>.git",
-    "DELIVERY_REPOSITORY": "<owner>/<repository-name>",
-    "DELIVERY_BASE_BRANCH": "<integration-branch>",
-    "DELIVERY_ALLOWED_PATHS": ".",
-    "DELIVERY_MERGE_METHOD": "merge"
-  },
-  "secrets": {"GITHUB_TOKEN": "DELIVERY_GITHUB_TOKEN"}
-}
-```
-
-and the single process of the `verify_merged` role with:
-
-```json
-{
-  "name": "merged-check",
-  "command": [
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/git_workspace.py", "--",
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/bundle/harnesses/linux_role.py",
-    "--runtime", "/opt/ticket-automation/bundle", "--runtime", "/opt/ticket-automation/scripts",
-    "--runtime", "/opt/ticket-automation/operator",
-    "--network", "inherit", "--",
-    "/usr/bin/python3", "-B", "/opt/ticket-automation/scripts/verify_merged.py"
-  ],
-  "instructions": "Run the fixed post-delivery check. It fetches the integration branch from the delivery service, confirms the recorded merge is in it, and runs the configured commands against it. Its exit status is the observation.",
-  "env": {
-    "PYTHONDONTWRITEBYTECODE": "1",
-    "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/<repository-name>.git",
-    "DELIVERY_REPOSITORY": "<owner>/<repository-name>",
-    "DELIVERY_BASE_BRANCH": "<integration-branch>",
-    "VERIFY_COMMANDS": "/opt/ticket-automation/operator/build\n/opt/ticket-automation/operator/test"
-  },
-  "secrets": {"GITHUB_TOKEN": "DELIVERY_GITHUB_TOKEN"}
-}
-```
-
-- `DELIVERY_ALLOWED_PATHS` is `.` because which files a change needs is not
-  known before the work. `.git` stays out of reach of every model role either
-  way.
-- `VERIFY_COMMANDS` is one command per line, each run without a shell, in a
-  fresh clone of the integration branch. Naming your `build` and `test`
-  scripts here runs the same checks before and after the merge. Commands are
-  found on the engine's `PATH`, which includes Go.
-- Optional: `DELIVERY_FORBIDDEN_TEXT` (newline-separated text the delivery
-  refuses to carry, such as internal names), and
-  `DELIVERY_AUTHOR_NAME` / `DELIVERY_AUTHOR_EMAIL` for the commits, which are
-  otherwise authored as "ticket engine".
-
-The pull request is titled `Deliver <ISSUE-KEY>`, comes from the branch
-`ticket/<ISSUE-KEY>`, and is merged as `Deliver <ISSUE-KEY> (#<number>)`. A
-later round for the same issue reuses the branch.
+The first line must print `valid JSON` and the second `no example value
+left`.
 
 ### Settings you may leave
 
 - `router` (`mode: stages`, and `llm` for the entrance decision) and
   `model_selection` (OpenRouter's decision model chooses a model for each
-  launch among the publishers in `authors`). To run every model launch on one
-  model instead, set `model_selection.fixed` to its id
-  (rewrite/README.md, "Naming one model instead of selecting").
+  launch among the publishers in `authors`; section 1 says where that sends
+  the code). To run every model launch on one model instead, set
+  `model_selection.fixed` to its `publisher/model` id.
 - `intake.poll_interval_seconds` (30), `intake.max_running` (1),
   `intake.stop_report_role`, `intake.question_role`.
 - The roles' commands, their `model_env` (`NATIVE_MODEL`), their `secrets`
   mappings and their `tracker_access` values.
 - `REVIEW_MODEL`: the model that reviews, as the endpoint names it.
+- `DELIVERY_ALLOWED_PATHS` (`.`, the whole tree: which files a change needs is
+  not known before the work; the checkout's `.git` stays out of reach of every
+  model role either way) and `DELIVERY_MERGE_METHOD` (`merge`).
 - `NATIVE_MAX_TOKENS`: unset, the bridge allows 32000 output tokens per model
   answer ([section 11](#work-ends-without-a-change-or-a-model-stage-keeps-failing-with-ended-without-a-report)).
+
+Optional in the delivery process's `env`: `DELIVERY_FORBIDDEN_TEXT`
+(newline-separated text the delivery refuses to carry, such as internal
+names) and `DELIVERY_AUTHOR_NAME` / `DELIVERY_AUTHOR_EMAIL` for its commits,
+which are otherwise authored as "ticket engine". The pull request is titled
+`Deliver <ISSUE-KEY>`, comes from the branch `ticket/<ISSUE-KEY>`, and is
+merged as `Deliver <ISSUE-KEY> (#<number>)`.
 
 Do not remove `model_env` from a model stage's process, and do not put a
 model id into its `env` instead: the engine refuses to start
@@ -416,7 +416,7 @@ model id into its `env` instead: the engine refuses to start
 ### Settings the requester will notice
 
 None of these is required. Each changes what appears on the issue
-([section 8](#8-filing-the-first-ticket) shows the result):
+([section 8](#what-the-requester-sees-comment-by-comment) shows the result):
 
 ```json
 "intake": {
@@ -434,37 +434,47 @@ None of these is required. Each changes what appears on the issue
 your own ids from section 2.)
 
 - `announce`: fixed comments when a request is accepted, when it starts after
-  waiting its turn, and when it resumes after an answer; a stage's own
-  sentence when it first begins; the list of models used once it is
-  delivered.
+  waiting its turn, and when it resumes after an answer; each stage's own
+  sentence when it first begins (below); the list of models used once the
+  request is delivered. Without `announce`, no stage sentence is posted.
 - `declare_models`: says which model was chosen when a model stage begins,
   and again when a later launch of it runs on a different model.
 - `status_page`: only if the status page is reachable from the requester's
-  browser ([section 6](#6-applying-the-manifests-in-order)); the acceptance
-  comment then links to the request's own page.
+  browser (`status-ingress.yaml.example`); the acceptance comment then links
+  to the request's own page.
 - `assign`: hands the issue to the requester while a question or the
   delivered result waits for them, back to the engine's account while it
   works, and records the hours from acceptance to the report.
-- `stall_notice_minutes` (default 90; 0 turns it off) and `min_model_credit`
-  (default off): rewrite/README.md, "What the requester is told at night".
-  `min_model_credit` reads the remaining limit of the key named by
-  `router.decision.key_env`. The shipped ordered configuration has no
-  `router.decision`, and with `min_model_credit` alone the engine refuses to
-  start. Add the decision service as `rewrite/examples/operator.json` names it
+- `stall_notice_minutes` (default 90; 0 turns it off): rewrite/README.md,
+  "What the requester is told at night".
+- `min_model_credit` (default off) reads the remaining limit of the key named
+  by `router.decision.key_env`, from `intake.model_credit_url` (by default
+  OpenRouter's `https://openrouter.ai/api/v1/key`, asked on every poll). The
+  shipped configuration has no `router.decision`, and with `min_model_credit`
+  alone the engine refuses to start. Add the decision service as
+  `rewrite/examples/operator.json` names it
   (`"decision": {"url": "https://openrouter.ai/api/alpha/decisions", "model": "typesafe/jev-1.13", "key_env": "MODEL_API_KEY"}`
   inside `router`); the entrance decision then goes to that service instead of
-  the chat API. Both were accepted together by the engine.
+  the chat API. The engine accepted the two together.
 
-A stage can also carry a sentence of yours, posted once when it first begins:
+A stage can carry a sentence of yours, posted once when it first begins if
+`announce` is on. Section 8 assumes these two, in `workflow`:
 
 ```json
-{"name": "deliver", "kind": "command", "on_failure": "work", "announce": "納品先へのマージを始めました。マージ後の検証と報告を続けます。"}
+"stages": [
+  {"name": "elicit", "kind": "model"},
+  {"name": "work", "kind": "model", "announce": "自動実装を開始しました。"},
+  {"name": "verify", "kind": "command", "on_failure": "work"},
+  {"name": "review", "kind": "command", "on_failure": "work"},
+  {"name": "deliver", "kind": "command", "on_failure": "work", "announce": "納品先へのマージを始めました。マージ後の検証と報告を続けます。"},
+  {"name": "verify_merged", "kind": "command", "on_failure": "work"},
+  {"name": "report", "kind": "model"},
+  {"name": "confirm_report", "kind": "command", "on_failure": "report"}
+]
 ```
 
-Write what is true when the stage begins. The sentence is posted at the start,
-before anything is merged: in the instance this guide comes from, a sentence
-saying the change "was merged" stood on an issue for 19 minutes while the
-delivery was being refused.
+Write what is true when the stage begins: the `deliver` sentence is posted
+before anything is merged ([section 11](#the-issue-says-merged-while-the-delivery-is-refused)).
 
 ### With a gateway in front of the models
 
@@ -479,19 +489,20 @@ them. This ordered configuration needs them and the review's as well:
   `url` and `key_env`;
 - the review's `REVIEW_MODEL_URL` (the gateway's chat completions URL),
   `REVIEW_MODEL` (with the gateway's prefix) and its `secrets` mapping;
-- if the gateway does not serve OpenRouter's decisions API (the gateway
-  measured here answered 405), remove `model_selection.judge` (and
+- if the gateway does not serve OpenRouter's decisions API (the one measured
+  for rewrite/README.md answered 405), remove `model_selection.judge` (and
   `router.decision`, if you added it), name the gateway's chat endpoint and a
-  model it serves in `model_selection.fallback`, and remove
-  `intake.min_model_credit`. Every choice is then made by that chat model.
+  model it serves, prefix included (`openrouter/publisher/model`), in
+  `model_selection.fallback`, and remove `intake.min_model_credit`. Every
+  choice is then made by that chat model.
 
-Then put `GATEWAY_API_KEY` in the Secret and uncomment it in the StatefulSet.
-This ordered configuration with every change above was accepted by the engine
-from the same commit, which began polling. Two things were met with a
-gateway: a process left pointing at the provider directly fails at its first
-model call, because the chosen model ids are the gateway's
-([section 11](#the-stop-report-never-starts-behind-a-gateway)); and the
-gateway's own request timeout cut long answers
+Then put `GATEWAY_API_KEY` in the Secret and uncomment it in the StatefulSet,
+and use the gateway's variants of the checks in section 7. This ordered
+configuration with every change above was accepted by the engine from the
+same commit, which began polling. A process left pointing at the provider
+directly fails at its first model call
+([section 11](#the-stop-report-never-starts-behind-a-gateway)), and the
+gateway's own request timeout can cut long answers
 ([section 11](#long-answers-fail-with-http-504-through-a-gateway)).
 
 ## 5. The secrets
@@ -508,10 +519,10 @@ from:
 | | `GATEWAY_API_KEY` | only with a gateway |
 | `<consumer>-ticket-engine-status` | `STATUS_USER`, `STATUS_PASSWORD` | basic authentication for the status page; choose them yourself |
 
-Create them with the secret path you already use, or fill a copy of the
-template outside any repository, create the Secrets from it and delete the
-copy. Never commit a filled copy. From here on the values are referred to by
-name only.
+Every key the StatefulSet reads must exist in the Secret, or the Pod does not
+start: to leave out `MODEL_API_KEY` with a gateway, delete its three lines in
+the StatefulSet as well. Never commit a filled copy. From here on the values
+are referred to by name only.
 
 ## 6. Applying the manifests, in order
 
@@ -524,9 +535,20 @@ NS=<namespace>
 POD=<consumer>-ticket-engine-0
 ```
 
-1. **The namespace**, with Pod Security as described in section 1.
+1. **The namespace**, admitting this Pod (section 1):
 
-2. **The Secrets** (section 5).
+   ```sh
+   kubectl create namespace "$NS"
+   kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=privileged --overwrite
+   ```
+
+2. **The Secrets** (section 5), from your filled copy, which you then delete;
+   or with the secret path you already use:
+
+   ```sh
+   kubectl -n "$NS" apply -f secrets.yaml
+   rm secrets.yaml
+   ```
 
 3. **The egress rules.** In your copy of `egress-configmap.yaml.example`,
    `<dns-cluster-ip>` is the address the Pods' `/etc/resolv.conf` names (the
@@ -536,7 +558,8 @@ POD=<consumer>-ticket-engine-0
    kubectl -n "$NS" apply -f egress-configmap.yaml
    ```
 
-4. **The operator configuration**, from your `operator.json`:
+4. **The operator configuration**, from your `operator.json`, with the intake
+   still closed (`created_since` in 2100):
 
    ```sh
    kubectl -n "$NS" create configmap <consumer>-ticket-engine-operator \
@@ -562,14 +585,19 @@ POD=<consumer>-ticket-engine-0
    print(json.dumps({"hostUsers": spec.get("hostUsers"),
                      "automountServiceAccountToken": spec.get("automountServiceAccountToken"),
                      "envFrom": [c.get("envFrom") for c in spec["containers"]],
-                     "initContainers": [[c["name"], c.get("restartPolicy")] for c in spec["initContainers"]]}))'
+                     "restartPolicy": {c["name"]: c.get("restartPolicy") for c in spec["initContainers"]},
+                     "securityContext": {c["name"]: {k: c.get("securityContext", {}).get(k) for k in ("procMount", "seccompProfile", "capabilities")}
+                                         for c in spec["initContainers"] + spec["containers"]}}, indent=1))'
    ```
 
    Expect `hostUsers` false, `automountServiceAccountToken` false, no
-   `envFrom`, and `mirror` with `restartPolicy` `Always`. Anything else means
-   an admission controller changed the Pod: stop and find out why. If the API
-   server refuses `restartPolicy` on an init container, move the `mirror`
-   entry to `containers` (the comment on that entry says what that costs).
+   `envFrom`, `mirror` with `restartPolicy` `Always`; the engine with
+   `procMount` `Unmasked` and `seccompProfile` `Unconfined`; every other
+   container with `RuntimeDefault`; and `NET_ADMIN` added only for
+   `network-v4` and `network-v6`. Anything else means an admission controller
+   changed the Pod: stop and find out why. If the API server refuses
+   `restartPolicy` on an init container, move the `mirror` entry to
+   `containers` (the comment on that entry says what that costs).
 
 7. **The StatefulSet:**
 
@@ -577,6 +605,9 @@ POD=<consumer>-ticket-engine-0
    kubectl -n "$NS" apply -f statefulset.yaml
    kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=10m
    ```
+
+   If the wait ends without the Pod ready, see
+   [section 11](#the-pod-does-not-become-ready).
 
 8. **The status page's Service**, and, only if you decide to expose the page,
    its Ingress (`status-ingress.yaml.example`; read its comments first). The
@@ -589,7 +620,8 @@ POD=<consumer>-ticket-engine-0
 ## 7. Checking that it is up
 
 Each check has an answer you can see. One that cannot be answered is a
-blocker, not something to note and pass.
+blocker, not something to note and pass. The intake is still closed, so
+nothing here can start a request.
 
 ### The Pod and its setup containers
 
@@ -605,7 +637,9 @@ kubectl -n "$NS" logs "$POD" -c mirror --tail=5
   `compiled_rules` count and `"native_architecture": "arm64"`.
 - `network-v4` and `network-v6` printed nothing.
 - `mirror` printed `Mirroring <owner>/<repository-name> into ... every 60 seconds`
-  and, on the first start, `Created the mirror at /var/lib/ticket-automation/mirror/<repository-name>.git`.
+  and, on the first start, `Created the mirror at /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`.
+  Its startup check passes only once the copy holds a branch, so the engine
+  starts after the first copy is complete.
 
 ### The status page
 
@@ -641,8 +675,7 @@ something is wrong:
 
 ### Before it accepts work
 
-These follow README.md, "Before it accepts work". None of them hands the
-engine a request or prints a credential.
+None of these hands the engine a request or prints a credential.
 
 **The role launcher starts a role** (rewrite/RUNTIME.md, "Check the target
 runtime before accepting work"). Exit status 0 is the only acceptable answer:
@@ -695,7 +728,8 @@ Expect `Seccomp` 2, `Seccomp_filters` 1, `CapEff` and `CapPrm` all zeros,
 30; `ALLOWED` fails the check), and `unshare_return` -1.
 
 **Egress, both ways.** `<kubernetes-service-ip>` is
-`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`:
+`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`;
+with a gateway, add its host to the targets:
 
 ```sh
 kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
@@ -711,11 +745,11 @@ for name, address in targets.items():
 print(json.dumps(result))'
 ```
 
-The first four must be `connected`, `metadata` and `cluster-api`
-`ConnectionRefusedError`. An applied manifest is not evidence that anything
-is refused; this is.
+The first four (and the gateway) must be `connected`, `metadata` and
+`cluster-api` `ConnectionRefusedError`. An applied manifest is not evidence
+that anything is refused; this is.
 
-**The credentials, by name only:**
+**The credentials, by name only** (with a gateway, add `GATEWAY_API_KEY`):
 
 ```sh
 kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
@@ -735,7 +769,7 @@ kubectl -n "$NS" exec "$POD" -c engine -- /opt/ticket-automation/bundle/bin/tick
   --base-url https://<space>.backlog.com/api/v2 --key-env TRACKER_API_KEY --project-id <project-id> issues \
   | python3 -c 'import json, sys; rows = json.load(sys.stdin); print(len(rows), "issues"); [print(r["id"], r["issueKey"], r["created"]) for r in rows[-3:]]'
 kubectl -n "$NS" exec "$POD" -c engine -- \
-  git --git-dir=/var/lib/ticket-automation/mirror/<repository-name>.git log -1 --format='%H %ci' <integration-branch>
+  git --git-dir=/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git log -1 --format='%H %ci' <integration-branch>
 ```
 
 **The delivery and the merged check, in check mode.** Both end with exit
@@ -747,8 +781,8 @@ export GITHUB_TOKEN="$DELIVERY_GITHUB_TOKEN"
 export DELIVERY_REPOSITORY=<owner>/<repository-name> DELIVERY_BASE_BRANCH=<integration-branch>
 d=$(mktemp -d /tmp/delivery-check.XXXXXXXX)
 export TASK_WORKSPACE="$d/workspace" TASK_HOME="$d/home"
-git -c core.hooksPath=/dev/null clone --quiet --no-local \
-  /var/lib/ticket-automation/mirror/<repository-name>.git "$TASK_WORKSPACE"
+git -c core.hooksPath=/dev/null clone --quiet --no-local --branch <integration-branch> \
+  /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git "$TASK_WORKSPACE"
 cd "$TASK_WORKSPACE" || exit
 TASK_ISSUE=CHECK-0 DELIVERY_ALLOWED_PATHS=. \
   python3 -B /opt/ticket-automation/scripts/deliver_git.py --dry-run
@@ -774,8 +808,8 @@ with the checkout read-only, which is not how it ran in the check above:
 ```sh
 kubectl -n "$NS" exec -i "$POD" -c engine -- /bin/sh -s <<'CHECK'
 d=$(mktemp -d /tmp/test-check.XXXXXXXX)
-git -c core.hooksPath=/dev/null clone --quiet --no-local \
-  /var/lib/ticket-automation/mirror/<repository-name>.git "$d/work"
+git -c core.hooksPath=/dev/null clone --quiet --no-local --branch <integration-branch> \
+  /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git "$d/work"
 env -i PATH=/runtime-policy/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin \
   TASK_WORKSPACE="$d/work" TASK_HOME="$d/home" \
   python3 -B /opt/ticket-automation/bundle/harnesses/linux_role.py \
@@ -803,15 +837,36 @@ queue, the mirror is still there (its log says `Mirroring ...` without
 full volume stops progress without a word, because saving history is retried
 rather than given up. Compare after the first real requests.
 
-## 8. Filing the first ticket
+**What only fails on a replacement node.** When its node is replaced, the Pod
+starts on a node that has never run it:
 
-### Narrow the intake to it
+```sh
+kubectl -n "$NS" get statefulset <consumer>-ticket-engine \
+  -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}{"\t"}{.image}{"\t"}{.imagePullPolicy}{"\n"}{end}'
+kubectl -n "$NS" get statefulset <consumer>-ticket-engine \
+  -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}{"\t"}{.emptyDir.sizeLimit}{"\n"}{end}'
+```
 
-Set `intake.created_since` to a moment just before you file the ticket. In a
-project that already has other new issues, also file the ticket first, look up
-its id (the `ticket-tracker ... issues` command above prints it) and set
-`intake.issue_ids` to `[<that id>]`. Change both in the same edit, apply the
-ConfigMap and restart the Pod:
+Every image must be one any node can pull (the published image needs no
+credential; a private registry needs an imagePullSecret in the StatefulSet),
+no init container may say `Never`, and the `temporary` volume must show no
+size limit: exceeding one evicts the Pod in the middle of a request.
+
+## 8. Opening the intake and filing the first ticket
+
+### Open the intake
+
+Until now `created_since` was `2100-01-01T00:00:00Z`, so the engine has taken
+nothing. It stays closed until every check in section 7 has passed because
+closing it again later does not stop what was already taken: an accepted
+request stays in the queue and runs.
+
+Set `intake.created_since` to a moment just before you file the first ticket,
+in UTC (for example `2026-10-05T09:00:00Z`; the moment itself counts). In a
+project that already has other new issues, file the ticket first, look up its
+id (the `ticket-tracker ... issues` command in section 7 prints it), and also
+set `intake.issue_ids` to `[<that id>]`. Change both in the same edit, apply
+the ConfigMap (section 6, step 4) and restart the Pod:
 
 ```sh
 kubectl -n "$NS" delete pod "$POD"
@@ -819,13 +874,14 @@ kubectl -n "$NS" delete pod "$POD"
 
 An `issue_ids` that lists nothing real accepts nothing; an empty one accepts
 every new issue in the project. Remove `issue_ids` once you are ready for all
-of them.
+of them. If anything else already takes issues from this project, make sure it
+cannot take the same ticket.
 
 ### What the requester sees, comment by comment
 
 File the ticket as a person, not as the engine's account, in ordinary words.
 No format is required. With the settings from section 4 (`announce`,
-`declare_models`, `statuses`, `category_on_accept`, `assign`, and stage
+`declare_models`, `statuses`, `category_on_accept`, `assign`, and the
 sentences for `work` and `deliver`), the issue shows the following. Status,
 category and assignee changes appear in Backlog as change entries without
 text. Model ids are examples.
@@ -855,6 +911,15 @@ when no stage has completed for `stall_notice_minutes`, and when the model
 budget falls below `min_model_credit` and recovers. rewrite/README.md ("What
 the requester is told at night") has their exact words.
 
+### Check that the review actually reviewed
+
+On the status page, open the first request's `review` record. Its output
+begins `Review by <model>: PASSED.` or `Review by <model>: SENT BACK to the
+worker.`. If it begins `Review by <model>: NOT REVIEWED.`, the review could
+not be performed (a wrong model id, the endpoint down, a missing key) and the
+work went on without one. The line says why; fix that before you rely on the
+review.
+
 ### Answering a question
 
 Reply on the issue with an ordinary comment: the number or the words of a
@@ -862,7 +927,8 @@ choice, or anything else that answers. Only the issue's creator and the users
 in `intake.stop_user_ids` can answer, only the first comment with words after
 the question counts, and a status change is not an answer. The reply goes into
 the run as the requester's own words; nothing checks that it answers the
-question. A reply whose first line is `停止` is a stop, not an answer.
+question. A reply whose first non-blank line is `停止` is a stop, not an
+answer.
 
 ### After it is delivered
 
@@ -928,11 +994,10 @@ engine's code:
 
 ### Try it against a copy of the queue first
 
-A new image can do something new to old records in its first minute. This was
-met: an image that introduced the list of models used posted that list on
-every request already delivered in the queue, 23 issues at once, before the
-queue kept its per-kind starts. Run the new engine over a copy of the queue,
-with no credentials, and read what it tried to do.
+A new image can do something new to old records in its first minute
+([section 11](#a-new-image-posts-on-requests-that-were-already-finished)).
+Run the new engine over a copy of the queue, with no credentials, and read
+what it tried to do.
 
 1. Copy the queue's records out of the Pod, without checkouts (and the
    staging copies a cut checkout preparation leaves as `.source-*`), agent
@@ -980,9 +1045,7 @@ This procedure was checked against a small queue made for the purpose (one
 request delivered before its queue's notice kinds began, one after, never
 announced): the log named a status change for both and the model list for the
 second only, and the copy recorded the first one's list as predating its kind.
-It has not been run as written against a real queue. The instance this guide
-comes from rehearsed with a stand-in tracker that recorded writes instead,
-which is not part of this repository.
+It has not been run as written against a real queue.
 
 ### Rolling it out
 
@@ -995,33 +1058,71 @@ which is not part of this repository.
 
 ## 11. Troubleshooting
 
-Each entry was met in practice unless it says otherwise.
+An entry that says "Met" was met at one installation. The others follow from
+the code they name, from how Kubernetes reports a Pod, or from the engine's
+tests, and were not met there.
+
+### The Pod does not become Ready
+
+```sh
+kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -n 30
+kubectl -n "$NS" describe statefulset <consumer>-ticket-engine
+kubectl -n "$NS" describe pod "$POD"
+kubectl -n "$NS" logs "$POD" -c <container> --previous
+```
+
+- **No Pod at all.** The StatefulSet's events carry the API server's refusal;
+  `violates PodSecurity` means the namespace's level (section 1).
+- **`Pending`.** No node matches the node selector and tolerations, or the
+  volume claim has no volume (the storage class).
+- **An init container failing.** `network-v4` or `network-v6`: the image has
+  no `/usr/sbin/xtables-nft-multi`, or a rule does not parse (their logs say
+  which). `policy`: its log.
+- **Containers that cannot be created**, with events about user namespaces or
+  mounts: the node or its container runtime does not support `hostUsers:
+  false` (section 1).
+- **`CreateContainerConfigError`.** A Secret or a key that the StatefulSet
+  names is missing (section 5).
+- **The engine never starts while `mirror` runs.** The mirror's startup check
+  waits until the copy holds a branch: a large repository is still copying, a
+  repository without any commit never passes, and a refused token ends the
+  container (below).
 
 ### The engine container restarts right after it starts
 
-The engine checks its configuration before it does anything and exits with
-one line naming what it refused; the container then restarts, and goes on
-restarting. Read the line with
-`kubectl -n "$NS" logs "$POD" -c engine --previous`. Two of them:
+The engine checks its configuration's structure before it does anything and
+exits with one line naming what it refused; the container then restarts, and
+goes on restarting. Read the line with
+`kubectl -n "$NS" logs "$POD" -c engine --previous`. Three of them:
 
 - `model stage "work" launches no model`: a model stage's process lost its
-  `model_env`. This happened when one stage was meant to run on one fixed
-  model and `model_env` was replaced by a model id in `env`. A model stage
-  must keep a process with `model_env`; to run on one model, set
-  `model_selection.fixed` instead.
+  `model_env`. Met, when one stage was meant to run on one fixed model and
+  `model_env` was replaced by a model id in `env`. A model stage must keep a
+  process with `model_env`; to run on one model, set `model_selection.fixed`
+  instead.
 - `watch requires intake.created_since as an explicit RFC3339 timestamp`: the
   time needs a time of day and a zone, `2026-10-05T00:00:00Z`.
 - `intake.min_model_credit needs router.decision.key_env to name the model credential`:
   see [section 4](#settings-the-requester-will-notice).
 
 These three lines were produced by the engine from the same commit, given
-each mistake on purpose.
+each mistake on purpose. A value the engine cannot judge does not stop it
+([section 4](#check-that-no-example-value-is-left)).
+
+### A request goes round without end
+
+Every failing command stage sends the work back without a limit. Read the
+stage that keeps failing on the status page; its output says why. The usual
+causes: a value still from the example (section 4), a missing credential
+(`A configured role credential is unavailable: <name>` in the record), your
+`build` or `test` failing in the read-only checkout (section 7), a branch rule
+or a conflict (below). Stop the request (`停止`) while you fix the cause.
 
 ### Work ends without a change, or a model stage keeps failing with "ended without a report"
 
 A model answer is cut off at the bridge's output limit, `NATIVE_MAX_TOKENS`.
-This was met when a role had to write a large file in one tool call: with the
-bridge's limit then at 6000, the answer never fit, and the work ended with no
+Met when a role had to write a large file in one tool call under a limit lower
+than today's default: the answer never fit, and the work ended with no
 change. The bridge now allows 32000 by default, and an answer still cut off
 after its continuations makes the role fail with
 `Native agent ended without a report (an answer cut off at NATIVE_MAX_TOKENS is one cause)`,
@@ -1032,72 +1133,78 @@ expect this again.
 ### Long answers fail with HTTP 504 through a gateway
 
 A gateway between the engine and the provider has its own limit on how long
-one request may take. One gateway's default was 300 seconds: with a model
-producing about 33 tokens a second, any answer longer than about 10,000
-tokens was cut off and the role received 504, whatever `NATIVE_MAX_TOKENS`
-allowed. Set the gateway's upstream request timeout above the longest answer
-you allow (`NATIVE_MAX_TOKENS` divided by your slowest model's output rate);
-the instance this guide comes from uses 3600 seconds. The engine's own limit
-on a routing or selection request is 60 minutes.
+one request may take. Met: one gateway's default of 300 seconds cut every
+long answer, and the role received 504, whatever `NATIVE_MAX_TOKENS` allowed.
+Set the gateway's upstream request timeout above the longest answer you allow
+(`NATIVE_MAX_TOKENS` divided by your slowest model's output rate). The
+engine's own limit on a routing or selection request is 60 minutes.
 
 ### The run keeps going back to the report stage
 
-`confirm_report` fails, sends the work back to `report`, and the cycle
-repeats. A check that requires the report to be the **last** comment does
-this for ever once the engine posts anything after the report: a model
-declaration for the relaunched report stage (`報告をやり直します。選定モデル: ...`),
-a stage's sentence, a restart notice. Each relaunch on another model adds a
-declaration, so the check never passes again. This was caught in review and
-reproduced in the engine's tests before it reached a live instance, not met
-in a live run. The check in
+A report check that wants the report to be the last comment fails once the
+engine posts anything after it (a relaunch's model declaration, a stage
+sentence, a restart notice). The check in
 `operator-scripts-configmap.yaml.example` looks through the comments newest
-first and passes when one of them is exactly `report/result.md` (surrounding
-whitespace aside). If the check still fails, the status page shows its line:
-`no stored comment equals report/result.md (...)` means the report on the
-issue differs from the file, `reading the stored comments failed: ...` means
-the tracker could not be read.
+first; keep it. Its line on the status page says what it found.
 
-### A delivery is refused by branch protection
+### A delivery is refused by a branch rule
 
 The `deliver` stage's output says `Nothing was delivered for <ISSUE-KEY>.`
 and `The delivery service refused the merge (status 405): ...`, and the
 request goes round `work`, `verify`, `review` and `deliver` again and again,
-each round costing a model launch and a review. Change the rule or let the
-delivery identity bypass it
-([section 3](#rules-that-would-refuse-the-merge)); the next round then
-delivers. If the rule cannot change, stop the request (`停止`).
+each round costing a model launch and a review. Met: a rule requiring an
+approving review was added to an integration branch while requests were
+running, and every delivery was refused ("At least 1 approving review is
+required") until it was removed. Change the rule or let the delivery identity
+bypass it ([section 3](#rules-that-would-refuse-the-merge)); the next round
+then delivers. If the rule cannot change, stop the request (`停止`).
 
 ### A delivery is refused for a conflict with another request
 
-Requests running side by side change the same files and the second
-delivery's branch no longer merges. Before the delivery learned to merge the
-integration branch first, one such request was refused, its `work` role could
-not merge anything itself (its `.git` is read-only, on purpose), and it kept
-searching for 45 tool calls without a change until the requester stopped it.
-Now the delivery merges the integration branch into the ticket branch, leaves
+Requests running side by side change the same files, and the second
+delivery's branch no longer merges. Met before the delivery learned to merge
+the integration branch first: the request could not be delivered, and its
+`work` role could not merge anything itself (its `.git` is read-only, on
+purpose), so it kept searching until the requester stopped it. Now the
+delivery merges the integration branch into the ticket branch, leaves
 conflicts in the checkout between markers and names the paths, and the next
 `work` launch resolves them. If you still see this: the merge method must be
-`merge`, and the delivery process must have both `--write .` and
-`--write .git` ([section 3](#requests-running-side-by-side)). Otherwise keep
-`intake.max_running` at 1.
+`merge`, and the delivery process must keep both `--write .` and
+`--write .git` (the example has both). Otherwise keep `intake.max_running`
+at 1.
 
 ### The stop report never starts behind a gateway
 
 When every model goes through a gateway, the ids the selection chooses are
 the gateway's (with its prefix). A process still pointed at the provider
-directly receives such an id and fails at once (HTTP 400 in the case met,
-which was the `stop_report` role, so stopped requests never got their
-report). Point every model process at the gateway, `stop_report` included
-([section 4](#with-a-gateway-in-front-of-the-models)).
+directly receives such an id and fails at its first model call. Met: the
+`stop_report` role had been left on the provider, so stopped requests never
+got their report. Point every model process at the gateway, `stop_report`
+included ([section 4](#with-a-gateway-in-front-of-the-models)).
 
 ### The status page answers 504 through a load balancer
 
 The Pod's egress rules reject private destinations, and a load balancer
-reaches the Pod from a private address, so the replies are dropped. The rule
-that accepts replies from port 9200
+reaches the Pod from a private address, so the replies are dropped. Met. The
+rule that accepts replies from port 9200
 (`-A TICKET_EGRESS -p tcp --sport 9200 ! --syn -j ACCEPT`, already in
 `egress-configmap.yaml.example`) fixes it. The rules are applied when the Pod
 starts: apply the ConfigMap, then restart the Pod.
+
+### The issue says "merged" while the delivery is refused
+
+A stage's sentence is posted when the stage begins. Met: a `deliver` sentence
+saying the change was merged stood on an issue while the delivery was being
+refused. Write each sentence as what is true when its stage begins
+([section 4](#settings-the-requester-will-notice)).
+
+### A new image posts on requests that were already finished
+
+Met: an image that introduced the list of models used posted that list on
+every request already delivered in the queue, before the queue kept a start
+for each kind of comment. The queue keeps it now (section 10), but status,
+assignee and hours changes have no such start; try each new image against a
+copy of the queue first ([section 10](#try-it-against-a-copy-of-the-queue-first)).
 
 ### A configuration change has no effect, or the engine waits on a different request
 
@@ -1115,29 +1222,28 @@ they are the only record of what has already been done outside the cluster.
 
 ### The `mirror` container keeps restarting
 
-Not met here; this follows from the mirror's code (`mirror_loop.py`). Its log
-ends with `The mirror was refused and this process is ending: ...`:
-the token was refused (expired, revoked, or without access to the
-repository), or the repository is not there. A network failure does not end
-it; it logs `The mirror was not updated, in a way that may pass on its own`
-and tries again. Replace the token in the Secret and restart the Pod.
+From the mirror's code (`mirror_loop.py`). Its log ends with
+`The mirror was refused and this process is ending: ...`: the token was
+refused (expired, revoked, or without access to the repository), or the
+repository is not there. A network failure does not end it; it logs
+`The mirror was not updated, in a way that may pass on its own` and tries
+again. Replace the token in the Secret and restart the Pod.
 
 ### Answers or stops from the person who asked are ignored
 
 The issue was filed with the engine's key, so the engine's account is its
 requester ([section 2](#the-engines-own-account)): only that account and the
 users in `intake.stop_user_ids` can answer or stop it, and the engine cannot
-tell its own comments from an answer. This was met in an earlier version,
-which also took the engine's own status change for the answer and went on
-without waiting; comments without words are no longer answers, but the rest
-holds. File requests from a person's account.
+tell its own comments from an answer. Met in an earlier version, which also
+took the engine's own status change for the answer and went on without
+waiting; comments without words are no longer answers, but the rest holds.
+File requests from a person's account.
 
 ### A request that needs no change goes round without end
 
-Not met in a real run here, but it follows from the delivery script: when the
-work changes nothing, the delivery refuses with
-`No change under the allowed paths is ready to deliver`, which sends the work
-back like any other failure. Stop such a request (`停止`) and tell the
+From the delivery script: when the work changes nothing, the delivery refuses
+with `No change under the allowed paths is ready to deliver`, which sends the
+work back like any other failure. Stop such a request (`停止`) and tell the
 requester; the ordered configuration has no ending for "nothing to do".
 
 ## 12. Where things are
@@ -1150,7 +1256,7 @@ In the Pod:
 | `/opt/ticket-automation/operator/` | the operator's programs (ConfigMap) |
 | `/opt/ticket-automation/bundle/` | the engine, the tracker tool, the status page, the harnesses |
 | `/opt/ticket-automation/scripts/` | the fixed delivery, merged check and mirror programs |
-| `/var/lib/ticket-automation/mirror/<repository-name>.git` | the mirror the roles clone from |
+| `/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git` | the mirror the roles clone from |
 | `/var/lib/ticket-automation/queue/engine.log` | the engine's log, also shown at `/log` on the status page |
 | `/var/lib/ticket-automation/queue/jobs/<issue id>/` | one request |
 
@@ -1159,9 +1265,10 @@ In a request's directory: `issue.json` (the issue as first accepted),
 `turns.json` (what was posted and changed on the issue), `question.json` and
 `answer-<comment id>.json` (a question and its answer), `stop-request.json`
 and `stop-report/` (a stop and its report's own record), `workspace/` (the
-checkout), `homes/` (each role's private
-directory) and `live/` (a running process's output). These can hold the
-requester's text and project code: keep them private.
+checkout, whose `.git/ticket-engine/delivery.json` is the delivery's
+receipt), `homes/` (each role's private directory) and `live/` (a running
+process's output). These can hold the requester's text and project code:
+keep them private.
 
 On the status page: `/` (every request), `/jobs/<issue id>` (one request),
 `/jobs/<issue id>/workspace` (its checkout now), `/files/` (every file of the

@@ -1,9 +1,10 @@
 # The operator's own programs, mounted read-only at /opt/ticket-automation/operator
 # in the engine container (statefulset.yaml.example, volume operator-scripts).
-# rewrite/examples/operator-stages.json names three of them by exactly these
-# keys: build and test (the verify stage, and the review's test output) and
-# confirm-report (the last stage). Copy this file, replace every <placeholder>,
-# write build and test for your project, and create it before the StatefulSet.
+# rewrite/examples/operator-stages.json names them by exactly these keys:
+# build and test (the verify stage, the review's test output and the merged
+# check) and confirm-report (the last stage). Copy this file, replace every
+# <placeholder>, write build and test for your project, and create it before
+# the StatefulSet.
 #
 # A role sees this directory only when its launcher arguments name it with
 # --runtime /opt/ticket-automation/operator, and it sees it read-only. The
@@ -12,7 +13,7 @@
 #
 # build and test run with the current directory set to a checkout of the change:
 # the request's own checkout in the verify stage, where it is read-only, and a
-# fresh clone of the integration branch in the merged check, when SETUP.md's
+# fresh clone of the integration branch in the merged check, whose
 # VERIFY_COMMANDS names them. Write anything a build produces under $HOME (the
 # process's private directory, writable) or /tmp, not into the checkout, or
 # grant the verify process write access to those paths. The image carries Git,
