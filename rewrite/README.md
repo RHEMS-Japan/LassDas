@@ -494,6 +494,15 @@ change, and the conflict is handled like any other (below). For this the
 delivery process's sandbox grant must cover the working tree as well as
 `.git`.
 
+A change that is not UTF-8, such as a file kept in Shift_JIS or a name Git
+gives in such bytes, is delivered byte for byte. Its names are held to the
+operator's grant like any other, and forbidden text written in ASCII is found
+in it as written. Forbidden text that is not ASCII cannot be looked for in
+such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
+them is refused, saying so, rather than delivered unchecked. Where such a name
+or text is printed or recorded, each byte that is not UTF-8 shows as a
+replacement character (U+FFFD).
+
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
 shipped delivery refuses it ("No change under the allowed paths is ready to

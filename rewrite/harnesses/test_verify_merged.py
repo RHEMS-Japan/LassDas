@@ -258,6 +258,13 @@ class VerificationTests(unittest.TestCase):
                 self.assertNotIn("Nothing to check", result.stdout)
                 self.assertNotIn("nothing of this request", result.stdout)
 
+    def test_command_output_that_is_not_utf8_is_reported_with_replacement_characters(self):
+        self.receipt()
+        result = self.verify("/bin/sh -c 'printf \"\\223\\372\\214\\352 checked\\n\"'")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("���� checked", result.stdout)
+        self.assertIn("0 of 1 configured verification commands failed.", result.stdout)
+
     def test_check_mode_runs_the_commands_without_a_delivery_and_ends_non_zero(self):
         result = self.verify("/bin/sh -c 'echo checked'", "--dry-run")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)

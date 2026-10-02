@@ -5,6 +5,7 @@ operator's environment, not from a role's answer, and the credential never
 reaches a command line, a remote URL or the printed report: Git asks for it
 through the credential helper below, which answers one configured host.
 """
+import codecs
 import datetime
 import http.client
 import json
@@ -20,6 +21,18 @@ import urllib.request
 
 SUPPORT = Path(__file__).resolve()
 RECEIPT = Path(".git/ticket-engine/delivery.json")
+
+# Text Git gives that is not UTF-8 (a file in Shift_JIS, a name in its bytes)
+# is kept as surrogate escapes, so that a name goes back to Git as the bytes
+# it was. Printed or recorded, each such byte is a replacement character,
+# given as its UTF-8 bytes: Python's UTF-8 encoder takes only ASCII text back.
+codecs.register_error("replacement-character",
+                      lambda error: ("\N{REPLACEMENT CHARACTER}".encode() * (error.end - error.start), error.end))
+
+
+def readable(text):
+    """Text as a person reads it, with no byte that is not UTF-8 left in it."""
+    return text.encode("utf-8", "replacement-character").decode("utf-8")
 
 
 class DeliveryError(RuntimeError):
@@ -166,7 +179,7 @@ def run(command, *, cwd=None, check=True, timeout=None, environment=None,
     credential check below has to see what is actually there.
     """
     result = subprocess.run(command, cwd=cwd, env=environment or git_environment(), text=True,
-                            stdin=stdin, capture_output=True, timeout=timeout)
+                            errors="surrogateescape", stdin=stdin, capture_output=True, timeout=timeout)
     output = result.stdout if not redact else scrub(result.stdout)
     diagnostics = scrub(result.stderr)
     if check and result.returncode != 0:
@@ -300,6 +313,8 @@ def discard_prompt():
 
 def main(entry):
     """Shared entry point. A refusal is a process failure, never a summary."""
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replacement-character")
     try:
         return entry(sys.argv[1:])
     except DeliveryError as error:

@@ -195,6 +195,12 @@ def refuse_forbidden_text(diff, paths=()):
                             % (len(found), "y" if len(found) == 1 else "ies"))
     if support.credential() in added:
         raise DeliveryError("Refused: the staged change contains the delivery credential")
+    # Bytes that are not UTF-8 are read as surrogate escapes. ASCII is found
+    # in them as written; other text is not, so it cannot pass unlooked-for.
+    if re.search("[\udc80-\udcff]", added) and not all(
+            entry.isascii() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()):
+        raise DeliveryError("Refused: the staged change carries text that is not UTF-8, in which configured "
+                            "forbidden text that is not ASCII cannot be looked for")
 
 
 def head(workspace):
@@ -673,7 +679,8 @@ def end_changed(workspace, path, receipt, previous, tip):
     recorded = receipt.get("head")
     unpushed = recorded if recorded and not is_ancestor(workspace, recorded, tip) else None
     receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed,
-                   not_committed=sorted(changed_paths(workspace)), ended_at=support.timestamp())
+                   not_committed=[support.readable(path) for path in sorted(changed_paths(workspace))],
+                   ended_at=support.timestamp())
     receipt["previous"] = previous
     support.write_receipt(path, receipt)
     print(changed_summary(receipt))
@@ -697,7 +704,7 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
         # what was read then, and names the work still not committed.
         receipt["previous"] = previous
         if receipt.get("changed_by_person"):
-            receipt["not_committed"] = sorted(changed_paths(workspace))
+            receipt["not_committed"] = [support.readable(path) for path in sorted(changed_paths(workspace))]
             support.write_receipt(path, receipt)
         print(closed_summary(receipt, again=True) if receipt.get("closed_unmerged")
               else changed_summary(receipt, again=True))
