@@ -110,6 +110,17 @@ func (p BacklogProject) ReadComment(raw json.RawMessage, issue Issue) (Comment, 
 		OnIssue: record.IssueID == issue.ID && record.ProjectID == p.ProjectID}, nil
 }
 
+func (p BacklogProject) CommentText(raw json.RawMessage) (int64, string, error) {
+	var record struct {
+		ID      int64
+		Content string
+	}
+	if err := json.Unmarshal(raw, &record); err != nil || record.ID <= 0 {
+		return 0, "", errors.New("the comment record could not be read")
+	}
+	return record.ID, record.Content, nil
+}
+
 func (p BacklogProject) AddComment(ctx context.Context, issue Issue, text string) (int64, error) {
 	receipt, err := p.Client.AddComment(ctx, issue.Key, text)
 	if err != nil {

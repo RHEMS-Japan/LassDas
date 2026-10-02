@@ -35,7 +35,7 @@ type config struct {
 	Workflow       *chain.Workflow  `json:"workflow,omitempty"`
 	// runtimeUser is the tracker account the credential belongs to, read at
 	// start when issues are handed over.
-	runtimeUser int64
+	runtimeUser tracker.Account
 }
 
 // Give the dispatcher the same configured work instructions as its workers.
@@ -375,7 +375,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	}
 	readRequest := func(ctx context.Context) (string, error) {
 		if *issue != "" {
-			return cfg.Backlog.Request(ctx, *issue)
+			return cfg.source().Request(ctx, *issue)
 		}
 		data, err := os.ReadFile(*requestPath)
 		return string(data), err

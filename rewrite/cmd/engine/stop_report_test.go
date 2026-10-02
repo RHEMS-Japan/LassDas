@@ -395,7 +395,7 @@ func TestStoppedReporterCannotDispatchAnotherRole(t *testing.T) {
 
 func TestStoppedReportRequiresReadableSavedStopAndHistory(t *testing.T) {
 	cfg := stoppedReportConfiguration(t)
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	issue.Creator.ID = 55
 	for _, raw := range []json.RawMessage{[]byte(`broken`), stopComment(52, 55, "停止"), stopComment(51, 88, "停止")} {
 		dir := t.TempDir()

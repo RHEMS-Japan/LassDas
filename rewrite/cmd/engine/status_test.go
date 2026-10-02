@@ -44,7 +44,7 @@ func TestTheIssueMovesOncePerTurnAndARefusedMoveIsAskedAgain(t *testing.T) {
 		return nil, http.ErrNotSupported
 	})
 	directory := t.TempDir()
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	var log bytes.Buffer
 	observe := func(message string) { log.WriteString(message + "\n") }
 	now := time.Now()

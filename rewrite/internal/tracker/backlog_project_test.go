@@ -124,6 +124,27 @@ func TestABacklogProjectPlacesACommentByTheIssueAndProjectItNames(t *testing.T) 
 	}
 }
 
+// The engine finds a notice of its own by the comment's id and words alone,
+// so nothing else a record holds, in whatever shape, keeps it from reading
+// those two.
+func TestABacklogProjectReadsACommentsIdAndWordsAlone(t *testing.T) {
+	project := BacklogProject{ProjectID: 17}
+	for raw, want := range map[string]string{
+		`{"id":701,"issueId":"51","projectId":[17],"createdUser":"someone","content":"words"}`: "words",
+		`{"id":702}`: "",
+	} {
+		id, words, err := project.CommentText(json.RawMessage(raw))
+		if err != nil || id <= 0 || words != want {
+			t.Errorf("%s: read as %d %q (%v)", raw, id, words, err)
+		}
+	}
+	for _, raw := range []string{`{"id":"broken"}`, `{"id":0,"content":"words"}`, `{"content":"words"}`, `{"id":701,"content":42}`, `not JSON`} {
+		if id, words, err := project.CommentText(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s: read as %d %q", raw, id, words)
+		}
+	}
+}
+
 // Each operation sends what the engine sent when it called the client itself.
 func TestABacklogProjectAsksTheTrackerWhatTheEngineAskedBefore(t *testing.T) {
 	t.Setenv("TRACKER_TEST_KEY", "synthetic-token")
@@ -201,10 +222,19 @@ func TestABacklogProjectAsksTheTrackerWhatTheEngineAskedBefore(t *testing.T) {
 		t.Fatalf("myself: %+v (%v)", me, err)
 	}
 	// The accepted issue keeps its category 7 and gains 2001; one built
-	// without a record has none to keep.
+	// without a record has none to keep; a category without an id and the one
+	// it already carries are not sent again.
+	record := backlogRecord(51)
+	record["category"] = []any{map[string]any{"id": 0}, map[string]any{"id": 7}, map[string]any{"id": 2001}}
+	raw, _ := json.Marshal(record)
+	carrying, err := project.ReadIssue(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, step := range []error{
 		project.Move(ctx, issue, Accepted),
 		project.Move(ctx, Issue{ID: 51, Key: "EXAMPLE-51"}, Accepted),
+		project.Move(ctx, carrying, Accepted),
 		project.Move(ctx, issue, Processing),
 		project.Assign(ctx, issue, me),
 		project.Move(ctx, issue, Delivered),
@@ -229,6 +259,7 @@ func TestABacklogProjectAsksTheTrackerWhatTheEngineAskedBefore(t *testing.T) {
 		"GET /api/v2/users/myself",
 		"PATCH /api/v2/issues/EXAMPLE-51  categoryId%5B%5D=7&categoryId%5B%5D=2001",
 		"PATCH /api/v2/issues/EXAMPLE-51  categoryId%5B%5D=2001",
+		"PATCH /api/v2/issues/EXAMPLE-51  categoryId%5B%5D=7&categoryId%5B%5D=2001",
 		"PATCH /api/v2/issues/EXAMPLE-51  statusId=1001",
 		"PATCH /api/v2/issues/EXAMPLE-51  assigneeId=900",
 		"PATCH /api/v2/issues/EXAMPLE-51  statusId=3",
