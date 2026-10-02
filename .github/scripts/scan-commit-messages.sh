@@ -15,7 +15,17 @@ if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
 fi
 if [ -n "$RANGE_BASE" ] && git cat-file -e "$RANGE_BASE" 2>/dev/null; then
   range=("$RANGE_BASE..$RANGE_HEAD")
-  echo "reading the messages of $RANGE_BASE..$RANGE_HEAD"
+  # Anywhere but on the default branch itself (a branch, a pull request, a
+  # tag), what the default branch already holds is not read either: a branch
+  # that merges main to catch up brings main's published history into its
+  # range, and no change on the branch can reword that.
+  if [ "${GITHUB_REF:-}" != "refs/heads/${DEFAULT_BRANCH:-}" ] &&
+     git rev-parse --verify --quiet "refs/remotes/origin/${DEFAULT_BRANCH:-}^{commit}" >/dev/null; then
+    range+=(--not "refs/remotes/origin/$DEFAULT_BRANCH")
+    echo "reading the messages of $RANGE_BASE..$RANGE_HEAD that $DEFAULT_BRANCH does not hold"
+  else
+    echo "reading the messages of $RANGE_BASE..$RANGE_HEAD"
+  fi
 elif [ "${GITHUB_REF:-}" = "refs/heads/${DEFAULT_BRANCH:?DEFAULT_BRANCH is not set}" ]; then
   # A push to the default branch itself without a usable base (a force push
   # of it): it holds every commit it has, so every reachable message is read,
