@@ -155,7 +155,28 @@ func TestGitHubReadsEveryPageOfOpenIssuesAndLeavesPullRequestsOut(t *testing.T) 
 }
 
 func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
-	for _, failure := range []string{"another repository", "repeated issue", "second page outage", "next page on another host", "moved", "not an array", "oversized page"} {
+	// A next page named anywhere the token is not to go fails the list, and so
+	// does one the list already gave.
+	elsewhere := map[string]func(base string) string{
+		"next page on another host": func(string) string { return "https://127.0.0.1:1/repositories/1/issues?page=2" },
+		"next page over http": func(base string) string {
+			return strings.Replace(base, "https://", "http://", 1) + "/repositories/1/issues?page=2"
+		},
+		"next page with a user": func(base string) string {
+			return strings.Replace(base, "https://", "https://someone:secret@", 1) + "/repositories/1/issues?page=2"
+		},
+		"next page through dot segments": func(base string) string { return base + "/repos/octo-org/widgets/../../admin?page=2" },
+		"next page through a lone dot":   func(base string) string { return base + "/repositories/1/./issues?page=2" },
+		"next page through encoded dots": func(base string) string { return base + "/repositories/1/%2e%2e/%2E%2E/admin?page=2" },
+		"next page already given": func(base string) string {
+			return base + "/repos/octo-org/widgets/issues?sort=created&per_page=100&state=open&direction=asc"
+		},
+	}
+	failures := []string{"another repository", "repeated issue", "second page outage", "moved", "not an array", "oversized page"}
+	for failure := range elsewhere {
+		failures = append(failures, failure)
+	}
+	for _, failure := range failures {
 		t.Run(failure, func(t *testing.T) {
 			github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 				records := []any{}
@@ -173,10 +194,6 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 						fmt.Fprint(w, "second page unavailable")
 						return
 					}
-				case "next page on another host":
-					w.Header().Set("Link", `<https://127.0.0.1:1/repositories/1/issues?page=2>; rel="next"`)
-					json.NewEncoder(w).Encode(records[:100])
-					return
 				case "moved":
 					w.Header().Set("Location", base+"/repositories/1/issues")
 					w.WriteHeader(http.StatusMovedPermanently)
@@ -188,18 +205,54 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 					fmt.Fprint(w, "[]"+strings.Repeat(" ", 32<<20))
 					return
 				}
+				if next, found := elsewhere[failure]; found {
+					w.Header().Set("Link", "<"+next(base)+`>; rel="next"`)
+					json.NewEncoder(w).Encode(records[:100])
+					return
+				}
 				servePages(base, w, r, records, true)
 			})
 			rows, err := github.Issues(context.Background())
 			want := map[string]string{"another repository": "outside the configured repository", "repeated issue": "repeated an issue",
-				"second page outage": "503: second page unavailable", "next page on another host": "outside its API", "moved": "HTTP 301",
+				"second page outage": "503: second page unavailable", "moved": "HTTP 301, a redirect to", "next page already given": "already given",
 				"not an array": "not a bounded array", "oversized page": "exceeds 32 MiB"}[failure]
+			if want == "" {
+				want = "outside its API"
+			}
+			if failure == "moved" && (err == nil || !strings.Contains(err.Error(), "may have been moved or renamed; check the configured repository")) {
+				t.Fatalf("the operator is not told what a redirect likely means: %v", err)
+			}
 			wantCalls := map[string]int32{"second page outage": 2, "another repository": 2, "repeated issue": 2}[failure]
 			if wantCalls == 0 {
 				wantCalls = 1
 			}
 			if err == nil || rows != nil || !strings.Contains(err.Error(), want) || calls.Load() != wantCalls {
 				t.Fatalf("a list was returned, or for another reason: rows=%d calls=%d error=%v", len(rows), calls.Load(), err)
+			}
+		})
+	}
+}
+
+// A redirect's error says where it points in short and without the token,
+// also when the token sits where the address is cut.
+func TestGitHubQuotesARedirectInShortAndWithoutTheToken(t *testing.T) {
+	for name, query := range map[string]func(prefix string) string{
+		"the token in the address":  func(string) string { return githubTestToken },
+		"an address out of measure": func(string) string { return strings.Repeat("x", 64<<10) },
+		"the token across the cut": func(prefix string) string {
+			return strings.Repeat("x", 190-len(prefix)) + githubTestToken + strings.Repeat("y", 100)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+				prefix := base + "/repositories/1/issues?q="
+				w.Header().Set("Location", prefix+query(prefix))
+				w.WriteHeader(http.StatusMovedPermanently)
+			})
+			_, err := github.Myself(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "HTTP 301, a redirect to") || len(err.Error()) > 500 ||
+				strings.Contains(err.Error(), githubTestToken[:9]) {
+				t.Fatalf("the redirect was quoted at length or with the token: %d bytes: %.300v", len(fmt.Sprint(err)), err)
 			}
 		})
 	}
