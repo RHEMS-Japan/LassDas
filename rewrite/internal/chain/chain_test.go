@@ -337,6 +337,79 @@ func TestTheNoteForAnInterruptedLaunchSaysWhenItBegan(t *testing.T) {
 	}
 }
 
+// A launch cut by a stop, the requester's or a hold for the model budget, is
+// saved still pending with its start, so the note the next run writes for it
+// says when it began, as for a launch cut by a crash. Here the launch taken up
+// after a crash is itself stopped: each cut launch's note keeps its own start,
+// and a stage cut either way is placed by when it began.
+func TestAStopKeepsWhenThePendingLaunchBegan(t *testing.T) {
+	const request = "Keep the start of a launch a stop cut."
+	directory := t.TempDir()
+	crashed := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	saved := `{"request":"` + request + `","history":[],"pending":{"role":"work"},"pending_since":"` + crashed.Format(time.RFC3339) + `","done":false}`
+	if err := os.WriteFile(filepath.Join(directory, "history.json"), []byte(saved), 0600); err != nil {
+		t.Fatal(err)
+	}
+	router := testRouter(func(_ context.Context, state State) (Assignment, error) {
+		for _, result := range state.History {
+			if result.Speaker == "worker" && result.Error == "" {
+				return Assignment{Role: "done"}, nil
+			}
+		}
+		return Assignment{Role: "work"}, nil
+	})
+	store, err := Open(directory, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	var during State
+	engine := Chain{Store: store, Router: router, Executor: testExecutor(func(ctx context.Context, _ Assignment, _ State) []Result {
+		during, _ = store.Load()
+		stop()
+		<-ctx.Done()
+		return []Result{{Role: "work", Speaker: "worker", Error: "context canceled"}}
+	})}
+	if err := engine.Run(ctx); err == nil {
+		t.Fatal("the stopped run returned no error")
+	}
+	stopped, err := store.Load()
+	store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Pending == nil || stopped.PendingSince.IsZero() || !stopped.PendingSince.Equal(during.PendingSince) {
+		t.Fatalf("the stop saved the launch without its start: %+v", stopped)
+	}
+	store, err = Open(directory, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	engine = Chain{Store: store, Router: router, Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+		return []Result{{Role: "work", Speaker: "worker", Output: "worked"}}
+	})}
+	if err := engine.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []Result
+	for _, result := range final.History {
+		if result.Speaker == "runtime" && strings.HasPrefix(result.Error, "The process stopped while this action was pending") {
+			notes = append(notes, result)
+		}
+	}
+	if len(notes) != 2 || !notes[0].StartedAt.Equal(crashed) || !notes[1].StartedAt.Equal(during.PendingSince) {
+		t.Fatalf("the cut launches' notes are %+v", notes)
+	}
+	if final.Pending != nil || !final.PendingSince.IsZero() || !final.Done {
+		t.Fatalf("the request after the last run: %+v", final)
+	}
+}
+
 func TestStopInterruptsUnavailableRouterAndStoreWait(t *testing.T) {
 	for _, storage := range []bool{false, true} {
 		t.Run(map[bool]string{false: "router", true: "store"}[storage], func(t *testing.T) {
