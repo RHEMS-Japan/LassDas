@@ -31,24 +31,28 @@ if [ "$status" -ne 1 ] || ! grep -qxF "$expected" <<<"$output"; then
 fi
 echo "the packaged engine started and refused the unedited example as expected"
 named="$(bash "$(dirname "$0")/image-go-version.sh")" || exit 1
-built="$(docker run --rm --network none --platform linux/arm64 \
-  --entrypoint /usr/local/go/bin/go "$1" \
-  version /opt/ticket-automation/bundle/bin/ticket-engine 2>&1)" || {
-  printf '%s\n' "$built"
+engine=/opt/ticket-automation/bundle/bin/ticket-engine
+answer="$(docker run --rm --network none --platform linux/arm64 \
+  --entrypoint /usr/local/go/bin/go "$1" version "$engine" 2>&1)" || {
+  printf '%s\n' "$answer"
   echo "::error::could not read which Go built the packaged engine"
   exit 1
 }
-printf '%s\n' "$built"
-# "<path>: go1.26.8", with words after it when Go was built with an experiment
-# (go1.26.8 X:boringcrypto): the version is the word that starts with go and
-# a digit.
-read -ra words <<< "${built#*: }"
+printf '%s\n' "$answer"
+# Only the line about the engine itself is read: "<path>: go1.26.8", with words
+# after it when Go was built with an experiment (go1.26.8 X:boringcrypto). The
+# version is the word on it that starts with go and a digit.
+line=""
+while IFS= read -r candidate; do
+  case "$candidate" in "$engine: "*) line="$candidate"; break ;; esac
+done <<< "$answer"
+read -ra words <<< "${line#"$engine: "}"
 built=""
 for word in ${words[@]+"${words[@]}"}; do
   case "$word" in go[0-9]*) built="$word"; break ;; esac
 done
 if [ -z "$built" ]; then
-  echo "::error::the answer above names no Go version for the packaged engine"
+  echo "::error::no line of the answer above starts with $engine and names a Go version"
   exit 1
 fi
 case "$built" in
