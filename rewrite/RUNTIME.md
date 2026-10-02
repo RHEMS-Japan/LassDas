@@ -161,25 +161,21 @@ BuildKit's [nested rootless runtime notes](https://github.com/moby/buildkit/blob
 Supported host security policy and live network isolation remain deployment work.
 
 Creating a Kubernetes `NetworkPolicy` object does not prove that the network
-plugin enforces it. In an actual credential-free cluster trial, a policy selected
-the diagnostic workload and denied all ingress/egress, yet TCP connections to a
-public address and the link-local metadata address remained possible. The same
-result occurred for a Job-owned Pod, both after a propagation wait and after the
-workflow completed. The installed network agent had policy enforcement disabled.
-Only TCP handshakes were attempted; no metadata/token/credential request was made.
-Before live credentials or untrusted work are admitted, test both required allowed
-traffic and forbidden traffic from the actual workload. Check the cluster plugin's
-configuration; do not infer isolation from accepted YAML, Pod readiness, or an
-otherwise successful workflow. Changes to a shared network plugin have their own
-deployment scope and must not be silently applied by this bundle.
+plugin enforces it: whether it does depends on the cluster's network plugin and
+its configuration, and a policy that is accepted but not enforced lets every
+connection through. Before live credentials or untrusted work are admitted,
+test both required allowed traffic and forbidden traffic from the actual
+workload; do not infer isolation from accepted YAML, Pod readiness, or an
+otherwise successful workflow. Changes to a shared network plugin have their
+own deployment scope and must not be silently applied by this bundle.
 
-A subsequent own-workload-only alternative worked without changing that shared
-plugin: an init container set IPv4/IPv6 firewall rules in its Pod's network
-namespace, with `NET_ADMIN` confined to that setup container. No host network or
-node mount was used. Required DNS and public connectivity stayed available;
-link-local metadata connections were refused before and after the full workflow
-and restart. Workers had no capabilities. This does not provide a public-domain
-allowlist or permission to access arbitrary public services.
+An own-workload-only alternative does not depend on the network plugin, and it
+held in a measured trial: an init container set IPv4/IPv6 firewall rules in its
+Pod's network namespace, with `NET_ADMIN` confined to that setup container. No
+host network or node mount was used. Required DNS and public connectivity stayed
+available; link-local metadata connections were refused before and after the
+full workflow and restart. Workers had no capabilities. This does not provide a
+public-domain allowlist or permission to access arbitrary public services.
 
 The same nested runtime also ran the actual SDK workflow with a native-ABI,
 zero-capability adaptation of the pinned
@@ -238,8 +234,8 @@ example using the actual engine, installed native SDK and fixture model/tracker/
 delivery APIs. The controller was PID 1; a crash after comment storage caused one
 automatic container restart, followed by readback rather than a second post.
 All eleven completed native tool calls succeeded, the accepted original request
-survived, and one delivery/one comment remained. The Job, Pod and dedicated policy
-were removed afterward. This confirms that bounded integration/recovery path,
-not live model judgment, production delivery, or effective egress isolation; the
-network negative observation above came from this same trial. It still used the
-diagnostic syscall profile described above, not an approved production profile.
+survived, and one delivery/one comment remained. The Job, its Pod and the
+`NetworkPolicy` object made for this run were removed afterward. This confirms
+that bounded integration/recovery path, not live model judgment, production
+delivery, or effective egress isolation. It still used the diagnostic syscall
+profile described above, not an approved production profile.

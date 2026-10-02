@@ -1,5 +1,10 @@
 # The single-pod runtime image (docs/RUNTIME_POD.md).
 # Build for linux/arm64 (the cluster's node architecture).
+#
+# The Go version in the two golang stages below is the one place that version
+# is set: the engine's CI jobs test on it (.github/scripts/image-go-version.sh
+# reads these lines and fails if the two differ), and the image check holds
+# the packaged engine to it. Change both lines together.
 
 # ---- Stage 1: engine binaries -------------------------------------------
 FROM golang:1.26-bookworm AS engine
@@ -53,6 +58,16 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && mkdir -p /opt/google/chrome \
     && test -x /usr/lib/chromium/chromium \
     && ln -s /usr/lib/chromium/chromium /opt/google/chrome/chrome
+
+# The firewall tool of deploy/ticket-engine: that Pod's network init
+# containers can run this image's iptables (the nf_tables backend,
+# /usr/sbin/xtables-nft-multi) with NET_ADMIN to write the Pod's own egress
+# rules, instead of a second image every node must also pull. On a line of its
+# own and without -qq, so the build log names the packages it adds and the
+# space they take.
+RUN apt-get update -qq && apt-get install -y -q --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/sbin/xtables-nft-multi
 
 # Node 22 (validation toolchain of node consumers) + pinned pnpm.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

@@ -22,6 +22,9 @@ const (
 // operator, or the account the engine's own credential belongs to.
 type Account struct {
 	ID int64
+	// Login is the account's name where the tracker addresses accounts by
+	// name; empty where it does not.
+	Login string
 }
 
 // Issue is one issue as the engine reads it from the tracker's own record.

@@ -1,0 +1,108 @@
+# The operator's own programs, mounted read-only at /opt/ticket-automation/operator
+# in the engine container (statefulset.yaml.example, volume operator-scripts).
+# rewrite/examples/operator-stages.json names them by exactly these keys:
+# build and test (the verify stage, the review's test output and the merged
+# check) and confirm-report (the last stage). Copy this file, replace every
+# <placeholder>, write build and test for your project, and create it before
+# the StatefulSet.
+#
+# A role sees this directory only when its launcher arguments name it with
+# --runtime /opt/ticket-automation/operator, and it sees it read-only. The
+# volume's defaultMode (0555) is what makes the keys executable, so each one
+# starts with its interpreter line.
+#
+# build and test run with the current directory set to a checkout of the change:
+# the request's own checkout in the verify stage, where it is read-only, and a
+# fresh clone of the integration branch in the merged check, whose
+# VERIFY_COMMANDS names them. Write anything a build produces under $HOME (the
+# process's private directory, writable) or /tmp, not into the checkout, or
+# grant the verify process write access to those paths. The image carries Git,
+# Python 3, Go, and Node.js 22 with npm and pnpm (deploy/pod/Dockerfile); a
+# toolchain it lacks is not there for these scripts either.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: <consumer>-ticket-engine-operator-scripts
+  namespace: <namespace>
+data:
+  # Until it is replaced this fails on purpose, so an unconfigured build shows
+  # up as a failing verify stage on the status page rather than as a pass.
+  # For a Go module the body can be as short as: go build ./...
+  # A build that installs dependencies into the checkout (node_modules, a
+  # virtual environment) needs that path granted to the verify process.
+  build: |
+    #!/bin/sh
+    set -eu
+    echo "the operator's build command is not configured: replace 'build' in the operator-scripts ConfigMap" >&2
+    exit 1
+  # The same for the tests. For a Go module: go test ./...
+  test: |
+    #!/bin/sh
+    set -eu
+    echo "the operator's test command is not configured: replace 'test' in the operator-scripts ConfigMap" >&2
+    exit 1
+  # The last stage's check. Needs tracker_access "read" on its process, which
+  # the shipped example grants; no other setting.
+  confirm-report: |
+    #!/usr/bin/python3
+    """The last stage's check: one stored comment on the assigned issue must be
+    exactly the report the report stage wrote to report/result.md.
+
+    The stored comments are looked through newest first, and the report does
+    not have to be the last one. The runtime posts notices of its own that can
+    land after the report: the model chosen for a relaunch, a stage's sentence,
+    a restart notice. A check that wants the report last fails on every launch
+    once one of them follows it, and the run then never ends.
+
+    Exits 0 when one comment matches and 1 otherwise. What it found is printed
+    and joins the run's history. It never posts, edits or deletes anything.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    TRACKER_TOOL = os.environ.get("TRACKER_TOOL") or "/opt/ticket-automation/bundle/bin/ticket-tracker"
+
+
+    def finish(status, message):
+        print(message)
+        sys.exit(status)
+
+
+    def stored_comments():
+        command = [TRACKER_TOOL, "--base-url", os.environ["TASK_TRACKER_URL"], "--key-env", "TASK_TRACKER_KEY",
+                   "--cert-env", "TASK_TRACKER_CERT", "--issue", os.environ["TASK_TRACKER_ISSUE"], "comments"]
+        try:
+            finished = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            finish(1, "reading the stored comments failed: %s" % error)
+        if finished.returncode != 0:
+            finish(1, "reading the stored comments failed: " + finished.stderr.strip()[-300:])
+        try:
+            return json.loads(finished.stdout or "[]")
+        except ValueError:
+            finish(1, "the stored comments could not be read as a list")
+
+
+    def main():
+        report = Path(os.environ["TASK_WORKSPACE"]) / "report" / "result.md"
+        if not report.is_file():
+            finish(1, "no report/result.md in the workspace")
+        stored = stored_comments()
+        if not stored:
+            finish(1, "no comment is stored on the issue")
+        wanted = report.read_text(encoding="utf-8").strip()
+        # The tracker tool lists comments oldest first; the newest are read first here.
+        for later, comment in enumerate(reversed(stored)):
+            if (comment.get("content") or "").strip() == wanted:
+                finish(0, "a stored comment matches report/result.md (%d comments on the issue, %d after it)"
+                       % (len(stored), later))
+        last = (stored[-1].get("content") or "").strip()
+        finish(1, "no stored comment equals report/result.md (%d comments; the last has %d characters, the report %d)"
+               % (len(stored), len(last), len(wanted)))
+
+
+    if __name__ == "__main__":
+        main()
