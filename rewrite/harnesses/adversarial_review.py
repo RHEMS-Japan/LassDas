@@ -42,7 +42,10 @@ REVIEW_ATTEMPTS requests, or at once where the review would hold, it prints
 NOT REVIEWED with the reason and exits 0. One exception stands even then:
 when Git lists no changed path at all and no earlier delivery round
 committed one, work let through can end with nothing delivered, so it is let
-through only on a verdict, and without one this exits 1.
+through only on a verdict, and without one this exits 1. So it does when
+whether anything changed cannot be told (no checkout, or Git cannot read it,
+or not in time), since the delivery reads the checkout on its own, waits
+longer, and may find no change.
 
 When no file was changed at all, the reviewer is told so in plain words and
 asked whether the request is met by the repository exactly as it is: a
@@ -297,14 +300,25 @@ def nothing_changed(workspace):
     """Whether the checkout holds no change at all: Git lists no changed,
     staged or untracked path, as the delivery reads it too, and no earlier
     delivery round committed one. Work let through from here can end with
-    nothing delivered. False whenever that cannot be told."""
+    nothing delivered. None when that cannot be told (no checkout, or Git
+    could not read it, or not in time): the delivery reads the checkout on
+    its own and waits longer, so it may still find no change, and not being
+    able to tell is never taken as a change."""
     if not workspace:
-        return False
+        return None
     workspace = Path(workspace)
     try:
-        return workspace.is_dir() and not changed_entries(workspace) and not committed_earlier(workspace)
+        if not workspace.is_dir():
+            return None
+        return not changed_entries(workspace) and not committed_earlier(workspace)
     except (ReviewError, OSError):
-        return False
+        return None
+
+
+def held_back(unchanged):
+    """Why work without a verdict goes back, when it may hold no change:
+    there is none, or that could not be told."""
+    return "no file was changed" if unchanged else "whether any file was changed could not be told"
 
 
 def prepare():
@@ -485,12 +499,12 @@ def verdict_or_none(found, prompt, diff, tests, rounds):
 
 def without_verdict(model, reason, unchanged, goes_on):
     """With REVIEW_UNAVAILABLE=pass, no verdict was obtained. With nothing
-    changed, letting the work through could end it with nothing delivered and
-    no one's judgement, so it goes back; otherwise it goes on unreviewed, as
-    goes_on says."""
-    if unchanged:
-        print("Review by %s: NOT REVIEWED. %s. No file was changed, and an ending with nothing delivered needs a"
-              " verdict, so the work goes back this time." % (model, reason))
+    changed, or when that cannot be told (unchanged is None), letting the work
+    through could end it with nothing delivered and no one's judgement, so it
+    goes back; otherwise it goes on unreviewed, as goes_on says."""
+    if unchanged is not False:
+        print("Review by %s: NOT REVIEWED. %s. %s, and an ending with nothing delivered needs a verdict, so the"
+              " work goes back this time." % (model, reason, held_back(unchanged).capitalize()))
         return 1
     print("Review by %s: NOT REVIEWED. %s. %s" % (model, reason, goes_on))
     return 0
@@ -516,9 +530,9 @@ def reviewed(stdin_text, unchanged, passing):
     outcome, status = "PASSED", 0
     if model is None:
         model, outcome = ", ".join(found["models"]), "NOT REVIEWED"
-        if unchanged:
-            findings = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
-                        " needs a verdict, so the work goes back this time" % findings)
+        if unchanged is not False:
+            findings = ("no verdict could be obtained (%s); %s, and an ending with nothing delivered needs a verdict,"
+                        " so the work goes back this time" % (findings, held_back(unchanged)))
             status = 1
         else:
             findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
@@ -562,7 +576,9 @@ def main():
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
     except (OSError, ValueError):
         stdin_text = ""
-    unchanged, held, told, wait = False, None, None, 0
+    # Until it has been told, whether anything changed is not known, and an
+    # error before then lets nothing through without a verdict.
+    unchanged, held, told, wait = None, None, None, 0
     while True:
         try:
             # Read before any setting: a setting that keeps the review from
