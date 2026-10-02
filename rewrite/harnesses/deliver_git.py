@@ -197,6 +197,12 @@ def refuse_forbidden_text(diff, paths=()):
                             % (len(found), "y" if len(found) == 1 else "ies"))
     if support.credential() in added:
         raise DeliveryError("Refused: the staged change contains the delivery credential")
+    # Bytes that are not UTF-8 are read as surrogate escapes. ASCII is found
+    # in them as written; other text is not, so it cannot pass unlooked-for.
+    if re.search("[\udc80-\udcff]", added) and not all(
+            entry.isascii() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()):
+        raise DeliveryError("Refused: the staged change carries text that is not UTF-8, in which configured "
+                            "forbidden text that is not ASCII cannot be looked for")
 
 
 def head(workspace):
@@ -674,8 +680,9 @@ def end_closed(path, receipt, previous):
 
 def uncommitted(workspace):
     """The changes the workspace holds uncommitted, whoever made them, as the
-    receipt keeps them: at most twenty paths and how many there are."""
-    paths = sorted(changed_paths(workspace))
+    receipt keeps them: at most twenty paths, in readable text, and how many
+    there are."""
+    paths = [support.readable(path) for path in sorted(changed_paths(workspace))]
     return {"not_committed": paths[:20], "not_committed_count": len(paths)}
 
 

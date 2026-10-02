@@ -1273,6 +1273,125 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("A request that changes no file ends without a delivery", on.stdout)
         self.assertEqual(self.receipt(), {})
 
+    # Changes that are not UTF-8: files in Shift_JIS, and names Git gives in bytes.
+
+    def shift_jis(self, relative, text):
+        """A file written in Shift_JIS, as older Japanese projects keep them."""
+        data = text.encode("shift_jis")
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return data
+
+    def stored(self, revision):
+        """What the delivery target holds, as bytes."""
+        return subprocess.run(["git", "-C", str(self.remote), "show", revision], check=True,
+                              capture_output=True, env=git_environment()).stdout
+
+    def git_naming_in_bytes(self, real, shown):
+        """A Git on PATH that does what Linux Git does for a file whose name is
+        not UTF-8, which macOS will not create: the file is on disk as real,
+        and every argument and every output carries the bytes shown instead."""
+        directory = self.root / "bytes-bin"
+        directory.mkdir()
+        shim = directory / "git"
+        shim.write_text("#!%s\nimport os, subprocess, sys\n"
+                        "arguments = [os.fsencode(argument).replace(%r, %r) for argument in sys.argv[1:]]\n"
+                        "done = subprocess.run([%r] + arguments, capture_output=True)\n"
+                        "sys.stdout.buffer.write(done.stdout.replace(%r, %r))\n"
+                        "sys.stderr.buffer.write(done.stderr.replace(%r, %r))\n"
+                        "sys.exit(done.returncode)\n"
+                        % (sys.executable, shown, real, str(self.root / "bin" / "git"), real, shown, real, shown))
+        shim.chmod(0o755)
+        self.path = str(directory) + os.pathsep + self.path
+
+    def test_a_change_that_is_not_utf8_is_delivered_byte_for_byte(self):
+        changed = self.shift_jis("main.go", "package main // 日本語の説明\n")
+        added = self.shift_jis("library/sjis.go", "package library // 表示とソース\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+        for branch in ("refs/heads/master", "refs/heads/ticket/TICKET-41"):
+            self.assertEqual((self.stored(branch + ":main.go"), self.stored(branch + ":library/sjis.go")),
+                             (changed, added))
+        self.assertEqual(self.methods().count("POST"), 1)
+
+    def test_forbidden_text_is_still_found_in_a_change_that_is_not_utf8(self):
+        self.shift_jis("main.go", "package main // 日本語 internal-project-codename\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="Internal-Project-Codename")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("contains configured forbidden text (1 entry)", refused.stdout)
+        self.shift_jis("main.go", "package main // 日本語 %s\n" % TOKEN)
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("contains the delivery credential", refused.stdout)
+        self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
+        # Text that is not ASCII cannot be looked for in bytes that are not
+        # UTF-8: such a change is refused, saying so, rather than let through.
+        self.shift_jis("main.go", "package main // 日本語の説明\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("Refused: the staged change carries text that is not UTF-8, in which configured forbidden text "
+                      "that is not ASCII cannot be looked for", refused.stdout)
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.methods(), [])
+        # A change that is UTF-8 throughout is looked through as before.
+        self.change("main.go", "package main // 日本語の説明\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
+        self.change("library/plain.go", "package library // a name Git gives in bytes\n")
+        self.git_naming_in_bytes(b"library/plain.go", b"library/\x82\xa0.go")
+        checked = self.deliver("--dry-run")
+        self.assertEqual(checked.returncode, 3, checked.stdout + checked.stderr)
+        self.assertIn("Changed paths inside the operator's grant: library/��.go.", checked.stdout)
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("a name Git gives in bytes", self.git(self.remote, "show", "refs/heads/master:library/plain.go").stdout)
+
+    def test_a_name_that_is_not_utf8_is_held_to_the_grant(self):
+        self.change("notes.md", "edited outside the grant\n")
+        self.git_naming_in_bytes(b"notes.md", b"notes-\x82\xa0.md")
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("Changes outside the operator's allowed paths were not delivered: notes-��.md",
+                      refused.stdout)
+        self.assertIn("notes-��.md", refused.stderr)
+        self.assertEqual(self.methods(), [])
+
+    def test_forbidden_text_is_found_in_a_name_that_is_not_utf8(self):
+        self.change("library/plain.go", "package library\n")
+        self.git_naming_in_bytes(b"library/plain.go", b"library/\x82\xa0internal-project-codename.go")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("contains configured forbidden text (1 entry)", refused.stdout)
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("carries text that is not UTF-8", refused.stdout)
+        self.assertEqual(self.methods(), [])
+
+    def test_a_name_that_is_not_utf8_is_recorded_with_replacement_characters(self):
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        self.person_pushes("library/run.go", "package library // a person's fix\n")
+        self.change("library/plain.go", "package library\n")
+        self.git_naming_in_bytes(b"library/plain.go", b"library/\x82\xa0.go")
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        self.assertIn(self.NOT_COMMITTED % "library/��.go", ended.stdout)
+        self.assertEqual(self.receipt()["not_committed"], ["library/��.go"])
+
+    def test_what_git_says_in_bytes_that_are_not_utf8_is_printed_with_replacement_characters(self):
+        hook = self.remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nprintf 'refused: \\223\\372\\214\\352\\n' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.change("main.go", "package main // delivered\n")
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("refused: ����", refused.stdout)
+        self.assertIn("refused: ����", refused.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

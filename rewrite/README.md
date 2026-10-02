@@ -494,6 +494,15 @@ change, and the conflict is handled like any other (below). For this the
 delivery process's sandbox grant must cover the working tree as well as
 `.git`.
 
+A change that is not UTF-8, such as a file kept in Shift_JIS or a name Git
+gives in such bytes, is delivered byte for byte. Its names are held to the
+operator's grant like any other, and forbidden text written in ASCII is found
+in it as written. Forbidden text that is not ASCII cannot be looked for in
+such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
+them is refused, saying so, rather than delivered unchecked. Where such a name
+or text is printed or recorded, each byte that is not UTF-8 shows as a
+replacement character (U+FFFD).
+
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
 shipped delivery refuses it ("No change under the allowed paths is ready to
@@ -555,12 +564,13 @@ after it:
   not in the pull request, whether the person's push came before or after this
   round's commit: a commit of this delivery that is not on the branch, and the
   changes the workspace still holds uncommitted, whoever made them (the work,
-  a pending catch-up, the report). It names at most twenty of those paths and
-  says how many there are. It records `changed_by_person` with the branch's
-  head, `not_pushed`, and `not_committed` with `not_committed_count`. A later
-  delivery does not read the pull request or its branch again: it says what
-  was read and when, and names the changes the workspace holds uncommitted
-  then.
+  a pending catch-up, the report). Twenty paths or fewer are all named; above
+  twenty it names the first twenty and says how many there are. It records
+  `changed_by_person` with the branch's head, `not_pushed`, and
+  `not_committed` (at most twenty paths) with `not_committed_count`, the
+  number of them in all, whatever it is. A later delivery does not read the
+  pull request or its branch again: it says what was read and when, and names
+  the changes the workspace holds uncommitted then.
 - merged by a person: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
