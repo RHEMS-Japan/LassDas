@@ -556,7 +556,10 @@ round for ever. The one exception is a checkout in which Git lists no changed
 path and no earlier delivery round committed one: work let through from there
 can end with nothing delivered, so it is let through only on a verdict that
 does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
-New files are read from Git's own list, so a name in Japanese or a new
+The same holds when whether anything changed cannot be told (no checkout, or
+Git cannot read it, or not within the review's 60 seconds): the delivery
+reads the checkout on its own and waits longer, so it may still find no
+change. New files are read from Git's own list, so a name in Japanese or a new
 symbolic link reaches the reviewer as it is, and a name that is not UTF-8 with
 a replacement character. Git runs without the user's or the system's Git
 settings, as it does for the delivery, so the two agree on whether anything
