@@ -32,6 +32,8 @@ go run ./cmd/engine --config operator.json --issue EXAMPLE-1 --run-dir run
 go run ./cmd/engine --config operator.json --watch --run-dir queue
 # Fetch the current model catalog before selecting experiment models:
 go run ./cmd/engine --list-models
+# Have an edited configuration read and checked; nothing is started:
+go run ./cmd/engine --config operator.json --check
 ```
 
 `operator.json` configures `router.mode` (`jev` or `llm`), routing endpoints,
@@ -194,6 +196,69 @@ rollout without starting unrelated tickets; it is not an input format or an
 assessment of a request. Removing an ID does not abandon already accepted work:
 those queue records continue to resume and the existing stop mechanism applies.
 
+Optional `intake.category_ids` narrows new discovery to issues that carry at
+least one of the listed tracker categories. This is how a project shared with
+people's own tickets hands the runtime only what was marked for it: the
+category is set when the issue is filed, or added later, and the issue is
+accepted on the next scan after it carries the category. An issue without one
+is left alone and looked at again on every scan. Like the allowlist, this is
+operator scope, not an input format: nothing about the wording of a request is
+inspected, and removing a category from the setting or from an issue does not
+abandon work that was already accepted. Omitted or empty means no narrowing by
+category. With both settings an issue must be on the allowlist and carry a
+category.
+
+Use a category that exists only for this purpose. The runtime compares the
+category's number and nothing else, so a category people already use for
+something else hands over every issue that carries it and was created at or
+after the starting time, all at once on the first scan. It also does not look
+at who set the category: anyone who may edit the issue's categories hands it
+over, while the requester remains the account that filed the issue. That
+account, and the ones in `intake.stop_user_ids`, are the only ones whose stop
+or answer the runtime follows. `intake.category_on_accept`, described below, is
+a different setting: it marks what the runtime accepted and narrows nothing.
+
+The runtime refuses a configuration it cannot take as written, instead of
+running on something else. A key it does not know is named with its place,
+`unknown key "category_id" in intake`: `category_id` for `category_ids` would
+otherwise be no filter at all. A key's letter case must be the documented one.
+A key written twice in one object is refused too, since the later one would
+win without a word. A runtime that refuses its configuration does not start,
+and says why on standard error and, with `--log-file`, in that file, which is
+what the status page shows.
+
+`--check` has the configuration read and checked without starting anything:
+
+```sh
+go run ./cmd/engine --config operator.json --check
+```
+
+It runs the checks of a `--watch` start, so a configuration the watch would
+refuse is refused here in the same words, and prints which new issues the
+watch would take up, for example `intake: project 17, issues created at or after
+2026-01-02T00:00:00Z; only issues carrying one of the categories [77]` or
+`...; every such issue is accepted`, then `the configuration is accepted;
+nothing was started`, and exits. It creates no queue and no log file and makes
+no request to any service; it takes `--config` and nothing else. Run it on an
+edited configuration before the runtime is restarted with it. The watch prints
+the same line once at start, and its first scan follows at once: when a filter
+is new, set `intake.created_since` to the moment of the change and read the
+line from `--check` first, so that issues people filed earlier are not taken up
+before anyone has read it.
+
+A watch, and so the check, also refuses a configuration that still holds one
+of the shipped examples' placeholders: a URL whose host is under
+`example.invalid`, which cannot exist, or the paragraph the examples'
+`instructions` open with. It names the first one by its place, for example
+`roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
+placeholder host under example.invalid; a watch needs your own value there`.
+Only the host of a URL is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
+configuration with such a host would take up requests and fail each of them
+over and over, launching models every time. The commands an example expects
+the operator to supply are not checked here: a stage whose command is missing
+fails on every round.
+
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
 the original request. Its title and complete description go directly to the
@@ -206,6 +271,9 @@ restart even if discovery is unavailable or the issue disappears remotely.
 
 Execution slots (`intake.max_running`) go to accepted requests in the order they
 were filed: a request runs only when no earlier request is waiting for a slot.
+Filed, not handed over: an older issue that gains its category today goes ahead
+of newer requests already waiting, and those are not told again how many are
+ahead of them.
 Once a request has finished, the caches its roles' agents built in their home
 directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
 request's footprint and nobody reads them; the record, the request, the
@@ -361,7 +429,7 @@ other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
 past them. While a request waits, each poll reads that issue's comments inside
 the collector loop, so a slow tracker delays the loop by up to one interval for
-every waiting request. Nothing notifies the requester beyond the posted comment
+every waiting request, and for every request held for the model budget. Nothing notifies the requester beyond the posted comment
 itself, and an unanswered question waits indefinitely unless someone stops it.
 
 ### Stages instead of roles
@@ -471,8 +539,10 @@ the run to its first stage. After that no routing decision exists at all.
 this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
 check of the delivered branch are that image's fixed processes,
 `deliver_git.py` and `verify_merged.py` under `/opt/ticket-automation/scripts`
-(copied there from `harnesses/`; they are not part of this bundle), and every
-checkout comes from the image's mirror of the delivery repository. Its other
+(copied there from `harnesses/`; they are not part of this bundle). Every
+checkout comes from `TASK_REPOSITORY`, which holds a placeholder URL under
+`example.invalid` until the operator names the image's mirror of the delivery
+repository there, so a watch refuses the example until then. Its other
 command stages run operator-supplied programs under
 `/opt/ticket-automation/operator`: a build, a test run, and a script that reads
 the stored comments back and passes when one of them, looked through newest
@@ -482,10 +552,13 @@ chose, a stage's sentence or a restart notice, can follow it, and a check that
 needs the report to be last then fails on every launch, sending the work back
 for good. Those programs are yours to write (`deploy/ticket-engine` carries
 examples of all three); the engine only observes what they return. Every
-value an operator must replace is one distinct string, `example-owner/example-repository`
-for the repository and `example-integration-branch` for its branch, so one
-substitution sets each everywhere. The stopped-report role is not part of the
-run, and a stop from the requester still wins over everything here.
+value an operator must replace is one distinct string, so one substitution
+sets each everywhere: the placeholder URL for the checkouts' source,
+`example-owner/example-repository` for the delivery repository and
+`example-integration-branch` for its branch. Those two are not URLs, and the
+watch does not recognise them as the example's. The stopped-report role is not
+part of the run, and a stop from the requester still wins over everything
+here.
 
 **Known limit**: one worker may carry several stages, because a stage's process
 may be the same launcher as another's, and each launch receives the goal and
@@ -551,8 +624,11 @@ by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. An id left out leaves that turn alone; the runtime never
-reads or names a status. Each change is made once and recorded beside the
+the requester's stop, once the stop is recorded and, where a stop report is
+configured, that report is done. A stop written while a question waits moves
+the issue from `awaiting_requester` to `stopped` without passing through
+`processing` or the runtime's own account. An id left out leaves that turn alone; the
+runtime never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.
@@ -574,7 +650,8 @@ while 1 and 3 are the tracker's built-in open and resolved statuses.
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
-second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
+second comment), and when it resumes after the requester's answer (a stop written while a question
+waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
 ` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
@@ -634,7 +711,8 @@ stage is looked at, so a launch that the next launch of the same stage
 replaces within those two seconds is not declared; the list at delivery names
 it.
 
-`category_on_accept` adds that category to an accepted issue. `assign` hands
+`category_on_accept` adds that category to an accepted issue; it does not
+decide which issues are accepted (`intake.category_ids` does). `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
 hours from acceptance to the report in the issue's actual hours.
@@ -779,7 +857,7 @@ endpoint above and may point at a gateway instead; it must be an HTTPS URL
 without credentials or a query. The answer's `limit_remaining` is read as the
 balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
-stop stops it, nothing new is launched, and the requester is told once:
+stop stops it, no work is launched, and the requester is told once:
 
 > 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（人の操作は不要です）。
 
@@ -787,6 +865,14 @@ The balance keeps being read each tick. When it is back above the floor the
 request is launched again and says so once:
 
 > モデル利用枠が回復したため、自動処理を再開しました。
+
+An authorized stop does not wait for the balance: recording it launches no
+model. A request held below the floor is still read for a stop on every tick,
+whether its work was running, had not started, or waits on a question, and a
+request stopped while a question waits is told nothing about a pause. Where a
+stop report is configured, that report runs as soon as the stop is recorded,
+below the floor too, and uses the key, exactly as after the stop of a running
+request.
 
 The pause and the recovery alternate, so each episode gets one line of each. An
 endpoint that cannot be read is not evidence of an empty budget: it never

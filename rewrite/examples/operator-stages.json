@@ -108,7 +108,7 @@
             "PYTHONDONTWRITEBYTECODE": "1",
             "TERMINAL_ENV": "local",
             "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "OMP_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1"
@@ -154,7 +154,7 @@
             "PYTHONDONTWRITEBYTECODE": "1",
             "TERMINAL_ENV": "local",
             "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "OMP_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1"
@@ -202,7 +202,7 @@
             "PYTHONDONTWRITEBYTECODE": "1",
             "TERMINAL_ENV": "local",
             "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "OMP_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1"
@@ -239,7 +239,7 @@
           ],
           "instructions": "Run the operator's build. Its exit status is the observation; it returns no report and no approval.",
           "env": {
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"
           }
         },
@@ -264,7 +264,7 @@
           ],
           "instructions": "Run the operator's tests. Its exit status is the observation; it returns no report and no approval.",
           "env": {
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"
           }
         }
@@ -297,7 +297,7 @@
           ],
           "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, as often as a blocking defect is found; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
           "env": {
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "REVIEW_MODEL_URL": "https://openrouter.ai/api/v1/chat/completions",
             "REVIEW_MODEL": "moonshotai/kimi-k3",
@@ -342,7 +342,7 @@
           "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, opens or reuses one pull request and merges it, and writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it.",
           "env": {
             "PYTHONDONTWRITEBYTECODE": "1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "DELIVERY_REPOSITORY": "example-owner/example-repository",
             "DELIVERY_BASE_BRANCH": "example-integration-branch",
@@ -386,7 +386,7 @@
           "instructions": "Run the image's fixed post-delivery check. It fetches the integration branch from the delivery service, confirms the recorded merge is in it, and runs the operator's build and tests against it. Its exit status is the observation.",
           "env": {
             "PYTHONDONTWRITEBYTECODE": "1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "DELIVERY_REPOSITORY": "example-owner/example-repository",
             "DELIVERY_BASE_BRANCH": "example-integration-branch",
@@ -433,7 +433,7 @@
             "PYTHONDONTWRITEBYTECODE": "1",
             "TERMINAL_ENV": "local",
             "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
             "OMP_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1"
@@ -471,7 +471,7 @@
           ],
           "instructions": "Read the assigned issue's stored comments and compare them, newest first, with report/result.md. Exit 0 only when one stored comment is exactly that text. Do not require it to be the last comment: the runtime's own notices, such as a declaration of the model a launch chose, a stage's sentence or a restart notice, can follow the report.",
           "env": {
-            "TASK_REPOSITORY": "/var/lib/ticket-automation/mirror/example-owner/example-repository.git",
+            "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch"
           },
           "tracker_access": "read"

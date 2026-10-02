@@ -333,7 +333,8 @@ the paths, so the next `work` launch resolves them in place. With `squash` or
 directory: its delivery and merged check are the image's fixed processes
 under `/opt/ticket-automation/scripts`, its build, tests and report check are
 the operator scripts of section 6, and every checkout comes from the Pod's
-mirror. Every value you must change is one distinct string in it.
+mirror once you name it in place of the example's placeholder URL. Every value
+you must change is one distinct string in it.
 
 ### Make your copy with one command
 
@@ -345,17 +346,21 @@ outside any repository:
 sed -e 's#https://tracker.example.invalid/api/v2#https://<space>.backlog.com/api/v2#' \
     -e 's#"project_id": 0,#"project_id": <project-id>,#' \
     -e 's#REPLACE_WITH_RFC3339_ACCEPTANCE_START#2100-01-01T00:00:00Z#' \
+    -e 's#https://repository.example.invalid/example-owner/example-repository.git#/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git#g' \
     -e 's#example-owner/example-repository#<owner>/<repository-name>#g' \
     -e 's#example-integration-branch#<integration-branch>#g' \
     rewrite/examples/operator-stages.json > operator.json
 ```
+
+The order of the lines matters: the fourth replaces the whole placeholder URL
+before the fifth replaces what is left of `example-owner/example-repository`.
 
 | What the command sets | Where it comes from |
 | --- | --- |
 | `backlog.base_url` | your space's API address (`.backlog.jp` for a space there) |
 | `intake.project_id` | section 2 |
 | `intake.created_since` | `2100-01-01T00:00:00Z` on purpose: the engine accepts nothing until section 8 opens the intake. The engine starts with this value; issues are taken only when they were created at or after it. |
-| `<owner>/<repository-name>` | the delivery repository (`DELIVERY_REPOSITORY`) and the mirror's path (every `TASK_REPOSITORY`, `/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`, the same as `MIRROR_PATH` in the StatefulSet) |
+| `<owner>/<repository-name>` | the mirror's path in every `TASK_REPOSITORY` (`/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`, the same as `MIRROR_PATH` in the StatefulSet), in place of the example's placeholder URL under `example.invalid`; and the delivery repository (`DELIVERY_REPOSITORY`) |
 | `<integration-branch>` | the branch every checkout starts from (`TASK_BRANCH`) and the delivery merges into (`DELIVERY_BASE_BRANCH`) |
 
 Then open `operator.json` and replace the first sentence of `instructions`
