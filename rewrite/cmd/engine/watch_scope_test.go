@@ -190,36 +190,121 @@ func TestCategoryScopeAndAllowlistBothHold(t *testing.T) {
 
 // A setting spelled wrong is not a setting left out. Before this, a category
 // filter written under a name the engine does not know was skipped, and the
-// engine took up every issue of the project. Now it names the key and starts
+// engine took up every issue of the project; written twice, the later one won
+// without a word. Now the engine names the key and where it is, and starts
 // nothing.
-func TestConfigurationKeyTheEngineDoesNotKnowIsRefused(t *testing.T) {
+func TestConfigurationKeyTheEngineDoesNotTakeIsRefused(t *testing.T) {
 	for _, tc := range []struct{ text, want string }{
-		{`{"intake":{"project_id":17,"category_id":[77]}}`, `unknown field "category_id"`},
-		{`{"intake":{"project_id":17,"categories":[77]}}`, `unknown field "categories"`},
-		{`{"intake":{"project_id":17},"category_ids":[77]}`, `unknown field "category_ids"`},
-		{`{"intake":{"project_id":17,"stop_user_id":[5]}}`, `unknown field "stop_user_id"`},
-		{`{"roles":[{"name":"implement","processes":[{"name":"worker","tracker_acess":"read"}]}]}`, `unknown field "tracker_acess"`},
+		{`{"intake":{"project_id":17,"category_id":[77]}}`, "unknown key intake.category_id"},
+		{`{"intake":{"project_id":17,"categories":[77]}}`, "unknown key intake.categories"},
+		{`{"intake":{"project_id":17},"category_ids":[77]}`, "unknown key category_ids"},
+		{`{"intake":{"project_id":17,"stop_user_id":[5]}}`, "unknown key intake.stop_user_id"},
+		{`{"roles":[{"name":"a","processes":[{"name":"w"}]},{"name":"b","processes":[{"name":"w"},{"name":"x","tracker_acess":"read"}]}]}`, "unknown key roles[1].processes[1].tracker_acess"},
+		// The decoder matches a struct's keys without regard to letter case,
+		// so this would be the same setting twice, the empty one last.
+		{`{"intake":{"project_id":17,"category_ids":[77],"Category_IDs":[]}}`, "unknown key intake.Category_IDs"},
+		{`{"intake":{"project_id":17,"category_ids":[77],"category_ids":[]}}`, "intake.category_ids is written twice"},
+		{`{"intake":{"project_id":17,"created_since":"2026-06-01T00:00:00Z","created_since":"2020-01-01T00:00:00Z"}}`, "intake.created_since is written twice"},
+		{`{"intake":{"project_id":17,"category_ids":[77]},"intake":{"project_id":17}}`, "intake is written twice"},
+		{`{"roles":[{"name":"a","processes":[{"name":"w","env":{"A":"1","A":"2"}}]}]}`, "roles[0].processes[0].env.A is written twice"},
 		{`{"intake":{"project_id":17}} {"intake":{"project_id":18}}`, "text follows the configuration object"},
+		{`{"intake":{"project_id":"17"}}`, "cannot unmarshal string"},
+		{`{"intake":[17]}`, "cannot unmarshal array"},
+		{`{"intake":{"project_id":17}`, "unexpected EOF"},
 	} {
-		if _, err := readConfig([]byte(tc.text)); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := readConfig([]byte(tc.text)); err == nil || !strings.HasPrefix(err.Error(), "reading the configuration: ") || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: %v", tc.text, err)
 		}
 	}
-	cfg, err := readConfig([]byte(`{"intake":{"project_id":17,"category_ids":[77,78],"stop_user_ids":[5]}}` + "\n"))
-	if err != nil || len(cfg.Intake.CategoryIDs) != 2 || len(cfg.Intake.StopUserIDs) != 1 {
+	// What the engine takes: its own names, each once; in a map, names that
+	// differ only by letter case are different names.
+	cfg, err := readConfig([]byte(`{"intake":{"project_id":17,"category_ids":[77,78],"stop_user_ids":[5]},"roles":[{"name":"a","processes":[{"name":"w","env":{"http_proxy":"x","HTTP_PROXY":"x"}}]}]}` + "\n"))
+	if err != nil || len(cfg.Intake.CategoryIDs) != 2 || len(cfg.Intake.StopUserIDs) != 1 || len(cfg.Roles[0].Processes[0].Env) != 2 {
 		t.Fatalf("known keys: %+v, %v", cfg.Intake, err)
 	}
+	// What the engine writes for each request, it reads back.
+	written, err := json.Marshal(watchConfiguration(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readConfig(written); err != nil {
+		t.Fatalf("the engine refused its own writing: %v", err)
+	}
 	directory := t.TempDir()
-	path, root := filepath.Join(directory, "operator.json"), filepath.Join(directory, "must-not-exist")
+	path, root, logFile := filepath.Join(directory, "operator.json"), filepath.Join(directory, "must-not-exist"), filepath.Join(directory, "engine.log")
 	if err := os.WriteFile(path, []byte(`{"intake":{"project_id":17,"created_since":"2026-01-02T00:00:00Z","category_id":[77]}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err = run(context.Background(), []string{"--config", path, "--watch", "--run-dir", root}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), `unknown field "category_id"`) {
+	err = run(context.Background(), []string{"--config", path, "--watch", "--run-dir", root, "--log-file", logFile}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unknown key intake.category_id") {
 		t.Fatalf("the engine started on a misspelled filter: %v", err)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("a refused configuration wrote state")
+	}
+	// The status page shows the log file, so the reason is there too.
+	if said, err := os.ReadFile(logFile); err != nil || string(said) != "the runtime stopped: reading the configuration: unknown key intake.category_id\n" {
+		t.Fatalf("the log file says %q, %v", said, err)
+	}
+}
+
+// The operator can have a configuration read and checked without starting
+// anything: the same checks as a real start, the line that says which issues
+// a watch would take up, and no queue, no log file and no request to any
+// service. A configuration the engine would refuse at start is refused here.
+func TestCheckReadsTheConfigurationAndStartsNothing(t *testing.T) {
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		t.Errorf("a check made a request: %s", r.URL)
+		return nil, http.ErrNotSupported
+	})
+	cfg := watchConfiguration(t)
+	cfg.Intake.CategoryIDs = []int64{77}
+	directory := t.TempDir()
+	write := func(cfg config) string {
+		t.Helper()
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "operator.json")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	var output strings.Builder
+	if err := run(context.Background(), []string{"--config", write(cfg), "--check"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	want := "intake: project 17, issues created at or after 2026-01-02T00:00:00Z; only issues carrying one of the categories [77]\nthe configuration is accepted; nothing was started\n"
+	if output.String() != want {
+		t.Fatalf("the check said:\n%s", output.String())
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("a check wrote beside the configuration: %v, %v", entries, err)
+	}
+	if _, err := os.Stat("queue"); !os.IsNotExist(err) {
+		t.Fatal("a check created a queue")
+	}
+	// The watch's own checks run too.
+	cfg.Intake.CategoryIDs = []int64{0}
+	output.Reset()
+	if err := run(context.Background(), []string{"--config", write(cfg), "--check"}, &output, io.Discard); err == nil || err.Error() != "intake.category_ids must contain positive category ids" || output.Len() != 0 {
+		t.Fatalf("an invalid watch passed the check: %v %q", err, output.String())
+	}
+	cfg.Intake.CategoryIDs, cfg.Intake.CreatedSince = nil, "yesterday"
+	if err := run(context.Background(), []string{"--config", write(cfg), "--check"}, &output, io.Discard); err == nil || !strings.Contains(err.Error(), "intake.created_since") {
+		t.Fatalf("an invalid starting time passed the check: %v", err)
+	}
+	// It is a check, not a way to start: nothing else goes with it.
+	for _, extra := range [][]string{{"--watch"}, {"--run-dir", filepath.Join(directory, "queue")}, {"--log-file", filepath.Join(directory, "engine.log")}, {"--request", "request.txt"}} {
+		if err := run(context.Background(), append([]string{"--config", write(watchConfiguration(t)), "--check"}, extra...), io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--check reads --config and starts nothing") {
+			t.Fatalf("--check with %v: %v", extra, err)
+		}
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 1 {
+		t.Fatalf("a refused check wrote beside the configuration: %v, %v", entries, err)
 	}
 }
 

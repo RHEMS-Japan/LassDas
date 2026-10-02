@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -57,10 +58,19 @@ func routingRoleDescription(role chain.Role) string {
 // A key the engine does not know is refused, not skipped. A setting spelled
 // wrong would otherwise be no setting at all: a misspelled intake filter takes
 // up every issue of the project, a misspelled stop list leaves the operator
-// unable to stop a request. The engine says which key it does not know and
-// starts nothing.
+// unable to stop a request. The same goes for a key written twice in one
+// object, where the later one would win without a word. The engine says which
+// key it is and where, and starts nothing.
 func readConfig(data []byte) (config, error) {
 	var cfg config
+	keys := json.NewDecoder(bytes.NewReader(data))
+	if err := checkKeys(keys, reflect.TypeOf(cfg), ""); err != nil {
+		// A text that is not JSON at all is described by the decoder below.
+		var refused keyRefusal
+		if errors.As(err, &refused) {
+			return config{}, fmt.Errorf("reading the configuration: %w", err)
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
@@ -72,6 +82,91 @@ func readConfig(data []byte) (config, error) {
 	return cfg, nil
 }
 
+// keyRefusal is a key of the configuration text that the engine does not
+// take: one it does not know, or one written twice.
+type keyRefusal string
+
+func (r keyRefusal) Error() string { return string(r) }
+
+// checkKeys reads one JSON value beside the Go type it will be decoded into.
+// In an object decoded into a struct, every key must be one of the struct's
+// names, spelled exactly: the decoder itself matches without regard to letter
+// case, so `Category_IDs` beside `category_ids` would be the same setting
+// twice. In any object a key may be written once. A value whose type is not
+// known here (a map's values, a list's items) is still walked for the keys
+// below it.
+func checkKeys(decoder *json.Decoder, expected reflect.Type, where string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	opening, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	for expected != nil && expected.Kind() == reflect.Pointer {
+		expected = expected.Elem()
+	}
+	var fields map[string]reflect.Type
+	var item reflect.Type
+	if expected != nil {
+		switch expected.Kind() {
+		case reflect.Struct:
+			fields = map[string]reflect.Type{}
+			for i := 0; i < expected.NumField(); i++ {
+				field := expected.Field(i)
+				name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+				if !field.IsExported() || name == "-" {
+					continue
+				}
+				if name == "" {
+					name = field.Name
+				}
+				fields[name] = field.Type
+			}
+		case reflect.Map:
+			if opening == '{' {
+				item = expected.Elem()
+			}
+		case reflect.Slice, reflect.Array:
+			if opening == '[' {
+				item = expected.Elem()
+			}
+		}
+	}
+	// A list where an object belongs is for the decoder to describe.
+	if opening != '{' {
+		fields = nil
+	}
+	seen := map[string]bool{}
+	for index := 0; decoder.More(); index++ {
+		at, next := fmt.Sprintf("%s[%d]", where, index), item
+		if opening == '{' {
+			name, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, _ := name.(string)
+			at = strings.TrimPrefix(where+"."+key, ".")
+			if seen[key] {
+				return keyRefusal(fmt.Sprintf("%s is written twice; the later one would win without a word", at))
+			}
+			seen[key] = true
+			if fields != nil {
+				known := false
+				if next, known = fields[key]; !known {
+					return keyRefusal(fmt.Sprintf("unknown key %s", at))
+				}
+			}
+		}
+		if err := checkKeys(decoder, next, at); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -81,7 +176,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string, output, log io.Writer) error {
+func run(ctx context.Context, args []string, output, log io.Writer) (failure error) {
 	flags := flag.NewFlagSet("engine", flag.ContinueOnError)
 	flags.SetOutput(log)
 	configPath := flags.String("config", "", "configured roles and router")
@@ -91,8 +186,12 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	watch := flags.Bool("watch", false, "poll the explicitly configured intake into separate request directories")
 	directory := flags.String("run-dir", "", "private directory for this request's history")
 	logFile := flags.String("log-file", "", "also append the runtime's own observations to this file (the status page reads it)")
+	check := flags.Bool("check", false, "read and validate the configuration, say which issues a watch would take up, and start nothing")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *check && (*configPath == "" || *requestPath != "" || *issue != "" || *directory != "" || *logFile != "" || *watch || *showModels || flags.NArg() != 0) {
+		return errors.New("--check reads --config and starts nothing; do not combine it with anything else")
 	}
 	if *logFile != "" {
 		file, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -100,6 +199,13 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 			return fmt.Errorf("opening --log-file: %w", err)
 		}
 		defer file.Close()
+		// The status page shows this file, not the process's standard error.
+		// A runtime that could not start, or stopped, says why here too.
+		defer func() {
+			if failure != nil && !errors.Is(failure, context.Canceled) {
+				fmt.Fprintln(file, "the runtime stopped: "+failure.Error())
+			}
+		}()
 		log = io.MultiWriter(log, file)
 	}
 	if *showModels {
@@ -108,9 +214,9 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		}
 		return writeModelList(ctx, output)
 	}
-	if *configPath == "" || *directory == "" || flags.NArg() != 0 ||
+	if !*check && (*configPath == "" || *directory == "" || flags.NArg() != 0 ||
 		(*watch && (*requestPath != "" || *issue != "")) ||
-		(!*watch && (*requestPath == "") == (*issue == "")) {
+		(!*watch && (*requestPath == "") == (*issue == ""))) {
 		return errors.New("provide --config, --run-dir and either --watch or exactly one of --request/--issue")
 	}
 	data, err := os.ReadFile(*configPath)
@@ -217,6 +323,22 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		router = chain.OneRoleRouter{Role: cfg.Roles[0].Name}
 	default:
 		return errors.New("choose router.mode jev, llm or stages")
+	}
+	if *check {
+		// Everything above and the watch's own checks ran as they would at a
+		// real start. Nothing was created, read from a service or written.
+		if cfg.Intake != nil {
+			if cfg.AssignedIssue != "" {
+				return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
+			}
+			_, since, _, _, err := watchSettings(&cfg, "queue")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(output, intakeScope(cfg, since))
+		}
+		fmt.Fprintln(output, "the configuration is accepted; nothing was started")
+		return nil
 	}
 	if *watch {
 		if cfg.AssignedIssue != "" {

@@ -91,43 +91,47 @@ func (w *serialLog) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+// watchSettings checks everything about a watch that can be checked before
+// the queue is touched, and returns what the watch runs on: the queue's
+// directory, the starting time, the seconds between scans and the slots.
+func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
+	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
 	if cfg.Intake == nil || cfg.Intake.ProjectID <= 0 {
-		return errors.New("watch requires an explicit intake.project_id")
+		return fail(errors.New("watch requires an explicit intake.project_id"))
 	}
-	if err := validateStopReporter(cfg); err != nil {
-		return err
+	if err := validateStopReporter(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateQuestionRole(cfg); err != nil {
-		return err
+	if err := validateQuestionRole(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateNotices(cfg); err != nil {
-		return err
+	if err := validateNotices(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := prepareStages(&cfg); err != nil {
-		return err
+	if err := prepareStages(cfg); err != nil {
+		return fail(err)
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	if err != nil {
-		return errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp")
+		return fail(errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp"))
 	}
 	delay, capacity := cfg.Intake.PollIntervalSeconds, cfg.Intake.MaxRunning
 	if delay < 0 || time.Duration(delay) > time.Duration(1<<63-1)/time.Second || capacity < 0 {
-		return errors.New("intake interval and capacity must be positive")
+		return fail(errors.New("intake interval and capacity must be positive"))
 	}
 	for _, id := range cfg.Intake.StopUserIDs {
 		if id <= 0 {
-			return errors.New("intake.stop_user_ids must contain positive user ids")
+			return fail(errors.New("intake.stop_user_ids must contain positive user ids"))
 		}
 	}
 	for _, id := range cfg.Intake.IssueIDs {
 		if id <= 0 {
-			return errors.New("intake.issue_ids must contain positive issue ids")
+			return fail(errors.New("intake.issue_ids must contain positive issue ids"))
 		}
 	}
 	for _, id := range cfg.Intake.CategoryIDs {
 		if id <= 0 {
-			return errors.New("intake.category_ids must contain positive category ids")
+			return fail(errors.New("intake.category_ids must contain positive category ids"))
 		}
 	}
 	if delay == 0 {
@@ -138,10 +142,18 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	}
 	root, err = filepath.Abs(root)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	// Validate binding before discovering/accepting any work.
-	if _, err := bindRequestConfig(cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+		return fail(err)
+	}
+	return root, since, delay, capacity, nil
+}
+
+func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+	root, since, delay, capacity, err := watchSettings(&cfg, root)
+	if err != nil {
 		return err
 	}
 	w := &serialLog{writer: log}
@@ -174,7 +186,7 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 // takes up. An operator who meant to narrow the intake reads here whether the
 // engine understood it that way before the first issue is accepted.
 func intakeScope(cfg config, since time.Time) string {
-	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339))
+	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
 	ids, categories := cfg.Intake.IssueIDs, cfg.Intake.CategoryIDs
 	switch {
 	case len(ids) > 0 && len(categories) > 0:

@@ -32,6 +32,8 @@ go run ./cmd/engine --config operator.json --issue EXAMPLE-1 --run-dir run
 go run ./cmd/engine --config operator.json --watch --run-dir queue
 # Fetch the current model catalog before selecting experiment models:
 go run ./cmd/engine --list-models
+# Have an edited configuration read and checked; nothing is started:
+go run ./cmd/engine --config operator.json --check
 ```
 
 `operator.json` configures `router.mode` (`jev` or `llm`), routing endpoints,
@@ -208,18 +210,40 @@ category.
 
 Use a category that exists only for this purpose. The runtime compares the
 category's number and nothing else, so a category people already use for
-something else hands over every issue that carries it, all at once on the first
-scan. It also does not look at who set the category: anyone who may edit the
-issue's categories hands it over, while the requester remains the account that
-filed the issue. That account, and the ones in `intake.stop_user_ids`, are the
-only ones whose stop or answer the runtime follows.
+something else hands over every issue that carries it and was created at or
+after the starting time, all at once on the first scan. It also does not look
+at who set the category: anyone who may edit the issue's categories hands it
+over, while the requester remains the account that filed the issue. That
+account, and the ones in `intake.stop_user_ids`, are the only ones whose stop
+or answer the runtime follows. `intake.category_on_accept`, described below, is
+a different setting: it marks what the runtime accepted and narrows nothing.
 
-The runtime refuses a configuration key it does not know and names it, instead
-of skipping it: `category_id` for `category_ids` would otherwise be no filter
-at all. At start it also says in its log which new issues it takes up, for
-example `intake: project 17, issues created at or after 2026-01-02T00:00:00Z;
-only issues carrying one of the categories [77]`, or `...; every such issue is
-accepted`. Read that line before filing the first request.
+The runtime refuses a configuration it cannot take as written, instead of
+running on something else. A key it does not know is named with its place,
+`unknown key intake.category_id`: `category_id` for `category_ids` would
+otherwise be no filter at all. A key's letter case must be the documented one.
+A key written twice in one object is refused too, since the later one would
+win without a word. A runtime that refuses its configuration does not start,
+and says why on standard error and, with `--log-file`, in that file, which is
+what the status page shows.
+
+`--check` has the configuration read and checked without starting anything:
+
+```sh
+go run ./cmd/engine --config operator.json --check
+```
+
+It runs the checks of a real start, prints which new issues a watch would take
+up, for example `intake: project 17, issues created at or after
+2026-01-02T00:00:00Z; only issues carrying one of the categories [77]` or
+`...; every such issue is accepted`, then `the configuration is accepted;
+nothing was started`, and exits. It creates no queue and no log file and makes
+no request to any service; it takes `--config` and nothing else. Run it on an
+edited configuration before the runtime is restarted with it. The watch prints
+the same line once at start, and its first scan follows at once: when a filter
+is new, set `intake.created_since` to the moment of the change and read the
+line from `--check` first, so that issues people filed earlier are not taken up
+before anyone has read it.
 
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
@@ -656,7 +680,8 @@ stage is looked at, so a launch that the next launch of the same stage
 replaces within those two seconds is not declared; the list at delivery names
 it.
 
-`category_on_accept` adds that category to an accepted issue. `assign` hands
+`category_on_accept` adds that category to an accepted issue; it does not
+decide which issues are accepted (`intake.category_ids` does). `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
 hours from acceptance to the report in the issue's actual hours.
