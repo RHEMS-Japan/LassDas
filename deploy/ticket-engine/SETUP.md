@@ -79,9 +79,10 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
   cluster that ran it was not recorded. Look up the feature gates
   `UserNamespacesSupport`, `ProcMountType` and `SidecarContainers` for your
   version; the nodes' operating system and container runtime must support
-  user namespaces as well. The server-side dry run in section 6 shows whether
-  the API server accepts the Pod, and only the Pod's events show whether a node
-  can run it ([section 11](#the-pod-does-not-become-ready)). One installation
+  user namespaces as well. The server-side dry run in section 6 shows what
+  admission does to the StatefulSet; whether the Pod itself is admitted, and
+  whether a node can run it, shows only in the StatefulSet's and the Pod's
+  events ([section 11](#the-pod-does-not-become-ready)). One installation
   runs this StatefulSet on arm64 nodes with a 20Gi ReadWriteOnce volume from
   its cluster's block storage class.
 - **A namespace that admits this Pod.** Pod Security admission at `baseline`
@@ -595,9 +596,11 @@ POD=<consumer>-ticket-engine-0
    `procMount` `Unmasked` and `seccompProfile` `Unconfined`; every other
    container with `RuntimeDefault`; and `NET_ADMIN` added only for
    `network-v4` and `network-v6`. Anything else means an admission controller
-   changed the Pod: stop and find out why. If the API server refuses
+   changed the StatefulSet: stop and find out why. If the API server refuses
    `restartPolicy` on an init container, move the `mirror` entry to
-   `containers` (the comment on that entry says what that costs).
+   `containers` (the comment on that entry says what that costs). Pod Security
+   is enforced on the Pod the StatefulSet creates, not on this dry run: a
+   refusal there shows in the StatefulSet's events after step 7.
 
 7. **The StatefulSet:**
 
@@ -606,8 +609,8 @@ POD=<consumer>-ticket-engine-0
    kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=10m
    ```
 
-   If the wait ends without the Pod ready, see
-   [section 11](#the-pod-does-not-become-ready).
+   If the wait ends without the Pod ready, or reports that there is no Pod,
+   see [section 11](#the-pod-does-not-become-ready).
 
 8. **The status page's Service**, and, only if you decide to expose the page,
    its Ingress (`status-ingress.yaml.example`; read its comments first). The
