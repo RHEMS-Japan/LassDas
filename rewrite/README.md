@@ -650,43 +650,69 @@ way it goes is the findings of each call at those two levels, arguments that
 cannot be read, and words given instead of a call, cut where findings are;
 findings further in, or inside a list, are not read. The command
 exits 1 on a blocking verdict, which sends the work back to the `work` stage,
-and 0
-otherwise; the findings are printed, so they join the history as an
+and 0 on a verdict that does not object; without a verdict it does neither
+(below). The findings are printed, so they join the history as an
 observation the worker and the report writer read, and the command writes
 nothing into the workspace (its send-back counter and log live in the
-process's own directory, `TASK_HOME`). The runtime reads
-the exit status and nothing else. There is no cap on send-backs: the review
-sends the work back for as long as it finds a blocking defect, the count so far
-is printed with each verdict, and a run that will not converge is ended by the
-requester's stop comment, not by a limit.
+process's own directory, `TASK_HOME`). The runtime reads the exit status and
+nothing else. There is no cap on send-backs: the review sends the work back
+for as long as it finds a blocking defect, the count so far is printed with
+each verdict, and a run that will not converge is ended by the requester's
+stop comment, not by a limit.
 
 No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that
 does not object and 1 only on one that does; without a verdict it does
 neither. Trouble with the model service (a connection that fails or times
 out, an HTTP error, a reply without a verdict or with one whose `blocking` is
-not plain), and any unexpected error, is waited out: the models
-named in `REVIEW_MODELS` (newline- or comma-separated, in order of preference;
-`REVIEW_MODEL` alone counts as the only one) are asked in turn, round after
-round, the wait between rounds growing from `REVIEW_RETRY_SECONDS` (5) to
+not plain), and any unexpected error, is waited out: the models named in
+`REVIEW_MODELS` (newline- or comma-separated, in order of preference; a model
+named twice is asked once a round) are asked in turn, round after round, the
+wait between rounds growing from `REVIEW_RETRY_SECONDS` (5) to
 `REVIEW_RETRY_CAP_SECONDS` (300), and the printed result names the model that
-gave the verdict. What asking again cannot
-get past, a setting that is missing or mistyped, an endpoint that is not
-HTTPS, a credential that is not set, test commands that cannot be read, holds
-the review: the reason is printed once and then a short line every
+gave the verdict. When `REVIEW_MODELS` is set, `REVIEW_MODEL` is not used;
+without it, `REVIEW_MODEL` is the only model. Whichever model answers first
+reviews, so every model in the list should come from a different publisher
+than the worker, as the first one does. An HTTP error is said with what the
+service answered, the credential scrubbed and cut to about 200 characters;
+400, 401, 403, 404, 413 and 422 are named as the operator's to fix (the
+credential, the model id, a request the service refuses), and asking goes
+on, the other models included. What asking again cannot get past, a setting
+that is missing or mistyped (among them `REVIEW_UNAVAILABLE` with any value
+but `pass`, read in any letter case), an endpoint that is not HTTPS, a
+credential that is not set, test commands that cannot be read, holds the
+review: the reason is printed once and then a short line every
 `REVIEW_HOLD_SECONDS` (900), and the stage waits there. A workspace or a
 `TASK_HOME` that cannot be used, or a change that cannot be read, is looked at
-again at each of those intervals, and the review goes on once it can. While it
-waits, the command says on stderr what is happening whenever that changes
-(which model, why it failed, when it asks again, and what a model wrote
-without a plain verdict), so the status page's live view shows it without a
-line per request; what was written without a verdict is also kept in the
-result the review ends with. The runtime's own notice tells the
-requester when a stage runs long; an operator who fixes a setting restarts the
-engine, which launches the stage afresh. The send-back counter and the log
-only inform: a verdict stands whether or not they could be saved. When
-`REVIEW_DIFF_PATHS` matches none of what changed, the reviewer is shown the
-whole change instead of none of it.
+again at each of those intervals, and the review goes on once it can. An
+unexpected error starts the review again at the same growing waits as asking
+again, the reason said again every `REVIEW_HOLD_SECONDS`; the operator's test
+commands run once a review, not at every start. While it waits, the command
+says on stderr what is happening whenever that changes (which model, why it
+failed, when it asks again, what a model wrote without a plain verdict), and
+again every `REVIEW_HOLD_SECONDS` while nothing changes, so the status page's
+live view shows it without a line per request. A reply without a plain verdict
+is also written to `review.md` as it comes, and kept in the result the review
+ends with. The send-back counter and the log only inform: a verdict stands
+whether or not they could be saved. When `REVIEW_DIFF_PATHS` matches none of
+what changed, the reviewer is shown the whole change instead of none of it,
+cut like any diff, as the note above it says; when the paths match part of
+the change, a note says that the rest is not shown.
+
+While the review waits, its request keeps its run slot: a slot is given back
+only when the run ends, so with `max_running` 1, as in the examples, every
+later request waits its turn behind it. The operator sees why in the status
+page's live view, in the lines above; the requester hears only the runtime's
+notice that a stage is running long, after `intake.stall_notice_minutes` (90)
+and then every six hours. There are three ways out: fix what keeps the verdict
+from coming (a setting, the credential, a model id) and restart the engine,
+which launches the stage afresh; a stop comment from the requester, which
+ends the run; or the model service coming back. Each request to a model
+carries the change and the test output: once the waits reach
+`REVIEW_RETRY_CAP_SECONDS`, every model in `REVIEW_MODELS` is asked once
+every 300 seconds: about 100 rounds in eight hours, so up to about 100
+requests with one model and 300 with three. A longer
+`REVIEW_RETRY_CAP_SECONDS` asks less often.
 
 `REVIEW_UNAVAILABLE=pass` is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after

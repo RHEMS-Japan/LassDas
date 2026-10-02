@@ -27,20 +27,25 @@ call at those two levels, arguments that cannot be read, and words given
 instead of a call, cut where findings are; findings further in, or inside a
 list, are not read.
 Trouble with the model service (a connection that fails or times out, an
-HTTP error, a reply without a verdict), and anything unexpected, is waited
-out: the models
-are asked in the operator's order, round after round, the wait between
-rounds growing from REVIEW_RETRY_SECONDS to REVIEW_RETRY_CAP_SECONDS, and the
-printed result names the model that gave the verdict. What asking again
-cannot get past (a setting that is missing or mistyped, an endpoint that is
-not HTTPS, a credential that is not set, test commands that cannot be read)
-holds the review: the reason is said once, then a short line every
-REVIEW_HOLD_SECONDS. A workspace or TASK_HOME that cannot be used, or a
-change that cannot be read, is looked at again at each of those, and the
-review goes on once it can. What the review is doing is said on stderr when
-it changes, for the live view. The runtime's own notice tells the requester
-when a stage runs long; an operator who fixes a setting restarts the engine,
-which launches the stage afresh.
+HTTP error, a reply without a verdict) is waited out: the models are asked
+in the operator's order, a model named twice once a round, round after
+round, the wait between rounds growing from REVIEW_RETRY_SECONDS to
+REVIEW_RETRY_CAP_SECONDS, and the printed result names the model that gave
+the verdict. An HTTP error is said with what the service answered, scrubbed
+and cut to about 200 characters; 400, 401, 403, 404, 413 and 422 are named
+as the operator's to fix, and the other models are still asked. What asking
+again cannot get past (a setting that is missing or mistyped, an endpoint
+that is not HTTPS, a credential that is not set, test commands that cannot
+be read, a REVIEW_UNAVAILABLE other than pass or none) holds the review: the
+reason is said once, then a short line every REVIEW_HOLD_SECONDS. A
+workspace or TASK_HOME that cannot be used, or a change that cannot be read,
+is looked at again at each of those, and the review goes on once it can.
+Anything unexpected starts the review again at the growing waits, said again
+every REVIEW_HOLD_SECONDS, without running the operator's test commands
+again. What the review is doing is said on stderr when it changes, and
+again every REVIEW_HOLD_SECONDS while it does not, for the live view. The
+runtime's own notice tells the requester when a stage runs long; an operator
+who fixes a setting restarts the engine, which launches the stage afresh.
 
 REVIEW_UNAVAILABLE=pass is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after
@@ -58,7 +63,9 @@ When no file was changed at all, the reviewer is told so in plain words and
 asked whether the request is met by the repository exactly as it is: a
 request whose answer is that nothing needs to change reaches review this way,
 and so does work that was never done. When REVIEW_DIFF_PATHS matches none of
-what changed, the whole change is shown instead of none of it.
+what changed, the whole change is shown instead of none of it, and the note
+above it says when that had to be cut; when the paths match part of the
+change, a note says that the rest is not shown.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -69,7 +76,7 @@ Environment (all from the operator, never from a role):
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
   TASK_HOME               the process's own directory, where the send-back counter and the log live
-  REVIEW_UNAVAILABLE      pass: deliver unreviewed work when no verdict can be obtained (default: hold)
+  REVIEW_UNAVAILABLE      pass, in any case: deliver unreviewed work when no verdict can be obtained (default: hold)
   REVIEW_TIMEOUT_SECONDS  the limit of one request (default 300)
   REVIEW_RETRY_SECONDS, REVIEW_RETRY_CAP_SECONDS: the first and the longest wait between rounds (default 5, 300)
   REVIEW_HOLD_SECONDS     the wait between looks while the review holds (default 900)
@@ -168,9 +175,12 @@ def seconds(name, default):
 
 def models():
     """The reviewing models in the operator's order of preference:
-    REVIEW_MODELS, newline- or comma-separated, or REVIEW_MODEL alone."""
-    listed = [name.strip() for name in os.environ.get("REVIEW_MODELS", "").replace(",", "\n").splitlines()
-              if name.strip()]
+    REVIEW_MODELS, newline- or comma-separated, or REVIEW_MODEL alone. A model
+    named twice is asked once a round."""
+    listed = []
+    for name in os.environ.get("REVIEW_MODELS", "").replace(",", "\n").splitlines():
+        if name.strip() and name.strip() not in listed:
+            listed.append(name.strip())
     return listed or [setting("REVIEW_MODEL")]
 
 
@@ -202,12 +212,14 @@ def run(command, cwd, timeout):
     """One operator command: what it printed, its exit status, or why it
     could not start. None of it is a verdict."""
     try:
-        finished = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        finished = subprocess.run(command, cwd=cwd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "$ %s\n(timed out after %d seconds)" % (" ".join(command), timeout)
     except OSError as error:
         return "$ %s\n(could not start: %s)" % (" ".join(command), error)
-    output = (finished.stdout + finished.stderr).strip()
+    # Read as bytes: output that is not UTF-8 shows a replacement character
+    # instead of ending the review in an error it would start again from.
+    output = (finished.stdout + finished.stderr).decode("utf-8", "replace").strip()
     if len(output) > 4000:
         output = "[test output cut here: the last 4000 of %d characters shown]\n" % len(output) + output[-4000:]
     return "$ %s -> exit %d\n%s" % (" ".join(command), finished.returncode, output)
@@ -260,24 +272,28 @@ def changed_entries(workspace, *scope):
     return [entry for entry in output.split("\0") if len(entry) > 3]
 
 
-def gather(workspace, paths, test_commands, timeout):
+def gather(workspace, paths, test_commands, timeout, ran):
     """The diff, whole, cut only at LIMIT with a visible marker; then the
     operator's test commands, each with its exit status and output; and
     whether the checkout holds no change at all, from what Git listed here,
     so that the review that shows the change also decides that from the same
-    reading, never from one that failed."""
+    reading, never from one that failed. The commands run once a review: ran
+    keeps their output for a review that starts again after an error, so they
+    are not run again every few seconds while it waits."""
     scope = ["--", *paths] if paths else []
     tracked = git(workspace, "diff", "HEAD", *scope)
     entries = changed_entries(workspace, *scope)
     listed, note = entries, ""
-    if paths and not tracked.strip() and not entries:
+    if paths:
         listed = changed_entries(workspace)
-        if listed:
+        if not tracked.strip() and not entries and listed:
             # The paths matched none of what changed: the reviewer is shown
             # the whole change rather than nothing, since that would be no
-            # review.
-            note = ("REVIEW_DIFF_PATHS (%s) matched no change, so the whole change is shown.\n\n" % " ".join(paths))
+            # review. Whether it then had to be cut is said below.
+            note = "REVIEW_DIFF_PATHS (%s) matched no change, so the whole change is shown" % " ".join(paths)
             tracked, entries = git(workspace, "diff", "HEAD"), listed
+        elif set(listed) - set(entries):
+            note = "Changes outside REVIEW_DIFF_PATHS (%s) are not shown.\n\n" % " ".join(paths)
     # New files come first, so their names survive a cut of a long diff: new
     # code is where untested code most often is. A new path that is not a
     # file the reviewer can read is still named, never left out silently.
@@ -298,9 +314,15 @@ def gather(workspace, paths, test_commands, timeout):
             new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
         else:
             new_files += "--- new path %s, which is not a regular file ---\n" % name
-    tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
+    change = new_files + tracked
+    if note.startswith("REVIEW_DIFF_PATHS"):
+        note += (", cut at %d of its %d characters where it says so.\n\n" % (LIMIT, len(change))
+                 if len(change) > LIMIT else ".\n\n")
+    if "tests" not in ran:
+        ran["tests"] = "\n\n".join(run(shlex.split(command), workspace, timeout)
+                                    for command in test_commands if command.strip())
     unchanged = not listed and not tracked.strip() and not committed_earlier(workspace)
-    return note + cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output"), unchanged
+    return note + cut(change, LIMIT, "diff"), cut(ran["tests"], LIMIT, "test output"), unchanged
 
 
 def committed_earlier(workspace):
@@ -350,6 +372,10 @@ def prepare():
     if parsed.scheme != "https" and parsed.hostname not in ("127.0.0.1", "localhost"):
         raise ReviewError("REVIEW_MODEL_URL must be https")
     names = models()
+    unavailable = os.environ.get("REVIEW_UNAVAILABLE", "")
+    if unavailable.strip().lower() not in ("", "pass"):
+        # Not taken quietly as the default: the operator meant something.
+        raise ReviewError("REVIEW_UNAVAILABLE is %r; it may be pass, or left unset to wait for a verdict" % unavailable)
     key_env = setting("REVIEW_KEY_ENV", "REVIEW_API_KEY")
     key = os.environ.get(key_env, "")
     if not key:
@@ -357,6 +383,7 @@ def prepare():
     found = {"workspace": workspace, "url": url, "secure": parsed.scheme == "https", "models": names, "key": key,
              "timeout": number("REVIEW_TIMEOUT_SECONDS", "300", 1), "attempts": number("REVIEW_ATTEMPTS", "3", 1),
              "retry": seconds("REVIEW_RETRY_SECONDS", "5"), "cap": seconds("REVIEW_RETRY_CAP_SECONDS", "300"),
+             "hold": seconds("REVIEW_HOLD_SECONDS", "900"),
              "paths": setting("REVIEW_DIFF_PATHS", "").split()}
     try:
         found["tests"] = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
@@ -487,19 +514,52 @@ def ask_once(found, model, prompt, diff, tests, rounds):
             return None, said_in(message), "the reviewer returned no verdict"
         return read_verdict(calls)
     except urllib.error.HTTPError as error:
-        return None, "", "HTTP %d from the model service" % error.code
+        return None, "", refused(error, found["key"])
     except Exception as error:  # a model service hiccup is not a defect in the change
         return None, "", type(error).__name__ + ": " + scrub(str(error), found["key"])[:200]
 
 
-def keep_unclear(model, findings, unclear):
-    """What a model wrote without a plain verdict, once per text, for the
-    record the review ends with. Whether it is new."""
+# What the model service says with these is about the request the operator
+# set up (a credential, a model id, a request too large), not a passing fault.
+OPERATORS_TO_FIX = (400, 401, 403, 404, 413, 422)
+
+
+def refused(error, key):
+    """An HTTP error from the model service as a reason: its status, what it
+    said, scrubbed and cut to about 200 characters, and whether it is the
+    operator's to fix."""
+    try:
+        said = error.read().decode("utf-8", "replace")
+    except Exception:  # what it said only informs
+        said = ""
+    said = " ".join(scrub(said, key).split())
+    return "HTTP %d from the model service%s%s" % (
+        error.code, ": " + (said[:200] + "..." if len(said) > 200 else said) if said else "",
+        "; this is for the operator to fix (the credential, the model id or the request), and asking again"
+        " will not mend it" if error.code in OPERATORS_TO_FIX else "")
+
+
+def keep_unclear(found, model, findings, why, unclear):
+    """What a model wrote without a plain verdict, once per text: kept for
+    the result the review ends with, and logged at once, so that review.md
+    tells what the model last said while the review is still asking. Whether
+    it is new."""
     entry = "%s: %s" % (model, findings)
     if not findings or entry in unclear:
         return False
     unclear.append(entry)
+    log(found, "## Review by %s: no verdict yet (%s)\n\n%s\n\n" % (model, why, findings))
     return True
+
+
+def log(found, text):
+    """Add to review.md in TASK_HOME. It only informs, so a log that cannot
+    be written changes nothing."""
+    try:
+        with (found["state"] / "review.md").open("a", encoding="utf-8") as written:
+            written.write(scrub(text, found["key"]))
+    except OSError:
+        pass
 
 
 def verdict_until_given(found, prompt, diff, tests, rounds):
@@ -509,7 +569,7 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
     told when what goes wrong changes, not on every request, and is shown
     what a model wrote without a plain verdict, since this may go on a while.
     Returns (model, blocking, findings, what was written without a verdict)."""
-    wait, told, asked, unclear = 0, None, 0, []
+    wait, told, asked, unclear, said_at = 0, None, 0, [], time.monotonic()
     while True:
         failures = []
         for model in found["models"]:
@@ -520,14 +580,20 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
                     say("Review: %s gave a verdict, after %d request%s that got none."
                         % (model, asked - 1, "" if asked == 2 else "s"))
                 return model, blocking, findings, unclear
-            if keep_unclear(model, findings, unclear):
+            if keep_unclear(found, model, findings, why, unclear):
                 say("Review: %s wrote, without a plain verdict: %s" % (model, findings[:2000]))
             failures.append("%s: %s" % (model, why))
         wait = min(max(wait * 2, found["retry"]), found["cap"])
         if failures != told:
             say("Review: no verdict yet (%s). Asking again in %gs, then at waits growing to %gs; until a model"
                 " gives a verdict the work is neither let through nor sent back." % ("; ".join(failures), wait, found["cap"]))
-            told = failures
+            told, said_at = failures, time.monotonic()
+        elif time.monotonic() - said_at >= found["hold"]:
+            # Not one line for hours: the live view hears again at the hold
+            # interval that the review is still waiting, and why.
+            say("Review still without a verdict at %s, %d requests so far: %s."
+                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), asked, "; ".join(failures)))
+            said_at = time.monotonic()
         time.sleep(wait)
 
 
@@ -541,7 +607,7 @@ def verdict_or_none(found, prompt, diff, tests, rounds):
         blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
         if why is None:
             return model, blocking, findings, unclear
-        keep_unclear(model, findings, unclear)
+        keep_unclear(found, model, findings, why, unclear)
         last = why if len(found["models"]) == 1 else "%s: %s" % (model, why)
         if attempt + 1 < found["attempts"]:
             time.sleep(min(5 * (attempt + 1), 20))
@@ -561,9 +627,10 @@ def without_verdict(model, reason, unchanged, goes_on):
     return 0
 
 
-def reviewed(stdin_text, unchanged, passing):
+def reviewed(stdin_text, unchanged, passing, ran):
     """One review: the verdict's exit status, or, with REVIEW_UNAVAILABLE=pass
-    and no verdict, the old pass-through."""
+    and no verdict, the old pass-through. ran keeps what the operator's test
+    commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
     counter = state / "review-send-backs"
@@ -576,7 +643,7 @@ def reviewed(stdin_text, unchanged, passing):
     # Once the change is read, the reading that showed it decides whether
     # anything changed: not the look before, which may have failed, nor a
     # look after, which could fail in turn.
-    diff, test_output, unchanged = gather(found["workspace"], found["paths"], found["tests"], found["timeout"])
+    diff, test_output, unchanged = gather(found["workspace"], found["paths"], found["tests"], found["timeout"], ran)
     if unchanged:
         diff = NO_CHANGE
     ask = verdict_or_none if passing else verdict_until_given
@@ -594,17 +661,18 @@ def reviewed(stdin_text, unchanged, passing):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
-    if unclear:
-        # What the reviewer wrote without a verdict stays in the record.
-        findings = (findings + "\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
     findings = scrub(findings, key)
+    # What the reviewer wrote without a verdict stays in the record: in the
+    # result printed here, and in review.md, where it was logged as written.
+    printed = findings + (("\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
+                          if unclear else "")
     print("Review by %s: %s. Send-backs so far: %d.\n%s"
-          % (model, outcome, sent_back, (findings or "(no findings)")[:FINDINGS_LIMIT]))
+          % (model, outcome, sent_back, scrub(printed or "(no findings)", key)[:FINDINGS_LIMIT]))
     try:
         if blocking:
             counter.write_text(str(sent_back))
-        with (state / "review.md").open("a", encoding="utf-8") as log:
-            log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
+        with (state / "review.md").open("a", encoding="utf-8") as written:
+            written.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
                 model, sent_back, outcome, findings or "(no findings)"))
     except OSError as error:
         # The count and the log only inform; the outcome above stands.
@@ -623,7 +691,9 @@ def waits(name, default):
 
 
 def main():
-    passing = os.environ.get("REVIEW_UNAVAILABLE", "") == "pass"
+    # Read as the operator may have written it; any other value than pass,
+    # or none, holds the review until it is fixed (see prepare).
+    passing = os.environ.get("REVIEW_UNAVAILABLE", "").strip().lower() == "pass"
     try:
         # Read as bytes and decode leniently: a stray byte in the runtime's
         # text must not become a traceback.
@@ -632,13 +702,13 @@ def main():
         stdin_text = ""
     # Until it has been told, whether anything changed is not known, and an
     # error before then lets nothing through without a verdict.
-    unchanged, held, told, wait = None, None, None, 0
+    unchanged, held, told, wait, said_at, ran = None, None, None, 0, 0, {}
     while True:
         try:
             # Read before any setting: a setting that keeps the review from
             # running must not let an unchanged checkout through either.
             unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
-            return reviewed(stdin_text, unchanged, passing)
+            return reviewed(stdin_text, unchanged, passing, ran)
         except ReviewError as error:
             reason = scrub(str(error), credential())
             if passing:
@@ -661,12 +731,17 @@ def main():
             if passing:
                 return without_verdict(named_models(), reason, unchanged, "The work goes on unreviewed this time.")
             # Never a pass: an unexpected error is waited out like trouble
-            # with the model service, and the review starts again.
+            # with the model service, at the same growing waits, and the
+            # review starts again; the test commands are not run again.
             wait = min(max(wait * 2, waits("REVIEW_RETRY_SECONDS", "5")), waits("REVIEW_RETRY_CAP_SECONDS", "300"))
             if reason != told:
                 say("Review by %s: %s. Starting the review again in %gs; until a model gives a verdict the work is"
                     " neither let through nor sent back." % (named_models(), reason, wait))
-                told = reason
+                told, said_at = reason, time.monotonic()
+            elif time.monotonic() - said_at >= waits("REVIEW_HOLD_SECONDS", "900"):
+                say("Review still starting again at %s; the reason is above."
+                    % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                said_at = time.monotonic()
             time.sleep(wait)
 
 

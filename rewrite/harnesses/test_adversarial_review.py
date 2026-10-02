@@ -172,8 +172,8 @@ class AdversarialReviewTests(unittest.TestCase):
     def review_in_process(self, service, before_each_command, **extra):
         """The review run in this process, so that a Git that runs out of
         time can be had without waiting for it: before_each_command sees each
-        command the review starts and may raise in its place. The exit status
-        and what the review printed."""
+        command the review starts and may raise in its place. The exit status,
+        what the review printed, and what it said on stderr."""
         spec = importlib.util.spec_from_file_location("review_under_test", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -182,14 +182,17 @@ class AdversarialReviewTests(unittest.TestCase):
             before_each_command(command)
             return subprocess.run(command, *arguments, **keywords)
 
-        printed = io.StringIO()
+        printed, said = io.StringIO(), io.StringIO()
         stdin = io.TextIOWrapper(io.BytesIO(b"Original request:\nadd a thing\n"))
         with mock.patch.object(module, "subprocess", types.SimpleNamespace(
                 run=run, TimeoutExpired=subprocess.TimeoutExpired)), \
                 mock.patch.dict(os.environ, self.environment(service, **extra), clear=True), \
-                mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed):
+                mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed), \
+                contextlib.redirect_stderr(said):
+            if hasattr(self, "before_main"):
+                self.before_main(module)
             status = module.main()
-        return status, printed.getvalue()
+        return status, printed.getvalue(), said.getvalue()
 
     def review_log(self):
         path = self.home / "review.md"
@@ -261,7 +264,8 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertIn("Review by maker-b/second: SENT BACK", finished.stdout)
             self.assertNotIn("fixture/reviewer", finished.stdout)
             self.assertEqual(service.models_asked(), ["maker-a/first", "maker-b/second"] * 2)
-            self.assertIn("maker-a/first: HTTP 503 from the model service; maker-b/second: the reviewer returned no verdict",
+            self.assertIn("maker-a/first: HTTP 503 from the model service: {\"error\": \"service error\"};"
+                          " maker-b/second: the reviewer returned no verdict",
                           finished.stderr)
             self.assertIn("maker-b/second gave a verdict", finished.stderr)
 
@@ -340,6 +344,24 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("REVIEW_DIFF_PATHS (app lib) matched no change, so the whole change is shown.", text)
         self.assertIn("+    return 2  # changed", text)
         self.assertIn("new file tests/test_tool.py", text)
+
+    def test_the_notes_on_the_diff_paths_say_what_was_shown(self):
+        # F9: the whole change shown in place of the paths is cut like any
+        # other, and the note says so; and when the paths match part of the
+        # change, the rest is said not to be shown instead of left out quietly.
+        (self.workspace / "src" / "tool.py").write_text("def run():\n    return 2  # changed\n" + "".join(
+            "# line %05d of an edit that makes the diff long\n" % i for i in range(1000)))
+        service = ModelStandIn([{"verdict": (False, "")}, {"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        self.assertEqual(self.run_review(service, REVIEW_DIFF_PATHS="app").returncode, 0)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertRegex(text, r"REVIEW_DIFF_PATHS \(app\) matched no change, so the whole change is shown, cut at"
+                               r" 20000 of its \d+ characters where it says so\.")
+        self.assertIn("[diff cut here:", text)
+        self.assertEqual(self.run_review(service, REVIEW_DIFF_PATHS="tests").returncode, 0)
+        text = service.requests[1]["body"]["messages"][1]["content"]
+        self.assertIn("Changes outside REVIEW_DIFF_PATHS (tests) are not shown.", text)
+        self.assertNotIn("+    return 2  # changed", text)
 
     # With REVIEW_UNAVAILABLE=pass, today's behaviour on every path where no
     # verdict can be obtained: NOT REVIEWED, and the work goes through.
@@ -721,7 +743,8 @@ class AdversarialReviewTests(unittest.TestCase):
                 self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
                 self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
                 self.assertIn(finding, finished.stdout, (case, tree))
-                self.assertIn(finding, self.review_log().split("## Review by")[-1], (case, tree))
+                # On this branch a reply without a verdict is logged as it comes.
+                self.assertIn(finding, self.review_log(), (case, tree))
         # Kept as written, but no more than findings are shown.
         service = ModelStandIn([{"content": "x" * 20000}])
         self.addCleanup(service.close)
@@ -814,6 +837,104 @@ class AdversarialReviewTests(unittest.TestCase):
     CANNOT_TELL = ("Whether any file was changed could not be told, and an ending with nothing delivered needs a"
                    " verdict, so the work goes back this time.")
 
+    def test_while_asking_again_the_log_tells_what_the_model_last_said(self):
+        # F1: a reply without a plain verdict is written to review.md as it
+        # comes, so whoever looks while the review asks again can read it.
+        finding = "REQUIRED_NEW_BEHAVIOR is missing; the model said so without a verdict"
+        service = ModelStandIn({"fixture/reviewer": {"arguments": {"blocking": None, "findings": finding}}})
+        self.addCleanup(service.close)
+        running, stdout, stderr = self.held_review(service)
+        self.assertTrue(running, (stdout, stderr))
+        self.assertIn(finding, self.review_log())
+        self.assertIn("no verdict yet", self.review_log())
+        self.assertEqual(self.review_log().count(finding), 1, "logged once, not at every request")
+
+    def test_output_that_is_not_utf8_is_read_and_the_review_happens(self):
+        # F2: a change and a test command's output in Shift_JIS reach the
+        # reviewer with replacement characters, instead of an error the review
+        # would start again from without ever asking.
+        (self.workspace / "src" / "tool.py").write_bytes("def run():\n    return '設定'\n".encode("shift_jis"))
+        service = ModelStandIn([{"verdict": (True, "the encoding of src/tool.py changed")}])
+        self.addCleanup(service.close)
+        command = sys.executable + " -c \"import sys; sys.stdout.buffer.write(b'\\x90\\xdd\\x92\\xe8 test ran')\""
+        finished = self.run_review(service, REVIEW_TEST_COMMANDS=command)
+        self.assertEqual(finished.returncode, 1, (finished.stdout, finished.stderr))
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("\ufffd", text)
+        self.assertIn("test ran", text)
+        self.assertNotIn("Unexpected", finished.stderr)
+
+    def test_an_unexpected_error_is_waited_out_said_again_and_the_tests_are_not_run_again(self):
+        # F2: the review starts again at the growing waits, says so again at
+        # the hold interval, and does not run the operator's test commands at
+        # every start.
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        tests_run = []
+
+        def count_tests(command):
+            if command[:1] == [sys.executable]:
+                tests_run.append(command)
+
+        def before_main(module):
+            real, failures = module.verdict_until_given, []
+
+            def failing(*arguments):
+                if len(failures) < 8:
+                    failures.append(1)
+                    raise RuntimeError("an error the review does not expect")
+                return real(*arguments)
+            module.verdict_until_given = failing
+
+        self.before_main = before_main
+        status, printed, said = self.review_in_process(service, count_tests)
+        self.assertEqual(status, 0, (printed, said))
+        self.assertIn("PASSED", printed)
+        self.assertEqual(len(tests_run), 1, tests_run)
+        self.assertEqual(said.count("Unexpected RuntimeError"), 1, said)
+        self.assertIn("Review still starting again at", said)
+
+    def test_an_answer_the_operator_has_to_fix_is_said_with_the_services_words_and_again_while_waiting(self):
+        # F3: a 404 for a mistyped model id, with what the service said (the
+        # credential scrubbed), named as the operator's to fix, and said again
+        # at the hold interval; another model in REVIEW_MODELS is still asked.
+        service = ModelStandIn({"fixture/reviewer": {"status": 404, "error": "not a valid model ID; key " + KEY}})
+        self.addCleanup(service.close)
+        running, stdout, stderr = self.held_review(service)
+        self.assertTrue(running, (stdout, stderr))
+        self.assertIn("HTTP 404 from the model service: {\"error\": \"not a valid model ID; key [credential]\"}", stderr)
+        self.assertIn("this is for the operator to fix", stderr)
+        self.assertIn("Review still without a verdict at", stderr)
+        self.assertNotIn(KEY, stdout + stderr + self.review_log())
+        service = ModelStandIn({"maker-a/first": {"status": 401, "error": "no such key"},
+                                "maker-b/second": [{"verdict": (True, "src/tool.py returns 2")}]})
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_MODELS="maker-a/first, maker-b/second")
+        self.assertEqual(finished.returncode, 1, (finished.stdout, finished.stderr))
+        self.assertIn("Review by maker-b/second: SENT BACK", finished.stdout)
+
+    def test_the_opt_in_is_read_as_written_and_another_value_holds(self):
+        # F7: "pass" in any letter case and with spaces around it is the
+        # opt-in; another value is named and holds, never quietly the default.
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_UNAVAILABLE=" Pass ")
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        self.assertIn("NOT REVIEWED", finished.stdout)
+        running, stdout, stderr = self.held_review(service, REVIEW_UNAVAILABLE="yes")
+        self.assertTrue(running, (stdout, stderr))
+        self.assertIn("REVIEW_UNAVAILABLE is 'yes'; it may be pass, or left unset", stderr)
+        self.assertIn("fix the setting and restart the engine", stderr)
+
+    def test_a_model_named_twice_is_asked_once_a_round(self):
+        # F8
+        service = ModelStandIn({"maker-a/first": {"status": 503},
+                                "maker-b/second": [{"verdict": None}, {"verdict": (False, "")}]})
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_MODELS="maker-a/first, maker-b/second, maker-a/first")
+        self.assertEqual(finished.returncode, 0, (finished.stdout, finished.stderr))
+        self.assertEqual(service.models_asked(), ["maker-a/first", "maker-b/second"] * 2)
+
     def test_a_review_that_cannot_tell_whether_anything_changed_lets_nothing_through_without_a_verdict(self):
         # Case B of the third review: the review's git status runs out of its
         # 60 seconds while the delivery, which waits up to 600, reads the same
@@ -869,7 +990,7 @@ class AdversarialReviewTests(unittest.TestCase):
             if unsaved:
                 self.home.chmod(0o500)
             try:
-                status, printed = self.review_in_process(service, before, REVIEW_DIFF_PATHS="", **self.PASS)
+                status, printed, _ = self.review_in_process(service, before, REVIEW_DIFF_PATHS="", **self.PASS)
             finally:
                 self.home.chmod(0o700)
             self.assertEqual(status, expected, (case, printed))
@@ -882,7 +1003,7 @@ class AdversarialReviewTests(unittest.TestCase):
                 self.assertNotIn("could not be told", printed, case)
         service = ModelStandIn([{"status": 503}, {"status": 503}])
         self.addCleanup(service.close)
-        status, printed = self.review_in_process(service, lambda command: None, **self.PASS)
+        status, printed, _ = self.review_in_process(service, lambda command: None, **self.PASS)
         self.assertEqual(status, 1, printed)
         self.assertIn("no file was changed, and an ending with nothing delivered needs a verdict", printed)
         self.assertNotIn("could not be told", printed)
