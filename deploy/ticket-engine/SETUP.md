@@ -947,6 +947,8 @@ In your copy (`$CONFIG`), in the same edit:
 3. Run `--check` on the copy (section 4) and read the intake line. It must say
    what you meant, for example
    `intake: project <project-id>, issues created at or after 2026-10-05T09:00:00Z; only issues carrying one of the categories [<id>]`.
+   Without Go, read the same line as the first line of the engine's log after
+   the restart below.
 
 Then apply the ConfigMap (section 6, step 4) and restart the Pod; the
 engine's log opens with the same intake line:
