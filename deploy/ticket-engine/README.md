@@ -61,16 +61,16 @@ One consumer's installation has run these templates since September 2026,
 with a live tracker, real pull requests merged by the shipped delivery, and
 models reached through a gateway in front of OpenRouter. What it showed is in
 SETUP.md where it matters: the cluster it ran on in section 1, and what went
-wrong there and how it was resolved in section 11.
+wrong there and how it was resolved in section 11. On 2026-10-02 it ran its
+two network init containers from the image's own iptables (SETUP.md,
+section 1).
 
 Proposed, or simply not measured. Check each one before trusting it:
 
 - Another cluster, node architecture or storage class, and this volume's
   behaviour when the Pod moves to another node.
-- The two network init containers running the image's own iptables (in
-  images built from commit f71872f, 2026-10-02, on). The egress rules above
-  were measured with the same program from the network plugin's image; the
-  image's build checks only that the program is there.
+- The IPv6 egress rules as the image's own iptables writes them: the
+  installation that ran them saw only that they were written.
 - `resources`. The requests and limits are a starting point from spare node
   capacity, not a measured working set. A model-driven build can exceed them.
 - The shipped ordered configuration as it stands, with OpenRouter invoked

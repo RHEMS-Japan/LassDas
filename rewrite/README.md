@@ -954,6 +954,8 @@ the approved publisher ids. No new account or credential value is required.
 For the initial Chinese-model experiments the configured publishers are
 `qwen`, `z-ai`, `deepseek`, `moonshotai`, and `minimax`; these names are not
 hard-coded in the selector and are not a complete nationality classifier.
+`examples/operator-stages.json` leaves out `moonshotai`, the publisher of its
+review model, so that the review comes from another publisher than the work.
 
 With `model_selection` configured, ordinary-LLM routing also selects from a
 fresh catalog before every routing decision. This applies both to
