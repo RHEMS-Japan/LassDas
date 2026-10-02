@@ -362,29 +362,75 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertEqual(finished.returncode, 0, (case, finished.stdout))
             self.assertIn("the work goes on unreviewed this time", finished.stdout, case)
 
-    def test_a_verdict_counts_only_with_true_or_false_for_blocking(self):
-        # REPRO 07: blocking null beside a finding that a needed behaviour is
-        # missing was printed as PASSED. Anything but true or false is no
-        # verdict: with nothing changed the work goes back, with a change it
-        # is NOT REVIEWED as any other missing verdict.
-        for blocking in (None, "false", 0, "MISSING"):
-            reply = {"verdict": (blocking, "REQUIRED_NEW_BEHAVIOR is missing; this change is needed.")}
-            if blocking == "MISSING":
-                reply = {"arguments": {"findings": "REQUIRED_NEW_BEHAVIOR is missing; this change is needed."}}
-            service = ModelStandIn([reply, reply])
-            self.addCleanup(service.close)
-            finished = self.run_review(service)
-            self.assertEqual(finished.returncode, 0, (blocking, finished.stdout))
-            self.assertIn("NOT REVIEWED", finished.stdout, blocking)
-            self.assertIn("neither true nor false for blocking", finished.stdout, blocking)
-            self.assertNotIn("PASSED", finished.stdout, blocking)
+    def test_blocking_is_read_when_its_meaning_is_plain_and_the_findings_always_stay(self):
+        # REPRO 07 printed blocking null beside a finding that a needed change
+        # is missing as PASSED; read as true or false only, "true" and 1 then
+        # let a change through unreviewed with the findings gone. A plain
+        # value is a verdict, in any letter case of the field; anything else
+        # is none, and what the reviewer wrote stays in the output and log.
+        cases = (("\"true\"", {"blocking": "true"}, "SENT BACK", 1, 1),
+                 ("\" TRUE \"", {"blocking": " TRUE "}, "SENT BACK", 1, 1),
+                 ("1", {"blocking": 1}, "SENT BACK", 1, 1),
+                 ("Blocking", {"Blocking": True}, "SENT BACK", 1, 1),
+                 ("\"false\"", {"blocking": "false"}, "PASSED", 0, 0),
+                 ("0", {"blocking": 0}, "PASSED", 0, 0),
+                 ("null", {"blocking": None}, "NOT REVIEWED", 0, 1),
+                 ("missing", {}, "NOT REVIEWED", 0, 1),
+                 ("\"maybe\"", {"blocking": "maybe"}, "NOT REVIEWED", 0, 1))
+        for tree in ("a change", "no change"):
+            if tree == "no change":
+                self.leave_unchanged()
+            for case, fields, outcome, changed, unchanged in cases:
+                finding = "REQUIRED_NEW_BEHAVIOR is missing (%s, %s)." % (case, tree)
+                reply = {"arguments": dict(fields, Findings=finding)}
+                service = ModelStandIn([reply, reply])
+                self.addCleanup(service.close)
+                finished = self.run_review(service)
+                status = changed if tree == "a change" else unchanged
+                self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
+                self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
+                self.assertIn(finding, finished.stdout, (case, tree))
+                self.assertIn(finding, self.review_log(), (case, tree))
+                if outcome == "NOT REVIEWED":
+                    self.assertIn("no verdict could be obtained", finished.stdout, (case, tree))
+                    if tree == "no change":
+                        self.assertIn(self.GOES_BACK, finished.stdout, case)
+
+    def test_git_reads_neither_the_users_nor_the_systems_settings(self):
+        # As for the delivery: a user's own settings could hide a path from
+        # one of the two only, and they would disagree on whether anything
+        # changed. Here the only new file is hidden by Git's default exclude
+        # file, as the delivery sees it, while the user's settings name another.
         self.leave_unchanged()
-        service = ModelStandIn([{"verdict": (None, "REQUIRED_NEW_BEHAVIOR is missing")}] * 2)
+        home = self.home.parent / "user-home"
+        (home / ".config" / "git").mkdir(parents=True)
+        (home / ".config" / "git" / "ignore").write_text("notes.txt\n")
+        (home / "nothing-excluded").write_text("")
+        (home / ".gitconfig").write_text("[core]\n\texcludesFile = %s\n" % (home / "nothing-excluded"))
+        (self.workspace / "notes.txt").write_text("a note Git's default exclude file hides\n")
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
         self.addCleanup(service.close)
-        finished = self.run_review(service)
+        finished = self.run_review(service, HOME=str(home))
         self.assertEqual(finished.returncode, 1, finished.stdout)
         self.assertIn(self.GOES_BACK, finished.stdout)
-        self.assertNotIn("PASSED", finished.stdout)
+
+    def test_a_name_that_is_not_utf8_is_named_not_a_traceback(self):
+        # macOS refuses such a name, so a Git ahead on PATH lists one as Linux
+        # Git does, with the name's own bytes, and leaves the rest to Git.
+        shim = self.home.parent / "git-shim"
+        shim.mkdir()
+        (shim / "git").write_text(
+            "#!/bin/sh\n"
+            "for a in \"$@\"; do if [ \"$a\" = status ]; then printf '?? src/\\202\\240.go\\0'; exit 0; fi; done\n"
+            "exec %s \"$@\"\n" % shutil.which("git"))
+        (shim / "git").chmod(0o755)
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, PATH=str(shim) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(finished.returncode, 0, (finished.stdout, finished.stderr))
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertIn("PASSED", finished.stdout)
+        self.assertIn("new path src/��.go", service.requests[0]["body"]["messages"][1]["content"])
 
     def test_a_new_file_with_a_japanese_name_reaches_the_reviewer(self):
         self.leave_unchanged()

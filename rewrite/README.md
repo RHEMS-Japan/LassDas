@@ -461,10 +461,14 @@ names, normally from a different publisher than the worker, is handed the
 runtime's text for the stage (where it sits, the original request, the settled
 requirements, the previous reports), the diff of the change and the output of
 the operator's test commands, and returns one structured verdict: blocking or
-not, with its findings. The command exits 1 on a blocking verdict, which sends
-the work back to the `work` stage, and 0 otherwise; the findings are printed,
-so they join the history as an observation the worker and the report writer
-read, and the command writes nothing into the workspace (its send-back counter
+not, with its findings. The verdict's fields are read in any letter case, and
+blocking counts when its meaning is plain: true or false, `"true"` or
+`"false"` in any case, 1 or 0. Anything else is no verdict, and what the
+reviewer wrote is printed with the reason all the same. The command exits 1
+on a blocking verdict, which sends the work back to the `work` stage, and 0
+otherwise; the findings are printed, so they join the history as an
+observation the worker and the report writer read, and the command writes
+nothing into the workspace (its send-back counter
 and log live in the process's own directory, `TASK_HOME`). The runtime reads
 the exit status and nothing else. There is no cap on send-backs: the review
 sends the work back for as long as it finds a blocking defect, the count so far
@@ -481,8 +485,11 @@ path and no earlier delivery round committed one: work let through from there
 can end with nothing delivered, so it is let through only on a verdict that
 does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
 New files are read from Git's own list, so a name in Japanese or a new
-symbolic link reaches the reviewer as it is. A diff or test output longer than
-its limit is cut with a visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+symbolic link reaches the reviewer as it is, and a name that is not UTF-8 with
+a replacement character. Git runs without the user's or the system's Git
+settings, as it does for the delivery, so the two agree on whether anything
+changed. A diff or test output longer than its limit is cut with a visible
+marker, never silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
 the command prints or writes.
 
@@ -1085,15 +1092,20 @@ restore or by hand, together with everything the earlier stages did in it. Its
 next launch prepares it again from the repository, prints that the workspace
 was lost and ends non-zero without running its command: a command stage then
 goes back to its `on_failure` stage, after which every later stage runs again,
-and a model stage runs again. A stage that passed on the lost work is never
-taken as passed on the fresh checkout, so an ending with nothing delivered
-cannot follow from it. A workspace prepared before this record existed is
-taken as it is at its next launch and gains the record without a word, so a
-queue already running when this arrives goes on as it was. A workspace
-directory removed while the engine runs is not covered: no process can start
-in it, so each launch fails at once, spaced like any launch that cannot start,
-and nothing passes; restarting the engine creates the directory again, empty,
-and the next launch reports the loss.
+and a model stage runs again. A stage that passed on the lost work is not
+taken as passed on the fresh checkout. Only a workspace found empty is
+noticed, though. One put back to how it was just after its preparation (a
+checkout and clean by hand, or a restore from a copy taken then) still holds
+files, so it is taken as it is; with `DELIVERY_ALLOW_UNCHANGED=1`, a request
+whose work was undone that way after its review ends with nothing delivered.
+A workspace prepared before this record existed is taken as it is at its next
+launch and gains the record without a word, so a queue already running when
+this arrives goes on as it was. If it is emptied before that launch, it is
+prepared as if for the first time: its loss is not reported either, and the
+same ending can follow. A workspace directory removed while the engine runs is
+not covered: no process can start in it, so each launch fails at once, spaced
+like any launch that cannot start, and nothing passes; restarting the engine
+creates the directory again, empty, and the next launch reports the loss.
 
 The wrapper is **not an isolation boundary**. Its job parent, lock and staging
 must be private to the controller. The command after `--` must establish the

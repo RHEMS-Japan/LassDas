@@ -19,7 +19,10 @@ start, an endpoint that is not HTTPS, a change that cannot be read, paths
 that match no change, a model service that is down or returns no verdict)
 ends 0 and prints NOT REVIEWED with the reason, which joins the history for
 the worker and the report writer: a review that could not be performed is not
-a defect in the change.
+a defect in the change. A verdict's fields are read in any letter case, and
+its blocking counts when its meaning is plain: true or false, "true" or
+"false" in any case, 1 or 0. Anything else is no verdict, and what the
+reviewer wrote is printed and logged with the reason all the same.
 
 One exception: when Git lists no changed path at all and no earlier delivery
 round committed one, the work let through here can end with nothing
@@ -140,25 +143,39 @@ def cut(text, limit, what):
     return text[:limit] + "\n[%s cut here: %d of %d characters shown]\n" % (what, limit, len(text))
 
 
-def git(workspace, *arguments):
-    # Names as they are, not as octal escapes: a diff header in Japanese is
-    # read by the reviewer as it was written.
+def git(workspace, *arguments, names=False):
+    """Git's output, read without the user's or the system's Git settings, as
+    the delivery reads the checkout: with one of them (an exclude file, say),
+    the two could disagree on whether anything changed. Names come as they
+    are, not as octal escapes, so a diff header in Japanese is read as it was
+    written; a name that is not UTF-8 is kept usable as a path when names is
+    set, and otherwise shows a replacement character."""
+    environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                       GIT_CONFIG_NOSYSTEM="1")
     try:
         finished = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(workspace), *arguments],
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, timeout=60, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error))
     if finished.returncode != 0:
         raise ReviewError("the change could not be read: git %s exited %d: %s"
-                          % (arguments[0], finished.returncode, finished.stderr.strip()[:200]))
-    return finished.stdout
+                          % (arguments[0], finished.returncode,
+                             finished.stderr.decode("utf-8", "replace").strip()[:200]))
+    return finished.stdout.decode("utf-8", "surrogateescape" if names else "replace")
+
+
+def shown(name):
+    """A name as it can be printed and sent: bytes that are not UTF-8 become
+    a replacement character."""
+    return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def changed_entries(workspace, *scope):
     """Every path Git lists as changed, staged or untracked, as "XY path".
     Read separated by NUL, where Git quotes and escapes no name: read from the
     ordinary listing, a name in Japanese or with a quote in it named no file."""
-    output = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *scope)
+    output = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *scope,
+                 names=True)
     return [entry for entry in output.split("\0") if len(entry) > 3]
 
 
@@ -172,7 +189,8 @@ def gather(workspace, paths, test_commands, timeout):
         elsewhere = changed_entries(workspace)
         if elsewhere:
             raise ReviewError("REVIEW_DIFF_PATHS (%s) matched no change, but the checkout has changes under: %s"
-                              % (" ".join(paths), ", ".join(sorted({entry[3:].split("/")[0] for entry in elsewhere}))))
+                              % (" ".join(paths), ", ".join(sorted({shown(entry[3:].split("/")[0])
+                                                                   for entry in elsewhere}))))
     # New files come first, so their names survive a cut of a long diff: new
     # code is where untested code most often is. A new path that is not a
     # file the reviewer can read is still named, never left out silently.
@@ -180,15 +198,15 @@ def gather(workspace, paths, test_commands, timeout):
     for entry in entries:
         if not entry.startswith("?? "):
             continue
-        name = entry[3:]
-        path = workspace / name
+        path = workspace / entry[3:]
+        name = shown(entry[3:])
         if path.is_symlink():
-            new_files += "--- new symbolic link %s -> %s ---\n" % (name, os.readlink(path))
+            new_files += "--- new symbolic link %s -> %s ---\n" % (name, shown(os.readlink(path)))
         elif path.is_file():
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
             except OSError as error:
-                new_files += "--- new file %s, which could not be read: %s ---\n" % (name, error)
+                new_files += "--- new file %s, which could not be read: %s ---\n" % (name, shown(str(error)))
                 continue
             new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
         else:
@@ -224,8 +242,44 @@ def nothing_changed(workspace):
         return False
 
 
+def truth(value):
+    """A value read as true or false when its meaning is plain: true or false,
+    "true" or "false" in any letter case, 1 or 0. None otherwise."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return value == 1
+    return None
+
+
+def read_verdict(arguments):
+    """(blocking, findings, why) from the verdict tool's arguments. Field names
+    are read in any letter case. blocking is True or False when it is plain,
+    or None, with why, when it is not; the findings are kept either way, so
+    the worker and the report writer can read what the reviewer wrote."""
+    verdict = json.loads(arguments)
+    if not isinstance(verdict, dict):
+        return None, "", "the reviewer's verdict was not a set of named fields"
+    given = {}
+    for name, value in verdict.items():
+        given.setdefault(str(name).lower(), []).append(value)
+    findings = "\n".join(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+                         for text in given.get("findings", []) if text not in (None, ""))
+    values = given.get("blocking", [])
+    read = {truth(value) for value in values}
+    if values and None not in read and len(read) == 1:
+        return read.pop(), findings, None
+    if not values:
+        return None, findings, "the reviewer's verdict gave no blocking"
+    return None, findings, ("the reviewer's verdict gave no plain true or false for blocking (it gave %s)"
+                            % ", ".join(json.dumps(value, ensure_ascii=False)[:40] for value in values))
+
+
 def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
-    """One structured verdict, or None when none could be obtained."""
+    """One structured verdict as (blocking, findings, None), or, when none
+    could be obtained, (None, what the reviewer last wrote, why)."""
     request = {"model": model, "temperature": 0.2, "tools": [TOOL],
                "tool_choice": {"type": "function", "function": {"name": "verdict"}},
                "messages": [
@@ -241,7 +295,7 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
     if parsed.scheme != "https" and parsed.hostname not in ("127.0.0.1", "localhost"):
         raise ReviewError("REVIEW_MODEL_URL must be https")
     context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
-    last = ""
+    last, written = "", ""
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, body, headers), timeout=timeout,
@@ -251,19 +305,17 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
             if not calls:
                 last = "the reviewer returned no verdict"
             else:
-                verdict = json.loads(calls[0]["function"]["arguments"])
-                # The one field read strictly, since it decides whether the
-                # work goes on: anything but true or false is no verdict.
-                if isinstance(verdict, dict) and isinstance(verdict.get("blocking"), bool):
-                    return verdict["blocking"], str(verdict.get("findings") or "")
-                last = "the reviewer's verdict gave neither true nor false for blocking"
+                blocking, findings, why = read_verdict(calls[0]["function"]["arguments"])
+                if why is None:
+                    return blocking, findings, None
+                last, written = why, findings or written
         except urllib.error.HTTPError as error:
             last = "HTTP %d from the model service" % error.code
         except Exception as error:  # a model service hiccup is not a defect in the change
             last = type(error).__name__ + ": " + scrub(str(error), key)[:200]
         if attempt + 1 < attempts:
             time.sleep(min(5 * (attempt + 1), 20))
-    return None, last
+    return None, written, last
 
 
 def without_verdict(model, reason, unchanged, goes_on):
@@ -329,16 +381,18 @@ def reviewed(stdin_text, model, unchanged):
     diff, test_output = gather(workspace, paths, tests, timeout)
     if unchanged:
         diff = NO_CHANGE
-    blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)
+    blocking, findings, why = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)
     outcome, status = "PASSED", 0
     if blocking is None:
         outcome = "NOT REVIEWED"
         if unchanged:
-            findings = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
-                        " needs a verdict, so the work goes back this time" % findings)
+            note = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
+                    " needs a verdict, so the work goes back this time" % why)
             status = 1
         else:
-            findings = "no verdict could be obtained (%s); the work goes on unreviewed this time" % findings
+            note = "no verdict could be obtained (%s); the work goes on unreviewed this time" % why
+        # What the reviewer wrote stays in the record even without a verdict.
+        findings = note + ("\nWhat the reviewer wrote without a verdict:\n" + findings if findings else "")
         blocking = False
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
@@ -369,10 +423,11 @@ def reviewed(stdin_text, model, unchanged):
 
 def main():
     model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
-    # Read before any setting: a setting that keeps the review from running
-    # must not let an unchanged checkout through either.
-    unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
+    unchanged = False
     try:
+        # Read before any setting: a setting that keeps the review from running
+        # must not let an unchanged checkout through either.
+        unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
         # Read as bytes and decode leniently: a stray byte in the runtime's
         # text must not become a traceback, which an ordered run would read
         # as a send-back for ever.
