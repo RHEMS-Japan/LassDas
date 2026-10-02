@@ -346,6 +346,84 @@ func TestBudgetBelowMinimumHoldsWorkAndResumesByItself(t *testing.T) {
 	}
 }
 
+// A request held for the budget before its work ever started still follows an
+// authorized stop: the stop launches no model, so it does not wait for the
+// budget to return. Before this, nothing read the issue's comments while the
+// queue was held, and the requester's stop stayed unread for as long as it
+// took someone to raise the budget.
+func TestAStopIsFollowedWhileTheBudgetHoldsTheRequest(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.MinModelCredit = 5
+	holdingWorker(&cfg)
+	var mu sync.Mutex
+	remaining := "3"
+	server := creditServer(t, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return `{"data":{"limit":50,"usage":47,"limit_remaining":` + remaining + `,"limit_reset":"2026-10-01"}}`
+	})
+	cfg.Intake.ModelCreditURL, cfg.Intake.Client = server.URL, server.Client()
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("implement"))
+	root, directory := noticeJob(t, chain.State{History: []chain.Result{}})
+	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return fixture.count(pausedNoticeText) > 0 })
+	// The person who filed the issue, account 55, writes the stop.
+	fixture.mu.Lock()
+	stop, _ := json.Marshal(map[string]any{"id": 900 + len(fixture.rows), "issueId": 51, "projectId": 17,
+		"content": "停止", "createdUser": map[string]any{"id": 55}})
+	fixture.rows = append(fixture.rows, stop)
+	fixture.mu.Unlock()
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(directory, "stop-request.json"))
+		return err == nil
+	})
+	time.Sleep(80 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a stopped request while the budget was short")
+	}
+	// The budget returns: a stopped request is not told that its work resumed.
+	mu.Lock()
+	remaining = "20"
+	mu.Unlock()
+	time.Sleep(120 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a stopped request once the budget returned")
+	}
+	if got := fixture.all(); len(got) != 1 || got[0] != pausedNoticeText {
+		t.Fatalf("the requester was told something else: %v", got)
+	}
+}
+
+// An interrupted request is told on restart that the same request carries on.
+// One with a stop standing at its issue is launched only for the stop to be
+// recorded, so it is told nothing of the kind; before this the notice was
+// posted a moment before the stop took effect.
+func TestAnInterruptedRequestWithAStopStandingIsNotToldItCarriesOn(t *testing.T) {
+	cfg := watchConfiguration(t)
+	holdingWorker(&cfg)
+	root, directory := noticeJob(t, chain.State{Pending: &chain.Assignment{Role: "implement"}, History: []chain.Result{}})
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("implement"))
+	// The person who filed the issue, account 55, wrote the stop while the
+	// runtime was down.
+	stop, _ := json.Marshal(map[string]any{"id": 900, "issueId": 51, "projectId": 17,
+		"content": "停止", "createdUser": map[string]any{"id": 55}})
+	fixture.rows = append(fixture.rows, stop)
+	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(directory, "stop-request.json"))
+		return err == nil
+	})
+	time.Sleep(80 * time.Millisecond)
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("a request being stopped was told: %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a request with a stop standing")
+	}
+}
+
 // A running role is stopped when the budget falls away under it.
 func TestBudgetFallingAwayStopsTheRunningChild(t *testing.T) {
 	cfg := watchConfiguration(t)

@@ -107,21 +107,23 @@ func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int
 }
 
 // resumeWaitingRequest reports whether a request that is waiting for a person
-// may run again. An authorized stop hands it to the existing stop machinery
-// untouched; otherwise only a reply above the recorded boundary resumes it.
-func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, state chain.State, interval time.Duration) (bool, error) {
+// may run again, and whether that is because they answered. An authorized
+// stop hands it to the existing stop machinery untouched: it runs again only
+// for the stop to be recorded, and it was not answered. Otherwise only a
+// reply above the recorded boundary resumes it.
+func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, state chain.State, interval time.Duration) (resume, answered bool, err error) {
 	readCtx, release := context.WithTimeout(ctx, interval)
 	rows, err := cfg.Backlog.Comments(readCtx, issue.Key, 0)
 	release()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	stop, err := stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if stop != nil {
-		return true, nil
+		return true, false, nil
 	}
 	path := filepath.Join(directory, "question.json")
 	raw, err := os.ReadFile(path)
@@ -129,28 +131,28 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 		// An interrupted hold left no boundary. Record where the conversation
 		// stands now and keep waiting, rather than reading an older comment as
 		// an answer to a question it cannot have replied to.
-		return false, recordQuestion(directory, rows, issue)
+		return false, false, recordQuestion(directory, rows, issue)
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	var boundary questionBoundary
 	if err := json.Unmarshal(raw, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
-		return false, errors.New("the recorded question is unreadable; the request keeps waiting for the requester's answer")
+		return false, false, errors.New("the recorded question is unreadable; the request keeps waiting for the requester's answer")
 	}
 	id, answer, err := answerToQuestion(rows, issue, cfg.Intake.StopUserIDs, *boundary.After)
 	if err != nil || id == 0 {
-		return false, err
+		return false, false, err
 	}
 	if err := appendAnswer(directory, request, state.Step, answer); err != nil {
-		return false, err
+		return false, false, err
 	}
 	// Keep the answered question, so the same comment cannot be read as a
 	// second answer after a restart or a later question.
 	if err := os.Rename(path, filepath.Join(directory, "answer-"+strconv.FormatInt(id, 10)+".json")); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, nil
+	return true, true, nil
 }
 
 // The requester's own words join the history like any other report. They are
