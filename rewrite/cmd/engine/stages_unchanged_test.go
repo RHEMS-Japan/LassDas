@@ -308,6 +308,7 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				if options.checkFailsOnce {
 					env["VERIFY_COMMANDS"] = `/bin/sh -c "test -e $TASK_HOME/checked-once || { touch $TASK_HOME/checked-once; exit 1; }"`
 				}
+				p.Secrets = map[string]string{"GITHUB_TOKEN": "DELIVERY_TEST_TOKEN"}
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("verify_merged.py"))
 			default:
 				env["UNCHANGED_STAGE_ACTION"], env["UNCHANGED_STAGE_REQUEST"] = cfg.Roles[i].Name, request
