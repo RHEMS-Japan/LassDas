@@ -26,7 +26,7 @@ import (
 // its piece at most once, and the work carries on or resumes by itself.
 const (
 	resumeNoticeText   = "自動処理は再起動後に同じ依頼を続けています。直前の工程は途中で止まった可能性があるため、確認してから進めます。"
-	pausedNoticeText   = "自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（この通知への返信は不要です）。"
+	pausedNoticeText   = "自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。"
 	restoredNoticeText = "モデル利用枠が回復したため、自動処理を再開しました。"
 )
 
@@ -48,13 +48,15 @@ const (
 // The engine knows what it recorded, not what will end the wait. A launch that
 // runs long may be working or may be waiting for its operator to correct a
 // setting, a failure that repeats may need a person, and a spent budget may
-// need someone to add to it. So a notice says what was recorded and promises
-// one thing only: it does not wait for an answer.
+// need someone to add to it. A stall is also said while the engine itself
+// holds the work for the budget, when nothing is being tried. So a notice says
+// what was recorded and nothing about who has to act: not that nobody does,
+// and not that no answer is awaited, since a question may be standing above it.
 func stallNoticeText(minutes int, detail string) string {
 	if detail == "" {
-		return fmt.Sprintf("自動処理は続いていますが、過去 %d 分間は工程が完了していません（工程の失敗は記録されていません。進行中の工程が長引いているか、運用者の対応を待っています）。この通知への返信は不要です。", minutes)
+		return fmt.Sprintf("依頼はまだ終わっていませんが、過去 %d 分間は工程が完了していません。この間に工程の失敗は記録されていないため、工程が長引いているか、運用担当者の対応待ちのどちらかです。", minutes)
 	}
-	return fmt.Sprintf("自動処理は続いていますが、過去 %d 分間は工程が完了していません（直近の失敗: %s）。復旧を試し続けています。この通知への返信は不要です。", minutes, detail)
+	return fmt.Sprintf("依頼はまだ終わっていませんが、過去 %d 分間は工程が完了していません（直近の失敗: %s）。", minutes, detail)
 }
 
 // quietFor is how long the request has gone without any record being

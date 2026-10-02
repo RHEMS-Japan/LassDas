@@ -846,7 +846,7 @@ balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
 stop stops it, no work is launched, and the requester is told once:
 
-> 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（この通知への返信は不要です）。
+> 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。
 
 The balance keeps being read each tick. When it is back above the floor the
 request is launched again and says so once:
@@ -873,7 +873,7 @@ window is measured from the last history entry that finished without an error,
 so any successful role output inside it keeps the request quiet. Past the
 window, a request whose steps keep failing is told:
 
-> 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。復旧を試し続けています。この通知への返信は不要です。
+> 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。
 
 The quoted failure is the first nonblank line of the most recent error, with
 every configured credential value replaced by `[credential]` and the result cut
@@ -881,25 +881,30 @@ to 200 characters. A launch that runs long without a recorded failure is said
 once nothing has been recorded for that long; no time limit ends it, so this is
 the requester's only word about it:
 
-> 自動処理は続いていますが、過去 <n> 分間は工程が完了していません（工程の失敗は記録されていません。進行中の工程が長引いているか、運用者の対応を待っています）。この通知への返信は不要です。
+> 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていないため、工程が長引いているか、運用担当者の対応待ちのどちらかです。
 
-Neither form says that no person is needed. The engine records what its steps
-did, and from there a launch that is working and one that waits for its
-operator look the same: a step held for a setting only the operator can
-correct has not failed and has not finished. The same holds for the budget
-notice above, where the balance may come back by itself or only when someone
-adds to it. What each notice does promise is that it waits for no answer,
-unlike a question. The stall notice repeats at most once per six hours per
-request. It is a notice and nothing else: routing, recovery and the request's
-goal are untouched by it.
+Neither form says who has to act, and the budget notice above does not either.
+The engine records what its steps did, and from there a launch that is working
+and one that waits for its operator look the same: a step held for a setting
+only the operator can correct has not failed and has not finished. A failure
+that repeats may need a person. A balance may come back by itself or only when
+someone adds to it. The failing form is also said while the engine itself
+holds the work for the budget; the failure it quotes then is the engine's own
+cancellation of the step it stopped, and nothing is being tried. None of the
+three says that no answer is awaited, because a question to the requester may
+be standing right above it. The stall notice repeats at most once per six
+hours per request. It is a notice and nothing else: routing, recovery and the
+request's goal are untouched by it.
 
 All three go out through the controller's own tracker credential, the same one
 the stop report uses. No role is given the means to post them.
 
-What this does not do: these notices say that the machinery is still trying,
-not that it will succeed. They are posted from the collector loop, so a slow
-tracker delays that loop while one is being submitted. A request that is
-waiting for the requester's answer is not stalled and says nothing further.
+What this does not do: these notices say what the engine recorded, not that
+the work is being tried at that moment or that it will succeed. They are
+posted from the collector loop, so a slow tracker delays that loop while one
+is being submitted. A request recorded as waiting for the requester's answer
+is not stalled and says nothing further; a question whose launch has not
+returned yet is not recorded as waiting, so a notice can follow it.
 Nothing here notices a crash loop that never reaches the collector at all, a
 full disk, or a provider that answers quickly and uselessly. The budget reader
 has been exercised against a local fixture of the documented response shape,
