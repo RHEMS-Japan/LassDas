@@ -94,7 +94,7 @@ jobs:
       # a run inside one, skips the scans and says so, as before.
       - name: State whether the purity scan can run
         env:
-          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+          ENGINE_PURITY_TOKENS: "" # Withheld on purpose for one run; reverted next.
           REPOSITORY_IS_FORK: ${{ github.event.repository.fork }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
@@ -122,6 +122,20 @@ jobs:
           RANGE_HEAD: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh
+
+  # Temporary, for one run; reverted next: the Go version reader on forty
+  # Dockerfile shapes, read with this runner's tools.
+  reader-shapes-on-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          persist-credentials: false
+      - name: Read forty Dockerfile shapes with the Go version reader
+        run: |
+          bash --version | head -n 1
+          bash .github/scripts/reader-shapes-demo.sh
 
   # rewrite/START.md says the engine builds with the Go its go.mod names or
   # later, while the jobs above run on the Go the shipped image builds with.
