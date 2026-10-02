@@ -95,12 +95,12 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
   engine runs without the runtime's default seccomp profile, and `baseline`
   forbids both. Use a namespace whose enforced level is `privileged`
   (section 6 shows the label), and keep other workloads out of it.
-- **An image with the iptables tools for the egress rules.** The two network
-  init containers run `/usr/sbin/xtables-nft-multi` from an image you name.
-  One installation used its network plugin's own DaemonSet image, which
-  carries that program and which every node already pulls. If your network
-  plugin's image does not carry it, any image that does and that every node
-  can pull will serve; this repository does not ship one.
+- **An image built from commit f71872f (2026-10-02) or a later one.** The two
+  network init containers write the egress rules with the image's own
+  iptables (`/usr/sbin/xtables-nft-multi`), which older images do not carry.
+  The image `docs/DISTRIBUTION.json` names is such an image. The installation
+  named above wrote the same rules with the same program from its network
+  plugin's own image; running it from this image has not been measured.
 - **A storage class** that provides a 20Gi ReadWriteOnce volume.
 - **Room for the Pod.** The engine requests 1 CPU and 3Gi of memory (limit
   6Gi); the other containers are small. These figures are a starting point,
@@ -1187,9 +1187,9 @@ It has not been run as written against a real queue.
 ### Rolling it out
 
 1. If you can, wait until the status page shows nothing running.
-2. Put the new `image` reference into all four places in your
-   `statefulset.yaml` (`policy`, `mirror`, `engine`, `status`) and apply it.
-   The Pod is replaced.
+2. Put the new `image` reference into all six places in your
+   `statefulset.yaml` (`network-v4`, `network-v6`, `policy`, `mirror`,
+   `engine`, `status`) and apply it. The Pod is replaced.
 3. Check as in section 7: the configuration check inside the Pod, the Pod
    ready with no restarts, the status page, the engine's log (it opens with
    the intake line), and the issues of any request that was running.
@@ -1213,9 +1213,10 @@ kubectl -n "$NS" logs "$POD" -c <container> --previous
   `violates PodSecurity` means the namespace's level (section 1).
 - **`Pending`.** No node matches the node selector and tolerations, or the
   volume claim has no volume (the storage class).
-- **An init container failing.** `network-v4` or `network-v6`: the image has
-  no `/usr/sbin/xtables-nft-multi`, or a rule does not parse (their logs say
-  which). `policy`: its log.
+- **An init container failing.** `network-v4` or `network-v6`: the image was
+  built before commit f71872f and has no `/usr/sbin/xtables-nft-multi` (use
+  the image `docs/DISTRIBUTION.json` names), or a rule does not parse (its
+  log). `policy`: its log.
 - **Containers that cannot be created**, with events about user namespaces or
   mounts: the node or its container runtime does not support `hostUsers:
   false` (section 1).

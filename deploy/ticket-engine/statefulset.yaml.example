@@ -14,7 +14,7 @@
 #
 # <image>@sha256:<digest>: the published image and the digest built from a
 # commit of the default branch are the "image" field of docs/DISTRIBUTION.json.
-# Use the same reference in all four places below. The image must be pullable
+# Use the same reference in all six places below. The image must be pullable
 # on a node that has never run it: the Pod moves when its node is replaced,
 # and a registry that needs a credential needs an imagePullSecret named in
 # this spec. An image that only exists in one node's cache strands this
@@ -69,16 +69,13 @@ spec:
         # 1-2. This Pod's own egress rules, in this Pod's own network
         # namespace. NET_ADMIN is confined to these two containers; no host
         # network, no node mount, and no change to the cluster's plugin.
-        # <network-tool-image>: an image that carries /usr/sbin/xtables-nft-multi
-        # and that every node can pull. The measured cluster used exactly the
-        # reference its own network DaemonSet uses, read from that DaemonSet's
-        # container image field, not the digest a node happens to have cached;
-        # a network plugin whose image lacks the program needs another image.
-        # With imagePullPolicy Never this works until the Pod lands on a
-        # replacement node, and then the init container fails with no image to
-        # pull.
+        # Both run the image's own iptables (the nf_tables backend,
+        # /usr/sbin/xtables-nft-multi). An image built from a commit before
+        # f71872f (2026-10-02) has no such program. The measured installation
+        # wrote the same rules with the same program from its network
+        # plugin's image (README.md).
         - name: network-v4
-          image: <network-tool-image>:<tag>
+          image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
           command: ["/usr/sbin/xtables-nft-multi", "iptables-restore", "--noflush", "--wait", "5", "/policy/ipv4.rules"]
           securityContext:
@@ -96,7 +93,7 @@ spec:
             - { name: network-policy, mountPath: /policy, readOnly: true }
             - { name: network-run, mountPath: /run }
         - name: network-v6
-          image: <network-tool-image>:<tag>
+          image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
           command: ["/usr/sbin/xtables-nft-multi", "ip6tables-restore", "--noflush", "--wait", "5", "/policy/ipv6.rules"]
           securityContext:

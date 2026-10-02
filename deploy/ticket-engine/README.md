@@ -67,6 +67,10 @@ Proposed, or simply not measured. Check each one before trusting it:
 
 - Another cluster, node architecture or storage class, and this volume's
   behaviour when the Pod moves to another node.
+- The two network init containers running the image's own iptables (in
+  images built from commit f71872f, 2026-10-02, on). The egress rules above
+  were measured with the same program from the network plugin's image; the
+  image's build checks only that the program is there.
 - `resources`. The requests and limits are a starting point from spare node
   capacity, not a measured working set. A model-driven build can exceed them.
 - The shipped ordered configuration as it stands, with OpenRouter invoked
