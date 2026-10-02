@@ -24,7 +24,9 @@ type githubShared struct {
 	quiet time.Time
 	// strikes counts the limits met in a row that did not say for how long.
 	strikes int
-	// lastChange is when the last change was sent.
+	// change is held by the one change being sent, and lastChange is when
+	// the answer to the one before came back.
+	change     chan struct{}
 	lastChange time.Time
 }
 
@@ -43,6 +45,9 @@ const (
 	githubKeptCount = 512
 	// GitHub asks for at least a second between changes.
 	githubChangeSpacing = time.Second
+	// githubLongestWait bounds any wait: an answer out of all measure, or a
+	// clock running behind GitHub's, is asked again after it.
+	githubLongestWait = time.Hour
 )
 
 // The clock and the waiting are the tests' to replace.
@@ -71,7 +76,7 @@ func (g GitHub) shared() *githubShared {
 	defer githubStates.Unlock()
 	state := githubStates.shared[key]
 	if state == nil {
-		state = &githubShared{kept: map[string]githubKept{}}
+		state = &githubShared{kept: map[string]githubKept{}, change: make(chan struct{}, 1)}
 		githubStates.shared[key] = state
 	}
 	return state
@@ -87,49 +92,66 @@ func (s *githubShared) closedUntil(now time.Time) time.Time {
 	return time.Time{}
 }
 
-// spaceChange waits until a second has passed since the change sent before,
-// and takes the moment for this one, so changes sent from several places are
-// still a second apart.
-func (s *githubShared) spaceChange(ctx context.Context) error {
+// takeChange waits for the change before this one to be answered and for a
+// second to pass after that, then holds the turn until release is called,
+// once this change is answered.
+func (s *githubShared) takeChange(ctx context.Context) (func(), error) {
+	select {
+	case s.change <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	release := func() {
+		s.mu.Lock()
+		s.lastChange = githubNow()
+		s.mu.Unlock()
+		<-s.change
+	}
 	s.mu.Lock()
 	now, next := githubNow(), s.lastChange.Add(githubChangeSpacing)
-	if !now.Before(next) {
-		s.lastChange = now
-		s.mu.Unlock()
-		return nil
-	}
-	s.lastChange = next
 	s.mu.Unlock()
-	return githubWait(ctx, next.Sub(now))
+	if now.Before(next) {
+		if err := githubWait(ctx, next.Sub(now)); err != nil {
+			<-s.change
+			return nil, err
+		}
+	}
+	return release, nil
 }
 
-// learn reads what an answer says about asking again: the seconds a refusal
-// gives, the end of a spent hourly allowance, or, for a limit that says
-// neither, a minute that doubles while such limits come in a row.
+// learn reads what an answer says about asking again: the later of the
+// seconds a refusal gives and the end of a spent hourly allowance, or, for a
+// limit that gives no time still to come (none, one already past, one that
+// cannot be read), a minute that doubles while such limits come in a row.
+// No wait is longer than an hour.
 func (s *githubShared) learn(status int, header http.Header, body []byte, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var until time.Time
-	if seconds, err := strconv.Atoi(strings.TrimSpace(header.Get("Retry-After"))); err == nil && seconds >= 0 {
-		until = now.Add(time.Duration(seconds) * time.Second)
+	if status < 300 || status == http.StatusNotModified {
+		s.strikes = 0
 	}
-	if strings.TrimSpace(header.Get("X-RateLimit-Remaining")) == "0" {
-		reset := now.Add(time.Minute)
-		if epoch, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
-			reset = time.Unix(epoch, 0)
-		}
-		if reset.After(until) {
+	text := strings.ToLower(string(body))
+	spent := strings.TrimSpace(header.Get("X-RateLimit-Remaining")) == "0"
+	// The older wording of a secondary limit is an abuse detection mechanism.
+	if !spent && status != http.StatusTooManyRequests &&
+		(status != http.StatusForbidden || !strings.Contains(text, "rate limit") && !strings.Contains(text, "abuse detection")) {
+		return
+	}
+	var until time.Time
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(header.Get("Retry-After")), 10, 64); err == nil && seconds > 0 {
+		until = now.Add(time.Duration(min(seconds, int64(githubLongestWait/time.Second))) * time.Second)
+	}
+	if epoch, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64); err == nil && spent {
+		if reset := time.Unix(epoch, 0); reset.After(until) {
 			until = reset
 		}
 	}
-	limited := status == http.StatusTooManyRequests ||
-		(status == http.StatusForbidden && strings.Contains(strings.ToLower(string(body)), "rate limit"))
-	switch {
-	case limited && until.IsZero():
+	if !until.After(now) {
 		s.strikes++
-		until = now.Add(min(time.Minute<<min(s.strikes-1, 6), time.Hour))
-	case status < 300 || status == http.StatusNotModified:
-		s.strikes = 0
+		until = now.Add(min(time.Minute<<min(s.strikes-1, 6), githubLongestWait))
+	}
+	if longest := now.Add(githubLongestWait); until.After(longest) {
+		until = longest
 	}
 	if until.After(s.quiet) {
 		s.quiet = until
