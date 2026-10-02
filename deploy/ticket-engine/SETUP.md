@@ -84,10 +84,9 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
   1.33. On an older release, or where a cluster turned one off, the Pod is
   refused or never runs. The nodes' operating system and container runtime
   must support user namespaces as well. One installation was confirmed to run
-  this StatefulSet on Kubernetes 1.36 (control plane 1.36.3, kubelet 1.36.4)
-  with containerd 2.2 and Linux kernel 6.18 on arm64 nodes, with a 20Gi
-  ReadWriteOnce volume from its cluster's block storage class. The
-  server-side dry run in section 6 shows what admission does to the
+  this StatefulSet on Kubernetes 1.36, containerd 2.2 and Linux 6.18 on arm64
+  nodes, with a 20Gi ReadWriteOnce volume from its cluster's block storage
+  class. The server-side dry run in section 6 shows what admission does to the
   StatefulSet; whether the Pod itself is admitted, and whether a node can run
   it, shows only in the StatefulSet's and the Pod's events
   ([section 11](#the-pod-does-not-become-ready)).
@@ -473,15 +472,17 @@ None of these is required. Each changes what appears on the issue
   "announce": true,
   "declare_models": true,
   "status_page": "https://<status-host>/jobs/",
-  "statuses": {"processing": 1001, "awaiting_requester": 1002, "delivered": 3, "stopped": 1},
-  "category_on_accept": 2001,
+  "statuses": {"processing": <processing-status-id>, "awaiting_requester": <awaiting-status-id>, "delivered": 3, "stopped": 1},
+  "category_on_accept": <accepted-category-id>,
   "assign": true,
-  "stop_user_ids": [3001]
+  "stop_user_ids": [<operator-user-id>]
 }
 ```
 
-(merged into the existing `intake` object; 1001, 1002, 2001 and 3001 stand for
-your own ids from section 2.)
+(merged into the existing `intake` object, with your own ids from section 2
+in place of each `<...>`; 3 and 1 are Backlog's built-in Resolved and Open.
+A `<...>` left in place is found by the check at the end of
+[Check that no example value is left](#check-that-no-example-value-is-left).)
 
 - `announce`: fixed comments when a request is accepted, when it starts after
   waiting its turn, and when it resumes after an answer; each stage's own
@@ -601,9 +602,16 @@ POD=<consumer>-ticket-engine-0
    or with the secret path you already use:
 
    ```sh
-   kubectl -n "$NS" apply -f secrets.yaml
+   kubectl -n "$NS" create -f secrets.yaml
    rm secrets.yaml
    ```
+
+   `create`, not `apply`: a client-side `apply` keeps a copy of the whole
+   object, values included, in the annotation
+   `kubectl.kubernetes.io/last-applied-configuration`. To change a value
+   later, fill a copy again, run `kubectl -n "$NS" replace -f secrets.yaml`,
+   delete the copy, and restart the Pod: the containers read the values only
+   when they start.
 
 3. **The egress rules.** In your copy of `egress-configmap.yaml.example`,
    `<dns-cluster-ip>` is the address the Pods' `/etc/resolv.conf` names (the
@@ -715,6 +723,24 @@ kubectl -n "$NS" logs "$POD" -c mirror --tail=5
   and, on the first start, `Created the mirror at /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`.
   Its startup check passes only once the copy holds a branch, so the engine
   starts after the first copy is complete.
+
+The configuration's checkout source must be that mirror. This reads every
+`TASK_REPOSITORY` from the configuration the engine reads and says whether the
+Pod has it:
+
+```sh
+kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
+import json, os
+config = json.load(open("/etc/ticket-automation/operator.json"))
+sources = {p["env"]["TASK_REPOSITORY"] for r in config["roles"] for p in r["processes"] if "TASK_REPOSITORY" in p.get("env", {})}
+for source in sorted(sources):
+    print(source, "found" if os.path.isdir(source) else "NOT FOUND")'
+```
+
+It must print one line,
+`/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git found`. Another
+path, or `NOT FOUND`, means the configuration and the StatefulSet's
+`MIRROR_PATH` disagree, and every request would fail at its first checkout.
 
 ### The status page
 
@@ -939,17 +965,21 @@ request stays in the queue and runs.
 
 In your copy (`$CONFIG`), in the same edit:
 
-1. Set `intake.created_since` to the moment you open the intake, in UTC (for
-   example `2026-10-05T09:00:00Z`; the moment itself counts). Issues created
-   before it are never taken.
-2. Narrow what is taken, if the project is not the engine's alone: in a
+1. Narrow what is taken, if the project is not the engine's alone: in a
    project people also use for their own tickets, set `intake.category_ids` to
    the category of section 2. For a single first ticket you can instead file
-   it first, look up its id (the `ticket-tracker ... issues` command in
-   section 7 prints it), and set `intake.issue_ids` to `[<that id>]`. An
-   `issue_ids` that lists nothing real accepts nothing, and an empty one
-   accepts every new issue in the project; remove it once you are ready for
-   all of them.
+   it first, look up its id and creation time (the `ticket-tracker ... issues`
+   command in section 7 prints both), and set `intake.issue_ids` to
+   `[<that id>]`. An `issue_ids` that lists nothing real accepts nothing, and
+   an empty one accepts every new issue in the project; remove it once you
+   are ready for all of them.
+2. Set `intake.created_since`, in UTC (the moment itself counts): use the
+   moment you open the intake, for example `2026-10-05T09:00:00Z`, or, for a
+   ticket you filed in advance and listed in `issue_ids`, its own creation
+   time or any moment before it. An issue created before `created_since` is
+   never taken, whatever `issue_ids` or `category_ids` say: the engine looks
+   at the creation time first and skips such an issue without a line in its
+   log.
 3. Run `--check` on the copy (section 4) and read the intake line. It must say
    what you meant, for example
    `intake: project <project-id>, issues created at or after 2026-10-05T09:00:00Z; only issues carrying one of the categories [<id>]`.
@@ -1194,7 +1224,10 @@ kubectl -n "$NS" logs "$POD" -c <container> --previous
 - **The engine never starts while `mirror` runs.** The mirror's startup check
   waits until the copy holds a branch: a large repository is still copying, a
   repository without any commit never passes, and a refused token ends the
-  container (below).
+  container (below). The check gives up after 10 minutes (every 5 seconds, 120
+  times: `periodSeconds` and `failureThreshold` of the `mirror` entry), and the
+  container is then restarted in the middle of its first copy. For a
+  repository whose first copy takes longer, raise `failureThreshold`.
 
 ### The engine container restarts right after it starts
 

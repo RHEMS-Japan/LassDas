@@ -173,7 +173,10 @@ spec:
           # Passes once the copy holds a branch. The mirror's directory exists
           # from the moment the first clone starts, before any branch is in
           # it, and a role cloning from it then would start from an empty
-          # repository. A repository with no commit at all never passes.
+          # repository. A repository with no commit at all never passes. It
+          # gives up after 5 s x 120 = 10 minutes and the container is
+          # restarted in the middle of its first copy: raise failureThreshold
+          # for a repository whose first copy takes longer.
           startupProbe:
             exec:
               command: ["/bin/sh", "-c", "test -n \"$(git --git-dir=/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git for-each-ref --count=1 --format=x refs/heads)\""]
