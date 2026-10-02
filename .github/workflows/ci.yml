@@ -58,6 +58,7 @@ jobs:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
           RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh
       - name: Build the role-chain commands
         run: go build ./...
@@ -106,4 +107,5 @@ jobs:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
           RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh

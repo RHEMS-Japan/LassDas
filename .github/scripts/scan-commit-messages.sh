@@ -5,23 +5,32 @@
 # republish the identifier this gate exists to keep out.
 #
 # Both jobs in ci.yml run this. It reads ENGINE_PURITY_TOKENS (the list, a
-# repository secret), RANGE_BASE and RANGE_HEAD from the environment, and
-# needs the history of the range (a checkout with fetch-depth: 0).
+# repository secret), RANGE_BASE, RANGE_HEAD and DEFAULT_BRANCH from the
+# environment, and needs the history of the range and the default branch (a
+# checkout with fetch-depth: 0).
 set -euo pipefail
 if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
   echo "ENGINE_PURITY_TOKENS is not set; the commit-message scan is skipped"
   exit 0
 fi
-# Without a usable base (first push of a branch, force push), every
-# reachable message is scanned - histories here are short, and a
-# single-commit fallback measurably let mid-branch commits through.
-if [ -z "$RANGE_BASE" ] || ! git cat-file -e "$RANGE_BASE" 2>/dev/null; then
-  messages=$(git log --format=%B "$RANGE_HEAD")
-  count=$(git rev-list --count "$RANGE_HEAD")
+if [ -n "$RANGE_BASE" ] && git cat-file -e "$RANGE_BASE" 2>/dev/null; then
+  range=("$RANGE_BASE..$RANGE_HEAD")
+  echo "reading the messages of $RANGE_BASE..$RANGE_HEAD"
 else
-  messages=$(git log --format=%B "$RANGE_BASE".."$RANGE_HEAD")
-  count=$(git rev-list --count "$RANGE_BASE".."$RANGE_HEAD")
+  # Without a usable base (the first push of a branch, a force push), the
+  # messages read are those of the commits the default branch does not hold
+  # yet: every commit of the branch, mid-branch ones included, and none of
+  # the history already published, which no change on a branch can reword.
+  default="refs/remotes/origin/${DEFAULT_BRANCH:?DEFAULT_BRANCH is not set}"
+  if ! git rev-parse --verify --quiet "$default^{commit}" >/dev/null; then
+    echo "there is no usable base and $default is not in the checkout, so the new commits cannot be told apart" >&2
+    exit 1
+  fi
+  range=("$RANGE_HEAD" --not "$default")
+  echo "no usable base; reading the messages of the commits $DEFAULT_BRANCH does not hold"
 fi
+messages=$(git log --format=%B "${range[@]}")
+count=$(git rev-list --count "${range[@]}")
 lowered=$(printf '%s' "$messages" | tr '[:upper:]' '[:lower:]')
 index=0
 failed=0
