@@ -13,8 +13,9 @@ import (
 )
 
 // githubClock stands in for the clock and the waiting, and gives the time it
-// is and the waits asked for.
-func githubClock(t *testing.T) (*time.Time, *[]time.Duration) {
+// is, the waits asked for, and a way to move the clock on from another
+// goroutine (a fake server's): it takes the clock's lock and records no wait.
+func githubClock(t *testing.T) (*time.Time, *[]time.Duration, func(time.Duration)) {
 	t.Helper()
 	now := time.Unix(1_800_000_000, 0)
 	var waits []time.Duration
@@ -28,8 +29,9 @@ func githubClock(t *testing.T) (*time.Time, *[]time.Duration) {
 		now = now.Add(wait)
 		return nil
 	}
+	advance := func(by time.Duration) { mu.Lock(); defer mu.Unlock(); now = now.Add(by) }
 	t.Cleanup(func() { githubNow, githubWait = previousNow, previousWait })
-	return &now, &waits
+	return &now, &waits, advance
 }
 
 func TestGitHubAsksAgainWithTheValidatorAndKeepsTheAnswerWhenNothingChanged(t *testing.T) {
@@ -120,7 +122,7 @@ func TestGitHubReadsOnPastAFullPageThatDidNotChange(t *testing.T) {
 }
 
 func TestGitHubSendsNothingUntilTheAllowanceComesBack(t *testing.T) {
-	now, _ := githubClock(t)
+	now, _, _ := githubClock(t)
 	reset := now.Add(10 * time.Minute)
 	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 		if call == 1 {
@@ -149,7 +151,7 @@ func TestGitHubSendsNothingUntilTheAllowanceComesBack(t *testing.T) {
 }
 
 func TestGitHubWaitsAsLongAsALimitSays(t *testing.T) {
-	now, _ := githubClock(t)
+	now, _, _ := githubClock(t)
 	answers := []func(w http.ResponseWriter){
 		func(w http.ResponseWriter) {
 			w.Header().Set("Retry-After", "30")
@@ -200,7 +202,7 @@ func TestGitHubWaitsAsLongAsALimitSays(t *testing.T) {
 }
 
 func TestGitHubSpacesChangesASecondApart(t *testing.T) {
-	_, waits := githubClock(t)
+	_, waits, _ := githubClock(t)
 	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusCreated)
@@ -265,7 +267,7 @@ func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *tes
 		"reset a day ahead":          {200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1800086400"}, "", time.Hour},
 	} {
 		t.Run(name, func(t *testing.T) {
-			now, _ := githubClock(t)
+			now, _, _ := githubClock(t)
 			github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 				if call == 1 {
 					for key, value := range test.header {
@@ -296,7 +298,7 @@ func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *tes
 // minute again. The later of a refusal's seconds and the end of a spent
 // allowance is the one waited for.
 func TestGitHubStartsAgainFromAMinuteAndWaitsForTheLaterTime(t *testing.T) {
-	now, _ := githubClock(t)
+	now, _, _ := githubClock(t)
 	start := *now
 	silent := func(w http.ResponseWriter) {
 		w.WriteHeader(http.StatusForbidden)
@@ -388,7 +390,7 @@ func TestGitHubSendsNoChangeThatWaitedThroughALimit(t *testing.T) {
 // Changes go one at a time, each at least a second after the answer to the
 // one before; a slow answer moves the next change later, not earlier.
 func TestGitHubSendsChangesOneAtATimeASecondAfterTheLastAnswer(t *testing.T) {
-	now, waits := githubClock(t)
+	_, waits, advance := githubClock(t)
 	var mu sync.Mutex
 	posts := 0
 	hold := make(chan struct{})
@@ -400,7 +402,7 @@ func TestGitHubSendsChangesOneAtATimeASecondAfterTheLastAnswer(t *testing.T) {
 		if first {
 			<-hold
 			// The first answer takes a while to come back.
-			*now = now.Add(300 * time.Millisecond)
+			advance(300 * time.Millisecond)
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"id":1}`)
@@ -473,5 +475,31 @@ func TestGitHubKeepsItsOwnCopyAndSendsNoValidatorWithAChange(t *testing.T) {
 	}
 	if strings.Join(validators, "|") != `GET |GET "v1"|GET "v1"|POST ` {
 		t.Fatalf("validators sent: %q", validators)
+	}
+}
+
+// A closed fake server leaves nothing for a later one given its port, such as
+// a wait it was told of under the stand-in clock, which the real clock has
+// not reached.
+func TestGitHubFakeServersLeaveNothingForTheNextOnTheirPort(t *testing.T) {
+	var base string
+	t.Run("told to wait", func(t *testing.T) {
+		githubClock(t)
+		github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+		})
+		github.Myself(context.Background())
+		if _, err := github.Myself(context.Background()); err == nil || !strings.Contains(err.Error(), "nothing was sent") {
+			t.Fatalf("the wait was not kept while the server was open: %v", err)
+		}
+		base = github.base()
+	})
+	githubStates.Lock()
+	defer githubStates.Unlock()
+	for key := range githubStates.shared {
+		if strings.HasPrefix(key, base+"\x00") {
+			t.Fatalf("the closed server left its state for the next one on its port: %q", key)
+		}
 	}
 }

@@ -44,9 +44,27 @@ func githubFixture(t *testing.T, handler func(base string, call int32, w http.Re
 		}
 		handler(base, call, w, r)
 	}))
-	t.Cleanup(server.Close)
 	base = server.URL
+	// The process keeps waits and answers by address, and a later server can
+	// be given this one's port: it starts with none and leaves none behind.
+	forgetGitHubStates(base)
+	t.Cleanup(func() {
+		server.Close()
+		forgetGitHubStates(base)
+	})
 	return GitHub{APIURL: server.URL, Repository: "octo-org/widgets", KeyEnv: "GITHUB_TEST_TOKEN", Client: server.Client()}, &calls
+}
+
+// forgetGitHubStates drops what the process keeps for any API on the server
+// at base.
+func forgetGitHubStates(base string) {
+	githubStates.Lock()
+	defer githubStates.Unlock()
+	for key := range githubStates.shared {
+		if strings.HasPrefix(key, base+"\x00") || strings.HasPrefix(key, base+"/") {
+			delete(githubStates.shared, key)
+		}
+	}
 }
 
 // servePages answers a list of records a hundred at a time, naming the next
