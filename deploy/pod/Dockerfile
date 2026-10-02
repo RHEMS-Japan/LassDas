@@ -62,7 +62,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 # space they take.
 RUN apt-get update -qq && apt-get install -y -q --no-install-recommends iptables \
     && rm -rf /var/lib/apt/lists/* \
-    && test -x /usr/sbin/xtables-nft-multi
+    && test -x /usr/sbin/xtables-nft-multi-missing-on-purpose
 
 # Node 22 (validation toolchain of node consumers) + pinned pnpm.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
