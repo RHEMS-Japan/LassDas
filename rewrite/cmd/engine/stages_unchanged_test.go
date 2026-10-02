@@ -124,6 +124,8 @@ type unchangedOptions struct {
 	checkFailsOnce bool
 	// closedByPerson has a person close each pull request right after it opens.
 	closedByPerson bool
+	// review adds to the review command's settings.
+	review map[string]string
 }
 
 func (run *unchangedRun) workspace() string {
@@ -285,6 +287,9 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				}
 				env["REVIEW_MODEL_URL"], env["REVIEW_MODEL"] = model.URL+"/v1/chat/completions", "fixture/reviewer"
 				env["REVIEW_TEST_COMMANDS"], env["REVIEW_ATTEMPTS"] = `/bin/sh -c "grep -q Hello src/greeting.txt"`, "1"
+				// Trouble with the model service is waited out in moments here, not minutes.
+				env["REVIEW_RETRY_SECONDS"], env["REVIEW_RETRY_CAP_SECONDS"] = "0.05", "0.2"
+				maps.Copy(env, options.review)
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("adversarial_review.py"))
 			case "deliver":
 				maps.Copy(env, delivery)
@@ -478,12 +483,14 @@ func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 }
 
 // A request that needs a change, a work stage that writes nothing, and a
-// reviewing model that is down or answers without a verdict. Let through,
-// the work would end with nothing delivered and nobody's judgement, so the
-// review sends it back each time: the run never reaches the delivery, and
-// nothing is pushed, opened or reported.
+// reviewing model that is down or answers without a verdict. By default the
+// review keeps asking and the run waits at it; with the operator's opt-in for
+// the old pass-through, the review still cannot let an unchanged checkout
+// through without a verdict, so it sends the work back each time. Either way
+// the run never reaches the delivery, and nothing is pushed, opened or
+// reported.
 func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
-	for i, shape := range []struct {
+	shapes := []struct {
 		name   string
 		answer func(w http.ResponseWriter, n int)
 	}{
@@ -494,59 +501,70 @@ func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{
 				"role": "assistant", "content": "Looks fine to me."}}}})
 		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			run := startUnchangedRun(t, 70+i, neededChangeRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
-				shape.answer(w, n)
-			}, unchangedOptions{})
-			deadline := time.Now().Add(120 * time.Second)
-			for {
-				run.mu.Lock()
-				asked := len(run.reviews)
-				run.mu.Unlock()
-				if state, err := loadWatchState(run.queue, run.issue); asked >= 3 || (err == nil && state.Done) {
-					break
+	}
+	issue := 70
+	for _, passing := range []bool{false, true} {
+		for _, shape := range shapes {
+			issue++
+			t.Run(fmt.Sprintf("%s, opt-in=%t", shape.name, passing), func(t *testing.T) {
+				review := map[string]string{}
+				if passing {
+					review["REVIEW_UNAVAILABLE"] = "pass"
 				}
-				if time.Now().After(deadline) {
-					run.finish()
-					t.Fatalf("the review was asked %d times\n%s", asked, run.log.String())
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			run.finish()
-			state, err := loadWatchState(run.queue, run.issue)
-			if err != nil || state.Done {
-				t.Fatalf("the run ended without a verdict: step=%s err=%v", state.Step, err)
-			}
-			sentBack := 0
-			for _, result := range state.History {
-				switch {
-				case slices.Contains([]string{"deliver", "verify_merged", "report", "confirm_report"}, result.Role):
-					t.Fatalf("the run went past the review without a verdict: %+v", result)
-				case result.Role == "review" && result.Speaker != "runtime" && result.Error == "":
-					t.Fatalf("a review without a verdict let the work through: %s", result.Output)
-				case result.Role == "review" && strings.HasPrefix(result.Error, "exit status 1"):
-					if !strings.Contains(result.Output, "an ending with nothing delivered needs a verdict, so the work goes back this time") {
-						t.Fatalf("the review did not say why the work goes back: %s", result.Output)
+				run := startUnchangedRun(t, issue, neededChangeRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
+					shape.answer(w, n)
+				}, unchangedOptions{review: review})
+				deadline := time.Now().Add(120 * time.Second)
+				for {
+					run.mu.Lock()
+					asked := len(run.reviews)
+					run.mu.Unlock()
+					if state, err := loadWatchState(run.queue, run.issue); asked >= 3 || (err == nil && state.Done) {
+						break
 					}
-					sentBack++
+					if time.Now().After(deadline) {
+						run.finish()
+						t.Fatalf("the review was asked %d times\n%s", asked, run.log.String())
+					}
+					time.Sleep(20 * time.Millisecond)
 				}
-			}
-			if sentBack < 2 {
-				t.Fatalf("only %d reviews ended, each sending the work back", sentBack)
-			}
-			if _, err := os.Stat(filepath.Join(run.queue, "jobs", fmt.Sprint(run.issue), "workspace", ".git", "ticket-engine", "delivery.json")); !os.IsNotExist(err) {
-				t.Fatalf("a delivery receipt exists: %v", err)
-			}
-			if refs := run.git(run.target, "for-each-ref", "--format=%(refname)", "refs/heads"); refs != "refs/heads/master" {
-				t.Fatalf("something was pushed to the target: %s", refs)
-			}
-			run.mu.Lock()
-			defer run.mu.Unlock()
-			if len(run.serviceCalls) != 0 || len(run.stored) != 0 {
-				t.Fatalf("service calls %v, stored comments %q", run.serviceCalls, run.stored)
-			}
-		})
+				run.finish()
+				state, err := loadWatchState(run.queue, run.issue)
+				if err != nil || state.Done {
+					t.Fatalf("the run ended without a verdict: step=%s err=%v", state.Step, err)
+				}
+				sentBack := 0
+				for _, result := range state.History {
+					switch {
+					case slices.Contains([]string{"deliver", "verify_merged", "report", "confirm_report"}, result.Role):
+						t.Fatalf("the run went past the review without a verdict: %+v", result)
+					case result.Role == "review" && result.Speaker != "runtime" && result.Error == "":
+						t.Fatalf("a review without a verdict let the work through: %s", result.Output)
+					case result.Role == "review" && strings.HasPrefix(result.Error, "exit status 1"):
+						if !passing || !strings.Contains(result.Output, "an ending with nothing delivered needs a verdict, so the work goes back this time") {
+							t.Fatalf("a review ended without a verdict: %s %s", result.Error, result.Output)
+						}
+						sentBack++
+					}
+				}
+				// By default one review keeps asking, so no review has ended at
+				// all; with the opt-in each one sends the work back.
+				if passing != (sentBack >= 2) {
+					t.Fatalf("with opt-in=%t, %d reviews ended, each sending the work back", passing, sentBack)
+				}
+				if _, err := os.Stat(filepath.Join(run.queue, "jobs", fmt.Sprint(run.issue), "workspace", ".git", "ticket-engine", "delivery.json")); !os.IsNotExist(err) {
+					t.Fatalf("a delivery receipt exists: %v", err)
+				}
+				if refs := run.git(run.target, "for-each-ref", "--format=%(refname)", "refs/heads"); refs != "refs/heads/master" {
+					t.Fatalf("something was pushed to the target: %s", refs)
+				}
+				run.mu.Lock()
+				defer run.mu.Unlock()
+				if len(run.serviceCalls) != 0 || len(run.stored) != 0 {
+					t.Fatalf("service calls %v, stored comments %q", run.serviceCalls, run.stored)
+				}
+			})
+		}
 	}
 }
 
