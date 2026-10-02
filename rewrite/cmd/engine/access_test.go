@@ -213,7 +213,7 @@ func TestIssueAccessConfigurationCannotBorrowBroadCredentialsOrModelAuthority(t 
 	}
 	// Both posting grants are operator choices: one comment per launch, or
 	// every post kept.
-	for _, grant := range []string{"comment", "comments"} {
+	for _, grant := range []string{"comment", "every-comment"} {
 		cfg := accessConfiguration(t)
 		cfg.Roles[0].Processes[0].TrackerAccess = grant
 		if prepare, err := roleAccess(cfg, "EXAMPLE-1"); err != nil || prepare == nil {

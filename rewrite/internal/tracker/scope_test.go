@@ -344,41 +344,46 @@ func TestIssueAccessTLSAndCancellation(t *testing.T) {
 }
 
 // A launch that posts a trial line before what it means to say leaves only
-// the latter: the scope removes its earlier comment once the later one is
-// stored. Which is which is never read; the later post stays.
+// the latter: once the launch is over, the scope removes what it stored
+// before its last comment. Which is which is never read; the one the tracker
+// stored last stays. No removal runs while a post is being answered.
 func TestIssueScopeKeepsOnlyTheLatestPostOfALaunch(t *testing.T) {
 	for _, test := range []struct {
 		name            string
 		options         []func(*IssueScope)
+		ids             []int
 		removalStatus   int
 		secondPostFails bool
-		want            []string
+		removals        []string
+		removed         int
 	}{
-		{name: "a later post replaces the earlier one", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 200,
-			want: []string{"POST", "POST", "DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
-		{name: "every post stays without the option", removalStatus: 200, want: []string{"POST", "POST"}},
-		{name: "a refused removal does not fail the post", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 403,
-			want: []string{"POST", "POST", "DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
-		{name: "a post that fails leaves the earlier comment", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 200,
-			secondPostFails: true, want: []string{"POST", "POST"}},
+		{name: "the earlier post is removed when the launch is over", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 200, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}, removed: 1},
+		{name: "the comment stored last stays whatever the order of the answers", options: []func(*IssueScope){KeepLatestPost}, ids: []int{42, 41},
+			removalStatus: 200, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}, removed: 1},
+		{name: "every post stays without the option", ids: []int{41, 42}, removalStatus: 200},
+		{name: "a refused removal leaves both", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 403, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
+		{name: "a post that fails leaves the earlier comment", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 200, secondPostFails: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var operations []string
-			next := 40
-			b, _ := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			posts := 0
+			b, scope := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
 				switch {
 				case r.Method == "POST" && r.URL.Path == "/api/v2/issues/EXAMPLE-1/comments":
 					operations = append(operations, "POST")
-					if test.secondPostFails && next == 41 {
+					posts++
+					if test.secondPostFails && posts == 2 {
 						w.WriteHeader(500)
 						return
 					}
-					next++
 					w.WriteHeader(201)
-					json.NewEncoder(w).Encode(map[string]any{"id": next, "content": r.PostFormValue("content")})
+					json.NewEncoder(w).Encode(map[string]any{"id": test.ids[posts-1], "content": r.PostFormValue("content")})
 				case r.Method == "DELETE":
 					operations = append(operations, "DELETE "+r.URL.Path)
 					w.WriteHeader(test.removalStatus)
@@ -396,11 +401,76 @@ func TestIssueScopeKeepsOnlyTheLatestPostOfALaunch(t *testing.T) {
 				t.Fatalf("second post: %v", err)
 			}
 			mu.Lock()
+			during := strings.Join(operations, ", ")
+			mu.Unlock()
+			if during != "POST, POST" {
+				t.Fatalf("something other than the posts ran while the launch was posting: %s", during)
+			}
+			if removed := scope.RemoveEarlierPosts(ctx); removed != test.removed {
+				t.Fatalf("removed %d comments, want %d", removed, test.removed)
+			}
+			// Settling twice removes nothing more.
+			if again := scope.RemoveEarlierPosts(ctx); again != 0 && test.removalStatus == 200 {
+				t.Fatalf("a second settlement removed %d more", again)
+			}
+			mu.Lock()
 			defer mu.Unlock()
-			if strings.Join(operations, ", ") != strings.Join(test.want, ", ") {
-				t.Fatalf("upstream saw %v, want %v", operations, test.want)
+			after := operations[2:]
+			if test.removalStatus != 200 && len(after) > len(test.removals) {
+				after = after[:len(test.removals)] // a refused removal may be tried again by the second settlement
+			}
+			if strings.Join(after, ", ") != strings.Join(test.removals, ", ") {
+				t.Fatalf("removals %v, want %v", after, test.removals)
 			}
 		})
+	}
+}
+
+// Closing a launch's access is what settles its comments, after the endpoint
+// has stopped accepting posts.
+func TestIssueAccessSettlesTheLaunchCommentsWhenItCloses(t *testing.T) {
+	t.Setenv("SCOPE_TEST_ACCOUNT", "synthetic-account+/=key")
+	var mu sync.Mutex
+	var operations []string
+	next := 40
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case "POST":
+			next++
+			operations = append(operations, "POST")
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{"id": next})
+		case "DELETE":
+			operations = append(operations, "DELETE "+r.URL.Path)
+			json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer upstream.Close()
+	source := Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}
+	access, err := ServeIssue(context.Background(), source, "EXAMPLE-1", true, KeepLatestPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := CertificateClient(access.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	t.Setenv("SCOPE_TEST_WORKER", access.Key)
+	b := Backlog{BaseURL: access.URL, KeyEnv: "SCOPE_TEST_WORKER", Client: client}
+	for _, text := range []string{"test comment", "the question itself"} {
+		if _, err := b.AddComment(context.Background(), "EXAMPLE-1", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	access.Close()
+	access.Close() // repeated by a deferred release; settles once
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(operations, ", "); got != "POST, POST, DELETE /api/v2/issues/EXAMPLE-1/comments/41" {
+		t.Fatalf("upstream saw %s", got)
 	}
 }
 
