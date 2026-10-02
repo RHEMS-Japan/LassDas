@@ -388,11 +388,15 @@ func TestConfigurationTypesEmbedNoStruct(t *testing.T) {
 		seen[kind] = true
 		for i := 0; i < kind.NumField(); i++ {
 			field := kind.Field(i)
-			if name, _, _ := strings.Cut(field.Tag.Get("json"), ","); !field.IsExported() || name == "-" {
-				continue
-			}
-			if field.Anonymous {
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			// An embedded struct of a type that is not exported is itself not
+			// exported, and the decoder still takes its keys: look for the
+			// embedding before skipping what is not exported.
+			if field.Anonymous && name != "-" {
 				t.Errorf("%s embeds %s; give it a name of its own, or teach checkKeys to take an embedded struct's keys", where, field.Name)
+			}
+			if !field.IsExported() || name == "-" {
+				continue
 			}
 			walk(field.Type, where+"."+field.Name)
 		}
