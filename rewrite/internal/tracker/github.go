@@ -313,10 +313,17 @@ func (g GitHub) Myself(ctx context.Context) (Account, error) {
 func (g GitHub) pages(ctx context.Context, first string) ([]json.RawMessage, error) {
 	address := g.base() + first
 	rows := []json.RawMessage{}
+	// A next page that is one already read would be read again and again,
+	// each time out of the hourly allowance.
+	read := map[string]bool{}
 	for count := 0; ; count++ {
 		if count == githubPages {
 			return nil, fmt.Errorf("the list ran past %d pages; no partial list returned", githubPages)
 		}
+		if read[samePage(address)] {
+			return nil, errors.New("tracker named as the next page one it had already given; no partial list returned")
+		}
+		read[samePage(address)] = true
 		data, header, err := g.call(ctx, http.MethodGet, address, nil, http.StatusOK, githubPageLimit)
 		if err != nil {
 			return nil, err
@@ -367,15 +374,34 @@ func (g GitHub) next(link, current string, count int) (string, error) {
 }
 
 // sameAPI says whether an address is under the configured API: the token goes
-// to no other host.
+// to no other host, and to no path that a "." or ".." segment, written out or
+// percent-encoded, could lead out of the API's own.
 func (g GitHub) sameAPI(address string) bool {
 	base, err := url.Parse(g.base())
 	if err != nil {
 		return false
 	}
 	given, err := url.Parse(address)
-	return err == nil && given.Scheme == "https" && given.User == nil && strings.EqualFold(given.Host, base.Host) &&
+	if err != nil {
+		return false
+	}
+	for _, segment := range strings.Split(given.Path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return given.Scheme == "https" && given.User == nil && strings.EqualFold(given.Host, base.Host) &&
 		strings.HasPrefix(given.Path, strings.TrimRight(base.Path, "/")+"/")
+}
+
+// samePage is an address with its host's case and its query's order set
+// aside, so that one page named twice is known for the same.
+func samePage(address string) string {
+	given, err := url.Parse(address)
+	if err != nil {
+		return address
+	}
+	return strings.ToLower(given.Host) + given.EscapedPath() + "?" + given.Query().Encode()
 }
 
 // githubError is an answer with a status other than the one expected.
@@ -470,6 +496,12 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 		return nil, nil, fmt.Errorf("tracker returned HTTP %d; response exceeds %d MiB; no truncated response returned", response.StatusCode, limit>>20)
 	}
 	if response.StatusCode != expected {
+		if response.StatusCode >= 300 && response.StatusCode < 400 && response.StatusCode != http.StatusNotModified {
+			// Nothing is sent where it points: the token goes only where the
+			// configuration says.
+			return nil, nil, fmt.Errorf("tracker returned HTTP %d, a redirect to %q, which is not followed: the repository or the issue may have been moved or renamed; check the configured repository",
+				response.StatusCode, redact(response.Header.Get("Location")))
+		}
 		return nil, nil, &githubError{Status: response.StatusCode, Body: redact(string(data))}
 	}
 	if read {

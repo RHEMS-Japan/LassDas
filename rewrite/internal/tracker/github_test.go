@@ -137,7 +137,27 @@ func TestGitHubReadsEveryPageOfOpenIssuesAndLeavesPullRequestsOut(t *testing.T) 
 }
 
 func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
-	for _, failure := range []string{"another repository", "repeated issue", "second page outage", "next page on another host", "moved", "not an array", "oversized page"} {
+	// A next page named anywhere the token is not to go fails the list, and so
+	// does one the list already gave.
+	elsewhere := map[string]func(base string) string{
+		"next page on another host": func(string) string { return "https://127.0.0.1:1/repositories/1/issues?page=2" },
+		"next page over http": func(base string) string {
+			return strings.Replace(base, "https://", "http://", 1) + "/repositories/1/issues?page=2"
+		},
+		"next page with a user": func(base string) string {
+			return strings.Replace(base, "https://", "https://someone:secret@", 1) + "/repositories/1/issues?page=2"
+		},
+		"next page through dot segments": func(base string) string { return base + "/repos/octo-org/widgets/../../admin?page=2" },
+		"next page through encoded dots": func(base string) string { return base + "/repositories/1/%2e%2e/%2E%2E/admin?page=2" },
+		"next page already given": func(base string) string {
+			return base + "/repos/octo-org/widgets/issues?sort=created&per_page=100&state=open&direction=asc"
+		},
+	}
+	failures := []string{"another repository", "repeated issue", "second page outage", "moved", "not an array", "oversized page"}
+	for failure := range elsewhere {
+		failures = append(failures, failure)
+	}
+	for _, failure := range failures {
 		t.Run(failure, func(t *testing.T) {
 			github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 				records := []any{}
@@ -155,10 +175,6 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 						fmt.Fprint(w, "second page unavailable")
 						return
 					}
-				case "next page on another host":
-					w.Header().Set("Link", `<https://127.0.0.1:1/repositories/1/issues?page=2>; rel="next"`)
-					json.NewEncoder(w).Encode(records[:100])
-					return
 				case "moved":
 					w.Header().Set("Location", base+"/repositories/1/issues")
 					w.WriteHeader(http.StatusMovedPermanently)
@@ -170,12 +186,23 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 					fmt.Fprint(w, "[]"+strings.Repeat(" ", 32<<20))
 					return
 				}
+				if next, found := elsewhere[failure]; found {
+					w.Header().Set("Link", "<"+next(base)+`>; rel="next"`)
+					json.NewEncoder(w).Encode(records[:100])
+					return
+				}
 				servePages(base, w, r, records, true)
 			})
 			rows, err := github.Issues(context.Background())
 			want := map[string]string{"another repository": "outside the configured repository", "repeated issue": "repeated an issue",
-				"second page outage": "503: second page unavailable", "next page on another host": "outside its API", "moved": "HTTP 301",
+				"second page outage": "503: second page unavailable", "moved": "HTTP 301, a redirect to", "next page already given": "already given",
 				"not an array": "not a bounded array", "oversized page": "exceeds 32 MiB"}[failure]
+			if want == "" {
+				want = "outside its API"
+			}
+			if failure == "moved" && (err == nil || !strings.Contains(err.Error(), "may have been moved or renamed; check the configured repository")) {
+				t.Fatalf("the operator is not told what a redirect likely means: %v", err)
+			}
 			wantCalls := map[string]int32{"second page outage": 2, "another repository": 2, "repeated issue": 2}[failure]
 			if wantCalls == 0 {
 				wantCalls = 1
