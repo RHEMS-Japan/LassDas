@@ -70,9 +70,10 @@ func (g GitHub) Target(turn string) json.RawMessage {
 // Move gives the issue the turn's label. A working turn (processing, awaiting
 // the requester, delivered, stopped) also takes off the label of any other
 // working turn the issue carries, so the issue shows one; the label of
-// acceptance stays, as do the labels people gave the issue. A label already
-// gone counts as taken off, and a move cut short is completed by asking for
-// it again.
+// acceptance stays, as do the labels people gave the issue. A label is taken
+// off under the name GitHub gave it, and one GitHub answers it cannot find
+// counts as taken off only when the issue's labels, read again, no longer
+// hold it. A move cut short is completed by asking for it again.
 func (g GitHub) Move(ctx context.Context, issue Issue, turn string) error {
 	name := g.Labels.label(turn)
 	if name == "" {
@@ -95,25 +96,51 @@ func (g GitHub) Move(ctx context.Context, issue Issue, turn string) error {
 		return nil
 	}
 	for _, other := range []string{g.Labels.Processing, g.Labels.AwaitingRequester, g.Labels.Delivered, g.Labels.Stopped} {
-		if other == "" || strings.EqualFold(other, name) || !hasLabel(carried, other) {
+		given, found := labelNamed(carried, other)
+		if other == "" || strings.EqualFold(other, name) || !found {
 			continue
 		}
-		_, _, err := g.call(ctx, http.MethodDelete, g.base()+path+"/labels/"+url.PathEscape(other), nil, http.StatusOK, githubItemLimit)
+		_, _, err := g.call(ctx, http.MethodDelete, g.base()+path+"/labels/"+url.PathEscape(given), nil, http.StatusOK, githubItemLimit)
 		var refusal *githubError
-		if err != nil && !(errors.As(err, &refusal) && refusal.Status == http.StatusNotFound) {
+		if err == nil {
+			continue
+		}
+		if !errors.As(err, &refusal) || refusal.Status != http.StatusNotFound {
 			return err
+		}
+		rows, err := g.pages(ctx, path+"/labels?per_page=100")
+		if err != nil {
+			return fmt.Errorf("the label %q was answered as not found, and the issue's labels could not be read again: %w", given, err)
+		}
+		var now []githubLabel
+		for _, raw := range rows {
+			var label githubLabel
+			if json.Unmarshal(raw, &label) != nil {
+				return errors.New("the issue's labels could not be read again")
+			}
+			now = append(now, label)
+		}
+		if _, still := labelNamed(now, given); still {
+			return fmt.Errorf("the label %q could not be taken off: GitHub answered that it was not found, and the issue still carries it", given)
 		}
 	}
 	return nil
 }
 
 func hasLabel(labels []githubLabel, name string) bool {
+	_, found := labelNamed(labels, name)
+	return found
+}
+
+// labelNamed is a label's name as the issue carries it, matched without
+// regard to case.
+func labelNamed(labels []githubLabel, name string) (string, bool) {
 	for _, label := range labels {
 		if strings.EqualFold(label.Name, name) {
-			return true
+			return label.Name, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // Assign hands the issue to the account by its login. GitHub adds an assignee
@@ -143,7 +170,7 @@ func (g GitHub) Assign(ctx context.Context, issue Issue, to Account) error {
 	}
 	current, err := assignees(data)
 	if err != nil || !hasLogin(current, to.Login) {
-		return errors.New("tracker did not confirm the assignee change")
+		return fmt.Errorf("tracker did not confirm the assignee change: GitHub did not assign %q to the issue; it assigns an account with access to the repository or one that commented on the issue, by its current login, and no more than ten to one issue", to.Login)
 	}
 	me, err := g.Myself(ctx)
 	if err != nil {
@@ -164,7 +191,7 @@ func (g GitHub) Assign(ctx context.Context, issue Issue, to Account) error {
 		return err
 	}
 	if current, err = assignees(data); err != nil || hasLogin(current, other) {
-		return errors.New("tracker did not confirm the assignee change")
+		return fmt.Errorf("tracker did not confirm the assignee change: GitHub did not take %q off the issue; it takes an assignee off only for an account with push access to the repository", other)
 	}
 	return nil
 }
