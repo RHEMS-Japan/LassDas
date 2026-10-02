@@ -1,6 +1,9 @@
 """A real Git checkout, real test commands, and a local service standing in for
 the model: what the review command sends, what it writes, and how it ends."""
+import contextlib
 import http.server
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +12,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name("adversarial_review.py").resolve()
 KEY = "fixture-review-credential-9e1f3a"
@@ -95,7 +100,7 @@ class AdversarialReviewTests(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.workspace), *IDENTITY, *arguments],
                               check=True, capture_output=True, text=True, env=git_environment())
 
-    def run_review(self, service, stdin_text="Current assignment:\nStage 4 of 8\n\nOriginal request:\nadd a thing\n", **extra):
+    def environment(self, service, **extra):
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
                        "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "REVIEW_MODEL_URL": service.url,
                        "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY", "REVIEW_API_KEY": KEY,
@@ -103,8 +108,33 @@ class AdversarialReviewTests(unittest.TestCase):
                        "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ATTEMPTS": "2",
                        "REVIEW_TIMEOUT_SECONDS": "30"}
         environment.update(extra)
+        return environment
+
+    def run_review(self, service, stdin_text="Current assignment:\nStage 4 of 8\n\nOriginal request:\nadd a thing\n", **extra):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
-                              text=True, env=environment, timeout=120)
+                              text=True, env=self.environment(service, **extra), timeout=120)
+
+    def review_in_process(self, service, before_each_command):
+        """The review run in this process, so that a Git that runs out of
+        time can be had without waiting for it: before_each_command sees each
+        command the review starts and may raise in its place. The exit status
+        and what the review printed."""
+        spec = importlib.util.spec_from_file_location("review_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def run(command, *arguments, **keywords):
+            before_each_command(command)
+            return subprocess.run(command, *arguments, **keywords)
+
+        printed = io.StringIO()
+        stdin = io.TextIOWrapper(io.BytesIO(b"Original request:\nadd a thing\n"))
+        with mock.patch.object(module, "subprocess", types.SimpleNamespace(
+                run=run, TimeoutExpired=subprocess.TimeoutExpired)), \
+                mock.patch.dict(os.environ, self.environment(service), clear=True), \
+                mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed):
+            status = module.main()
+        return status, printed.getvalue()
 
     def review_log(self):
         path = self.home / "review.md"
@@ -478,17 +508,84 @@ class AdversarialReviewTests(unittest.TestCase):
         # Something did change, so a missing verdict is no reason to hold it back here.
         self.assertEqual(finished.returncode, 0, finished.stdout)
 
-    def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
+    def test_a_workspace_that_is_not_a_checkout_goes_back_with_a_note(self):
+        # Without a checkout whether anything changed cannot be told, so no
+        # missing verdict lets the work through. The delivery could deliver
+        # nothing from here either, so the request goes back to work as before.
         shutil.rmtree(self.workspace / ".git")
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
         finished = self.run_review(service)
-        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(finished.returncode, 1, finished.stderr)
         self.assertNotIn("Traceback", finished.stderr)
         self.assertIn("could not be read", finished.stdout)
         self.assertIn("NOT REVIEWED", finished.stdout)
+        self.assertIn("Whether any file was changed could not be told", finished.stdout)
+        missing = self.run_review(service, TASK_WORKSPACE=str(self.workspace / "no-such-directory"))
+        self.assertEqual(missing.returncode, 1, missing.stdout)
+        self.assertIn("Whether any file was changed could not be told", missing.stdout)
         self.assertEqual(service.requests, [])
 
+    CANNOT_TELL = ("Whether any file was changed could not be told, and an ending with nothing delivered needs a"
+                   " verdict, so the work goes back this time.")
+
+    def test_a_review_that_cannot_tell_whether_anything_changed_lets_nothing_through_without_a_verdict(self):
+        # Case B of the third review: the review's git status runs out of its
+        # 60 seconds while the delivery, which waits up to 600, reads the same
+        # unchanged checkout and ends with nothing delivered. Not being able
+        # to tell is not taken as a change, and neither is an error before it
+        # was told: without a verdict the work goes back, and a blocking
+        # verdict stands even when its state cannot be saved. The control,
+        # with Git answering, says that no file was changed.
+        self.leave_unchanged()
+
+        def status_runs_out_of_time(times):
+            ran_out = []
+
+            def before(command):
+                if command[:1] == ["git"] and "status" in command and len(ran_out) < times:
+                    ran_out.append(command)
+                    raise subprocess.TimeoutExpired(command, 60)
+            return before
+
+        def unexpected_error_first():
+            failed = []
+
+            def before(command):
+                if command[:1] == ["git"] and "status" in command and not failed:
+                    failed.append(command)
+                    raise RuntimeError("an error the review does not expect")
+            return before
+
+        cases = (("git status always runs out of time", status_runs_out_of_time(99), [], False,
+                  ["timed out after 60 seconds", self.CANNOT_TELL]),
+                 ("an unexpected error first", unexpected_error_first(), [], False,
+                  ["Unexpected RuntimeError", self.CANNOT_TELL]),
+                 ("git status runs out of time once, then no verdict", status_runs_out_of_time(1),
+                  [{"status": 503}, {"status": 503}], False,
+                  ["no verdict could be obtained (HTTP 503 from the model service); whether any file was changed"
+                   " could not be told, and an ending with nothing delivered needs a verdict"]),
+                 ("git status runs out of time once, then a blocking verdict not saved", status_runs_out_of_time(1),
+                  [{"verdict": (True, "the request needs a new file")}], True,
+                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]))
+        for case, before, replies, unsaved, said in cases:
+            service = ModelStandIn(replies)
+            self.addCleanup(service.close)
+            if unsaved:
+                self.home.chmod(0o500)
+            try:
+                status, printed = self.review_in_process(service, before)
+            finally:
+                self.home.chmod(0o700)
+            self.assertEqual(status, 1, (case, printed))
+            for text in said:
+                self.assertIn(text, printed, case)
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        status, printed = self.review_in_process(service, lambda command: None)
+        self.assertEqual(status, 1, printed)
+        self.assertIn("no file was changed, and an ending with nothing delivered needs a verdict", printed)
+        self.assertNotIn("could not be told", printed)
 
 if __name__ == "__main__":
     unittest.main()

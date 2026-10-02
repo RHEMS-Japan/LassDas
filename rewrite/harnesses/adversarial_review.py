@@ -31,11 +31,13 @@ One exception: when Git lists no changed path at all and no earlier delivery
 round committed one, the work let through here can end with nothing
 delivered, so it is let through only on a verdict that does not object.
 Without one (no verdict, a setting that keeps the review from running, an
-unexpected error), this ends 1 and the work goes back. The reviewer is told
-in plain words that no file was changed and asked whether the request is met
-by the repository exactly as it is: a request whose answer is that nothing
-needs to change reaches review this way, and so does work that was never
-done.
+unexpected error), this ends 1 and the work goes back. So it does when
+whether anything changed cannot be told (no checkout, or Git cannot read it,
+or not in time), since the delivery reads the checkout on its own, waits
+longer, and may find no change. When no file was changed, the reviewer is
+told so in plain words and asked whether the request is met by the
+repository exactly as it is: a request whose answer is that nothing needs to
+change reaches review this way, and so does work that was never done.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -235,14 +237,25 @@ def nothing_changed(workspace):
     """Whether the checkout holds no change at all: Git lists no changed,
     staged or untracked path, as the delivery reads it too, and no earlier
     delivery round committed one. Work let through from here can end with
-    nothing delivered. False whenever that cannot be told."""
+    nothing delivered. None when that cannot be told (no checkout, or Git
+    could not read it, or not in time): the delivery reads the checkout on
+    its own and waits longer, so it may still find no change, and not being
+    able to tell is never taken as a change."""
     if not workspace:
-        return False
+        return None
     workspace = Path(workspace)
     try:
-        return workspace.is_dir() and not changed_entries(workspace) and not committed_earlier(workspace)
+        if not workspace.is_dir():
+            return None
+        return not changed_entries(workspace) and not committed_earlier(workspace)
     except (ReviewError, OSError):
-        return False
+        return None
+
+
+def held_back(unchanged):
+    """Why work without a verdict goes back, when it may hold no change:
+    there is none, or that could not be told."""
+    return "no file was changed" if unchanged else "whether any file was changed could not be told"
 
 
 def truth(value):
@@ -339,20 +352,21 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
 
 
 def without_verdict(model, reason, unchanged, goes_on):
-    """No verdict was obtained. With nothing changed, letting the work through
-    could end it with nothing delivered and no one's judgement, so it goes
-    back; otherwise it goes on unreviewed, as goes_on says."""
-    if unchanged:
-        print("Review by %s: NOT REVIEWED. %s. No file was changed, and an ending with nothing delivered needs a"
-              " verdict, so the work goes back this time." % (model, reason))
+    """No verdict was obtained. With nothing changed, or when that cannot be
+    told (unchanged is None), letting the work through could end it with
+    nothing delivered and no one's judgement, so it goes back; otherwise it
+    goes on unreviewed, as goes_on says."""
+    if unchanged is not False:
+        print("Review by %s: NOT REVIEWED. %s. %s, and an ending with nothing delivered needs a verdict, so the"
+              " work goes back this time." % (model, reason, held_back(unchanged).capitalize()))
         return 1
     print("Review by %s: NOT REVIEWED. %s. %s" % (model, reason, goes_on))
     return 0
 
 
 def review(stdin_text, model, unchanged):
-    """Exit 1 on a real blocking verdict, or when nothing changed and no
-    verdict lets it through; 0 otherwise."""
+    """Exit 1 on a real blocking verdict, or when nothing changed, or that
+    cannot be told, and no verdict lets it through; 0 otherwise."""
     try:
         return reviewed(stdin_text, model, unchanged)
     except ReviewError as error:
@@ -405,9 +419,9 @@ def reviewed(stdin_text, model, unchanged):
     outcome, status = "PASSED", 0
     if blocking is None:
         outcome = "NOT REVIEWED"
-        if unchanged:
-            note = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
-                    " needs a verdict, so the work goes back this time" % why)
+        if unchanged is not False:
+            note = ("no verdict could be obtained (%s); %s, and an ending with nothing delivered needs a verdict,"
+                    " so the work goes back this time" % (why, held_back(unchanged)))
             status = 1
         else:
             note = "no verdict could be obtained (%s); the work goes on unreviewed this time" % why
@@ -427,11 +441,12 @@ def reviewed(stdin_text, model, unchanged):
             log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
                 model, sent_back, outcome, findings or "(no findings)"))
     except OSError as error:
-        if unchanged:
-            # Nothing was changed: only a verdict that lets the work through
-            # ends it here, whether or not the state was saved.
-            print("Review by %s: the send-back state could not be saved (%s). No file was changed, so the outcome"
-                  " above stands all the same." % (model, scrub(str(error), key)))
+        if unchanged is not False:
+            # Nothing was changed, or that cannot be told: only a verdict that
+            # lets the work through ends it here, whether or not the state
+            # was saved.
+            print("Review by %s: the send-back state could not be saved (%s). %s, so the outcome above stands all"
+                  " the same." % (model, scrub(str(error), key), held_back(unchanged).capitalize()))
             return status
         # Without its state the send-backs are not counted, so this verdict
         # does not send the work back; the findings above are in the record.
@@ -443,7 +458,9 @@ def reviewed(stdin_text, model, unchanged):
 
 def main():
     model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
-    unchanged = False
+    # Until it has been told, whether anything changed is not known, and an
+    # error before then lets nothing through without a verdict.
+    unchanged = None
     try:
         # Read before any setting: a setting that keeps the review from running
         # must not let an unchanged checkout through either.
@@ -453,7 +470,7 @@ def main():
         # as a send-back for ever.
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
         return review(stdin_text, model, unchanged)
-    except Exception as error:  # never a traceback, and exit 1 only when nothing changed
+    except Exception as error:  # never a traceback, and exit 1 only when nothing changed or that is not known
         key = os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
         return without_verdict(model, "Unexpected %s: %s" % (type(error).__name__, scrub(str(error), key)[:300]),
                                unchanged, "The work goes on unreviewed this time.")
