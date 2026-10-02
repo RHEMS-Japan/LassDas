@@ -245,3 +245,233 @@ func TestGitHubKeepsABoundedAmountOfAnswers(t *testing.T) {
 		t.Fatal("an answer without a validator replaced nothing")
 	}
 }
+
+// A limit that gives no time still to come waits a minute as one that gives
+// none does, and no wait is longer than an hour.
+func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *testing.T) {
+	for name, test := range map[string]struct {
+		status int
+		header map[string]string
+		body   string
+		wait   time.Duration
+	}{
+		"reset already past":         {403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1799999940"}, "API rate limit exceeded", time.Minute},
+		"reset at zero":              {403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"}, "API rate limit exceeded", time.Minute},
+		"retry after zero":           {429, map[string]string{"Retry-After": "0"}, "", time.Minute},
+		"retry after unreadable":     {429, map[string]string{"Retry-After": "soon"}, "", time.Minute},
+		"retry after past int64":     {429, map[string]string{"Retry-After": "99999999999999999999"}, "", time.Minute},
+		"older secondary wording":    {403, nil, "You have triggered an abuse detection mechanism.", time.Minute},
+		"retry after out of measure": {429, map[string]string{"Retry-After": "9300000000"}, "", time.Hour},
+		"reset a day ahead":          {200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1800086400"}, "", time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now, _ := githubClock(t)
+			github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+				if call == 1 {
+					for key, value := range test.header {
+						w.Header().Set(key, value)
+					}
+					w.WriteHeader(test.status)
+					fmt.Fprint(w, test.body)
+					return
+				}
+				fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`)
+			})
+			ctx := context.Background()
+			github.Myself(ctx)
+			start := *now
+			*now = start.Add(test.wait - time.Second)
+			if _, err := github.Myself(ctx); err == nil || calls.Load() != 1 {
+				t.Fatalf("asked again before the wait was over: calls=%d (%v)", calls.Load(), err)
+			}
+			*now = start.Add(test.wait)
+			if _, err := github.Myself(ctx); err != nil || calls.Load() != 2 {
+				t.Fatalf("not asked again once the wait was over: calls=%d (%v)", calls.Load(), err)
+			}
+		})
+	}
+}
+
+// A success ends the doubling: the next limit that gives no time waits a
+// minute again. The later of a refusal's seconds and the end of a spent
+// allowance is the one waited for.
+func TestGitHubStartsAgainFromAMinuteAndWaitsForTheLaterTime(t *testing.T) {
+	now, _ := githubClock(t)
+	start := *now
+	silent := func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"You have exceeded a secondary rate limit."}`)
+	}
+	answers := []func(w http.ResponseWriter){
+		silent,
+		func(w http.ResponseWriter) { fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`) },
+		silent,
+		func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "30")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(start.Add(10*time.Minute).Unix(), 10))
+			w.WriteHeader(http.StatusTooManyRequests)
+		},
+		func(w http.ResponseWriter) { fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`) },
+	}
+	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		answers[call-1](w)
+	})
+	ctx := context.Background()
+	for i, step := range []struct {
+		at      time.Duration
+		reaches bool
+	}{
+		{0, true},                               // a limit that gives no time: a minute
+		{time.Minute, true},                     // answered
+		{time.Minute, true},                     // the same limit again: a minute, not two
+		{2*time.Minute - time.Second, false},    //
+		{2 * time.Minute, true},                 // thirty seconds, or until the allowance comes back
+		{2*time.Minute + 31*time.Second, false}, // the later one holds
+		{10 * time.Minute, true},                //
+	} {
+		*now = start.Add(step.at)
+		before := calls.Load()
+		github.Myself(ctx)
+		if reached := calls.Load() > before; reached != step.reaches {
+			t.Fatalf("step %d: reached the server %t, want %t", i, reached, step.reaches)
+		}
+	}
+}
+
+// A change waiting for its turn when GitHub says to wait is not sent once its
+// turn comes.
+func TestGitHubSendsNoChangeThatWaitedThroughALimit(t *testing.T) {
+	githubClock(t)
+	waiting, release := make(chan struct{}, 1), make(chan struct{})
+	previousWait := githubWait
+	githubWait = func(ctx context.Context, wait time.Duration) error {
+		waiting <- struct{}{}
+		<-release
+		return previousWait(ctx, wait)
+	}
+	var mu sync.Mutex
+	posts := 0
+	github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mu.Lock()
+			posts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":1}`)
+			return
+		}
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	ctx := context.Background()
+	address := github.base() + "/repos/octo-org/widgets/issues/12/comments"
+	if _, _, err := github.call(ctx, http.MethodPost, address, map[string]string{"body": "first"}, http.StatusCreated, githubItemLimit); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := github.call(ctx, http.MethodPost, address, map[string]string{"body": "second"}, http.StatusCreated, githubItemLimit)
+		done <- err
+	}()
+	<-waiting
+	github.Myself(ctx)
+	close(release)
+	err := <-done
+	mu.Lock()
+	defer mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "nothing was sent") || posts != 1 {
+		t.Fatalf("a change was sent after GitHub said to wait: posts=%d (%v)", posts, err)
+	}
+}
+
+// Changes go one at a time, each at least a second after the answer to the
+// one before; a slow answer moves the next change later, not earlier.
+func TestGitHubSendsChangesOneAtATimeASecondAfterTheLastAnswer(t *testing.T) {
+	now, waits := githubClock(t)
+	var mu sync.Mutex
+	posts := 0
+	hold := make(chan struct{})
+	github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		posts++
+		first := posts == 1
+		mu.Unlock()
+		if first {
+			<-hold
+			// The first answer takes a while to come back.
+			*now = now.Add(300 * time.Millisecond)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":1}`)
+	})
+	ctx := context.Background()
+	address := github.base() + "/repos/octo-org/widgets/issues/12/comments"
+	send := func(done chan<- error) {
+		_, _, err := github.call(ctx, http.MethodPost, address, map[string]string{"body": "words"}, http.StatusCreated, githubItemLimit)
+		done <- err
+	}
+	first, second := make(chan error, 1), make(chan error, 1)
+	go send(first)
+	for {
+		mu.Lock()
+		arrived := posts
+		mu.Unlock()
+		if arrived == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go send(second)
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	early := posts
+	mu.Unlock()
+	close(hold)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	if early != 1 || posts != 2 || len(*waits) != 1 || (*waits)[0] != time.Second {
+		t.Fatalf("a change went before the one before was answered, or less than a second after its answer: early=%d posts=%d waits=%v", early, posts, *waits)
+	}
+}
+
+// A change carries no validator, and what the caller is handed is a copy:
+// changing it changes nothing kept.
+func TestGitHubKeepsItsOwnCopyAndSendsNoValidatorWithAChange(t *testing.T) {
+	githubClock(t)
+	var validators []string
+	github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		validators = append(validators, r.Method+" "+r.Header.Get("If-None-Match"))
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Link", `<`+base+`/repositories/1/issues/12/comments?page=2>; rel="next"`)
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+		}
+		fmt.Fprint(w, `[{"id":1}]`)
+	})
+	ctx := context.Background()
+	address := github.base() + "/repos/octo-org/widgets/issues/12/comments"
+	// The first answer is kept; the second and third are the kept one.
+	for range 3 {
+		data, header, err := github.call(ctx, http.MethodGet, address, nil, http.StatusOK, githubItemLimit)
+		if err != nil || string(data) != `[{"id":1}]` || !strings.Contains(header.Get("Link"), "page=2") {
+			t.Fatalf("read %q %q (%v)", data, header.Get("Link"), err)
+		}
+		data[0] = 'x'
+		header.Set("Link", "changed")
+	}
+	if _, _, err := github.call(ctx, http.MethodPost, address, map[string]string{"body": "words"}, http.StatusCreated, githubItemLimit); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(validators, "|") != `GET |GET "v1"|GET "v1"|POST ` {
+		t.Fatalf("validators sent: %q", validators)
+	}
+}

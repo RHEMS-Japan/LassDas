@@ -92,6 +92,8 @@ func TestGitHubMovesTheIssueByLabelsAndLeavesPeoplesOwn(t *testing.T) {
 				}
 			}
 			if len(kept) == len(carried) || gone {
+				// Someone took it off a moment before.
+				carried = kept
 				w.WriteHeader(http.StatusNotFound)
 				fmt.Fprint(w, `{"message":"Label does not exist"}`)
 				return
@@ -115,7 +117,8 @@ func TestGitHubMovesTheIssueByLabelsAndLeavesPeoplesOwn(t *testing.T) {
 			t.Fatalf("%s: %v", turn, err)
 		}
 	}
-	// A working label someone took off meanwhile counts as taken off.
+	// A working label someone took off meanwhile counts as taken off once the
+	// issue's labels, read again, no longer hold it.
 	gone = true
 	if err := github.Move(ctx, issue, Delivered); err != nil {
 		t.Fatalf("delivered: %v", err)
@@ -135,13 +138,75 @@ func TestGitHubMovesTheIssueByLabelsAndLeavesPeoplesOwn(t *testing.T) {
 		`DELETE /repos/octo-org/widgets/issues/12/labels/engine:%20working`,
 		`POST /repos/octo-org/widgets/issues/12/labels {"labels":["engine:delivered"]}`,
 		`DELETE /repos/octo-org/widgets/issues/12/labels/engine%2Fquestion%3F`,
+		`GET /repos/octo-org/widgets/issues/12/labels`,
 		`POST /repos/octo-org/widgets/issues/12/labels {"labels":["never confirmed"]}`,
 	}
 	if strings.Join(asked, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the tracker was asked:\n%s", strings.Join(asked, "\n"))
 	}
-	if strings.Join(carried, ",") != "bug,engine:accepted,engine/question?,engine:delivered" {
+	if strings.Join(carried, ",") != "bug,engine:accepted,engine:delivered" {
 		t.Fatalf("the issue carries %q", carried)
+	}
+}
+
+// A label is taken off under the name the issue carries it by, a later move
+// takes off the label of a stop too, and a removal GitHub refuses, or answers
+// as not found while the issue still carries the label, fails the move.
+func TestGitHubTakesALabelOffOnlyWhenItIsGone(t *testing.T) {
+	for _, answer := range []string{"removed", "not found but still there", "refused"} {
+		t.Run(answer, func(t *testing.T) {
+			githubClock(t)
+			carried := []string{"bug", "Engine:Working", "engine:stopped"}
+			var asked []string
+			github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				asked = append(asked, strings.TrimSpace(r.Method+" "+r.URL.EscapedPath()+" "+string(body)))
+				if r.Method == http.MethodPost {
+					carried = append(carried, "engine:delivered")
+				}
+				if r.Method == http.MethodDelete {
+					name := strings.TrimPrefix(r.URL.Path, "/repos/octo-org/widgets/issues/12/labels/")
+					switch answer {
+					case "not found but still there":
+						w.WriteHeader(http.StatusNotFound)
+						fmt.Fprint(w, `{"message":"Label does not exist"}`)
+						return
+					case "refused":
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					kept := []string{}
+					for _, label := range carried {
+						if label != name {
+							kept = append(kept, label)
+						}
+					}
+					carried = kept
+				}
+				labels := []map[string]string{}
+				for _, name := range carried {
+					labels = append(labels, map[string]string{"name": name})
+				}
+				json.NewEncoder(w).Encode(labels)
+			})
+			github.Labels = GitHubLabels{Processing: "engine:working", Delivered: "engine:delivered", Stopped: "engine:stopped"}
+			err := github.Move(context.Background(), Issue{ID: 12, Key: "12"}, Delivered)
+			switch answer {
+			case "removed":
+				if err != nil || strings.Join(carried, ",") != "bug,engine:delivered" ||
+					!strings.Contains(strings.Join(asked, "\n"), "DELETE /repos/octo-org/widgets/issues/12/labels/Engine:Working") {
+					t.Fatalf("carried %q after %q (%v)", carried, asked, err)
+				}
+			case "not found but still there":
+				if err == nil || !strings.Contains(err.Error(), `"Engine:Working" could not be taken off`) {
+					t.Fatalf("a label still on the issue was taken as taken off: %v", err)
+				}
+			case "refused":
+				if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+					t.Fatalf("a refused removal was taken as made: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -224,5 +289,70 @@ func TestGitHubRecordsNoHoursAndAsksNothing(t *testing.T) {
 	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {})
 	if err := github.RecordHours(context.Background(), Issue{ID: 12, Key: "12"}, 0.25); err != nil || calls.Load() != 0 {
 		t.Fatalf("calls=%d (%v)", calls.Load(), err)
+	}
+}
+
+// On an issue the engine's own account opened, handing it over either way
+// leaves the engine's account assigned: it is never taken off as the other
+// side. Logins are matched without regard to case, as GitHub matches them,
+// and a refused assignment names the login and why GitHub may refuse it.
+func TestGitHubKeepsTheEngineOnAnIssueItOpenedAndMatchesLoginsWithoutCase(t *testing.T) {
+	githubClock(t)
+	// GitHub answers with an account's login as the account spells it.
+	assigned := []string{"Engine-Bot"}
+	spelled := func(login string) string {
+		if strings.EqualFold(login, "engine-bot") {
+			return "Engine-Bot"
+		}
+		return login
+	}
+	refuse := false
+	var asked []string
+	github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/user" {
+			fmt.Fprint(w, `{"id":900,"login":"Engine-Bot"}`)
+			return
+		}
+		asked = append(asked, strings.TrimSpace(r.Method+" "+string(body)))
+		var change struct{ Assignees []string }
+		json.Unmarshal(body, &change)
+		for _, login := range change.Assignees {
+			kept := []string{}
+			for _, current := range assigned {
+				if !strings.EqualFold(current, login) {
+					kept = append(kept, current)
+				}
+			}
+			if r.Method == http.MethodDelete || !refuse {
+				assigned = kept
+				if r.Method == http.MethodPost {
+					assigned = append(assigned, spelled(login))
+				}
+			}
+		}
+		users := []map[string]any{}
+		for _, login := range assigned {
+			users = append(users, map[string]any{"login": login})
+		}
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"number": 12, "assignees": users})
+	})
+	ctx := context.Background()
+	issue := Issue{ID: 12, Key: "12", Creator: Account{ID: 900, Login: "engine-bot"}}
+	for _, to := range []Account{{ID: 900, Login: "engine-bot"}, issue.Creator} {
+		if err := github.Assign(ctx, issue, to); err != nil {
+			t.Fatalf("to %s: %v", to.Login, err)
+		}
+	}
+	if strings.Join(assigned, ",") != "Engine-Bot" || strings.Contains(strings.Join(asked, "\n"), "DELETE") {
+		t.Fatalf("the engine's own issue was left with %q after %q", assigned, asked)
+	}
+	refuse = true
+	err := github.Assign(ctx, Issue{ID: 12, Key: "12", Creator: Account{ID: 55, Login: "requester"}}, Account{ID: 55, Login: "requester"})
+	if err == nil || !strings.Contains(err.Error(), `GitHub did not assign "requester"`) || !strings.Contains(err.Error(), "commented on the issue") || !strings.Contains(err.Error(), "no more than ten") {
+		t.Fatalf("a refused assignment does not say whom or why: %v", err)
 	}
 }
