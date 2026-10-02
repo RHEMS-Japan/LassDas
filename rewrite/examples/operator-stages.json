@@ -330,7 +330,7 @@
             "--",
             "/opt/ticket-automation/operator/deliver"
           ],
-          "instructions": "Run the operator's delivery command. It writes its own receipt, which the runtime reads back and records; it does not decide that the delivery is acceptable.",
+          "instructions": "Run the operator's delivery command. It writes its own receipt, which the runtime reads back and records; it does not decide that the delivery is acceptable. A request that changed no file is refused by the shipped delivery process and goes back to the work stage, unless the operator sets DELIVERY_ALLOW_UNCHANGED=1 for it, which this example does not: it is off by default, and with it on such a request ends with nothing delivered whenever the review before this stage does not object, including when that review could not be performed.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git"
           },

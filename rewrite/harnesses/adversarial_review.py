@@ -23,6 +23,11 @@ and must never send the work round for ever. And the operator's cap: once
 the review has sent the work back that many times, the next blocking verdict
 lets the work through with the objections recorded as unresolved.
 
+When no file was changed at all, the reviewer is told so in plain words and
+asked whether the request is met by the repository exactly as it is: a
+request whose answer is that nothing needs to change reaches review this way,
+and so does work that was never done.
+
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
   REVIEW_MODEL_URL        chat-completions endpoint (HTTPS, or loopback for tests)
@@ -73,6 +78,14 @@ SYSTEM = ("You are an adversarial reviewer of one code change. Your job is to fi
           " where each defect is and why it matters, so the implementer can act on it. The work has"
           " been sent back %d times so far; an objection already raised and addressed is not raised"
           " again. Answer with the verdict tool.")
+
+# Handed in place of the diff when there is none at all.
+NO_CHANGE = ("No file was changed. Judge whether the request and the settled requirements are satisfied with the"
+             " repository exactly as it is; if a change is needed and none was made, that is a blocking defect.")
+
+# The shipped delivery process's receipt. A round of it that committed put
+# the change in HEAD, so a diff against HEAD no longer shows that change.
+DELIVERY_RECEIPT = Path(".git", "ticket-engine", "delivery.json")
 
 
 class ReviewError(Exception):
@@ -163,6 +176,19 @@ def gather(workspace, paths, test_commands, timeout):
                 new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
     tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
     return cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output")
+
+
+def committed_earlier(workspace):
+    """Whether an earlier delivery round of this request committed its change
+    in this checkout. An empty diff then means only that nothing changed
+    since that round, so it is not called "no file was changed": told that,
+    the reviewer would send back for good a change the worker cannot make
+    again, such as one whose merge waits on the service's own checks."""
+    try:
+        receipt = json.loads((workspace / DELIVERY_RECEIPT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(receipt, dict) and bool(receipt.get("head"))
 
 
 def status_path(line):
@@ -260,6 +286,8 @@ def reviewed(stdin_text, model):
         raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
     diff, test_output = gather(workspace, paths, tests, timeout)
+    if not diff and not committed_earlier(workspace):
+        diff = NO_CHANGE
     blocking, findings = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)
     outcome = "PASSED"
     if blocking is None:

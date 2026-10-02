@@ -552,6 +552,122 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(json.loads(receipt_path.read_text())["head"],
                          self.git(self.workspace, "rev-parse", "HEAD").stdout.strip())
 
+    def pushes(self):
+        return [line for line in self.git_log.read_text().splitlines() if " push " in line]
+
+    def test_a_request_that_changed_nothing_ends_without_a_delivery_when_the_operator_allows_it(self):
+        started = self.git(self.workspace, "rev-parse", "HEAD").stdout.strip()
+        # Another request was merged since this checkout: the request stands on
+        # the branch as it is now, which still contains where the work started.
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        tip = self.git(self.remote, "rev-parse", "refs/heads/master").stdout.strip()
+        result = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Nothing was delivered for TICKET-41: no file was changed.", result.stdout)
+        self.assertIn("The request stands on master of owner/project as it is at %s;" % tip, result.stdout)
+        self.assertIn("what the review before this stage looked at", result.stdout)
+        self.assertEqual(self.receipt(), {"unchanged": True, "issue": "TICKET-41", "repository": "owner/project",
+                                          "base_branch": "master", "base_sha": tip, "workspace_head": started})
+        self.assertEqual(self.git(self.workspace, "rev-parse", "HEAD").stdout.strip(), started)
+        self.assertEqual(self.git(self.workspace, "status", "--porcelain").stdout, "")
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.git(self.remote, "rev-parse", "refs/heads/master").stdout.strip(), tip)
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.methods(), [], "the service was asked something although nothing was delivered")
+
+    def test_without_the_setting_a_request_that_changed_nothing_is_refused_as_before(self):
+        for setting in ({}, {"DELIVERY_ALLOW_UNCHANGED": "0"}):
+            refused = self.deliver(**setting)
+            self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+            self.assertIn("What stopped it: No change under the allowed paths is ready to deliver\n", refused.stdout)
+            self.assertEqual(refused.stderr, "No change under the allowed paths is ready to deliver\n")
+        self.assertEqual(self.receipt(), {})
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.methods(), [])
+
+    def test_a_mistyped_setting_is_refused_rather_than_read_as_off(self):
+        self.change("main.go", "package main // delivered\n")
+        refused = self.deliver(DELIVERY_ALLOW_UNCHANGED="yes")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("DELIVERY_ALLOW_UNCHANGED must be 1, 0 or unset", refused.stderr)
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.methods(), [])
+
+    def test_a_checkout_that_is_not_part_of_the_integration_branch_is_refused_as_before(self):
+        self.git(self.workspace, "commit", "--allow-empty", "-m", "Codex: a commit the integration branch lacks")
+        refused = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("What stopped it: No change under the allowed paths is ready to deliver", refused.stdout)
+        self.assertIn("is not part of master as it is now", refused.stdout)
+        self.assertEqual(self.receipt(), {})
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.methods(), [])
+
+    def test_a_rerun_after_ending_unchanged_says_the_same_and_pushes_nothing(self):
+        first = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        receipt = self.receipt()
+        again = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(again.stdout, first.stdout)
+        self.assertEqual(self.receipt(), receipt)
+        # The ending is no round to continue: with the setting gone, the same
+        # tree is refused as it always was, and still nothing is pushed.
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("No change under the allowed paths is ready to deliver", refused.stdout)
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.methods(), [])
+
+    def test_work_changed_after_ending_unchanged_is_delivered_as_a_first_round(self):
+        self.assertEqual(self.deliver(DELIVERY_ALLOW_UNCHANGED="1").returncode, 0)
+        self.change("main.go", "package main // delivered after all\n")
+        done = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        receipt = self.receipt()
+        self.assertNotIn("unchanged", receipt)
+        self.assertEqual(receipt["previous"], [])
+        self.assertEqual(receipt["pull_request"], 1)
+        self.assertRegex(receipt["merge_sha"], r"\A[0-9a-f]{40}\Z")
+        self.assertIn("delivered after all", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertEqual(self.methods().count("POST"), 1)
+        self.assertEqual(self.methods().count("PUT"), 1)
+        # A delivered round with nothing new is reported as delivered, as before.
+        again = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("Delivered TICKET-41", again.stdout)
+        self.assertEqual(self.receipt(), receipt)
+
+    def test_a_round_whose_merge_was_refused_is_continued_not_ended_unchanged(self):
+        # The change is committed in the round, so the tree is clean afterwards;
+        # the round on record is what the next delivery carries on.
+        self.state["merge_refusal"] = (405, 'Required status check "build" is expected.')
+        self.change("main.go", "package main // delivered\n")
+        refused = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        interrupted = self.receipt()
+        self.assertNotIn("merge_sha", interrupted)
+        self.assertEqual(self.git(self.workspace, "status", "--porcelain").stdout, "")
+        self.state["merge_refusal"] = None
+        done = self.deliver(DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+        self.assertNotIn("no file was changed", done.stdout)
+        self.assertEqual(self.receipt()["head"], interrupted["head"])
+        self.assertIn("// delivered", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertEqual(self.methods().count("POST"), 1)
+
+    def test_check_mode_says_whether_a_request_that_changed_nothing_may_end(self):
+        off = self.deliver("--dry-run")
+        self.assertEqual(off.returncode, 3, off.stdout + off.stderr)
+        self.assertIn("A request that changes no file is refused (DELIVERY_ALLOW_UNCHANGED is not 1).", off.stdout)
+        on = self.deliver("--dry-run", DELIVERY_ALLOW_UNCHANGED="1")
+        self.assertEqual(on.returncode, 3, on.stdout + on.stderr)
+        self.assertIn("A request that changes no file ends without a delivery", on.stdout)
+        self.assertEqual(self.receipt(), {})
+
 
 if __name__ == "__main__":
     unittest.main()

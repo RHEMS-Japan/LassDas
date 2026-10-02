@@ -206,38 +206,8 @@ func TestStagesRoleHelper(t *testing.T) {
 			t.Fatalf("actual %s=%q err=%v", path, text, err)
 		}
 	}
-	issueClient := func() (tracker.Backlog, string, func()) {
-		client, err := tracker.CertificateClient(os.Getenv("TASK_TRACKER_CERT"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return tracker.Backlog{BaseURL: os.Getenv("TASK_TRACKER_URL"), KeyEnv: "TASK_TRACKER_KEY", Client: client},
-			os.Getenv("TASK_TRACKER_ISSUE"), client.CloseIdleConnections
-	}
-	storedComments := func() []string {
-		b, issue, closer := issueClient()
-		defer closer()
-		rows, err := b.Comments(context.Background(), issue, 0)
-		if err != nil {
-			t.Fatal("stored comments unavailable", err)
-		}
-		var contents []string
-		for _, raw := range rows {
-			var row struct{ Content string }
-			if json.Unmarshal(raw, &row) != nil {
-				t.Fatal("stored comment could not be read")
-			}
-			contents = append(contents, row.Content)
-		}
-		return contents
-	}
-	post := func(text string) {
-		b, issue, closer := issueClient()
-		defer closer()
-		if _, err := b.AddComment(context.Background(), issue, text); err != nil {
-			t.Fatal(err)
-		}
-	}
+	storedComments := func() []string { return fixtureComments(t) }
+	post := func(text string) { fixturePost(t, text) }
 	// os.Exit below skips deferred work, so the claim is written up front.
 	if slices.Contains([]string{"elicit", "ask_requester", "work", "report"}, action) {
 		fmt.Print(stagesClaim)
@@ -344,6 +314,46 @@ func TestStagesRoleHelper(t *testing.T) {
 	}
 	fmt.Print("\nActual fixture operation observed; ordinary prose, no approval object.\n")
 	os.Exit(0)
+}
+
+// fixtureTracker is the assigned issue as a fixture process reaches it: through
+// the scope the runtime handed that process, never with the controller's key.
+func fixtureTracker(t *testing.T) (tracker.Backlog, string, func()) {
+	t.Helper()
+	client, err := tracker.CertificateClient(os.Getenv("TASK_TRACKER_CERT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tracker.Backlog{BaseURL: os.Getenv("TASK_TRACKER_URL"), KeyEnv: "TASK_TRACKER_KEY", Client: client},
+		os.Getenv("TASK_TRACKER_ISSUE"), client.CloseIdleConnections
+}
+
+func fixtureComments(t *testing.T) []string {
+	t.Helper()
+	b, issue, closer := fixtureTracker(t)
+	defer closer()
+	rows, err := b.Comments(context.Background(), issue, 0)
+	if err != nil {
+		t.Fatal("stored comments unavailable", err)
+	}
+	var contents []string
+	for _, raw := range rows {
+		var row struct{ Content string }
+		if json.Unmarshal(raw, &row) != nil {
+			t.Fatal("stored comment could not be read")
+		}
+		contents = append(contents, row.Content)
+	}
+	return contents
+}
+
+func fixturePost(t *testing.T, text string) {
+	t.Helper()
+	b, issue, closer := fixtureTracker(t)
+	defer closer()
+	if _, err := b.AddComment(context.Background(), issue, text); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func stagesFixtureConfig(t *testing.T) config {

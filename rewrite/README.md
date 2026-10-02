@@ -422,6 +422,33 @@ This happens under the merge method only, since a service that squashes or
 rebases rewrites the delivered history. For this the delivery process's
 sandbox grant must cover the working tree as well as `.git`.
 
+A request whose right outcome is that nothing changes, because what it asks
+for already exists, leaves the delivery nothing to commit. By default the
+shipped delivery refuses it ("No change under the allowed paths is ready to
+deliver"), so an ordered run sends it back to the work stage for as long as it
+runs. `DELIVERY_ALLOW_UNCHANGED=1` in the delivery process's environment lets
+such a request end instead. When the workspace has no changed path, no merge in
+progress and no receipt of an earlier delivery round, and the commit the work
+started from is part of the integration branch as fetched at that moment, the
+delivery commits, pushes and opens nothing and ends 0. It prints that nothing
+was delivered and which commit of the integration branch the request stands
+on, and its receipt records the same (`"unchanged": true` with that commit as
+`base_sha`). A rerun checks again and ends the same way; work changed after
+such an ending is delivered as usual. The post-delivery check
+(`harnesses/verify_merged.py`) then has no merge to look for: it requires the
+recorded commit to be part of the integration branch, runs the configured
+commands with that commit checked out, and says that no merge was made. The
+run then ends like any finished run: where they are configured, the
+`delivered` status of `intake.statuses` is applied and `intake.assign` hands
+the request back to the requester although nothing was merged, so the report
+is what tells them that nothing was delivered. The setting is off by default
+and the shipped example leaves it off. With it on, a run finishes with nothing
+delivered whenever the review before the delivery does not object, and a
+review that could not be performed (`NOT REVIEWED`) does not object either;
+turn it on only where that review runs. The review command tells its model in
+plain words when no file was changed at all, and that a change that was needed
+but not made is a blocking defect.
+
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
 names, normally from a different publisher than the worker, is handed the

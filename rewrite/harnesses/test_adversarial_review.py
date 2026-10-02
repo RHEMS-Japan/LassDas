@@ -255,6 +255,58 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("[new file cut here:", text)
         self.assertLess(text.index("new file src/big.py"), text.index("+# padding 299"), "new files come first")
 
+    NO_CHANGE = ("Diff of the change:\nNo file was changed. Judge whether the request and the settled requirements"
+                 " are satisfied with the repository exactly as it is; if a change is needed and none was made,"
+                 " that is a blocking defect.")
+
+    def leave_unchanged(self):
+        self.git("checkout", "--", ".")
+        shutil.rmtree(self.workspace / "tests")
+
+    def test_no_change_at_all_is_said_in_plain_words_and_the_verdict_is_read_as_before(self):
+        self.leave_unchanged()
+        service = ModelStandIn([{"verdict": (False, "")}, {"verdict": (True, "the request asks for a new option")}])
+        self.addCleanup(service.close)
+        passed = self.run_review(service)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("PASSED", passed.stdout)
+        sent_back = self.run_review(service)
+        self.assertEqual(sent_back.returncode, 1, sent_back.stdout)
+        self.assertIn("SENT BACK", sent_back.stdout)
+        for request in service.requests:
+            text = request["body"]["messages"][1]["content"]
+            self.assertIn(self.NO_CHANGE, text)
+            self.assertNotIn("(no change)", text)
+            self.assertIn("tests ran fine", text)
+
+    def test_a_change_is_never_called_no_change(self):
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("+    return 2  # changed", text)
+        self.assertNotIn("No file was changed", text)
+
+    def test_an_empty_diff_after_a_committed_delivery_round_is_shown_as_before(self):
+        # The delivery committed its round, so the change is in HEAD and the
+        # diff against it is empty: that is not a change nobody made.
+        self.leave_unchanged()
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        receipt = self.workspace / ".git" / "ticket-engine" / "delivery.json"
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({"issue": "TICKET-41", "head": head, "pull_request": 1}))
+        service = ModelStandIn([{"verdict": (False, "")}, {"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        self.assertEqual(self.run_review(service).returncode, 0)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("Diff of the change:\n(no change)", text)
+        self.assertNotIn("No file was changed", text)
+        # An ending without a delivery committed nothing, so it changes nothing here.
+        receipt.write_text(json.dumps({"unchanged": True, "base_sha": head, "workspace_head": head}))
+        self.assertEqual(self.run_review(service).returncode, 0)
+        self.assertIn(self.NO_CHANGE, service.requests[1]["body"]["messages"][1]["content"])
+
     def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
         shutil.rmtree(self.workspace / ".git")
         service = ModelStandIn([{"verdict": (True, "x")}])

@@ -16,6 +16,17 @@ launch resolves them in place; the commit of the following delivery then
 completes that merge. This needs the working tree writable as well as .git,
 and happens under the merge method only.
 
+A request whose right outcome is that nothing changes, because what it asks
+for already exists, leaves nothing to commit, and by default that is refused
+like any other empty delivery. With DELIVERY_ALLOW_UNCHANGED=1 it ends here
+instead, when the workspace has no changed path, no merge in progress and no
+receipt of an earlier round, and the commit the work started from is part of
+the integration branch as fetched at that moment: nothing is committed,
+pushed or opened, the process ends 0 and its receipt says that nothing was
+delivered and which commit of the integration branch the request stands on.
+Whether that satisfies the request is not judged here; the review before
+this stage is what looked at it.
+
 Environment (all from the operator, never from a role):
   TASK_ISSUE                 assigned ticket; names the branch and the message
   TASK_WORKSPACE             prepared checkout (default: the process directory)
@@ -25,6 +36,7 @@ Environment (all from the operator, never from a role):
   DELIVERY_ALLOWED_PATHS     colon-separated paths that may change; '.' is the whole tree
   DELIVERY_FORBIDDEN_TEXT    optional newline-separated text refused in a diff
   DELIVERY_MERGE_METHOD      merge (default), squash or rebase
+  DELIVERY_ALLOW_UNCHANGED   1 lets a request that changed no file end without a delivery (default: refused)
   DELIVERY_REMOTE_URL        optional Git URL override (default: github.com)
   DELIVERY_API_BASE          optional REST base (default: api.github.com)
   DELIVERY_AUTHOR_NAME/_EMAIL, DELIVERY_POLL_SECONDS,
@@ -68,6 +80,17 @@ def allowed_paths():
     if not paths:
         raise DeliveryError("DELIVERY_ALLOWED_PATHS grants no path; nothing may be delivered")
     return paths
+
+
+def allow_unchanged():
+    """Whether the operator lets a request that changed no file end here: 1
+    does, 0 or unset does not. Anything else is refused rather than read as
+    off: read as off, a mistyped setting would leave such a request refused
+    round after round with nothing in the record saying why."""
+    value = os.environ.get("DELIVERY_ALLOW_UNCHANGED", "")
+    if value not in ("", "0", "1"):
+        raise DeliveryError("DELIVERY_ALLOW_UNCHANGED must be 1, 0 or unset")
+    return value == "1"
 
 
 def status_entries(workspace):
@@ -205,6 +228,15 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     return head(workspace), True
 
 
+def integration_tip(workspace, url, base):
+    """The integration branch's commit as the delivery service holds it now."""
+    support.run_git(support.git("-C", str(workspace), "fetch", "--no-tags", url, "refs/heads/" + base, url=url),
+                    describe="read the integration branch",
+                    timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+    _, target, _ = support.run(support.git("-C", str(workspace), "rev-parse", "FETCH_HEAD"))
+    return target.strip()
+
+
 def catch_up(workspace, url, base, issue, method):
     """Bring the ticket branch up to date with the integration branch. Returns
     whether a merge commit was made. A conflict is left in the working tree,
@@ -214,11 +246,7 @@ def catch_up(workspace, url, base, issue, method):
     cannot tell its own earlier rounds from the integration branch's."""
     if method != "merge":
         return False
-    support.run_git(support.git("-C", str(workspace), "fetch", "--no-tags", url, "refs/heads/" + base, url=url),
-                    describe="read the integration branch",
-                    timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
-    _, target, _ = support.run(support.git("-C", str(workspace), "rev-parse", "FETCH_HEAD"))
-    target = target.strip()
+    target = integration_tip(workspace, url, base)
     code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor", target, "HEAD"),
                              check=False)
     if code == 0:
@@ -347,7 +375,18 @@ def summary(receipt, pushed, committed):
     return "\n".join(lines)
 
 
-def check_only(workspace, owner, name, base, branch, url, allowed):
+def unchanged_summary(receipt):
+    return "\n".join([
+        "Nothing was delivered for %s: no file was changed." % receipt["issue"],
+        "The request stands on %s of %s as it is at %s; the commit the work started from, %s, is part of it."
+        % (receipt["base_branch"], receipt["repository"], receipt["base_sha"], receipt["workspace_head"]),
+        "Nothing was committed, pushed, opened or merged, because DELIVERY_ALLOW_UNCHANGED is set; "
+        "the receipt at %s records this." % support.RECEIPT,
+        "Whether that satisfies the request is what the review before this stage looked at; this process "
+        "does not judge it."])
+
+
+def check_only(workspace, owner, name, base, branch, url, allowed, unchanged):
     """An operator check: local settings plus read-only calls to the target."""
     paths = changed_paths(workspace)
     exempt = integration_paths(workspace)
@@ -355,7 +394,11 @@ def check_only(workspace, owner, name, base, branch, url, allowed):
     lines = ["Checked the delivery settings; nothing was committed, pushed, opened or merged.",
              "Target %s/%s, integration branch %s, ticket branch %s." % (owner, name, base, branch),
              "Changed paths inside the operator's grant: %s."
-             % (", ".join(sorted(path for path in paths if path not in exempt)) or "none")]
+             % (", ".join(sorted(path for path in paths if path not in exempt)) or "none"),
+             "A request that changes no file %s."
+             % ("ends without a delivery when the commit it started from is part of the integration branch "
+                "(DELIVERY_ALLOW_UNCHANGED is 1)" if unchanged else
+                "is refused (DELIVERY_ALLOW_UNCHANGED is not 1)")]
     if exempt:
         lines.append("Paths the integration branch changed, which need no grant: %s." % ", ".join(sorted(exempt)))
     status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
@@ -398,19 +441,54 @@ def deliver(arguments):
     if method not in METHODS:
         raise DeliveryError("DELIVERY_MERGE_METHOD must be one of: " + ", ".join(METHODS))
     allowed = allowed_paths()
+    unchanged = allow_unchanged()
     url = support.remote_url(owner, name)
     if dry:
-        return check_only(workspace, owner, name, base, branch, url, allowed)
+        return check_only(workspace, owner, name, base, branch, url, allowed, unchanged)
     try:
-        return carry_out(workspace, issue, owner, name, base, branch, method, url, allowed)
+        return carry_out(workspace, issue, owner, name, base, branch, method, url, allowed, unchanged)
     except DeliveryError as error:
         print(refusal(issue, owner, name, base, branch, error), flush=True)
         raise
 
 
-def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed):
+def finish_unchanged(workspace, issue, owner, name, base, url, path):
+    """End without a delivery: nothing changed, and the commit the work
+    started from is already part of the integration branch, so the request
+    stands on that branch as it is now. A rerun checks again from the start
+    and records where the branch is then, which is what the verification
+    after delivery checks out."""
+    code, current, _ = support.run(support.git("-C", str(workspace), "rev-parse", "-q", "--verify", "HEAD^{commit}"),
+                                   check=False)
+    if code != 0:
+        raise DeliveryError("No change under the allowed paths is ready to deliver, and the checkout has no "
+                            "commit for the request to stand on")
+    current = current.strip()
+    tip = integration_tip(workspace, url, base)
+    code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor", current, tip),
+                             check=False)
+    if code != 0:
+        # The work did not start from this branch, or the branch was rewritten
+        # since: the request does not stand on it, so this is no ending.
+        raise DeliveryError("No change under the allowed paths is ready to deliver, and the commit the work "
+                            "started from, %s, is not part of %s as it is now" % (current, base))
+    receipt = {"unchanged": True, "issue": issue, "repository": owner + "/" + name, "base_branch": base,
+               "base_sha": tip, "workspace_head": current}
+    support.write_receipt(path, receipt)
+    print(unchanged_summary(receipt))
+    return 0
+
+
+def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed, unchanged):
     path = support.receipt_path(workspace)
     receipt = support.read_receipt(path)
+    if receipt.get("unchanged"):
+        # A round that ended without a delivery committed, pushed and opened
+        # nothing, so there is nothing of it to continue: the workspace as it
+        # is now decides again, and work changed since is a first round.
+        receipt = {}
+    if unchanged and not receipt and not changed_paths(workspace) and not merge_in_progress(workspace):
+        return finish_unchanged(workspace, issue, owner, name, base, url, path)
     previous = receipt.pop("previous", [])
     if receipt.get("merge_sha") and receipt.get("head") == head(workspace) and not changed_paths(workspace):
         # Already delivered and nothing new arrived: report, do not deliver again.
