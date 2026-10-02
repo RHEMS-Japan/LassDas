@@ -339,5 +339,219 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(ask("protocol=https\nhost=service.invalid\n\n", ""), "")
 
 
+    def advance_integration_branch(self, relative, text, message="Codex: another delivery"):
+        """Another request's work lands on the integration branch after this
+        checkout was made, the way it does when requests run side by side."""
+        other = self.root / ("other-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        (other / relative).write_text(text)
+        self.git(other, "add", "-A")
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def parents(self, directory, revision="HEAD"):
+        return self.git(directory, "rev-list", "--parents", "-n", "1", revision).stdout.split()[1:]
+
+    def test_a_moved_integration_branch_is_merged_before_publishing(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the ticket branch did not take the merge")
+        merged = self.git(self.remote, "show", "refs/heads/master:library/run.go").stdout
+        self.assertIn("Other", merged)
+        self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertIn("created a commit", done.stdout)
+
+    def test_a_conflict_with_the_integration_branch_waits_for_the_next_round(self):
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Nothing was delivered for TICKET-41.", refused.stdout)
+        self.assertIn("1 path conflict with this change: main.go", refused.stdout)
+        self.assertIn("conflict markers", refused.stdout)
+        text = (self.workspace / "main.go").read_text()
+        self.assertIn("<<<<<<<", text)
+        self.assertIn("// theirs", text)
+        self.assertIn("// ours", text)
+        self.assertTrue((self.workspace / ".git" / "MERGE_HEAD").exists(), "the merge was not left for the next round")
+        self.assertEqual(self.state["pulls"], [], "a conflicting branch was published")
+        # Unresolved markers are not delivered either.
+        again = self.deliver()
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("conflict markers in: main.go", again.stdout)
+        # The next round resolves the markers in place; delivery completes the merge.
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the resolving commit is not a merge")
+        self.assertIn("theirs and ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
+
+    def test_the_integration_branch_s_own_paths_need_no_grant(self):
+        # notes.md and a non-ASCII name are outside the grant; the integration
+        # branch changing them is not the worker's change and must not stop
+        # the delivery that completes a conflicted merge.
+        self.advance_integration_branch("notes.md", "revised elsewhere\n")
+        self.advance_integration_branch("メモ.md", "別の依頼の文書\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("revised elsewhere", self.git(self.remote, "show", "refs/heads/master:notes.md").stdout)
+        self.assertIn("別の依頼", self.git(self.remote, "show", "refs/heads/master:メモ.md").stdout)
+
+    def test_a_path_the_worker_wrote_needs_the_grant_even_when_the_integration_branch_changed_it(self):
+        self.advance_integration_branch("notes.md", "revised elsewhere\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        self.change("notes.md", "smuggled outside the grant\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the operator's allowed paths were not delivered: notes.md", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_text_the_integration_branch_already_carries_is_not_this_change(self):
+        self.advance_integration_branch("library/run.go", "package library\n\n// internal-project-codename\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # The worker writing it is still refused.
+        self.change("main.go", "package main\n\n// internal-project-codename again\n")
+        refused = self.deliver(**forbidden)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+
+    def test_a_failed_catch_up_leaves_the_commit_on_record_for_the_rerun(self):
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        refused = self.deliver(DELIVERY_REMOTE_URL=str(self.root / "no-such-target.git"),
+                               DELIVERY_GIT_TIMEOUT_SECONDS="5")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Nothing was delivered", refused.stdout)
+        receipt = json.loads((self.workspace / ".git" / "ticket-engine" / "delivery.json").read_text())
+        self.assertEqual(receipt.get("head"), self.git(self.workspace, "rev-parse", "HEAD").stdout.strip())
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+
+    def test_a_squashing_service_gets_no_catch_up(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver(DELIVERY_MERGE_METHOD="squash")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 1, "the branch was caught up under the squash method")
+    def remove_on_integration_branch(self, relative, message="Codex: another delivery removes a path"):
+        other = self.root / ("other-remove-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        self.git(other, "rm", "-q", relative)
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def rename_on_integration_branch(self, relative, target, message="Codex: another delivery renames a path"):
+        other = self.root / ("other-rename-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        self.git(other, "mv", relative, target)
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def conflict_then_resolve(self, **extra):
+        """A conflicting integration branch, refused once; main.go resolved."""
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver(**extra).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+
+    def test_a_path_the_integration_branch_removed_is_not_the_worker_s_to_bring_back(self):
+        self.remove_on_integration_branch("notes.md")
+        self.conflict_then_resolve()
+        self.change("notes.md", "smuggled back outside the grant\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the operator's allowed paths were not delivered: notes.md", refused.stdout)
+
+    def test_a_path_the_integration_branch_renamed_needs_no_grant(self):
+        self.rename_on_integration_branch("notes.md", "記録.md")
+        self.conflict_then_resolve()
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("original", self.git(self.remote, "show", "refs/heads/master:記録.md").stdout)
+
+    def test_forbidden_text_next_to_the_resolution_is_not_this_change(self):
+        self.advance_integration_branch("main.go", "package main\n\n// internal-project-codename stays\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        # Keeping the integration branch's line as context: delivered.
+        self.change("main.go", "package main\n\n// internal-project-codename stays\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_removing_a_forbidden_line_the_integration_branch_wrote_is_not_this_change(self):
+        self.advance_integration_branch("main.go", "package main\n\n// internal-project-codename stays\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_resolution_back_to_this_branch_s_own_content_still_concludes_the_merge(self):
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// ours\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the unchanged resolution did not conclude the merge")
+        self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
+        self.assertIn("// ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+
+    def test_an_added_line_that_begins_with_plus_signs_is_still_scanned(self):
+        self.change("main.go", "package main\n\n++" + TOKEN + "\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("delivery credential", refused.stdout)
+        self.change("main.go", "package main\n\n++internal-project-codename\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_a_forbidden_word_in_a_path_name_is_refused(self):
+        self.change("library/internal-project-codename.go", "package library\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_a_catch_up_merge_made_before_its_receipt_was_written_is_delivered(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # The state a kill between the merge commit and the receipt write
+        # leaves: the receipt names the merge's first parent.
+        receipt_path = self.workspace / ".git" / "ticket-engine" / "delivery.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["head"] = self.parents(self.workspace)[0]
+        for key in ("pushed_at", "pull_request", "pull_request_url", "opened_at", "merge_sha", "merged_at"):
+            receipt.pop(key, None)
+        receipt_path.write_text(json.dumps(receipt))
+        self.git(self.remote, "update-ref", "-d", "refs/heads/ticket/TICKET-41")
+        again = self.deliver()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text())["head"],
+                         self.git(self.workspace, "rev-parse", "HEAD").stdout.strip())
+
+
 if __name__ == "__main__":
     unittest.main()
