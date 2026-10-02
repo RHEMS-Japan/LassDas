@@ -168,7 +168,8 @@ func TestAStageSaysWhichModelBeganItAndSaysItOnce(t *testing.T) {
 	cfg := announcingStagesConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
-	_, directory := noticeJob(t, chain.State{})
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	run := filepath.Join(directory, "run")
 	observe := func(string) {}
 	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
@@ -210,7 +211,8 @@ func TestAStageWithoutAChosenModelIsAnnouncedAsTheOperatorWroteIt(t *testing.T) 
 	cfg := announcingStagesConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
-	_, directory := noticeJob(t, chain.State{})
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	observe := func(string) {}
 	beginStage(t, directory, "verify-build")
 	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
@@ -234,12 +236,15 @@ func TestAStageWhoseSelectionFailedIsAnnouncedWithoutAModel(t *testing.T) {
 	cfg := announcingStagesConfig(t)
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
-	_, directory := noticeJob(t, chain.State{})
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	observe := func(string) {}
 	// Nothing ran, so there is no live copy: the record of the launch that
-	// could not choose is all there is of the stage.
+	// could not choose is all there is of the stage. It carries its times,
+	// as every record the engine writes does.
+	failed := time.Now().UTC()
 	writeJobHistory(t, directory, chain.State{History: []chain.Result{
-		{Role: "work", Speaker: "worker", Error: "Selecting a current model: catalog HTTP 503: actual reason"},
+		{Role: "work", Speaker: "worker", Error: "Selecting a current model: catalog HTTP 503: actual reason", StartedAt: failed, FinishedAt: failed},
 	}})
 	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
 	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。" {
@@ -264,7 +269,8 @@ func TestAStageStillChoosingWaitsForItsModel(t *testing.T) {
 	cfg.Roles[0].Processes = append(cfg.Roles[0].Processes, chain.Process{Name: "peer", Command: []string{"/bin/true"}})
 	fixture := &noticeTracker{}
 	fixture.install(t, alwaysChoose("done"))
-	_, directory := noticeJob(t, chain.State{})
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	observe := func(string) {}
 	// The stage's model-less process is already running; its peer has not
 	// come back from the selection yet.
@@ -332,6 +338,8 @@ func TestTheModelsUsedArePostedOnceAcrossARestart(t *testing.T) {
 	root, directory := noticeJob(t, chain.State{Done: true, History: []chain.Result{
 		{Role: "implement", Speaker: "worker", Model: "maker/one", StartedAt: base, FinishedAt: base.Add(32 * time.Second)},
 	}})
+	// The request was delivered while the queue's engines posted the list.
+	queueRanSince(t, root, cfg, base)
 	since, _ := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	const want = "使ったモデル (工程ごと、起動順):\n- 実装: maker/one (32 秒)"
 	status := filepath.Join(directory, "status.json")

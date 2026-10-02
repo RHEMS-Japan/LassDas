@@ -689,6 +689,19 @@ tracker cannot turn into two identical comments. The stage sentences and the
 delivered request's list of the models it used are recorded there the same way,
 so a restart repeats neither.
 
+A notice is posted only about something that happened after the queue's
+engines began posting its kind: `queue/notice-kinds.json` keeps that start for
+each kind from the first run of an engine that posts it (a kind switched off,
+or unknown to a run in between, starts again when it returns), and anything
+older, such as a request accepted or delivered, a stage begun or a stall
+started before then, is not posted; a notice said once per request is recorded
+in `notices.json` as `predates` instead. On the first run of an engine that
+keeps this record every kind starts with that run, so a stage that began before
+it and had not been announced yet, or a request delivered before it whose list
+had not gone out, stays silent; a record the engine cannot read when it starts
+is set aside as `notice-kinds.json.unreadable`, said once, and treated the same
+way.
+
 **After a restart.** When the queue picks up a request whose history holds an
 interrupted action or an unfinished recovery, it posts:
 

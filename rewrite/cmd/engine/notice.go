@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -71,12 +72,16 @@ func quietFor(state chain.State, accepted, now time.Time) time.Duration {
 }
 
 // noticeRecord is written before the comment is submitted and marked after it
-// is confirmed, so an interrupted post is retried instead of repeated.
+// is confirmed, so an interrupted post is retried instead of repeated. One
+// marked Predates is never submitted: what it would report happened before the
+// queue's engines posted its kind, and the record settles the kind for this
+// request as a posted one would.
 type noticeRecord struct {
 	Kind      string     `json:"kind"`
 	Text      string     `json:"text"`
 	WrittenAt time.Time  `json:"written_at"`
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
+	Predates  bool       `json:"predates,omitempty"`
 }
 
 type noticeLog struct {
@@ -89,10 +94,13 @@ type notices struct {
 	backlog   tracker.Backlog
 	issue     sourceIssue
 	directory string
+	// queue keeps when each kind of notice began; a request's directory is
+	// the queue's jobs/<id>.
+	queue string
 }
 
 func requestNotices(cfg config, issue sourceIssue, directory string) notices {
-	return notices{backlog: cfg.Backlog, issue: issue, directory: directory}
+	return notices{backlog: cfg.Backlog, issue: issue, directory: directory, queue: filepath.Dir(filepath.Dir(directory))}
 }
 
 func (n notices) path() string { return filepath.Join(n.directory, "notices.json") }
@@ -122,11 +130,17 @@ func (n notices) save(log noticeLog) error {
 
 func pendingNotice(log noticeLog) int {
 	for i := range log.Notices {
-		if log.Notices[i].PostedAt == nil {
+		if log.Notices[i].PostedAt == nil && !log.Notices[i].Predates {
 			return i
 		}
 	}
 	return -1
+}
+
+// onceNotice reports a kind said at most once per request, so any record of
+// it, posted or predating, settles it.
+func onceNotice(kind string) bool {
+	return kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
 }
 
 // noticeDue decides whether a condition may speak again. The budget pause and
@@ -148,7 +162,7 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
-	once := kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
+	once := onceNotice(kind)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
 		if log.Notices[i].Kind == kind {
 			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval
@@ -157,9 +171,150 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	return true
 }
 
+// A notice is news only from the time the queue's engines post its kind. A
+// request older than the kind has no record of it, so an engine that learned
+// a new kind used to post it on every request already delivered, a burst of
+// comments about the past. The queue therefore keeps, for each kind, when its
+// engines began posting it, and every notice carries the time of the event it
+// reports: an event before its kind began is not posted.
+const noticeKindsFile = "notice-kinds.json"
+
+type noticeKinds struct {
+	Since map[string]time.Time `json:"since"`
+}
+
+// noticeKindsLock serializes changes to the queue's record: the collector and
+// the watcher of each running request may each add a kind.
+var noticeKindsLock sync.Mutex
+
+var errUnreadableKinds = errors.New("the queue's record of notice kinds is unreadable; no notice is posted without it")
+
+func loadNoticeKinds(queue string) (noticeKinds, error) {
+	var kinds noticeKinds
+	raw, err := os.ReadFile(filepath.Join(queue, noticeKindsFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return kinds, err
+	}
+	if err == nil && json.Unmarshal(raw, &kinds) != nil {
+		return noticeKinds{}, errUnreadableKinds
+	}
+	if kinds.Since == nil {
+		kinds.Since = map[string]time.Time{}
+	}
+	return kinds, nil
+}
+
+func saveNoticeKinds(queue string, kinds noticeKinds) error {
+	data, err := json.Marshal(kinds)
+	if err != nil {
+		return err
+	}
+	return writeRuntimeFile(filepath.Join(queue, noticeKindsFile), data)
+}
+
+// kindStart is the start written for a kind, in whole seconds: an acceptance
+// and a running stage are read from a file's time, and on a filesystem that
+// keeps only seconds a file written just after the start must not read as
+// before it.
+func kindStart(now time.Time) time.Time {
+	return now.UTC().Truncate(time.Second)
+}
+
+// postableKinds are the kinds of notice an engine with this configuration
+// posts.
+func postableKinds(cfg config) []string {
+	kinds := []string{resumeNotice}
+	if cfg.Intake == nil {
+		return kinds
+	}
+	if cfg.Intake.MinModelCredit > 0 {
+		kinds = append(kinds, pausedNotice, restoredNotice)
+	}
+	if stallWindow(cfg) > 0 {
+		kinds = append(kinds, stallNotice)
+	}
+	if cfg.Intake.Announce {
+		kinds = append(kinds, acceptedNotice, startedNotice, resumedNotice, modelsNotice)
+		if cfg.Workflow != nil {
+			for _, stage := range cfg.Workflow.Stages {
+				if stage.Announce != "" {
+					kinds = append(kinds, stagePrefix+stage.Name)
+				}
+			}
+		}
+	}
+	return kinds
+}
+
+// startNoticeKinds brings the queue's record in line with the engine about to
+// run on it, before anything is accepted or said. A kind this engine posts and
+// the record lacks starts now. A kind it does not post is dropped, so a kind
+// switched off, or unknown to an engine that ran in between, starts again when
+// it is posted again instead of reaching back over the time nothing posted it.
+func startNoticeKinds(queue string, cfg config, now time.Time, observe func(string)) error {
+	noticeKindsLock.Lock()
+	defer noticeKindsLock.Unlock()
+	kinds, err := loadNoticeKinds(queue)
+	if errors.Is(err, errUnreadableKinds) {
+		// A record that cannot be read says when no kind began, and left as
+		// it is it would hold every notice and be logged for every request on
+		// every tick. It is set aside for a person to look at, and the queue
+		// starts again as one without a record: nothing from before is said.
+		aside := filepath.Join(queue, noticeKindsFile+".unreadable")
+		if err := os.Rename(filepath.Join(queue, noticeKindsFile), aside); err != nil {
+			return err
+		}
+		observe("the queue's record of notice kinds was unreadable; it was set aside as " + aside + " and every kind starts again now")
+		kinds, err = noticeKinds{Since: map[string]time.Time{}}, nil
+	}
+	if err != nil {
+		return err
+	}
+	postable := map[string]bool{}
+	changed := false
+	for _, kind := range postableKinds(cfg) {
+		postable[kind] = true
+		if kinds.Since[kind].IsZero() {
+			kinds.Since[kind] = kindStart(now)
+			changed = true
+		}
+	}
+	for kind := range kinds.Since {
+		if !postable[kind] {
+			delete(kinds.Since, kind)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return saveNoticeKinds(queue, kinds)
+}
+
+// kindSince is when the queue's engines began posting a kind. A kind the record
+// lacks starts now; nothing says it began earlier.
+func kindSince(queue, kind string, now time.Time) (time.Time, error) {
+	noticeKindsLock.Lock()
+	defer noticeKindsLock.Unlock()
+	kinds, err := loadNoticeKinds(queue)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if since := kinds.Since[kind]; !since.IsZero() {
+		return since, nil
+	}
+	kinds.Since[kind] = kindStart(now)
+	if err := saveNoticeKinds(queue, kinds); err != nil {
+		return time.Time{}, err
+	}
+	return kinds.Since[kind], nil
+}
+
 // post records the notice first and submits it after. An earlier notice whose
-// submission was never confirmed is settled before a new condition speaks.
-func (n notices) post(ctx context.Context, kind, text string) error {
+// submission was never confirmed is settled before a new condition speaks. The
+// time given is when the event the notice reports happened; an event from
+// before the queue's engines posted this kind is not posted at all.
+func (n notices) post(ctx context.Context, kind, text string, at time.Time) error {
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -172,10 +327,27 @@ func (n notices) post(ctx context.Context, kind, text string) error {
 			return nil
 		}
 	}
-	if !noticeDue(log, kind, time.Now().UTC()) {
+	now := time.Now().UTC()
+	if !noticeDue(log, kind, now) {
 		return nil
 	}
-	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: time.Now().UTC()})
+	since, err := kindSince(n.queue, kind, now)
+	if err != nil {
+		return err
+	}
+	if at.Before(since) {
+		// A kind said once is settled by a record that it predates, so no
+		// later tick or restart weighs it again. A kind that speaks again
+		// keeps no record: one would hold back its next, current occasion
+		// for a whole interval, and this occasion's time does not move, so
+		// every later tick finds it before the kind's start again.
+		if !onceNotice(kind) {
+			return nil
+		}
+		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true})
+		return n.save(log)
+	}
+	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now})
 	if err := n.save(log); err != nil {
 		return err
 	}
@@ -329,10 +501,12 @@ func modelCreditHold(ctx context.Context, cfg config, observe func(string)) (low
 // applyBudgetNotice says once that the work is held for the model budget, and
 // once that it carried on. Neither line is a verdict on any role's answer.
 func applyBudgetNotice(ctx context.Context, n notices, low bool) error {
+	// The reading is the event: the budget is short, or back, now.
+	now := time.Now().UTC()
 	if low {
-		return n.post(ctx, pausedNotice, pausedNoticeText)
+		return n.post(ctx, pausedNotice, pausedNoticeText, now)
 	}
-	return n.post(ctx, restoredNotice, restoredNoticeText)
+	return n.post(ctx, restoredNotice, restoredNoticeText, now)
 }
 
 // savedHistory reads the request's history without taking the runtime lock,
@@ -434,9 +608,11 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 		return err
 	}
 	now := time.Now().UTC()
+	// Each silence began where it is measured from: a stall at the last
+	// completed step, a quiet launch at the last record or the acceptance.
 	elapsed, failure, stalled := stalledFor(state, now)
 	if stalled && elapsed > window {
-		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)))
+		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)), now.Add(-elapsed))
 	}
 	// A long silence is worth a word only while the work runs: a request
 	// waiting its turn, or held for the model budget, is quiet for other
@@ -449,7 +625,7 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 		accepted = info.ModTime().UTC()
 	}
 	if quiet := quietFor(state, accepted, now); quiet > window {
-		return n.post(ctx, stallNotice, stallNoticeText(int(quiet.Minutes()), ""))
+		return n.post(ctx, stallNotice, stallNoticeText(int(quiet.Minutes()), ""), now.Add(-quiet))
 	}
 	return nil
 }

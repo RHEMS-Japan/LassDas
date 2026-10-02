@@ -227,6 +227,9 @@ func TestTheQueueMovesDeliveredAndStoppedRequestsOnItsTicks(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", "exec sleep 60"}
+	// The third request was accepted while the queue's engines announced
+	// acceptances; this run is not their first.
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
 	var queueLog bytes.Buffer
 	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, &queueLog)
 	defer func() {
