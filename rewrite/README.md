@@ -726,7 +726,9 @@ started before then, is not posted; a notice said once per request is recorded
 in `notices.json` as `predates` instead. On the first run of an engine that
 keeps this record every kind starts with that run, so a stage that began before
 it and had not been announced yet, or a request delivered before it whose list
-had not gone out, stays silent.
+had not gone out, stays silent; a record the engine cannot read when it starts
+is set aside as `notice-kinds.json.unreadable`, said once, and treated the same
+way.
 
 **After a restart.** When the queue picks up a request whose history holds an
 interrupted action or an unfinished recovery, it posts:

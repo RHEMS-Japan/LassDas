@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -176,7 +177,7 @@ func readNotices(t *testing.T, directory string) noticeLog {
 // time.
 func queueRanSince(t *testing.T, root string, cfg config, since time.Time) {
 	t.Helper()
-	if err := startNoticeKinds(root, cfg, since); err != nil {
+	if err := startNoticeKinds(root, cfg, since, func(string) {}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -985,7 +986,7 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 	}
 	// The engine starts as the watch loop starts it, and the second stage
 	// runs again under it.
-	if err := startNoticeKinds(root, cfg, time.Now()); err != nil {
+	if err := startNoticeKinds(root, cfg, time.Now(), func(string) {}); err != nil {
 		t.Fatal(err)
 	}
 	beginStage(t, directory, "verify-build")
@@ -1018,6 +1019,140 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 		record, found := records[kind]
 		if !found || record.Predates != predates || (record.PostedAt != nil) == predates {
 			t.Fatalf("the record of %s does not say what became of it: %+v", kind, records)
+		}
+	}
+}
+
+// pendingRun is announcingStagesConfig with stages that run for a moment, so
+// a request taken up again is seen running.
+func pendingRun(t *testing.T) config {
+	t.Helper()
+	cfg := announcingStagesConfig(t)
+	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", "sleep 0.3"}
+	cfg.Roles[1].Processes[0].Command = []string{"/bin/sh", "-c", "sleep 0.3"}
+	return cfg
+}
+
+// A stage that was running when the engine was replaced is taken up again
+// after the restart. It began before this engine, so the first engine that
+// keeps the queue's record does not announce it, though it runs again under
+// it: the note the restart writes for the cut launch has no start to place
+// after the record's, and its end, at the restart, is not when the stage
+// began.
+func TestAStageRunningWhenTheEngineWasReplacedIsNotAnnouncedAgain(t *testing.T) {
+	earlier := time.Now().UTC().Add(-2 * time.Hour)
+	for _, shape := range []struct {
+		name    string
+		pending string
+		history []chain.Result
+		before  []string
+	}{
+		{"its first stage", "work", []chain.Result{}, []string{"作業を始めます。"}},
+		{"its second stage", "verify", []chain.Result{
+			{Role: "work", Speaker: "worker", Model: "maker/first", StartedAt: earlier, FinishedAt: earlier.Add(time.Minute)},
+			{Role: "work", Speaker: "runtime", Output: "Runtime record for stage work, written by the engine from what it observed.\nProcess worker exited 0.\n", StartedAt: earlier.Add(time.Minute), FinishedAt: earlier.Add(time.Minute)},
+		}, []string{"作業を始めます。", "検証を始めます。"}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := pendingRun(t)
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "work", Pending: &chain.Assignment{Role: shape.pending}, History: shape.history})
+			if err := os.Chtimes(filepath.Join(directory, "issue.json"), earlier, earlier); err != nil {
+				t.Fatal(err)
+			}
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+			waitFor(t, func() bool { return loadJobState(t, directory).Done })
+			time.Sleep(100 * time.Millisecond)
+			finish()
+			for _, posted := range fixture.all() {
+				for _, sentence := range shape.before {
+					if strings.HasPrefix(posted, sentence) {
+						t.Fatalf("a stage that began before this engine was announced: %q", fixture.all())
+					}
+				}
+			}
+			for _, record := range readNotices(t, directory).Notices {
+				if record.Kind == stagePrefix+shape.pending && !record.Predates {
+					t.Fatalf("the stage taken up again is not settled as begun before: %+v", record)
+				}
+			}
+		})
+	}
+}
+
+// A stage whose first launch began under this engine and was cut by a restart
+// before its sentence went out is announced when it runs again: the note the
+// restart writes for the cut launch keeps when it began. Whether the sentence
+// names a model depends on whether the launch taken up again has chosen one by
+// the look that finds the note, as for any stage known from its record.
+func TestAStageCutUnderThisEngineIsAnnouncedWhenItRunsAgain(t *testing.T) {
+	cfg := pendingRun(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	accepted := time.Now().UTC().Add(-10 * time.Minute)
+	root, directory := noticeJob(t, chain.State{Workflow: cfg.Workflow, Step: "work", Pending: &chain.Assignment{Role: "work"}, PendingSince: accepted, History: []chain.Result{}})
+	queueRanSince(t, root, cfg, accepted.Add(-time.Hour))
+	if err := os.Chtimes(filepath.Join(directory, "issue.json"), accepted, accepted); err != nil {
+		t.Fatal(err)
+	}
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return loadJobState(t, directory).Done })
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if got := fixture.withPrefix("作業を始めます。"); len(got) != 1 {
+		t.Fatalf("the stage cut under this engine was announced %d times: %q", len(got), fixture.all())
+	}
+}
+
+// A record of kinds that cannot be read is set aside when the engine starts,
+// said once, and the queue starts again as one without a record: nothing from
+// before is posted, and nothing is held or logged again on every tick.
+func TestAnUnreadableRecordOfKindsIsSetAsideOnce(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.Announce = true
+	cfg.Intake.Statuses = &statusConfig{Delivered: 3}
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, noticeKindsFile), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	delivered := time.Now().UTC().Add(-time.Hour)
+	var directories []string
+	for _, id := range []int{51, 52, 53} {
+		directories = append(directories, deliveredJob(t, root, id, delivered))
+	}
+	var queueLog bytes.Buffer
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &queueLog)
+	waitFor(t, func() bool {
+		for _, directory := range directories {
+			if len(readNotices(t, directory).Notices) == 0 {
+				return false
+			}
+		}
+		return true
+	})
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if said := strings.Count(queueLog.String(), "notice kinds"); said != 1 {
+		t.Fatalf("the unreadable record was said %d times:\n%s", said, queueLog.String())
+	}
+	if aside, err := os.ReadFile(filepath.Join(root, noticeKindsFile+".unreadable")); err != nil || string(aside) != "{not json" {
+		t.Fatalf("the unreadable record was not set aside as it was: %q %v", aside, err)
+	}
+	if kinds, err := loadNoticeKinds(root); err != nil || !kinds.Since[modelsNotice].After(delivered) {
+		t.Fatalf("the queue did not start again with a readable record: %+v %v", kinds, err)
+	}
+	if got := fixture.attempts(); got != 0 {
+		t.Fatalf("requests delivered before were told %d times: %v", got, fixture.all())
+	}
+	for _, directory := range directories {
+		if log := readNotices(t, directory).Notices; len(log) != 1 || !log[0].Predates {
+			t.Fatalf("a request delivered before is not settled: %+v", log)
 		}
 	}
 }
