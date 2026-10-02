@@ -7,6 +7,14 @@ the ticket branch, opens or reuses one pull request, merges it and records a
 receipt. A rerun continues the same delivery instead of repeating it; it is
 not a general exactly-once guarantee for an interrupted remote operation.
 
+Before publishing, it brings the ticket branch up to date with the
+integration branch, since another request may have been merged there since
+this checkout was made. A clean merge becomes a merge commit on the ticket
+branch. A conflicting one is left in the working tree between Git's markers
+and the delivery is refused naming the paths, so the next implementation
+launch resolves them in place; the commit of the following delivery then
+completes that merge. This needs the working tree writable as well as .git.
+
 Environment (all from the operator, never from a role):
   TASK_ISSUE                 assigned ticket; names the branch and the message
   TASK_WORKSPACE             prepared checkout (default: the process directory)
@@ -73,10 +81,26 @@ def changed_paths(workspace):
     return paths
 
 
-def refuse_paths_outside_grant(paths, allowed):
+def merge_in_progress(workspace):
+    return (workspace / ".git" / "MERGE_HEAD").exists() if hasattr(workspace, "exists") \
+        else os.path.exists(os.path.join(str(workspace), ".git", "MERGE_HEAD"))
+
+
+def integration_paths(workspace):
+    """While a merge of the integration branch is being completed, the paths
+    that branch changed are its own, not something the worker wrote."""
+    if not merge_in_progress(workspace):
+        return set()
+    _, output, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "HEAD", "MERGE_HEAD"))
+    return {line for line in output.splitlines() if line}
+
+
+def refuse_paths_outside_grant(paths, allowed, exempt=()):
     outside = []
     for path in paths:
         candidate = PurePosixPath(path)
+        if path in exempt:
+            continue
         if not any(candidate == grant or grant in candidate.parents for grant in allowed):
             outside.append(path)
     if outside:
@@ -104,9 +128,14 @@ def head(workspace):
 def stage_and_commit(workspace, issue, allowed, receipt):
     """Stage the granted paths, refuse anything else, and commit once."""
     paths = changed_paths(workspace)
-    refuse_paths_outside_grant(paths, allowed)
+    refuse_paths_outside_grant(paths, allowed, integration_paths(workspace))
     if paths:
         support.run(support.git("-C", str(workspace), "add", "-A", "--", *paths))
+    code, check, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--check"), check=False)
+    if "conflict marker" in check:
+        raise DeliveryError("Refused: the change still carries Git conflict markers in: "
+                            + ", ".join(sorted({line.split(":")[0] for line in check.splitlines()
+                                                if "conflict marker" in line})[:20]))
     # The staged text is read unredacted because one of the refusals below is
     # "this change carries the delivery credential". It is never printed.
     staged, diff, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--no-color"),
@@ -132,6 +161,50 @@ def stage_and_commit(workspace, issue, allowed, receipt):
                             "commit", "--no-verify", "-m", "Deliver " + issue),
                 environment=environment)
     return head(workspace), True
+
+
+def catch_up(workspace, url, base, issue):
+    """Bring the ticket branch up to date with the integration branch. Returns
+    whether a merge commit was made. A conflict is left in the working tree,
+    between Git's markers, for the next implementation launch to resolve."""
+    support.run_git(support.git("-C", str(workspace), "fetch", "--no-tags", url, "refs/heads/" + base, url=url),
+                    describe="read the integration branch",
+                    timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+    _, target, _ = support.run(support.git("-C", str(workspace), "rev-parse", "FETCH_HEAD"))
+    target = target.strip()
+    code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor", target, "HEAD"),
+                             check=False)
+    if code == 0:
+        return False
+    # Work the integration branch already contains (a merge recorded there
+    # before this run was interrupted) has nothing to catch up with either.
+    code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor", "HEAD", target),
+                             check=False)
+    if code == 0:
+        return False
+    name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
+    address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
+    environment = support.git_environment()
+    environment.update(GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=address,
+                       GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=address)
+    code, _, diagnostics = support.run(
+        support.git("-C", str(workspace), "-c", "user.name=" + name, "-c", "user.email=" + address,
+                    "merge", "--no-ff", "--no-edit", "-m", "Merge %s into ticket/%s" % (base, issue), target),
+        check=False, environment=environment)
+    if code == 0:
+        return True
+    _, unmerged, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "--diff-filter=U"),
+                                 check=False)
+    conflicted = sorted(line for line in unmerged.splitlines() if line)
+    if not conflicted:
+        # Not a conflict: Git refused for another reason. Leave the tree as it was.
+        support.run(support.git("-C", str(workspace), "merge", "--abort"), check=False)
+        raise DeliveryError("Git could not merge the integration branch %s: %s" % (base, diagnostics.strip()[:300]))
+    raise DeliveryError(
+        "The integration branch %s moved since this checkout and %d path%s conflict with this change: %s. "
+        "The working tree now holds both sides between Git's conflict markers (<<<<<<<, =======, >>>>>>>). "
+        "Resolve them in place, keep the result building and tested, and the next delivery completes the merge."
+        % (base, len(conflicted), "" if len(conflicted) == 1 else "s", ", ".join(conflicted[:20])))
 
 
 def push_branch(workspace, url, branch, commit):
@@ -299,6 +372,8 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed)
     receipt.update(issue=issue, repository=owner + "/" + name, base_branch=base,
                    branch=branch, merge_method=method)
     commit, committed = stage_and_commit(workspace, issue, allowed, receipt)
+    if catch_up(workspace, url, base, issue):
+        commit, committed = head(workspace), True
     receipt["head"] = commit
     if committed:
         receipt["committed_at"] = support.timestamp()

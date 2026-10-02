@@ -339,5 +339,65 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(ask("protocol=https\nhost=service.invalid\n\n", ""), "")
 
 
+    def advance_integration_branch(self, relative, text, message="Codex: another delivery"):
+        """Another request's work lands on the integration branch after this
+        checkout was made, the way it does when requests run side by side."""
+        other = self.root / ("other-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        (other / relative).write_text(text)
+        self.git(other, "add", "-A")
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def parents(self, directory, revision="HEAD"):
+        return self.git(directory, "rev-list", "--parents", "-n", "1", revision).stdout.split()[1:]
+
+    def test_a_moved_integration_branch_is_merged_before_publishing(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the ticket branch did not take the merge")
+        merged = self.git(self.remote, "show", "refs/heads/master:library/run.go").stdout
+        self.assertIn("Other", merged)
+        self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertIn("created a commit", done.stdout)
+
+    def test_a_conflict_with_the_integration_branch_waits_for_the_next_round(self):
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Nothing was delivered for TICKET-41.", refused.stdout)
+        self.assertIn("1 path conflict with this change: main.go", refused.stdout)
+        self.assertIn("conflict markers", refused.stdout)
+        text = (self.workspace / "main.go").read_text()
+        self.assertIn("<<<<<<<", text)
+        self.assertIn("// theirs", text)
+        self.assertIn("// ours", text)
+        self.assertTrue((self.workspace / ".git" / "MERGE_HEAD").exists(), "the merge was not left for the next round")
+        self.assertEqual(self.state["pulls"], [], "a conflicting branch was published")
+        # Unresolved markers are not delivered either.
+        again = self.deliver()
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("conflict markers in: main.go", again.stdout)
+        # The next round resolves the markers in place; delivery completes the merge.
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the resolving commit is not a merge")
+        self.assertIn("theirs and ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
+
+    def test_the_integration_branch_s_own_paths_need_no_grant(self):
+        # notes.md is outside the grant; the integration branch changing it is
+        # not the worker's change and must not stop the delivery.
+        self.advance_integration_branch("notes.md", "revised elsewhere\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("revised elsewhere", self.git(self.remote, "show", "refs/heads/master:notes.md").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
