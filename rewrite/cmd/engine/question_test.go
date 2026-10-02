@@ -408,3 +408,24 @@ func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
 		t.Fatalf("creator's reply: id=%d %q err=%v", id, answer, err)
 	}
 }
+
+// A list holding a comment whose record places it on another issue or in
+// another project is not read for a question's boundary or its answer at
+// all, as it is not read for a stop.
+func TestAListWithACommentPlacedElsewhereIsNotReadForTheQuestion(t *testing.T) {
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
+	issue.Creator.ID = 55
+	for name, elsewhere := range map[string]json.RawMessage{
+		"another issue":   []byte(`{"id":702,"issueId":52,"projectId":17,"createdUser":{"id":55},"content":"words for another issue"}`),
+		"another project": []byte(`{"id":702,"issueId":51,"projectId":99,"createdUser":{"id":55},"content":"words in another project"}`),
+	} {
+		rows := []json.RawMessage{issueComment(701, 88, "someone else's words"), elsewhere, issueComment(703, 55, requesterAnswer)}
+		if highest, err := latestComment(source, rows, issue); err == nil {
+			t.Errorf("%s: the question's boundary was read as %d", name, highest)
+		}
+		if id, answer, err := answerToQuestion(source, rows, issue, nil, 0); err == nil {
+			t.Errorf("%s: an answer was read: id=%d %q", name, id, answer)
+		}
+	}
+}

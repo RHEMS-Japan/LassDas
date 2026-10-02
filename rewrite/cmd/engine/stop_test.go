@@ -458,3 +458,31 @@ func TestStopMissingRequesterIdentityHoldsWorkUnlessAnOperatorIsConfigured(t *te
 		t.Fatal("explicitly configured operator could not stop work")
 	}
 }
+
+// The queue looks for a stop itself before it holds a request for the budget
+// and before it tells an interrupted one that it carries on. It reads the
+// list as the watcher does: a list holding a comment placed elsewhere gives
+// no stop, even with the requester's stop after it.
+func TestTheQueuesOwnLookForAStopReadsTheListAsTheWatcherDoes(t *testing.T) {
+	cfg := watchConfiguration(t)
+	var rows []json.RawMessage
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		return selectionReply(r, 200, rows), nil
+	})
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+	issue.Creator.ID = 55
+	for _, test := range []struct {
+		name string
+		rows []json.RawMessage
+		stop bool
+	}{
+		{"the requester's stop", []json.RawMessage{stopComment(51, 55, "停止")}, true},
+		{"a stop on another issue", []json.RawMessage{stopComment(52, 55, "停止")}, false},
+		{"a stop after a comment in another project", []json.RawMessage{[]byte(`{"id":700,"issueId":51,"projectId":99,"createdUser":{"id":88},"content":"words"}`), stopComment(51, 55, "停止")}, false},
+	} {
+		rows = test.rows
+		if got := stopWritten(context.Background(), cfg, issue, time.Second); got != test.stop {
+			t.Errorf("%s: a stop was read as %t", test.name, got)
+		}
+	}
+}
