@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -129,9 +130,18 @@ def api_base():
     return os.environ.get("DELIVERY_API_BASE", "").rstrip("/") or "https://api.github.com"
 
 
+# Settings Git takes from the environment: a count of numbered keys and values,
+# and the -c settings a Git passes to the Gits it starts. In one stage's
+# environment only, they would make the review and the delivery disagree on
+# whether anything changed. adversarial_review.py drops the same; a test keeps
+# the two lists the same.
+GIT_SETTINGS = re.compile(r"GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)")
+
+
 def git_environment(*, with_credential=True):
-    """Git's own configuration only: no personal, repository or system file."""
-    environment = dict(os.environ)
+    """Git's own configuration only: no personal, repository or system file.
+    Settings handed to Git through the environment are dropped as well."""
+    environment = {name: value for name, value in os.environ.items() if not GIT_SETTINGS.fullmatch(name)}
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ASKPASS", "SSH_ASKPASS"):
         environment.pop(name, None)

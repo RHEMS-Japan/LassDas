@@ -60,6 +60,7 @@ and is scrubbed from anything this command prints or writes.
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import ssl
 import subprocess
@@ -154,23 +155,35 @@ def cut(text, limit, what):
     return text[:limit] + "\n[%s cut here: %d of %d characters shown]\n" % (what, limit, len(text))
 
 
+# Settings Git takes from the environment: a count of numbered keys and values,
+# and the -c settings a Git passes to the Gits it starts. The delivery drops
+# the same (delivery_support.GIT_SETTINGS); a test keeps the two lists the same.
+GIT_SETTINGS = re.compile(r"GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)")
+
+
+def git_environment():
+    """The environment the review runs Git in; see git()."""
+    environment = {name: value for name, value in os.environ.items() if name not in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        and not GIT_SETTINGS.fullmatch(name)}
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return environment
+
+
 def git(workspace, *arguments, names=False):
     """Git's output, read as the delivery reads the checkout: without the
-    user's or the system's Git settings, and without the variables that point
-    Git at another repository, index or work tree. With one of them (an
-    exclude file, an index of its own, a clean checkout elsewhere) the two
-    could disagree on whether anything changed. The delivery's list is in
-    delivery_support.git_environment, which the review's bundle does not
-    carry, so the same list is kept here. Names come as they are, not as
-    octal escapes, so a diff header in Japanese is read as it was written; a
-    name that is not UTF-8 is kept usable as a path when names is set, and
-    otherwise shows a replacement character."""
-    environment = {name: value for name, value in os.environ.items() if name not in (
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
-    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    user's or the system's Git settings, without settings handed to it through
+    the environment, and without the variables that point Git at another
+    repository, index or work tree. With one of them (an exclude file, an index
+    of its own, a clean checkout elsewhere) the two could disagree on whether
+    anything changed. The delivery's lists are in delivery_support, which the
+    review's bundle does not carry, so the same lists are kept here. Names come
+    as they are, not as octal escapes, so a diff header in Japanese is read as
+    it was written; a name that is not UTF-8 is kept usable as a path when
+    names is set, and otherwise shows a replacement character."""
     try:
         finished = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(workspace), *arguments],
-                                  capture_output=True, timeout=60, env=environment)
+                                  capture_output=True, timeout=60, env=git_environment())
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error))
     if finished.returncode != 0:

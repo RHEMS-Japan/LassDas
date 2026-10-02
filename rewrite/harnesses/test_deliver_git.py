@@ -23,7 +23,9 @@ IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid
 
 def git_environment():
     """No personal configuration, and no guessed identity either: a runtime
-    with neither is exactly where these programs have to work."""
+    with neither is exactly where these programs have to work. The delivery
+    drops settings handed to Git through the environment, so the workspace's
+    own configuration forbids the guess for its Git (see setUp)."""
     return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
@@ -145,6 +147,7 @@ class DeliveryTests(unittest.TestCase):
         self.git(source, "clone", "--bare", str(source), str(self.remote))
         self.git(self.root, "clone", "--no-local", str(self.remote), str(self.workspace))
         self.git(self.workspace, "checkout", "--detach", "HEAD")
+        self.git(self.workspace, "config", "user.useConfigOnly", "true")
         self.state = {"repository": str(self.remote), "pulls": [], "requests": [], "authorization": set(),
                       "post_failures": 0, "merge_refusal": None, "fixture_errors": []}
         self.addCleanup(lambda: self.assertEqual(self.state["fixture_errors"], []))
@@ -658,6 +661,34 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.receipt()["head"], interrupted["head"])
         self.assertIn("// delivered", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
         self.assertEqual(self.methods().count("POST"), 1)
+
+    def delivered_although_settings_hide_it(self, settings):
+        """A new file, with settings handed to Git through the delivery's
+        environment only that would hide it, as an exclude file does."""
+        self.change("library/new.go", "package library // a new file the review saw\n")
+        done = self.deliver(DELIVERY_ALLOW_UNCHANGED="1", **settings)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+        self.assertNotIn("no file was changed", done.stdout)
+        self.assertIn("a new file the review saw",
+                      self.git(self.remote, "show", "refs/heads/master:library/new.go").stdout)
+
+    def hide_the_new_file(self):
+        hide = self.root / "hide-new-file"
+        hide.write_text("library/new.go\n")
+        return hide
+
+    # G2 of the final review of the ending with no change: the delivery took
+    # the new file the review had seen for no change at all, and ended without
+    # a delivery. It drops these settings now, as the review does.
+
+    def test_a_count_of_settings_in_the_environment_does_not_hide_a_change(self):
+        self.delivered_although_settings_hide_it({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.excludesFile",
+                                                  "GIT_CONFIG_VALUE_0": str(self.hide_the_new_file())})
+
+    def test_settings_passed_as_by_git_itself_do_not_hide_a_change(self):
+        self.delivered_although_settings_hide_it(
+            {"GIT_CONFIG_PARAMETERS": "'core.excludesFile'='%s'" % self.hide_the_new_file()})
 
     def test_check_mode_says_whether_a_request_that_changed_nothing_may_end(self):
         off = self.deliver("--dry-run")

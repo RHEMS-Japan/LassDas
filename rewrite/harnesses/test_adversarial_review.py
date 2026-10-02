@@ -488,6 +488,48 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("--- new file src/farewell.txt ---\na new file the reviewer must see", text)
         self.assertNotIn("No file was changed", text)
 
+    def test_git_takes_no_settings_from_the_environment(self):
+        # G1 of the final review: settings handed to Git through the review's
+        # environment only, an exclude file that hides the one new file, made
+        # the reviewer hear that no file was changed while the delivery
+        # delivered it. The review drops them now, as the delivery does.
+        self.leave_unchanged()
+        hide = self.home.parent / "hide-farewell"
+        hide.write_text("src/farewell.txt\n")
+        (self.workspace / "src" / "farewell.txt").write_text("a new file the reviewer must see\n")
+        for settings in ({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.excludesFile",
+                          "GIT_CONFIG_VALUE_0": str(hide)},
+                         {"GIT_CONFIG_PARAMETERS": "'core.excludesFile'='%s'" % hide}):
+            service = ModelStandIn([{"verdict": (False, "")}])
+            self.addCleanup(service.close)
+            finished = self.run_review(service, **settings)
+            self.assertEqual(finished.returncode, 0, finished.stdout)
+            text = service.requests[0]["body"]["messages"][1]["content"]
+            self.assertIn("--- new file src/farewell.txt ---\na new file the reviewer must see", text)
+            self.assertNotIn("No file was changed", text)
+
+    def test_the_review_drops_the_settings_the_delivery_drops(self):
+        # The review's bundle carries no delivery_support, so each keeps its
+        # own list of the settings Git takes from the environment. Lists that
+        # drift apart would let one stage's environment split the two again.
+        def load(name, path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        review = load("review_under_test", SCRIPT)
+        delivery = load("delivery_support_under_test", SCRIPT.with_name("delivery_support.py"))
+        probe = {name: "probe" for name in (
+            "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_12", "GIT_CONFIG_VALUE_12",
+            "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG",
+            "GIT_CONFIG_KEY_", "GIT_CONFIG_KEY_A", "PATH")}
+        with mock.patch.dict(os.environ, probe, clear=True):
+            dropped_by_review = sorted(set(probe) - set(review.git_environment()))
+            dropped_by_delivery = sorted(set(probe) - set(delivery.git_environment()))
+        self.assertEqual(dropped_by_review, dropped_by_delivery)
+        self.assertEqual(dropped_by_review, ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_12",
+                                             "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_12"])
+
     def test_a_reply_in_another_shape_is_read_as_far_as_it_can_be_and_kept_as_written(self):
         # The second point of the third review: arguments given as an object,
         # a verdict wrapped one level down, arguments that are not JSON, words
