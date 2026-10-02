@@ -87,14 +87,25 @@ jobs:
           cache: false
       - name: Say which Go the scans use
         run: go version
+      # Without the list the scans have nothing to look for, and this job would
+      # pass having checked nothing. In a run of this repository (a push to it,
+      # or a pull request from one of its own branches) that is a fault, and
+      # the job fails. A fork receives no secrets: a pull request from one, or
+      # a run inside one, skips the scans and says so, as before.
       - name: State whether the purity scan can run
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+          REPOSITORY_IS_FORK: ${{ github.event.repository.fork }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
-            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
-          else
+          if [ -n "${ENGINE_PURITY_TOKENS:-}" ]; then
             echo "consumer-identifier scans are armed"
+          elif [ "$REPOSITORY_IS_FORK" = "true" ] ||
+               { [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; }; then
+            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run (a fork receives no secrets)"
+          else
+            echo "::error::ENGINE_PURITY_TOKENS is not set in a run of this repository - the consumer-identifier scans cannot run, so this job fails instead of passing with nothing checked"
+            exit 1
           fi
       - name: Scan the tracked files for consumer identifiers
         env:
