@@ -28,8 +28,9 @@ person did decides:
   (otherwise that commit is pushed), or new reviewed work goes to the same
   branch and pull request;
 - its branch pushed to or rewritten by a person: nothing is pushed over it,
-  and the delivery ends 0 saying so, naming this round's work that is not in
-  the pull request (a commit, or changes never committed), and records it;
+  and the delivery ends 0 saying so, naming a commit of this delivery that is
+  not on that branch and the changes the workspace holds uncommitted, and
+  records it;
 - merged: recorded as merged by someone else, with the commit they made, and
   work after it is a further round with a pull request of its own; a merge
   made before this round's commit reached the pull request is such an earlier
@@ -37,9 +38,10 @@ person did decides:
 - closed without a merge: the request ends, 0, with nothing of this round
   delivered and nothing reopened in its place; an earlier round that was
   merged is named.
-After either of the last two endings a later run does not read the pull
-request or its branch again: it says what was read then, and when, and after
-a changed branch it names the work still not committed.
+After a changed branch or a closed pull request, a later run reads neither
+the pull request nor its branch again: it says what was read then, and when,
+and after a changed branch it names the changes the workspace still holds
+uncommitted.
 A merge found in a round left to a person is never reported as "merged with
 method". Under a merge method alone that is said of the merge this process
 asks for and also of one it finds already made, since that cannot be told
@@ -496,20 +498,23 @@ def read_then(receipt):
 
 
 def closed_summary(receipt, again=False):
-    """again: a later run, which does not read the pull request again."""
+    """again: a later run, which does not read the pull request again and
+    says only what was read then."""
     address = receipt.get("pull_request_url") or "(the service gave no address)"
+    earlier = earlier_merges(receipt)
+    nothing = "nothing %sdelivered" % ("of this round " if earlier else "")
     if again:
         lines = ["When a delivery read it%s, pull request %d against %s for %s had been closed by a person without "
                  "being merged: %s. This delivery did not read it again."
                  % (read_then(receipt), receipt["pull_request"], receipt["base_branch"], receipt["issue"], address)]
+        ending = ("This request ended then with %s. This process opens no other pull request in its place; "
+                  "continuing needs a new request." % nothing)
     else:
         lines = ["Pull request %d against %s for %s was closed by a person without being merged: %s."
                  % (receipt["pull_request"], receipt["base_branch"], receipt["issue"], address)]
-    earlier = earlier_merges(receipt)
-    return "\n".join(lines + earlier + [
-        "This request ends with nothing %sdelivered. The pull request is not reopened and no other is opened in its "
-        "place; continuing needs a new request." % ("of this round " if earlier else ""),
-        "The receipt at %s records this." % support.RECEIPT])
+        ending = ("This request ends with %s. The pull request is not reopened and no other is opened in its place; "
+                  "continuing needs a new request." % nothing)
+    return "\n".join(lines + earlier + [ending, "The receipt at %s records this." % support.RECEIPT])
 
 
 def changed_summary(receipt, again=False):
@@ -532,8 +537,9 @@ def changed_summary(receipt, again=False):
         lines.append("This delivery's commit %s %s not on that branch, so it %s not in the pull request; nothing "
                      "was pushed over the person's commits." % (receipt["not_pushed"], verb, verb))
     if receipt.get("not_committed"):
-        lines.append("This round's changes to %s were not committed, so this process did not put them in the pull "
-                     "request; they are left in the workspace." % ", ".join(receipt["not_committed"]))
+        lines.append("The workspace still holds changes that are not committed (%s). This process did not put them "
+                     "in the pull request."
+                     % support.some_paths(receipt["not_committed"], receipt.get("not_committed_count")))
     lines.append("Merging is left to a person; nothing was merged by this process.")
     return "\n".join(lines)
 
@@ -666,14 +672,21 @@ def end_closed(path, receipt, previous):
     return 0
 
 
+def uncommitted(workspace):
+    """The changes the workspace holds uncommitted, whoever made them, as the
+    receipt keeps them: at most twenty paths and how many there are."""
+    paths = sorted(changed_paths(workspace))
+    return {"not_committed": paths[:20], "not_committed_count": len(paths)}
+
+
 def end_changed(workspace, path, receipt, previous, tip):
     """A person pushed to the pull request's branch, or rewrote it: nothing
-    more is pushed there, and this round's work that is not in the pull
-    request is named, whether committed or not."""
+    more is pushed there, and what is not in the pull request is named: a
+    commit of this delivery, and changes the workspace holds uncommitted."""
     recorded = receipt.get("head")
     unpushed = recorded if recorded and not is_ancestor(workspace, recorded, tip) else None
-    receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed,
-                   not_committed=sorted(changed_paths(workspace)), ended_at=support.timestamp())
+    receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed, ended_at=support.timestamp(),
+                   **uncommitted(workspace))
     receipt["previous"] = previous
     support.write_receipt(path, receipt)
     print(changed_summary(receipt))
@@ -694,10 +707,10 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
     if receipt.get("closed_unmerged") or receipt.get("changed_by_person"):
         # A person closed the pull request or changed its branch. Nothing more
         # is done with it, and it is not read again: a later delivery says
-        # what was read then, and names the work still not committed.
+        # what was read then, and names the changes still not committed.
         receipt["previous"] = previous
         if receipt.get("changed_by_person"):
-            receipt["not_committed"] = sorted(changed_paths(workspace))
+            receipt.update(uncommitted(workspace))
             support.write_receipt(path, receipt)
         print(closed_summary(receipt, again=True) if receipt.get("closed_unmerged")
               else changed_summary(receipt, again=True))

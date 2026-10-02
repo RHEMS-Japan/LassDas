@@ -227,25 +227,31 @@ class VerificationTests(unittest.TestCase):
         # A pull request closed without a merge, or one whose branch a person
         # changed: nothing of this delivery is left to verify, and failing would
         # only send the work round again. The check says so and ends 0.
-        for fields, said in (({"closed_unmerged": True},
-                              "Nothing to check: pull request 1 (http://service.invalid/pulls/1) was closed by a "
-                              "person without being merged, so nothing of this request was delivered."),
+        generated = ["build/out-%02d.txt" % number for number in range(20)]
+        for fields, said in (({"closed_unmerged": True, "ended_at": "2026-01-02T00:00:00Z"},
+                              "Nothing to check: when the delivery last looked, at 2026-01-02T00:00:00Z, pull request "
+                              "1 (http://service.invalid/pulls/1) had been closed by a person without being merged, "
+                              "so nothing of this request had been delivered."),
                              ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": self.delivered},
                               "Not checked: a person changed branch ticket/TICKET-41 of pull request 1 "
                               "(http://service.invalid/pulls/1); it was at %s when the delivery last looked. The "
                               "delivery's commit %s is not on that branch" % (self.unmerged, self.delivered)),
                              ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": None,
-                               "not_committed": ["go.mod", "main.go"]},
-                              "The delivery's last commit %s is on that branch. This round's changes to go.mod, "
-                              "main.go were never committed, so the delivery did not put them in the pull request."
-                              % self.delivered),
+                               "not_committed": ["go.mod", "main.go"], "not_committed_count": 2},
+                              "The delivery's last commit %s is on that branch. The workspace then held changes that "
+                              "were not committed (go.mod, main.go), which the delivery did not put in the pull "
+                              "request." % self.delivered),
+                             ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": None,
+                               "not_committed": generated, "not_committed_count": 25},
+                              "The workspace then held changes that were not committed (25 paths, the first 20 of "
+                              "them %s)" % ", ".join(generated)),
                              ({"closed_unmerged": True, "pull_request": 2,
                                "pull_request_url": "http://service.invalid/pulls/2",
                                "previous": [{"pull_request": 1, "merge_sha": self.merge}]},
-                              "Not checked: pull request 2 (http://service.invalid/pulls/2) was closed by a person "
-                              "without being merged, so nothing of this round was delivered. An earlier round of "
-                              "this request was merged as commit %s through pull request 1; this check does not "
-                              "look at it." % self.merge)):
+                              "Not checked: when the delivery last looked, pull request 2 "
+                              "(http://service.invalid/pulls/2) had been closed by a person without being merged, so "
+                              "nothing of this round had been delivered. An earlier round of this request was merged "
+                              "as commit %s through pull request 1; this check does not look at it." % self.merge)):
             self.left_to_person_receipt(**fields)
             result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home,
                                  DELIVERY_REMOTE_URL=str(self.root / "unreachable.git"))

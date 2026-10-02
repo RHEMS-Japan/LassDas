@@ -551,14 +551,16 @@ after it:
 - open, with new reviewed work: the work is pushed to the same branch, so the
   same pull request carries it.
 - open, with a branch a person pushed to or rewrote: the branch is theirs.
-  Nothing is pushed over it; the delivery ends 0 saying so and names this
-  round's work that is not in the pull request, whether the person's push came
-  before or after this round's commit: a commit of this delivery that is not
-  on the branch, and the paths of changes that were never committed, which
-  stay in the workspace. It records `changed_by_person` with the branch's head,
-  `not_pushed` and `not_committed`. A later delivery does not read the pull
-  request or its branch again: it says what was read and when, and names the
-  changes still not committed.
+  Nothing is pushed over it; the delivery ends 0 saying so and names what is
+  not in the pull request, whether the person's push came before or after this
+  round's commit: a commit of this delivery that is not on the branch, and the
+  changes the workspace still holds uncommitted, whoever made them (the work,
+  a pending catch-up, the report). It names at most twenty of those paths and
+  says how many there are. It records `changed_by_person` with the branch's
+  head, `not_pushed`, and `not_committed` with `not_committed_count`. A later
+  delivery does not read the pull request or its branch again: it says what
+  was read and when, and names the changes the workspace holds uncommitted
+  then.
 - merged by a person: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
@@ -571,7 +573,15 @@ after it:
 - merged by a person before this round's commit reached the pull request (they
   merged between the delivery's read and its push): that merge is recorded as
   an earlier round, and the pushed commit gets a new pull request. The merged
-  pull request's own head is what tells the two apart.
+  pull request's own head is what tells the two apart. If a round stopped
+  after its commit and before its push, the earlier round's record carries the
+  stopped round's commit time as `committed_at`.
+- not handled: a person pushes to the pull request's branch and merges it
+  before any delivery has seen their push, and the next delivery has no new
+  work. That delivery takes their merge for an earlier round and pushes its
+  own older commit again; while their branch exists the push is refused, and
+  the delivery ends 1 saying that nothing was merged, which is not so, so the
+  work goes round again.
 - merged by a person, but the service does not report the merge commit yet: the
   delivery ends 1 saying so, and the next one reads it again.
 - closed without a merge: the request ends. The delivery ends 0 with `Pull
@@ -581,9 +591,9 @@ after it:
   request. When an earlier round of the request was merged, it names that
   round's merge commit and pull request and says that nothing of this round
   was delivered. A later delivery does not read the pull request again: it
-  says what was read and when. A delivery interrupted after opening a pull
-  request but before recording it does not know that one, and opens another
-  if a person closed it meanwhile.
+  says what was read and when, and that the request ended then. A delivery
+  interrupted after opening a pull request but before recording it does not
+  know that one, and opens another if a person closed it meanwhile.
 
 Switching to a merge method takes a round from the person it was left to only
 once the delivery's own merge request succeeds, and only that merge is
@@ -642,7 +652,9 @@ after the run ended does not change it; only a delivery while the run still
 goes on records a person's merge. A request whose pull request a person closed
 is shown as done with the pull request closed unmerged; where an earlier round
 of it was merged, its status says so instead of saying that nothing was
-delivered.
+delivered. That too is the receipt's reading: a pull request a person reopens
+and merges after the run ended is still shown closed unmerged, and the check
+after delivery says what the delivery last read and when.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
