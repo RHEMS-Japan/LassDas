@@ -398,6 +398,11 @@ The next assignment is the first stage that is not yet satisfied.
   error. What the model wrote is never read, decoded or compared, so writing
   "done", "verified" or "delivered" advances nothing. The command stage that
   follows is what proves the work.
+- The run is `done` when the last stage is satisfied. The last stage must be a
+  command, so an observed exit status and not a model's words finishes it.
+- `on_failure` must name a model stage, and a model stage takes none: a process
+  error or an interrupted launch simply runs that stage again, with the
+  runtime's usual note about the interruption in the record.
 
 The shipped delivery process (`harnesses/deliver_git.py`) brings the ticket
 branch up to date with the integration branch before publishing it, because
@@ -406,14 +411,12 @@ being worked on. A clean merge becomes a merge commit on the ticket branch. A
 conflicting one is left in the working tree between Git's markers and the
 delivery is refused naming the paths, so the role behind the stage's
 `on_failure` resolves them in place; the commit of the next delivery completes
-the merge, and a change that still carries markers is refused. For this the
-delivery process's sandbox grant must cover the working tree as well as
-`.git`.
-- The run is `done` when the last stage is satisfied. The last stage must be a
-  command, so an observed exit status and not a model's words finishes it.
-- `on_failure` must name a model stage, and a model stage takes none: a process
-  error or an interrupted launch simply runs that stage again, with the
-  runtime's usual note about the interruption in the record.
+the merge, and a change that still carries markers is refused. Paths the
+integration branch changed and the worker left as that branch has them need
+no grant; what the branch already carried is not scanned for forbidden text.
+This happens under the merge method only, since a service that squashes or
+rebases rewrites the delivered history. For this the delivery process's
+sandbox grant must cover the working tree as well as `.git`.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator

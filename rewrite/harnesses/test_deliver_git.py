@@ -390,14 +390,65 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
 
     def test_the_integration_branch_s_own_paths_need_no_grant(self):
-        # notes.md is outside the grant; the integration branch changing it is
-        # not the worker's change and must not stop the delivery.
+        # notes.md and a non-ASCII name are outside the grant; the integration
+        # branch changing them is not the worker's change and must not stop
+        # the delivery that completes a conflicted merge.
         self.advance_integration_branch("notes.md", "revised elsewhere\n")
-        self.change("main.go", "package main\n\nfunc main() {}\n")
+        self.advance_integration_branch("メモ.md", "別の依頼の文書\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
         done = self.deliver()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("revised elsewhere", self.git(self.remote, "show", "refs/heads/master:notes.md").stdout)
+        self.assertIn("別の依頼", self.git(self.remote, "show", "refs/heads/master:メモ.md").stdout)
 
+    def test_a_path_the_worker_wrote_needs_the_grant_even_when_the_integration_branch_changed_it(self):
+        self.advance_integration_branch("notes.md", "revised elsewhere\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        self.change("notes.md", "smuggled outside the grant\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the operator's allowed paths were not delivered: notes.md", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_text_the_integration_branch_already_carries_is_not_this_change(self):
+        self.advance_integration_branch("library/run.go", "package library\n\n// internal-project-codename\n")
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # The worker writing it is still refused.
+        self.change("main.go", "package main\n\n// internal-project-codename again\n")
+        refused = self.deliver(**forbidden)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+
+    def test_a_failed_catch_up_leaves_the_commit_on_record_for_the_rerun(self):
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        refused = self.deliver(DELIVERY_REMOTE_URL=str(self.root / "no-such-target.git"),
+                               DELIVERY_GIT_TIMEOUT_SECONDS="5")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Nothing was delivered", refused.stdout)
+        receipt = json.loads((self.workspace / ".git" / "ticket-engine" / "delivery.json").read_text())
+        self.assertEqual(receipt.get("head"), self.git(self.workspace, "rev-parse", "HEAD").stdout.strip())
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("func main", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+
+    def test_a_squashing_service_gets_no_catch_up(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver(DELIVERY_MERGE_METHOD="squash")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 1, "the branch was caught up under the squash method")
 
 if __name__ == "__main__":
     unittest.main()
