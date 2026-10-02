@@ -169,8 +169,9 @@ of selecting").
 
 ### On your workstation
 
-`kubectl` for the cluster, `python3`, and `sed`. Go 1.25 or later to try each
-new image before it goes in (section 10).
+`kubectl` for the cluster, `python3`, and `sed`. Go 1.25 or later to check
+your configuration before it goes in (section 4) and to try each new image
+(section 10); without Go, the configuration check runs inside the Pod.
 
 ## 2. Preparing the tracker
 
@@ -215,6 +216,21 @@ running" and "Waiting for the requester".
 `intake.category_on_accept` adds one category to every accepted issue, so the
 board can filter them. Create the category in the project first.
 
+### A category that hands an issue over (in a shared project)
+
+In a project people also use for their own tickets, `intake.category_ids`
+makes the engine take only the new issues that carry one of the listed
+categories: the requester sets it when filing, or later, and the issue is
+taken on the next poll after it carries the category. Create a category for
+this purpose only. The engine compares the category's number and nothing
+else, so a category already in use hands over every issue that carries it and
+was created at or after the start time, all at once. It does not look at who
+set the category either: anyone who may edit an issue's categories can hand
+it over, while the requester stays the account that filed the issue. This is
+a different setting from `intake.category_on_accept`, which marks what was
+accepted and narrows nothing (rewrite/README.md, "Automatic intake
+experiment").
+
 ### Looking up the ids
 
 The configuration takes numeric ids. This reads them through Backlog's API v2
@@ -257,7 +273,8 @@ script was syntax-checked but not run against Backlog for this guide.
 | --- | --- |
 | the project | `intake.project_id` |
 | the statuses you chose | `intake.statuses` (`processing`, `awaiting_requester`, `delivered`, `stopped`) |
-| the category | `intake.category_on_accept` |
+| the category that marks what was accepted | `intake.category_on_accept` |
+| the category that hands an issue over, in a shared project | `intake.category_ids` ([section 8](#open-the-intake)) |
 | members who may stop or answer any request besides its requester | `intake.stop_user_ids` |
 | one issue, for the first ticket only | `intake.issue_ids` ([section 8](#8-opening-the-intake-and-filing-the-first-ticket)) |
 
@@ -339,17 +356,18 @@ you must change is one distinct string in it.
 ### Make your copy with one command
 
 Run this from the repository's root, with your values in place of the
-`<...>` parts (none of them may contain `#` or `&`), and keep the result
-outside any repository:
+`<...>` parts (none of them may contain `#` or `&`). `CONFIG` is where your
+copy lives: an absolute path outside any repository, used again below.
 
 ```sh
+CONFIG=<absolute path outside the repository>/operator.json
 sed -e 's#https://tracker.example.invalid/api/v2#https://<space>.backlog.com/api/v2#' \
     -e 's#"project_id": 0,#"project_id": <project-id>,#' \
     -e 's#REPLACE_WITH_RFC3339_ACCEPTANCE_START#2100-01-01T00:00:00Z#' \
     -e 's#https://repository.example.invalid/example-owner/example-repository.git#/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git#g' \
     -e 's#example-owner/example-repository#<owner>/<repository-name>#g' \
     -e 's#example-integration-branch#<integration-branch>#g' \
-    rewrite/examples/operator-stages.json > operator.json
+    rewrite/examples/operator-stages.json > "$CONFIG"
 ```
 
 The order of the lines matters: the fourth replaces the whole placeholder URL
@@ -363,7 +381,7 @@ before the fifth replaces what is left of `example-owner/example-repository`.
 | `<owner>/<repository-name>` | the mirror's path in every `TASK_REPOSITORY` (`/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git`, the same as `MIRROR_PATH` in the StatefulSet), in place of the example's placeholder URL under `example.invalid`; and the delivery repository (`DELIVERY_REPOSITORY`) |
 | `<integration-branch>` | the branch every checkout starts from (`TASK_BRANCH`) and the delivery merges into (`DELIVERY_BASE_BRANCH`) |
 
-Then open `operator.json` and replace the first sentence of `instructions`
+Then open your copy and replace the first sentence of `instructions`
 ("Operator setup is incomplete: ...") with your project's guidance: where the
 project's own knowledge is written (a path in the repository such as
 `CONTRIBUTING.md`), what the delivery target is, and anything the work must or
@@ -372,23 +390,43 @@ progress is decided.
 
 ### Check that no example value is left
 
-The engine checks only the configuration's structure when it starts (stage
-kinds, role names, the form of each setting). Values it cannot judge, such as
-the example's repository and branch, an unedited instruction or a model id
-that does not exist, are accepted. A request then fails where such a value is
-used (a checkout from a mirror that is not there, a push to a repository that
-does not exist) and goes round without end, with a model chosen, a paid call,
-on every launch; an unedited instruction misleads every role without failing
-anything. Before you go on:
+The engine reads the configuration strictly and, before it does anything,
+refuses what it can tell is wrong, saying where: a key it does not know, in
+the wrong letter case or written twice; a stage whose kind does not match its
+role; a missing project or start time; the example's paragraph still in
+`instructions`; a URL whose host is still under `example.invalid`. `--check`
+runs those same checks without starting anything, contacting anything or
+creating any file. Run it from the repository's root, on a checkout of the
+commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
+with Go 1.25 or later; without Go, the same check runs inside the Pod at the
+start of section 7:
 
 ```sh
-python3 -m json.tool operator.json > /dev/null && echo "valid JSON"
-grep -n -E 'example\.invalid|example-owner|example-repository|example-integration-branch|REPLACE_WITH|Operator setup is incomplete|"project_id": 0,|<[a-z-]+>' operator.json \
+go -C rewrite run ./cmd/engine --config "$CONFIG" --check
+```
+
+It must end with `the configuration is accepted; nothing was started`, after
+the line that says which issues the engine would take up. With the intake
+still closed that line reads
+`intake: project <project-id>, issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`.
+A refusal names the place instead, for example
+`roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder host under example.invalid; a watch needs your own value there`.
+
+Two kinds of values the engine cannot tell from yours: the delivery
+repository and its branch, which are not URLs, and an unreplaced `<...>`.
+Find them with:
+
+```sh
+python3 -m json.tool "$CONFIG" > /dev/null && echo "valid JSON"
+grep -n -E 'example-owner|example-repository|example-integration-branch|<[a-z-]+>' "$CONFIG" \
   && echo "the lines above still carry example values" || echo "no example value left"
 ```
 
-The first line must print `valid JSON` and the second `no example value
-left`.
+It must print `valid JSON` and `no example value left`. Neither check finds a value that is
+well formed but wrong: a model id that does not exist, an operator command
+that is missing or fails, a repository you cannot push to. The request that
+meets one fails at that stage and goes round without end, with a model
+chosen, a paid call, on every launch (section 11).
 
 ### Settings you may leave
 
@@ -451,6 +489,11 @@ your own ids from section 2.)
 - `assign`: hands the issue to the requester while a question or the
   delivered result waits for them, back to the engine's account while it
   works, and records the hours from acceptance to the report.
+- `category_ids`: the engine takes only issues carrying one of these
+  categories, for a project people also use for their own tickets (section 2).
+  The requester then sets that category on the issue. It is set when the
+  intake opens (section 8), and the intake line names it:
+  `...; only issues carrying one of the categories [<id>]`.
 - `stall_notice_minutes` (default 90; 0 turns it off): rewrite/README.md,
   "What the requester is told at night".
 - `min_model_credit` (default off) reads the remaining limit of the key named
@@ -564,12 +607,13 @@ POD=<consumer>-ticket-engine-0
    kubectl -n "$NS" apply -f egress-configmap.yaml
    ```
 
-4. **The operator configuration**, from your `operator.json`, with the intake
-   still closed (`created_since` in 2100):
+4. **The operator configuration**, from your copy (`$CONFIG`, section 4), with
+   the intake still closed (`created_since` in 2100). The key must stay
+   `operator.json`, the name the engine reads:
 
    ```sh
    kubectl -n "$NS" create configmap <consumer>-ticket-engine-operator \
-     --from-file=operator.json=operator.json --dry-run=client -o yaml \
+     --from-file=operator.json="$CONFIG" --dry-run=client -o yaml \
      | kubectl -n "$NS" apply -f -
    ```
 
@@ -631,6 +675,23 @@ Each check has an answer you can see. One that cannot be answered is a
 blocker, not something to note and pass. The intake is still closed, so
 nothing here can start a request.
 
+### The configuration, as the engine reads it
+
+First run the check of section 4 inside the Pod, on the configuration the
+engine itself reads:
+
+```sh
+kubectl -n "$NS" exec "$POD" -c engine -- \
+  /opt/ticket-automation/bundle/bin/ticket-engine --config /etc/ticket-automation/operator.json --check
+```
+
+It must print `intake: project <project-id>, issues created at or after 2100-01-01T00:00:00Z; every such issue is accepted`
+and `the configuration is accepted; nothing was started`. Read the intake line
+as a statement of what the engine will take up: the project, the moment, and
+any narrowing by issue id or category. If the engine container keeps
+restarting instead, it refused the configuration when it started
+([section 11](#the-engine-container-restarts-right-after-it-starts)).
+
 ### The Pod and its setup containers
 
 ```sh
@@ -670,8 +731,9 @@ at the top of the page.
 kubectl -n "$NS" logs "$POD" -c engine
 ```
 
-A healthy engine with nothing to do prints nothing. These lines mean
-something is wrong:
+A healthy engine prints the intake line once when it starts, the same line as
+the check above, and nothing more while it has nothing to do. These lines
+mean something is wrong:
 
 | Line | Meaning |
 | --- | --- |
@@ -869,21 +931,34 @@ nothing. It stays closed until every check in section 7 has passed because
 closing it again later does not stop what was already taken: an accepted
 request stays in the queue and runs.
 
-Set `intake.created_since` to a moment just before you file the first ticket,
-in UTC (for example `2026-10-05T09:00:00Z`; the moment itself counts). In a
-project that already has other new issues, file the ticket first, look up its
-id (the `ticket-tracker ... issues` command in section 7 prints it), and also
-set `intake.issue_ids` to `[<that id>]`. Change both in the same edit, apply
-the ConfigMap (section 6, step 4) and restart the Pod:
+In your copy (`$CONFIG`), in the same edit:
+
+1. Set `intake.created_since` to the moment you open the intake, in UTC (for
+   example `2026-10-05T09:00:00Z`; the moment itself counts). Issues created
+   before it are never taken.
+2. Narrow what is taken, if the project is not the engine's alone: in a
+   project people also use for their own tickets, set `intake.category_ids` to
+   the category of section 2. For a single first ticket you can instead file
+   it first, look up its id (the `ticket-tracker ... issues` command in
+   section 7 prints it), and set `intake.issue_ids` to `[<that id>]`. An
+   `issue_ids` that lists nothing real accepts nothing, and an empty one
+   accepts every new issue in the project; remove it once you are ready for
+   all of them.
+3. Run `--check` on the copy (section 4) and read the intake line. It must say
+   what you meant, for example
+   `intake: project <project-id>, issues created at or after 2026-10-05T09:00:00Z; only issues carrying one of the categories [<id>]`.
+
+Then apply the ConfigMap (section 6, step 4) and restart the Pod; the
+engine's log opens with the same intake line:
 
 ```sh
 kubectl -n "$NS" delete pod "$POD"
+kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=10m
+kubectl -n "$NS" logs "$POD" -c engine | head -n 1
 ```
 
-An `issue_ids` that lists nothing real accepts nothing; an empty one accepts
-every new issue in the project. Remove `issue_ids` once you are ready for all
-of them. If anything else already takes issues from this project, make sure it
-cannot take the same ticket.
+If anything else already takes issues from this project, make sure it cannot
+take the same ticket.
 
 ### What the requester sees, comment by comment
 
@@ -951,10 +1026,17 @@ whose first non-blank line is exactly `停止`. A reason can follow on later
 lines. Within one poll interval:
 
 - the running process is stopped, and nothing more of the request runs;
-- the status becomes `stopped` and the issue is handed to the requester (with
-  those settings);
 - the `stop_report` role posts an account of what had happened and what is
-  uncertain.
+  uncertain;
+- once that report is done, the status becomes `stopped` and the issue is
+  handed to the requester (with those settings).
+
+A stop written while a question waits for its answer is a stop, not the
+answer: no `返答を受け取りました。…` is posted, and the status goes from
+`awaiting_requester` straight to `stopped`. A stop does not wait for a model
+budget pause either: recording it launches no model, and the stop report runs
+at once, below the floor too (rewrite/README.md, "Requester stop in watch
+mode" and "What the requester is told at night").
 
 A stop does not undo anything already done outside the cluster: a pushed
 branch, an open pull request or a merge stays. It is permanent: deleting the
@@ -1030,8 +1112,17 @@ what it tried to do.
    (cd <checkout of this repository>/rewrite && sh package.sh /absolute/path/to/new-bundle)
    ```
 
-3. Run it over the copy with an empty environment, so it holds no credential,
-   for two or three poll intervals, then stop it with Ctrl-C:
+3. Check your configuration with the new engine first: it reads the
+   configuration strictly, so a key that a newer version no longer knows
+   stops it at start.
+
+   ```sh
+   /absolute/path/to/new-bundle/bin/ticket-engine --config operator-current.json --check
+   ```
+
+   It must end with `the configuration is accepted; nothing was started`.
+   Then run it over the copy with an empty environment, so it holds no
+   credential, for two or three poll intervals, and stop it with Ctrl-C:
 
    ```sh
    env -i PATH=/usr/bin:/bin /absolute/path/to/new-bundle/bin/ticket-engine \
@@ -1042,7 +1133,7 @@ what it tried to do.
    machine, and the engine logs each write it could not make. Lines with
    `not set`, `not announced`, `not declared`, `not recorded`, `not handed`
    or `not confirmed` name a request and a change the new image would make
-   on the issue. `issue discovery unavailable`,
+   on the issue. The `intake: ...` line opens every start. `issue discovery unavailable`,
    `stop instructions could not be read`,
    `work paused while stop instructions are unavailable` and
    `the runtime's own tracker account is unknown` are only the missing
@@ -1061,8 +1152,9 @@ It has not been run as written against a real queue.
 2. Put the new `image` reference into all four places in your
    `statefulset.yaml` (`policy`, `mirror`, `engine`, `status`) and apply it.
    The Pod is replaced.
-3. Check as in section 7: the Pod ready with no restarts, the status page,
-   the engine's log, and the issues of any request that was running.
+3. Check as in section 7: the configuration check inside the Pod, the Pod
+   ready with no restarts, the status page, the engine's log (it opens with
+   the intake line), and the issues of any request that was running.
 
 ## 11. Troubleshooting
 
@@ -1098,11 +1190,22 @@ kubectl -n "$NS" logs "$POD" -c <container> --previous
 
 ### The engine container restarts right after it starts
 
-The engine checks its configuration's structure before it does anything and
-exits with one line naming what it refused; the container then restarts, and
+The engine checks its configuration before it does anything and exits with
+one line naming what it refused and where; the container then restarts, and
 goes on restarting. Read the line with
-`kubectl -n "$NS" logs "$POD" -c engine --previous`. Three of them:
+`kubectl -n "$NS" logs "$POD" -c engine --previous`; with `--log-file` it is
+also in that file, which the status page shows at `/log`. `--check` on the
+same file prints the same line without starting anything (section 4). Some
+of them:
 
+- `reading the configuration: unknown key "category_id" in intake`: a key the
+  engine does not know, here a misspelling of `category_ids`, which would
+  otherwise have narrowed nothing. A key in the wrong letter case is refused
+  the same way (`unknown key "Project_ID" in intake`).
+- `reading the configuration: the key "category_ids" is written twice in intake; the later one would win without a word`.
+- `instructions still holds the example's paragraph ("Operator setup is incomplete"); a watch needs the project's own guidance there`,
+  and `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder host under example.invalid; a watch needs your own value there`:
+  a value left from the example (section 4).
 - `model stage "work" launches no model`: a model stage's process lost its
   `model_env`. Met, when one stage was meant to run on one fixed model and
   `model_env` was replaced by a model id in `env`. A model stage must keep a
@@ -1113,9 +1216,9 @@ goes on restarting. Read the line with
 - `intake.min_model_credit needs router.decision.key_env to name the model credential`:
   see [section 4](#settings-the-requester-will-notice).
 
-These three lines were produced by the engine from the same commit, given
-each mistake on purpose. A value the engine cannot judge does not stop it
-([section 4](#check-that-no-example-value-is-left)).
+Each of these lines was produced by the engine from the same commit, given
+the mistake on purpose. A value that is well formed but wrong does not stop
+it ([section 4](#check-that-no-example-value-is-left)).
 
 ### A request goes round without end
 

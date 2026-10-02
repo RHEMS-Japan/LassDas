@@ -47,9 +47,11 @@ runtime, without credentials or task data (`rewrite/RUNTIME.md`):
 - Egress rules written by init containers into this Pod's own network
   namespace held: the link-local metadata address was refused before and
   after a full workflow and a restart, while DNS and public destinations
-  stayed reachable. `NET_ADMIN` never left those setup containers. A
-  `NetworkPolicy` object was **not** enough on this cluster: its network
-  plugin has policy enforcement disabled, and connections still went through.
+  stayed reachable. `NET_ADMIN` never left those setup containers. Whether a
+  `NetworkPolicy` object is enforced depends on the cluster's network plugin,
+  and an accepted object is no evidence that it is. These rules close the
+  Pod's egress whether or not one is, so check the refusals from the running
+  Pod (SETUP.md, section 7) rather than trusting either.
 - With the controller as the container's main process, a crash after a
   comment had been stored led to one automatic restart and a read-back
   instead of a second post.
