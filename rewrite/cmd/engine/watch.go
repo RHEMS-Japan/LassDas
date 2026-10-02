@@ -403,13 +403,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				continue
 			}
+			stopping := false
 			if state.Waiting {
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes
 				// it runnable again; anything else leaves it untouched.
 				applyStatus(ctx, cfg, issue, directory, awaitingStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
-				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
+				resume, answered, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
 					continue
@@ -417,15 +418,35 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if !resume {
 					continue
 				}
-				resumeTurn(ctx, cfg, issue, directory, say)
+				// A stop is not an answer. The request runs again only for the
+				// stop to be recorded and reported, so the requester is not told
+				// that their reply was received and the work goes on, and the
+				// issue does not pass through the working status and the
+				// runtime's hands on its way to stopped.
+				stopping = !answered
+				if answered {
+					resumeTurn(ctx, cfg, issue, directory, say)
+				}
 			}
-			applyStatus(ctx, cfg, issue, directory, processingStatus, say)
-			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			if !stopping {
+				applyStatus(ctx, cfg, issue, directory, processingStatus, say)
+				acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			}
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
 			notice := requestNotices(cfg, issue, directory)
-			if creditKnown {
+			// Recording a stop launches no model, so it does not wait for the
+			// budget and is not told about it: the requester asked for the
+			// work to end, not to hear that it is paused and will carry on. A
+			// request held here has no watcher reading its comments, so the
+			// stop is looked for on its behalf. A configured stop report then
+			// runs at once and uses the key, as it does after the stop of a
+			// running request.
+			if creditKnown && creditLow && !stopping {
+				stopping = stopWritten(ctx, cfg, issue, interval)
+			}
+			if creditKnown && !stopping {
 				if err := applyBudgetNotice(ctx, notice, creditLow); err != nil {
 					observe("request " + entry.Name() + ": budget notice not confirmed: " + err.Error())
 				}
@@ -458,10 +479,17 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 			// An interrupted action or an unfinished recovery means the work is
 			// picked up again, not started afresh. Say so before it runs, so
-			// the requester is not left reading a silent gap in the night.
+			// the requester is not left reading a silent gap in the night. A
+			// request with a stop standing at its issue is launched only for
+			// the stop to be recorded, so it is not told that the same request
+			// carries on; the comments are read once here for that, when the
+			// queue has not found the stop already.
 			if state.Pending != nil || state.Recovering {
-				if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
-					observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+				stopping = stopping || stopWritten(ctx, cfg, issue, interval)
+				if !stopping {
+					if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
+						observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+					}
 				}
 			}
 			// No process of this request can be running before it is launched
@@ -488,6 +516,20 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 		}
 	}
+}
+
+// stopWritten reports whether an authorized stop stands at the issue. A read
+// that fails says no: the request stays as it is and is asked again on the
+// next tick.
+func stopWritten(ctx context.Context, cfg config, issue sourceIssue, interval time.Duration) bool {
+	readCtx, release := context.WithTimeout(ctx, interval)
+	defer release()
+	rows, err := cfg.Backlog.Comments(readCtx, issue.Key, 0)
+	if err != nil {
+		return false
+	}
+	stop, err := stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
+	return err == nil && stop != nil
 }
 
 func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, collected chan<- struct{}, observe func(string)) {

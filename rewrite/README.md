@@ -429,7 +429,7 @@ other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
 past them. While a request waits, each poll reads that issue's comments inside
 the collector loop, so a slow tracker delays the loop by up to one interval for
-every waiting request. Nothing notifies the requester beyond the posted comment
+every waiting request, and for every request held for the model budget. Nothing notifies the requester beyond the posted comment
 itself, and an unanswered question waits indefinitely unless someone stops it.
 
 ### Stages instead of roles
@@ -611,8 +611,11 @@ by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. An id left out leaves that turn alone; the runtime never
-reads or names a status. Each change is made once and recorded beside the
+the requester's stop, once the stop is recorded and, where a stop report is
+configured, that report is done. A stop written while a question waits moves
+the issue from `awaiting_requester` to `stopped` without passing through
+`processing` or the runtime's own account. An id left out leaves that turn alone; the
+runtime never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.
@@ -634,7 +637,8 @@ while 1 and 3 are the tracker's built-in open and resolved statuses.
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
-second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
+second comment), and when it resumes after the requester's answer (a stop written while a question
+waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
 ` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
@@ -840,7 +844,7 @@ endpoint above and may point at a gateway instead; it must be an HTTPS URL
 without credentials or a query. The answer's `limit_remaining` is read as the
 balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
-stop stops it, nothing new is launched, and the requester is told once:
+stop stops it, no work is launched, and the requester is told once:
 
 > 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（人の操作は不要です）。
 
@@ -848,6 +852,14 @@ The balance keeps being read each tick. When it is back above the floor the
 request is launched again and says so once:
 
 > モデル利用枠が回復したため、自動処理を再開しました。
+
+An authorized stop does not wait for the balance: recording it launches no
+model. A request held below the floor is still read for a stop on every tick,
+whether its work was running, had not started, or waits on a question, and a
+request stopped while a question waits is told nothing about a pause. Where a
+stop report is configured, that report runs as soon as the stop is recorded,
+below the floor too, and uses the key, exactly as after the stop of a running
+request.
 
 The pause and the recovery alternate, so each episode gets one line of each. An
 endpoint that cannot be read is not evidence of an empty budget: it never
