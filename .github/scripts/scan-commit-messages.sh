@@ -65,13 +65,20 @@ fi
 messages=$(git log --format=%B "${range[@]}")
 count=$(git rev-list --count "${range[@]}")
 lowered=$(printf '%s' "$messages" | tr '[:upper:]' '[:lower:]')
+# What a pushed commit can still be reworded on is a branch; on the default
+# branch itself the commit is already published.
+if [ "${GITHUB_REF:-}" = "refs/heads/${DEFAULT_BRANCH:-}" ]; then
+  remedy="the commit is on $DEFAULT_BRANCH already; only rewriting $DEFAULT_BRANCH's history removes it"
+else
+  remedy="reword the commit"
+fi
 failed=0
 for index in "${!tokens[@]}"; do
   # Not `printf | grep -q`: grep stops at the first match, the printf still
   # writing a long text dies of SIGPIPE, and pipefail turns the match into a
   # miss. A here-string leaves nothing to cut short.
   if grep -qF -e "${tokens[index]}" <<< "$lowered"; then
-    echo "a commit message in the pushed range contains forbidden identifier #$((index + 1)) - reword the commit"
+    echo "a commit message in the pushed range contains forbidden identifier #$((index + 1)) - $remedy"
     failed=1
   fi
 done
