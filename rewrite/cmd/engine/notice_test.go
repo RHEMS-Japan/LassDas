@@ -844,11 +844,11 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	queueRanSince(t, root, cfg, accepted)
 	// Accepted three hours ago with nothing recorded: the one waiting its
 	// turn says nothing, the one running says it is long but not failing.
-	waiting := sourceIssue{ID: 52, ProjectID: 17, Key: "EXAMPLE-52"}
+	waiting := sourceIssue{ID: 52, Key: "EXAMPLE-52"}
 	if err := noteStall(context.Background(), cfg, requestNotices(cfg, waiting, directories[52]), directories[52], false); err != nil {
 		t.Fatal(err)
 	}
-	running := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	running := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	if err := noteStall(context.Background(), cfg, requestNotices(cfg, running, directories[51]), directories[51], true); err != nil {
 		t.Fatal(err)
 	}

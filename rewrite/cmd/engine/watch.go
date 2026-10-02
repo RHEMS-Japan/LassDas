@@ -72,14 +72,8 @@ type intakeConfig struct {
 	Client        *http.Client `json:"-"`
 }
 
-type sourceIssue struct {
-	ID        int64                `json:"id"`
-	Key       string               `json:"issueKey"`
-	ProjectID int64                `json:"projectId"`
-	Created   time.Time            `json:"created"`
-	Creator   struct{ ID int64 }   `json:"createdUser"`
-	Category  []struct{ ID int64 } `json:"category"`
-}
+// sourceIssue is an issue as the engine reads it from its tracker.
+type sourceIssue = tracker.Issue
 
 type serialLog struct {
 	mu     sync.Mutex
@@ -220,7 +214,7 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	// The queue belongs to one tracker and one project. The intake window,
 	// the issue allowlist and the categories are filters an operator changes
 	// while the queue lives on, so they are not part of its identity.
-	identity := fmt.Sprintf("Issue intake: %s\nProject: %d", cfg.Backlog.BaseURL, cfg.Intake.ProjectID)
+	identity := cfg.source().Identity()
 	// Reuse the existing exclusive, durable runtime store for ownership of this
 	// queue. Its identity is not a verdict or completion mark for any issue.
 	jobs := filepath.Join(root, "jobs")
@@ -262,10 +256,11 @@ func intakeScope(cfg config, since time.Time) string {
 // tell it which already-run engines chose done. Pending histories are resumed
 // by the same engine; the collector does not make a new completion judgment.
 func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, capacity int, log io.Writer) error {
+	source := cfg.source()
 	if cfg.Intake != nil && cfg.Intake.Assign {
 		// The runtime's own account, to hand an issue back to itself. Without
 		// it the work still runs; only the hand-overs wait for a later start.
-		if me, err := cfg.Backlog.Myself(ctx); err != nil {
+		if me, err := source.Myself(ctx); err != nil {
 			fmt.Fprintln(log, "the runtime's own tracker account is unknown; issues are not handed over either way: "+err.Error())
 			cfg.Intake.Assign = false
 		} else {
@@ -345,12 +340,12 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				observe("reading accepted issue: " + err.Error())
 				continue
 			}
-			var issue sourceIssue
-			if err := json.Unmarshal(raw, &issue); err != nil || issue.ID != id || issue.ProjectID != cfg.Intake.ProjectID || issue.Key == "" {
+			issue, err := source.ReadIssue(raw)
+			if err != nil || issue.ID != id {
 				observe("accepted issue record could not be read for its source; no replacement used")
 				continue
 			}
-			if stopped, err := savedStop(directory, issue, cfg.Intake.StopUserIDs); err != nil {
+			if stopped, err := savedStop(source, directory, issue, cfg.Intake.StopUserIDs); err != nil {
 				observe("request " + entry.Name() + " held: " + err.Error())
 				continue
 			} else if stopped {
@@ -365,7 +360,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				continue
 			}
-			request, err := tracker.RequestText(raw)
+			request, err := source.RequestText(raw)
 			if err != nil {
 				observe(err.Error())
 				continue
@@ -524,19 +519,21 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 func stopWritten(ctx context.Context, cfg config, issue sourceIssue, interval time.Duration) bool {
 	readCtx, release := context.WithTimeout(ctx, interval)
 	defer release()
-	rows, err := cfg.Backlog.Comments(readCtx, issue.Key, 0)
+	source := cfg.source()
+	rows, err := source.Comments(readCtx, issue)
 	if err != nil {
 		return false
 	}
-	stop, err := stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
+	stop, err := stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
 	return err == nil && stop != nil
 }
 
 func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, collected chan<- struct{}, observe func(string)) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	source := cfg.source()
 	for ctx.Err() == nil {
-		rows, err := cfg.Backlog.Issues(ctx, cfg.Intake.ProjectID)
+		rows, err := source.Issues(ctx)
 		changed := false
 		if err != nil {
 			observe("issue discovery unavailable: " + err.Error())
@@ -545,8 +542,8 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				if ctx.Err() != nil {
 					return
 				}
-				var issue sourceIssue
-				if err := json.Unmarshal(raw, &issue); err != nil || issue.Created.IsZero() {
+				issue, err := source.ReadIssue(raw)
+				if err != nil || issue.Created.IsZero() {
 					observe("issue discovery returned no readable creation time; it was not accepted")
 					continue
 				}
@@ -567,16 +564,8 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 				// The same goes for the categories a requester marks an issue
 				// with: an issue without one of them is left for people, and
 				// is looked at again each tick in case it gains one.
-				if len(cfg.Intake.CategoryIDs) > 0 {
-					marked := false
-					for _, category := range issue.Category {
-						for _, id := range cfg.Intake.CategoryIDs {
-							marked = marked || category.ID == id
-						}
-					}
-					if !marked {
-						continue
-					}
+				if !source.Marked(issue) {
+					continue
 				}
 				directory := filepath.Join(jobs, strconv.FormatInt(issue.ID, 10))
 				path := filepath.Join(directory, "issue.json")

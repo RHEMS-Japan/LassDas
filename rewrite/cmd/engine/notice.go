@@ -97,7 +97,7 @@ type noticeLog struct {
 // notices posts the controller's own fixed comments for one accepted request.
 // The controller holds the tracker credential; no role posts these.
 type notices struct {
-	backlog   tracker.Backlog
+	source    tracker.Tracker
 	issue     sourceIssue
 	directory string
 	// queue keeps when each kind of notice began; a request's directory is
@@ -106,7 +106,7 @@ type notices struct {
 }
 
 func requestNotices(cfg config, issue sourceIssue, directory string) notices {
-	return notices{backlog: cfg.Backlog, issue: issue, directory: directory, queue: filepath.Dir(filepath.Dir(directory))}
+	return notices{source: cfg.source(), issue: issue, directory: directory, queue: filepath.Dir(filepath.Dir(directory))}
 }
 
 func (n notices) path() string { return filepath.Join(n.directory, "notices.json") }
@@ -427,7 +427,7 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 			return n.confirm(log, i, id)
 		}
 	}
-	receipt, err := n.backlog.AddComment(ctx, n.issue.Key, record.Text)
+	stored, err := n.source.AddComment(ctx, n.issue, record.Text)
 	if err != nil {
 		id, readErr := n.postedAfter(ctx, record.Text, after)
 		if readErr != nil || id == 0 {
@@ -435,10 +435,7 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 		}
 		return n.confirm(log, i, id)
 	}
-	// The receipt was read for a positive id before it was returned.
-	var stored struct{ ID int64 }
-	json.Unmarshal(receipt, &stored)
-	return n.confirm(log, i, stored.ID)
+	return n.confirm(log, i, stored)
 }
 
 func (n notices) confirm(log *noticeLog, i int, id int64) error {
@@ -451,20 +448,19 @@ func (n notices) confirm(log *noticeLog, i int, id int64) error {
 // text, or zero when there is none. The words are the controller's own, so
 // an exact match identifies the notice without decoding anyone's prose.
 func (n notices) postedAfter(ctx context.Context, text string, after int64) (int64, error) {
-	rows, err := n.backlog.Comments(ctx, n.issue.Key, 0)
+	rows, err := n.source.Comments(ctx, n.issue)
 	if err != nil {
 		return 0, err
 	}
 	found := int64(0)
 	for _, raw := range rows {
-		var comment struct {
-			ID      int64
-			Content string
-		}
-		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 {
+		// Only the id and the words are compared, never where the record
+		// places the comment: the list is the issue's own.
+		comment, err := n.source.ReadComment(raw, n.issue)
+		if err != nil {
 			return 0, errors.New("issue comments could not be read before repeating a notice")
 		}
-		if comment.ID > after && comment.Content == text {
+		if comment.ID > after && comment.Body == text {
 			found = comment.ID
 		}
 	}
@@ -711,7 +707,7 @@ func lastInstructionLine(content string) string {
 // credentialValues collects every credential value this controller can name,
 // longest first so a shorter value inside a longer one cannot leave a remnant.
 func credentialValues(cfg config) []string {
-	names := map[string]bool{cfg.Backlog.KeyEnv: true, cfg.Router.Decision.KeyEnv: true, cfg.Router.LLM.KeyEnv: true}
+	names := map[string]bool{cfg.source().CredentialEnv(): true, cfg.Router.Decision.KeyEnv: true, cfg.Router.LLM.KeyEnv: true}
 	if cfg.ModelSelection != nil {
 		names[cfg.ModelSelection.Judge.KeyEnv] = true
 		if cfg.ModelSelection.Fallback != nil {

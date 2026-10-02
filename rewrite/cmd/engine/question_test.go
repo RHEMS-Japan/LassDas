@@ -387,7 +387,8 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 // and the runtime makes such changes itself while it waits. Words from the
 // creator or an operator are the answer; a stop line is not.
 func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
-	issue := sourceIssue{ID: 51, ProjectID: 17}
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
 	issue.Creator.ID = 55
 	rows := []json.RawMessage{
 		issueComment(700, 55, "below the boundary"),
@@ -396,14 +397,14 @@ func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
 		issueComment(703, 88, "someone else's words"),
 		issueComment(704, 55, "停止\nnot an answer"),
 	}
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
 		t.Fatalf("a comment without words, a stranger's or a stop line was read as an answer: id=%d %q err=%v", id, answer, err)
 	}
 	rows = append(rows, issueComment(705, 90, "an operator's reply"), issueComment(706, 55, requesterAnswer))
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
 		t.Fatalf("operator's reply: id=%d %q err=%v", id, answer, err)
 	}
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
 		t.Fatalf("creator's reply: id=%d %q err=%v", id, answer, err)
 	}
 }
