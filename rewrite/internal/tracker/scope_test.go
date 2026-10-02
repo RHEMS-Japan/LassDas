@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestIssueScopePreservesUploadFailureReason(t *testing.T) {
 }
 
 // Only synthetic credentials and local TLS services are used in these tests.
-func scopedFixture(t *testing.T, handler http.Handler, post bool) (Backlog, *IssueScope) {
+func scopedFixture(t *testing.T, handler http.Handler, post bool, options ...func(*IssueScope)) (Backlog, *IssueScope) {
 	t.Helper()
 	t.Setenv("SCOPE_TEST_ACCOUNT", "synthetic-account+/=key")
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +47,7 @@ func scopedFixture(t *testing.T, handler http.Handler, post bool) (Backlog, *Iss
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(upstream.Close)
-	scope, err := NewIssueScope(Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}, "EXAMPLE-1", post)
+	scope, err := NewIssueScope(Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}, "EXAMPLE-1", post, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,5 +340,154 @@ func TestIssueAccessTLSAndCancellation(t *testing.T) {
 	if err == nil {
 		conn.Close()
 		t.Fatal("cancelled access still listening")
+	}
+}
+
+// A launch that posts a trial line before what it means to say leaves only
+// the latter: once the launch is over, the scope removes what it stored
+// before its last comment. Which is which is never read; the one the tracker
+// stored last stays. No removal runs while a post is being answered.
+func TestIssueScopeKeepsOnlyTheLatestPostOfALaunch(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		options         []func(*IssueScope)
+		ids             []int
+		removalStatus   int
+		secondPostFails bool
+		removals        []string
+		removed         int
+	}{
+		{name: "the earlier post is removed when the launch is over", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 200, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}, removed: 1},
+		{name: "the comment stored last stays whatever the order of the answers", options: []func(*IssueScope){KeepLatestPost}, ids: []int{42, 41},
+			removalStatus: 200, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}, removed: 1},
+		{name: "every post stays without the option", ids: []int{41, 42}, removalStatus: 200},
+		{name: "a refused removal leaves both", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 403, removals: []string{"DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
+		{name: "a post that fails leaves the earlier comment", options: []func(*IssueScope){KeepLatestPost}, ids: []int{41, 42},
+			removalStatus: 200, secondPostFails: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var operations []string
+			posts := 0
+			b, scope := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case r.Method == "POST" && r.URL.Path == "/api/v2/issues/EXAMPLE-1/comments":
+					operations = append(operations, "POST")
+					posts++
+					if test.secondPostFails && posts == 2 {
+						w.WriteHeader(500)
+						return
+					}
+					w.WriteHeader(201)
+					json.NewEncoder(w).Encode(map[string]any{"id": test.ids[posts-1], "content": r.PostFormValue("content")})
+				case r.Method == "DELETE":
+					operations = append(operations, "DELETE "+r.URL.Path)
+					w.WriteHeader(test.removalStatus)
+					json.NewEncoder(w).Encode(map[string]any{})
+				default:
+					t.Errorf("unexpected operation: %s %s", r.Method, r.URL.Path)
+				}
+			}), true, test.options...)
+			ctx := context.Background()
+			if _, err := b.AddComment(ctx, "EXAMPLE-1", "test comment"); err != nil {
+				t.Fatal(err)
+			}
+			_, err := b.AddComment(ctx, "EXAMPLE-1", "the question itself")
+			if (err != nil) != test.secondPostFails {
+				t.Fatalf("second post: %v", err)
+			}
+			mu.Lock()
+			during := strings.Join(operations, ", ")
+			mu.Unlock()
+			if during != "POST, POST" {
+				t.Fatalf("something other than the posts ran while the launch was posting: %s", during)
+			}
+			if removed := scope.RemoveEarlierPosts(ctx); removed != test.removed {
+				t.Fatalf("removed %d comments, want %d", removed, test.removed)
+			}
+			// Settling twice removes nothing more and asks for nothing more: a
+			// removal the tracker refused is not tried again.
+			if again := scope.RemoveEarlierPosts(ctx); again != 0 {
+				t.Fatalf("a second settlement removed %d more", again)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			after := operations[2:]
+			if strings.Join(after, ", ") != strings.Join(test.removals, ", ") {
+				t.Fatalf("removals %v, want %v", after, test.removals)
+			}
+		})
+	}
+}
+
+// Closing a launch's access is what settles its comments, after the endpoint
+// has stopped accepting posts.
+func TestIssueAccessSettlesTheLaunchCommentsWhenItCloses(t *testing.T) {
+	t.Setenv("SCOPE_TEST_ACCOUNT", "synthetic-account+/=key")
+	var mu sync.Mutex
+	var operations []string
+	next := 40
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case "POST":
+			next++
+			operations = append(operations, "POST")
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{"id": next})
+		case "DELETE":
+			operations = append(operations, "DELETE "+r.URL.Path)
+			json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer upstream.Close()
+	source := Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}
+	access, err := ServeIssue(context.Background(), source, "EXAMPLE-1", true, KeepLatestPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := CertificateClient(access.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	t.Setenv("SCOPE_TEST_WORKER", access.Key)
+	b := Backlog{BaseURL: access.URL, KeyEnv: "SCOPE_TEST_WORKER", Client: client}
+	for _, text := range []string{"test comment", "the question itself"} {
+		if _, err := b.AddComment(context.Background(), "EXAMPLE-1", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	access.Close()
+	access.Close() // repeated by a deferred release; settles once
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(operations, ", "); got != "POST, POST, DELETE /api/v2/issues/EXAMPLE-1/comments/41" {
+		t.Fatalf("upstream saw %s", got)
+	}
+}
+
+// The removal is the scope's own, made with the controller's account for a
+// comment the scope itself stored. A worker cannot ask for one.
+func TestIssueScopeDoesNotLetAWorkerRemoveComments(t *testing.T) {
+	b, scope := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a removal reached the tracker: %s %s", r.Method, r.URL.Path)
+	}), true, KeepLatestPost)
+	request, err := http.NewRequest("DELETE", b.BaseURL+"/issues/EXAMPLE-1/comments/41?apiKey="+scope.Key(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := b.Client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("a worker's removal was answered %d", response.StatusCode)
 	}
 }

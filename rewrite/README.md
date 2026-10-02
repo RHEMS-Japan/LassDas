@@ -1239,10 +1239,17 @@ by waiting; reasons remain visible, not reported as a completed request.
 
 #### Issue-scoped role access
 
-Set a process's `tracker_access` to `read` or `comment` to give it temporary
-access to the assigned issue without giving it the controller's tracker account
-key. `read` permits the issue and its comments; `comment` additionally permits
-posting ordinary comment content. The assignment comes from the operator's
+Set a process's `tracker_access` to `read`, `comment` or `every-comment` to give
+it temporary access to the assigned issue without giving it the controller's
+tracker account key. `read` permits the issue and its comments; `comment`
+additionally permits posting ordinary comment content, and leaves one comment
+per launch: when the launch is over, the comments it stored before its last
+one are removed with the controller's account, so a role that posts a trial
+line before its question leaves only the question. Which post is which is
+never read; the one the tracker stored last stays, a removal the tracker
+refuses leaves that comment in place, and a notification the tracker already
+sent for a removed comment is not recalled. `every-comment` keeps every post.
+The assignment comes from the operator's
 `--issue`, the accepted watch issue, or explicit `assigned_issue` configuration
 for file-based requests. It is never inferred from model prose. Watch mode
 assigns each issue separately and rejects a queue-wide `assigned_issue`.

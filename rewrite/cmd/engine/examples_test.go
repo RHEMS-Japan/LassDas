@@ -81,7 +81,7 @@ func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
 					t.Fatal("account tracker credential assigned to worker")
 				}
 			}
-			if process.TrackerAccess == "comment" && !slices.Contains([]string{"post_report", "stop_report", "ask_requester"}, role.Name) {
+			if process.TrackerAccess != "" && process.TrackerAccess != "read" && !slices.Contains([]string{"post_report", "stop_report", "ask_requester"}, role.Name) {
 				t.Fatal("posting granted outside posting role")
 			}
 			if slices.Contains([]string{"elicit", "ask_requester", "review", "review_report", "post_report", "confirm_report", "stop_report"}, role.Name) && (slices.Contains(process.Command, "--write") || slices.Contains(process.Command, "--create")) {

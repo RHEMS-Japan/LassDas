@@ -25,12 +25,23 @@ import (
 type IssueAccess struct {
 	URL, Certificate, Key string
 	close                 func()
+	settle                func()
 }
 
-func (a *IssueAccess) Close() { a.close() }
+// Close ends the launch's access. A scope that keeps only its latest post
+// removes the earlier ones now, after the endpoint is closed, so nothing a
+// role posted waits on a removal. A post still in flight when the endpoint
+// closes may be stored after the count; it then stays as one comment more,
+// and nothing stored at or after the kept one is ever removed.
+func (a *IssueAccess) Close() {
+	a.close()
+	if a.settle != nil {
+		a.settle()
+	}
+}
 
-func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool) (*IssueAccess, error) {
-	scope, err := NewIssueScope(source, issue, mayPost)
+func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
+	scope, err := NewIssueScope(source, issue, mayPost, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -81,8 +92,18 @@ func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool)
 		case <-done:
 		}
 	}()
+	var settled sync.Once
+	settle := func() {
+		settled.Do(func() {
+			// The launch's context may already be cancelled; the removal has
+			// its own short bound instead of inheriting that.
+			bounded, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			scope.RemoveEarlierPosts(bounded)
+		})
+	}
 	return &IssueAccess{URL: "https://" + listener.Addr().String(), Key: scope.Key(),
-		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), close: closeServer}, nil
+		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), close: closeServer, settle: settle}, nil
 }
 
 // CertificateClient trusts this explicit local endpoint certificate instead of
