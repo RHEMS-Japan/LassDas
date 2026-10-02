@@ -79,6 +79,10 @@ type Tracker interface {
 	Comments(ctx context.Context, issue Issue) ([]json.RawMessage, error)
 	// ReadComment reads one comment record. A record without an id is refused.
 	ReadComment(raw json.RawMessage, issue Issue) (Comment, error)
+	// CommentText reads only a comment record's id and words, which is all
+	// the engine needs to find a comment of its own. A record without an id
+	// is refused; nothing else in it is looked at.
+	CommentText(raw json.RawMessage) (int64, string, error)
 	// AddComment posts the text once and returns the new comment's id. A
 	// failure may still have posted it: read the comments before trying again.
 	AddComment(ctx context.Context, issue Issue, text string) (int64, error)

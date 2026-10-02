@@ -454,14 +454,14 @@ func (n notices) postedAfter(ctx context.Context, text string, after int64) (int
 	}
 	found := int64(0)
 	for _, raw := range rows {
-		// Only the id and the words are compared, never where the record
-		// places the comment: the list is the issue's own.
-		comment, err := n.source.ReadComment(raw, n.issue)
+		// Only the id and the words are read: who wrote a comment, and where
+		// its record places it, do not decide whether it is this notice.
+		id, words, err := n.source.CommentText(raw)
 		if err != nil {
 			return 0, errors.New("issue comments could not be read before repeating a notice")
 		}
-		if comment.ID > after && comment.Body == text {
-			found = comment.ID
+		if id > after && words == text {
+			found = id
 		}
 	}
 	return found, nil
