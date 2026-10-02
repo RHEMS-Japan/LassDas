@@ -1,6 +1,9 @@
 """A real Git checkout, real test commands, and a local service standing in for
 the model: what the review command sends, what it writes, and how it ends."""
+import contextlib
 import http.server
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +12,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name("adversarial_review.py").resolve()
 KEY = "fixture-review-credential-9e1f3a"
@@ -40,18 +45,20 @@ class ModelStandIn:
                 if reply.get("status", 200) != 200:
                     payload = json.dumps({"error": reply.get("error", "service error")}).encode()
                     self.send_response(reply["status"])
-                elif reply.get("verdict") is None and "arguments" not in reply:
+                elif reply.get("verdict") is None and "arguments" not in reply and "calls" not in reply:
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
                     self.send_response(200)
                 else:
-                    if "arguments" in reply:
-                        arguments = reply["arguments"]
+                    if "calls" in reply:
+                        calls = reply["calls"]
+                    elif "arguments" in reply:
+                        calls = [reply["arguments"]]
                     else:
                         blocking, findings = reply["verdict"]
-                        arguments = {"blocking": blocking, "findings": findings}
+                        calls = [{"blocking": blocking, "findings": findings}]
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
-                        {"id": "call-1", "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
-                            arguments)}}]}}]}).encode()
+                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
+                            arguments)}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -93,7 +100,7 @@ class AdversarialReviewTests(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.workspace), *IDENTITY, *arguments],
                               check=True, capture_output=True, text=True, env=git_environment())
 
-    def run_review(self, service, stdin_text="Current assignment:\nStage 4 of 8\n\nOriginal request:\nadd a thing\n", **extra):
+    def environment(self, service, **extra):
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
                        "TASK_WORKSPACE": str(self.workspace), "TASK_HOME": str(self.home), "REVIEW_MODEL_URL": service.url,
                        "REVIEW_MODEL": "fixture/reviewer", "REVIEW_KEY_ENV": "REVIEW_API_KEY", "REVIEW_API_KEY": KEY,
@@ -101,8 +108,33 @@ class AdversarialReviewTests(unittest.TestCase):
                        "REVIEW_DIFF_PATHS": "src tests", "REVIEW_ATTEMPTS": "2",
                        "REVIEW_TIMEOUT_SECONDS": "30"}
         environment.update(extra)
+        return environment
+
+    def run_review(self, service, stdin_text="Current assignment:\nStage 4 of 8\n\nOriginal request:\nadd a thing\n", **extra):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
-                              text=True, env=environment, timeout=120)
+                              text=True, env=self.environment(service, **extra), timeout=120)
+
+    def review_in_process(self, service, before_each_command):
+        """The review run in this process, so that a Git that runs out of
+        time can be had without waiting for it: before_each_command sees each
+        command the review starts and may raise in its place. The exit status
+        and what the review printed."""
+        spec = importlib.util.spec_from_file_location("review_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def run(command, *arguments, **keywords):
+            before_each_command(command)
+            return subprocess.run(command, *arguments, **keywords)
+
+        printed = io.StringIO()
+        stdin = io.TextIOWrapper(io.BytesIO(b"Original request:\nadd a thing\n"))
+        with mock.patch.object(module, "subprocess", types.SimpleNamespace(
+                run=run, TimeoutExpired=subprocess.TimeoutExpired)), \
+                mock.patch.dict(os.environ, self.environment(service), clear=True), \
+                mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed):
+            status = module.main()
+        return status, printed.getvalue()
 
     def review_log(self):
         path = self.home / "review.md"
@@ -365,32 +397,47 @@ class AdversarialReviewTests(unittest.TestCase):
     def test_blocking_is_read_when_its_meaning_is_plain_and_the_findings_always_stay(self):
         # REPRO 07 printed blocking null beside a finding that a needed change
         # is missing as PASSED; read as true or false only, "true" and 1 then
-        # let a change through unreviewed with the findings gone. A plain
-        # value is a verdict, in any letter case of the field; anything else
-        # is none, and what the reviewer wrote stays in the output and log.
-        cases = (("\"true\"", {"blocking": "true"}, "SENT BACK", 1, 1),
-                 ("\" TRUE \"", {"blocking": " TRUE "}, "SENT BACK", 1, 1),
-                 ("1", {"blocking": 1}, "SENT BACK", 1, 1),
-                 ("Blocking", {"Blocking": True}, "SENT BACK", 1, 1),
-                 ("\"false\"", {"blocking": "false"}, "PASSED", 0, 0),
-                 ("0", {"blocking": 0}, "PASSED", 0, 0),
-                 ("null", {"blocking": None}, "NOT REVIEWED", 0, 1),
-                 ("missing", {}, "NOT REVIEWED", 0, 1),
-                 ("\"maybe\"", {"blocking": "maybe"}, "NOT REVIEWED", 0, 1))
+        # let a change through unreviewed with the findings gone. Every call
+        # and every blocking field in any letter case is read: one plain true
+        # sends back, else one plain false passes, else there is no verdict.
+        # What the reviewer wrote stays in the output and the log every time.
+        sent_back, passed, none = ("SENT BACK", 1, 1), ("PASSED", 0, 0), ("NOT REVIEWED", 0, 1)
+        cases = (("\"true\"", [{"blocking": "true"}], sent_back),
+                 ("\" TRUE \"", [{"blocking": " TRUE "}], sent_back),
+                 ("1", [{"blocking": 1}], sent_back),
+                 ("\"yes\"", [{"blocking": "yes"}], sent_back),
+                 ("\"1\"", [{"blocking": "1"}], sent_back),
+                 ("Blocking", [{"Blocking": True}], sent_back),
+                 ("false and Blocking true", [{"blocking": False, "Blocking": True}], sent_back),
+                 ("false, then true", [{"blocking": False}, {"blocking": True}], sent_back),
+                 ("true, then false", [{"blocking": True}, {"blocking": False}], sent_back),
+                 ("\"false\"", [{"blocking": "false"}], passed),
+                 ("0", [{"blocking": 0}], passed),
+                 ("\"no\"", [{"blocking": "no"}], passed),
+                 ("\"0\"", [{"blocking": "0"}], passed),
+                 ("false and Blocking maybe", [{"blocking": False, "Blocking": "maybe"}], passed),
+                 ("null", [{"blocking": None}], none),
+                 ("missing", [{}], none),
+                 ("\"maybe\"", [{"blocking": "maybe"}], none),
+                 ("2", [{"blocking": 2}], none),
+                 ("1.5", [{"blocking": 1.5}], none),
+                 ("is_blocking", [{"is_blocking": True}], none))
         for tree in ("a change", "no change"):
             if tree == "no change":
                 self.leave_unchanged()
-            for case, fields, outcome, changed, unchanged in cases:
-                finding = "REQUIRED_NEW_BEHAVIOR is missing (%s, %s)." % (case, tree)
-                reply = {"arguments": dict(fields, Findings=finding)}
-                service = ModelStandIn([reply, reply])
+            for case, calls, (outcome, changed, unchanged) in cases:
+                findings = ["REQUIRED_NEW_BEHAVIOR is missing (%s, %s, call %d)." % (case, tree, number)
+                            for number in range(1, len(calls) + 1)]
+                service = ModelStandIn([{"calls": [dict(fields, Findings=finding)
+                                                   for fields, finding in zip(calls, findings)]}])
                 self.addCleanup(service.close)
-                finished = self.run_review(service)
+                finished = self.run_review(service, REVIEW_ATTEMPTS="1")
                 status = changed if tree == "a change" else unchanged
                 self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
                 self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
-                self.assertIn(finding, finished.stdout, (case, tree))
-                self.assertIn(finding, self.review_log(), (case, tree))
+                for finding in findings:
+                    self.assertIn(finding, finished.stdout, (case, tree))
+                    self.assertIn(finding, self.review_log(), (case, tree))
                 if outcome == "NOT REVIEWED":
                     self.assertIn("no verdict could be obtained", finished.stdout, (case, tree))
                     if tree == "no change":
@@ -461,17 +508,84 @@ class AdversarialReviewTests(unittest.TestCase):
         # Something did change, so a missing verdict is no reason to hold it back here.
         self.assertEqual(finished.returncode, 0, finished.stdout)
 
-    def test_a_workspace_that_is_not_a_checkout_lets_the_work_through_with_a_note(self):
+    def test_a_workspace_that_is_not_a_checkout_goes_back_with_a_note(self):
+        # Without a checkout whether anything changed cannot be told, so no
+        # missing verdict lets the work through. The delivery could deliver
+        # nothing from here either, so the request goes back to work as before.
         shutil.rmtree(self.workspace / ".git")
         service = ModelStandIn([{"verdict": (True, "x")}])
         self.addCleanup(service.close)
         finished = self.run_review(service)
-        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(finished.returncode, 1, finished.stderr)
         self.assertNotIn("Traceback", finished.stderr)
         self.assertIn("could not be read", finished.stdout)
         self.assertIn("NOT REVIEWED", finished.stdout)
+        self.assertIn("Whether any file was changed could not be told", finished.stdout)
+        missing = self.run_review(service, TASK_WORKSPACE=str(self.workspace / "no-such-directory"))
+        self.assertEqual(missing.returncode, 1, missing.stdout)
+        self.assertIn("Whether any file was changed could not be told", missing.stdout)
         self.assertEqual(service.requests, [])
 
+    CANNOT_TELL = ("Whether any file was changed could not be told, and an ending with nothing delivered needs a"
+                   " verdict, so the work goes back this time.")
+
+    def test_a_review_that_cannot_tell_whether_anything_changed_lets_nothing_through_without_a_verdict(self):
+        # Case B of the third review: the review's git status runs out of its
+        # 60 seconds while the delivery, which waits up to 600, reads the same
+        # unchanged checkout and ends with nothing delivered. Not being able
+        # to tell is not taken as a change, and neither is an error before it
+        # was told: without a verdict the work goes back, and a blocking
+        # verdict stands even when its state cannot be saved. The control,
+        # with Git answering, says that no file was changed.
+        self.leave_unchanged()
+
+        def status_runs_out_of_time(times):
+            ran_out = []
+
+            def before(command):
+                if command[:1] == ["git"] and "status" in command and len(ran_out) < times:
+                    ran_out.append(command)
+                    raise subprocess.TimeoutExpired(command, 60)
+            return before
+
+        def unexpected_error_first():
+            failed = []
+
+            def before(command):
+                if command[:1] == ["git"] and "status" in command and not failed:
+                    failed.append(command)
+                    raise RuntimeError("an error the review does not expect")
+            return before
+
+        cases = (("git status always runs out of time", status_runs_out_of_time(99), [], False,
+                  ["timed out after 60 seconds", self.CANNOT_TELL]),
+                 ("an unexpected error first", unexpected_error_first(), [], False,
+                  ["Unexpected RuntimeError", self.CANNOT_TELL]),
+                 ("git status runs out of time once, then no verdict", status_runs_out_of_time(1),
+                  [{"status": 503}, {"status": 503}], False,
+                  ["no verdict could be obtained (HTTP 503 from the model service); whether any file was changed"
+                   " could not be told, and an ending with nothing delivered needs a verdict"]),
+                 ("git status runs out of time once, then a blocking verdict not saved", status_runs_out_of_time(1),
+                  [{"verdict": (True, "the request needs a new file")}], True,
+                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]))
+        for case, before, replies, unsaved, said in cases:
+            service = ModelStandIn(replies)
+            self.addCleanup(service.close)
+            if unsaved:
+                self.home.chmod(0o500)
+            try:
+                status, printed = self.review_in_process(service, before)
+            finally:
+                self.home.chmod(0o700)
+            self.assertEqual(status, 1, (case, printed))
+            for text in said:
+                self.assertIn(text, printed, case)
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        status, printed = self.review_in_process(service, lambda command: None)
+        self.assertEqual(status, 1, printed)
+        self.assertIn("no file was changed, and an ending with nothing delivered needs a verdict", printed)
+        self.assertNotIn("could not be told", printed)
 
 if __name__ == "__main__":
     unittest.main()

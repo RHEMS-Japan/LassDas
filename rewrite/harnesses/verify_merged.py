@@ -159,9 +159,11 @@ def verify(arguments):
         earlier = ["An earlier round of this request was merged as commit %s through pull request %s; this check "
                    "does not look at it." % (round["merge_sha"], round.get("pull_request"))
                    for round in receipt.get("previous") or [] if round.get("merge_sha")]
-        print(" ".join(["%s: pull request %s was closed by a person without being merged, so nothing of this %s was "
-                        "delivered." % ("Not checked" if earlier else "Nothing to check", named,
-                                        "round" if earlier else "request")]
+        # What the delivery read then: a person may have reopened it since.
+        looked = "when the delivery last looked" + (", at " + receipt["ended_at"] if receipt.get("ended_at") else "")
+        print(" ".join(["%s: %s, pull request %s had been closed by a person without being merged, so nothing of "
+                        "this %s had been delivered." % ("Not checked" if earlier else "Nothing to check", looked,
+                                                         named, "round" if earlier else "request")]
                        + earlier + ["The configured verification commands were not run."]))
         return 0
     if receipt.get("changed_by_person"):
@@ -169,8 +171,9 @@ def verify(arguments):
                  % receipt["not_pushed"] if receipt.get("not_pushed")
                  else "The delivery's last commit %s is on that branch." % receipt.get("head"))
         if receipt.get("not_committed"):
-            where += (" This round's changes to %s were never committed, so the delivery did not put them in the "
-                      "pull request." % ", ".join(receipt["not_committed"]))
+            where += (" The workspace then held changes that were not committed (%s), which the delivery did not "
+                      "put in the pull request."
+                      % support.some_paths(receipt["not_committed"], receipt.get("not_committed_count")))
         print("Not checked: a person changed branch %s of pull request %s; it was at %s when the delivery last "
               "looked. %s What a person merges from there is theirs, so the configured verification commands "
               "were not run, and the branch was not read again here."

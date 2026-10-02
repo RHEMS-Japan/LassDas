@@ -19,20 +19,25 @@ start, an endpoint that is not HTTPS, a change that cannot be read, paths
 that match no change, a model service that is down or returns no verdict)
 ends 0 and prints NOT REVIEWED with the reason, which joins the history for
 the worker and the report writer: a review that could not be performed is not
-a defect in the change. A verdict's fields are read in any letter case, and
-its blocking counts when its meaning is plain: true or false, "true" or
-"false" in any case, 1 or 0. Anything else is no verdict, and what the
-reviewer wrote is printed and logged with the reason all the same.
+a defect in the change. Every call of the verdict tool in the reply is read,
+and in each every field named blocking in any letter case, taken as true or
+false when its meaning is plain: true or false, a number equal to 1 or 0, or
+"true", "yes", "1", "false", "no" or "0" in any case. One that reads as true
+sends the work back; with none true, one that reads as false lets it
+through; anything else is no verdict. What the reviewer wrote is printed and
+logged in every case.
 
 One exception: when Git lists no changed path at all and no earlier delivery
 round committed one, the work let through here can end with nothing
 delivered, so it is let through only on a verdict that does not object.
 Without one (no verdict, a setting that keeps the review from running, an
-unexpected error), this ends 1 and the work goes back. The reviewer is told
-in plain words that no file was changed and asked whether the request is met
-by the repository exactly as it is: a request whose answer is that nothing
-needs to change reaches review this way, and so does work that was never
-done.
+unexpected error), this ends 1 and the work goes back. So it does when
+whether anything changed cannot be told (no checkout, or Git cannot read it,
+or not in time), since the delivery reads the checkout on its own, waits
+longer, and may find no change. When no file was changed, the reviewer is
+told so in plain words and asked whether the request is met by the
+repository exactly as it is: a request whose answer is that nothing needs to
+change reaches review this way, and so does work that was never done.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -232,49 +237,77 @@ def nothing_changed(workspace):
     """Whether the checkout holds no change at all: Git lists no changed,
     staged or untracked path, as the delivery reads it too, and no earlier
     delivery round committed one. Work let through from here can end with
-    nothing delivered. False whenever that cannot be told."""
+    nothing delivered. None when that cannot be told (no checkout, or Git
+    could not read it, or not in time): the delivery reads the checkout on
+    its own and waits longer, so it may still find no change, and not being
+    able to tell is never taken as a change."""
     if not workspace:
-        return False
+        return None
     workspace = Path(workspace)
     try:
-        return workspace.is_dir() and not changed_entries(workspace) and not committed_earlier(workspace)
+        if not workspace.is_dir():
+            return None
+        return not changed_entries(workspace) and not committed_earlier(workspace)
     except (ReviewError, OSError):
-        return False
+        return None
+
+
+def held_back(unchanged):
+    """Why work without a verdict goes back, when it may hold no change:
+    there is none, or that could not be told."""
+    return "no file was changed" if unchanged else "whether any file was changed could not be told"
 
 
 def truth(value):
-    """A value read as true or false when its meaning is plain: true or false,
-    "true" or "false" in any letter case, 1 or 0. None otherwise."""
+    """A blocking value read as true or false when its meaning is plain: true
+    or false; a number equal to 1 or 0; "true", "yes" or "1", or "false", "no"
+    or "0", in any letter case and without spaces around it. None when it
+    cannot be read."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-        return value.strip().lower() == "true"
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return value == 1
+    if isinstance(value, (int, float)):
+        return True if value == 1 else False if value == 0 else None
+    if isinstance(value, str):
+        word = value.strip().lower()
+        return True if word in ("true", "yes", "1") else False if word in ("false", "no", "0") else None
     return None
 
 
-def read_verdict(arguments):
-    """(blocking, findings, why) from the verdict tool's arguments. Field names
-    are read in any letter case. blocking is True or False when it is plain,
-    or None, with why, when it is not; the findings are kept either way, so
-    the worker and the report writer can read what the reviewer wrote."""
-    verdict = json.loads(arguments)
-    if not isinstance(verdict, dict):
-        return None, "", "the reviewer's verdict was not a set of named fields"
-    given = {}
-    for name, value in verdict.items():
-        given.setdefault(str(name).lower(), []).append(value)
-    findings = "\n".join(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
-                         for text in given.get("findings", []) if text not in (None, ""))
-    values = given.get("blocking", [])
-    read = {truth(value) for value in values}
-    if values and None not in read and len(read) == 1:
-        return read.pop(), findings, None
-    if not values:
-        return None, findings, "the reviewer's verdict gave no blocking"
-    return None, findings, ("the reviewer's verdict gave no plain true or false for blocking (it gave %s)"
+def read_verdict(calls):
+    """(blocking, findings, why) from every call of the verdict tool in one
+    reply. Every field named blocking, in any letter case, is read in every
+    call. One that reads as true sends the work back, so a finding is never
+    let through because the reply also said false somewhere; with none true,
+    one that reads as false lets the work through; with neither there is no
+    verdict, and why says so. The findings of every call are kept whichever
+    way it goes, so the worker and the report writer can read them."""
+    values, findings, unread = [], [], []
+    for call in calls:
+        try:
+            arguments = json.loads(call["function"]["arguments"])
+        except (KeyError, TypeError, ValueError) as error:
+            unread.append(type(error).__name__)
+            continue
+        if not isinstance(arguments, dict):
+            unread.append("not a set of named fields")
+            continue
+        for name, value in arguments.items():
+            if str(name).lower() == "blocking":
+                values.append(value)
+            elif str(name).lower() == "findings" and value not in (None, ""):
+                findings.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+    read = [truth(value) for value in values]
+    text = "\n".join(findings)
+    if True in read:
+        return True, text, None
+    if False in read:
+        return False, text, None
+    if values:
+        return None, text, ("the reviewer's verdict gave no blocking that reads as true or false (it gave %s)"
                             % ", ".join(json.dumps(value, ensure_ascii=False)[:40] for value in values))
+    if unread:
+        return None, text, "the reviewer's verdict could not be read (%s)" % ", ".join(unread)
+    return None, text, "the reviewer's verdict gave no blocking"
 
 
 def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
@@ -305,7 +338,7 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
             if not calls:
                 last = "the reviewer returned no verdict"
             else:
-                blocking, findings, why = read_verdict(calls[0]["function"]["arguments"])
+                blocking, findings, why = read_verdict(calls)
                 if why is None:
                     return blocking, findings, None
                 last, written = why, findings or written
@@ -319,20 +352,21 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
 
 
 def without_verdict(model, reason, unchanged, goes_on):
-    """No verdict was obtained. With nothing changed, letting the work through
-    could end it with nothing delivered and no one's judgement, so it goes
-    back; otherwise it goes on unreviewed, as goes_on says."""
-    if unchanged:
-        print("Review by %s: NOT REVIEWED. %s. No file was changed, and an ending with nothing delivered needs a"
-              " verdict, so the work goes back this time." % (model, reason))
+    """No verdict was obtained. With nothing changed, or when that cannot be
+    told (unchanged is None), letting the work through could end it with
+    nothing delivered and no one's judgement, so it goes back; otherwise it
+    goes on unreviewed, as goes_on says."""
+    if unchanged is not False:
+        print("Review by %s: NOT REVIEWED. %s. %s, and an ending with nothing delivered needs a verdict, so the"
+              " work goes back this time." % (model, reason, held_back(unchanged).capitalize()))
         return 1
     print("Review by %s: NOT REVIEWED. %s. %s" % (model, reason, goes_on))
     return 0
 
 
 def review(stdin_text, model, unchanged):
-    """Exit 1 on a real blocking verdict, or when nothing changed and no
-    verdict lets it through; 0 otherwise."""
+    """Exit 1 on a real blocking verdict, or when nothing changed, or that
+    cannot be told, and no verdict lets it through; 0 otherwise."""
     try:
         return reviewed(stdin_text, model, unchanged)
     except ReviewError as error:
@@ -385,9 +419,9 @@ def reviewed(stdin_text, model, unchanged):
     outcome, status = "PASSED", 0
     if blocking is None:
         outcome = "NOT REVIEWED"
-        if unchanged:
-            note = ("no verdict could be obtained (%s); no file was changed, and an ending with nothing delivered"
-                    " needs a verdict, so the work goes back this time" % why)
+        if unchanged is not False:
+            note = ("no verdict could be obtained (%s); %s, and an ending with nothing delivered needs a verdict,"
+                    " so the work goes back this time" % (why, held_back(unchanged)))
             status = 1
         else:
             note = "no verdict could be obtained (%s); the work goes on unreviewed this time" % why
@@ -407,11 +441,12 @@ def reviewed(stdin_text, model, unchanged):
             log.write("## Review by %s (send-backs so far: %d): %s\n\n%s\n\n" % (
                 model, sent_back, outcome, findings or "(no findings)"))
     except OSError as error:
-        if unchanged:
-            # Nothing was changed: only a verdict that lets the work through
-            # ends it here, whether or not the state was saved.
-            print("Review by %s: the send-back state could not be saved (%s). No file was changed, so the outcome"
-                  " above stands all the same." % (model, scrub(str(error), key)))
+        if unchanged is not False:
+            # Nothing was changed, or that cannot be told: only a verdict that
+            # lets the work through ends it here, whether or not the state
+            # was saved.
+            print("Review by %s: the send-back state could not be saved (%s). %s, so the outcome above stands all"
+                  " the same." % (model, scrub(str(error), key), held_back(unchanged).capitalize()))
             return status
         # Without its state the send-backs are not counted, so this verdict
         # does not send the work back; the findings above are in the record.
@@ -423,7 +458,9 @@ def reviewed(stdin_text, model, unchanged):
 
 def main():
     model = os.environ.get("REVIEW_MODEL", "") or "(no model named)"
-    unchanged = False
+    # Until it has been told, whether anything changed is not known, and an
+    # error before then lets nothing through without a verdict.
+    unchanged = None
     try:
         # Read before any setting: a setting that keeps the review from running
         # must not let an unchanged checkout through either.
@@ -433,7 +470,7 @@ def main():
         # as a send-back for ever.
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
         return review(stdin_text, model, unchanged)
-    except Exception as error:  # never a traceback, and exit 1 only when nothing changed
+    except Exception as error:  # never a traceback, and exit 1 only when nothing changed or that is not known
         key = os.environ.get(os.environ.get("REVIEW_KEY_ENV", "REVIEW_API_KEY"), "")
         return without_verdict(model, "Unexpected %s: %s" % (type(error).__name__, scrub(str(error), key)[:300]),
                                unchanged, "The work goes on unreviewed this time.")

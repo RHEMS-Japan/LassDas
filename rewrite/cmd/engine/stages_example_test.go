@@ -71,6 +71,15 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 			if writes != slices.Contains([]string{"work", "deliver", "report"}, role.Name) {
 				t.Fatalf("%s workspace write permission is %t", role.Name, writes)
 			}
+			// .git holds hooks and configuration the credentialed delivery
+			// runs; only that fixed process, which launches no model, may write it.
+			metadata := false
+			for k := 1; k < len(process.Command); k++ {
+				metadata = metadata || process.Command[k-1] == "--write" && process.Command[k] == ".git"
+			}
+			if metadata != (role.Name == "deliver") || metadata && process.ModelEnv != "" {
+				t.Fatalf("%s may write .git: %t", role.Name, metadata)
+			}
 		}
 	}
 	for _, stage := range cfg.Workflow.Stages {
@@ -252,7 +261,9 @@ func TestStagesRoleHelper(t *testing.T) {
 	case "deliver":
 		read("src/greeting.txt", stagesArtifact)
 		write("release/greeting.txt", stagesArtifact)
-		write("release/receipt.txt", stagesReceipt)
+		// The receipt goes where the example's delivery process names it, so
+		// the runtime's read-back of that setting is what is exercised.
+		write(os.Getenv("EXAMPLE_STAGE_RECEIPT"), stagesReceipt)
 	case "verify_merged":
 		read("release/greeting.txt", stagesArtifact)
 	case "report":
@@ -361,6 +372,7 @@ func stagesFixtureConfig(t *testing.T) config {
 	cfg := stagesExample(t)
 	t.Setenv("MODEL_API_KEY", "synthetic-example-model")
 	t.Setenv("TRACKER_API_KEY", "synthetic-example-tracker")
+	t.Setenv("DELIVERY_GITHUB_TOKEN", "synthetic-example-delivery")
 	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
 	binary, err := os.Executable()
 	if err != nil {
@@ -371,6 +383,9 @@ func stagesFixtureConfig(t *testing.T) config {
 			p := &cfg.Roles[i].Processes[j]
 			p.Command = []string{binary, "-test.run=^TestStagesRoleHelper$"}
 			p.Env = map[string]string{"EXAMPLE_STAGE_ACTION": cfg.Roles[i].Name, "EXAMPLE_STAGE_PROCESS": p.Name}
+			if p.Receipt != "" {
+				p.Env["EXAMPLE_STAGE_RECEIPT"] = p.Receipt
+			}
 		}
 	}
 	return cfg
