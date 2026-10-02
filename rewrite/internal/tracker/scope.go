@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // IssueScope exposes only one operator-assigned issue to a worker. The upstream
@@ -24,9 +25,21 @@ type IssueScope struct {
 	issue  string
 	key    string
 	post   bool
+	// latest makes a later post through this scope replace its earlier one.
+	latest bool
+	mu     sync.Mutex
+	posted int64
 }
 
-func NewIssueScope(source Backlog, issue string, mayPost bool) (*IssueScope, error) {
+// KeepLatestPost makes a scope leave one comment: when it posts again, the
+// comment it posted before is removed once the new one is stored. A scope
+// lives for one launch, so a role that posts a trial line before what it
+// means to say leaves only the latter. Nothing is read to decide which: the
+// later post stays. Removing the earlier one is best effort; a refusal
+// leaves both, which is what there was before this option.
+func KeepLatestPost(s *IssueScope) { s.latest = true }
+
+func NewIssueScope(source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueScope, error) {
 	if issue == "" || issue == "." || issue == ".." || strings.ContainsAny(issue, "/\\?#\r\n\x00") {
 		return nil, errors.New("provide one operator-assigned tracker issue")
 	}
@@ -34,7 +47,11 @@ func NewIssueScope(source Backlog, issue string, mayPost bool) (*IssueScope, err
 	if _, err := rand.Read(key[:]); err != nil {
 		return nil, fmt.Errorf("creating issue-scoped access: %w", err)
 	}
-	return &IssueScope{source: source, issue: issue, key: base64.RawURLEncoding.EncodeToString(key[:]), post: mayPost}, nil
+	scope := &IssueScope{source: source, issue: issue, key: base64.RawURLEncoding.EncodeToString(key[:]), post: mayPost}
+	for _, option := range options {
+		option(scope)
+	}
+	return scope, nil
 }
 
 // Key grants only this instance's issue access; do not log it or save it in a
@@ -134,9 +151,31 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusBadGateway, "scoped tracker request: "+err.Error())
 		return
 	}
+	if r.Method == http.MethodPost && s.latest {
+		s.replaceEarlierPost(r, path, data)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(expected)
 	w.Write(data)
+}
+
+// replaceEarlierPost removes the comment this scope stored before the one the
+// tracker has just accepted. The new comment is stored first, so a failure
+// here can only leave one comment too many, never none.
+func (s *IssueScope) replaceEarlierPost(r *http.Request, path string, receipt []byte) {
+	var stored struct {
+		ID int64 `json:"id"`
+	}
+	if json.Unmarshal(receipt, &stored) != nil || stored.ID <= 0 {
+		return
+	}
+	s.mu.Lock()
+	earlier := s.posted
+	s.posted = stored.ID
+	s.mu.Unlock()
+	if earlier > 0 && earlier != stored.ID {
+		s.source.call(r.Context(), http.MethodDelete, path+"/comments/"+strconv.FormatInt(earlier, 10), nil, nil, http.StatusOK)
+	}
 }
 
 func (s *IssueScope) reject(w http.ResponseWriter, status int, message string) {

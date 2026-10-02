@@ -19,10 +19,10 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 			switch process.TrackerAccess {
 			case "":
 				continue
-			case "read", "comment":
+			case "read", "comment", "comments":
 				enabled = true
 			default:
-				return nil, errors.New("tracker_access must be read, comment, or absent")
+				return nil, errors.New("tracker_access must be read, comment, comments, or absent")
 			}
 			for _, name := range trackerEnvironment {
 				_, env := process.Env[name]
@@ -55,7 +55,13 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 		if process.TrackerAccess == "" {
 			return process, nil, nil
 		}
-		access, err := tracker.ServeIssue(ctx, cfg.Backlog, issue, process.TrackerAccess == "comment")
+		// "comment" leaves one comment per launch: a later post replaces the
+		// launch's earlier one. "comments" keeps every post.
+		var options []func(*tracker.IssueScope)
+		if process.TrackerAccess == "comment" {
+			options = append(options, tracker.KeepLatestPost)
+		}
+		access, err := tracker.ServeIssue(ctx, cfg.Backlog, issue, process.TrackerAccess != "read", options...)
 		if err != nil {
 			return process, nil, err
 		}

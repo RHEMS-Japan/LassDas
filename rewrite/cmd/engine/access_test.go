@@ -211,6 +211,15 @@ func TestIssueAccessConfigurationCannotBorrowBroadCredentialsOrModelAuthority(t 
 			}
 		})
 	}
+	// Both posting grants are operator choices: one comment per launch, or
+	// every post kept.
+	for _, grant := range []string{"comment", "comments"} {
+		cfg := accessConfiguration(t)
+		cfg.Roles[0].Processes[0].TrackerAccess = grant
+		if prepare, err := roleAccess(cfg, "EXAMPLE-1"); err != nil || prepare == nil {
+			t.Fatalf("tracker_access %q was refused: %v", grant, err)
+		}
+	}
 	cfg := accessConfiguration(t)
 	bound, err := bindRequestConfig(cfg, t.TempDir(), "EXAMPLE-1")
 	if err != nil || bound.AssignedIssue != "EXAMPLE-1" || cfg.AssignedIssue != "" {

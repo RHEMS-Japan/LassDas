@@ -26,7 +26,7 @@ func validateQuestionRole(cfg config) error {
 			continue
 		}
 		for _, process := range role.Processes {
-			if process.TrackerAccess == "comment" {
+			if process.TrackerAccess == "comment" || process.TrackerAccess == "comments" {
 				return nil
 			}
 		}

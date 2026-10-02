@@ -29,8 +29,8 @@ type IssueAccess struct {
 
 func (a *IssueAccess) Close() { a.close() }
 
-func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool) (*IssueAccess, error) {
-	scope, err := NewIssueScope(source, issue, mayPost)
+func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
+	scope, err := NewIssueScope(source, issue, mayPost, options...)
 	if err != nil {
 		return nil, err
 	}

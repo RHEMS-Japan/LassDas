@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestIssueScopePreservesUploadFailureReason(t *testing.T) {
 }
 
 // Only synthetic credentials and local TLS services are used in these tests.
-func scopedFixture(t *testing.T, handler http.Handler, post bool) (Backlog, *IssueScope) {
+func scopedFixture(t *testing.T, handler http.Handler, post bool, options ...func(*IssueScope)) (Backlog, *IssueScope) {
 	t.Helper()
 	t.Setenv("SCOPE_TEST_ACCOUNT", "synthetic-account+/=key")
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +47,7 @@ func scopedFixture(t *testing.T, handler http.Handler, post bool) (Backlog, *Iss
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(upstream.Close)
-	scope, err := NewIssueScope(Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}, "EXAMPLE-1", post)
+	scope, err := NewIssueScope(Backlog{BaseURL: upstream.URL + "/api/v2", KeyEnv: "SCOPE_TEST_ACCOUNT", Client: upstream.Client()}, "EXAMPLE-1", post, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,5 +340,86 @@ func TestIssueAccessTLSAndCancellation(t *testing.T) {
 	if err == nil {
 		conn.Close()
 		t.Fatal("cancelled access still listening")
+	}
+}
+
+// A launch that posts a trial line before what it means to say leaves only
+// the latter: the scope removes its earlier comment once the later one is
+// stored. Which is which is never read; the later post stays.
+func TestIssueScopeKeepsOnlyTheLatestPostOfALaunch(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		options         []func(*IssueScope)
+		removalStatus   int
+		secondPostFails bool
+		want            []string
+	}{
+		{name: "a later post replaces the earlier one", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 200,
+			want: []string{"POST", "POST", "DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
+		{name: "every post stays without the option", removalStatus: 200, want: []string{"POST", "POST"}},
+		{name: "a refused removal does not fail the post", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 403,
+			want: []string{"POST", "POST", "DELETE /api/v2/issues/EXAMPLE-1/comments/41"}},
+		{name: "a post that fails leaves the earlier comment", options: []func(*IssueScope){KeepLatestPost}, removalStatus: 200,
+			secondPostFails: true, want: []string{"POST", "POST"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var operations []string
+			next := 40
+			b, _ := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case r.Method == "POST" && r.URL.Path == "/api/v2/issues/EXAMPLE-1/comments":
+					operations = append(operations, "POST")
+					if test.secondPostFails && next == 41 {
+						w.WriteHeader(500)
+						return
+					}
+					next++
+					w.WriteHeader(201)
+					json.NewEncoder(w).Encode(map[string]any{"id": next, "content": r.PostFormValue("content")})
+				case r.Method == "DELETE":
+					operations = append(operations, "DELETE "+r.URL.Path)
+					w.WriteHeader(test.removalStatus)
+					json.NewEncoder(w).Encode(map[string]any{})
+				default:
+					t.Errorf("unexpected operation: %s %s", r.Method, r.URL.Path)
+				}
+			}), true, test.options...)
+			ctx := context.Background()
+			if _, err := b.AddComment(ctx, "EXAMPLE-1", "test comment"); err != nil {
+				t.Fatal(err)
+			}
+			_, err := b.AddComment(ctx, "EXAMPLE-1", "the question itself")
+			if (err != nil) != test.secondPostFails {
+				t.Fatalf("second post: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.Join(operations, ", ") != strings.Join(test.want, ", ") {
+				t.Fatalf("upstream saw %v, want %v", operations, test.want)
+			}
+		})
+	}
+}
+
+// The removal is the scope's own, made with the controller's account for a
+// comment the scope itself stored. A worker cannot ask for one.
+func TestIssueScopeDoesNotLetAWorkerRemoveComments(t *testing.T) {
+	b, scope := scopedFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a removal reached the tracker: %s %s", r.Method, r.URL.Path)
+	}), true, KeepLatestPost)
+	request, err := http.NewRequest("DELETE", b.BaseURL+"/issues/EXAMPLE-1/comments/41?apiKey="+scope.Key(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := b.Client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("a worker's removal was answered %d", response.StatusCode)
 	}
 }
