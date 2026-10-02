@@ -543,10 +543,11 @@ by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. A stop written while a question waits moves the issue
-from `awaiting_requester` straight to `stopped`, and the runtime does not say
-that a reply was received. An id left out leaves that turn alone; the runtime
-never reads or names a status. Each change is made once and recorded beside the
+the requester's stop, once the stop is recorded and, where a stop report is
+configured, that report is done. A stop written while a question waits moves
+the issue from `awaiting_requester` to `stopped` without passing through
+`processing` or the runtime's hands. An id left out leaves that turn alone; the
+runtime never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.
@@ -568,7 +569,8 @@ while 1 and 3 are the tracker's built-in open and resolved statuses.
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
-second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
+second comment), and when it resumes after the requester's answer (a stop written while a question
+waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
 ` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
@@ -781,6 +783,11 @@ The balance keeps being read each tick. When it is back above the floor the
 request is launched again and says so once:
 
 > モデル利用枠が回復したため、自動処理を再開しました。
+
+An authorized stop does not wait for the balance: it launches no model. A
+request held below the floor is still read for a stop on every tick, whether
+its work was running, had not started, or waits on a question, and a request
+stopped while a question waits is told nothing about a pause.
 
 The pause and the recovery alternate, so each episode gets one line of each. An
 endpoint that cannot be read is not evidence of an empty budget: it never

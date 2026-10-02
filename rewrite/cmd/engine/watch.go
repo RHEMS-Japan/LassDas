@@ -337,7 +337,15 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
 			notice := requestNotices(cfg, issue, directory)
-			if creditKnown {
+			// A stop launches no model, so it does not wait for the budget and
+			// is not told about it: the requester asked for the work to end,
+			// not to hear that it is paused and will carry on. A request held
+			// here has no watcher reading its comments, so the stop is looked
+			// for on its behalf.
+			if creditKnown && creditLow && !stopping {
+				stopping = stopWritten(ctx, cfg, issue, interval)
+			}
+			if creditKnown && !stopping {
 				if err := applyBudgetNotice(ctx, notice, creditLow); err != nil {
 					observe("request " + entry.Name() + ": budget notice not confirmed: " + err.Error())
 				}
@@ -400,6 +408,20 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 		}
 	}
+}
+
+// stopWritten reports whether an authorized stop stands at the issue. A read
+// that fails says no: the request stays as it is and is asked again on the
+// next tick.
+func stopWritten(ctx context.Context, cfg config, issue sourceIssue, interval time.Duration) bool {
+	readCtx, release := context.WithTimeout(ctx, interval)
+	defer release()
+	rows, err := cfg.Backlog.Comments(readCtx, issue.Key, 0)
+	if err != nil {
+		return false
+	}
+	stop, err := stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
+	return err == nil && stop != nil
 }
 
 func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time, interval time.Duration, collected chan<- struct{}, observe func(string)) {

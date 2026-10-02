@@ -226,83 +226,123 @@ func TestAStopDuringAQuestionIsNotAnAnswer(t *testing.T) {
 
 // A requester who writes the stop instruction while the runtime waits for
 // their answer is told nothing about an answer, and the issue does not pass
-// through the working status on its way to stopped. Before this, the queue
-// treated the stop like an answer on the way to the stop machinery: it posted
-// that the reply was received and the work went on, and moved the issue back
-// to processing, a moment before stopping it.
+// through the working status or the runtime's hands on its way to stopped.
+// Before this, the queue treated the stop like an answer on the way to the
+// stop machinery: it posted that the reply was received and the work went on,
+// moved the issue back to processing and assigned it to the runtime, a moment
+// before stopping it. The stop also does not wait for the model budget: it
+// launches no model, and before this a short budget held it, told the
+// requester the work was paused and would carry on, and repeated the moves
+// above on every tick until the budget returned.
 func TestAStopWhileWaitingIsNotAnnouncedAsAnAnswer(t *testing.T) {
-	cfg := questionConfiguration(t)
-	cfg.Intake.Announce = true
-	cfg.Intake.Statuses = &statusConfig{Processing: 1001, AwaitingRequester: 1002, Delivered: 3, Stopped: 1}
-	root := t.TempDir()
-	var mu sync.Mutex
-	comments := []json.RawMessage{}
-	var posted, statuses []string
-	// The tracker lists comments by id, so every new one gets the next id.
-	next := int64(800)
-	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if r.URL.Host != "watch-tracker.example" {
-			return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "ask_requester"}}}), nil
+	for _, shortBudget := range []bool{false, true} {
+		cfg := questionConfiguration(t)
+		cfg.Intake.Announce = true
+		cfg.Intake.Assign = true
+		cfg.Intake.Statuses = &statusConfig{Processing: 1001, AwaitingRequester: 1002, Delivered: 3, Stopped: 1}
+		var mu sync.Mutex
+		remaining, shortReadings := "20", 0
+		if shortBudget {
+			cfg.Intake.MinModelCredit = 5
+			server := creditServer(t, func() string {
+				mu.Lock()
+				defer mu.Unlock()
+				if remaining == "3" {
+					shortReadings++
+				}
+				return `{"data":{"limit":50,"usage":30,"limit_remaining":` + remaining + `,"limit_reset":"2026-10-01"}}`
+			})
+			cfg.Intake.ModelCreditURL, cfg.Intake.Client = server.URL, server.Client()
 		}
-		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
-			return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
-			if err := r.ParseForm(); err != nil {
-				return nil, err
+		root := t.TempDir()
+		comments := []json.RawMessage{}
+		var posted, moves []string
+		// The tracker lists comments by id, so every new one gets the next id.
+		next := int64(800)
+		useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if r.URL.Host != "watch-tracker.example" {
+				return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "ask_requester"}}}), nil
 			}
-			posted = append(posted, r.PostForm.Get("content"))
-			next++
-			// The runtime's own account, 900, is neither the requester nor an operator.
-			comments = append(comments, issueComment(next, 900, r.PostForm.Get("content")))
-			return selectionReply(r, 201, map[string]any{"id": next, "content": r.PostForm.Get("content")}), nil
-		case r.Method == http.MethodPatch:
-			if err := r.ParseForm(); err != nil {
-				return nil, err
+			switch {
+			case r.URL.Path == "/api/v2/users/myself":
+				// The runtime's own account is neither the requester nor an operator.
+				return selectionReply(r, 200, map[string]any{"id": 900}), nil
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
+				return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+				if err := r.ParseForm(); err != nil {
+					return nil, err
+				}
+				posted = append(posted, r.PostForm.Get("content"))
+				next++
+				comments = append(comments, issueComment(next, 900, r.PostForm.Get("content")))
+				return selectionReply(r, 201, map[string]any{"id": next, "content": r.PostForm.Get("content")}), nil
+			case r.Method == http.MethodPatch:
+				if err := r.ParseForm(); err != nil {
+					return nil, err
+				}
+				reply := map[string]any{"id": 51}
+				if id := r.PostForm.Get("statusId"); id != "" {
+					moves = append(moves, "status:"+id)
+					n, _ := strconv.Atoi(id)
+					reply["status"] = map[string]any{"id": n}
+				}
+				if id := r.PostForm.Get("assigneeId"); id != "" {
+					moves = append(moves, "assignee:"+id)
+					n, _ := strconv.Atoi(id)
+					reply["assignee"] = map[string]any{"id": n}
+				}
+				return selectionReply(r, 200, reply), nil
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues"):
+				return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
 			}
-			id := r.PostForm.Get("statusId")
-			statuses = append(statuses, id)
-			n, _ := strconv.Atoi(id)
-			return selectionReply(r, 200, map[string]any{"id": 51, "status": map[string]any{"id": n}}), nil
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues"):
-			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
+			return nil, http.ErrNotSupported
+		})
+		log := &lockedLog{}
+		finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+		moved := func(move string) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(moves) > 0 && moves[len(moves)-1] == move
 		}
-		return nil, http.ErrNotSupported
-	})
-	log := &lockedLog{}
-	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
-	defer finish()
-	moved := func(status string) bool {
+		// The question was put, and the issue is in the requester's hands.
+		waitFor(t, func() bool {
+			state, err := loadWatchState(root, 51)
+			_, recorded := questionBoundaryAt(t, root)
+			return err == nil && state.Waiting && recorded && moved("assignee:55")
+		})
+		if shortBudget {
+			// The budget is short before the stop is written, and the queue
+			// has read it so on ticks of its own.
+			mu.Lock()
+			remaining = "3"
+			mu.Unlock()
+			waitFor(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return shortReadings >= 2
+			})
+		}
 		mu.Lock()
-		defer mu.Unlock()
-		return len(statuses) > 0 && statuses[len(statuses)-1] == status
-	}
-	waitFor(t, func() bool {
-		state, err := loadWatchState(root, 51)
-		_, recorded := questionBoundaryAt(t, root)
-		return err == nil && state.Waiting && recorded && moved("1002")
-	})
-	mu.Lock()
-	next++
-	comments = append(comments, issueComment(next, 55, "停止"))
-	mu.Unlock()
-	waitFor(t, func() bool { return moved("1") })
-	time.Sleep(60 * time.Millisecond) // several more ticks
-	finish()
-	mu.Lock()
-	defer mu.Unlock()
-	for _, text := range posted {
-		if strings.Contains(text, resumedNoticeText) {
-			t.Fatalf("a stop was announced as an answer: %q", posted)
+		next++
+		comments = append(comments, issueComment(next, 55, "停止"))
+		mu.Unlock()
+		waitFor(t, func() bool { return moved("status:1") })
+		time.Sleep(60 * time.Millisecond) // several more ticks
+		finish()
+		mu.Lock()
+		if got := strings.Join(posted, " | "); got != "受け付けました。すぐに自動処理を始めます。" {
+			t.Fatalf("short budget %t: the requester was told: %s", shortBudget, got)
 		}
-	}
-	if got := strings.Join(statuses, ","); got != "1001,1002,1" {
-		t.Fatalf("the issue moved %s; a stop while waiting goes from awaiting to stopped", got)
-	}
-	if asked := askedTimes(t, root); asked != 1 {
-		t.Fatalf("questions asked=%d", asked)
+		if got := strings.Join(moves, ","); got != "status:1001,assignee:900,status:1002,assignee:55,status:1" {
+			t.Fatalf("short budget %t: the issue moved %s; a stop while waiting goes from awaiting straight to stopped and stays with the requester", shortBudget, got)
+		}
+		mu.Unlock()
+		if asked := askedTimes(t, root); asked != 1 {
+			t.Fatalf("short budget %t: questions asked=%d", shortBudget, asked)
+		}
 	}
 }
 
