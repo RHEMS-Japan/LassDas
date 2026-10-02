@@ -729,12 +729,32 @@ func (j *job) endedUnchanged() bool {
 }
 
 // endedClosed says whether the delivery's own receipt records that a person
-// closed the pull request without merging it, so nothing was delivered.
+// closed the pull request without merging it, so nothing of that round was
+// delivered.
 func (j *job) endedClosed() bool {
 	var receipt struct {
 		Closed bool `json:"closed_unmerged"`
 	}
 	return j.Receipt != "" && json.Unmarshal([]byte(j.Receipt), &receipt) == nil && receipt.Closed
+}
+
+// mergedBefore says whether the receipt records an earlier round of the
+// request that was merged: a later round's closed pull request does not undo it.
+func (j *job) mergedBefore() bool {
+	var receipt struct {
+		Previous []struct {
+			MergeSHA string `json:"merge_sha"`
+		} `json:"previous"`
+	}
+	if j.Receipt == "" || json.Unmarshal([]byte(j.Receipt), &receipt) != nil {
+		return false
+	}
+	for _, round := range receipt.Previous {
+		if round.MergeSHA != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // endedUnmerged says whether the delivery's own receipt records a pull request
@@ -772,6 +792,9 @@ func (j *job) derive(now time.Time) {
 			}
 		case state.Done && j.endedClosed():
 			j.Status = "done; the pull request was closed without being merged, so nothing was delivered"
+			if j.mergedBefore() {
+				j.Status = "done; an earlier round was merged, and the last pull request was closed without being merged"
+			}
 			if !last.IsZero() {
 				end = last
 			}
@@ -1619,6 +1642,7 @@ var japanese = map[string]string{
 	"Done without a change": "変更なしで完了", "done without a change; nothing was delivered": "変更なしで完了 (何も納品していません)",
 	"Done with the pull request open": "PR を開いて完了", "Done, the pull request closed unmerged": "PR が閉じられて終了",
 	"done; the pull request was closed without being merged, so nothing was delivered": "完了 (PR はマージされずに閉じられたので、何も納品していません)", "done; the pull request is open, its merge left to a person": "完了 (PR は開いたまま。merge は人に任せています)",
+	"done; an earlier round was merged, and the last pull request was closed without being merged": "完了 (前の回はマージ済み。最後の PR はマージされずに閉じられました)",
 	"no checkout yet": "checkout はまだない", "more under files": "件は files 配下", "Position": "工程の位置", "model": "モデル", "links": "リンク",
 	"The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.": "この工程の実行中に本体が止まりました。報告は途中までの可能性があり、操作は既に反映されているかもしれません。作業場所と外部の状態を確認してから繰り返します。", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
 }

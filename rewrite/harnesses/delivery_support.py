@@ -236,6 +236,14 @@ def run_git(command, *, describe, timeout=None, retry=True, cwd=None):
     return with_retry(attempt, describe) if retry else attempt()
 
 
+def some_paths(paths, count=None):
+    """At most twenty paths for a person to read, with how many there are in
+    all when that is more."""
+    count = len(paths) if count is None else count
+    named = ", ".join(paths[:20])
+    return named if count <= 20 else "%d paths, the first 20 of them %s" % (count, named)
+
+
 def timestamp():
     """One machine-readable UTC instant, for the receipt only."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
