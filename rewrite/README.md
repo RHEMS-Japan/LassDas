@@ -447,10 +447,10 @@ request as done without a change, not as delivered. The setting is off by
 default and the shipped example leaves it off. An ending with nothing
 delivered needs a reviewer's verdict: when Git lists no changed path and no
 earlier delivery round committed one, the shipped review command lets the work
-through only on a verdict that does not object, and when none can be obtained
-(the model service is down or answers without one, a setting keeps the review
-from running, an unexpected error) it ends 1, so the work goes back to the
-work stage. The delivery itself does not look at the review, so turn the
+through only on a verdict that does not object. When none can be obtained it
+keeps asking or holds, as it does for any change (below), and even with its
+opt-in for passing work through unreviewed it ends 1 here, so the work goes
+back to the work stage. The delivery itself does not look at the review, so turn the
 setting on only where that review runs before it. The review command tells its
 model in plain words when no file was changed at all, and that a change that
 was needed but not made is a blocking defect.
@@ -529,22 +529,46 @@ and log live in the process's own directory, `TASK_HOME`). The runtime reads
 the exit status and nothing else. There is no cap on send-backs: the review
 sends the work back for as long as it finds a blocking defect, the count so far
 is printed with each verdict, and a run that will not converge is ended by the
-requester's stop comment, not by a limit. Only a real blocking verdict exits 1: everything that keeps a
-verdict from being obtained, a mistyped setting, a test command that cannot
-start, an endpoint that is not HTTPS, a change that cannot be read, diff
-paths that match no change, a model service that is down or returns none,
-ends 0 and prints `NOT REVIEWED` with the reason, which joins the history for
-the worker and the report writer. A review that could not be performed is not
-a defect in the change, and an ordered run would otherwise send the work
-round for ever. The one exception is a checkout in which Git lists no changed
-path and no earlier delivery round committed one: work let through from there
-can end with nothing delivered, so it is let through only on a verdict that
-does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
+requester's stop comment, not by a limit.
+
+No verdict, no pass. The adversarial review is what justifies delivering
+without a person, so by default the command exits 0 only on a verdict that
+does not object and 1 only on one that does; without a verdict it does
+neither. Trouble with the model service (a connection that fails or times
+out, an HTTP error, a reply without a verdict), and any unexpected error, is
+waited out: the models named in `REVIEW_MODELS` (newline- or comma-separated,
+in order of preference; `REVIEW_MODEL` alone counts as the only one) are
+asked in turn, round after round, the wait between rounds growing from
+`REVIEW_RETRY_SECONDS` (5) to `REVIEW_RETRY_CAP_SECONDS` (300), and the
+printed result names the model that gave the verdict. What asking again cannot
+get past, a setting that is missing or mistyped, an endpoint that is not
+HTTPS, a credential that is not set, test commands that cannot be read, holds
+the review: the reason is printed once and then a short line every
+`REVIEW_HOLD_SECONDS` (900), and the stage waits there. A workspace or a
+`TASK_HOME` that cannot be used, or a change that cannot be read, is looked at
+again at each of those intervals, and the review goes on once it can. While it
+waits, the command says on stderr what is happening whenever that changes
+(which model, why it failed, when it asks again), so the status page's live
+view shows it without a line per request. The runtime's own notice tells the
+requester when a stage runs long; an operator who fixes a setting restarts the
+engine, which launches the stage afresh. The send-back counter and the log
+only inform: a verdict stands whether or not they could be saved. When
+`REVIEW_DIFF_PATHS` matches none of what changed, the reviewer is shown the
+whole change instead of none of it.
+
+`REVIEW_UNAVAILABLE=pass` is the operator's opt-in for the old behaviour, and
+it delivers unreviewed work when no verdict can be obtained: after
+`REVIEW_ATTEMPTS` requests (3), the models in turn, or at once where the review
+would otherwise hold, the command prints `NOT REVIEWED` with the reason and
+exits 0. One rule comes before it: a checkout in which Git lists no changed
+path and no earlier delivery round committed one can end with nothing
+delivered if it is let through, so it is let through only on a verdict, and
+without one the command ends 1 with `NOT REVIEWED` and the reason.
 New files are read from Git's own list, so a name in Japanese or a new
 symbolic link reaches the reviewer as it is. A diff or test output longer than
-its limit is cut with a visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
-sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
-the command prints or writes.
+its limit is cut with a visible marker, never silently. The credential named
+by `REVIEW_KEY_ENV` is sent only to `REVIEW_MODEL_URL`, over HTTPS, and is
+scrubbed from everything the command prints or writes.
 
 After every stage the engine appends its own record of what it observed: how
 each process ended, and the content of the file named by that process's
