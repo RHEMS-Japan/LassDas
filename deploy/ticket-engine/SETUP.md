@@ -98,7 +98,7 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
 - **An image built from commit f71872f (2026-10-02) or a later one.** The two
   network init containers write the egress rules with the image's own
   iptables (`/usr/sbin/xtables-nft-multi`), which older images do not carry.
-  The image `docs/DISTRIBUTION.json` names is such an image. On 2026-10-03 the
+  The image `docs/DISTRIBUTION.json` names is such an image. On 2026-10-02 the
   installation named above ran both from the image built from commit 2ccff5e,
   with this directory's rules (its own DNS address in place of the
   placeholder): both exited 0 with no restart and no log line, the egress
@@ -1208,8 +1208,8 @@ It has not been run as written against a real queue.
 ### Rolling it out
 
 1. If you can, wait until the status page shows nothing running.
-2. Put the new `image` reference into all six places in your
-   `statefulset.yaml` (`network-v4`, `network-v6`, `policy`, `mirror`,
+2. Copy your `statefulset.yaml` as it is, then put the new `image` reference
+   into all six places in it (`network-v4`, `network-v6`, `policy`, `mirror`,
    `engine`, `status`) and apply it. The Pod is replaced.
 3. Check as in section 7: the configuration check inside the Pod, the Pod
    ready with no restarts, the status page, the engine's log (it opens with
@@ -1256,6 +1256,10 @@ kubectl -n "$NS" logs "$POD" -c <container> --previous
   times: `periodSeconds` and `failureThreshold` of the `mirror` entry), and the
   container is then restarted in the middle of its first copy. For a
   repository whose first copy takes longer, raise `failureThreshold`.
+
+After changing the StatefulSet for any of these, delete the Pod as well: the
+StatefulSet does not replace a Pod that is not Ready
+([section 10](#rolling-it-out)).
 
 ### The engine container restarts right after it starts
 

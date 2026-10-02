@@ -72,7 +72,8 @@ spec:
         # Both run the image's own iptables (the nf_tables backend,
         # /usr/sbin/xtables-nft-multi). An image built from a commit before
         # f71872f (2026-10-02) has no such program. The installation SETUP.md
-        # section 1 names ran both from this image.
+        # section 1 names ran both from the runtime image (that section says
+        # which build).
         - name: network-v4
           image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
