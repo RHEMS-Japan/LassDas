@@ -40,18 +40,20 @@ class ModelStandIn:
                 if reply.get("status", 200) != 200:
                     payload = json.dumps({"error": reply.get("error", "service error")}).encode()
                     self.send_response(reply["status"])
-                elif reply.get("verdict") is None and "arguments" not in reply:
+                elif reply.get("verdict") is None and "arguments" not in reply and "calls" not in reply:
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
                     self.send_response(200)
                 else:
-                    if "arguments" in reply:
-                        arguments = reply["arguments"]
+                    if "calls" in reply:
+                        calls = reply["calls"]
+                    elif "arguments" in reply:
+                        calls = [reply["arguments"]]
                     else:
                         blocking, findings = reply["verdict"]
-                        arguments = {"blocking": blocking, "findings": findings}
+                        calls = [{"blocking": blocking, "findings": findings}]
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
-                        {"id": "call-1", "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
-                            arguments)}}]}}]}).encode()
+                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
+                            arguments)}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -365,32 +367,47 @@ class AdversarialReviewTests(unittest.TestCase):
     def test_blocking_is_read_when_its_meaning_is_plain_and_the_findings_always_stay(self):
         # REPRO 07 printed blocking null beside a finding that a needed change
         # is missing as PASSED; read as true or false only, "true" and 1 then
-        # let a change through unreviewed with the findings gone. A plain
-        # value is a verdict, in any letter case of the field; anything else
-        # is none, and what the reviewer wrote stays in the output and log.
-        cases = (("\"true\"", {"blocking": "true"}, "SENT BACK", 1, 1),
-                 ("\" TRUE \"", {"blocking": " TRUE "}, "SENT BACK", 1, 1),
-                 ("1", {"blocking": 1}, "SENT BACK", 1, 1),
-                 ("Blocking", {"Blocking": True}, "SENT BACK", 1, 1),
-                 ("\"false\"", {"blocking": "false"}, "PASSED", 0, 0),
-                 ("0", {"blocking": 0}, "PASSED", 0, 0),
-                 ("null", {"blocking": None}, "NOT REVIEWED", 0, 1),
-                 ("missing", {}, "NOT REVIEWED", 0, 1),
-                 ("\"maybe\"", {"blocking": "maybe"}, "NOT REVIEWED", 0, 1))
+        # let a change through unreviewed with the findings gone. Every call
+        # and every blocking field in any letter case is read: one plain true
+        # sends back, else one plain false passes, else there is no verdict.
+        # What the reviewer wrote stays in the output and the log every time.
+        sent_back, passed, none = ("SENT BACK", 1, 1), ("PASSED", 0, 0), ("NOT REVIEWED", 0, 1)
+        cases = (("\"true\"", [{"blocking": "true"}], sent_back),
+                 ("\" TRUE \"", [{"blocking": " TRUE "}], sent_back),
+                 ("1", [{"blocking": 1}], sent_back),
+                 ("\"yes\"", [{"blocking": "yes"}], sent_back),
+                 ("\"1\"", [{"blocking": "1"}], sent_back),
+                 ("Blocking", [{"Blocking": True}], sent_back),
+                 ("false and Blocking true", [{"blocking": False, "Blocking": True}], sent_back),
+                 ("false, then true", [{"blocking": False}, {"blocking": True}], sent_back),
+                 ("true, then false", [{"blocking": True}, {"blocking": False}], sent_back),
+                 ("\"false\"", [{"blocking": "false"}], passed),
+                 ("0", [{"blocking": 0}], passed),
+                 ("\"no\"", [{"blocking": "no"}], passed),
+                 ("\"0\"", [{"blocking": "0"}], passed),
+                 ("false and Blocking maybe", [{"blocking": False, "Blocking": "maybe"}], passed),
+                 ("null", [{"blocking": None}], none),
+                 ("missing", [{}], none),
+                 ("\"maybe\"", [{"blocking": "maybe"}], none),
+                 ("2", [{"blocking": 2}], none),
+                 ("1.5", [{"blocking": 1.5}], none),
+                 ("is_blocking", [{"is_blocking": True}], none))
         for tree in ("a change", "no change"):
             if tree == "no change":
                 self.leave_unchanged()
-            for case, fields, outcome, changed, unchanged in cases:
-                finding = "REQUIRED_NEW_BEHAVIOR is missing (%s, %s)." % (case, tree)
-                reply = {"arguments": dict(fields, Findings=finding)}
-                service = ModelStandIn([reply, reply])
+            for case, calls, (outcome, changed, unchanged) in cases:
+                findings = ["REQUIRED_NEW_BEHAVIOR is missing (%s, %s, call %d)." % (case, tree, number)
+                            for number in range(1, len(calls) + 1)]
+                service = ModelStandIn([{"calls": [dict(fields, Findings=finding)
+                                                   for fields, finding in zip(calls, findings)]}])
                 self.addCleanup(service.close)
-                finished = self.run_review(service)
+                finished = self.run_review(service, REVIEW_ATTEMPTS="1")
                 status = changed if tree == "a change" else unchanged
                 self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
                 self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
-                self.assertIn(finding, finished.stdout, (case, tree))
-                self.assertIn(finding, self.review_log(), (case, tree))
+                for finding in findings:
+                    self.assertIn(finding, finished.stdout, (case, tree))
+                    self.assertIn(finding, self.review_log(), (case, tree))
                 if outcome == "NOT REVIEWED":
                     self.assertIn("no verdict could be obtained", finished.stdout, (case, tree))
                     if tree == "no change":
