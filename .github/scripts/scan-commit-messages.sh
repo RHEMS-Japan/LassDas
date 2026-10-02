@@ -9,9 +9,26 @@
 # environment, and needs the history of the range and the default branch (a
 # checkout with fetch-depth: 0).
 set -euo pipefail
-if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
+list="${ENGINE_PURITY_TOKENS:-}"
+if [ -z "${list//[[:space:]]/}" ]; then
   echo "ENGINE_PURITY_TOKENS is not set; the commit-message scan is skipped"
   exit 0
+fi
+# The list is read the way the Go scan (rewrite/internal/enginepurity) reads
+# it: split at commas and line breaks (CR or LF), each entry trimmed of the
+# blanks around it and lowered, empty entries dropped, and the rest numbered
+# from 1, so that #N names the same entry in both scans.
+tokens=()
+while IFS= read -r token; do
+  token="${token#"${token%%[![:space:]]*}"}"
+  token="${token%"${token##*[![:space:]]}"}"
+  if [ -n "$token" ]; then
+    tokens+=("$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')")
+  fi
+done < <(printf '%s\n' "$list" | tr ',\r' '\n')
+if [ "${#tokens[@]}" -eq 0 ]; then
+  echo "ENGINE_PURITY_TOKENS is set but holds no tokens" >&2
+  exit 1
 fi
 if [ -n "$RANGE_BASE" ] && git cat-file -e "$RANGE_BASE" 2>/dev/null; then
   range=("$RANGE_BASE..$RANGE_HEAD")
@@ -48,18 +65,13 @@ fi
 messages=$(git log --format=%B "${range[@]}")
 count=$(git rev-list --count "${range[@]}")
 lowered=$(printf '%s' "$messages" | tr '[:upper:]' '[:lower:]')
-index=0
 failed=0
-IFS=',' read -ra tokens <<< "$(printf '%s' "$ENGINE_PURITY_TOKENS" | tr '\n' ',')"
-for token in "${tokens[@]}"; do
-  index=$((index + 1))
-  token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | xargs)
-  [ -z "$token" ] && continue
+for index in "${!tokens[@]}"; do
   # Not `printf | grep -q`: grep stops at the first match, the printf still
   # writing a long text dies of SIGPIPE, and pipefail turns the match into a
   # miss. A here-string leaves nothing to cut short.
-  if grep -qF -e "$token" <<< "$lowered"; then
-    echo "a commit message in the pushed range contains forbidden identifier #$index - reword the commit"
+  if grep -qF -e "${tokens[index]}" <<< "$lowered"; then
+    echo "a commit message in the pushed range contains forbidden identifier #$((index + 1)) - reword the commit"
     failed=1
   fi
 done
