@@ -27,8 +27,10 @@ type GitHub struct {
 	KeyEnv     string `json:"key_env"`
 	// IntakeLabel narrows the intake to the open issues carrying it. Empty
 	// takes up every open issue.
-	IntakeLabel string       `json:"intake_label,omitempty"`
-	Client      *http.Client `json:"-"`
+	IntakeLabel string `json:"intake_label,omitempty"`
+	// Labels names the label set on an issue at each turn of the work.
+	Labels GitHubLabels `json:"labels"`
+	Client *http.Client `json:"-"`
 }
 
 const (
