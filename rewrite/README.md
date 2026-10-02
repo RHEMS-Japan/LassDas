@@ -511,7 +511,9 @@ like any finished run, with the `delivered` status and the hand-back where
 they are configured, although nothing reaches the integration branch until a
 person merges. The operator sees the open pull request at the service, the
 receipt on the status page, and, with `--dry-run`, a line saying that a
-delivery ends at the open pull request.
+delivery ends at the open pull request. The status page shows such a request
+as done with the pull request open, not as delivered, until a later delivery
+records that a person merged it.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
