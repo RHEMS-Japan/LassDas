@@ -173,6 +173,97 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("records no commit the request stands on", result.stderr)
         self.assertNotIn("unreachable", result.stdout)
 
+    def left_to_person_receipt(self, **fields):
+        """What the delivery records when it opened the pull request and left
+        the merge to a person (DELIVERY_MERGE_METHOD=none)."""
+        record = {"merge_method": "none", "merge_left_to_person": True, "merge_sha": None,
+                  "pull_request_url": "http://service.invalid/pulls/1"}
+        record.update(fields)
+        self.receipt(**record)
+
+    def test_an_unmerged_pull_request_is_verified_at_the_head_the_delivery_pushed(self):
+        self.left_to_person_receipt()
+        result = self.verify("/bin/sh -c 'grep -q delivered main.go'")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Fetched ticket/TICKET-41 of owner/project at commit %s." % self.delivered, result.stdout)
+        self.assertIn("This delivery did not merge pull request 1 (http://service.invalid/pulls/1); the merge was "
+                      "left to a person, and whether they merged it since is not looked at here.", result.stdout)
+        self.assertIn("The commit the delivery pushed is contained in ticket/TICKET-41.", result.stdout)
+        self.assertIn("The configured commands ran with commit %s checked out.\n" % self.delivered, result.stdout)
+        self.assertIn("0 of 1 configured verification commands failed.", result.stdout)
+
+    def test_an_unmerged_pull_request_whose_head_left_its_branch_is_not_verified(self):
+        self.left_to_person_receipt(head=self.unmerged)
+        result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The commit the delivery pushed is NOT contained in ticket/TICKET-41.", result.stdout)
+        self.assertIn("the commit the delivery pushed is not part of ticket/TICKET-41", result.stdout)
+        self.assertFalse((self.home / "ran-anyway").exists())
+
+    def test_an_unmerged_pull_request_whose_branch_is_gone_is_not_verified(self):
+        self.left_to_person_receipt(branch="ticket/TICKET-GONE")
+        result = self.verify("/bin/sh -c 'echo unreachable'", DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Could not read ticket/TICKET-GONE of owner/project, so nothing was verified.", result.stdout)
+        self.assertIn("fetch the pull request's branch ticket/TICKET-GONE", result.stdout)
+        self.assertNotIn("unreachable", result.stdout)
+
+    def test_a_pull_request_a_person_merged_is_verified_on_the_integration_branch(self):
+        self.left_to_person_receipt(merge_sha=self.merge)
+        result = self.verify("/bin/sh -c 'grep -q delivered main.go'")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Fetched master of owner/project", result.stdout)
+        self.assertIn("The receipt records pull request 1 merged as commit %s by someone else, not by the "
+                      "delivery." % self.merge, result.stdout)
+        self.assertIn("The merge commit is contained in master.", result.stdout)
+
+    def test_a_receipt_left_to_a_person_without_its_pushed_commit_is_refused(self):
+        self.left_to_person_receipt(head="")
+        result = self.verify("/bin/sh -c 'echo unreachable'")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("records no pushed commit and ticket branch to verify", result.stderr)
+
+    def test_endings_a_person_caused_end_the_check_without_running_anything(self):
+        # A pull request closed without a merge, or one whose branch a person
+        # changed: nothing of this delivery is left to verify, and failing would
+        # only send the work round again. The check says so and ends 0.
+        generated = ["build/out-%02d.txt" % number for number in range(20)]
+        for fields, said in (({"closed_unmerged": True, "ended_at": "2026-01-02T00:00:00Z"},
+                              "Nothing to check: when the delivery last looked, at 2026-01-02T00:00:00Z, pull request "
+                              "1 (http://service.invalid/pulls/1) had been closed by a person without being merged, "
+                              "so nothing of this request had been delivered."),
+                             ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": self.delivered},
+                              "Not checked: a person changed branch ticket/TICKET-41 of pull request 1 "
+                              "(http://service.invalid/pulls/1); it was at %s when the delivery last looked. The "
+                              "delivery's commit %s is not on that branch" % (self.unmerged, self.delivered)),
+                             ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": None,
+                               "not_committed": ["go.mod", "main.go"], "not_committed_count": 2},
+                              "The delivery's last commit %s is on that branch. The workspace then held changes that "
+                              "were not committed (go.mod, main.go), which the delivery did not put in the pull "
+                              "request." % self.delivered),
+                             ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": None,
+                               "not_committed": generated, "not_committed_count": 25},
+                              "The workspace then held changes that were not committed (25 paths, the first 20 of "
+                              "them %s)" % ", ".join(generated)),
+                             ({"closed_unmerged": True, "pull_request": 2,
+                               "pull_request_url": "http://service.invalid/pulls/2",
+                               "previous": [{"pull_request": 1, "merge_sha": self.merge}]},
+                              "Not checked: when the delivery last looked, pull request 2 "
+                              "(http://service.invalid/pulls/2) had been closed by a person without being merged, so "
+                              "nothing of this round had been delivered. An earlier round of this request was merged "
+                              "as commit %s through pull request 1; this check does not look at it." % self.merge)):
+            self.left_to_person_receipt(**fields)
+            result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home,
+                                 DELIVERY_REMOTE_URL=str(self.root / "unreachable.git"))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(said, result.stdout)
+            self.assertIn("not run", result.stdout)
+            self.assertFalse((self.home / "ran-anyway").exists())
+            if fields.get("previous"):
+                # An earlier round was merged: something was delivered.
+                self.assertNotIn("Nothing to check", result.stdout)
+                self.assertNotIn("nothing of this request", result.stdout)
+
     def test_check_mode_runs_the_commands_without_a_delivery_and_ends_non_zero(self):
         result = self.verify("/bin/sh -c 'echo checked'", "--dry-run")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)

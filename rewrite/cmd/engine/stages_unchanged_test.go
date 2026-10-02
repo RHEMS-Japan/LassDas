@@ -67,13 +67,21 @@ func TestUnchangedStagesRoleHelper(t *testing.T) {
 		if err := os.MkdirAll("report", 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile("report/result.md", []byte(unchangedReport), 0600); err != nil {
+		// A report carries what the record says happened to the pull request.
+		report := unchangedReport
+		for _, line := range strings.Split(string(prompt), "\n") {
+			if strings.Contains(line, "was closed by a person without being merged") {
+				report += line + "\n"
+				break
+			}
+		}
+		if err := os.WriteFile("report/result.md", []byte(report), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Contains(fixtureComments(t), unchangedReport) {
-			fixturePost(t, unchangedReport)
+		if !slices.Contains(fixtureComments(t), report) {
+			fixturePost(t, report)
 		}
-		fmt.Print(unchangedReport)
+		fmt.Print(report)
 	case "confirm_report":
 		reported, err := os.ReadFile("report/result.md")
 		if err != nil {
@@ -110,6 +118,12 @@ type unchangedRun struct {
 type unchangedOptions struct {
 	// writes asks the work stage to write src/farewell.txt.
 	writes bool
+	// method is the delivery's DELIVERY_MERGE_METHOD; empty leaves it unset.
+	method string
+	// checkFailsOnce makes the check after delivery fail the first time.
+	checkFailsOnce bool
+	// closedByPerson has a person close each pull request right after it opens.
+	closedByPerson bool
 }
 
 func (run *unchangedRun) workspace() string {
@@ -202,6 +216,9 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				"head": body["head"], "base": body["base"], "state": "open", "merged": false}
 			pulls = append(pulls, pull)
 			reply(201, pull)
+			if options.closedByPerson {
+				pull["state"] = "closed"
+			}
 		case number < 1 || number > len(pulls):
 			reply(404, map[string]string{"message": "no such pull request"})
 		case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/merge"):
@@ -274,12 +291,18 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 				env["DELIVERY_ALLOWED_PATHS"], env["DELIVERY_API_BASE"] = "src", service.URL
 				// The operator's opt-in. The shipped example leaves it off.
 				env["DELIVERY_ALLOW_UNCHANGED"] = "1"
+				if options.method != "" {
+					env["DELIVERY_MERGE_METHOD"] = options.method
+				}
 				p.Secrets = map[string]string{"GITHUB_TOKEN": "DELIVERY_TEST_TOKEN"}
 				p.Receipt = ".git/ticket-engine/delivery.json"
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("deliver_git.py"))
 			case "verify_merged":
 				maps.Copy(env, delivery)
 				env["VERIFY_COMMANDS"] = `/bin/sh -c "grep -q Hello src/greeting.txt"`
+				if options.checkFailsOnce {
+					env["VERIFY_COMMANDS"] = `/bin/sh -c "test -e $TASK_HOME/checked-once || { touch $TASK_HOME/checked-once; exit 1; }"`
+				}
 				p.Secrets = map[string]string{"GITHUB_TOKEN": "DELIVERY_TEST_TOKEN"}
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("verify_merged.py"))
 			default:
@@ -590,5 +613,75 @@ func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.
 	}
 	if delivered := run.git(run.target, "show", "refs/heads/master:src/farewell.txt"); delivered+"\n" != farewell {
 		t.Fatalf("the integration branch holds %q", delivered)
+	}
+}
+
+// A person closes the pull request a delivery left to them. The check after
+// delivery fails once, so the run goes back through the work to the delivery,
+// which finds the pull request closed: the request then ends, with nothing
+// delivered, no pull request reopened or opened in its place, and the report
+// saying what happened, instead of going round for as long as the queue runs.
+func TestARequestWhosePullRequestAPersonClosedEndsAndSaysSo(t *testing.T) {
+	run := startUnchangedRun(t, 90, neededChangeRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
+		verdict(w, false, "")
+	}, unchangedOptions{writes: true, method: "none", checkFailsOnce: true, closedByPerson: true})
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		state, err := loadWatchState(run.queue, run.issue)
+		if err == nil && state.Done {
+			break
+		}
+		if time.Now().After(deadline) {
+			run.finish()
+			t.Fatalf("the run did not end: step=%s error=%v\n%+v\n%s", state.Step, err, state.History, run.log.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	run.finish()
+	state, err := loadWatchState(run.queue, run.issue)
+	if err != nil || state.Step != "confirm_report" {
+		t.Fatalf("the run ended at %s: %v", state.Step, err)
+	}
+	var ran []string
+	closed, nothingToCheck := 0, 0
+	for _, result := range state.History {
+		switch {
+		case result.Speaker == "runtime":
+			ran = append(ran, result.Role)
+		case result.Role == "deliver" && strings.Contains(result.Output, "was closed by a person without being merged"):
+			if result.Error != "" {
+				t.Fatalf("the delivery that found the pull request closed failed: %+v", result)
+			}
+			closed++
+		case result.Role == "verify_merged" && strings.HasPrefix(result.Output, "Nothing to check"):
+			nothingToCheck++
+		}
+	}
+	want := []string{"elicit", "work", "verify", "review", "deliver", "verify_merged", "work", "verify", "review", "deliver",
+		"verify_merged", "report", "confirm_report"}
+	if !slices.Equal(ran, want) || closed != 1 || nothingToCheck != 1 {
+		t.Fatalf("the stages ran as %v (closed said %d times, nothing to check %d times), not %v", ran, closed, nothingToCheck, want)
+	}
+	var receipt map[string]any
+	data, err := os.ReadFile(filepath.Join(run.workspace(), ".git", "ticket-engine", "delivery.json"))
+	if err != nil || json.Unmarshal(data, &receipt) != nil || receipt["closed_unmerged"] != true {
+		t.Fatalf("the receipt does not record the closed pull request: %s %v", data, err)
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	opened := 0
+	for _, call := range run.serviceCalls {
+		if call == "POST /repos/owner/project/pulls" {
+			opened++
+		}
+		if strings.HasPrefix(call, "PUT ") {
+			t.Fatalf("something was merged: %v", run.serviceCalls)
+		}
+	}
+	if opened != 1 {
+		t.Fatalf("%d pull requests were opened", opened)
+	}
+	if len(run.stored) != 1 || !strings.Contains(run.stored[0], "was closed by a person without being merged") {
+		t.Fatalf("the report does not say what happened to the pull request: %q", run.stored)
 	}
 }

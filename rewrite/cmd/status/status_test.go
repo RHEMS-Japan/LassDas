@@ -859,6 +859,81 @@ func TestARequestThatEndedWithoutAChangeIsNotShownAsDelivered(t *testing.T) {
 	expectAll(t, string(japanese), "変更なしで完了 <b>1</b>", "変更なしで完了 (何も納品していません)", "納品済み <b>1</b>")
 }
 
+// A delivery that ended at the open pull request merged nothing, and the page
+// says so until a later delivery records that a person merged it.
+func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	done := chain.State{Done: true, Step: "confirm_report", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "confirm_report"}}},
+		History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}
+	for id, receipt := range map[string]string{
+		"25": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 5, "pull_request_url": "http://service.invalid/pulls/5"}`,
+		"26": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 6, "merge_sha": "MERGED-BY-A-PERSON"}`,
+		"27": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 7, "closed_unmerged": true}`,
+	} {
+		writeJob(t, root, id, done)
+		path := filepath.Join(root, "jobs", id, "workspace", ".git", "ticket-engine", "delivery.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(receipt), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `<article class="card unmerged" data-key="EXAMPLE-25">`, `<article class="card delivered" data-key="EXAMPLE-26">`,
+		`<article class="card closed" data-key="EXAMPLE-27">`, `Done with the pull request open <b>1</b>`, `Delivered <b>1</b>`,
+		`Done, the pull request closed unmerged <b>1</b>`, "done; the pull request is open, its merge left to a person",
+		"done; the pull request was closed without being merged, so nothing was delivered")
+	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "PR を開いて完了 <b>1</b>", "完了 (PR は開いたまま。merge は人に任せています)",
+		"PR が閉じられて終了 <b>1</b>", "完了 (PR はマージされずに閉じられたので、何も納品していません)")
+}
+
+// A person merged an earlier round of the request and closed the pull request
+// of a later one: something was delivered, and the page does not say otherwise.
+func TestAClosedPullRequestAfterAMergedRoundIsNotShownAsNothingDelivered(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	writeJob(t, root, "28", chain.State{Done: true, Step: "confirm_report", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "confirm_report"}}},
+		History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", StartedAt: started, FinishedAt: started.Add(time.Minute)}}})
+	path := filepath.Join(root, "jobs", "28", "workspace", ".git", "ticket-engine", "delivery.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	receipt := `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 8, "closed_unmerged": true, "previous": [{"pull_request": 7, "merge_sha": "MERGED-BY-A-PERSON"}]}`
+	if err := os.WriteFile(path, []byte(receipt), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `<article class="card closed" data-key="EXAMPLE-28">`,
+		"done; an earlier round was merged, and the last pull request was closed without being merged")
+	if strings.Contains(body, "nothing was delivered") {
+		t.Error("a request with a merged round is said to have delivered nothing")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "完了 (前の回はマージ済み。最後の PR はマージされずに閉じられました)")
+	if strings.Contains(string(japanese), "何も納品していません") {
+		t.Error("a request with a merged round is said to have delivered nothing, in Japanese")
+	}
+}
+
 func TestASideRoleWithNoStageBehindItStaysInTheOtherColumn(t *testing.T) {
 	root := fixtureQueue(t)
 	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
