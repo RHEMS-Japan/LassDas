@@ -342,8 +342,10 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 		live = entries
 	}
 	// first is when each role's earliest recorded launch began. A record
-	// without a time cannot be placed after anything, so it reads as the
-	// earliest of all.
+	// without a start cannot be placed after anything, so it reads as the
+	// earliest of all: when it ended is not when the stage began, as the note
+	// written after a restart for a launch the restart cut shows, which ends
+	// at the restart and began before it.
 	var first map[string]time.Time
 	for _, stage := range cfg.Workflow.Stages {
 		if stage.Announce == "" {
@@ -374,12 +376,8 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 			first = map[string]time.Time{}
 			if state, err := savedHistory(directory); err == nil {
 				for _, result := range state.History {
-					at := result.StartedAt
-					if at.IsZero() {
-						at = result.FinishedAt
-					}
-					if earliest, seen := first[result.Role]; !seen || at.Before(earliest) {
-						first[result.Role] = at
+					if earliest, seen := first[result.Role]; !seen || result.StartedAt.Before(earliest) {
+						first[result.Role] = result.StartedAt
 					}
 				}
 			}

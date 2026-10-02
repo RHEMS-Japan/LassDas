@@ -194,7 +194,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 	// The queue learns which kinds of notice this engine posts before anything
 	// is accepted or said, so a request accepted from here on is not older
 	// than its kinds, and one delivered or begun before is not news now.
-	if err := startNoticeKinds(filepath.Dir(jobs), cfg, time.Now()); err != nil {
+	if err := startNoticeKinds(filepath.Dir(jobs), cfg, time.Now(), observe); err != nil {
 		observe("the queue's notice kinds were not brought up to date; a kind it lacks starts when first posted: " + err.Error())
 	}
 	// Discovery must not hold up cancellation or local recovery of already

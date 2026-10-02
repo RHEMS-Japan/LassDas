@@ -262,6 +262,81 @@ func TestRestartObservesInterruptedActionBeforeAnyRepeat(t *testing.T) {
 	}
 }
 
+// A launch keeps its start while it runs and drops it when it returns. One cut
+// by a restart leaves no record of its own, so the note written for it says
+// when it began: a stage taken up again is not read as one that began at the
+// restart. A state saved before the start was kept still loads, and its note
+// has no start, which no reader can place after anything.
+func TestTheNoteForAnInterruptedLaunchSaysWhenItBegan(t *testing.T) {
+	const request = "Take the stage up again after a restart."
+	run := func(t *testing.T, directory string) (State, State) {
+		t.Helper()
+		store, err := Open(directory, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		var during State
+		engine := Chain{Store: store, Router: testRouter(func(_ context.Context, state State) (Assignment, error) {
+			for _, result := range state.History {
+				if result.Speaker == "worker" {
+					return Assignment{Role: "done"}, nil
+				}
+			}
+			return Assignment{Role: "work"}, nil
+		}), Executor: testExecutor(func(context.Context, Assignment, State) []Result {
+			during, _ = store.Load()
+			return []Result{{Role: "work", Speaker: "worker", Output: "worked"}}
+		})}
+		if err := engine.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		after, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return during, after
+	}
+	t.Run("a launch keeps its start while it runs", func(t *testing.T) {
+		directory := t.TempDir()
+		before := time.Now().UTC()
+		during, after := run(t, directory)
+		if during.Pending == nil || during.PendingSince.Before(before) || during.PendingSince.After(time.Now().UTC()) {
+			t.Fatalf("the running launch kept %v as its start", during.PendingSince)
+		}
+		if after.Pending != nil || !after.PendingSince.IsZero() {
+			t.Fatalf("a returned launch kept its start: %+v", after)
+		}
+		if raw, _ := os.ReadFile(filepath.Join(directory, "history.json")); strings.Contains(string(raw), "pending_since") {
+			t.Fatalf("a state with nothing pending was saved with a start: %s", raw)
+		}
+	})
+	began := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	for _, shape := range []struct {
+		name  string
+		saved string
+		start time.Time
+	}{
+		{"cut under a runtime that keeps the start", `{"request":"` + request + `","history":[],"pending":{"role":"work"},"pending_since":"` + began.Format(time.RFC3339) + `","done":false}`, began},
+		{"cut under a runtime that did not", `{"request":"` + request + `","history":[],"pending":{"role":"work"},"done":false}`, time.Time{}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.WriteFile(filepath.Join(directory, "history.json"), []byte(shape.saved), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, after := run(t, directory)
+			note := after.History[0]
+			if note.Speaker != "runtime" || note.Role != "work" || !note.StartedAt.Equal(shape.start) || note.FinishedAt.Before(began) {
+				t.Fatalf("the note for the cut launch is %+v", note)
+			}
+			if after.Pending != nil || !after.PendingSince.IsZero() || !after.Done {
+				t.Fatalf("the request after the restart: %+v", after)
+			}
+		})
+	}
+}
+
 func TestStopInterruptsUnavailableRouterAndStoreWait(t *testing.T) {
 	for _, storage := range []bool{false, true} {
 		t.Run(map[bool]string{false: "router", true: "store"}[storage], func(t *testing.T) {

@@ -187,6 +187,8 @@ type noticeKinds struct {
 // the watcher of each running request may each add a kind.
 var noticeKindsLock sync.Mutex
 
+var errUnreadableKinds = errors.New("the queue's record of notice kinds is unreadable; no notice is posted without it")
+
 func loadNoticeKinds(queue string) (noticeKinds, error) {
 	var kinds noticeKinds
 	raw, err := os.ReadFile(filepath.Join(queue, noticeKindsFile))
@@ -194,7 +196,7 @@ func loadNoticeKinds(queue string) (noticeKinds, error) {
 		return kinds, err
 	}
 	if err == nil && json.Unmarshal(raw, &kinds) != nil {
-		return noticeKinds{}, errors.New("the queue's record of notice kinds is unreadable; no notice is posted without it")
+		return noticeKinds{}, errUnreadableKinds
 	}
 	if kinds.Since == nil {
 		kinds.Since = map[string]time.Time{}
@@ -249,10 +251,22 @@ func postableKinds(cfg config) []string {
 // the record lacks starts now. A kind it does not post is dropped, so a kind
 // switched off, or unknown to an engine that ran in between, starts again when
 // it is posted again instead of reaching back over the time nothing posted it.
-func startNoticeKinds(queue string, cfg config, now time.Time) error {
+func startNoticeKinds(queue string, cfg config, now time.Time, observe func(string)) error {
 	noticeKindsLock.Lock()
 	defer noticeKindsLock.Unlock()
 	kinds, err := loadNoticeKinds(queue)
+	if errors.Is(err, errUnreadableKinds) {
+		// A record that cannot be read says when no kind began, and left as
+		// it is it would hold every notice and be logged for every request on
+		// every tick. It is set aside for a person to look at, and the queue
+		// starts again as one without a record: nothing from before is said.
+		aside := filepath.Join(queue, noticeKindsFile+".unreadable")
+		if err := os.Rename(filepath.Join(queue, noticeKindsFile), aside); err != nil {
+			return err
+		}
+		observe("the queue's record of notice kinds was unreadable; it was set aside as " + aside + " and every kind starts again now")
+		kinds, err = noticeKinds{Since: map[string]time.Time{}}, nil
+	}
 	if err != nil {
 		return err
 	}

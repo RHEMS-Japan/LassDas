@@ -49,6 +49,11 @@ type State struct {
 	// answer; only the caller that owns the conversation can clear it.
 	Waiting    bool `json:"waiting,omitempty"`
 	Recovering bool `json:"recovering,omitempty"`
+	// PendingSince is when the pending action's launch began. A launch cut
+	// by a restart leaves no record of its own, and the note written for it
+	// afterwards says when it began from this; a state saved before there
+	// was this field has none, and the note has no start either.
+	PendingSince time.Time `json:"pending_since,omitzero"`
 }
 
 // ErrWaiting reports that the request is held for a person's reply. The chain
@@ -128,10 +133,10 @@ func (c Chain) Run(ctx context.Context) error {
 		state.Step, state.Recovering = state.Pending.Role, true
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
-			Error:      "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
-			FinishedAt: time.Now().UTC(),
+			Error:     "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
+			StartedAt: state.PendingSince, FinishedAt: time.Now().UTC(),
 		})
-		state.Pending = nil
+		state.Pending, state.PendingSince = nil, time.Time{}
 		if err := c.save(ctx, state); err != nil {
 			return err
 		}
@@ -175,7 +180,8 @@ func (c Chain) Run(ctx context.Context) error {
 			state.Done = true
 			return c.save(ctx, state)
 		}
-		state.Pending = &next
+		launched := time.Now().UTC()
+		state.Pending, state.PendingSince = &next, launched
 		if err := c.save(ctx, state); err != nil {
 			return err
 		}
@@ -194,14 +200,14 @@ func (c Chain) Run(ctx context.Context) error {
 		}
 		paced := failedFast(results) && failedFastBefore(state.History, next.Role)
 		state.History = append(state.History, results...)
-		state.Pending = nil
+		state.Pending, state.PendingSince = nil, time.Time{}
 		if err := c.save(ctx, state); err != nil {
 			if ctx.Err() != nil {
 				// Stop authorizes no more work, but do not discard results that
 				// the stopped role already returned. Make one local write attempt
 				// without the cancelled retry loop. Keep Pending so a later
 				// authorized resume still warns about uncertain external effects.
-				state.Pending = &next
+				state.Pending, state.PendingSince = &next, launched
 				if saveErr := c.Store.Save(state); saveErr != nil {
 					cause := fmt.Errorf("retaining stopped role results: %w", saveErr)
 					c.observe(cause.Error())
