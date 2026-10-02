@@ -28,13 +28,18 @@ person did decides:
   (otherwise that commit is pushed), or new reviewed work goes to the same
   branch and pull request;
 - its branch pushed to or rewritten by a person: nothing is pushed over it,
-  the delivery ends 0 saying so and records it, and so do later runs;
+  and the delivery ends 0 saying so, naming this round's work that is not in
+  the pull request (a commit, or changes never committed), and records it;
 - merged: recorded as merged by someone else, with the commit they made, and
   work after it is a further round with a pull request of its own; a merge
   made before this round's commit reached the pull request is such an earlier
   round, and the commit gets a new pull request;
-- closed without a merge: the request ends, 0, with nothing delivered and
-  nothing reopened in its place.
+- closed without a merge: the request ends, 0, with nothing of this round
+  delivered and nothing reopened in its place; an earlier round that was
+  merged is named.
+After either of the last two endings a later run does not read the pull
+request or its branch again: it says what was read then, and when, and after
+a changed branch it names the work still not committed.
 A merge found in a round left to a person is never reported as "merged with
 method". Under a merge method alone that is said of the merge this process
 asks for and also of one it finds already made, since that cannot be told
@@ -478,25 +483,57 @@ def open_summary(receipt, pushed, committed):
     return "\n".join(lines)
 
 
-def closed_summary(receipt):
-    return "\n".join([
-        "Pull request %d against %s for %s was closed by a person without being merged: %s."
-        % (receipt["pull_request"], receipt["base_branch"], receipt["issue"],
-           receipt.get("pull_request_url") or "(the service gave no address)"),
-        "This request ends with nothing delivered. The pull request is not reopened and no other is opened in its "
-        "place; continuing needs a new request.",
+def earlier_merges(receipt):
+    """One sentence for each earlier round of this request that was merged."""
+    return ["An earlier round of this request was merged as commit %s through pull request %s."
+            % (round["merge_sha"], round.get("pull_request")) for round in receipt.get("previous") or []
+            if round.get("merge_sha")]
+
+
+def read_then(receipt):
+    """When a later run, which reads nothing again, says the ending was read."""
+    return " at " + receipt["ended_at"] if receipt.get("ended_at") else ""
+
+
+def closed_summary(receipt, again=False):
+    """again: a later run, which does not read the pull request again."""
+    address = receipt.get("pull_request_url") or "(the service gave no address)"
+    if again:
+        lines = ["When a delivery read it%s, pull request %d against %s for %s had been closed by a person without "
+                 "being merged: %s. This delivery did not read it again."
+                 % (read_then(receipt), receipt["pull_request"], receipt["base_branch"], receipt["issue"], address)]
+    else:
+        lines = ["Pull request %d against %s for %s was closed by a person without being merged: %s."
+                 % (receipt["pull_request"], receipt["base_branch"], receipt["issue"], address)]
+    earlier = earlier_merges(receipt)
+    return "\n".join(lines + earlier + [
+        "This request ends with nothing %sdelivered. The pull request is not reopened and no other is opened in its "
+        "place; continuing needs a new request." % ("of this round " if earlier else ""),
         "The receipt at %s records this." % support.RECEIPT])
 
 
-def changed_summary(receipt, unpushed):
-    lines = ["Pull request %d against %s is open for %s: %s."
-             % (receipt["pull_request"], receipt["base_branch"], receipt["issue"],
-                receipt.get("pull_request_url") or "(the service gave no address)"),
-             "A person changed its branch %s, which is at %s now, so this process does nothing more with that "
-             "pull request." % (receipt["branch"], receipt["branch_head"])]
-    if unpushed:
-        lines.append("This delivery's commit %s is not on that branch, so it is not in the pull request; nothing "
-                     "was pushed over the person's commits." % unpushed)
+def changed_summary(receipt, again=False):
+    """again: a later run, which reads neither the pull request nor its branch
+    again; only the work still not committed is looked at anew."""
+    address = receipt.get("pull_request_url") or "(the service gave no address)"
+    if again:
+        lines = ["When a delivery read them%s, pull request %d against %s for %s was open (%s) and a person had "
+                 "changed its branch %s, which was at %s. This delivery did not read them again and does nothing "
+                 "more with that pull request."
+                 % (read_then(receipt), receipt["pull_request"], receipt["base_branch"], receipt["issue"], address,
+                    receipt["branch"], receipt["branch_head"])]
+    else:
+        lines = ["Pull request %d against %s is open for %s: %s."
+                 % (receipt["pull_request"], receipt["base_branch"], receipt["issue"], address),
+                 "A person changed its branch %s, which is at %s now, so this process does nothing more with that "
+                 "pull request." % (receipt["branch"], receipt["branch_head"])]
+    if receipt.get("not_pushed"):
+        verb = "was" if again else "is"
+        lines.append("This delivery's commit %s %s not on that branch, so it %s not in the pull request; nothing "
+                     "was pushed over the person's commits." % (receipt["not_pushed"], verb, verb))
+    if receipt.get("not_committed"):
+        lines.append("This round's changes to %s were not committed, so this process did not put them in the pull "
+                     "request; they are left in the workspace." % ", ".join(receipt["not_committed"]))
     lines.append("Merging is left to a person; nothing was merged by this process.")
     return "\n".join(lines)
 
@@ -620,8 +657,9 @@ def is_ancestor(workspace, ancestor, commit):
 
 def end_closed(path, receipt, previous):
     """A person closed the pull request without merging it: the request ends
-    with nothing delivered, and the pull request is left as they left it."""
-    receipt["closed_unmerged"] = True
+    with nothing of this round delivered, and the pull request is left as they
+    left it."""
+    receipt.update(closed_unmerged=True, ended_at=support.timestamp())
     receipt["previous"] = previous
     support.write_receipt(path, receipt)
     print(closed_summary(receipt))
@@ -630,13 +668,15 @@ def end_closed(path, receipt, previous):
 
 def end_changed(workspace, path, receipt, previous, tip):
     """A person pushed to the pull request's branch, or rewrote it: nothing
-    more is pushed there, and what was not pushed is named."""
+    more is pushed there, and this round's work that is not in the pull
+    request is named, whether committed or not."""
     recorded = receipt.get("head")
     unpushed = recorded if recorded and not is_ancestor(workspace, recorded, tip) else None
-    receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed)
+    receipt.update(changed_by_person=True, branch_head=tip, not_pushed=unpushed,
+                   not_committed=sorted(changed_paths(workspace)), ended_at=support.timestamp())
     receipt["previous"] = previous
     support.write_receipt(path, receipt)
-    print(changed_summary(receipt, unpushed))
+    print(changed_summary(receipt))
     return 0
 
 
@@ -653,10 +693,14 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
     previous = receipt.pop("previous", [])
     if receipt.get("closed_unmerged") or receipt.get("changed_by_person"):
         # A person closed the pull request or changed its branch. Nothing more
-        # is done with it; every later delivery says where things stand.
+        # is done with it, and it is not read again: a later delivery says
+        # what was read then, and names the work still not committed.
         receipt["previous"] = previous
-        print(closed_summary(receipt) if receipt.get("closed_unmerged")
-              else changed_summary(receipt, receipt.get("not_pushed")))
+        if receipt.get("changed_by_person"):
+            receipt["not_committed"] = sorted(changed_paths(workspace))
+            support.write_receipt(path, receipt)
+        print(closed_summary(receipt, again=True) if receipt.get("closed_unmerged")
+              else changed_summary(receipt, again=True))
         return 0
     if receipt.get("pull_request") and not receipt.get("merge_sha") and (
             method == "none" or receipt.get("merge_left_to_person")):
@@ -709,6 +753,9 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
     # read again after the push, where they may have changed, merged or closed
     # the pull request since the read above.
     left = method == "none" or bool(receipt.get("merge_left_to_person"))
+    # A merge found after the push may end the round on record before this
+    # one's commit; that round keeps its own times, which this one overwrites.
+    times = {field: receipt[field] for field in ("committed_at", "pushed_at") if field in receipt}
     receipt.update(issue=issue, repository=owner + "/" + name, base_branch=base,
                    branch=branch, merge_method=method)
     if left:
@@ -748,7 +795,9 @@ def carry_out(workspace, issue, owner, name, base, branch, method, url, allowed,
         if merged and merged["head"] != commit:
             # They merged it before this round's commit reached it: that merge
             # is an earlier round, and the pushed commit gets a new pull request.
-            previous = previous + [merged]
+            for field in ("committed_at", "pushed_at"):
+                merged.pop(field, None)
+            previous = previous + [dict(merged, **times)]
             for field in ("pull_request", "pull_request_url", "opened_at"):
                 receipt.pop(field, None)
             pull = open_pull_request(owner, name, branch, base, issue, method)

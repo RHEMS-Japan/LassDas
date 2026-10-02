@@ -551,9 +551,14 @@ after it:
 - open, with new reviewed work: the work is pushed to the same branch, so the
   same pull request carries it.
 - open, with a branch a person pushed to or rewrote: the branch is theirs.
-  Nothing is pushed over it; the delivery ends 0 saying so, names a commit of
-  this delivery that is not on the branch, and records `changed_by_person`
-  with the branch's head. Every later delivery says the same.
+  Nothing is pushed over it; the delivery ends 0 saying so and names this
+  round's work that is not in the pull request, whether the person's push came
+  before or after this round's commit: a commit of this delivery that is not
+  on the branch, and the paths of changes that were never committed, which
+  stay in the workspace. It records `changed_by_person` with the branch's head,
+  `not_pushed` and `not_committed`. A later delivery does not read the pull
+  request or its branch again: it says what was read and when, and names the
+  changes still not committed.
 - merged by a person: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
@@ -573,9 +578,12 @@ after it:
   request N ... was closed by a person without being merged ... This request
   ends with nothing delivered`, records `closed_unmerged`, and never reopens
   the pull request or opens another in its place; continuing needs a new
-  request. A delivery interrupted after opening a pull request but before
-  recording it does not know that one, and opens another if a person closed it
-  meanwhile.
+  request. When an earlier round of the request was merged, it names that
+  round's merge commit and pull request and says that nothing of this round
+  was delivered. A later delivery does not read the pull request again: it
+  says what was read and when. A delivery interrupted after opening a pull
+  request but before recording it does not know that one, and opens another
+  if a person closed it meanwhile.
 
 Switching to a merge method takes a round from the person it was left to only
 once the delivery's own merge request succeeds, and only that merge is
@@ -602,7 +610,8 @@ anything the work changed in that extra round goes in a further round's pull
 request. After the two endings a person causes, a closed pull request and a
 branch a person changed, the check runs nothing and ends 0, saying what it did
 and did not look at: nothing of this delivery is left to verify, and failing
-would only send the work round again. Where the target's own checks on pull
+would only send the work round again. An earlier round of the request that was
+merged is named there and not checked. Where the target's own checks on pull
 requests are what the person merging relies on, the stage can be left out:
 
 ```json
@@ -626,9 +635,14 @@ they are configured, although nothing reaches the integration branch until a
 person merges. The operator sees the open pull request at the service, the
 receipt on the status page, and, with `--dry-run`, a line saying that a
 delivery ends at the open pull request. The status page shows such a request
-as done with the pull request open, not as delivered, until a later delivery
-records that a person merged it, and one whose pull request a person closed as
-done with the pull request closed unmerged.
+as done with the pull request open, not as delivered, and so it does for one
+whose branch a person changed. The page takes this from the receipt alone, and
+the runtime runs no stage of a request that has ended, so a person's merge
+after the run ended does not change it; only a delivery while the run still
+goes on records a person's merge. A request whose pull request a person closed
+is shown as done with the pull request closed unmerged; where an earlier round
+of it was merged, its status says so instead of saying that nothing was
+delivered.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
@@ -764,8 +778,9 @@ by status id, so a requester can see whose move it is on the tracker board:
 it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the run is done and the report posted: usually after the
 merge, but also when the run ended at the open pull request of
-`DELIVERY_MERGE_METHOD=none`, with no change, or at a pull request a person
-closed, so the status alone does not say that anything was merged; `stopped` after
+`DELIVERY_MERGE_METHOD=none`, with no change, at a pull request a person
+closed, or at one whose branch a person changed, so the status alone does not
+say that anything was merged; `stopped` after
 the requester's stop, once the stop is recorded and, where a stop report is
 configured, that report is done. A stop written while a question waits moves
 the issue from `awaiting_requester` to `stopped` without passing through

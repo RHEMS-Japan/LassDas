@@ -25,9 +25,11 @@ request, the integration branch is verified as usual.
 
 Two endings a person caused end this check at 0 without running anything,
 since there is nothing of this delivery left to verify and failing would only
-send the work round again: a pull request closed without a merge (nothing was
-delivered), and a pull request whose branch a person changed (what would be
-merged is theirs). The report says what was looked at and what was not.
+send the work round again: a pull request closed without a merge (nothing of
+that round was delivered; an earlier round of the request that was merged is
+named, not checked), and a pull request whose branch a person changed (what
+would be merged is theirs). The report says what was looked at and what was
+not.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE             checkout holding the delivery receipt
@@ -153,13 +155,22 @@ def verify(arguments):
     named = "%s (%s)" % (receipt.get("pull_request", "(none recorded)"),
                          receipt.get("pull_request_url") or "no address recorded")
     if receipt.get("closed_unmerged"):
-        print("Nothing to check: pull request %s was closed by a person without being merged, so nothing of this "
-              "request was delivered. The configured verification commands were not run." % named)
+        # An earlier round of the request may have been merged all the same.
+        earlier = ["An earlier round of this request was merged as commit %s through pull request %s; this check "
+                   "does not look at it." % (round["merge_sha"], round.get("pull_request"))
+                   for round in receipt.get("previous") or [] if round.get("merge_sha")]
+        print(" ".join(["%s: pull request %s was closed by a person without being merged, so nothing of this %s was "
+                        "delivered." % ("Not checked" if earlier else "Nothing to check", named,
+                                        "round" if earlier else "request")]
+                       + earlier + ["The configured verification commands were not run."]))
         return 0
     if receipt.get("changed_by_person"):
         where = ("The delivery's commit %s is not on that branch, so it is not in the pull request."
                  % receipt["not_pushed"] if receipt.get("not_pushed")
                  else "The delivery's last commit %s is on that branch." % receipt.get("head"))
+        if receipt.get("not_committed"):
+            where += (" This round's changes to %s were never committed, so the delivery did not put them in the "
+                      "pull request." % ", ".join(receipt["not_committed"]))
         print("Not checked: a person changed branch %s of pull request %s; it was at %s when the delivery last "
               "looked. %s What a person merges from there is theirs, so the configured verification commands "
               "were not run, and the branch was not read again here."

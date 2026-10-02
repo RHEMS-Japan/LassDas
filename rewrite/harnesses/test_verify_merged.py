@@ -233,7 +233,19 @@ class VerificationTests(unittest.TestCase):
                              ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": self.delivered},
                               "Not checked: a person changed branch ticket/TICKET-41 of pull request 1 "
                               "(http://service.invalid/pulls/1); it was at %s when the delivery last looked. The "
-                              "delivery's commit %s is not on that branch" % (self.unmerged, self.delivered))):
+                              "delivery's commit %s is not on that branch" % (self.unmerged, self.delivered)),
+                             ({"changed_by_person": True, "branch_head": self.unmerged, "not_pushed": None,
+                               "not_committed": ["go.mod", "main.go"]},
+                              "The delivery's last commit %s is on that branch. This round's changes to go.mod, "
+                              "main.go were never committed, so the delivery did not put them in the pull request."
+                              % self.delivered),
+                             ({"closed_unmerged": True, "pull_request": 2,
+                               "pull_request_url": "http://service.invalid/pulls/2",
+                               "previous": [{"pull_request": 1, "merge_sha": self.merge}]},
+                              "Not checked: pull request 2 (http://service.invalid/pulls/2) was closed by a person "
+                              "without being merged, so nothing of this round was delivered. An earlier round of "
+                              "this request was merged as commit %s through pull request 1; this check does not "
+                              "look at it." % self.merge)):
             self.left_to_person_receipt(**fields)
             result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home,
                                  DELIVERY_REMOTE_URL=str(self.root / "unreachable.git"))
@@ -241,6 +253,10 @@ class VerificationTests(unittest.TestCase):
             self.assertIn(said, result.stdout)
             self.assertIn("not run", result.stdout)
             self.assertFalse((self.home / "ran-anyway").exists())
+            if fields.get("previous"):
+                # An earlier round was merged: something was delivered.
+                self.assertNotIn("Nothing to check", result.stdout)
+                self.assertNotIn("nothing of this request", result.stdout)
 
     def test_check_mode_runs_the_commands_without_a_delivery_and_ends_non_zero(self):
         result = self.verify("/bin/sh -c 'echo checked'", "--dry-run")

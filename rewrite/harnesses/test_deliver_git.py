@@ -766,8 +766,11 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn("PUT", self.methods())
 
     CLOSED = ("Pull request 1 against master for TICKET-41 was closed by a person without being merged: "
-              "http://service.invalid/pulls/1.\nThis request ends with nothing delivered. The pull request is not "
-              "reopened and no other is opened in its place; continuing needs a new request.")
+              "http://service.invalid/pulls/1.\n")
+    CLOSED_THEN = ("When a delivery read it at %s, pull request 1 against master for TICKET-41 had been closed by a "
+                   "person without being merged: http://service.invalid/pulls/1. This delivery did not read it again.\n")
+    ENDS = ("This request ends with nothing delivered. The pull request is not reopened and no other is opened in its "
+            "place; continuing needs a new request.")
 
     def test_a_pull_request_a_person_closed_unmerged_ends_the_request_without_reopening_it(self):
         # A person closing the pull request is their decision: the request ends,
@@ -776,13 +779,17 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.leave_merge().returncode, 0)
         pushes = self.pushes()
         self.state["pulls"][0]["state"] = "closed"
-        for work in (None, "package main // more work after the close\n"):
-            if work:
-                self.change("main.go", work)
-            ended = self.leave_merge()
-            self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
-            self.assertIn(self.CLOSED, ended.stdout)
-            self.assertIs(self.receipt()["closed_unmerged"], True)
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        self.assertIn(self.CLOSED + self.ENDS, ended.stdout)
+        receipt = self.receipt()
+        self.assertIs(receipt["closed_unmerged"], True)
+        # A later delivery, here with more work, says what was read and when.
+        self.change("main.go", "package main // more work after the close\n")
+        again = self.leave_merge()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn(self.CLOSED_THEN % receipt["ended_at"] + self.ENDS, again.stdout)
+        self.assertEqual(self.receipt(), receipt)
         self.assertEqual(self.pushes(), pushes, "work was pushed to a pull request a person closed")
         self.assertEqual(self.methods().count("POST"), 1)
         self.assertNotIn("PUT", self.methods())
@@ -948,20 +955,33 @@ class DeliveryTests(unittest.TestCase):
 
     CHANGED = ("A person changed its branch ticket/TICKET-41, which is at %s now, so this process does nothing more "
                "with that pull request.")
+    CHANGED_THEN = ("When a delivery read them at %s, pull request 1 against master for TICKET-41 was open "
+                    "(http://service.invalid/pulls/1) and a person had changed its branch ticket/TICKET-41, which was "
+                    "at %s. This delivery did not read them again and does nothing more with that pull request.")
+    NOT_COMMITTED = ("This round's changes to %s were not committed, so this process did not put them in the pull "
+                     "request; they are left in the workspace.")
 
     def test_a_person_who_pushed_to_the_branch_keeps_it(self):
-        # s02: the branch is theirs now. New work is not pushed over it, the
-        # delivery says so and ends, and says the same again later.
+        # s02: the branch is theirs now. New work is not pushed over it; the
+        # delivery says so, names that work and ends. A later delivery says
+        # what was read then, and names the work still not committed.
         self.change("main.go", "package main // left for a person\n")
         self.assertEqual(self.leave_merge().returncode, 0)
         theirs = self.person_pushes("library/run.go", "package library // a person's fix\n")
         self.change("main.go", "package main // more reviewed work\n")
-        for _ in range(2):
-            ended = self.leave_merge()
-            self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
-            self.assertIn(self.CHANGED % theirs, ended.stdout)
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        self.assertIn(self.CHANGED % theirs, ended.stdout)
+        self.assertIn(self.NOT_COMMITTED % "main.go", ended.stdout)
         receipt = self.receipt()
-        self.assertEqual((receipt["changed_by_person"], receipt["branch_head"]), (True, theirs))
+        self.assertEqual((receipt["changed_by_person"], receipt["branch_head"], receipt["not_committed"]),
+                         (True, theirs, ["main.go"]))
+        self.change("go.mod", "module example\n")
+        again = self.leave_merge()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn(self.CHANGED_THEN % (receipt["ended_at"], theirs), again.stdout)
+        self.assertIn(self.NOT_COMMITTED % "go.mod, main.go", again.stdout)
+        self.assertEqual(self.receipt()["not_committed"], ["go.mod", "main.go"])
         self.assertEqual(self.published(), theirs)
         self.assertEqual(self.methods().count("POST"), 1)
         self.assertNotIn("PUT", self.methods())
@@ -979,6 +999,118 @@ class DeliveryTests(unittest.TestCase):
                       ended.stdout)
         self.assertEqual(self.receipt()["not_pushed"], pushed)
         self.assertEqual(self.published(), theirs)
+
+    def person_pushes_after_the_commit(self, relative, text):
+        """A person's push that reaches the pull request's branch after this
+        round committed: while the delivery reads the integration branch to
+        catch up, before its second look at the ticket branch."""
+        other = self.person_clone()
+        (other / relative).write_text(text)
+        self.git(other, "add", "-A")
+        self.git(other, "commit", "-m", "Codex: a person's own commit on the pull request")
+        theirs = self.git(other, "rev-parse", "HEAD").stdout.strip()
+        self.git(other, "push", "origin", "HEAD:refs/person/pending")
+        directory = self.root / "racing-bin"
+        directory.mkdir()
+        shim = directory / "git"
+        shim.write_text('#!/bin/sh\ncase " $* " in *" fetch "*"refs/heads/master"*) "%s" -C "%s" update-ref '
+                        'refs/heads/ticket/TICKET-41 %s %s 2>/dev/null;; esac\nexec "%s" "$@"\n'
+                        % (shutil.which("git"), self.remote, theirs, self.published(), self.root / "bin" / "git"))
+        shim.chmod(0o755)
+        self.path = str(directory) + os.pathsep + self.path
+        return theirs
+
+    def test_a_persons_push_after_this_round_committed_leaves_the_commit_named_and_unpushed(self):
+        # The second look before the push: the person's push came after this
+        # round's commit, so the commit is named instead of the round's paths,
+        # and it is not pushed over theirs.
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        pushes = self.pushes()
+        theirs = self.person_pushes_after_the_commit("library/run.go", "package library // a person's fix\n")
+        self.change("main.go", "package main // more reviewed work\n")
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        commit = self.git(self.workspace, "rev-parse", "HEAD").stdout.strip()
+        self.assertIn(self.CHANGED % theirs, ended.stdout)
+        self.assertIn("This delivery's commit %s is not on that branch, so it is not in the pull request; nothing was "
+                      "pushed over the person's commits." % commit, ended.stdout)
+        receipt = self.receipt()
+        self.assertEqual((receipt["changed_by_person"], receipt["not_pushed"], receipt["not_committed"]),
+                         (True, commit, []))
+        self.assertEqual(self.published(), theirs)
+        self.assertEqual(self.pushes(), pushes)
+
+    def test_a_later_delivery_does_not_call_a_reopened_pull_request_closed_now(self):
+        # A later delivery reads nothing again: it says when the pull request
+        # was found closed, not that it is closed.
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        self.state["pulls"][0]["state"] = "closed"
+        self.assertEqual(self.leave_merge().returncode, 0)
+        ended_at = self.receipt()["ended_at"]
+        self.state["pulls"][0]["state"] = "open"
+        calls = list(self.state["requests"])
+        later = self.leave_merge()
+        self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+        self.assertIn(self.CLOSED_THEN % ended_at + self.ENDS, later.stdout)
+        self.assertNotIn("was closed by a person", later.stdout)
+        self.assertEqual(self.state["requests"], calls, "the pull request was read again")
+
+    def test_a_later_delivery_names_the_head_it_read_then_and_pushes_nothing_after_the_persons_merge(self):
+        # The person pushed again and merged after the delivery ended. A later
+        # delivery names the head it read and when, and pushes nothing.
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        first = self.person_pushes("library/run.go", "package library // first push by a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        ended_at = self.receipt()["ended_at"]
+        self.person_pushes("library/run.go", "package library // second push by a person\n")
+        self.person_merges(1)
+        pushes, calls = self.pushes(), list(self.state["requests"])
+        later = self.leave_merge()
+        self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+        self.assertIn(self.CHANGED_THEN % (ended_at, first), later.stdout)
+        self.assertNotIn("which is at", later.stdout)
+        self.assertEqual((self.pushes(), self.state["requests"]), (pushes, calls))
+
+    def test_a_pull_request_closed_after_an_earlier_round_was_merged_names_that_merge(self):
+        # Something of the request was delivered: the ending does not say that
+        # nothing was.
+        self.change("main.go", "package main // first round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        merge = self.person_merges(1)
+        self.change("main.go", "package main // second round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        self.state["pulls"][1]["state"] = "closed"
+        merged = ("An earlier round of this request was merged as commit %s through pull request 1.\nThis request "
+                  "ends with nothing of this round delivered." % merge)
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        self.assertIn("Pull request 2 against master for TICKET-41 was closed by a person without being merged: "
+                      "http://service.invalid/pulls/2.\n" + merged, ended.stdout)
+        self.assertEqual([round["merge_sha"] for round in self.receipt()["previous"]], [merge])
+        again = self.leave_merge()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("This delivery did not read it again.\n" + merged, again.stdout)
+        for said in (ended.stdout, again.stdout):
+            self.assertNotIn("ends with nothing delivered", said)
+
+    def test_a_merge_before_the_push_leaves_the_earlier_round_its_own_times(self):
+        # The earlier round's record keeps when it was committed and pushed;
+        # this round's times stay this round's.
+        self.change("main.go", "package main // first round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        path = self.workspace / ".git" / "ticket-engine" / "delivery.json"
+        earlier = {"committed_at": "2026-01-01T00:00:01Z", "pushed_at": "2026-01-01T00:00:02Z"}
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), **earlier)))
+        self.merge_right_after_the_next_read(1)
+        self.change("main.go", "package main // reviewed again\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        receipt = self.receipt()
+        self.assertEqual({field: receipt["previous"][0][field] for field in earlier}, earlier)
+        self.assertNotIn(receipt["committed_at"], earlier.values())
+        self.assertNotIn(receipt["pushed_at"], earlier.values())
 
     def test_a_merge_before_the_push_leaves_the_pushed_commit_a_pull_request_of_its_own(self):
         # s04: the read says open, a person merges, the delivery pushes. The
