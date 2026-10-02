@@ -21,9 +21,11 @@ is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
 back; with none true, one that reads as false lets it through; anything else
 is no verdict, and what the reviewer wrote with it is shown in the live view
 and kept in the printed result and the log. A call's arguments are read as
-JSON text or as an object, and one object inside them, such as
-{"verdict": {...}}, is looked into too; arguments that cannot be read, and
-words given instead of a call, are kept as written, cut where findings are.
+JSON text or as an object; a call that names no blocking is read one object
+further in, as {"verdict": {...}} is. What is kept is the findings of each
+call at those two levels, arguments that cannot be read, and words given
+instead of a call, cut where findings are; findings further in, or inside a
+list, are not read.
 Trouble with the model service (a connection that fails or times out, an
 HTTP error, a reply without a verdict), and anything unexpected, is waited
 out: the models
@@ -49,8 +51,8 @@ committed one, work let through can end with nothing delivered, so it is let
 through only on a verdict, and without one this exits 1. So it does when
 whether anything changed cannot be told (no checkout, or Git cannot read it,
 or not in time), since the delivery reads the checkout on its own, waits
-longer, and may find no change; when Git reads the change after that first
-look failed, it is told again from what was read.
+longer, and may find no change. Once the change has been read, what Git
+listed while reading it decides, whatever the first look found.
 
 When no file was changed at all, the reviewer is told so in plain words and
 asked whether the request is met by the repository exactly as it is: a
@@ -260,16 +262,22 @@ def changed_entries(workspace, *scope):
 
 def gather(workspace, paths, test_commands, timeout):
     """The diff, whole, cut only at LIMIT with a visible marker; then the
-    operator's test commands, each with its exit status and output."""
+    operator's test commands, each with its exit status and output; and
+    whether the checkout holds no change at all, from what Git listed here,
+    so that the review that shows the change also decides that from the same
+    reading, never from one that failed."""
     scope = ["--", *paths] if paths else []
     tracked = git(workspace, "diff", "HEAD", *scope)
     entries = changed_entries(workspace, *scope)
-    note = ""
-    if paths and not tracked.strip() and not entries and changed_entries(workspace):
-        # The paths matched none of what changed: the reviewer is shown the
-        # whole change rather than nothing, since that would be no review.
-        note = ("REVIEW_DIFF_PATHS (%s) matched no change, so the whole change is shown.\n\n" % " ".join(paths))
-        tracked, entries = git(workspace, "diff", "HEAD"), changed_entries(workspace)
+    listed, note = entries, ""
+    if paths and not tracked.strip() and not entries:
+        listed = changed_entries(workspace)
+        if listed:
+            # The paths matched none of what changed: the reviewer is shown
+            # the whole change rather than nothing, since that would be no
+            # review.
+            note = ("REVIEW_DIFF_PATHS (%s) matched no change, so the whole change is shown.\n\n" % " ".join(paths))
+            tracked, entries = git(workspace, "diff", "HEAD"), listed
     # New files come first, so their names survive a cut of a long diff: new
     # code is where untested code most often is. A new path that is not a
     # file the reviewer can read is still named, never left out silently.
@@ -291,7 +299,8 @@ def gather(workspace, paths, test_commands, timeout):
         else:
             new_files += "--- new path %s, which is not a regular file ---\n" % name
     tests = "\n\n".join(run(shlex.split(command), workspace, timeout) for command in test_commands if command.strip())
-    return note + cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output")
+    unchanged = not listed and not tracked.strip() and not committed_earlier(workspace)
+    return note + cut(new_files + tracked, LIMIT, "diff"), cut(tests, LIMIT, "test output"), unchanged
 
 
 def committed_earlier(workspace):
@@ -394,10 +403,10 @@ def as_written(value):
 
 def read_verdict(calls):
     """(blocking, findings, why) from every call of the verdict tool in one
-    reply. Arguments are read as a JSON text or as an object as they come, and
-    an object one level inside them, such as {"verdict": {...}}, is looked
-    into too. Every field named blocking, in any letter case, is read in every
-    call. One that reads as true sends the work back, so a finding is never
+    reply. Arguments are read as a JSON text or as an object as they come.
+    Every field named blocking, in any letter case, is read in every call,
+    and in a call that names none, in the objects one level inside it, such
+    as {"verdict": {...}}; findings are read at both levels. One that reads as true sends the work back, so a finding is never
     let through because the reply also said false somewhere; with none true,
     one that reads as false lets the work through; with neither there is no
     verdict, and why says so. The findings of every call are kept whichever
@@ -419,14 +428,14 @@ def read_verdict(calls):
             if arguments not in (None, ""):
                 findings.append(as_written(arguments))
             continue
-        fields = list(arguments.items())
-        for value in arguments.values():
-            if isinstance(value, dict):
-                fields.extend(value.items())
-        for name, value in fields:
-            if str(name).lower() == "blocking":
-                values.append(value)
-            elif str(name).lower() == "findings" and value not in (None, ""):
+        below = [item for value in arguments.values() if isinstance(value, dict) for item in value.items()]
+        given = [value for name, value in arguments.items() if str(name).lower() == "blocking"]
+        # One object down stands in only for a call that names no blocking
+        # itself, as {"verdict": {...}} does: beside a blocking the call gave
+        # but that cannot be read, a false found further in decides nothing.
+        values.extend(given or [value for name, value in below if str(name).lower() == "blocking"])
+        for name, value in list(arguments.items()) + below:
+            if str(name).lower() == "findings" and value not in (None, ""):
                 findings.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
     findings = [text for text in findings if text]
     read = [truth(value) for value in values]
@@ -564,11 +573,10 @@ def reviewed(stdin_text, unchanged, passing):
         # The count only informs the reviewer; it decides nothing.
         say("Review: the send-back counter at %s could not be read (%s); counting from 0." % (counter, error))
         sent_back = 0
-    diff, test_output = gather(found["workspace"], found["paths"], found["tests"], found["timeout"])
-    if unchanged is None:
-        # Not told at the start, but Git has just read the change: tell again,
-        # so that a checkout with no change is still called that.
-        unchanged = nothing_changed(found["workspace"])
+    # Once the change is read, the reading that showed it decides whether
+    # anything changed: not the look before, which may have failed, nor a
+    # look after, which could fail in turn.
+    diff, test_output, unchanged = gather(found["workspace"], found["paths"], found["tests"], found["timeout"])
     if unchanged:
         diff = NO_CHANGE
     ask = verdict_or_none if passing else verdict_until_given

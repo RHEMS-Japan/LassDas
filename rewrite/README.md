@@ -643,10 +643,12 @@ false when its meaning is plain: true or false, a number equal to 1 or 0, or
 reads as true makes the verdict blocking, so a finding is never let through
 because the reply also said false; with none true, one that reads as false
 does not block; anything else is no verdict (below). A call's arguments are
-read as JSON text or as an object, and one object inside them, such as
-`{"verdict": {...}}`, is looked into too. What the reviewer wrote is kept
-whichever way it goes: arguments that cannot be read, and words given
-instead of a call, are kept as written, cut where findings are. The command
+read as JSON text or as an object; a call that names no blocking is read one
+object further in, as `{"verdict": {...}}` is, but a blocking the call names
+itself is never set aside for one found further in. What is kept whichever
+way it goes is the findings of each call at those two levels, arguments that
+cannot be read, and words given instead of a call, cut where findings are;
+findings further in, or inside a list, are not read. The command
 exits 1 on a blocking verdict, which sends the work back to the `work` stage,
 and 0
 otherwise; the findings are printed, so they join the history as an
@@ -697,8 +699,8 @@ without one the command ends 1 with `NOT REVIEWED` and the reason. The same
 holds when whether anything changed cannot be told (no checkout, or Git
 cannot read it, or not within the review's 60 seconds): the delivery reads
 the checkout on its own and waits longer, so it may still find no change.
-If Git reads the change once that first look has failed, the review tells
-again from what it read. With the opt-in, not being able to tell is not
+Once the change has been read, what Git listed while reading it decides,
+whatever that first look found. With the opt-in, not being able to tell is not
 limited to requests with no change: while Git cannot read the checkout in
 the review's environment, a request that did change files also goes back to
 the work stage, round after round, with the reason written in the record

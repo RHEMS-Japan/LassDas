@@ -699,7 +699,17 @@ class AdversarialReviewTests(unittest.TestCase):
                  ("arguments that are not JSON", {"raw_calls": [broken]}, "NOT REVIEWED", 0, 1),
                  ("words instead of a call", {"content": "BLOCKING: " + finding}, "NOT REVIEWED", 0, 1),
                  ("a broken call beside a false one", {"raw_calls": [broken, json.dumps({"blocking": False})]},
-                  "PASSED", 0, 0))
+                  "PASSED", 0, 0),
+                 # N1, N2 and N8 of the last review: one object down stands in
+                 # only for a call that names no blocking itself.
+                 ("a blocking that cannot be read beside a false one level down",
+                  {"calls": [{"blocking": "Yes, because the needed file is missing", "findings": finding,
+                              "issues": {"blocking": False}}]}, "NOT REVIEWED", 0, 1),
+                 ("a null blocking beside a false one level down",
+                  {"calls": [{"blocking": None, "findings": finding, "detail": {"blocking": False}}]},
+                  "NOT REVIEWED", 0, 1),
+                 ("no blocking, and a false one level down",
+                  {"calls": [{"findings": finding, "notes": {"blocking": False}}]}, "PASSED", 0, 0))
         for tree in ("a change", "no change"):
             if tree == "no change":
                 self.leave_unchanged()
@@ -810,11 +820,11 @@ class AdversarialReviewTests(unittest.TestCase):
         # unchanged checkout and ends with nothing delivered. By default the
         # review holds and asks again; with the opt-in, not being able to tell
         # is not taken as a change, and neither is an error before it was
-        # told: without a verdict the work goes back, and a blocking verdict
-        # stands even when its state cannot be saved. When Git reads
-        # the change after the first look failed, it is told again, and the
-        # reviewer hears that no file was changed. The control, with Git
-        # answering, says that no file was changed.
+        # told: without a verdict the work goes back. Once the change is read,
+        # the reading that showed it decides, so a first look that failed
+        # does not leave the reviewer handed "(no change)" (R1 of the last
+        # review, where a look after the reading failed in turn). The control,
+        # with Git answering, says that no file was changed.
         self.leave_unchanged()
 
         def status_runs_out_of_time(*which):
@@ -839,24 +849,20 @@ class AdversarialReviewTests(unittest.TestCase):
             return before
 
         # With the whole tree as the change (no REVIEW_DIFF_PATHS), the review
-        # reads status first to tell, then once with the change, and once more
-        # to tell again after a failed first look.
+        # reads status first to tell, then once as it reads the change; there
+        # is no look after that, so the third call that R1 failed is never made.
         cases = (("git status always runs out of time", status_runs_out_of_time(), [], False, 1,
                   ["timed out after 60 seconds", self.CANNOT_TELL]),
                  ("an unexpected error first", unexpected_error_first(), [], False, 1,
                   ["Unexpected RuntimeError", self.CANNOT_TELL]),
-                 ("the first look and the second telling run out of time, then no verdict",
-                  status_runs_out_of_time(1, 3), [{"status": 503}, {"status": 503}], False, 1,
-                  ["no verdict could be obtained (HTTP 503 from the model service); whether any file was changed"
-                   " could not be told, and an ending with nothing delivered needs a verdict"]),
-                 ("the first look and the second telling run out of time, then a blocking verdict not saved",
-                  status_runs_out_of_time(1, 3), [{"verdict": (True, "the request needs a new file")}], True, 1,
-                  ["SENT BACK", "the outcome above stands"]),
-                 ("only the first look runs out of time, then no verdict", status_runs_out_of_time(1),
+                 ("the first look runs out of time, then no verdict", status_runs_out_of_time(1, 3),
                   [{"status": 503}, {"status": 503}], False, 1,
                   ["no file was changed, and an ending with nothing delivered needs a verdict"]),
-                 ("only the first look runs out of time, then a passing verdict", status_runs_out_of_time(1),
-                  [{"verdict": (False, "")}], False, 0, ["PASSED"]))
+                 ("the first look runs out of time, then a passing verdict", status_runs_out_of_time(1, 3),
+                  [{"verdict": (False, "")}], False, 0, ["PASSED"]),
+                 ("the first look runs out of time, then a blocking verdict not saved", status_runs_out_of_time(1, 3),
+                  [{"verdict": (True, "the request needs a new file")}], True, 1,
+                  ["SENT BACK", "the outcome above stands"]))
         for case, before, replies, unsaved, expected, said in cases:
             service = ModelStandIn(replies)
             self.addCleanup(service.close)
@@ -869,9 +875,9 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertEqual(status, expected, (case, printed))
             for text in said:
                 self.assertIn(text, printed, case)
-            if case.startswith("only the first look"):
-                # Told again from what Git read: the reviewer is asked whether
-                # the request is met with no file changed.
+            if case.startswith("the first look"):
+                # Decided from the reading of the change: the reviewer is
+                # asked whether the request is met with no file changed.
                 self.assertIn(self.NO_CHANGE, service.requests[0]["body"]["messages"][1]["content"], case)
                 self.assertNotIn("could not be told", printed, case)
         service = ModelStandIn([{"status": 503}, {"status": 503}])
