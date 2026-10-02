@@ -98,15 +98,14 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
 - **An image built from commit f71872f (2026-10-02) or a later one.** The two
   network init containers write the egress rules with the image's own
   iptables (`/usr/sbin/xtables-nft-multi`), which older images do not carry.
-  The image `docs/DISTRIBUTION.json` names is such an image. On 2026-10-03 an
-  installation of the kind named above (with `hostUsers: false`) ran both
-  from the image built from commit 2ccff5e, with this directory's rules (its
-  own DNS address in place of the placeholder): both exited 0 with no restart
-  and no log line, the egress check of section 7 gave the same results both
-  ways as with its network plugin's image before, and the confinement,
-  launcher and configuration checks passed. For the IPv6 rules that shows
-  only that they were written, and no other cluster or network plugin was
-  tried.
+  The image `docs/DISTRIBUTION.json` names is such an image. On 2026-10-03 the
+  installation named above ran both from the image built from commit 2ccff5e,
+  with this directory's rules (its own DNS address in place of the
+  placeholder): both exited 0 with no restart and no log line, the egress
+  check of section 7 gave the same results both ways as with its network
+  plugin's image before, and the confinement, launcher and configuration
+  checks passed. For the IPv6 rules that shows only that they were written,
+  and no other cluster or network plugin was tried.
 - **A storage class** that provides a 20Gi ReadWriteOnce volume.
 - **Room for the Pod.** The engine requests 1 CPU and 3Gi of memory (limit
   6Gi); the other containers are small. These figures are a starting point,
@@ -168,10 +167,10 @@ project, whoever filed it, and its roles can reach any public address. So:
 
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
-in `model_selection.authors` (deepseek, minimax, moonshotai, qwen and z-ai),
-read the checkout and receive the request and the run's records; the review
-model (`REVIEW_MODEL`, `moonshotai/kimi-k3`) receives the request, the diff and
-the test output; the decision model that picks each launch's model
+in `model_selection.authors` (deepseek, minimax, qwen and z-ai), read the
+checkout and receive the request and the run's records; the review model
+(`REVIEW_MODEL`, `moonshotai/kimi-k3`, from a publisher outside that list)
+receives the request, the diff and the test output; the decision model that picks each launch's model
 (`typesafe/jev-1.13`) receives the request; and the chat model that decides at
 the entrance receives the request and the earlier reports.
 `model_selection.authors` narrows the publishers, and `model_selection.fixed`

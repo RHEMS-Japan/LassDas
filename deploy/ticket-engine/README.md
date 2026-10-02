@@ -61,9 +61,9 @@ One consumer's installation has run these templates since September 2026,
 with a live tracker, real pull requests merged by the shipped delivery, and
 models reached through a gateway in front of OpenRouter. What it showed is in
 SETUP.md where it matters: the cluster it ran on in section 1, and what went
-wrong there and how it was resolved in section 11. On 2026-10-03 an
-installation of the same kind ran the two network init containers from the
-image's own iptables (SETUP.md, section 1).
+wrong there and how it was resolved in section 11. On 2026-10-03 it ran its
+two network init containers from the image's own iptables (SETUP.md,
+section 1).
 
 Proposed, or simply not measured. Check each one before trusting it:
 
