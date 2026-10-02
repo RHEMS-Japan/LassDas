@@ -636,10 +636,14 @@ names, normally from a different publisher than the worker, is handed the
 runtime's text for the stage (where it sits, the original request, the settled
 requirements, the previous reports), the diff of the change and the output of
 the operator's test commands, and returns one structured verdict: blocking or
-not, with its findings. The verdict's fields are read in any letter case, and
-blocking counts when its meaning is plain: true or false, `"true"` or
-`"false"` in any case, 1 or 0. Anything else is no verdict, and what the
-reviewer wrote is printed with the reason all the same. The command exits 1
+not, with its findings. Every call of the verdict tool in the reply is read,
+and in each every field named blocking in any letter case, taken as true or
+false when its meaning is plain: true or false, a number equal to 1 or 0, or
+`"true"`, `"yes"`, `"1"`, `"false"`, `"no"` or `"0"` in any case. One that
+reads as true makes the verdict blocking, so a finding is never let through
+because the reply also said false; with none true, one that reads as false
+does not block; anything else is no verdict. What the reviewer wrote is
+printed whichever way it goes. The command exits 1
 on a blocking verdict, which sends the work back to the `work` stage, and 0
 otherwise; the findings are printed, so they join the history as an
 observation the worker and the report writer read, and the command writes
