@@ -7,6 +7,13 @@ commands against that fetched source. Its report is ordinary text; the engine
 parses nothing from it. A passing run is evidence about these commands on this
 branch, not a judgment that the original request is fulfilled.
 
+A receipt saying that nothing was changed (the delivery's
+DELIVERY_ALLOW_UNCHANGED) has no merge commit to look for. Then the commit the
+request stands on, as the delivery recorded it, has to be contained in the
+fetched branch, and the commands run on that branch as it is now, as they do
+after a merge: a request that needs no change is held to the target as the
+requester will find it. The report says that no merge was made.
+
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE             checkout holding the delivery receipt
   TASK_HOME                  private directory the branch is fetched into
@@ -41,6 +48,14 @@ def receipt_fields(workspace):
     receipt = support.read_receipt(support.receipt_path(workspace))
     if not receipt:
         raise DeliveryError("No delivery receipt is present; nothing was delivered to verify")
+    if receipt.get("unchanged"):
+        # No merge was made: what is verified is the integration branch's own
+        # commit that the request stands on, as the delivery recorded it.
+        stands = str(receipt.get("base_sha", ""))
+        if not COMMIT.match(stands):
+            raise DeliveryError("The delivery receipt says nothing was changed but records no commit "
+                                "the request stands on")
+        return receipt, stands
     merge = str(receipt.get("merge_sha", ""))
     if not COMMIT.match(merge):
         raise DeliveryError("The delivery receipt records no completed merge commit")
@@ -111,6 +126,7 @@ def verify(arguments):
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
     receipt, merge = ({}, "") if dry else receipt_fields(workspace)
+    unchanged = bool(receipt.get("unchanged"))
     owner, name = support.repository()
     base = support.setting("DELIVERY_BASE_BRANCH")
     url = support.remote_url(owner, name)
@@ -130,19 +146,28 @@ def verify(arguments):
     if dry:
         report.append("This was a check of the configured commands against the branch as it is, "
                       "with no delivery to verify, so it ends non-zero on purpose.")
+    elif unchanged:
+        report.append("No merge was made: the delivery receipt records that no file was changed, so there "
+                      "is no merge commit to look for. The request stands on %s as it was at commit %s."
+                      % (base, merge))
     else:
         report.append("The receipt records pull request %s merged as commit %s."
                       % (receipt.get("pull_request", "(none recorded)"), merge))
     contained = dry or contains_merge(source, merge)
     if not dry:
-        report.append("The merge commit is %scontained in %s." % ("" if contained else "NOT ", base))
+        report.append("The %s is %scontained in %s." % ("commit the request stands on" if unchanged
+                                                         else "merge commit", "" if contained else "NOT ", base))
     failures = 0
     if contained:
+        if unchanged:
+            report.append("The configured commands ran on %s as it is now, at commit %s, as after a merge."
+                          % (base, tip.strip()))
         failures = run_verification(source, commands, report)
         report.append("%d of %d configured verification commands failed." % (failures, len(commands)))
     else:
-        report.append("The configured verification commands were not run: the delivered merge is "
-                      "not part of the integration branch, so there is nothing verified to check.")
+        report.append("The configured verification commands were not run: the %s is not part of the "
+                      "integration branch, so there is nothing verified to check."
+                      % ("commit the request stands on" if unchanged else "delivered merge"))
     print("\n\n".join(report))
     if dry:
         return 3

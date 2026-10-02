@@ -820,6 +820,45 @@ func writeJob(t *testing.T, root, id string, state chain.State) {
 	}
 }
 
+// A request that ended with no change delivered nothing, and the page says
+// so: the delivery's own receipt is what tells it apart, not anything a role
+// wrote. A delivered request beside it is still shown as delivered.
+func TestARequestThatEndedWithoutAChangeIsNotShownAsDelivered(t *testing.T) {
+	root := fixtureQueue(t)
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	done := chain.State{Done: true, Step: "confirm_report", Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "elicit"}, {Name: "confirm_report"}}},
+		History: []chain.Result{{Role: "confirm_report", Speaker: "confirm-process", Output: "Delivered everything.", StartedAt: started, FinishedAt: started.Add(time.Minute)}}}
+	for id, receipt := range map[string]string{
+		"23": `{"unchanged": true, "issue": "EXAMPLE-23", "base_sha": "UNCHANGED-BASE"}`,
+		"24": `{"pull_request": 41, "merge_sha": "RECEIPT-SHA"}`,
+	} {
+		writeJob(t, root, id, done)
+		path := filepath.Join(root, "jobs", id, "workspace", ".git", "ticket-engine", "delivery.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(receipt), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := serve(t, root, "", "", "")
+	_, body := get(t, ts, "/")
+	expectAll(t, body, `<article class="card unchanged" data-key="EXAMPLE-23">`, `<article class="card delivered" data-key="EXAMPLE-24">`,
+		`Done without a change <b>1</b>`, `Delivered <b>1</b>`, "done without a change; nothing was delivered")
+	if !strings.Contains(inColumn(body, "done"), `data-key="EXAMPLE-23"`) {
+		t.Error("a request that ended without a change is not with the finished ones")
+	}
+	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), "変更なしで完了 <b>1</b>", "変更なしで完了 (何も納品していません)", "納品済み <b>1</b>")
+}
+
 func TestASideRoleWithNoStageBehindItStaysInTheOtherColumn(t *testing.T) {
 	root := fixtureQueue(t)
 	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)

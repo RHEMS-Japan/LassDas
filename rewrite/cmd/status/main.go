@@ -268,7 +268,8 @@ type lane struct {
 }
 
 var laneOrder = []lane{{Key: "queued", Title: "Queued"}, {Key: "running", Title: "Running"}, {Key: "awaiting", Title: "Awaiting answer"},
-	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}, {Key: "stopped", Title: "Stopped"}}
+	{Key: "attention", Title: "Needs attention"}, {Key: "delivered", Title: "Delivered"}, {Key: "unchanged", Title: "Done without a change"},
+	{Key: "stopped", Title: "Stopped"}}
 
 func lanes(jobs []*job) []lane {
 	result := make([]lane, len(laneOrder))
@@ -576,6 +577,13 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 				touch(name)
 			}
 		}
+		// A finished request's card says whether anything was delivered,
+		// which only the delivery's receipt records.
+		if j.State != nil && j.State.Done {
+			if raw, err := os.ReadFile(filepath.Join(dir, "workspace", ".git", "ticket-engine", "delivery.json")); err == nil {
+				j.Receipt = string(raw)
+			}
+		}
 		j.derive(now)
 		return j
 	}
@@ -709,6 +717,16 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	return j
 }
 
+// endedUnchanged says whether the delivery's own receipt records an ending
+// with no change: nothing committed, pushed or merged. It is the delivery
+// process's record, read for that one field; no role's words decide it.
+func (j *job) endedUnchanged() bool {
+	var receipt struct {
+		Unchanged bool `json:"unchanged"`
+	}
+	return j.Receipt != "" && json.Unmarshal([]byte(j.Receipt), &receipt) == nil && receipt.Unchanged
+}
+
 func (j *job) derive(now time.Time) {
 	end := now
 	if state := j.State; state != nil {
@@ -726,6 +744,11 @@ func (j *job) derive(now time.Time) {
 			}
 		}
 		switch {
+		case state.Done && j.endedUnchanged():
+			j.Status = "done without a change; nothing was delivered"
+			if !last.IsZero() {
+				end = last
+			}
 		case state.Done:
 			j.Status = "done"
 			if !last.IsZero() {
@@ -850,6 +873,8 @@ func (j *job) derive(now time.Time) {
 				j.Lane, j.Attention = "attention", note
 			}
 		}
+	case state.Done && j.endedUnchanged():
+		j.Lane = "unchanged"
 	case state.Done:
 		j.Lane = "delivered"
 	case state.Waiting:
@@ -1556,6 +1581,7 @@ var japanese = map[string]string{
 	"new file:": "新規ファイル:", "(symbolic link; not followed, the page stays inside the queue)": "(シンボリックリンク。たどらない。画面は queue の中だけを見せる)",
 	"Name": "名前", "Size": "サイズ", "Modified": "更新", "files": "ファイル",
 	"done": "完了", "waiting for the requester's reply": "依頼者の返事待ち", "between steps": "工程の切れ目", "no run record yet": "実行記録なし",
+	"Done without a change": "変更なしで完了", "done without a change; nothing was delivered": "変更なしで完了 (何も納品していません)",
 	"no checkout yet": "checkout はまだない", "more under files": "件は files 配下", "Position": "工程の位置", "model": "モデル", "links": "リンク",
 	"The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.": "この工程の実行中に本体が止まりました。報告は途中までの可能性があり、操作は既に反映されているかもしれません。作業場所と外部の状態を確認してから繰り返します。", "more new files are not shown here; they are under files": "件の新規ファイルはここには出していない (files 配下にある)",
 }

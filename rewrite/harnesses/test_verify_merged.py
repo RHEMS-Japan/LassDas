@@ -125,6 +125,54 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("so nothing was verified", result.stdout)
         self.assertNotIn("unreachable", result.stdout)
 
+    def unchanged_receipt(self, **fields):
+        """What the delivery records when it ended without a change."""
+        record = {"unchanged": True, "issue": "TICKET-41", "repository": "owner/project",
+                  "base_branch": "master", "base_sha": self.merge, "workspace_head": self.merge}
+        record.update(fields)
+        (self.workspace / ".git/ticket-engine/delivery.json").write_text(json.dumps(record))
+
+    def test_an_unchanged_delivery_is_checked_on_the_branch_as_it_is_now(self):
+        # The request stood on the branch before the delivery merged above.
+        # What is checked is the branch as the requester finds it now; the
+        # recorded commit only has to be part of it.
+        earlier = self.git(self.remote, "rev-parse", "refs/heads/master^1").stdout.strip()
+        self.unchanged_receipt(base_sha=earlier, workspace_head=earlier)
+        result = self.verify("/bin/sh -c 'grep -q delivered main.go'")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No merge was made: the delivery receipt records that no file was changed", result.stdout)
+        self.assertIn("The commit the request stands on is contained in master.", result.stdout)
+        self.assertIn("The configured commands ran on master as it is now, at commit %s, as after a merge."
+                      % self.merge, result.stdout)
+        self.assertIn("0 of 1 configured verification commands failed.", result.stdout)
+        # Someone breaks the behaviour on the branch afterwards: the check
+        # fails, as it would after a merge, instead of passing on the old
+        # commit the request stood on.
+        original = self.git(self.remote, "rev-parse", "refs/heads/master^1^{tree}").stdout.strip()
+        broken = self.git(self.remote, "commit-tree", original, "-p", self.merge,
+                          "-m", "Codex: remove the delivered behaviour").stdout.strip()
+        self.git(self.remote, "update-ref", "refs/heads/master", broken)
+        self.unchanged_receipt()
+        failing = self.verify("/bin/sh -c 'grep -q delivered main.go'")
+        self.assertEqual(failing.returncode, 1, failing.stdout + failing.stderr)
+        self.assertIn("The configured commands ran on master as it is now, at commit %s" % broken, failing.stdout)
+        self.assertIn("1 of 1 configured verification commands failed.", failing.stdout)
+
+    def test_an_unchanged_delivery_whose_commit_left_the_branch_is_not_verified(self):
+        self.unchanged_receipt(base_sha=self.unmerged)
+        result = self.verify("/bin/sh -c 'touch %s/ran-anyway'" % self.home)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("No merge was made", result.stdout)
+        self.assertIn("The commit the request stands on is NOT contained in master.", result.stdout)
+        self.assertFalse((self.home / "ran-anyway").exists())
+
+    def test_an_unchanged_receipt_without_its_commit_is_refused(self):
+        self.unchanged_receipt(base_sha="")
+        result = self.verify("/bin/sh -c 'echo unreachable'")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("records no commit the request stands on", result.stderr)
+        self.assertNotIn("unreachable", result.stdout)
+
     def test_check_mode_runs_the_commands_without_a_delivery_and_ends_non_zero(self):
         result = self.verify("/bin/sh -c 'echo checked'", "--dry-run")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)

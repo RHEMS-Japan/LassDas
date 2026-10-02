@@ -490,16 +490,60 @@ This happens under the merge method only, since a service that squashes or
 rebases rewrites the delivered history. For this the delivery process's
 sandbox grant must cover the working tree as well as `.git`.
 
+A request whose right outcome is that nothing changes, because what it asks
+for already exists, leaves the delivery nothing to commit. By default the
+shipped delivery refuses it ("No change under the allowed paths is ready to
+deliver"), so an ordered run sends it back to the work stage for as long as it
+runs. `DELIVERY_ALLOW_UNCHANGED=1` in the delivery process's environment lets
+such a request end instead. When the workspace has no changed path, no merge in
+progress and no receipt of an earlier delivery round, and the commit the work
+started from is part of the integration branch as fetched at that moment, the
+delivery commits, pushes and opens nothing and ends 0. It prints that nothing
+was delivered and which commit of the integration branch the request stands
+on, and its receipt records the same (`"unchanged": true` with that commit as
+`base_sha`). A rerun checks again and ends the same way; work changed after
+such an ending is delivered as usual. The post-delivery check
+(`harnesses/verify_merged.py`) then has no merge to look for: it requires the
+recorded commit to be part of the integration branch, runs the configured
+commands on that branch as it is now, as after a merge, and says that no merge
+was made. The
+run then ends like any finished run: where they are configured, the
+`delivered` status of `intake.statuses` is applied and `intake.assign` hands
+the request back to the requester although nothing was merged, so the report
+is what tells them that nothing was delivered; the status page shows such a
+request as done without a change, not as delivered. The setting is off by
+default and the shipped example leaves it off. An ending with nothing
+delivered needs a reviewer's verdict: when Git lists no changed path and no
+earlier delivery round committed one, the shipped review command lets the work
+through only on a verdict that does not object, and when none can be obtained
+(the model service is down or answers without one, a setting keeps the review
+from running, an unexpected error) it ends 1, so the work goes back to the
+work stage. The delivery itself does not look at the review, so turn the
+setting on only where that review runs before it. The review command tells its
+model in plain words when no file was changed at all, and that a change that
+was needed but not made is a blocking defect.
+
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
 names, normally from a different publisher than the worker, is handed the
 runtime's text for the stage (where it sits, the original request, the settled
 requirements, the previous reports), the diff of the change and the output of
 the operator's test commands, and returns one structured verdict: blocking or
-not, with its findings. The command exits 1 on a blocking verdict, which sends
-the work back to the `work` stage, and 0 otherwise; the findings are printed,
-so they join the history as an observation the worker and the report writer
-read, and the command writes nothing into the workspace (its send-back counter
+not, with its findings. Every call of the verdict tool in the reply is read,
+and in each every field named blocking in any letter case, taken as true or
+false when its meaning is plain: true or false, a number equal to 1 or 0, or
+`"true"`, `"yes"`, `"1"`, `"false"`, `"no"` or `"0"` in any case. One that
+reads as true makes the verdict blocking, so a finding is never let through
+because the reply also said false; with none true, one that reads as false
+does not block; anything else is no verdict. A call's arguments are read as
+JSON text or as an object, and one object inside them, such as
+`{"verdict": {...}}`, is looked into too. What the reviewer wrote is printed
+whichever way it goes: arguments that cannot be read, and words given instead
+of a call, are kept as written, cut where findings are. The command exits 1
+on a blocking verdict, which sends the work back to the `work` stage, and 0
+otherwise; the findings are printed, so they join the history as an
+observation the worker and the report writer read, and the command writes
+nothing into the workspace (its send-back counter
 and log live in the process's own directory, `TASK_HOME`). The runtime reads
 the exit status and nothing else. There is no cap on send-backs: the review
 sends the work back for as long as it finds a blocking defect, the count so far
@@ -511,8 +555,27 @@ paths that match no change, a model service that is down or returns none,
 ends 0 and prints `NOT REVIEWED` with the reason, which joins the history for
 the worker and the report writer. A review that could not be performed is not
 a defect in the change, and an ordered run would otherwise send the work
-round for ever. A diff or test output longer than its limit is cut with a
-visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+round for ever. The one exception is a checkout in which Git lists no changed
+path and no earlier delivery round committed one: work let through from there
+can end with nothing delivered, so it is let through only on a verdict that
+does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
+The same holds when whether anything changed cannot be told (no checkout, or
+Git cannot read it, or not within the review's 60 seconds): the delivery
+reads the checkout on its own and waits longer, so it may still find no
+change. If Git reads the change once that first look has failed, the review
+tells again from what it read. Not being able to tell is not limited to
+requests with no change: while Git cannot read the checkout in the review's
+environment, a request that did change files also goes back to the work
+stage, round after round, with the reason written in the record each time,
+instead of going on unreviewed. New files are read from Git's own list, so a
+name in Japanese or a new symbolic link reaches the reviewer as it is, and a
+name that is not UTF-8 with a replacement character. Git runs without the
+user's or the system's Git settings and without the variables that point it
+at another repository, index or work tree (`GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), as it
+does for the delivery, so the two agree on whether anything changed. A diff or
+test output longer than its limit is cut with a visible marker, never
+silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
 the command prints or writes.
 
@@ -1156,6 +1219,28 @@ checkout never starts the role and its reason reaches the existing chain. A
 retry can prepare the still-empty workspace. A killed preparation can leave
 unpublished private staging for operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
+
+Once a checkout is published, a record of it (`.workspace.prepared`) is kept
+beside the workspace, in the job's own directory, which no role's sandbox
+mounts. A workspace found empty although that record exists was lost, by a
+restore or by hand, together with everything the earlier stages did in it. Its
+next launch prepares it again from the repository, prints that the workspace
+was lost and ends non-zero without running its command: a command stage then
+goes back to its `on_failure` stage, after which every later stage runs again,
+and a model stage runs again. A stage that passed on the lost work is not
+taken as passed on the fresh checkout. Only a workspace found empty is
+noticed, though. One put back to how it was just after its preparation (a
+checkout and clean by hand, or a restore from a copy taken then) still holds
+files, so it is taken as it is; with `DELIVERY_ALLOW_UNCHANGED=1`, a request
+whose work was undone that way after its review ends with nothing delivered.
+A workspace prepared before this record existed is taken as it is at its next
+launch and gains the record without a word, so a queue already running when
+this arrives goes on as it was. If it is emptied before that launch, it is
+prepared as if for the first time: its loss is not reported either, and the
+same ending can follow. A workspace directory removed while the engine runs is
+not covered: no process can start in it, so each launch fails at once, spaced
+like any launch that cannot start, and nothing passes; restarting the engine
+creates the directory again, empty, and the next launch reports the loss.
 
 The wrapper is **not an isolation boundary**. Its job parent, lock and staging
 must be private to the controller. The command after `--` must establish the

@@ -294,7 +294,7 @@
             "-B",
             "/opt/ticket-automation/bundle/harnesses/adversarial_review.py"
           ],
-          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, as often as a blocking defect is found; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
+          "instructions": "Review the change as the operator's command. A blocking verdict exits 1 and sends the work back to the work stage, as often as a blocking defect is found; anything that keeps a verdict from being obtained (a setting that cannot be used, a test command that cannot start, a change that cannot be read, paths that match no change, a model service that is down or returns none) ends 0 and prints NOT REVIEWED with the reason, except when no file was changed at all: work let through from there can end with nothing delivered, so without a verdict that does not object it ends 1 and the work goes back. The findings are printed, so they join the history for the worker and the report writer; nothing here reads what any model wrote as prose.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
             "TASK_BRANCH": "example-integration-branch",
@@ -338,7 +338,7 @@
             "-B",
             "/opt/ticket-automation/scripts/deliver_git.py"
           ],
-          "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, opens or reuses one pull request and merges it, and writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it.",
+          "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, opens or reuses one pull request and merges it, and writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it. A request that changed no file is refused and goes back to the work stage, unless the operator sets DELIVERY_ALLOW_UNCHANGED=1 for it, which this example does not: it is off by default, and with it on such a request ends with nothing delivered once the review before this stage has given a verdict that does not object; the shipped review lets a checkout with no change through on nothing less.",
           "env": {
             "PYTHONDONTWRITEBYTECODE": "1",
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
