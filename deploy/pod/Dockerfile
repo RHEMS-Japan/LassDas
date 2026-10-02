@@ -1,5 +1,10 @@
 # The single-pod runtime image (docs/RUNTIME_POD.md).
 # Build for linux/arm64 (the cluster's node architecture).
+#
+# The Go version in the two golang stages below is the one place that version
+# is set: the engine's CI jobs test on it (.github/scripts/image-go-version.sh
+# reads these lines and fails if the two differ), and the image check holds
+# the packaged engine to it. Change both lines together.
 
 # ---- Stage 1: engine binaries -------------------------------------------
 FROM golang:1.26-bookworm AS engine

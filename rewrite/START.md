@@ -28,7 +28,7 @@ Jevの接続例は[OpenRouterのDecisions API](https://openrouter.ai/blog/insigh
 GOMAXPROCS=2 GOOS=linux GOARCH=arm64 sh package.sh /path/to/new-bundle
 ```
 
-実行先がx86-64なら `GOARCH=amd64`。既存の出力先は上書きしません。Go 1.25以降が必要です。
+実行先がx86-64なら `GOARCH=amd64`。既存の出力先は上書きしません。Go 1.25以降が必要です。テストは出荷イメージと同じ系列の Go で走らせています (系列は `deploy/pod/Dockerfile` の golang の行が決め、go.mod の版 1.25 では build と vet だけを確かめています)。
 SDKやコンテナimageはダウンロード・同梱しません。macOS用バイナリは作れますが、Linux役割ランチャーはmacOSでは動きません。
 
 ## 2. 実行環境と設定
