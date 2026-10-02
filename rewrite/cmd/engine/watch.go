@@ -304,13 +304,14 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				}
 				continue
 			}
+			stopping := false
 			if state.Waiting {
 				// This request put a question to the person who filed it. Only
 				// an authorized stop, or their reply after that question, makes
 				// it runnable again; anything else leaves it untouched.
 				applyStatus(ctx, cfg, issue, directory, awaitingStatus, say)
 				assignTurn(ctx, cfg, issue, directory, "requester", say)
-				resume, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
+				resume, answered, err := resumeWaitingRequest(ctx, cfg, issue, directory, request, state, interval)
 				if err != nil {
 					observe("request " + entry.Name() + " waits for the requester: " + err.Error())
 					continue
@@ -318,10 +319,20 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if !resume {
 					continue
 				}
-				resumeTurn(ctx, cfg, issue, directory, say)
+				// A stop is not an answer. The request runs again only for the
+				// stop to be recorded and reported, so the requester is not told
+				// that their reply was received and the work goes on, and the
+				// issue does not pass through the working status and the
+				// runtime's hands on its way to stopped.
+				stopping = !answered
+				if answered {
+					resumeTurn(ctx, cfg, issue, directory, say)
+				}
 			}
-			applyStatus(ctx, cfg, issue, directory, processingStatus, say)
-			acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			if !stopping {
+				applyStatus(ctx, cfg, issue, directory, processingStatus, say)
+				acceptTurn(ctx, cfg, issue, directory, unfinishedBefore(jobs, entries, id), say)
+			}
 			// Nothing else tells the requester why an accepted request sits
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.

@@ -543,8 +543,10 @@ by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
 `delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. An id left out leaves that turn alone; the runtime never
-reads or names a status. Each change is made once and recorded beside the
+the requester's stop. A stop written while a question waits moves the issue
+from `awaiting_requester` straight to `stopped`, and the runtime does not say
+that a reply was received. An id left out leaves that turn alone; the runtime
+never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -217,6 +218,88 @@ func TestAStopDuringAQuestionIsNotAnAnswer(t *testing.T) {
 	}
 	if _, ok := questionBoundaryAt(t, root); !ok {
 		t.Fatal("the unanswered question was closed by a stop")
+	}
+	if asked := askedTimes(t, root); asked != 1 {
+		t.Fatalf("questions asked=%d", asked)
+	}
+}
+
+// A requester who writes the stop instruction while the runtime waits for
+// their answer is told nothing about an answer, and the issue does not pass
+// through the working status on its way to stopped. Before this, the queue
+// treated the stop like an answer on the way to the stop machinery: it posted
+// that the reply was received and the work went on, and moved the issue back
+// to processing, a moment before stopping it.
+func TestAStopWhileWaitingIsNotAnnouncedAsAnAnswer(t *testing.T) {
+	cfg := questionConfiguration(t)
+	cfg.Intake.Announce = true
+	cfg.Intake.Statuses = &statusConfig{Processing: 1001, AwaitingRequester: 1002, Delivered: 3, Stopped: 1}
+	root := t.TempDir()
+	var mu sync.Mutex
+	comments := []json.RawMessage{}
+	var posted, statuses []string
+	// The tracker lists comments by id, so every new one gets the next id.
+	next := int64(800)
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host != "watch-tracker.example" {
+			return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "ask_requester"}}}), nil
+		}
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
+			return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			posted = append(posted, r.PostForm.Get("content"))
+			next++
+			// The runtime's own account, 900, is neither the requester nor an operator.
+			comments = append(comments, issueComment(next, 900, r.PostForm.Get("content")))
+			return selectionReply(r, 201, map[string]any{"id": next, "content": r.PostForm.Get("content")}), nil
+		case r.Method == http.MethodPatch:
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			id := r.PostForm.Get("statusId")
+			statuses = append(statuses, id)
+			n, _ := strconv.Atoi(id)
+			return selectionReply(r, 200, map[string]any{"id": 51, "status": map[string]any{"id": n}}), nil
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues"):
+			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
+		}
+		return nil, http.ErrNotSupported
+	})
+	log := &lockedLog{}
+	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+	defer finish()
+	moved := func(status string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(statuses) > 0 && statuses[len(statuses)-1] == status
+	}
+	waitFor(t, func() bool {
+		state, err := loadWatchState(root, 51)
+		_, recorded := questionBoundaryAt(t, root)
+		return err == nil && state.Waiting && recorded && moved("1002")
+	})
+	mu.Lock()
+	next++
+	comments = append(comments, issueComment(next, 55, "停止"))
+	mu.Unlock()
+	waitFor(t, func() bool { return moved("1") })
+	time.Sleep(60 * time.Millisecond) // several more ticks
+	finish()
+	mu.Lock()
+	defer mu.Unlock()
+	for _, text := range posted {
+		if strings.Contains(text, resumedNoticeText) {
+			t.Fatalf("a stop was announced as an answer: %q", posted)
+		}
+	}
+	if got := strings.Join(statuses, ","); got != "1001,1002,1" {
+		t.Fatalf("the issue moved %s; a stop while waiting goes from awaiting to stopped", got)
 	}
 	if asked := askedTimes(t, root); asked != 1 {
 		t.Fatalf("questions asked=%d", asked)
