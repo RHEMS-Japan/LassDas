@@ -87,6 +87,18 @@ class MirrorTests(unittest.TestCase):
         self.git(self.root, "clone", "--no-local", str(self.mirror), str(workspace))
         self.assertIn("later", (workspace / "main.go").read_text())
 
+    def test_the_mirror_keeps_the_operator_s_settings(self):
+        # Settings handed to Git through the environment are dropped only by the
+        # delivery's Git on the workspace. Here one is the only way to the source.
+        settings = {"DELIVERY_REMOTE_URL": "example-source:project.git", "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "url.%s.insteadOf" % self.source,
+                    "GIT_CONFIG_VALUE_0": "example-source:project.git"}
+        for _ in ("create", "fetch"):
+            done = self.cycle(**settings)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.git(self.mirror, "rev-parse", "refs/heads/master").stdout,
+                         self.git(self.source, "rev-parse", "HEAD").stdout)
+
     def test_a_refused_source_ends_the_loop_and_says_so(self):
         child = self.loop(DELIVERY_REMOTE_URL=str(self.root / "absent.git"))
         out, err = child.communicate(timeout=30)

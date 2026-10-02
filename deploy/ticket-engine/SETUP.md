@@ -463,6 +463,15 @@ which are otherwise authored as "ticket engine". The pull request is titled
 `Deliver <ISSUE-KEY>`, comes from the branch `ticket/<ISSUE-KEY>`, and is
 merged as `Deliver <ISSUE-KEY> (#<number>)`.
 
+Git settings put in a process's `env` (`GIT_CONFIG_COUNT` with
+`GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`, or `GIT_CONFIG_PARAMETERS`) reach
+the Git that talks to the service in the delivery, in the check after delivery
+(whose commands see them too) and in the mirror, so a proxy or a certificate
+can be given that way. They do not reach the delivery's and the review's Git
+on the workspace, which read it without them so that the two agree on whether
+anything changed; a setting that Git would need there, such as
+`safe.directory`, cannot be passed.
+
 Do not remove `model_env` from a model stage's process, and do not put a
 model id into its `env` instead: the engine refuses to start
 ([section 11](#the-engine-container-restarts-right-after-it-starts)).

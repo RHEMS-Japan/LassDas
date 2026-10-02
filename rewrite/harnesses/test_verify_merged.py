@@ -114,6 +114,19 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("credential=unset", result.stdout)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
+    def test_the_clone_and_the_configured_commands_keep_the_operator_s_settings(self):
+        # Settings handed to Git through the environment are dropped only by the
+        # delivery's Git on the workspace: this check's clone and the operator's
+        # commands keep them. Here one is the only way to the target.
+        self.receipt()
+        result = self.verify("/bin/sh -c 'printf \"settings=%s\\n\" \"${GIT_CONFIG_COUNT-none}\"'",
+                             DELIVERY_REMOTE_URL="example-target:project.git", GIT_CONFIG_COUNT="1",
+                             GIT_CONFIG_KEY_0="url.%s.insteadOf" % self.remote,
+                             GIT_CONFIG_VALUE_0="example-target:project.git")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("The merge commit is contained in master.", result.stdout)
+        self.assertIn("settings=1", result.stdout)
+
     def test_a_branch_that_cannot_be_reached_is_waited_out_then_reported(self):
         self.receipt()
         result = self.verify("/bin/sh -c 'echo unreachable'",

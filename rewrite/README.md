@@ -703,16 +703,19 @@ stage, round after round, with the reason written in the record each time,
 instead of going on unreviewed. New files are read from Git's own list, so a
 name in Japanese or a new symbolic link reaches the reviewer as it is, and a
 name that is not UTF-8 with a replacement character. Git runs without the
-user's or the system's Git settings, without settings handed to it through
+user's or the system's Git settings, without its default exclude and
+attributes files (`git/ignore` and `git/attributes` under `XDG_CONFIG_HOME`,
+or else under `.config/git` in `HOME`), without settings handed to it through
 the environment (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_n` and
 `GIT_CONFIG_VALUE_n`, and `GIT_CONFIG_PARAMETERS`), and without the variables
 that point it at another repository, index or work tree (`GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
-`GIT_ALTERNATE_OBJECT_DIRECTORIES`), as it does for the delivery, so none of
-these set for one of the two stages makes them disagree on whether anything
-changed. Git still reads its default exclude file (`git/ignore` under
-`XDG_CONFIG_HOME`, or else `.config/git/ignore` under `HOME`), so the two
-agree only while both stages find the same such file there, or none. A diff or
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`) or pick its attributes or its diff program
+(`GIT_ATTR_SOURCE`, `GIT_EXTERNAL_DIFF`). The delivery's Git on the workspace
+runs the same way, so none of these, set for one of the two stages, makes them
+disagree on whether anything changed. Settings handed to Git through the
+environment do reach the delivery's Git that fetches and pushes, the check
+after delivery and the mirror. A diff or
 test output longer than its limit is cut with a visible marker, never
 silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything

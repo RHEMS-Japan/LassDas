@@ -23,9 +23,9 @@ IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid
 
 def git_environment():
     """No personal configuration, and no guessed identity either: a runtime
-    with neither is exactly where these programs have to work. The delivery
-    drops settings handed to Git through the environment, so the workspace's
-    own configuration forbids the guess for its Git (see setUp)."""
+    with neither is exactly where these programs have to work. The delivery's
+    Git on the workspace drops settings handed to Git through the environment,
+    so the workspace's own configuration forbids the guess there (see setUp)."""
     return {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
@@ -691,7 +691,8 @@ class DeliveryTests(unittest.TestCase):
 
     # G2 of the final review of the ending with no change: the delivery took
     # the new file the review had seen for no change at all, and ended without
-    # a delivery. It drops these settings now, as the review does.
+    # a delivery. Its Git on the workspace drops these settings now, as the
+    # review's Git does.
 
     def test_a_count_of_settings_in_the_environment_does_not_hide_a_change(self):
         self.delivered_although_settings_hide_it({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.excludesFile",
@@ -700,6 +701,90 @@ class DeliveryTests(unittest.TestCase):
     def test_settings_passed_as_by_git_itself_do_not_hide_a_change(self):
         self.delivered_although_settings_hide_it(
             {"GIT_CONFIG_PARAMETERS": "'core.excludesFile'='%s'" % self.hide_the_new_file()})
+
+    # The -c the delivery gives its Git on the workspace keep an exclude file
+    # out whatever the environment says; core.fileMode=false is kept out only
+    # by dropping the settings.
+
+    def delivered_with_its_mode(self, settings):
+        """main.go made executable, its only change, delivered as it is."""
+        (self.workspace / "main.go").chmod(0o755)
+        done = self.deliver(DELIVERY_ALLOW_UNCHANGED="1", **settings)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+        listed = self.git(self.remote, "ls-tree", "refs/heads/master", "main.go").stdout
+        self.assertTrue(listed.startswith("100755 "), listed)
+
+    def test_a_count_of_settings_does_not_hide_a_change_of_mode(self):
+        self.delivered_with_its_mode({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fileMode",
+                                      "GIT_CONFIG_VALUE_0": "false"})
+
+    def test_settings_passed_as_by_git_itself_do_not_hide_a_change_of_mode(self):
+        self.delivered_with_its_mode({"GIT_CONFIG_PARAMETERS": "'core.fileMode'='false'"})
+
+    # The same kind, closed in the second review of this change: Git's default
+    # exclude and attributes files, and the variables that pick its attributes
+    # or its diff program, in the delivery's environment only.
+
+    def test_git_s_default_exclude_file_does_not_hide_a_change(self):
+        xdg = self.root / "xdg"
+        (xdg / "git").mkdir(parents=True)
+        (xdg / "git" / "ignore").write_text("new.go\n")
+        self.delivered_although_settings_hide_it({"XDG_CONFIG_HOME": str(xdg)})
+
+    def delivered_with_its_line_ends(self, **settings):
+        """main.go with only its line ends turned into CRLF, delivered as it is."""
+        (self.workspace / "main.go").write_bytes(b"package main\r\n")
+        done = self.deliver(**settings)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+        delivered = subprocess.run(["git", "-C", str(self.remote), "show", "refs/heads/master:main.go"],
+                                   capture_output=True, check=True, env=git_environment()).stdout
+        self.assertEqual(delivered, b"package main\r\n")
+
+    def test_git_s_default_attributes_file_does_not_hide_a_change(self):
+        (self.home / ".config" / "git").mkdir(parents=True)
+        (self.home / ".config" / "git" / "attributes").write_text("*.go text\n")
+        self.delivered_with_its_line_ends()
+
+    def test_attributes_taken_from_elsewhere_do_not_hide_a_change(self):
+        def git_in(*arguments, text):
+            return subprocess.run(["git", "-C", str(self.workspace), *arguments], input=text, capture_output=True,
+                                  text=True, check=True, env=git_environment()).stdout.strip()
+        blob = git_in("hash-object", "-w", "--stdin", text="*.go text\n")
+        self.delivered_with_its_line_ends(
+            GIT_ATTR_SOURCE=git_in("mktree", text="100644 blob %s\t.gitattributes\n" % blob))
+
+    def test_a_diff_program_in_the_environment_hides_no_change_and_no_forbidden_text(self):
+        self.change("main.go", "package main // delivered past a diff program\n")
+        done = self.deliver(GIT_EXTERNAL_DIFF="true")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("delivered past a diff program",
+                      self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+        # A diff program that prints its own format, as some do, no longer lets
+        # forbidden text through.
+        self.change("main.go", "package main // internal-project-codename\n")
+        refused = self.deliver(GIT_EXTERNAL_DIFF="printf 'changed: %s\\n'",
+                               DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("forbidden text", refused.stdout)
+
+    def test_the_git_that_talks_to_the_service_keeps_the_operator_s_settings(self):
+        # Only the delivery's Git on the workspace drops settings handed to Git
+        # through the environment: the Git that fetches, lists and pushes keeps
+        # them, as an operator's network may need. Here one is the only way to
+        # the target.
+        settings = {"DELIVERY_REMOTE_URL": "example-target:project.git", "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "url.%s.insteadOf" % self.remote,
+                    "GIT_CONFIG_VALUE_0": "example-target:project.git"}
+        self.change("main.go", "package main // delivered by way of a setting\n")
+        checked = self.deliver("--dry-run", **settings)
+        self.assertEqual(checked.returncode, 3, checked.stdout + checked.stderr)
+        self.assertIn("Listing the branch over Git exited 0 with ", checked.stdout)
+        done = self.deliver(**settings)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("delivered by way of a setting",
+                      self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
 
     def leave_merge(self, **extra):
         return self.deliver(DELIVERY_MERGE_METHOD="none", **extra)

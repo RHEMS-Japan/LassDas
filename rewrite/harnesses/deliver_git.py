@@ -579,7 +579,8 @@ def check_only(workspace, owner, name, base, branch, method, url, allowed, uncha
     lines.append("Reading the integration branch answered status %d." % status)
     code, listing, diagnostics = support.run(
         support.git("ls-remote", "--heads", url, "refs/heads/" + base, url=url),
-        check=False, timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600))
+        check=False, timeout=support.number("DELIVERY_GIT_TIMEOUT_SECONDS", 600),
+        environment=support.git_environment(service=True))
     lines.append("Listing the branch over Git exited %d%s." %
                  (code, (" with " + listing.split("\t")[0][:12]) if code == 0 and listing.strip() else ""))
     if code != 0:
@@ -608,6 +609,8 @@ def deliver(arguments):
     if arguments and not dry:
         raise DeliveryError("This delivery process takes no arguments except --dry-run")
     support.discard_prompt()
+    # Read and write the workspace as the review reads it (delivery_support).
+    support.workspace_as_reviewed = True
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     issue = issue_name()
     branch = "ticket/" + issue

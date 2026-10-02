@@ -448,22 +448,14 @@ class AdversarialReviewTests(unittest.TestCase):
                         self.assertIn(self.GOES_BACK, finished.stdout, case)
 
     def test_git_reads_neither_the_users_nor_the_systems_settings(self):
-        # As for the delivery: a user's own settings could hide a path from
-        # one of the two only, and they would disagree on whether anything
-        # changed. Here the only new file is hidden by Git's default exclude
-        # file, as the delivery sees it, while the user's settings name another.
-        self.leave_unchanged()
+        # As for the delivery: a user's own settings could change what one of
+        # the two reads, and they would disagree on whether anything changed.
+        # Here they name a diff program that prints nothing. (An exclude file
+        # they name is kept out by git() whether they are read or not.)
         home = self.home.parent / "user-home"
-        (home / ".config" / "git").mkdir(parents=True)
-        (home / ".config" / "git" / "ignore").write_text("notes.txt\n")
-        (home / "nothing-excluded").write_text("")
-        (home / ".gitconfig").write_text("[core]\n\texcludesFile = %s\n" % (home / "nothing-excluded"))
-        (self.workspace / "notes.txt").write_text("a note Git's default exclude file hides\n")
-        service = ModelStandIn([{"status": 503}, {"status": 503}])
-        self.addCleanup(service.close)
-        finished = self.run_review(service, HOME=str(home))
-        self.assertEqual(finished.returncode, 1, finished.stdout)
-        self.assertIn(self.GOES_BACK, finished.stdout)
+        home.mkdir()
+        (home / ".gitconfig").write_text("[diff]\n\texternal = true\n")
+        self.reviewed_as_it_is({"HOME": str(home)}, "+    return 2  # changed")
 
     def test_git_is_not_pointed_at_another_index_or_checkout(self):
         # V2 and V3 of the third review: an operator's GIT_INDEX_FILE, or a
@@ -492,7 +484,8 @@ class AdversarialReviewTests(unittest.TestCase):
         # G1 of the final review: settings handed to Git through the review's
         # environment only, an exclude file that hides the one new file, made
         # the reviewer hear that no file was changed while the delivery
-        # delivered it. The review drops them now, as the delivery does.
+        # delivered it. The review drops them now, as the delivery's Git on the
+        # workspace does.
         self.leave_unchanged()
         hide = self.home.parent / "hide-farewell"
         hide.write_text("src/farewell.txt\n")
@@ -508,10 +501,63 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertIn("--- new file src/farewell.txt ---\na new file the reviewer must see", text)
             self.assertNotIn("No file was changed", text)
 
-    def test_the_review_drops_the_settings_the_delivery_drops(self):
+    def test_settings_in_the_environment_do_not_hide_a_change_of_mode(self):
+        # git() keeps an exclude file out with -c whatever the environment
+        # says; core.fileMode=false is kept out only by dropping the settings.
+        self.leave_unchanged()
+        (self.workspace / "src" / "tool.py").chmod(0o755)
+        for settings in ({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fileMode",
+                          "GIT_CONFIG_VALUE_0": "false"},
+                         {"GIT_CONFIG_PARAMETERS": "'core.fileMode'='false'"}):
+            self.reviewed_as_it_is(settings, "old mode 100644\nnew mode 100755")
+
+    def reviewed_as_it_is(self, settings, seen):
+        """The review with something in its environment only that would hide
+        the change from its Git; the reviewer is shown the change all the same."""
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, **settings)
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn(seen, text)
+        self.assertNotIn("No file was changed", text)
+
+    def end_lines_only(self):
+        """The one change: src/tool.py with its line ends turned into CRLF."""
+        self.leave_unchanged()
+        (self.workspace / "src" / "tool.py").write_bytes(b"def run():\r\n    return 1\r\n")
+
+    def test_git_reads_no_default_exclude_file(self):
+        self.leave_unchanged()
+        (self.workspace / "src" / "farewell.txt").write_text("a new file the reviewer must see\n")
+        xdg = self.home.parent / "xdg"
+        (xdg / "git").mkdir(parents=True)
+        (xdg / "git" / "ignore").write_text("farewell.txt\n")
+        self.reviewed_as_it_is({"XDG_CONFIG_HOME": str(xdg)}, "--- new file src/farewell.txt ---")
+
+    def test_git_reads_no_default_attributes_file(self):
+        self.end_lines_only()
+        home = self.home.parent / "user-home"
+        (home / ".config" / "git").mkdir(parents=True)
+        (home / ".config" / "git" / "attributes").write_text("*.py text\n")
+        self.reviewed_as_it_is({"HOME": str(home)}, "+def run():\r")
+
+    def test_git_takes_no_attributes_from_elsewhere(self):
+        self.end_lines_only()
+        def git_in(*arguments, text):
+            return subprocess.run(["git", "-C", str(self.workspace), *arguments], input=text, capture_output=True,
+                                  text=True, check=True, env=git_environment()).stdout.strip()
+        blob = git_in("hash-object", "-w", "--stdin", text="*.py text\n")
+        tree = git_in("mktree", text="100644 blob %s\t.gitattributes\n" % blob)
+        self.reviewed_as_it_is({"GIT_ATTR_SOURCE": tree}, "+def run():\r")
+
+    def test_git_uses_no_diff_program_from_the_environment(self):
+        self.reviewed_as_it_is({"GIT_EXTERNAL_DIFF": "true"}, "+    return 2  # changed")
+
+    def test_the_review_drops_what_the_delivery_drops_on_the_workspace(self):
         # The review's bundle carries no delivery_support, so each keeps its
-        # own list of the settings Git takes from the environment. Lists that
-        # drift apart would let one stage's environment split the two again.
+        # own list of what it drops from Git's environment. Lists that drift
+        # apart would let one stage's environment split the two again.
         def load(name, path):
             spec = importlib.util.spec_from_file_location(name, path)
             module = importlib.util.module_from_spec(spec)
@@ -519,16 +565,24 @@ class AdversarialReviewTests(unittest.TestCase):
             return module
         review = load("review_under_test", SCRIPT)
         delivery = load("delivery_support_under_test", SCRIPT.with_name("delivery_support.py"))
+        delivery.workspace_as_reviewed = True
         probe = {name: "probe" for name in (
             "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_12", "GIT_CONFIG_VALUE_12",
             "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG",
-            "GIT_CONFIG_KEY_", "GIT_CONFIG_KEY_A", "PATH")}
+            "GIT_CONFIG_KEY_", "GIT_CONFIG_KEY_A", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ATTR_SOURCE", "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "SSH_ASKPASS",
+            "PATH")}
         with mock.patch.dict(os.environ, probe, clear=True):
             dropped_by_review = sorted(set(probe) - set(review.git_environment()))
             dropped_by_delivery = sorted(set(probe) - set(delivery.git_environment()))
-        self.assertEqual(dropped_by_review, dropped_by_delivery)
-        self.assertEqual(dropped_by_review, ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_12",
-                                             "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_12"])
+        # Only the delivery's Git can ask for a credential, so only it drops
+        # the programs that would ask a person for one.
+        self.assertEqual(dropped_by_review, [name for name in dropped_by_delivery
+                                             if name not in ("GIT_ASKPASS", "SSH_ASKPASS")])
+        self.assertEqual(dropped_by_review, [
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ATTR_SOURCE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_12", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_VALUE_12", "GIT_DIR", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE", "GIT_WORK_TREE"])
 
     def test_a_reply_in_another_shape_is_read_as_far_as_it_can_be_and_kept_as_written(self):
         # The second point of the third review: arguments given as an object,
