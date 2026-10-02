@@ -17,12 +17,24 @@ import (
 	"sync"
 )
 
+// Upstream carries out a request that an issue scope let through. It adds only
+// the account's own credential, follows no redirect, and sends a POST once: a
+// missing receipt stays ambiguous.
+type Upstream interface {
+	Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error)
+}
+
+// Forward is Backlog's guarded call, for an issue scope in front of it.
+func (b Backlog) Forward(ctx context.Context, method, path string, query, form url.Values, expected int) ([]byte, error) {
+	return b.call(ctx, method, path, query, form, expected)
+}
+
 // IssueScope exposes only one operator-assigned issue to a worker. The upstream
 // account credential stays with this handler, outside the worker environment.
 // Its key is an API capability, not a certificate attached to an LLM's answer.
 // The caller must supply TLS and isolate the handler from worker processes.
 type IssueScope struct {
-	source Backlog
+	source Upstream
 	issue  string
 	key    string
 	post   bool
@@ -42,7 +54,7 @@ type IssueScope struct {
 // tracker will not remove stays, which is what there was before this option.
 func KeepLatestPost(s *IssueScope) { s.latest = true }
 
-func NewIssueScope(source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueScope, error) {
+func NewIssueScope(source Upstream, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueScope, error) {
 	if issue == "" || issue == "." || issue == ".." || strings.ContainsAny(issue, "/\\?#\r\n\x00") {
 		return nil, errors.New("provide one operator-assigned tracker issue")
 	}
@@ -147,9 +159,9 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Never forward caller authority, paths, hosts or notification/status fields.
-	// Backlog.call inserts only the upstream account credential and refuses
+	// Forward inserts only the upstream account credential and refuses
 	// redirects. It sends a POST once; a missing receipt stays ambiguous.
-	data, err := s.source.call(r.Context(), r.Method, requested, query, form, expected)
+	data, err := s.source.Forward(r.Context(), r.Method, requested, query, form, expected)
 	if err != nil {
 		s.reject(w, http.StatusBadGateway, "scoped tracker request: "+err.Error())
 		return
@@ -201,7 +213,7 @@ func (s *IssueScope) RemoveEarlierPosts(ctx context.Context) int {
 		if id == latest {
 			continue
 		}
-		if _, err := s.source.call(ctx, http.MethodDelete, path+"/comments/"+strconv.FormatInt(id, 10), nil, nil, http.StatusOK); err == nil {
+		if _, err := s.source.Forward(ctx, http.MethodDelete, path+"/comments/"+strconv.FormatInt(id, 10), nil, nil, http.StatusOK); err == nil {
 			removed++
 		}
 	}

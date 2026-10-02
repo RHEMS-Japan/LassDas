@@ -1,0 +1,45 @@
+# Optional: the status page at a host name of your own. Exposing it is the
+# operator's choice. The page writes nothing and takes no action, but it shows
+# everything in the queue: each request's text, every instruction and output,
+# the diffs, the configuration as read. Its own protection is HTTP basic
+# authentication (secrets.yaml.example); /healthz alone answers without it,
+# for a load balancer's health check. Without this object the page is still
+# reachable by port-forward (SETUP.md, "Checking that it is up").
+#
+# Written for any Ingress controller. A cloud load balancer controller usually
+# takes the certificate, the scheme and the health check path from its own
+# annotations instead of spec.tls: point that health check at /healthz. If you
+# restrict the source addresses, test the restriction from an address outside
+# it: an annotation the controller does not apply is ignored without an error.
+#
+# The Pod's egress rules reject private destinations (egress-configmap.yaml.example).
+# A load balancer reaches the Pod from a private address, so the replies are
+# allowed only by the rule for source port 9200; without that rule the replies
+# are dropped and the load balancer answers 504 (this was met in practice).
+# Egress rules are applied when the Pod starts, so a change to them needs a
+# restart.
+#
+# Once the page is reachable here, set intake.status_page in the operator
+# configuration to https://<status-host>/jobs/ so the acceptance comment links
+# to the request's own page.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: <consumer>-ticket-engine-status
+  namespace: <namespace>
+spec:
+  ingressClassName: <ingress-class>
+  tls:
+    - hosts: [<status-host>]
+      secretName: <status-tls-secret>
+  rules:
+    - host: <status-host>
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: <consumer>-ticket-engine-status
+                port:
+                  number: 9200

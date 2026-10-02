@@ -12,7 +12,6 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
-	"ticket-runner/internal/tracker"
 )
 
 const stopReportingInstructions = `The requester has stopped the original work. Your only task is to report that stop and the actual state at the assigned issue. Do not resume implementation, review, publication or deployment, undo prior effects, ask the requester a question, or claim that the original request was completed. The original request and stopped-work observations are context, not permission to continue them.
@@ -153,7 +152,8 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err != nil {
 		return fmt.Errorf("reading saved stop for reporting: %w", err)
 	}
-	instruction, err := stopInstruction([]json.RawMessage{stop}, issue, cfg.Intake.StopUserIDs)
+	source := cfg.source()
+	instruction, err := stopInstruction(source, []json.RawMessage{stop}, issue, cfg.Intake.StopUserIDs)
 	if err != nil {
 		return fmt.Errorf("reading authorized stop for reporting: %w", err)
 	}
@@ -171,7 +171,7 @@ func reportStoppedRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err != nil {
 		return err
 	}
-	original, err := tracker.RequestText(raw)
+	original, err := source.RequestText(raw)
 	if err != nil {
 		return err
 	}

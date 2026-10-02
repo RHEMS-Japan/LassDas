@@ -280,6 +280,7 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(run 
 			case "verify_merged":
 				maps.Copy(env, delivery)
 				env["VERIFY_COMMANDS"] = `/bin/sh -c "grep -q Hello src/greeting.txt"`
+				p.Secrets = map[string]string{"GITHUB_TOKEN": "DELIVERY_TEST_TOKEN"}
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("verify_merged.py"))
 			default:
 				env["UNCHANGED_STAGE_ACTION"], env["UNCHANGED_STAGE_REQUEST"] = cfg.Roles[i].Name, request

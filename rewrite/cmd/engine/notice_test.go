@@ -346,6 +346,84 @@ func TestBudgetBelowMinimumHoldsWorkAndResumesByItself(t *testing.T) {
 	}
 }
 
+// A request held for the budget before its work ever started still follows an
+// authorized stop: the stop launches no model, so it does not wait for the
+// budget to return. Before this, nothing read the issue's comments while the
+// queue was held, and the requester's stop stayed unread for as long as it
+// took someone to raise the budget.
+func TestAStopIsFollowedWhileTheBudgetHoldsTheRequest(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.MinModelCredit = 5
+	holdingWorker(&cfg)
+	var mu sync.Mutex
+	remaining := "3"
+	server := creditServer(t, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return `{"data":{"limit":50,"usage":47,"limit_remaining":` + remaining + `,"limit_reset":"2026-10-01"}}`
+	})
+	cfg.Intake.ModelCreditURL, cfg.Intake.Client = server.URL, server.Client()
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("implement"))
+	root, directory := noticeJob(t, chain.State{History: []chain.Result{}})
+	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool { return fixture.count(pausedNoticeText) > 0 })
+	// The person who filed the issue, account 55, writes the stop.
+	fixture.mu.Lock()
+	stop, _ := json.Marshal(map[string]any{"id": 900 + len(fixture.rows), "issueId": 51, "projectId": 17,
+		"content": "停止", "createdUser": map[string]any{"id": 55}})
+	fixture.rows = append(fixture.rows, stop)
+	fixture.mu.Unlock()
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(directory, "stop-request.json"))
+		return err == nil
+	})
+	time.Sleep(80 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a stopped request while the budget was short")
+	}
+	// The budget returns: a stopped request is not told that its work resumed.
+	mu.Lock()
+	remaining = "20"
+	mu.Unlock()
+	time.Sleep(120 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a stopped request once the budget returned")
+	}
+	if got := fixture.all(); len(got) != 1 || got[0] != pausedNoticeText {
+		t.Fatalf("the requester was told something else: %v", got)
+	}
+}
+
+// An interrupted request is told on restart that the same request carries on.
+// One with a stop standing at its issue is launched only for the stop to be
+// recorded, so it is told nothing of the kind; before this the notice was
+// posted a moment before the stop took effect.
+func TestAnInterruptedRequestWithAStopStandingIsNotToldItCarriesOn(t *testing.T) {
+	cfg := watchConfiguration(t)
+	holdingWorker(&cfg)
+	root, directory := noticeJob(t, chain.State{Pending: &chain.Assignment{Role: "implement"}, History: []chain.Result{}})
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("implement"))
+	// The person who filed the issue, account 55, wrote the stop while the
+	// runtime was down.
+	stop, _ := json.Marshal(map[string]any{"id": 900, "issueId": 51, "projectId": 17,
+		"content": "停止", "createdUser": map[string]any{"id": 55}})
+	fixture.rows = append(fixture.rows, stop)
+	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		_, err := os.Stat(filepath.Join(directory, "stop-request.json"))
+		return err == nil
+	})
+	time.Sleep(80 * time.Millisecond)
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("a request being stopped was told: %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "child-pid")); err == nil {
+		t.Fatal("a role ran for a request with a stop standing")
+	}
+}
+
 // A running role is stopped when the budget falls away under it.
 func TestBudgetFallingAwayStopsTheRunningChild(t *testing.T) {
 	cfg := watchConfiguration(t)
@@ -766,11 +844,11 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	queueRanSince(t, root, cfg, accepted)
 	// Accepted three hours ago with nothing recorded: the one waiting its
 	// turn says nothing, the one running says it is long but not failing.
-	waiting := sourceIssue{ID: 52, ProjectID: 17, Key: "EXAMPLE-52"}
+	waiting := sourceIssue{ID: 52, Key: "EXAMPLE-52"}
 	if err := noteStall(context.Background(), cfg, requestNotices(cfg, waiting, directories[52]), directories[52], false); err != nil {
 		t.Fatal(err)
 	}
-	running := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	running := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	if err := noteStall(context.Background(), cfg, requestNotices(cfg, running, directories[51]), directories[51], true); err != nil {
 		t.Fatal(err)
 	}
@@ -1154,5 +1232,48 @@ func TestAnUnreadableRecordOfKindsIsSetAsideOnce(t *testing.T) {
 		if log := readNotices(t, directory).Notices; len(log) != 1 || !log[0].Predates {
 			t.Fatalf("a request delivered before is not settled: %+v", log)
 		}
+	}
+}
+
+// A notice whose submission was never confirmed is looked for among the
+// issue's comments by id and words alone. A comment whose author or place its
+// record writes in another shape neither hides the notice nor keeps it from
+// being posted.
+func TestAnUnconfirmedNoticeIsFoundByItsWordsWhateverElseTheCommentsHold(t *testing.T) {
+	odd := json.RawMessage(`{"id":950,"issueId":"51","projectId":null,"createdUser":"someone","content":"unrelated words"}`)
+	for name, stored := range map[string]bool{"stored before": true, "never stored": false} {
+		t.Run(name, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			_, directory := noticeJob(t, chain.State{History: []chain.Result{}})
+			written := time.Now().UTC()
+			saved, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: resumeNotice, Text: resumeNoticeText, WrittenAt: written}}})
+			if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), saved); err != nil {
+				t.Fatal(err)
+			}
+			rows := []json.RawMessage{odd}
+			if stored {
+				notice, _ := json.Marshal(map[string]any{"id": 951, "issueId": 51, "projectId": 17, "createdUser": map[string]any{"id": 99}, "content": resumeNoticeText})
+				rows = append(rows, notice)
+			}
+			posts := 0
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPost {
+					posts++
+					return selectionReply(r, 201, map[string]any{"id": 952, "content": resumeNoticeText}), nil
+				}
+				return selectionReply(r, 200, rows), nil
+			})
+			if err := requestNotices(cfg, sourceIssue{ID: 51, Key: "EXAMPLE-51"}, directory).flush(context.Background()); err != nil {
+				t.Fatalf("the notice was not settled: %v", err)
+			}
+			log := readNotices(t, directory).Notices
+			want, wantPosts := int64(952), 1
+			if stored {
+				want, wantPosts = 951, 0
+			}
+			if len(log) != 1 || log[0].PostedAt == nil || log[0].CommentID != want || posts != wantPosts {
+				t.Fatalf("settled as %+v after %d posts", log, posts)
+			}
+		})
 	}
 }

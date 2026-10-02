@@ -1,0 +1,19 @@
+# A cluster-internal address for the read-only status page, the second
+# container of statefulset.yaml.example (port 9200). Nothing outside the
+# cluster reaches it through this object alone; that takes an Ingress
+# (status-ingress.yaml.example) or a port-forward, and whether to expose the
+# page at all is the operator's choice (SETUP.md, "Checking that it is up").
+#
+# The engine takes no request, so nothing else needs a Service. The
+# StatefulSet's serviceName names a governing Service that is not created.
+apiVersion: v1
+kind: Service
+metadata:
+  name: <consumer>-ticket-engine-status
+  namespace: <namespace>
+spec:
+  type: ClusterIP
+  selector:
+    app: <consumer>-ticket-engine
+  ports:
+    - { name: http, port: 9200, targetPort: 9200, protocol: TCP }

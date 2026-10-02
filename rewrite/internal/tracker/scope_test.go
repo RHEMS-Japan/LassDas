@@ -109,8 +109,8 @@ func TestIssueScopeCannotExpandItsAuthority(t *testing.T) {
 	readServer := httptest.NewTLSServer(readOnly)
 	defer readServer.Close()
 	tests := []struct {
-		name, method, path, query, body, key string
-		readOnly                             bool
+		name, method, path, query, body, key, contentType string
+		readOnly                                          bool
 	}{
 		{name: "missing key", method: "GET", path: "/issues/EXAMPLE-1"},
 		{name: "other scope key", method: "GET", path: "/issues/EXAMPLE-1", key: other.Key()},
@@ -132,6 +132,8 @@ func TestIssueScopeCannotExpandItsAuthority(t *testing.T) {
 		{name: "duplicate page", method: "GET", path: "/issues/EXAMPLE-1/comments", query: "count=1&count=2", key: scope.Key()},
 		{name: "huge page", method: "GET", path: "/issues/EXAMPLE-1/comments", query: "count=101", key: scope.Key()},
 		{name: "bad cursor", method: "GET", path: "/issues/EXAMPLE-1/comments", query: "minId=-1", key: scope.Key()},
+		{name: "descending page", method: "GET", path: "/issues/EXAMPLE-1/comments", query: "order=desc", key: scope.Key()},
+		{name: "post that is not a form", method: "POST", path: "/issues/EXAMPLE-1/comments", body: "content=hello", contentType: "text/plain", key: scope.Key()},
 		{name: "additional form", method: "POST", path: "/issues/EXAMPLE-1/comments", body: "content=hello&statusId=4", key: scope.Key()},
 		{name: "notification", method: "POST", path: "/issues/EXAMPLE-1/comments", body: "content=hello&notifiedUserId[]=12", key: scope.Key()},
 		{name: "duplicate content", method: "POST", path: "/issues/EXAMPLE-1/comments", body: "content=hello&content=bye", key: scope.Key()},
@@ -152,7 +154,11 @@ func TestIssueScopeCannotExpandItsAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			contentType := "application/x-www-form-urlencoded"
+			if tt.contentType != "" {
+				contentType = tt.contentType
+			}
+			req.Header.Set("Content-Type", contentType)
 			response, err := client.Do(req)
 			if err != nil {
 				t.Fatal(err)
