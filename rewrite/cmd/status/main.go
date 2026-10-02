@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -134,6 +135,25 @@ func newServer(runDir, configPath, userEnv, passwordEnv string) (*server, error)
 	return s, nil
 }
 
+// githubIssue says whether a record is a GitHub issue's: one with a positive
+// number, its page and its repository. It gives the number, and the page when
+// that is a link to this very issue: https, nobody's name or password in it,
+// and a path ending in the issue's number.
+func githubIssue(issue map[string]any) (string, string, bool) {
+	value, isNumber := issue["number"].(float64)
+	page, isPage := issue["html_url"].(string)
+	_, isRepository := issue["repository_url"].(string)
+	if !isNumber || value <= 0 || !isPage || !isRepository {
+		return "", "", false
+	}
+	number := strconv.FormatFloat(value, 'f', -1, 64)
+	address, err := url.Parse(page)
+	if err != nil || address.Scheme != "https" || address.User != nil || address.Host == "" || !strings.HasSuffix(address.Path, "/issues/"+number) {
+		page = ""
+	}
+	return number, page, true
+}
+
 // issueLinkBase turns a tracker API base such as https://space.example/api/v2
 // into the prefix of a browser link for one issue key.
 func issueLinkBase(base string) string {
@@ -226,6 +246,9 @@ type job struct {
 	StageIndex  int
 	StageCount  int
 	Model       string
+	// GitHub says the issue is a GitHub issue, so the page names GitHub
+	// where it says where the requester wrote.
+	GitHub bool
 }
 
 // stageMark is one stage on a card: passed, current or ahead.
@@ -470,6 +493,16 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		var issue map[string]any
 		if err := json.Unmarshal(raw, &issue); err != nil {
 			note("issue.json could not be decoded: %v", err)
+		} else if number, page, github := githubIssue(issue); github {
+			// A GitHub issue is named by its number and opened at the page its
+			// record gives, so it needs no configuration to be shown.
+			j.GitHub = true
+			j.Key = "#" + number
+			j.Title, j.Created = stringOf(issue["title"]), stringOf(issue["created_at"])
+			if user, ok := issue["user"].(map[string]any); ok {
+				j.Requester = stringOf(user["login"])
+			}
+			j.Link = page
 		} else {
 			j.Key, j.Title, j.Created = stringOf(issue["issueKey"]), stringOf(issue["summary"]), stringOf(issue["created"])
 			if user, ok := issue["createdUser"].(map[string]any); ok {
@@ -1557,7 +1590,7 @@ var japanese = map[string]string{
 	"elapsed": "経過", "last change": "最終更新", "last failure": "直近の失敗", "Intake, as configured": "受付の設定", "Stages of the run": "工程の並び",
 	"Decision and models": "判断とモデル", "Runtime log (tail)": "本体のログ (末尾)", "(nothing yet)": "(まだ何もない)", "the whole log": "ログ全文",
 	"Rendered": "表示時刻", "this page reloads by itself (every 10 seconds while a process runs, otherwise every 30) and shows the queue as it is on disk. Read only.": "この画面は自動で更新され (工程の実行中は 10 秒ごと、それ以外は 30 秒ごと)、ディスク上の queue をそのまま表示します。読み取り専用。",
-	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "started": "開始",
+	"status": "状態", "Requested by": "依頼者", "at": "起票", "open the issue": "チケットを開く", "open the issue on GitHub": "issue を開く", "started": "開始",
 	"waiting for the requester": "依頼者の返事待ち", "pending:": "実行待ち:", "instruction of the pending action": "実行待ちの工程への指示", "Raw files:": "生のファイル:",
 	"workspace changes as text": "作業場所の変更 (テキスト)", "Running now:": "実行中:", "since": "開始", "instruction handed to it": "渡した指示",
 	"output so far": "ここまでの出力", "diagnostics so far": "ここまでの stderr", "the native agent's own log so far": "agent 自身のログ (ここまで)", "whole file": "全文",
@@ -1569,7 +1602,7 @@ var japanese = map[string]string{
 	"returned": "完了", "failed": "失敗", "could not start": "起動できず", "interrupted": "中断", "answer from the requester": "依頼者の返答", "note by the runtime": "本体の記録",
 	"why it ended so": "理由", "what the worker was handed": "担当 (LLM) に渡したもの", "what the worker wrote": "担当がしたこと・書いたこと", "what the runtime observed": "本体が観察したこと",
 	"written by": "書いた者", "the requester": "依頼者", "the runtime": "本体", "the worker": "担当", "the command": "コマンド", "the operator's settings": "運用者の設定",
-	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
+	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "your issue text, as written on GitHub (shown above as the request)": "あなたが GitHub の issue に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
 	"the record up to this launch, as shown on this page": "それまでの記録 (このページの前の起動)", "no output: the process could not start": "出力なし: 起動できず", "the worker's own stderr": "担当の stderr",
 	"the process ended with an error": "プロセスが失敗で終わった",
 	"no output":                       "出力なし", "what the requester wrote": "依頼者が書いたこと",

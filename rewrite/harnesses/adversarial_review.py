@@ -20,9 +20,13 @@ is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
 "false", "no" or "0" in any case. One that reads as true sends the work
 back; with none true, one that reads as false lets it through; anything else
 is no verdict, and what the reviewer wrote with it is shown in the live view
-and kept in the printed result and the log. Trouble with
-the model service (a connection that fails or times out, an HTTP error, a
-reply without a verdict), and anything unexpected, is waited out: the models
+and kept in the printed result and the log. A call's arguments are read as
+JSON text or as an object, and one object inside them, such as
+{"verdict": {...}}, is looked into too; arguments that cannot be read, and
+words given instead of a call, are kept as written, cut where findings are.
+Trouble with the model service (a connection that fails or times out, an
+HTTP error, a reply without a verdict), and anything unexpected, is waited
+out: the models
 are asked in the operator's order, round after round, the wait between
 rounds growing from REVIEW_RETRY_SECONDS to REVIEW_RETRY_CAP_SECONDS, and the
 printed result names the model that gave the verdict. What asking again
@@ -45,7 +49,8 @@ committed one, work let through can end with nothing delivered, so it is let
 through only on a verdict, and without one this exits 1. So it does when
 whether anything changed cannot be told (no checkout, or Git cannot read it,
 or not in time), since the delivery reads the checkout on its own, waits
-longer, and may find no change.
+longer, and may find no change; when Git reads the change after that first
+look failed, it is told again from what was read.
 
 When no file was changed at all, the reviewer is told so in plain words and
 asked whether the request is met by the repository exactly as it is: a
@@ -85,6 +90,7 @@ import urllib.request
 
 LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visible marker
 NEW_FILE_LIMIT = 6000
+FINDINGS_LIMIT = 6000  # characters of findings printed, and of a reply kept as written when it gives no verdict
 HEAD, TAIL = 12000, 6000  # the runtime's text: its start (assignment, request, settled requirements) and its end (latest reports)
 
 TOOL = {"type": "function", "function": {
@@ -212,14 +218,19 @@ def cut(text, limit, what):
 
 
 def git(workspace, *arguments, names=False):
-    """Git's output, read without the user's or the system's Git settings, as
-    the delivery reads the checkout: with one of them (an exclude file, say),
-    the two could disagree on whether anything changed. Names come as they
-    are, not as octal escapes, so a diff header in Japanese is read as it was
-    written; a name that is not UTF-8 is kept usable as a path when names is
-    set, and otherwise shows a replacement character."""
-    environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-                       GIT_CONFIG_NOSYSTEM="1")
+    """Git's output, read as the delivery reads the checkout: without the
+    user's or the system's Git settings, and without the variables that point
+    Git at another repository, index or work tree. With one of them (an
+    exclude file, an index of its own, a clean checkout elsewhere) the two
+    could disagree on whether anything changed. The delivery's list is in
+    delivery_support.git_environment, which the review's bundle does not
+    carry, so the same list is kept here. Names come as they are, not as
+    octal escapes, so a diff header in Japanese is read as it was written; a
+    name that is not UTF-8 is kept usable as a path when names is set, and
+    otherwise shows a replacement character."""
+    environment = {name: value for name, value in os.environ.items() if name not in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     try:
         finished = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(workspace), *arguments],
                                   capture_output=True, timeout=60, env=environment)
@@ -375,29 +386,49 @@ def truth(value):
     return None
 
 
+def as_written(value):
+    """What a reply said, as text the record can keep, cut where findings are."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return cut(text, FINDINGS_LIMIT, "reply") if text.strip() else ""
+
+
 def read_verdict(calls):
     """(blocking, findings, why) from every call of the verdict tool in one
-    reply. Every field named blocking, in any letter case, is read in every
+    reply. Arguments are read as a JSON text or as an object as they come, and
+    an object one level inside them, such as {"verdict": {...}}, is looked
+    into too. Every field named blocking, in any letter case, is read in every
     call. One that reads as true sends the work back, so a finding is never
     let through because the reply also said false somewhere; with none true,
     one that reads as false lets the work through; with neither there is no
     verdict, and why says so. The findings of every call are kept whichever
-    way it goes, so the worker and the report writer can read them."""
+    way it goes, and arguments that cannot be read are kept as they were
+    written, so the worker and the report writer can read them."""
     values, findings, unread = [], [], []
     for call in calls:
-        try:
-            arguments = json.loads(call["function"]["arguments"])
-        except (KeyError, TypeError, ValueError) as error:
-            unread.append(type(error).__name__)
-            continue
+        function = call.get("function") if isinstance(call, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                unread.append("arguments that are not JSON")
+                findings.append(as_written(arguments))
+                continue
         if not isinstance(arguments, dict):
-            unread.append("not a set of named fields")
+            unread.append("arguments that are not a set of named fields")
+            if arguments not in (None, ""):
+                findings.append(as_written(arguments))
             continue
-        for name, value in arguments.items():
+        fields = list(arguments.items())
+        for value in arguments.values():
+            if isinstance(value, dict):
+                fields.extend(value.items())
+        for name, value in fields:
             if str(name).lower() == "blocking":
                 values.append(value)
             elif str(name).lower() == "findings" and value not in (None, ""):
                 findings.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+    findings = [text for text in findings if text]
     read = [truth(value) for value in values]
     text = "\n".join(findings)
     if True in read:
@@ -410,6 +441,14 @@ def read_verdict(calls):
     if unread:
         return None, text, "the reviewer's verdict could not be read (%s)" % ", ".join(unread)
     return None, text, "the reviewer's verdict gave no blocking"
+
+
+def said_in(message):
+    """What a reply said in words rather than through the verdict tool."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        content = "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+    return as_written(content) if isinstance(content, str) else ""
 
 
 def ask_once(found, model, prompt, diff, tests, rounds):
@@ -431,9 +470,12 @@ def ask_once(found, model, prompt, diff, tests, rounds):
         with urllib.request.urlopen(urllib.request.Request(found["url"], body, headers), timeout=found["timeout"],
                                     context=context) as response:
             reply = json.loads(response.read().decode("utf-8", errors="replace"))
-        calls = ((reply.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
+        message = (reply.get("choices") or [{}])[0].get("message") or {}
+        calls = message.get("tool_calls") or []
         if not calls:
-            return None, "", "the reviewer returned no verdict"
+            # Words instead of the verdict tool: no verdict, but what was said
+            # stays in the record.
+            return None, said_in(message), "the reviewer returned no verdict"
         return read_verdict(calls)
     except urllib.error.HTTPError as error:
         return None, "", "HTTP %d from the model service" % error.code
@@ -523,6 +565,10 @@ def reviewed(stdin_text, unchanged, passing):
         say("Review: the send-back counter at %s could not be read (%s); counting from 0." % (counter, error))
         sent_back = 0
     diff, test_output = gather(found["workspace"], found["paths"], found["tests"], found["timeout"])
+    if unchanged is None:
+        # Not told at the start, but Git has just read the change: tell again,
+        # so that a checkout with no change is still called that.
+        unchanged = nothing_changed(found["workspace"])
     if unchanged:
         diff = NO_CHANGE
     ask = verdict_or_none if passing else verdict_until_given
@@ -545,7 +591,7 @@ def reviewed(stdin_text, unchanged, passing):
         findings = (findings + "\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
     findings = scrub(findings, key)
     print("Review by %s: %s. Send-backs so far: %d.\n%s"
-          % (model, outcome, sent_back, (findings or "(no findings)")[:6000]))
+          % (model, outcome, sent_back, (findings or "(no findings)")[:FINDINGS_LIMIT]))
     try:
         if blocking:
             counter.write_text(str(sent_back))

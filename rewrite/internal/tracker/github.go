@@ -27,8 +27,10 @@ type GitHub struct {
 	KeyEnv     string `json:"key_env"`
 	// IntakeLabel narrows the intake to the open issues carrying it. Empty
 	// takes up every open issue.
-	IntakeLabel string       `json:"intake_label,omitempty"`
-	Client      *http.Client `json:"-"`
+	IntakeLabel string `json:"intake_label,omitempty"`
+	// Labels names the label set on an issue at each turn of the work.
+	Labels GitHubLabels `json:"labels"`
+	Client *http.Client `json:"-"`
 }
 
 const (
@@ -311,10 +313,17 @@ func (g GitHub) Myself(ctx context.Context) (Account, error) {
 func (g GitHub) pages(ctx context.Context, first string) ([]json.RawMessage, error) {
 	address := g.base() + first
 	rows := []json.RawMessage{}
+	// A next page that is one already read would be read again and again,
+	// each time out of the hourly allowance.
+	read := map[string]bool{}
 	for count := 0; ; count++ {
 		if count == githubPages {
 			return nil, fmt.Errorf("the list ran past %d pages; no partial list returned", githubPages)
 		}
+		if read[samePage(address)] {
+			return nil, errors.New("tracker named as the next page one it had already given; no partial list returned")
+		}
+		read[samePage(address)] = true
 		data, header, err := g.call(ctx, http.MethodGet, address, nil, http.StatusOK, githubPageLimit)
 		if err != nil {
 			return nil, err
@@ -365,15 +374,34 @@ func (g GitHub) next(link, current string, count int) (string, error) {
 }
 
 // sameAPI says whether an address is under the configured API: the token goes
-// to no other host.
+// to no other host, and to no path that a "." or ".." segment, written out or
+// percent-encoded, could lead out of the API's own.
 func (g GitHub) sameAPI(address string) bool {
 	base, err := url.Parse(g.base())
 	if err != nil {
 		return false
 	}
 	given, err := url.Parse(address)
-	return err == nil && given.Scheme == "https" && given.User == nil && strings.EqualFold(given.Host, base.Host) &&
+	if err != nil {
+		return false
+	}
+	for _, segment := range strings.Split(given.Path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return given.Scheme == "https" && given.User == nil && strings.EqualFold(given.Host, base.Host) &&
 		strings.HasPrefix(given.Path, strings.TrimRight(base.Path, "/")+"/")
+}
+
+// samePage is an address with its host's case and its query's order set
+// aside, so that one page named twice is known for the same.
+func samePage(address string) string {
+	given, err := url.Parse(address)
+	if err != nil {
+		return address
+	}
+	return strings.ToLower(given.Host) + given.EscapedPath() + "?" + given.Query().Encode()
 }
 
 // githubError is an answer with a status other than the one expected.
@@ -384,6 +412,18 @@ type githubError struct {
 
 func (e *githubError) Error() string {
 	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
+}
+
+// clip is text cut to its first limit characters, marked where it was cut.
+func clip(text string, limit int) string {
+	count := 0
+	for index := range text {
+		if count == limit {
+			return text[:index] + "…"
+		}
+		count++
+	}
+	return text
 }
 
 // call sends one request with the token in its header, never in its address,
@@ -402,6 +442,25 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	token := os.Getenv(g.KeyEnv)
 	if token == "" || strings.ContainsAny(token, "\r\n") {
 		return nil, nil, errors.New("tracker credential is unavailable")
+	}
+	// GitHub asks a client it limited to send nothing until the time it gave;
+	// one that goes on may be banned.
+	shared := g.shared()
+	if until := shared.closedUntil(githubNow()); !until.IsZero() {
+		return nil, nil, fmt.Errorf("tracker asked to be sent nothing until %s; nothing was sent", until.UTC().Format(time.RFC3339))
+	}
+	read := method == http.MethodGet
+	if !read {
+		// Changes go one at a time, each a second after the answer to the one
+		// before, and GitHub may have said to wait while this one waited.
+		release, err := shared.takeChange(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer release()
+		if until := shared.closedUntil(githubNow()); !until.IsZero() {
+			return nil, nil, fmt.Errorf("tracker asked to be sent nothing until %s; nothing was sent", until.UTC().Format(time.RFC3339))
+		}
 	}
 	var reader io.Reader
 	if body != nil {
@@ -424,6 +483,13 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	// A read asked again with the validator of the answer kept costs nothing
+	// of the hourly allowance when GitHub answers that nothing changed.
+	kept, conditional := shared.recall(address)
+	conditional = conditional && read
+	if conditional {
+		request.Header.Set("If-None-Match", kept.etag)
+	}
 	client := http.Client{}
 	if g.Client != nil {
 		client = *g.Client
@@ -439,11 +505,27 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if err != nil {
 		return nil, nil, errors.New(redact(err.Error()))
 	}
+	shared.learn(response.StatusCode, response.Header, data, githubNow())
+	if conditional && response.StatusCode == http.StatusNotModified {
+		// The answer kept, with its own headers: its next page is the one
+		// it named.
+		return bytes.Clone(kept.data), kept.header.Clone(), nil
+	}
 	if len(data) > limit {
 		return nil, nil, fmt.Errorf("tracker returned HTTP %d; response exceeds %d MiB; no truncated response returned", response.StatusCode, limit>>20)
 	}
 	if response.StatusCode != expected {
+		if response.StatusCode >= 300 && response.StatusCode < 400 && response.StatusCode != http.StatusNotModified {
+			// Nothing is sent where it points: the token goes only where the
+			// configuration says. The address is quoted in short, the token
+			// taken out before it is cut so that no part of it is left.
+			return nil, nil, fmt.Errorf("tracker returned HTTP %d, a redirect to %q, which is not followed: the repository or the issue may have been moved or renamed; check the configured repository",
+				response.StatusCode, clip(redact(response.Header.Get("Location")), 200))
+		}
 		return nil, nil, &githubError{Status: response.StatusCode, Body: redact(string(data))}
+	}
+	if read {
+		shared.keep(address, githubKept{etag: response.Header.Get("ETag"), data: bytes.Clone(data), header: response.Header.Clone()})
 	}
 	return data, response.Header, nil
 }
