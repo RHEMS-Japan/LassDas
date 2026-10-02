@@ -34,6 +34,8 @@ type noticeTracker struct {
 	// at the issue but the caller was never told so.
 	silent bool
 	posts  int
+	// reads counts every read of the tracker, comments or otherwise.
+	reads int
 }
 
 func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
@@ -41,6 +43,11 @@ func (n *noticeTracker) install(t *testing.T, extra roundTripFunc) {
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host != "watch-tracker.example" {
 			return extra(r)
+		}
+		if r.Method == http.MethodGet {
+			n.mu.Lock()
+			n.reads++
+			n.mu.Unlock()
 		}
 		if !strings.HasSuffix(r.URL.Path, "/comments") {
 			return selectionReply(r, 200, []any{}), nil
@@ -105,6 +112,12 @@ func (n *noticeTracker) attempts() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.posts
+}
+
+func (n *noticeTracker) readings() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.reads
 }
 
 const noticeRequest = "Original issue: EXAMPLE-51\nTitle: Original title\n\nOriginal conditions"

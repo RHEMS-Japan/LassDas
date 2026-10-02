@@ -75,13 +75,19 @@ func quietFor(state chain.State, accepted, now time.Time) time.Duration {
 // is confirmed, so an interrupted post is retried instead of repeated. One
 // marked Predates is never submitted: what it would report happened before the
 // queue's engines posted its kind, and the record settles the kind for this
-// request as a posted one would.
+// request as a posted one would. A declaration keeps the models it named, so
+// the next launch of its stage is compared with them.
 type noticeRecord struct {
 	Kind      string     `json:"kind"`
 	Text      string     `json:"text"`
 	WrittenAt time.Time  `json:"written_at"`
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
+	Models    string     `json:"models,omitempty"`
+	// CommentID is the tracker's id of the comment the notice was confirmed
+	// as, so a later notice of the same kind in the same words is not taken
+	// for this one.
+	CommentID int64 `json:"comment_id,omitempty"`
 }
 
 type noticeLog struct {
@@ -243,6 +249,13 @@ func postableKinds(cfg config) []string {
 			}
 		}
 	}
+	if cfg.Intake.DeclareModels {
+		for _, role := range cfg.Roles {
+			if awaitsModel(cfg, role.Name) {
+				kinds = append(kinds, declarePrefix+role.Name)
+			}
+		}
+	}
 	return kinds
 }
 
@@ -315,6 +328,24 @@ func kindSince(queue, kind string, now time.Time) (time.Time, error) {
 // time given is when the event the notice reports happened; an event from
 // before the queue's engines posted this kind is not posted at all.
 func (n notices) post(ctx context.Context, kind, text string, at time.Time) error {
+	return n.say(ctx, kind, text, "", at, func(log noticeLog, now time.Time) bool {
+		return noticeDue(log, kind, now)
+	})
+}
+
+// declare says which models a launch of a role chose. It is due by its own
+// rule rather than once or after an interval, and its record keeps the
+// models, which is what that rule compares the next launch with.
+func (n notices) declare(ctx context.Context, role, text, models string, at time.Time, due func(noticeLog) bool) error {
+	return n.say(ctx, declarePrefix+role, text, models, at, func(log noticeLog, _ time.Time) bool {
+		return due(log)
+	})
+}
+
+// say is the work of post and declare: due decides, on the record as it
+// stands once an earlier unconfirmed notice is settled, whether this one
+// speaks at all.
+func (n notices) say(ctx context.Context, kind, text, models string, at time.Time, due func(noticeLog, time.Time) bool) error {
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -328,7 +359,7 @@ func (n notices) post(ctx context.Context, kind, text string, at time.Time) erro
 		}
 	}
 	now := time.Now().UTC()
-	if !noticeDue(log, kind, now) {
+	if !due(log, now) {
 		return nil
 	}
 	since, err := kindSince(n.queue, kind, now)
@@ -337,17 +368,19 @@ func (n notices) post(ctx context.Context, kind, text string, at time.Time) erro
 	}
 	if at.Before(since) {
 		// A kind said once is settled by a record that it predates, so no
-		// later tick or restart weighs it again. A kind that speaks again
-		// keeps no record: one would hold back its next, current occasion
-		// for a whole interval, and this occasion's time does not move, so
-		// every later tick finds it before the kind's start again.
-		if !onceNotice(kind) {
+		// later tick or restart weighs it again, and so is a declaration,
+		// whose record says which models its stage was last declared with.
+		// A kind that speaks again keeps no record: one would hold back its
+		// next, current occasion for a whole interval, and this occasion's
+		// time does not move, so every later tick finds it before the kind's
+		// start again.
+		if !onceNotice(kind) && models == "" {
 			return nil
 		}
-		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true})
+		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true, Models: models})
 		return n.save(log)
 	}
-	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now})
+	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now, Models: models})
 	if err := n.save(log); err != nil {
 		return err
 	}
@@ -376,51 +409,66 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 	if record.PostedAt != nil {
 		return nil
 	}
+	// A kind can say the same words again, a declaration of models said
+	// before or a restart noted again, so only a comment newer than the one
+	// the kind was last confirmed as can be this notice.
+	after := int64(0)
+	for _, earlier := range log.Notices[:i] {
+		if earlier.Kind == record.Kind && earlier.CommentID > after {
+			after = earlier.CommentID
+		}
+	}
 	if !fresh {
-		posted, err := n.alreadyPosted(ctx, record.Text)
+		id, err := n.postedAfter(ctx, record.Text, after)
 		if err != nil {
 			return err
 		}
-		if posted {
-			return n.confirm(log, i)
+		if id > 0 {
+			return n.confirm(log, i, id)
 		}
 	}
-	if _, err := n.backlog.AddComment(ctx, n.issue.Key, record.Text); err != nil {
-		posted, readErr := n.alreadyPosted(ctx, record.Text)
-		if readErr != nil || !posted {
+	receipt, err := n.backlog.AddComment(ctx, n.issue.Key, record.Text)
+	if err != nil {
+		id, readErr := n.postedAfter(ctx, record.Text, after)
+		if readErr != nil || id == 0 {
 			return errors.Join(err, readErr)
 		}
+		return n.confirm(log, i, id)
 	}
-	return n.confirm(log, i)
+	// The receipt was read for a positive id before it was returned.
+	var stored struct{ ID int64 }
+	json.Unmarshal(receipt, &stored)
+	return n.confirm(log, i, stored.ID)
 }
 
-func (n notices) confirm(log *noticeLog, i int) error {
+func (n notices) confirm(log *noticeLog, i int, id int64) error {
 	at := time.Now().UTC()
-	log.Notices[i].PostedAt = &at
+	log.Notices[i].PostedAt, log.Notices[i].CommentID = &at, id
 	return n.save(*log)
 }
 
-// alreadyPosted looks for this exact fixed text among the issue's comments.
-// The words are the controller's own, so an exact match identifies the notice
-// without decoding anyone's prose.
-func (n notices) alreadyPosted(ctx context.Context, text string) (bool, error) {
+// postedAfter is the id of a comment newer than after in exactly this fixed
+// text, or zero when there is none. The words are the controller's own, so
+// an exact match identifies the notice without decoding anyone's prose.
+func (n notices) postedAfter(ctx context.Context, text string, after int64) (int64, error) {
 	rows, err := n.backlog.Comments(ctx, n.issue.Key, 0)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
+	found := int64(0)
 	for _, raw := range rows {
 		var comment struct {
 			ID      int64
 			Content string
 		}
 		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 {
-			return false, errors.New("issue comments could not be read before repeating a notice")
+			return 0, errors.New("issue comments could not be read before repeating a notice")
 		}
-		if comment.Content == text {
-			return true, nil
+		if comment.ID > after && comment.Content == text {
+			found = comment.ID
 		}
 	}
-	return false, nil
+	return found, nil
 }
 
 // The shared model key running out is the one failure no role can recover: no
