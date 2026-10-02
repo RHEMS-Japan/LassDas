@@ -248,10 +248,15 @@ def ask(url, model, key, prompt, diff, tests, rounds, timeout, attempts):
                                         context=context if parsed.scheme == "https" else None) as response:
                 reply = json.loads(response.read().decode("utf-8", errors="replace"))
             calls = ((reply.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
-            if calls:
+            if not calls:
+                last = "the reviewer returned no verdict"
+            else:
                 verdict = json.loads(calls[0]["function"]["arguments"])
-                return bool(verdict.get("blocking")), str(verdict.get("findings") or "")
-            last = "the reviewer returned no verdict"
+                # The one field read strictly, since it decides whether the
+                # work goes on: anything but true or false is no verdict.
+                if isinstance(verdict, dict) and isinstance(verdict.get("blocking"), bool):
+                    return verdict["blocking"], str(verdict.get("findings") or "")
+                last = "the reviewer's verdict gave neither true nor false for blocking"
         except urllib.error.HTTPError as error:
             last = "HTTP %d from the model service" % error.code
         except Exception as error:  # a model service hiccup is not a defect in the change
