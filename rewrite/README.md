@@ -467,17 +467,25 @@ question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
 the run to its first stage. After that no routing decision exists at all.
 
-`examples/operator-stages.json` is the same delivery as `operator.json` written
-this way. Its command stages run operator-supplied programs under
-`/opt/ticket-automation/operator`: a build, a test run, the delivery, a check
-of the delivered target, and a script that reads the stored comments back and
-passes when one of them, looked through newest first, is exactly the reported
-text. It must not require the report to be the last comment: the runtime's own
-notices, a declaration of the model a launch chose, a stage's sentence or a
-restart notice, can follow it, and a check that needs the report to be last
-then fails on every launch, sending the work back for good. Those programs are
-yours to write; the engine only observes what they return. The stopped-report role is not part of
-the run, and a stop from the requester still wins over everything here.
+`examples/operator-stages.json` is the same chain as `operator.json` written
+this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
+check of the delivered branch are that image's fixed processes,
+`deliver_git.py` and `verify_merged.py` under `/opt/ticket-automation/scripts`
+(copied there from `harnesses/`; they are not part of this bundle), and every
+checkout comes from the image's mirror of the delivery repository. Its other
+command stages run operator-supplied programs under
+`/opt/ticket-automation/operator`: a build, a test run, and a script that reads
+the stored comments back and passes when one of them, looked through newest
+first, is exactly the reported text. It must not require the report to be the
+last comment: the runtime's own notices, a declaration of the model a launch
+chose, a stage's sentence or a restart notice, can follow it, and a check that
+needs the report to be last then fails on every launch, sending the work back
+for good. Those programs are yours to write (`deploy/ticket-engine` carries
+examples of all three); the engine only observes what they return. Every
+value an operator must replace is one distinct string, `example-owner/example-repository`
+for the repository and `example-integration-branch` for its branch, so one
+substitution sets each everywhere. The stopped-report role is not part of the
+run, and a stop from the requester still wins over everything here.
 
 **Known limit**: one worker may carry several stages, because a stage's process
 may be the same launcher as another's, and each launch receives the goal and
