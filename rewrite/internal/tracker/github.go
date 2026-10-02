@@ -413,8 +413,15 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	}
 	read := method == http.MethodGet
 	if !read {
-		if err := shared.spaceChange(ctx); err != nil {
+		// Changes go one at a time, each a second after the answer to the one
+		// before, and GitHub may have said to wait while this one waited.
+		release, err := shared.takeChange(ctx)
+		if err != nil {
 			return nil, nil, err
+		}
+		defer release()
+		if until := shared.closedUntil(githubNow()); !until.IsZero() {
+			return nil, nil, fmt.Errorf("tracker asked to be sent nothing until %s; nothing was sent", until.UTC().Format(time.RFC3339))
 		}
 	}
 	var reader io.Reader
@@ -464,7 +471,7 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if conditional && response.StatusCode == http.StatusNotModified {
 		// The answer kept, with its own headers: its next page is the one
 		// it named.
-		return kept.data, kept.header, nil
+		return bytes.Clone(kept.data), kept.header.Clone(), nil
 	}
 	if len(data) > limit {
 		return nil, nil, fmt.Errorf("tracker returned HTTP %d; response exceeds %d MiB; no truncated response returned", response.StatusCode, limit>>20)
@@ -473,7 +480,7 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 		return nil, nil, &githubError{Status: response.StatusCode, Body: redact(string(data))}
 	}
 	if read {
-		shared.keep(address, githubKept{etag: response.Header.Get("ETag"), data: data, header: response.Header.Clone()})
+		shared.keep(address, githubKept{etag: response.Header.Get("ETag"), data: bytes.Clone(data), header: response.Header.Clone()})
 	}
 	return data, response.Header, nil
 }
