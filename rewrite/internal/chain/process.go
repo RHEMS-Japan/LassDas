@@ -80,7 +80,10 @@ type Processes struct {
 	// answer because it is saved only once the launch has returned. It runs
 	// in the launching goroutine, so it must not be slow, and it judges
 	// nothing: a failed selection launches nothing and tells it nothing.
-	Chosen func(role, process, model string)
+	// Launch tells one launch of the role from the next: it is how many
+	// records the history held when this launch began, which every process
+	// of the launch shares and every launch adds to.
+	Chosen func(role, process, model string, launch int)
 }
 
 func (p Processes) Execute(ctx context.Context, assignment Assignment, state State) []Result {
@@ -113,7 +116,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			}
 			selected = append(selected, model)
 			if p.Chosen != nil {
-				p.Chosen(name, process.Name, model)
+				p.Chosen(name, process.Name, model, len(state.History))
 			}
 			prefix = p.ModelPrefix
 			// Do not mutate configured maps shared by this role's next launch.

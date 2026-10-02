@@ -411,8 +411,8 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 		SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
 			return "maker/current", nil
 		},
-		Chosen: func(role, process, model string) {
-			told = append(told, role+" "+process+" "+model)
+		Chosen: func(role, process, model string, launch int) {
+			told = append(told, fmt.Sprintf("%s %s %s %d", role, process, model, launch))
 			if _, err := os.Stat(marker); err == nil {
 				childHadRun = true
 			}
@@ -422,7 +422,7 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 	if result.Error != "" || result.Model != "maker/current" || result.ModelPrefix != "gateway/" {
 		t.Fatalf("launch: %#v", result)
 	}
-	if len(told) != 1 || told[0] != "work worker maker/current" {
+	if len(told) != 1 || told[0] != "work worker maker/current 0" {
 		t.Fatalf("the chosen model was handed over as %v", told)
 	}
 	if childHadRun {
@@ -432,6 +432,13 @@ func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
 	// catalog id, the same id the record keeps.
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "gateway/maker/current" {
 		t.Fatalf("the harness was given %q (%v)", data, err)
+	}
+	// A later launch begins after more records, so its choice is told apart
+	// from the first one's.
+	told = nil
+	processes.Execute(context.Background(), Assignment{Role: "work"}, State{History: make([]Result, 3)})
+	if len(told) != 1 || told[0] != "work worker maker/current 3" {
+		t.Fatalf("a later launch was handed over as %v", told)
 	}
 	processes.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
 		return "", errors.New("catalog HTTP 503: actual reason")

@@ -585,6 +585,26 @@ launch that did not exit 0. A stage the work returned to late keeps its own
 line, so its last launch is printed above launches that ran before that
 return.
 
+`"declare_models": true` (off unless set, and independent of `announce`) says,
+while a stage's work is under way, which model the selection chose for it:
+
+```
+要件確定を始めます。選定モデル: maker/one
+要件確定をやり直します。選定モデル: maker/two
+```
+
+The first line is said at a stage's first launch that chose a model; a stage
+whose `announce` sentence goes out says that launch in its sentence alone. The
+second is said at a later launch, after a later stage sent the work back or a
+launch did not exit 0, and only when its models differ from those the stage was
+last declared with: the same models again say nothing. A launch whose processes
+choose several models names them together, separated by `、`. A command stage
+and a launch whose selection failed say nothing. The declarations are recorded
+in `notices.json` like the notices, so a restart repeats none, and a launch is
+declared only during the run of the request it belongs to: one from before a
+question, a restart or a budget hold, and one from before the setting was
+turned on, are not declared afterwards; the list at delivery names them.
+
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the

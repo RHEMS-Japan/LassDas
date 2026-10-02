@@ -55,8 +55,13 @@ type intakeConfig struct {
 	// accepted, when its work starts and when it resumes after an answer, and
 	// the operator's sentence for a stage that announces itself. Off, the
 	// runtime posts only its notices.
-	Announce bool         `json:"announce,omitempty"`
-	Client   *http.Client `json:"-"`
+	Announce bool `json:"announce,omitempty"`
+	// DeclareModels says, at each launch of a stage that chose a model,
+	// which model that is: at the stage's first launch, and at a later one
+	// whose models differ from those last said. A stage whose sentence is
+	// announced says its first launch in that sentence alone.
+	DeclareModels bool         `json:"declare_models,omitempty"`
+	Client        *http.Client `json:"-"`
 }
 
 type sourceIssue struct {

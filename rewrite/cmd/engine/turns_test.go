@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -404,5 +405,356 @@ func TestNothingIsSaidAboutModelsWhenTheRuntimeDoesNotAnnounce(t *testing.T) {
 	}
 	if notices := readNotices(t, directory).Notices; len(notices) != 0 {
 		t.Fatalf("a runtime that announces nothing recorded %+v", notices)
+	}
+}
+
+// declaringConfig is announcingStagesConfig with the models declared, a first
+// stage that has no sentence of its own, as the requirements stage of the
+// shipped run has none, and a review stage whose two processes each choose a
+// model.
+func declaringConfig(t *testing.T) config {
+	t.Helper()
+	cfg := announcingStagesConfig(t)
+	cfg.Intake.DeclareModels = true
+	cfg.Roles = append(cfg.Roles,
+		chain.Role{Name: "elicit", Purpose: "settle the requirements", Processes: []chain.Process{{Name: "requirements", ModelEnv: "MODEL", Command: []string{"/bin/true"}}}},
+		chain.Role{Name: "review", Purpose: "review the work", Processes: []chain.Process{
+			{Name: "reviewer-a", ModelEnv: "MODEL", Command: []string{"/bin/true"}},
+			{Name: "reviewer-b", ModelEnv: "MODEL", Command: []string{"/bin/true"}},
+		}})
+	cfg.Workflow.Stages = append([]chain.Stage{{Name: "elicit", Kind: chain.ModelStage}}, cfg.Workflow.Stages...)
+	cfg.Workflow.Stages = append(cfg.Workflow.Stages, chain.Stage{Name: "review", Kind: chain.ModelStage})
+	return cfg
+}
+
+// launched writes down one launch's choices as the engine does, one per
+// process that chose a model.
+func launched(t *testing.T, directory, role string, launch int, models ...string) {
+	t.Helper()
+	for _, model := range models {
+		if err := recordLaunch(filepath.Join(directory, "run"), role, model, launch); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// declaringJob is an accepted request on a queue whose engines declare the
+// models of cfg, for a run that began a moment ago.
+func declaringJob(t *testing.T, cfg config) (string, time.Time) {
+	t.Helper()
+	root, directory := noticeJob(t, chain.State{})
+	queueRanSince(t, root, cfg, time.Now().Add(-time.Hour))
+	return directory, time.Now().UTC().Add(-time.Second)
+}
+
+func TestTheFirstLaunchOfAStageWithoutASentenceIsDeclaredOnce(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	observe := func(string) {}
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("a stage that chose nothing was declared: %v", got)
+	}
+	launched(t, directory, "elicit", 0, "maker/one")
+	for range 3 {
+		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	}
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定を始めます。選定モデル: maker/one" {
+		t.Fatalf("the first launch was declared as %v", got)
+	}
+	if log := readNotices(t, directory).Notices; len(log) != 1 || log[0].Kind != declarePrefix+"elicit" || log[0].Models != "maker/one" || log[0].PostedAt == nil {
+		t.Fatalf("the record does not keep the declared model: %+v", log)
+	}
+}
+
+// A stage launched again after a send-back or a failed launch is declared
+// again only when its models differ from those it was last declared with.
+func TestALaunchAgainIsDeclaredOnlyWhenItsModelsChange(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	observe := func(string) {}
+	tick := func() {
+		for range 2 {
+			declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+		}
+	}
+	launched(t, directory, "elicit", 0, "maker/one")
+	tick()
+	launched(t, directory, "elicit", 2, "maker/one")
+	tick()
+	if got := fixture.all(); len(got) != 1 {
+		t.Fatalf("a launch again on the same model was declared: %v", got)
+	}
+	launched(t, directory, "elicit", 4, "maker/two")
+	tick()
+	launched(t, directory, "elicit", 6, "maker/one")
+	tick()
+	want := []string{
+		"要件確定を始めます。選定モデル: maker/one",
+		"要件確定をやり直します。選定モデル: maker/two",
+		"要件確定をやり直します。選定モデル: maker/one",
+	}
+	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the launches were declared as %q", got)
+	}
+}
+
+// A stage that announces itself says its first launch in the operator's
+// sentence alone; a later launch on other models is declared like any other.
+func TestAnAnnouncedStageIsNotDeclaredTwiceForOneLaunch(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	observe := func(string) {}
+	launched(t, directory, "work", 0, "maker/first")
+	beginStage(t, directory, "work-worker")
+	// The sentence goes out first, on the same tick or a later one.
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("the launch was declared before its sentence: %v", got)
+	}
+	for range 2 {
+		announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	}
+	launched(t, directory, "work", 2, "maker/first")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	launched(t, directory, "work", 4, "maker/second")
+	for range 2 {
+		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	}
+	want := []string{"作業を始めます。 (モデル: maker/first)", "作業をやり直します。選定モデル: maker/second"}
+	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the announced stage was told %q", got)
+	}
+}
+
+// One launch whose processes choose several models is declared once with all
+// of them, once they have all chosen or once it has returned, as a launch
+// does whose selection failed for one process. A fixed model running both is
+// named once. A stage that chooses nothing, and a failed selection, say
+// nothing.
+func TestALaunchOfSeveralModelsIsDeclaredOnceWithAllOfThem(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	observe := func(string) {}
+	tick := func() { declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe) }
+	launched(t, directory, "review", 0, "maker/a")
+	tick()
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("a launch still choosing was declared: %v", got)
+	}
+	launched(t, directory, "review", 0, "maker/b")
+	tick()
+	tick()
+	// The next launch chose for one process; the other's selection failed.
+	launched(t, directory, "review", 3, "maker/c")
+	tick()
+	if got := fixture.all(); len(got) != 1 {
+		t.Fatalf("a launch still choosing was declared: %v", got)
+	}
+	failed := time.Now().UTC()
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{
+		{Role: "verify", Speaker: "build", StartedAt: failed, FinishedAt: failed},
+		{Role: "review", Speaker: "reviewer-a", Model: "maker/a", StartedAt: failed, FinishedAt: failed},
+		{Role: "review", Speaker: "reviewer-b", Model: "maker/b", StartedAt: failed, FinishedAt: failed},
+		{Role: "review", Speaker: "reviewer-a", Model: "maker/c", StartedAt: failed, FinishedAt: failed},
+		{Role: "review", Speaker: "reviewer-b", Error: "Selecting a current model: catalog HTTP 503", StartedAt: failed, FinishedAt: failed},
+	}})
+	tick()
+	launched(t, directory, "review", 7, "maker/d", "maker/d")
+	tick()
+	want := []string{
+		"レビューを始めます。選定モデル: maker/a、maker/b",
+		"レビューをやり直します。選定モデル: maker/c",
+		"レビューをやり直します。選定モデル: maker/d",
+	}
+	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the review launches were declared as %q", got)
+	}
+}
+
+// A launch that chose its model before declarations existed on the queue is
+// settled without a word, its record keeping the model, so no later tick
+// weighs it again and a later launch on the same model is no news either.
+func TestALaunchFromBeforeDeclarationsExistedIsSettledWithoutAWord(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := noticeJob(t, chain.State{})
+	earlier := time.Now().UTC().Add(-time.Hour)
+	chosen, _ := json.Marshal(chosenRecord{First: map[string]string{"elicit": "maker/one"}, Launches: map[string][]chosenLaunch{
+		"elicit": {{Launch: 0, At: earlier, Models: []string{"maker/one"}}},
+	}})
+	if err := writeRuntimeFile(chosenPath(filepath.Join(directory, "run")), chosen); err != nil {
+		t.Fatal(err)
+	}
+	// Declarations begin on this queue now, with a run that began before the
+	// launch it meets.
+	queueRanSince(t, root, cfg, time.Now())
+	observe := func(string) {}
+	for range 2 {
+		declareModels(context.Background(), cfg, announcedIssue(), directory, earlier.Add(-time.Minute), observe)
+	}
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("a launch from before declarations existed was declared: %v", got)
+	}
+	if log := readNotices(t, directory).Notices; len(log) != 1 || !log[0].Predates || log[0].Models != "maker/one" || log[0].PostedAt != nil {
+		t.Fatalf("the record does not settle the launch: %+v", log)
+	}
+	launched(t, directory, "elicit", 2, "maker/one")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, earlier.Add(-time.Minute), observe)
+	launched(t, directory, "elicit", 4, "maker/two")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, earlier.Add(-time.Minute), observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。選定モデル: maker/two" {
+		t.Fatalf("the launches after it were declared as %v", got)
+	}
+}
+
+// A launch of an earlier run of the request, here one that returned before any
+// tick saw it and before the request waited for its requester, is not
+// declared afterwards: it would be news about the past. It leaves no record,
+// so the next launch, in the run under way, is the one declared, as a launch
+// again since the stage has run before.
+func TestALaunchFromAnEarlierRunIsNotDeclaredAfterwards(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, _ := declaringJob(t, cfg)
+	asked := time.Now().UTC().Add(-10 * time.Minute)
+	resumed := asked.Add(5 * time.Minute)
+	keep := func(launches ...chosenLaunch) {
+		t.Helper()
+		chosen, _ := json.Marshal(chosenRecord{First: map[string]string{"elicit": "maker/one"}, Launches: map[string][]chosenLaunch{"elicit": launches}})
+		if err := writeRuntimeFile(chosenPath(filepath.Join(directory, "run")), chosen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe := func(string) {}
+	first := chosenLaunch{Launch: 0, At: asked, Models: []string{"maker/one"}}
+	keep(first)
+	declareModels(context.Background(), cfg, announcedIssue(), directory, resumed, observe)
+	if got, log := fixture.all(), readNotices(t, directory).Notices; len(got) != 0 || len(log) != 0 {
+		t.Fatalf("a launch of an earlier run was declared or recorded: %v %+v", got, log)
+	}
+	keep(first, chosenLaunch{Launch: 4, At: resumed.Add(time.Second), Models: []string{"maker/one"}})
+	declareModels(context.Background(), cfg, announcedIssue(), directory, resumed, observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "要件確定をやり直します。選定モデル: maker/one" {
+		t.Fatalf("the launch of the run under way was declared as %v", got)
+	}
+}
+
+// Without the setting the runtime says and keeps exactly what it did before:
+// the operator's sentence, no line of its own, and only the first model of
+// each stage.
+func TestWithoutDeclaringNothingChanges(t *testing.T) {
+	cfg := declaringConfig(t)
+	cfg.Intake.DeclareModels = false
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	run := filepath.Join(directory, "run")
+	observe := func(string) {}
+	for _, choice := range [][2]string{{"elicit", "maker/one"}, {"work", "maker/first"}, {"work", "maker/second"}, {"review", "maker/a"}, {"review", "maker/b"}} {
+		if err := recordChosen(run, choice[0], choice[1]); err != nil {
+			t.Fatal(err)
+		}
+		beginStage(t, directory, choice[0]+"-worker")
+		announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+		declareModels(context.Background(), cfg, announcedIssue(), directory, began, observe)
+	}
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。 (モデル: maker/first)" {
+		t.Fatalf("without the setting the requester was told %q", got)
+	}
+	raw, err := os.ReadFile(chosenPath(run))
+	if err != nil || string(raw) != `{"first":{"elicit":"maker/one","review":"maker/a","work":"maker/first"}}` {
+		t.Fatalf("without the setting the choices were kept as %s (%v)", raw, err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(directory, "notices.json")); err != nil || strings.Contains(string(raw), `"models"`) {
+		t.Fatalf("without the setting the record changed: %s (%v)", raw, err)
+	}
+}
+
+// Through the queue: the engine writes each choice down as it makes it, the
+// watcher's tick declares it, and a restart that takes the stage up again on
+// the same model says nothing more. A request delivered long ago is not told
+// about a launch it never heard of. Without the setting nothing is said and
+// the engine keeps only the first model, as it always did.
+func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
+	for _, declaring := range []bool{true, false} {
+		t.Run(fmt.Sprintf("declare_models=%v", declaring), func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			cfg.Intake.DeclareModels = declaring
+			cfg.Router.Mode = "stages"
+			cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+			cfg.Roles = []chain.Role{
+				// The first launch holds until the queue is stopped under it;
+				// the one after the restart returns at once.
+				{Name: "work", Purpose: "do the work", Processes: []chain.Process{{Name: "worker", ModelEnv: "MODEL",
+					Command: []string{"/bin/sh", "-c", `if [ -e worked ]; then exit 0; fi; touch worked; exec sleep 30`}}}},
+				{Name: "verify", Purpose: "run the checks", Processes: []chain.Process{{Name: "build", Command: []string{"/bin/sh", "-c", "exit 0"}}}},
+			}
+			cfg.Workflow = &chain.Workflow{Stages: []chain.Stage{{Name: "work", Kind: chain.ModelStage}, {Name: "verify", Kind: chain.CommandStage, OnFailure: "work"}}}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := noticeJob(t, chain.State{})
+			old := deliveredJob(t, root, 52, time.Now().Add(-26*time.Hour))
+			undeclared, _ := json.Marshal(chosenRecord{First: map[string]string{"work": "maker/old"}, Launches: map[string][]chosenLaunch{
+				"work": {{Launch: 0, At: time.Now().UTC().Add(-27 * time.Hour), Models: []string{"maker/old"}}},
+			}})
+			if err := writeRuntimeFile(chosenPath(filepath.Join(old, "run")), undeclared); err != nil {
+				t.Fatal(err)
+			}
+			const line = "作業を始めます。選定モデル: maker/configured"
+			var queueLog bytes.Buffer
+			defer func() {
+				if t.Failed() {
+					t.Logf("queue log:\n%s", queueLog.String())
+					for i, result := range loadJobState(t, directory).History {
+						if i < 8 {
+							t.Logf("record %d: %s %s error=%q output=%.300q", i, result.Role, result.Speaker, result.Error, result.Output)
+						}
+					}
+				}
+			}()
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &queueLog)
+			waitFor(t, func() bool {
+				_, err := os.Stat(filepath.Join(directory, "workspace", "worked"))
+				return err == nil && (!declaring || fixture.count(line) > 0)
+			})
+			time.Sleep(100 * time.Millisecond)
+			finish()
+			finish = startStopQueue(t, cfg, root, 10*time.Millisecond, &queueLog)
+			waitFor(t, func() bool { return loadJobState(t, directory).Done })
+			time.Sleep(100 * time.Millisecond)
+			finish()
+			var declared []string
+			for _, comment := range fixture.all() {
+				if strings.Contains(comment, "選定モデル") {
+					declared = append(declared, comment)
+				}
+			}
+			if declaring && (len(declared) != 1 || declared[0] != line) {
+				t.Fatalf("the launches were declared as %q", declared)
+			}
+			if !declaring && len(declared) != 0 {
+				t.Fatalf("without the setting the requester was told %q", declared)
+			}
+			if !declaring {
+				if raw, err := os.ReadFile(chosenPath(filepath.Join(directory, "run"))); err != nil || string(raw) != `{"first":{"work":"maker/configured"}}` {
+					t.Fatalf("without the setting the choices were kept as %s (%v)", raw, err)
+				}
+			}
+			if log := readNotices(t, old).Notices; len(log) != 0 {
+				t.Fatalf("a request delivered long ago was told about its launch: %+v", log)
+			}
+		})
 	}
 }

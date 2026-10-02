@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ const (
 	startedNotice  = "started"
 	modelsNotice   = "models"
 	stagePrefix    = "stage:"
+	declarePrefix  = "declare:"
 )
 
 func acceptedNoticeText(ahead int, page string) string {
@@ -416,4 +418,142 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 			observe("stage " + stage.Name + " not announced: " + err.Error())
 		}
 	}
+}
+
+// The requester is told which models the selection chose for a stage while
+// its work is under way: at the stage's first launch that chose one, in the
+// operator's sentence when the stage announces itself and in the runtime's
+// own line when it does not, and at a later launch, after the work came back
+// or a launch did not exit 0, only when its models differ from the ones last
+// said. The same models again are no news.
+const (
+	declaredBegins = "を始めます。選定モデル: "
+	declaredAgain  = "をやり直します。選定モデル: "
+)
+
+// declareModels says, on a tick of a running request, the models of each
+// role's latest launch that the requester has not been told. A launch from an
+// earlier run of the request, before a question, a restart or a hold, is in
+// the history and in the list at delivery, and said now it would be news
+// about the past, so only launches since this run began are declared.
+func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory string, began time.Time, observe func(string)) {
+	if cfg.Intake == nil || !cfg.Intake.DeclareModels {
+		return
+	}
+	record, err := loadChosen(filepath.Join(directory, "run"))
+	if err != nil {
+		observe("the models chosen were not declared: " + err.Error())
+		return
+	}
+	if len(record.Launches) == 0 {
+		return
+	}
+	notice := requestNotices(cfg, issue, directory)
+	log, err := notice.load()
+	if err != nil {
+		observe("the models chosen were not declared: " + err.Error())
+		return
+	}
+	recorded := -1
+	for _, role := range cfg.Roles {
+		launches := record.Launches[role.Name]
+		if len(launches) == 0 || launches[len(launches)-1].At.Before(began) {
+			continue
+		}
+		latest := launches[len(launches)-1]
+		// The processes of a launch choose in turn, so its models are said
+		// together once all have chosen, or once it has returned, as a launch
+		// whose selection failed for one of them does with fewer.
+		if len(latest.Models) < modelProcesses(cfg, role.Name) {
+			if recorded < 0 {
+				recorded = 0
+				if state, err := savedHistory(directory); err == nil {
+					recorded = len(state.History)
+				}
+			}
+			if recorded <= latest.Launch {
+				continue
+			}
+		}
+		sentence := stageSentence(cfg, role.Name)
+		// A stage that announces itself says its first launch in that
+		// sentence, which goes out first.
+		if cfg.Intake.Announce && sentence != "" && !slices.ContainsFunc(log.Notices, func(said noticeRecord) bool {
+			return said.Kind == stagePrefix+role.Name
+		}) {
+			continue
+		}
+		models := declaredModels(latest.Models)
+		last, told := declared(log, role.Name, sentence, record)
+		if told && last == models {
+			continue
+		}
+		name, known := stagename.Japanese(role.Name)
+		if !known {
+			name = role.Name
+		}
+		text := name + declaredBegins + models
+		if told || len(launches) > 1 {
+			text = name + declaredAgain + models
+		}
+		due := func(log noticeLog) bool {
+			last, told := declared(log, role.Name, sentence, record)
+			return !told || last != models
+		}
+		if err := notice.declare(ctx, role.Name, text, models, latest.At, due); err != nil {
+			observe("the models chosen for " + role.Name + " were not declared: " + err.Error())
+		}
+	}
+}
+
+// declared reports which models the requester was last told a launch of the
+// role chose, and whether they were told any. The role's last declaration
+// says. Before there is one, the operator's sentence for the stage says,
+// naming the model of the launch it went out about, the stage's first that
+// chose one, unless it went out as written, without a model.
+func declared(log noticeLog, role, sentence string, record chosenRecord) (string, bool) {
+	var stage *noticeRecord
+	for i := len(log.Notices) - 1; i >= 0; i-- {
+		switch log.Notices[i].Kind {
+		case declarePrefix + role:
+			return log.Notices[i].Models, true
+		case stagePrefix + role:
+			stage = &log.Notices[i]
+		}
+	}
+	if stage == nil || stage.Text == sentence {
+		return "", false
+	}
+	// The sentence is about the launch that had begun when it was written.
+	// A recorded launch that began after it is not what it named, which
+	// happens when launches were not kept yet; the stage's first model is.
+	if launches := record.Launches[role]; len(launches) > 0 && !launches[0].At.After(stage.WrittenAt) {
+		return declaredModels(launches[0].Models), true
+	}
+	return record.First[role], true
+}
+
+// declaredModels names a launch's models in the order they were chosen, each
+// once: under a fixed model every process of a group runs the same one.
+func declaredModels(models []string) string {
+	var named []string
+	for _, model := range models {
+		if !slices.Contains(named, model) {
+			named = append(named, model)
+		}
+	}
+	return strings.Join(named, "、")
+}
+
+// stageSentence is the operator's sentence for a stage, when one is written.
+func stageSentence(cfg config, role string) string {
+	if cfg.Workflow == nil {
+		return ""
+	}
+	for _, stage := range cfg.Workflow.Stages {
+		if stage.Name == role {
+			return stage.Announce
+		}
+	}
+	return ""
 }

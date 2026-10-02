@@ -75,13 +75,15 @@ func quietFor(state chain.State, accepted, now time.Time) time.Duration {
 // is confirmed, so an interrupted post is retried instead of repeated. One
 // marked Predates is never submitted: what it would report happened before the
 // queue's engines posted its kind, and the record settles the kind for this
-// request as a posted one would.
+// request as a posted one would. A declaration keeps the models it named, so
+// the next launch of its stage is compared with them.
 type noticeRecord struct {
 	Kind      string     `json:"kind"`
 	Text      string     `json:"text"`
 	WrittenAt time.Time  `json:"written_at"`
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
+	Models    string     `json:"models,omitempty"`
 }
 
 type noticeLog struct {
@@ -241,6 +243,13 @@ func postableKinds(cfg config) []string {
 			}
 		}
 	}
+	if cfg.Intake.DeclareModels {
+		for _, role := range cfg.Roles {
+			if awaitsModel(cfg, role.Name) {
+				kinds = append(kinds, declarePrefix+role.Name)
+			}
+		}
+	}
 	return kinds
 }
 
@@ -301,6 +310,24 @@ func kindSince(queue, kind string, now time.Time) (time.Time, error) {
 // time given is when the event the notice reports happened; an event from
 // before the queue's engines posted this kind is not posted at all.
 func (n notices) post(ctx context.Context, kind, text string, at time.Time) error {
+	return n.say(ctx, kind, text, "", at, func(log noticeLog, now time.Time) bool {
+		return noticeDue(log, kind, now)
+	})
+}
+
+// declare says which models a launch of a role chose. It is due by its own
+// rule rather than once or after an interval, and its record keeps the
+// models, which is what that rule compares the next launch with.
+func (n notices) declare(ctx context.Context, role, text, models string, at time.Time, due func(noticeLog) bool) error {
+	return n.say(ctx, declarePrefix+role, text, models, at, func(log noticeLog, _ time.Time) bool {
+		return due(log)
+	})
+}
+
+// say is the work of post and declare: due decides, on the record as it
+// stands once an earlier unconfirmed notice is settled, whether this one
+// speaks at all.
+func (n notices) say(ctx context.Context, kind, text, models string, at time.Time, due func(noticeLog, time.Time) bool) error {
 	log, err := n.load()
 	if err != nil {
 		return err
@@ -314,7 +341,7 @@ func (n notices) post(ctx context.Context, kind, text string, at time.Time) erro
 		}
 	}
 	now := time.Now().UTC()
-	if !noticeDue(log, kind, now) {
+	if !due(log, now) {
 		return nil
 	}
 	since, err := kindSince(n.queue, kind, now)
@@ -323,17 +350,19 @@ func (n notices) post(ctx context.Context, kind, text string, at time.Time) erro
 	}
 	if at.Before(since) {
 		// A kind said once is settled by a record that it predates, so no
-		// later tick or restart weighs it again. A kind that speaks again
-		// keeps no record: one would hold back its next, current occasion
-		// for a whole interval, and this occasion's time does not move, so
-		// every later tick finds it before the kind's start again.
-		if !onceNotice(kind) {
+		// later tick or restart weighs it again, and so is a declaration,
+		// whose record says which models its stage was last declared with.
+		// A kind that speaks again keeps no record: one would hold back its
+		// next, current occasion for a whole interval, and this occasion's
+		// time does not move, so every later tick finds it before the kind's
+		// start again.
+		if !onceNotice(kind) && models == "" {
 			return nil
 		}
-		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true})
+		log.Notices = append(log.Notices, noticeRecord{Kind: kind, WrittenAt: now, Predates: true, Models: models})
 		return n.save(log)
 	}
-	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now})
+	log.Notices = append(log.Notices, noticeRecord{Kind: kind, Text: text, WrittenAt: now, Models: models})
 	if err := n.save(log); err != nil {
 		return err
 	}

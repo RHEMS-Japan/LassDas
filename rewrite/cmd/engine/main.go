@@ -236,9 +236,16 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 		executor.ModelPrefix = selection.invocationPrefix()
 		// A stage is announced when it begins, which is before this launch has
 		// returned anything to the history. Write the choice down as it is made
-		// so the announcement can say which model took the work on.
-		executor.Chosen = func(role, _, model string) {
-			if err := recordChosen(*directory, role, model); err != nil {
+		// so the announcement can say which model took the work on. A runtime
+		// that declares its models keeps every launch's choice, so a stage
+		// launched again is declared when its models change.
+		declaring := cfg.Intake != nil && cfg.Intake.DeclareModels
+		executor.Chosen = func(role, _, model string, launch int) {
+			record := func() error { return recordChosen(*directory, role, model) }
+			if declaring {
+				record = func() error { return recordLaunch(*directory, role, model, launch) }
+			}
+			if err := record(); err != nil {
 				observe("the model chosen for " + role + " was not written down for its announcement: " + err.Error())
 			}
 		}

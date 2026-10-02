@@ -104,6 +104,9 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	// to wait for a slot; told the work starts at once, they hear nothing
 	// more until a stage the operator chose to announce begins.
 	waited := false
+	// began is when the current run of the request was launched: the models
+	// declared are those of launches since then.
+	var began time.Time
 	notice := requestNotices(cfg, issue, directory)
 	for {
 		if ctx.Err() != nil {
@@ -191,6 +194,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				cancel = releaseWork
 				result = make(chan error, 1)
 				outcome := result
+				began = time.Now().UTC()
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
 				if cfg.Intake != nil && cfg.Intake.Announce && waited {
 					// The slot was taken just now.
@@ -208,6 +212,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 		}
 		if result != nil {
 			announceStages(ctx, cfg, issue, directory, observe)
+			declareModels(ctx, cfg, issue, directory, began, observe)
 		}
 		select {
 		case <-ctx.Done():
