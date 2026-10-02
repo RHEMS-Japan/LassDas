@@ -28,16 +28,65 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           persist-credentials: false
-          fetch-depth: 0 # The commit-message scan reads the pushed range.
+      # The tests run on the Go the shipped image builds the engine with: the
+      # version deploy/pod/Dockerfile names, at its newest release.
+      - name: Read the Go the shipped image builds with
+        id: image-go
+        working-directory: .
+        run: |
+          version="$(bash .github/scripts/image-go-version.sh)"
+          echo "deploy/pod/Dockerfile builds the engine with Go $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          # A `uses:` step does not take defaults.run's directory: this names
-          # the module's own go.mod, not the root module's.
-          go-version-file: rewrite/go.mod
+          go-version: ${{ steps.image-go.outputs.version }}
+          check-latest: true # The newest release of it, not one the runner has cached.
           cache: false # This module currently uses only the standard library.
-      # The identifier scans of the test job below, run from this module and
-      # this job so that they do not depend on the root module. They come
-      # first so that a failing test does not keep them from running.
+      - name: Say which Go the role-chain steps use
+        run: go version
+      - name: Build the role-chain commands
+        run: go build ./...
+      - name: Check the role-chain code
+        run: go vet ./...
+      - name: Test the role chain
+        run: go test -count=1 ./...
+      - name: Check concurrent execution
+        run: go test -race -count=1 ./...
+      - name: Test native bridge and Git preparation
+        run: python3 -B -m unittest discover -s harnesses -p 'test_*.py'
+
+  # The consumer-identifier scans, run from the role chain's module so that
+  # they do not depend on the root one, in a job of their own: a failing scan
+  # fails this job without keeping the role chain's tests from running. The
+  # test job below runs the root module's copies until that module goes.
+  identifier-scans:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: rewrite
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: "-p=1"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # The commit-message scan reads the pushed range.
+      - name: Read the Go the shipped image builds with
+        id: image-go
+        working-directory: .
+        run: |
+          version="$(bash .github/scripts/image-go-version.sh)"
+          echo "deploy/pod/Dockerfile builds the engine with Go $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: ${{ steps.image-go.outputs.version }}
+          check-latest: true
+          cache: false
+      - name: Say which Go the scans use
+        run: go version
       - name: State whether the purity scan can run
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
@@ -53,22 +102,48 @@ jobs:
         # -v so that the log says PASS or SKIP, not only "ok".
         run: go test -count=1 -v -run '^TestWorkingTreeContainsNoConsumerIdentifiers$' ./internal/enginepurity
       - name: Scan commit messages for consumer identifiers
+        # Also after a failed tree scan, so that both scans report.
+        if: ${{ !cancelled() }}
         working-directory: .
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
           RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh
+
+  # rewrite/START.md says the engine builds with the Go its go.mod names or
+  # later, while the jobs above run on the Go the shipped image builds with.
+  # This keeps the lower end true: the role chain builds and passes vet on the
+  # version its go.mod names.
+  role-chain-minimum-go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: rewrite
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: "-p=1"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          # A `uses:` step does not take defaults.run's directory: this names
+          # the module's own go.mod, not the root module's.
+          go-version-file: rewrite/go.mod
+          cache: false
+      # setup-go ends with `go env` at the repository root, where the root
+      # module's go.mod has the go command fetch and report that module's
+      # version. This is the Go the steps below run in rewrite/.
+      - name: Say which Go this job uses
+        run: go version
       - name: Build the role-chain commands
         run: go build ./...
       - name: Check the role-chain code
         run: go vet ./...
-      - name: Test the role chain
-        run: go test -count=1 ./...
-      - name: Check concurrent execution
-        run: go test -race -count=1 ./...
-      - name: Test native bridge and Git preparation
-        run: python3 -B -m unittest discover -s harnesses -p 'test_*.py'
 
   test:
     runs-on: ubuntu-latest
@@ -100,10 +175,11 @@ jobs:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
       # Commit messages travel with the tree, so they are held to the same
       # standard (.github/scripts/scan-commit-messages.sh, shared with the
-      # role-chain job).
+      # identifier-scans job).
       - name: Scan commit messages for consumer identifiers
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
           RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/scan-commit-messages.sh

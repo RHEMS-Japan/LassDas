@@ -662,10 +662,14 @@ names, normally from a different publisher than the worker, is handed the
 runtime's text for the stage (where it sits, the original request, the settled
 requirements, the previous reports), the diff of the change and the output of
 the operator's test commands, and returns one structured verdict: blocking or
-not, with its findings. The verdict's fields are read in any letter case, and
-blocking counts when its meaning is plain: true or false, `"true"` or
-`"false"` in any case, 1 or 0. Anything else is no verdict, and what the
-reviewer wrote is printed with the reason all the same. The command exits 1
+not, with its findings. Every call of the verdict tool in the reply is read,
+and in each every field named blocking in any letter case, taken as true or
+false when its meaning is plain: true or false, a number equal to 1 or 0, or
+`"true"`, `"yes"`, `"1"`, `"false"`, `"no"` or `"0"` in any case. One that
+reads as true makes the verdict blocking, so a finding is never let through
+because the reply also said false; with none true, one that reads as false
+does not block; anything else is no verdict. What the reviewer wrote is
+printed whichever way it goes. The command exits 1
 on a blocking verdict, which sends the work back to the `work` stage, and 0
 otherwise; the findings are printed, so they join the history as an
 observation the worker and the report writer read, and the command writes
@@ -685,7 +689,10 @@ round for ever. The one exception is a checkout in which Git lists no changed
 path and no earlier delivery round committed one: work let through from there
 can end with nothing delivered, so it is let through only on a verdict that
 does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
-New files are read from Git's own list, so a name in Japanese or a new
+The same holds when whether anything changed cannot be told (no checkout, or
+Git cannot read it, or not within the review's 60 seconds): the delivery
+reads the checkout on its own and waits longer, so it may still find no
+change. New files are read from Git's own list, so a name in Japanese or a new
 symbolic link reaches the reviewer as it is, and a name that is not UTF-8 with
 a replacement character. Git runs without the user's or the system's Git
 settings, as it does for the delivery, so the two agree on whether anything
@@ -713,17 +720,30 @@ question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
 the run to its first stage. After that no routing decision exists at all.
 
-`examples/operator-stages.json` is the same delivery as `operator.json` written
-this way. Its command stages run operator-supplied programs under
-`/opt/ticket-automation/operator`: a build, a test run, the delivery, a check
-of the delivered target, and a script that reads the stored comments back and
-passes when one of them, looked through newest first, is exactly the reported
-text. It must not require the report to be the last comment: the runtime's own
-notices, a declaration of the model a launch chose, a stage's sentence or a
-restart notice, can follow it, and a check that needs the report to be last
-then fails on every launch, sending the work back for good. Those programs are
-yours to write; the engine only observes what they return. The stopped-report role is not part of
-the run, and a stop from the requester still wins over everything here.
+`examples/operator-stages.json` is the same chain as `operator.json` written
+this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
+check of the delivered branch are that image's fixed processes,
+`deliver_git.py` and `verify_merged.py` under `/opt/ticket-automation/scripts`
+(copied there from `harnesses/`; they are not part of this bundle). Every
+checkout comes from `TASK_REPOSITORY`, which holds a placeholder URL under
+`example.invalid` until the operator names the image's mirror of the delivery
+repository there, so a watch refuses the example until then. Its other
+command stages run operator-supplied programs under
+`/opt/ticket-automation/operator`: a build, a test run, and a script that reads
+the stored comments back and passes when one of them, looked through newest
+first, is exactly the reported text. It must not require the report to be the
+last comment: the runtime's own notices, a declaration of the model a launch
+chose, a stage's sentence or a restart notice, can follow it, and a check that
+needs the report to be last then fails on every launch, sending the work back
+for good. Those programs are yours to write (`deploy/ticket-engine` carries
+examples of all three); the engine only observes what they return. Every
+value an operator must replace is one distinct string, so one substitution
+sets each everywhere: the placeholder URL for the checkouts' source,
+`example-owner/example-repository` for the delivery repository and
+`example-integration-branch` for its branch. Those two are not URLs, and the
+watch does not recognise them as the example's. The stopped-report role is not
+part of the run, and a stop from the requester still wins over everything
+here.
 
 **Known limit**: one worker may carry several stages, because a stage's process
 may be the same launcher as another's, and each launch receives the goal and
