@@ -605,6 +605,14 @@ declared only during the run of the request it belongs to: one from before a
 question, a restart or a budget hold, and one from before the setting was
 turned on, are not declared afterwards; the list at delivery names them.
 
+With the setting on, the watcher of a running request also looks in the
+request's own files every two seconds, between polls and without reading the
+tracker, and once more when the run is delivered, fails or waits for the
+requester. A declaration, and a stage's `announce` sentence, therefore goes
+out within seconds of the choice, and the launch a run ends or waits on, such
+as the question or the report written last, is not missed. A comment whose
+submission was not confirmed is still retried on the poll.
+
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the

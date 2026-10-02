@@ -339,6 +339,27 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 	if cfg.Workflow == nil || cfg.Intake == nil || !cfg.Intake.Announce {
 		return
 	}
+	// A stage said, settled or on its way belongs to the record, and only a
+	// stage without one goes further, so a watcher that looks every few
+	// seconds reads its own files and nothing else until there is news. A
+	// submission left unconfirmed is retried on the tracker's own ticks.
+	notice := requestNotices(cfg, issue, directory)
+	log, err := notice.load()
+	if err != nil {
+		observe("stages not announced: " + err.Error())
+		return
+	}
+	var stages []chain.Stage
+	for _, stage := range cfg.Workflow.Stages {
+		if stage.Announce != "" && !slices.ContainsFunc(log.Notices, func(said noticeRecord) bool {
+			return said.Kind == stagePrefix+stage.Name
+		}) {
+			stages = append(stages, stage)
+		}
+	}
+	if len(stages) == 0 {
+		return
+	}
 	var live []os.DirEntry
 	if entries, err := os.ReadDir(filepath.Join(directory, "live")); err == nil {
 		live = entries
@@ -347,10 +368,7 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 	// without a time cannot be placed after anything, so it reads as the
 	// earliest of all.
 	var first map[string]time.Time
-	for _, stage := range cfg.Workflow.Stages {
-		if stage.Announce == "" {
-			continue
-		}
+	for _, stage := range stages {
 		// A live copy means a process of this stage is running now, so a
 		// model it is still choosing can arrive on a later tick; a stage
 		// known only from the record has returned, and what it did not name
@@ -414,7 +432,7 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 			// nothing later will name it for this stage. The operator's
 			// sentence still goes out: that the stage began is the news.
 		}
-		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, text, began); err != nil {
+		if err := notice.post(ctx, stagePrefix+stage.Name, text, began); err != nil {
 			observe("stage " + stage.Name + " not announced: " + err.Error())
 		}
 	}

@@ -682,26 +682,46 @@ func TestWithoutDeclaringNothingChanges(t *testing.T) {
 	}
 }
 
+// declaringRun is an ordered run that declares its models: a model stage whose
+// worker runs the given shell script in the workspace, then a command stage
+// that passes. The model is fixed, so nothing is looked up.
+func declaringRun(t *testing.T, worker string) config {
+	t.Helper()
+	cfg := watchConfiguration(t)
+	cfg.Intake.DeclareModels = true
+	cfg.Router.Mode = "stages"
+	cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+	cfg.Roles = []chain.Role{
+		{Name: "work", Purpose: "do the work", Processes: []chain.Process{{Name: "worker", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", worker}}}},
+		{Name: "verify", Purpose: "run the checks", Processes: []chain.Process{{Name: "build", Command: []string{"/bin/sh", "-c", "exit 0"}}}},
+	}
+	cfg.Workflow = &chain.Workflow{Stages: []chain.Stage{{Name: "work", Kind: chain.ModelStage}, {Name: "verify", Kind: chain.CommandStage, OnFailure: "work"}}}
+	return cfg
+}
+
+// lookEvery sets how often a declaring watcher looks at its files.
+func lookEvery(t *testing.T, period time.Duration) {
+	t.Helper()
+	saved := declareLook
+	declareLook = period
+	t.Cleanup(func() { declareLook = saved })
+}
+
+// declaredWork is how the work stage of declaringRun is declared.
+const declaredWork = "作業を始めます。選定モデル: maker/configured"
+
 // Through the queue: the engine writes each choice down as it makes it, the
-// watcher's tick declares it, and a restart that takes the stage up again on
-// the same model says nothing more. A request delivered long ago is not told
+// watcher declares it, and a restart that takes the stage up again on the
+// same model says nothing more. A request delivered long ago is not told
 // about a launch it never heard of. Without the setting nothing is said and
 // the engine keeps only the first model, as it always did.
 func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 	for _, declaring := range []bool{true, false} {
 		t.Run(fmt.Sprintf("declare_models=%v", declaring), func(t *testing.T) {
-			cfg := watchConfiguration(t)
+			// The first launch holds until the queue is stopped under it; the
+			// one after the restart returns at once.
+			cfg := declaringRun(t, `if [ -e worked ]; then exit 0; fi; touch worked; exec sleep 30`)
 			cfg.Intake.DeclareModels = declaring
-			cfg.Router.Mode = "stages"
-			cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
-			cfg.Roles = []chain.Role{
-				// The first launch holds until the queue is stopped under it;
-				// the one after the restart returns at once.
-				{Name: "work", Purpose: "do the work", Processes: []chain.Process{{Name: "worker", ModelEnv: "MODEL",
-					Command: []string{"/bin/sh", "-c", `if [ -e worked ]; then exit 0; fi; touch worked; exec sleep 30`}}}},
-				{Name: "verify", Purpose: "run the checks", Processes: []chain.Process{{Name: "build", Command: []string{"/bin/sh", "-c", "exit 0"}}}},
-			}
-			cfg.Workflow = &chain.Workflow{Stages: []chain.Stage{{Name: "work", Kind: chain.ModelStage}, {Name: "verify", Kind: chain.CommandStage, OnFailure: "work"}}}
 			fixture := &noticeTracker{}
 			fixture.install(t, alwaysChoose("done"))
 			root, directory := noticeJob(t, chain.State{})
@@ -712,7 +732,6 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 			if err := writeRuntimeFile(chosenPath(filepath.Join(old, "run")), undeclared); err != nil {
 				t.Fatal(err)
 			}
-			const line = "作業を始めます。選定モデル: maker/configured"
 			var queueLog bytes.Buffer
 			defer func() {
 				if t.Failed() {
@@ -727,7 +746,7 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, &queueLog)
 			waitFor(t, func() bool {
 				_, err := os.Stat(filepath.Join(directory, "workspace", "worked"))
-				return err == nil && (!declaring || fixture.count(line) > 0)
+				return err == nil && (!declaring || fixture.count(declaredWork) > 0)
 			})
 			time.Sleep(100 * time.Millisecond)
 			finish()
@@ -741,7 +760,7 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 					declared = append(declared, comment)
 				}
 			}
-			if declaring && (len(declared) != 1 || declared[0] != line) {
+			if declaring && (len(declared) != 1 || declared[0] != declaredWork) {
 				t.Fatalf("the launches were declared as %q", declared)
 			}
 			if !declaring && len(declared) != 0 {
@@ -754,6 +773,135 @@ func TestTheQueueDeclaresEachLaunchOnceAcrossARestart(t *testing.T) {
 			}
 			if log := readNotices(t, old).Notices; len(log) != 0 {
 				t.Fatalf("a request delivered long ago was told about its launch: %+v", log)
+			}
+		})
+	}
+}
+
+// A launch shorter than the poll interval is declared while it runs: the
+// watcher looks at its own files between polls, so the requester reads the
+// model before the stage's work is done, not a poll later or never.
+func TestALaunchShorterThanThePollIsDeclaredWhileItRuns(t *testing.T) {
+	cfg := declaringRun(t, `sleep 2; touch ended`)
+	lookEvery(t, 20*time.Millisecond)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := noticeJob(t, chain.State{})
+	startStopQueue(t, cfg, root, time.Minute, io.Discard)
+	waitFor(t, func() bool { return fixture.count(declaredWork) > 0 })
+	if _, err := os.Stat(filepath.Join(directory, "workspace", "ended")); err == nil {
+		t.Fatal("the launch was declared only once it had ended")
+	}
+	waitFor(t, func() bool { return loadJobState(t, directory).Done })
+	if got := fixture.all(); len(got) != 1 || got[0] != declaredWork {
+		t.Fatalf("the requester was told %q", got)
+	}
+}
+
+// The launch a run ends on, or waits on, is said when the run returns, though
+// nothing looked between its start and its end: the report written last, the
+// question asked last. A stage's sentence missed the same way goes out too.
+// Here no look and no poll comes in between at all.
+func TestTheLaunchARunEndsOrWaitsOnIsSaidWhenItReturns(t *testing.T) {
+	lookEvery(t, time.Hour)
+	t.Run("delivered", func(t *testing.T) {
+		cfg := declaringRun(t, "exit 0")
+		cfg.Intake.Announce = true
+		cfg.Workflow.Stages[1].Announce = "検証を始めます。"
+		fixture := &noticeTracker{}
+		fixture.install(t, alwaysChoose("done"))
+		root, directory := noticeJob(t, chain.State{})
+		startStopQueue(t, cfg, root, time.Minute, io.Discard)
+		waitFor(t, func() bool { return loadJobState(t, directory).Done })
+		waitFor(t, func() bool { return fixture.count(declaredWork) > 0 && fixture.count("検証を始めます。") > 0 })
+		time.Sleep(50 * time.Millisecond)
+		if fixture.count(declaredWork) != 1 || fixture.count("検証を始めます。") != 1 {
+			t.Fatalf("the delivered run was told %q", fixture.all())
+		}
+	})
+	t.Run("waiting for the requester", func(t *testing.T) {
+		cfg := watchConfiguration(t)
+		cfg.Intake.DeclareModels = true
+		cfg.Intake.QuestionRole = "ask_requester"
+		cfg.ModelSelection = &selectionConfig{Fixed: "maker/configured"}
+		cfg.Roles = []chain.Role{{Name: "ask_requester", Purpose: "ask the requester what is unclear", Processes: []chain.Process{
+			{Name: "questioner", TrackerAccess: "comment", ModelEnv: "MODEL", Command: []string{"/bin/sh", "-c", "exit 0"}},
+		}}}
+		fixture := &noticeTracker{}
+		fixture.install(t, alwaysChoose("ask_requester"))
+		root, directory := noticeJob(t, chain.State{})
+		var queueLog bytes.Buffer
+		defer func() {
+			if t.Failed() {
+				t.Logf("queue log:\n%s", queueLog.String())
+				for i, result := range loadJobState(t, directory).History {
+					t.Logf("record %d: %s %s error=%q", i, result.Role, result.Speaker, result.Error)
+				}
+			}
+		}()
+		startStopQueue(t, cfg, root, time.Minute, &queueLog)
+		waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "question.json")); return err == nil })
+		if got := fixture.all(); len(got) != 1 || got[0] != "依頼者への質問を始めます。選定モデル: maker/configured" {
+			t.Fatalf("the question's launch was told as %q", got)
+		}
+		if !loadJobState(t, directory).Waiting {
+			t.Fatal("the request did not wait for its requester")
+		}
+	})
+}
+
+// Looking reads the request's own files and nothing else: over a quiet second
+// of a running launch, fifty looks read nothing from the tracker and submit
+// nothing, even with a declaration or a stage's sentence left unconfirmed,
+// whose retry belongs to the poll.
+func TestLookingReadsNothingFromTheTracker(t *testing.T) {
+	for _, shape := range []struct {
+		name     string
+		refused  int
+		sentence string
+	}{
+		{"the declaration went out", 0, ""},
+		{"the declaration was refused", 1, ""},
+		{"the stage's sentence was refused", 1, "作業を始めます。"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := declaringRun(t, `exec sleep 30`)
+			kind := declarePrefix + "work"
+			if shape.sentence != "" {
+				cfg.Intake.Announce = true
+				cfg.Workflow.Stages[0].Announce = shape.sentence
+				kind = stagePrefix + "work"
+			}
+			lookEvery(t, 20*time.Millisecond)
+			fixture := &noticeTracker{postFail: shape.refused}
+			fixture.install(t, alwaysChoose("done"))
+			root, directory := noticeJob(t, chain.State{})
+			// Accepted an hour ago, so the acceptance is settled without a
+			// comment and the one refusal falls on the notice under test.
+			accepted := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(filepath.Join(directory, "issue.json"), accepted, accepted); err != nil {
+				t.Fatal(err)
+			}
+			startStopQueue(t, cfg, root, time.Minute, io.Discard)
+			waitFor(t, func() bool { return fixture.attempts() > 0 })
+			// A refused submission reads the issue back once, as it always has.
+			time.Sleep(100 * time.Millisecond)
+			reads, attempts := fixture.readings(), fixture.attempts()
+			time.Sleep(time.Second)
+			if got := fixture.readings(); got != reads {
+				t.Fatalf("looking read the tracker %d times", got-reads)
+			}
+			if got := fixture.attempts(); got != attempts {
+				t.Fatalf("looking submitted %d times more", got-attempts)
+			}
+			var told []noticeRecord
+			for _, record := range readNotices(t, directory).Notices {
+				if record.Kind == kind {
+					told = append(told, record)
+				}
+			}
+			if len(told) != 1 || (told[0].PostedAt == nil) != (shape.refused > 0) {
+				t.Fatalf("the record of %s is %+v", kind, told)
 			}
 		})
 	}

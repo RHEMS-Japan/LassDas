@@ -78,6 +78,13 @@ func savedStop(directory string, issue sourceIssue, operators []int64) (bool, er
 // filed during those ticks is still read as soon as the tracker answers.
 const toleratedUnreadableTicks = 3
 
+// declareLook is how often the watcher of a running request that declares its
+// models looks in the request's own files for a stage begun or a model chosen
+// since it last looked, so the requester reads it within seconds and not a
+// poll interval later. It reads nothing from the tracker: the stop comments,
+// and the retry of a submission left unconfirmed, keep the poll interval.
+var declareLook = 2 * time.Second
+
 func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, configPath, requestPath string, interval time.Duration, turns *turnstile, log io.Writer) error {
 	observe := func(message string) { fmt.Fprintf(log, "request %d: %s\n", issue.ID, message) }
 	tick := time.NewTicker(interval)
@@ -107,6 +114,22 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	// began is when the current run of the request was launched: the models
 	// declared are those of launches since then.
 	var began time.Time
+	// tell says what the run has begun and chosen that the requester has not
+	// heard yet. A runtime that declares its models also tells between the
+	// tracker's ticks, quietly, so a failure is logged once a tick and not
+	// every few seconds, and once more when the run returns.
+	tell := func(observe func(string)) {
+		announceStages(ctx, cfg, issue, directory, observe)
+		declareModels(ctx, cfg, issue, directory, began, observe)
+	}
+	declaring := cfg.Intake != nil && cfg.Intake.DeclareModels
+	var look <-chan time.Time
+	if declaring {
+		looking := time.NewTicker(declareLook)
+		defer looking.Stop()
+		look = looking.C
+	}
+	quiet := func(string) {}
 	notice := requestNotices(cfg, issue, directory)
 	for {
 		if ctx.Err() != nil {
@@ -211,21 +234,35 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 		}
 		if result != nil {
-			announceStages(ctx, cfg, issue, directory, observe)
-			declareModels(ctx, cfg, issue, directory, began, observe)
+			tell(observe)
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-result:
-			cancel()
-			turns.release()
-			cancel, result = nil, nil
-			if !errors.Is(err, chain.ErrWaiting) {
-				return err
+		for pause := true; pause; {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case err := <-result:
+				cancel()
+				turns.release()
+				cancel, result = nil, nil
+				// The run is delivered, failed or waits for the requester. A
+				// stage it began or a model it chose since the last look is
+				// said now, or it would never be: the question asked last and
+				// the report written last are the launches a look can miss.
+				if declaring {
+					tell(observe)
+				}
+				if !errors.Is(err, chain.ErrWaiting) {
+					return err
+				}
+				waiting = true
+				pause = false
+			case <-tick.C:
+				pause = false
+			case <-look:
+				if result != nil {
+					tell(quiet)
+				}
 			}
-			waiting = true
-		case <-tick.C:
 		}
 	}
 }

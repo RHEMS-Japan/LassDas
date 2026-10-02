@@ -59,7 +59,9 @@ type intakeConfig struct {
 	// DeclareModels says, at each launch of a stage that chose a model,
 	// which model that is: at the stage's first launch, and at a later one
 	// whose models differ from those last said. A stage whose sentence is
-	// announced says its first launch in that sentence alone.
+	// announced says its first launch in that sentence alone. The request's
+	// own files are looked at every few seconds for it, and once more when
+	// the run returns, so neither waits for a poll.
 	DeclareModels bool         `json:"declare_models,omitempty"`
 	Client        *http.Client `json:"-"`
 }
