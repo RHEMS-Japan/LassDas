@@ -70,21 +70,27 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
 
 - **arm64 nodes.** The published image is built for arm64 only.
 - **Three Kubernetes features, turned on**: Pod user namespaces
-  (`hostUsers: false`, here together with a persistent volume), the
-  `procMount` field (`procMount: Unmasked`), and sidecar containers
-  (`restartPolicy: Always` on an init container). The engine container also
+  (`UserNamespacesSupport`: `hostUsers: false`, here together with a
+  persistent volume), the `procMount` field (`ProcMountType`:
+  `procMount: Unmasked`), and sidecar containers (`SidecarContainers`:
+  `restartPolicy: Always` on an init container). The engine container also
   runs with `seccompProfile: Unconfined`. These are requirements found by
-  running the role launcher (README.md), not a recommended profile. This
-  repository names no minimum Kubernetes version: the version of the one
-  cluster that ran it was not recorded. Look up the feature gates
-  `UserNamespacesSupport`, `ProcMountType` and `SidecarContainers` for your
-  version; the nodes' operating system and container runtime must support
-  user namespaces as well. The server-side dry run in section 6 shows what
-  admission does to the StatefulSet; whether the Pod itself is admitted, and
-  whether a node can run it, shows only in the StatefulSet's and the Pod's
-  events ([section 11](#the-pod-does-not-become-ready)). One installation
-  runs this StatefulSet on arm64 nodes with a 20Gi ReadWriteOnce volume from
-  its cluster's block storage class.
+  running the role launcher (README.md), not a recommended profile. By the
+  Kubernetes feature-gate reference
+  ([kubernetes.io](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)),
+  all three are on by default from Kubernetes 1.33: user namespaces and the
+  `procMount` field were off by default before 1.33 and are stable from 1.36,
+  and sidecar containers have been on by default since 1.29 and stable since
+  1.33. On an older release, or where a cluster turned one off, the Pod is
+  refused or never runs. The nodes' operating system and container runtime
+  must support user namespaces as well. One installation was confirmed to run
+  this StatefulSet on Kubernetes 1.36 (control plane 1.36.3, kubelet 1.36.4)
+  with containerd 2.2 and Linux kernel 6.18 on arm64 nodes, with a 20Gi
+  ReadWriteOnce volume from its cluster's block storage class. The
+  server-side dry run in section 6 shows what admission does to the
+  StatefulSet; whether the Pod itself is admitted, and whether a node can run
+  it, shows only in the StatefulSet's and the Pod's events
+  ([section 11](#the-pod-does-not-become-ready)).
 - **A namespace that admits this Pod.** Pod Security admission at `baseline`
   or `restricted` refuses it: two init containers add `NET_ADMIN` and the
   engine runs without the runtime's default seccomp profile, and `baseline`
