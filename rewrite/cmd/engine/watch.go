@@ -30,6 +30,11 @@ type intakeConfig struct {
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
 	QuestionRole        string  `json:"question_role,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	// CategoryIDs narrows discovery to issues that carry one of these tracker
+	// categories, so a project shared with people's own tickets hands the
+	// runtime only what a requester marked for it. A category added to an
+	// issue later is accepted then. Absent, every issue in scope is accepted.
+	CategoryIDs []int64 `json:"category_ids,omitempty"`
 	// MinModelCredit is the USD balance below which the shared model key can no
 	// longer carry the work. Absent or zero asks the provider nothing.
 	MinModelCredit float64 `json:"min_model_credit,omitempty"`
@@ -118,6 +123,11 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	for _, id := range cfg.Intake.IssueIDs {
 		if id <= 0 {
 			return errors.New("intake.issue_ids must contain positive issue ids")
+		}
+	}
+	for _, id := range cfg.Intake.CategoryIDs {
+		if id <= 0 {
+			return errors.New("intake.category_ids must contain positive category ids")
 		}
 	}
 	if delay == 0 {
@@ -420,6 +430,20 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 						allowed = allowed || issue.ID == id
 					}
 					if !allowed {
+						continue
+					}
+				}
+				// The same goes for the categories a requester marks an issue
+				// with: an issue without one of them is left for people, and
+				// is looked at again each tick in case it gains one.
+				if len(cfg.Intake.CategoryIDs) > 0 {
+					marked := false
+					for _, category := range issue.Category {
+						for _, id := range cfg.Intake.CategoryIDs {
+							marked = marked || category.ID == id
+						}
+					}
+					if !marked {
 						continue
 					}
 				}

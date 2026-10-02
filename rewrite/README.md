@@ -194,6 +194,16 @@ rollout without starting unrelated tickets; it is not an input format or an
 assessment of a request. Removing an ID does not abandon already accepted work:
 those queue records continue to resume and the existing stop mechanism applies.
 
+Optional `intake.category_ids` narrows new discovery to issues that carry at
+least one of the listed tracker categories. This is how a project shared with
+people's own tickets hands the runtime only what a requester marked for it:
+the requester sets the category when filing, or adds it later, and the issue
+is accepted on the next scan after it carries the category. An issue without
+one is left alone and looked at again on every scan. Like the allowlist, this
+is operator scope, not an input format: nothing about the wording of a request
+is inspected, and removing a category from the setting or from an issue does
+not abandon work that was already accepted.
+
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
 the original request. Its title and complete description go directly to the
