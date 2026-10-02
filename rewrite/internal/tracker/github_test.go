@@ -166,6 +166,7 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 			return strings.Replace(base, "https://", "https://someone:secret@", 1) + "/repositories/1/issues?page=2"
 		},
 		"next page through dot segments": func(base string) string { return base + "/repos/octo-org/widgets/../../admin?page=2" },
+		"next page through a lone dot":   func(base string) string { return base + "/repositories/1/./issues?page=2" },
 		"next page through encoded dots": func(base string) string { return base + "/repositories/1/%2e%2e/%2E%2E/admin?page=2" },
 		"next page already given": func(base string) string {
 			return base + "/repos/octo-org/widgets/issues?sort=created&per_page=100&state=open&direction=asc"
@@ -227,6 +228,31 @@ func TestGitHubReturnsNoListThatIsPartialOrNotTheRepositorys(t *testing.T) {
 			}
 			if err == nil || rows != nil || !strings.Contains(err.Error(), want) || calls.Load() != wantCalls {
 				t.Fatalf("a list was returned, or for another reason: rows=%d calls=%d error=%v", len(rows), calls.Load(), err)
+			}
+		})
+	}
+}
+
+// A redirect's error says where it points in short and without the token,
+// also when the token sits where the address is cut.
+func TestGitHubQuotesARedirectInShortAndWithoutTheToken(t *testing.T) {
+	for name, query := range map[string]func(prefix string) string{
+		"the token in the address":  func(string) string { return githubTestToken },
+		"an address out of measure": func(string) string { return strings.Repeat("x", 64<<10) },
+		"the token across the cut": func(prefix string) string {
+			return strings.Repeat("x", 190-len(prefix)) + githubTestToken + strings.Repeat("y", 100)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+				prefix := base + "/repositories/1/issues?q="
+				w.Header().Set("Location", prefix+query(prefix))
+				w.WriteHeader(http.StatusMovedPermanently)
+			})
+			_, err := github.Myself(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "HTTP 301, a redirect to") || len(err.Error()) > 500 ||
+				strings.Contains(err.Error(), githubTestToken[:9]) {
+				t.Fatalf("the redirect was quoted at length or with the token: %d bytes: %.300v", len(fmt.Sprint(err)), err)
 			}
 		})
 	}

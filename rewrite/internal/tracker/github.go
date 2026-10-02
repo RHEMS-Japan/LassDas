@@ -414,6 +414,18 @@ func (e *githubError) Error() string {
 	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
 }
 
+// clip is text cut to its first limit characters, marked where it was cut.
+func clip(text string, limit int) string {
+	count := 0
+	for index := range text {
+		if count == limit {
+			return text[:index] + "…"
+		}
+		count++
+	}
+	return text
+}
+
 // call sends one request with the token in its header, never in its address,
 // follows no redirect, and reads no more of the answer than limit. A moved
 // repository answers 301, which is refused rather than followed: the token
@@ -505,9 +517,10 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if response.StatusCode != expected {
 		if response.StatusCode >= 300 && response.StatusCode < 400 && response.StatusCode != http.StatusNotModified {
 			// Nothing is sent where it points: the token goes only where the
-			// configuration says.
+			// configuration says. The address is quoted in short, the token
+			// taken out before it is cut so that no part of it is left.
 			return nil, nil, fmt.Errorf("tracker returned HTTP %d, a redirect to %q, which is not followed: the repository or the issue may have been moved or renamed; check the configured repository",
-				response.StatusCode, redact(response.Header.Get("Location")))
+				response.StatusCode, clip(redact(response.Header.Get("Location")), 200))
 		}
 		return nil, nil, &githubError{Status: response.StatusCode, Body: redact(string(data))}
 	}
