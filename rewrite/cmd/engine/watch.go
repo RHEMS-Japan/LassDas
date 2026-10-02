@@ -146,9 +146,9 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	}
 	w := &serialLog{writer: log}
 	observe := func(message string) { fmt.Fprintln(w, message) }
-	// The queue belongs to one tracker and one project. The intake window
-	// and the issue allowlist are filters an operator changes while the
-	// queue lives on, so they are not part of its identity.
+	// The queue belongs to one tracker and one project. The intake window,
+	// the issue allowlist and the categories are filters an operator changes
+	// while the queue lives on, so they are not part of its identity.
 	identity := fmt.Sprintf("Issue intake: %s\nProject: %d", cfg.Backlog.BaseURL, cfg.Intake.ProjectID)
 	// Reuse the existing exclusive, durable runtime store for ownership of this
 	// queue. Its identity is not a verdict or completion mark for any issue.
@@ -166,7 +166,25 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 		return err
 	}
 	defer owner.Close()
+	observe(intakeScope(cfg, since))
 	return pollRequests(ctx, cfg, jobs, since, time.Duration(delay)*time.Second, capacity, w)
+}
+
+// Said once at start, in the engine's own log: which new issues this queue
+// takes up. An operator who meant to narrow the intake reads here whether the
+// engine understood it that way before the first issue is accepted.
+func intakeScope(cfg config, since time.Time) string {
+	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339))
+	ids, categories := cfg.Intake.IssueIDs, cfg.Intake.CategoryIDs
+	switch {
+	case len(ids) > 0 && len(categories) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v, and of those only the ones carrying one of the categories %v", ids, categories)
+	case len(ids) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v", ids)
+	case len(categories) > 0:
+		return scope + fmt.Sprintf("; only issues carrying one of the categories %v", categories)
+	}
+	return scope + "; every such issue is accepted"
 }
 
 // One collector owns the queue. Job histories, not child exit codes or prose,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,24 @@ func routingRoleDescription(role chain.Role) string {
 	return description.String()
 }
 
+// A key the engine does not know is refused, not skipped. A setting spelled
+// wrong would otherwise be no setting at all: a misspelled intake filter takes
+// up every issue of the project, a misspelled stop list leaves the operator
+// unable to stop a request. The engine says which key it does not know and
+// starts nothing.
+func readConfig(data []byte) (config, error) {
+	var cfg config
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return config{}, fmt.Errorf("reading the configuration: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return config{}, errors.New("reading the configuration: text follows the configuration object")
+	}
+	return cfg, nil
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -98,8 +117,8 @@ func run(ctx context.Context, args []string, output, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var cfg config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, err := readConfig(data)
+	if err != nil {
 		return err
 	}
 	if err := cfg.ModelSelection.validate(); err != nil {

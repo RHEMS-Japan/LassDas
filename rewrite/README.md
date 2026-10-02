@@ -196,13 +196,30 @@ those queue records continue to resume and the existing stop mechanism applies.
 
 Optional `intake.category_ids` narrows new discovery to issues that carry at
 least one of the listed tracker categories. This is how a project shared with
-people's own tickets hands the runtime only what a requester marked for it:
-the requester sets the category when filing, or adds it later, and the issue
-is accepted on the next scan after it carries the category. An issue without
-one is left alone and looked at again on every scan. Like the allowlist, this
-is operator scope, not an input format: nothing about the wording of a request
-is inspected, and removing a category from the setting or from an issue does
-not abandon work that was already accepted.
+people's own tickets hands the runtime only what was marked for it: the
+category is set when the issue is filed, or added later, and the issue is
+accepted on the next scan after it carries the category. An issue without one
+is left alone and looked at again on every scan. Like the allowlist, this is
+operator scope, not an input format: nothing about the wording of a request is
+inspected, and removing a category from the setting or from an issue does not
+abandon work that was already accepted. Omitted or empty means no narrowing by
+category. With both settings an issue must be on the allowlist and carry a
+category.
+
+Use a category that exists only for this purpose. The runtime compares the
+category's number and nothing else, so a category people already use for
+something else hands over every issue that carries it, all at once on the first
+scan. It also does not look at who set the category: anyone who may edit the
+issue's categories hands it over, while the requester remains the account that
+filed the issue. That account, and the ones in `intake.stop_user_ids`, are the
+only ones whose stop or answer the runtime follows.
+
+The runtime refuses a configuration key it does not know and names it, instead
+of skipping it: `category_id` for `category_ids` would otherwise be no filter
+at all. At start it also says in its log which new issues it takes up, for
+example `intake: project 17, issues created at or after 2026-01-02T00:00:00Z;
+only issues carrying one of the categories [77]`, or `...; every such issue is
+accepted`. Read that line before filing the first request.
 
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
@@ -216,6 +233,9 @@ restart even if discovery is unavailable or the issue disappears remotely.
 
 Execution slots (`intake.max_running`) go to accepted requests in the order they
 were filed: a request runs only when no earlier request is waiting for a slot.
+Filed, not handed over: an older issue that gains its category today goes ahead
+of newer requests already waiting, and those are not told again how many are
+ahead of them.
 Once a request has finished, the caches its roles' agents built in their home
 directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
 request's footprint and nobody reads them; the record, the request, the
