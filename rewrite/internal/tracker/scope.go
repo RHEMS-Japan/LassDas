@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // IssueScope exposes only one operator-assigned issue to a worker. The upstream
@@ -24,9 +26,23 @@ type IssueScope struct {
 	issue  string
 	key    string
 	post   bool
+	// latest makes the scope leave only the last comment it stored.
+	latest bool
+	mu     sync.Mutex
+	posts  []int64
 }
 
-func NewIssueScope(source Backlog, issue string, mayPost bool) (*IssueScope, error) {
+// KeepLatestPost makes a scope leave one comment. The scope lives for one
+// launch and remembers the comments stored through it; when the launch is
+// over, RemoveEarlierPosts removes all of them but the one stored last (the
+// highest id the tracker gave). A role that posts a trial line before what it
+// means to say therefore leaves only the latter. Nothing is read to decide
+// which: the last stored stays. The removal happens after the role's posts
+// were answered, never in their path, and is best effort: a comment the
+// tracker will not remove stays, which is what there was before this option.
+func KeepLatestPost(s *IssueScope) { s.latest = true }
+
+func NewIssueScope(source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueScope, error) {
 	if issue == "" || issue == "." || issue == ".." || strings.ContainsAny(issue, "/\\?#\r\n\x00") {
 		return nil, errors.New("provide one operator-assigned tracker issue")
 	}
@@ -34,7 +50,11 @@ func NewIssueScope(source Backlog, issue string, mayPost bool) (*IssueScope, err
 	if _, err := rand.Read(key[:]); err != nil {
 		return nil, fmt.Errorf("creating issue-scoped access: %w", err)
 	}
-	return &IssueScope{source: source, issue: issue, key: base64.RawURLEncoding.EncodeToString(key[:]), post: mayPost}, nil
+	scope := &IssueScope{source: source, issue: issue, key: base64.RawURLEncoding.EncodeToString(key[:]), post: mayPost}
+	for _, option := range options {
+		option(scope)
+	}
+	return scope, nil
 }
 
 // Key grants only this instance's issue access; do not log it or save it in a
@@ -134,9 +154,58 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, http.StatusBadGateway, "scoped tracker request: "+err.Error())
 		return
 	}
+	if r.Method == http.MethodPost && s.latest {
+		s.remember(data)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(expected)
 	w.Write(data)
+}
+
+// remember notes the comment the tracker has just stored for this scope. The
+// id comes from the tracker's own receipt, never from the worker's request.
+func (s *IssueScope) remember(receipt []byte) {
+	var stored struct {
+		ID int64 `json:"id"`
+	}
+	if json.Unmarshal(receipt, &stored) != nil || stored.ID <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.posts = append(s.posts, stored.ID)
+	s.mu.Unlock()
+}
+
+// RemoveEarlierPosts removes every comment this scope stored except the one
+// stored last, and is a no-op without KeepLatestPost. Call it once the launch
+// is over. It returns how many comments it removed.
+func (s *IssueScope) RemoveEarlierPosts(ctx context.Context) int {
+	s.mu.Lock()
+	posts := s.posts
+	latest := int64(0)
+	for _, id := range posts {
+		if id > latest {
+			latest = id
+		}
+	}
+	if latest > 0 {
+		s.posts = []int64{latest}
+	}
+	s.mu.Unlock()
+	if !s.latest {
+		return 0
+	}
+	removed := 0
+	path := "/issues/" + url.PathEscape(s.issue)
+	for _, id := range posts {
+		if id == latest {
+			continue
+		}
+		if _, err := s.source.call(ctx, http.MethodDelete, path+"/comments/"+strconv.FormatInt(id, 10), nil, nil, http.StatusOK); err == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 func (s *IssueScope) reject(w http.ResponseWriter, status int, message string) {

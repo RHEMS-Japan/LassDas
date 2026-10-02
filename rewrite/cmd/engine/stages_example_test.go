@@ -64,7 +64,7 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 			if !slices.Contains(process.Command, "/opt/ticket-automation/bundle/harnesses/linux_role.py") && role.Name != "stop_report" {
 				t.Fatal("example role bypasses actual launcher")
 			}
-			if process.TrackerAccess == "comment" && !slices.Contains([]string{"ask_requester", "report", "stop_report"}, role.Name) {
+			if process.TrackerAccess != "" && process.TrackerAccess != "read" && !slices.Contains([]string{"ask_requester", "report", "stop_report"}, role.Name) {
 				t.Fatalf("posting granted to %s", role.Name)
 			}
 			writes := slices.Contains(process.Command, "--write") || slices.Contains(process.Command, "--create")
