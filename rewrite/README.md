@@ -886,19 +886,19 @@ a long one:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
 
-Neither form gives a cause or says who has to act, and the budget notice above
-does not either. The engine records what its steps did, and from there a
-launch that is working and one that waits for its operator look the same: a
-step held for a setting only the operator can correct has not failed and has
-not finished. A failure
-that repeats may need a person. A balance may come back by itself or only when
-someone adds to it. The failing form is also said while the engine itself
-holds the work for the budget; the failure it quotes then is the engine's own
-cancellation of the step it stopped, and nothing is being tried. None of the
-three says that no answer is awaited, because a question to the requester may
-be standing right above it. The stall notice repeats at most once per six
-hours per request. It is a notice and nothing else: routing, recovery and the
-request's goal are untouched by it.
+Neither form gives a cause or says who has to act; the budget notice above
+says why the work paused, and not who has to act. The engine records what its
+steps did, and from there a launch that is working and one that waits for its
+operator look the same: a step held for a setting only the operator can
+correct has not failed and has not finished. A failure that repeats may need a
+person. A balance may come back by itself or only when someone adds to it. The
+failing form is also said while the engine itself holds the work for the
+budget; the failure it quotes then is the engine's own cancellation of the
+step it stopped, and nothing is being tried. None of the three says that no
+answer is awaited, because a question to the requester may be standing right
+above it. The stall notice repeats at most once per six hours per request. It
+is a notice and nothing else: routing, recovery and the request's goal are
+untouched by it.
 
 All three go out through the controller's own tracker credential, the same one
 the stop report uses. No role is given the means to post them.
