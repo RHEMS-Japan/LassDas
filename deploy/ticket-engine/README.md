@@ -71,6 +71,9 @@ Proposed, or simply not measured. Check each one before trusting it:
   behaviour when the Pod moves to another node.
 - The IPv6 egress rules as the image's own iptables writes them: the
   installation that ran them saw only that they were written.
+- Leaving the merge to a person (SETUP.md, "Leaving the merge to a person"):
+  checked by the repository's tests and against a stand-in for GitHub, not
+  yet on an installation.
 - `resources`. The requests and limits are a starting point from spare node
   capacity, not a measured working set. A model-driven build can exceed them.
 - The shipped ordered configuration as it stands, with OpenRouter invoked
