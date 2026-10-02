@@ -21,8 +21,9 @@ is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
 back; with none true, one that reads as false lets it through; anything else
 is no verdict, and what the reviewer wrote with it is shown in the live view
 and kept in the printed result and the log. A call's arguments are read as
-JSON text or as an object; a call that names no blocking is read one object
-further in, as {"verdict": {...}} is. What is kept is the findings of each
+JSON text or as an object, and one object further in, as {"verdict": {...}}
+is: a true found there always counts, anything else there only in a call
+that names no blocking itself. What is kept is the findings of each
 call at those two levels, arguments that cannot be read, and words given
 instead of a call, cut where findings are; findings further in, or inside a
 list, are not read.
@@ -44,8 +45,10 @@ Anything unexpected starts the review again at the growing waits, said again
 every REVIEW_HOLD_SECONDS, without running the operator's test commands
 again. What the review is doing is said on stderr when it changes, and
 again every REVIEW_HOLD_SECONDS while it does not, for the live view. The
-runtime's own notice tells the requester when a stage runs long; an operator
-who fixes a setting restarts the engine, which launches the stage afresh.
+runtime's own notice tells the requester when a stage runs long. An operator
+who fixes a setting restarts the engine: the runtime records the stopped
+review as a failure and goes on at the review's on_failure stage (the work
+stage in the examples), and the review runs again after it.
 
 REVIEW_UNAVAILABLE=pass is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after
@@ -219,7 +222,10 @@ def run(command, cwd, timeout):
         return "$ %s\n(could not start: %s)" % (" ".join(command), error)
     # Read as bytes: output that is not UTF-8 shows a replacement character
     # instead of ending the review in an error it would start again from.
-    output = (finished.stdout + finished.stderr).decode("utf-8", "replace").strip()
+    # CR and CRLF end a line, as when the output was read as text, so a test
+    # tool that redraws its progress with CR shows each step on its own line.
+    output = "".join(stream.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+                     for stream in (finished.stdout, finished.stderr)).strip()
     if len(output) > 4000:
         output = "[test output cut here: the last 4000 of %d characters shown]\n" % len(output) + output[-4000:]
     return "$ %s -> exit %d\n%s" % (" ".join(command), finished.returncode, output)
@@ -251,9 +257,13 @@ def git(workspace, *arguments, names=False):
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error), recheck=True)
     if finished.returncode != 0:
+        # One line of Git's: the one saying fatal or error, else its first.
+        # The rest, such as the usage text after a warning, would fill the
+        # live view at every interval the review holds.
+        lines = finished.stderr.decode("utf-8", "replace").strip().splitlines()
+        why = next((line for line in lines if line.startswith(("fatal:", "error:"))), lines[0] if lines else "")
         raise ReviewError("the change could not be read: git %s exited %d: %s"
-                          % (arguments[0], finished.returncode,
-                             finished.stderr.decode("utf-8", "replace").strip()[:200]), recheck=True)
+                          % (arguments[0], finished.returncode, why[:200]), recheck=True)
     return finished.stdout.decode("utf-8", "surrogateescape" if names else "replace")
 
 
@@ -431,10 +441,12 @@ def as_written(value):
 def read_verdict(calls):
     """(blocking, findings, why) from every call of the verdict tool in one
     reply. Arguments are read as a JSON text or as an object as they come.
-    Every field named blocking, in any letter case, is read in every call,
-    and in a call that names none, in the objects one level inside it, such
-    as {"verdict": {...}}; findings are read at both levels. One that reads as true sends the work back, so a finding is never
-    let through because the reply also said false somewhere; with none true,
+    Every field named blocking, in any letter case, is read in every call
+    and in the objects one level inside it, such as {"verdict": {...}}; one
+    level inside, a value that does not read as true counts only in a call
+    that names no blocking itself. Findings are read at both levels. One
+    that reads as true sends the work back, so a finding is never let
+    through because the reply also said false somewhere; with none true,
     one that reads as false lets the work through; with neither there is no
     verdict, and why says so. The findings of every call are kept whichever
     way it goes, and arguments that cannot be read are kept as they were
@@ -457,10 +469,13 @@ def read_verdict(calls):
             continue
         below = [item for value in arguments.values() if isinstance(value, dict) for item in value.items()]
         given = [value for name, value in arguments.items() if str(name).lower() == "blocking"]
-        # One object down stands in only for a call that names no blocking
+        nested = [value for name, value in below if str(name).lower() == "blocking"]
+        # A true one object down counts whatever the call says itself, so an
+        # objection written there is never let through for a false beside it.
+        # Anything else there stands in only for a call that names no blocking
         # itself, as {"verdict": {...}} does: beside a blocking the call gave
         # but that cannot be read, a false found further in decides nothing.
-        values.extend(given or [value for name, value in below if str(name).lower() == "blocking"])
+        values.extend(given + [value for value in nested if truth(value) is True] if given else nested)
         for name, value in list(arguments.items()) + below:
             if str(name).lower() == "findings" and value not in (None, ""):
                 findings.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
@@ -721,7 +736,8 @@ def main():
             if reason != held:
                 say("Review by %s: held, with no verdict: %s. The work is neither let through nor sent back; %s"
                     % (named_models(), reason, "this is looked at again every %gs." % interval if error.recheck else
-                       "fix the setting and restart the engine, which launches this stage afresh."))
+                       "fix the setting and restart the engine. The restarted runtime records this review as a"
+                       " failure and goes on at the review's on_failure stage, and the review runs again after it."))
                 held = reason
             else:
                 say("Review still held at %s; the reason is above." % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))

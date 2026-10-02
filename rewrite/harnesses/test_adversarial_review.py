@@ -283,6 +283,9 @@ class AdversarialReviewTests(unittest.TestCase):
             self.assertEqual(stdout, "", name)
             self.assertEqual(stderr.count(reason), 1, (name, stderr))
             self.assertIn("fix the setting and restart the engine", stderr, name)
+            # A restart does not launch the review afresh: the runtime records
+            # it as a failure and goes on at the stage named for that.
+            self.assertIn("goes on at the review's on_failure stage", stderr, name)
             self.assertGreaterEqual(stderr.count("Review still held at"), 2, (name, stderr))
             self.assertEqual(service.requests, [], name)
 
@@ -616,7 +619,16 @@ class AdversarialReviewTests(unittest.TestCase):
                    ("0", [{"blocking": 0}], "PASSED", 0),
                    ("\"no\"", [{"blocking": "no"}], "PASSED", 0),
                    ("\"0\"", [{"blocking": "0"}], "PASSED", 0),
-                   ("false and Blocking maybe", [{"blocking": False, "Blocking": "maybe"}], "PASSED", 0))
+                   ("false and Blocking maybe", [{"blocking": False, "Blocking": "maybe"}], "PASSED", 0),
+                   # A true one object down counts whatever the call says itself.
+                   ("false beside a true one object down", [{"blocking": False, "verdict": {"blocking": True}}],
+                    "SENT BACK", 1),
+                   ("\"false\" beside \"yes\" one object down",
+                    [{"blocking": "false", "verdict": {"blocking": "yes"}}], "SENT BACK", 1),
+                   ("null beside a true one object down", [{"blocking": None, "detail": {"blocking": True}}],
+                    "SENT BACK", 1),
+                   ("\"maybe\" beside a true one object down", [{"blocking": "maybe", "detail": {"blocking": True}}],
+                    "SENT BACK", 1))
         unclear = (("null", [{"blocking": None}]), ("missing", [{}]), ("\"maybe\"", [{"blocking": "maybe"}]),
                    ("2", [{"blocking": 2}]), ("1.5", [{"blocking": 1.5}]), ("is_blocking", [{"is_blocking": True}]))
 
@@ -722,7 +734,12 @@ class AdversarialReviewTests(unittest.TestCase):
                  ("words instead of a call", {"content": "BLOCKING: " + finding}, "NOT REVIEWED", 0, 1),
                  ("a broken call beside a false one", {"raw_calls": [broken, json.dumps({"blocking": False})]},
                   "PASSED", 0, 0),
-                 # One object down stands in only for a call that names no blocking itself.
+                 # A true one level down counts beside the call's own false, with
+                 # the findings written next to it.
+                 ("a false beside a true one level down",
+                  {"calls": [{"blocking": False, "verdict": {"blocking": True, "findings": finding}}]}, "SENT BACK", 1, 1),
+                 # Anything else one level down stands in only for a call that
+                 # names no blocking itself.
                  ("a blocking that cannot be read beside a false one level down",
                   {"calls": [{"blocking": "Yes, because the needed file is missing", "findings": finding,
                               "issues": {"blocking": False}}]}, "NOT REVIEWED", 0, 1),
@@ -812,7 +829,31 @@ class AdversarialReviewTests(unittest.TestCase):
         running, stdout, stderr = self.held_review(service)
         self.assertTrue(running, (stdout, stderr))
         self.assertEqual(stderr.count("the change could not be read"), 1, stderr)
-        self.assertIn("this is looked at again every", stderr)
+        # One line of Git's in the reason, not the usage text Git prints
+        # after it, so the live view shows the hold on one line.
+        held = [line for line in stderr.splitlines() if "the change could not be read" in line]
+        self.assertIn("this is looked at again every", held[0], stderr)
+        self.assertNotIn("usage:", stderr)
+        self.assertEqual(service.requests, [])
+
+    def test_the_reason_from_git_is_its_fatal_line_not_a_warning_before_it(self):
+        # A warning Git prints first, such as a file of its own it cannot read
+        # in a sandbox, is not why the change could not be read.
+        shim = self.home.parent / "git-shim"
+        shim.mkdir()
+        (shim / "git").write_text(
+            "#!/bin/sh\n"
+            "for a in \"$@\"; do if [ \"$a\" = diff ]; then\n"
+            "  echo \"warning: unable to access 'attributes': Permission denied\" >&2\n"
+            "  echo 'fatal: bad object HEAD' >&2; exit 128; fi; done\n"
+            "exec %s \"$@\"\n" % shutil.which("git"))
+        (shim / "git").chmod(0o755)
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        running, stdout, stderr = self.held_review(service, PATH=str(shim) + os.pathsep + os.environ["PATH"])
+        self.assertTrue(running, (stdout, stderr))
+        self.assertIn("git diff exited 128: fatal: bad object HEAD. The work is neither", stderr)
+        self.assertNotIn("Permission denied", stderr)
         self.assertEqual(service.requests, [])
 
     def test_with_the_opt_in_a_workspace_that_is_not_a_checkout_goes_back_with_a_note(self):
@@ -862,6 +903,20 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("\ufffd", text)
         self.assertIn("test ran", text)
         self.assertNotIn("Unexpected", finished.stderr)
+
+    def test_carriage_returns_in_the_test_output_end_lines(self):
+        # A test tool that redraws its progress with CR, or ends its lines with
+        # CRLF, reaches the reviewer one step a line, as when the output was
+        # read as text.
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        command = (sys.executable + " -c \"import sys; sys.stdout.buffer.write(b'progress 1\\rprogress 2\\r\\ndone\\r\\n');"
+                   " sys.stderr.buffer.write(b'a warning\\r\\n')\"")
+        finished = self.run_review(service, REVIEW_TEST_COMMANDS=command)
+        self.assertEqual(finished.returncode, 0, (finished.stdout, finished.stderr))
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("progress 1\nprogress 2\ndone\na warning", text)
+        self.assertNotIn("\r", text)
 
     def test_an_unexpected_error_is_waited_out_said_again_and_the_tests_are_not_run_again(self):
         # The review starts again at the growing waits, says so again at

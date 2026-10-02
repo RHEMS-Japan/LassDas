@@ -669,12 +669,13 @@ false when its meaning is plain: true or false, a number equal to 1 or 0, or
 reads as true makes the verdict blocking, so a finding is never let through
 because the reply also said false; with none true, one that reads as false
 does not block; anything else is no verdict (below). A call's arguments are
-read as JSON text or as an object; a call that names no blocking is read one
-object further in, as `{"verdict": {...}}` is, but a blocking the call names
-itself is never set aside for one found further in. What is kept whichever
-way it goes is the findings of each call at those two levels, arguments that
-cannot be read, and words given instead of a call, cut where findings are;
-findings further in, or inside a list, are not read. The command
+read as JSON text or as an object, and one object further in, as
+`{"verdict": {...}}` is: a true found there always counts, so an objection
+written there is never let through for a false beside it, while anything else
+there counts only in a call that names no blocking itself. What is kept
+whichever way it goes is the findings of each call at those two levels,
+arguments that cannot be read, and words given instead of a call, cut where
+findings are; findings further in, or inside a list, are not read. The command
 exits 1 on a blocking verdict, which sends the work back to the `work` stage,
 and 0 on a verdict that does not object; without a verdict it does neither
 (below). The findings are printed, so they join the history as an
@@ -731,9 +732,14 @@ later request waits its turn behind it. The operator sees why in the status
 page's live view, in the lines above; the requester hears only the runtime's
 notice that a stage is running long, after `intake.stall_notice_minutes` (90)
 and then every six hours. There are three ways out: fix what keeps the verdict
-from coming (a setting, the credential, a model id) and restart the engine,
-which launches the stage afresh; a stop comment from the requester, which
-ends the run; or the model service coming back. Each request to a model
+from coming (a setting, the credential, a model id) and restart the engine; a
+stop comment from the requester, which ends the run; or the model service
+coming back. A restart does not launch the review afresh: the runtime records
+the stopped review as a failure and goes on at the review's `on_failure` stage
+(`work` in the examples: the worker is launched again, with a record that the
+last step may have stopped midway), then the stages after it, the review among
+them, run again. The requester is told that the request carries on after a
+restart. Each request to a model
 carries the change and the test output: once the waits reach
 `REVIEW_RETRY_CAP_SECONDS`, every model in `REVIEW_MODELS` is asked once
 every 300 seconds: about 100 rounds in eight hours, so up to about 100
