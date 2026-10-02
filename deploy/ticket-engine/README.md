@@ -58,11 +58,11 @@ runtime, without credentials or task data (`rewrite/RUNTIME.md`):
 Measured in one consumer's live instance, run from these templates since
 2026-09-29 on one cluster:
 
-- The StatefulSet as written here, status page and operator scripts
-  included, on arm64 nodes: a 20Gi ReadWriteOnce volume from the cluster's
-  block storage class together with `hostUsers: false`, and the mirror as a
-  sidecar (`restartPolicy: Always` on an init container), were accepted and
-  worked.
+- The StatefulSet in this directory, status page and operator scripts
+  included, with the gateway's key in place of `MODEL_API_KEY`, on arm64
+  nodes: a 20Gi ReadWriteOnce volume from the cluster's block storage class
+  together with `hostUsers: false`, and the mirror as a sidecar
+  (`restartPolicy: Always` on an init container), were accepted and worked.
 - Live services: a Backlog project as the tracker; pull requests opened and
   merged in a GitHub repository by the shipped delivery and checked by the
   shipped merged check; models invoked through an OpenAI-compatible gateway,
