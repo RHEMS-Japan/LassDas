@@ -118,8 +118,22 @@ func TestStagesExampleIsAnOrderedRunNothingWrittenCanAdvance(t *testing.T) {
 	if err := validateQuestionRole(cfg); err != nil || validateStopReporter(cfg) != nil {
 		t.Fatal("the example lost its question or stopped-report role", err)
 	}
-	if cfg.ModelSelection == nil || len(cfg.ModelSelection.Authors) != 5 || cfg.Router.LLM.Model != "" {
+	if cfg.ModelSelection == nil || len(cfg.ModelSelection.Authors) != 4 || cfg.Router.LLM.Model != "" {
 		t.Fatal("example lost current-catalog selection")
+	}
+	// The review comes from another publisher than the work (README.md): no
+	// model it names may share a publisher with the launches' candidates.
+	reviewers := 0
+	for _, process := range roles["review"].Processes {
+		if model := process.Env["REVIEW_MODEL"]; model != "" {
+			reviewers++
+			if publisher, _, _ := strings.Cut(model, "/"); slices.Contains(cfg.ModelSelection.Authors, publisher) {
+				t.Fatalf("the review model %s shares its publisher with the candidates %v", model, cfg.ModelSelection.Authors)
+			}
+		}
+	}
+	if reviewers == 0 {
+		t.Fatal("the example's review names no model")
 	}
 	useCatalogTransport(t, func(*http.Request) (*http.Response, error) {
 		t.Error("unedited example made an external request")

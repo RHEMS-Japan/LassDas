@@ -45,20 +45,24 @@ class ModelStandIn:
                 if reply.get("status", 200) != 200:
                     payload = json.dumps({"error": reply.get("error", "service error")}).encode()
                     self.send_response(reply["status"])
-                elif reply.get("verdict") is None and "arguments" not in reply and "calls" not in reply:
-                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
+                elif reply.get("verdict") is None and not {"arguments", "calls", "raw_calls"} & set(reply):
+                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": reply.get(
+                        "content", "I have looked.")}}]}).encode()
                     self.send_response(200)
                 else:
-                    if "calls" in reply:
-                        calls = reply["calls"]
+                    if "raw_calls" in reply:
+                        # Arguments as a service might send them: broken text, or an object.
+                        calls = reply["raw_calls"]
+                    elif "calls" in reply:
+                        calls = [json.dumps(arguments) for arguments in reply["calls"]]
                     elif "arguments" in reply:
-                        calls = [reply["arguments"]]
+                        calls = [json.dumps(reply["arguments"])]
                     else:
                         blocking, findings = reply["verdict"]
-                        calls = [{"blocking": blocking, "findings": findings}]
+                        calls = [json.dumps({"blocking": blocking, "findings": findings})]
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
-                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
-                            arguments)}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
+                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments":
+                            arguments}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -114,7 +118,7 @@ class AdversarialReviewTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
                               text=True, env=self.environment(service, **extra), timeout=120)
 
-    def review_in_process(self, service, before_each_command):
+    def review_in_process(self, service, before_each_command, **extra):
         """The review run in this process, so that a Git that runs out of
         time can be had without waiting for it: before_each_command sees each
         command the review starts and may raise in its place. The exit status
@@ -131,7 +135,7 @@ class AdversarialReviewTests(unittest.TestCase):
         stdin = io.TextIOWrapper(io.BytesIO(b"Original request:\nadd a thing\n"))
         with mock.patch.object(module, "subprocess", types.SimpleNamespace(
                 run=run, TimeoutExpired=subprocess.TimeoutExpired)), \
-                mock.patch.dict(os.environ, self.environment(service), clear=True), \
+                mock.patch.dict(os.environ, self.environment(service, **extra), clear=True), \
                 mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed):
             status = module.main()
         return status, printed.getvalue()
@@ -461,6 +465,61 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(finished.returncode, 1, finished.stdout)
         self.assertIn(self.GOES_BACK, finished.stdout)
 
+    def test_git_is_not_pointed_at_another_index_or_checkout(self):
+        # V2 and V3 of the third review: an operator's GIT_INDEX_FILE, or a
+        # GIT_DIR and GIT_WORK_TREE of a clean checkout elsewhere, in the
+        # review's settings only. The delivery reads the workspace without
+        # them, and so does the review now: an unchanged checkout is still
+        # unchanged, and a new file in the workspace is shown, not hidden.
+        self.leave_unchanged()
+        other = self.home.parent / "other"
+        subprocess.run(["git", "clone", "-q", str(self.workspace), str(other)], check=True, env=git_environment())
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, GIT_INDEX_FILE=str(self.home.parent / "an-index-of-its-own"))
+        self.assertEqual(finished.returncode, 1, finished.stdout)
+        self.assertIn(self.GOES_BACK, finished.stdout)
+        (self.workspace / "src" / "farewell.txt").write_text("a new file the reviewer must see\n")
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("--- new file src/farewell.txt ---\na new file the reviewer must see", text)
+        self.assertNotIn("No file was changed", text)
+
+    def test_a_reply_in_another_shape_is_read_as_far_as_it_can_be_and_kept_as_written(self):
+        # The second point of the third review: arguments given as an object,
+        # a verdict wrapped one level down, arguments that are not JSON, words
+        # instead of a call, and a broken call beside a readable one. The rule
+        # is the same; what the reviewer wrote reaches the output and the log.
+        finding = "REQUIRED_NEW_BEHAVIOR is missing in src/tool.py"
+        broken = '{"blocking": true, "findings": "%s' % finding
+        cases = (("arguments as an object", {"raw_calls": [{"blocking": True, "findings": finding}]}, "SENT BACK", 1, 1),
+                 ("a verdict one level down", {"calls": [{"verdict": {"blocking": True, "findings": finding}}]},
+                  "SENT BACK", 1, 1),
+                 ("arguments that are not JSON", {"raw_calls": [broken]}, "NOT REVIEWED", 0, 1),
+                 ("words instead of a call", {"content": "BLOCKING: " + finding}, "NOT REVIEWED", 0, 1),
+                 ("a broken call beside a false one", {"raw_calls": [broken, json.dumps({"blocking": False})]},
+                  "PASSED", 0, 0))
+        for tree in ("a change", "no change"):
+            if tree == "no change":
+                self.leave_unchanged()
+            for case, reply, outcome, changed, unchanged in cases:
+                service = ModelStandIn([reply])
+                self.addCleanup(service.close)
+                finished = self.run_review(service, REVIEW_ATTEMPTS="1")
+                status = changed if tree == "a change" else unchanged
+                self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
+                self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
+                self.assertIn(finding, finished.stdout, (case, tree))
+                self.assertIn(finding, self.review_log().split("## Review by")[-1], (case, tree))
+        # Kept as written, but no more than findings are shown.
+        service = ModelStandIn([{"content": "x" * 20000}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_ATTEMPTS="1")
+        self.assertIn("[reply cut here: 6000 of 20000 characters shown]", self.review_log())
+
     def test_a_name_that_is_not_utf8_is_named_not_a_traceback(self):
         # macOS refuses such a name, so a Git ahead on PATH lists one as Linux
         # Git does, with the name's own bytes, and leaves the rest to Git.
@@ -535,17 +594,22 @@ class AdversarialReviewTests(unittest.TestCase):
         # unchanged checkout and ends with nothing delivered. Not being able
         # to tell is not taken as a change, and neither is an error before it
         # was told: without a verdict the work goes back, and a blocking
-        # verdict stands even when its state cannot be saved. The control,
-        # with Git answering, says that no file was changed.
+        # verdict stands even when its state cannot be saved. When Git reads
+        # the change after the first look failed, it is told again, and the
+        # reviewer hears that no file was changed. The control, with Git
+        # answering, says that no file was changed.
         self.leave_unchanged()
 
-        def status_runs_out_of_time(times):
-            ran_out = []
+        def status_runs_out_of_time(*which):
+            """The status calls that run out of time, counted from 1; all of
+            them when none is named."""
+            seen = []
 
             def before(command):
-                if command[:1] == ["git"] and "status" in command and len(ran_out) < times:
-                    ran_out.append(command)
-                    raise subprocess.TimeoutExpired(command, 60)
+                if command[:1] == ["git"] and "status" in command:
+                    seen.append(command)
+                    if not which or len(seen) in which:
+                        raise subprocess.TimeoutExpired(command, 60)
             return before
 
         def unexpected_error_first():
@@ -557,35 +621,49 @@ class AdversarialReviewTests(unittest.TestCase):
                     raise RuntimeError("an error the review does not expect")
             return before
 
-        cases = (("git status always runs out of time", status_runs_out_of_time(99), [], False,
+        # With the whole tree as the change (no REVIEW_DIFF_PATHS), the review
+        # reads status first to tell, then once with the change, and once more
+        # to tell again after a failed first look.
+        cases = (("git status always runs out of time", status_runs_out_of_time(), [], False, 1,
                   ["timed out after 60 seconds", self.CANNOT_TELL]),
-                 ("an unexpected error first", unexpected_error_first(), [], False,
+                 ("an unexpected error first", unexpected_error_first(), [], False, 1,
                   ["Unexpected RuntimeError", self.CANNOT_TELL]),
-                 ("git status runs out of time once, then no verdict", status_runs_out_of_time(1),
-                  [{"status": 503}, {"status": 503}], False,
+                 ("the first look and the second telling run out of time, then no verdict",
+                  status_runs_out_of_time(1, 3), [{"status": 503}, {"status": 503}], False, 1,
                   ["no verdict could be obtained (HTTP 503 from the model service); whether any file was changed"
                    " could not be told, and an ending with nothing delivered needs a verdict"]),
-                 ("git status runs out of time once, then a blocking verdict not saved", status_runs_out_of_time(1),
-                  [{"verdict": (True, "the request needs a new file")}], True,
-                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]))
-        for case, before, replies, unsaved, said in cases:
+                 ("the first look and the second telling run out of time, then a blocking verdict not saved",
+                  status_runs_out_of_time(1, 3), [{"verdict": (True, "the request needs a new file")}], True, 1,
+                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]),
+                 ("only the first look runs out of time, then no verdict", status_runs_out_of_time(1),
+                  [{"status": 503}, {"status": 503}], False, 1,
+                  ["no file was changed, and an ending with nothing delivered needs a verdict"]),
+                 ("only the first look runs out of time, then a passing verdict", status_runs_out_of_time(1),
+                  [{"verdict": (False, "")}], False, 0, ["PASSED"]))
+        for case, before, replies, unsaved, expected, said in cases:
             service = ModelStandIn(replies)
             self.addCleanup(service.close)
             if unsaved:
                 self.home.chmod(0o500)
             try:
-                status, printed = self.review_in_process(service, before)
+                status, printed = self.review_in_process(service, before, REVIEW_DIFF_PATHS="")
             finally:
                 self.home.chmod(0o700)
-            self.assertEqual(status, 1, (case, printed))
+            self.assertEqual(status, expected, (case, printed))
             for text in said:
                 self.assertIn(text, printed, case)
+            if case.startswith("only the first look"):
+                # Told again from what Git read: the reviewer is asked whether
+                # the request is met with no file changed.
+                self.assertIn(self.NO_CHANGE, service.requests[0]["body"]["messages"][1]["content"], case)
+                self.assertNotIn("could not be told", printed, case)
         service = ModelStandIn([{"status": 503}, {"status": 503}])
         self.addCleanup(service.close)
         status, printed = self.review_in_process(service, lambda command: None)
         self.assertEqual(status, 1, printed)
         self.assertIn("no file was changed, and an ending with nothing delivered needs a verdict", printed)
         self.assertNotIn("could not be told", printed)
+
 
 if __name__ == "__main__":
     unittest.main()

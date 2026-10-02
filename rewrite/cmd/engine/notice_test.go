@@ -497,7 +497,7 @@ func TestNoProgressNoticeSaysTheLastFailureWithoutACredential(t *testing.T) {
 	// The queue's engines have said a stall since before this one began.
 	queueRanSince(t, root, cfg, start)
 	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
-	const opening = "自動処理は続いていますが"
+	const opening = "依頼はまだ終わっていませんが"
 	waitFor(t, func() bool { return len(fixture.withPrefix(opening)) > 0 })
 	time.Sleep(120 * time.Millisecond)
 	found := fixture.withPrefix(opening)
@@ -792,8 +792,31 @@ func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *tes
 	if quiet := quietFor(chain.State{}, time.Time{}, now); quiet != 0 {
 		t.Fatalf("a request with nothing to measure from was measured: %v", quiet)
 	}
-	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗はなく") || strings.Contains(text, "直近の失敗") {
+	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗は記録されていません") || strings.Contains(text, "直近の失敗") {
 		t.Fatalf("the notice without a failure names one: %q", text)
+	}
+}
+
+// A launch held for a setting only its operator can correct is, to the
+// engine, a launch that runs long; a stall is also said while the engine
+// itself holds the work for the budget; and the quiet time of a request that
+// has just started can be all waiting before its first launch. So these
+// three are fixed word for word: what was recorded, with no cause given and
+// nothing about who has to act. A wording that says nobody is needed, that
+// the work goes on, why nothing completed, or that no answer is awaited (a
+// question may stand right above the notice) fails here.
+func TestTheNoticesSayOnlyWhatWasRecorded(t *testing.T) {
+	for name, pair := range map[string][2]string{
+		"a long launch": {stallNoticeText(95, ""),
+			"依頼はまだ終わっていませんが、過去 95 分間は工程が完了していません。この間に工程の失敗は記録されていません。"},
+		"a repeated failure": {stallNoticeText(95, "exit status 1: the review model answers HTTP 404"),
+			"依頼はまだ終わっていませんが、過去 95 分間は工程が完了していません（直近の失敗: exit status 1: the review model answers HTTP 404）。"},
+		"a spent budget": {pausedNoticeText,
+			"自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。"},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s is said in other words:\n got %q\nwant %q", name, pair[0], pair[1])
+		}
 	}
 }
 
@@ -857,7 +880,7 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	if len(posted["EXAMPLE-52"]) != 0 {
 		t.Fatalf("a request waiting its turn was told its work is long: %q", posted["EXAMPLE-52"])
 	}
-	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗はなく") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
+	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗は記録されていません") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
 		t.Fatalf("the running request was not told, or told wrongly: %q", posted["EXAMPLE-51"])
 	}
 }

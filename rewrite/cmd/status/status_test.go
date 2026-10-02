@@ -1336,3 +1336,129 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	response.Body.Close()
 	expectAll(t, string(japanese), "順番待ち <b>3</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
 }
+
+// A GitHub issue is shown by its number, its title, the account that opened
+// it and its own page, all read from its record, with or without a
+// configuration. A Backlog issue beside it is shown as before, and each page
+// names where its requester wrote.
+func TestAGitHubIssueIsShownByItsNumberTitleOpenerAndPage(t *testing.T) {
+	root := fixtureQueue(t)
+	job := filepath.Join(root, "jobs", "12")
+	if err := os.MkdirAll(filepath.Join(job, "run"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	issue := func(page string) {
+		t.Helper()
+		record := `{"number":12,"title":"Add a docstring on GitHub","body":"BODY","created_at":"2026-01-02T00:00:00Z",` +
+			`"user":{"id":11,"login":"fixture-requester"},"html_url":"` + page + `","repository_url":"https://api.github.example/repos/octo-org/widgets"}`
+		if err := os.WriteFile(filepath.Join(job, "issue.json"), []byte(record), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issue("https://github.example/octo-org/widgets/issues/12")
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	raw, _ := json.Marshal(chain.State{Request: "Original issue: 12\nTitle: Add a docstring on GitHub\n\nBODY", Step: "implement",
+		History: []chain.Result{{Role: "elicit", Speaker: "elicit-process", Output: "OUTPUT", Instruction: "INSTRUCTION", StartedAt: started, FinishedAt: started.Add(time.Minute)}}})
+	if err := os.WriteFile(filepath.Join(job, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	japanese := func(ts *httptest.Server, path string) string {
+		t.Helper()
+		request, _ := http.NewRequest("GET", ts.URL+path, nil)
+		request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	for _, config := range []string{"", fixtureConfig(t)} {
+		ts := serve(t, root, config, "", "")
+		_, body := get(t, ts, "/")
+		expectAll(t, body, `data-key="#12"`, "Add a docstring on GitHub", "fixture-requester", `data-key="EXAMPLE-7"`)
+		_, body = get(t, ts, "/jobs/12")
+		expectAll(t, body, "<title>#12 status</title>", `<a href="https://github.example/octo-org/widgets/issues/12">`, "fixture-requester · 2026-01-02T00:00:00Z")
+		if body := japanese(ts, "/jobs/12"); !strings.Contains(body, "あなたが GitHub の issue に書いた本文") || strings.Contains(body, "Backlog") {
+			t.Errorf("config %q: the GitHub issue's page does not name GitHub, or names Backlog", config)
+		}
+		if body := japanese(ts, "/jobs/7"); !strings.Contains(body, "あなたが Backlog に書いた本文") {
+			t.Errorf("config %q: the Backlog issue's page changed its words", config)
+		}
+	}
+	// Only a page on https is linked.
+	issue("http://github.example/octo-org/widgets/issues/12")
+	ts := serve(t, root, "", "", "")
+	if _, body := get(t, ts, "/jobs/12"); strings.Contains(body, "github.example/octo-org/widgets/issues/12") {
+		t.Error("a page address that is not https was linked")
+	}
+}
+
+// A record is a GitHub issue's when it has a positive number, its page and
+// its repository, whatever else it holds, and only a link to that very issue
+// is offered: on https, with nobody's name or password, to the issue's number.
+func TestOnlyAGitHubIssuesOwnPageIsLinkedAndTheRecordDecidesTheKind(t *testing.T) {
+	root := t.TempDir()
+	write := func(id, record string) {
+		t.Helper()
+		dir := filepath.Join(root, "jobs", id)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "issue.json"), []byte(record), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	github := func(number, page string, extra string) string {
+		return `{"number":` + number + `,"title":"GITHUB-TITLE","user":{"login":"fixture-requester"},"html_url":"` + page +
+			`","repository_url":"https://api.github.example/repos/octo-org/widgets"` + extra + `}`
+	}
+	own := "https://github.example/octo-org/widgets/issues/12"
+	write("12", github("12", own, `,"issueKey":"EXAMPLE-12"`))
+	write("13", github("13", own, ""))
+	write("14", github("14", "https://github.example@evil.example/octo-org/widgets/issues/14", ""))
+	write("15", github("15", "https://user:secret@github.example/octo-org/widgets/issues/15", ""))
+	write("16", github("16", "https://evil.example/phish", ""))
+	write("17", github("17", "https:///octo-org/widgets/issues/17", ""))
+	write("18", `{"issueKey":"","summary":"BACKLOG-TITLE","html_url":"https://github.example/octo-org/widgets/issues/18","createdUser":{"name":"backlog requester"}}`)
+	write("19", github("0", own, ""))
+	write("20", github(`"20"`, own, ""))
+	write("21", `{"number":21,"title":"GITHUB-TITLE","html_url":"https://github.example/octo-org/widgets/issues/21"}`)
+	ts := serve(t, root, "", "", "")
+	page := func(id string) string {
+		t.Helper()
+		_, body := get(t, ts, "/jobs/"+id)
+		return body
+	}
+	// Both shapes at once: the GitHub fields decide.
+	expectAll(t, page("12"), "<title>#12 status</title>", "GITHUB-TITLE", `<a href="`+own+`">open the issue on GitHub</a>`)
+	if body := page("13"); strings.Contains(body, `href="`+own+`"`) {
+		t.Error("a page of another issue was linked")
+	}
+	for _, id := range []string{"14", "15", "16", "17"} {
+		if body := page(id); !strings.Contains(body, "<title>#"+id+" status</title>") || strings.Contains(body, "open the issue") {
+			t.Errorf("issue %s: not shown as a GitHub issue, or its page was linked", id)
+		}
+	}
+	// Without a positive number, or without its repository, it is not a
+	// GitHub issue's record.
+	for _, id := range []string{"18", "19", "20", "21"} {
+		if body := page(id); strings.Contains(body, "<title>#") || strings.Contains(body, "GITHUB-TITLE") {
+			t.Errorf("record %s was read as a GitHub issue's", id)
+		}
+	}
+	expectAll(t, page("18"), "BACKLOG-TITLE", "backlog requester")
+	request, _ := http.NewRequest("GET", ts.URL+"/jobs/12", nil)
+	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	japanese, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	expectAll(t, string(japanese), `<a href="`+own+`">issue を開く</a>`)
+	if _, body := get(t, serve(t, fixtureQueue(t), fixtureConfig(t), "", ""), "/jobs/7"); !strings.Contains(body, `<a href="https://space.example/view/EXAMPLE-7">open the issue</a>`) {
+		t.Error("the Backlog issue's link changed")
+	}
+}
