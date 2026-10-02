@@ -839,7 +839,7 @@ func TestAnExampleLeftPartlyUneditedIsRefused(t *testing.T) {
 		}
 		cfg.Instructions = "Deliver to the project's repository."
 		err = watchRequests(context.Background(), cfg, root, io.Discard)
-		if err == nil || !strings.HasSuffix(err.Error(), " still holds the example's placeholder under example.invalid; a watch needs your own value there") ||
+		if err == nil || !strings.HasSuffix(err.Error(), " still holds the example's placeholder host under example.invalid; a watch needs your own value there") ||
 			!strings.Contains(err.Error()[:strings.Index(err.Error(), " still holds")], ".") {
 			t.Fatalf("%s with the example's hosts: %v", path, err)
 		}
@@ -866,7 +866,33 @@ func TestAnExampleLeftPartlyUneditedIsRefused(t *testing.T) {
 	cfg := loadExample(t, "../../examples/operator-stages.json")
 	cfg.Backlog.BaseURL, cfg.Instructions = "https://tracker.example.com/api/v2", "Deliver to the project's repository."
 	cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
-	if left := examplePlaceholder(cfg); left != "roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder under example.invalid; a watch needs your own value there" {
+	if left := examplePlaceholder(cfg); left != "roles[0].processes[0].env.TASK_REPOSITORY still holds the example's placeholder host under example.invalid; a watch needs your own value there" {
 		t.Fatalf("the place said: %s", left)
+	}
+	// Only a URL's host is the example's placeholder. What an operator may
+	// well write is taken: an author's address under that name, a sentence
+	// that mentions it, a real host that merely begins like it. A placeholder
+	// host written in capitals is still the placeholder.
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(string(data), "example.invalid", "example.com")), &edited); err != nil {
+		t.Fatal(err)
+	}
+	environment := edited.Roles[0].Processes[0].Env
+	for _, value := range []string{"ticket-engine@example.invalid", "https://git.example.invalidation-tools.com/owner/project.git", "example.invalid", "see https://repository.example.invalid/ in the example"} {
+		environment["OPERATOR_VALUE"] = value
+		edited.Instructions = "The example named repository.example.invalid; ours is elsewhere."
+		if left := examplePlaceholder(edited); left != "" {
+			t.Fatalf("the operator's own value %q was taken for a placeholder: %s", value, left)
+		}
+	}
+	for _, value := range []string{"https://REPOSITORY.EXAMPLE.INVALID/owner/project.git", "https://example.invalid", " https://tracker.example.invalid:8443/api/v2 ", "ssh://git@repository.example.invalid/owner/project.git"} {
+		environment["OPERATOR_VALUE"] = value
+		if left := examplePlaceholder(edited); !strings.HasPrefix(left, "roles[0].processes[0].env.OPERATOR_VALUE still holds") {
+			t.Fatalf("the placeholder host in %q was taken: %q", value, left)
+		}
 	}
 }

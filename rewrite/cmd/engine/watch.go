@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -158,9 +159,11 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 // and open their instructions by saying the setup is incomplete. A watch on a
 // configuration that still holds one of those would start, take up requests
 // and fail each of them over and over at the model's price, so it is refused
-// here with the place of the first one found. This reads the operator's own
-// file for the examples' own words; it is not a check of anything a role or a
-// model wrote.
+// here with the place of the first one found. Only a value that is a URL is
+// looked at, and only its host: an author's address under example.invalid, a
+// sentence that mentions the name and a real host that merely begins like it
+// are the operator's own. This reads the operator's own file for the
+// examples' own words; it is not a check of anything a role or a model wrote.
 func examplePlaceholder(cfg config) string {
 	if strings.HasPrefix(strings.TrimSpace(cfg.Instructions), "Operator setup is incomplete") {
 		return "instructions still holds the example's paragraph (\"Operator setup is incomplete\"); a watch needs the project's own guidance there"
@@ -177,8 +180,12 @@ func examplePlaceholder(cfg config) string {
 	find = func(value any, place string) string {
 		switch value := value.(type) {
 		case string:
-			if strings.Contains(value, "example.invalid") {
-				return place + " still holds the example's placeholder under example.invalid; a watch needs your own value there"
+			address, err := url.Parse(strings.TrimSpace(value))
+			if err != nil || address.Scheme == "" || address.Host == "" {
+				return ""
+			}
+			if host := strings.ToLower(address.Hostname()); host == "example.invalid" || strings.HasSuffix(host, ".example.invalid") {
+				return place + " still holds the example's placeholder host under example.invalid; a watch needs your own value there"
 			}
 		case []any:
 			for index, item := range value {
