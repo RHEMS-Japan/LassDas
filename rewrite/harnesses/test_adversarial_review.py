@@ -118,7 +118,7 @@ class AdversarialReviewTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
                               text=True, env=self.environment(service, **extra), timeout=120)
 
-    def review_in_process(self, service, before_each_command):
+    def review_in_process(self, service, before_each_command, **extra):
         """The review run in this process, so that a Git that runs out of
         time can be had without waiting for it: before_each_command sees each
         command the review starts and may raise in its place. The exit status
@@ -135,7 +135,7 @@ class AdversarialReviewTests(unittest.TestCase):
         stdin = io.TextIOWrapper(io.BytesIO(b"Original request:\nadd a thing\n"))
         with mock.patch.object(module, "subprocess", types.SimpleNamespace(
                 run=run, TimeoutExpired=subprocess.TimeoutExpired)), \
-                mock.patch.dict(os.environ, self.environment(service), clear=True), \
+                mock.patch.dict(os.environ, self.environment(service, **extra), clear=True), \
                 mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(printed):
             status = module.main()
         return status, printed.getvalue()
@@ -594,17 +594,22 @@ class AdversarialReviewTests(unittest.TestCase):
         # unchanged checkout and ends with nothing delivered. Not being able
         # to tell is not taken as a change, and neither is an error before it
         # was told: without a verdict the work goes back, and a blocking
-        # verdict stands even when its state cannot be saved. The control,
-        # with Git answering, says that no file was changed.
+        # verdict stands even when its state cannot be saved. When Git reads
+        # the change after the first look failed, it is told again, and the
+        # reviewer hears that no file was changed. The control, with Git
+        # answering, says that no file was changed.
         self.leave_unchanged()
 
-        def status_runs_out_of_time(times):
-            ran_out = []
+        def status_runs_out_of_time(*which):
+            """The status calls that run out of time, counted from 1; all of
+            them when none is named."""
+            seen = []
 
             def before(command):
-                if command[:1] == ["git"] and "status" in command and len(ran_out) < times:
-                    ran_out.append(command)
-                    raise subprocess.TimeoutExpired(command, 60)
+                if command[:1] == ["git"] and "status" in command:
+                    seen.append(command)
+                    if not which or len(seen) in which:
+                        raise subprocess.TimeoutExpired(command, 60)
             return before
 
         def unexpected_error_first():
@@ -616,35 +621,49 @@ class AdversarialReviewTests(unittest.TestCase):
                     raise RuntimeError("an error the review does not expect")
             return before
 
-        cases = (("git status always runs out of time", status_runs_out_of_time(99), [], False,
+        # With the whole tree as the change (no REVIEW_DIFF_PATHS), the review
+        # reads status first to tell, then once with the change, and once more
+        # to tell again after a failed first look.
+        cases = (("git status always runs out of time", status_runs_out_of_time(), [], False, 1,
                   ["timed out after 60 seconds", self.CANNOT_TELL]),
-                 ("an unexpected error first", unexpected_error_first(), [], False,
+                 ("an unexpected error first", unexpected_error_first(), [], False, 1,
                   ["Unexpected RuntimeError", self.CANNOT_TELL]),
-                 ("git status runs out of time once, then no verdict", status_runs_out_of_time(1),
-                  [{"status": 503}, {"status": 503}], False,
+                 ("the first look and the second telling run out of time, then no verdict",
+                  status_runs_out_of_time(1, 3), [{"status": 503}, {"status": 503}], False, 1,
                   ["no verdict could be obtained (HTTP 503 from the model service); whether any file was changed"
                    " could not be told, and an ending with nothing delivered needs a verdict"]),
-                 ("git status runs out of time once, then a blocking verdict not saved", status_runs_out_of_time(1),
-                  [{"verdict": (True, "the request needs a new file")}], True,
-                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]))
-        for case, before, replies, unsaved, said in cases:
+                 ("the first look and the second telling run out of time, then a blocking verdict not saved",
+                  status_runs_out_of_time(1, 3), [{"verdict": (True, "the request needs a new file")}], True, 1,
+                  ["SENT BACK", "Whether any file was changed could not be told, so the outcome above stands"]),
+                 ("only the first look runs out of time, then no verdict", status_runs_out_of_time(1),
+                  [{"status": 503}, {"status": 503}], False, 1,
+                  ["no file was changed, and an ending with nothing delivered needs a verdict"]),
+                 ("only the first look runs out of time, then a passing verdict", status_runs_out_of_time(1),
+                  [{"verdict": (False, "")}], False, 0, ["PASSED"]))
+        for case, before, replies, unsaved, expected, said in cases:
             service = ModelStandIn(replies)
             self.addCleanup(service.close)
             if unsaved:
                 self.home.chmod(0o500)
             try:
-                status, printed = self.review_in_process(service, before)
+                status, printed = self.review_in_process(service, before, REVIEW_DIFF_PATHS="")
             finally:
                 self.home.chmod(0o700)
-            self.assertEqual(status, 1, (case, printed))
+            self.assertEqual(status, expected, (case, printed))
             for text in said:
                 self.assertIn(text, printed, case)
+            if case.startswith("only the first look"):
+                # Told again from what Git read: the reviewer is asked whether
+                # the request is met with no file changed.
+                self.assertIn(self.NO_CHANGE, service.requests[0]["body"]["messages"][1]["content"], case)
+                self.assertNotIn("could not be told", printed, case)
         service = ModelStandIn([{"status": 503}, {"status": 503}])
         self.addCleanup(service.close)
         status, printed = self.review_in_process(service, lambda command: None)
         self.assertEqual(status, 1, printed)
         self.assertIn("no file was changed, and an ending with nothing delivered needs a verdict", printed)
         self.assertNotIn("could not be told", printed)
+
 
 if __name__ == "__main__":
     unittest.main()

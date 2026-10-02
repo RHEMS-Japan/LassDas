@@ -37,10 +37,12 @@ Without one (no verdict, a setting that keeps the review from running, an
 unexpected error), this ends 1 and the work goes back. So it does when
 whether anything changed cannot be told (no checkout, or Git cannot read it,
 or not in time), since the delivery reads the checkout on its own, waits
-longer, and may find no change. When no file was changed, the reviewer is
-told so in plain words and asked whether the request is met by the
-repository exactly as it is: a request whose answer is that nothing needs to
-change reaches review this way, and so does work that was never done.
+longer, and may find no change; when Git reads the change after that first
+look failed, it is told again from what was read. When no file was changed,
+the reviewer is told so in plain words and asked whether the request is met
+by the repository exactly as it is: a request whose answer is that nothing
+needs to change reaches review this way, and so does work that was never
+done.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE          the checkout holding the change
@@ -453,6 +455,10 @@ def reviewed(stdin_text, model, unchanged):
         raise ReviewError("the send-back counter at %s is not a whole number" % counter)
 
     diff, test_output = gather(workspace, paths, tests, timeout)
+    if unchanged is None:
+        # Not told at the start, but Git has just read the change: tell again,
+        # so that a checkout with no change is still called that.
+        unchanged = nothing_changed(workspace)
     if unchanged:
         diff = NO_CHANGE
     blocking, findings, why = ask(url, model, key, stdin_text, diff, test_output, sent_back, timeout, attempts)

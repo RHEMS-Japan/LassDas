@@ -562,15 +562,20 @@ does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
 The same holds when whether anything changed cannot be told (no checkout, or
 Git cannot read it, or not within the review's 60 seconds): the delivery
 reads the checkout on its own and waits longer, so it may still find no
-change. New files are read from Git's own list, so a name in Japanese or a new
-symbolic link reaches the reviewer as it is, and a name that is not UTF-8 with
-a replacement character. Git runs without the user's or the system's Git
-settings and without the variables that point it at another repository,
-index or work tree (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
-`GIT_COMMON_DIR`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), as it does for the
-delivery, so the two agree on whether anything changed. A diff or test output
-longer than its limit is cut with a visible
-marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+change. If Git reads the change once that first look has failed, the review
+tells again from what it read. Not being able to tell is not limited to
+requests with no change: while Git cannot read the checkout in the review's
+environment, a request that did change files also goes back to the work
+stage, round after round, with the reason written in the record each time,
+instead of going on unreviewed. New files are read from Git's own list, so a
+name in Japanese or a new symbolic link reaches the reviewer as it is, and a
+name that is not UTF-8 with a replacement character. Git runs without the
+user's or the system's Git settings and without the variables that point it
+at another repository, index or work tree (`GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), as it
+does for the delivery, so the two agree on whether anything changed. A diff or
+test output longer than its limit is cut with a visible marker, never
+silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
 the command prints or writes.
 
