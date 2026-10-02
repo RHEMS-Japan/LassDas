@@ -618,6 +618,63 @@ func TestALaunchFromBeforeDeclarationsExistedIsSettledWithoutAWord(t *testing.T)
 	}
 }
 
+// A stage that goes back and forth between two models says the same words a
+// second time. When that second submission is refused, the first comment in
+// those words is not taken for it: the notice stays unconfirmed, and the
+// poll's retry posts it.
+func TestTheSameWordsSaidAgainAreNotTakenForTheEarlierComment(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	tick := func() { declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {}) }
+	launched(t, directory, "elicit", 0, "maker/a")
+	tick()
+	launched(t, directory, "elicit", 2, "maker/b")
+	tick()
+	launched(t, directory, "elicit", 4, "maker/a")
+	tick()
+	fixture.mu.Lock()
+	fixture.postFail = 1
+	fixture.mu.Unlock()
+	launched(t, directory, "elicit", 6, "maker/b")
+	tick()
+	const again = "要件確定をやり直します。選定モデル: maker/b"
+	log := readNotices(t, directory).Notices
+	if last := log[len(log)-1]; fixture.count(again) != 1 || last.PostedAt != nil || last.Models != "maker/b" {
+		t.Fatalf("a refused submission was taken for the earlier comment in its words: %+v %q", last, fixture.all())
+	}
+	if err := requestNotices(cfg, announcedIssue(), directory).flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	log = readNotices(t, directory).Notices
+	if last := log[len(log)-1]; fixture.count(again) != 2 || last.PostedAt == nil || last.CommentID <= log[1].CommentID {
+		t.Fatalf("the retry did not post it: %+v %q", log, fixture.all())
+	}
+}
+
+// A stage that ran before its launches were kept, before the setting was
+// turned on, is told as launched again at its first kept launch, since the
+// history holds a record of it from before that launch began. A stage without
+// such a record begins.
+func TestAStageThatRanBeforeTheSettingIsDeclaredAsLaunchedAgain(t *testing.T) {
+	cfg := declaringConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	directory, began := declaringJob(t, cfg)
+	earlier := time.Now().UTC().Add(-time.Hour)
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{
+		{Role: "elicit", Speaker: "requirements", Model: "maker/old", StartedAt: earlier, FinishedAt: earlier.Add(time.Minute)},
+	}})
+	launched(t, directory, "elicit", 1, "maker/one")
+	launched(t, directory, "review", 1, "maker/a", "maker/b")
+	declareModels(context.Background(), cfg, announcedIssue(), directory, began, func(string) {})
+	want := []string{"要件確定をやり直します。選定モデル: maker/one", "レビューを始めます。選定モデル: maker/a、maker/b"}
+	if got := fixture.all(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the launches were declared as %q", got)
+	}
+}
+
 // A launch of an earlier run of the request, here one that returned before any
 // tick saw it and before the request waited for its requester, is not
 // declared afterwards: it would be news about the past. It leaves no record,

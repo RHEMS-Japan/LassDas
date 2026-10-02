@@ -438,7 +438,7 @@
             "--",
             "/opt/ticket-automation/operator/confirm-report"
           ],
-          "instructions": "Read the assigned issue's stored comments and compare the last one with report/result.md. Exit 0 only when the stored text matches.",
+          "instructions": "Read the assigned issue's stored comments and compare them, newest first, with report/result.md. Exit 0 only when one stored comment is exactly that text. Do not require it to be the last comment: the runtime's own notices, such as a declaration of the model a launch chose, a stage's sentence or a restart notice, can follow the report.",
           "env": {
             "TASK_REPOSITORY": "https://repository.example.invalid/owner/project.git"
           },

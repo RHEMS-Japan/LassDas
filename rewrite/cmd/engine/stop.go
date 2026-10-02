@@ -81,8 +81,10 @@ const toleratedUnreadableTicks = 3
 // declareLook is how often the watcher of a running request that declares its
 // models looks in the request's own files for a stage begun or a model chosen
 // since it last looked, so the requester reads it within seconds and not a
-// poll interval later. It reads nothing from the tracker: the stop comments,
-// and the retry of a submission left unconfirmed, keep the poll interval.
+// poll interval later. A look with nothing to say reads nothing from the
+// tracker; one that posts goes through the notices, which first settle a
+// submission left unconfirmed with one read of the issue. The stop comments,
+// and that retry when nothing is posted, keep the poll interval.
 var declareLook = 2 * time.Second
 
 func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, configPath, requestPath string, interval time.Duration, turns *turnstile, log io.Writer) error {

@@ -84,6 +84,10 @@ type noticeRecord struct {
 	PostedAt  *time.Time `json:"posted_at,omitempty"`
 	Predates  bool       `json:"predates,omitempty"`
 	Models    string     `json:"models,omitempty"`
+	// CommentID is the tracker's id of the comment the notice was confirmed
+	// as, so a later notice of the same kind in the same words is not taken
+	// for this one.
+	CommentID int64 `json:"comment_id,omitempty"`
 }
 
 type noticeLog struct {
@@ -405,51 +409,66 @@ func (n notices) settle(ctx context.Context, log *noticeLog, i int, fresh bool) 
 	if record.PostedAt != nil {
 		return nil
 	}
+	// A kind can say the same words again, a declaration of models said
+	// before or a restart noted again, so only a comment newer than the one
+	// the kind was last confirmed as can be this notice.
+	after := int64(0)
+	for _, earlier := range log.Notices[:i] {
+		if earlier.Kind == record.Kind && earlier.CommentID > after {
+			after = earlier.CommentID
+		}
+	}
 	if !fresh {
-		posted, err := n.alreadyPosted(ctx, record.Text)
+		id, err := n.postedAfter(ctx, record.Text, after)
 		if err != nil {
 			return err
 		}
-		if posted {
-			return n.confirm(log, i)
+		if id > 0 {
+			return n.confirm(log, i, id)
 		}
 	}
-	if _, err := n.backlog.AddComment(ctx, n.issue.Key, record.Text); err != nil {
-		posted, readErr := n.alreadyPosted(ctx, record.Text)
-		if readErr != nil || !posted {
+	receipt, err := n.backlog.AddComment(ctx, n.issue.Key, record.Text)
+	if err != nil {
+		id, readErr := n.postedAfter(ctx, record.Text, after)
+		if readErr != nil || id == 0 {
 			return errors.Join(err, readErr)
 		}
+		return n.confirm(log, i, id)
 	}
-	return n.confirm(log, i)
+	// The receipt was read for a positive id before it was returned.
+	var stored struct{ ID int64 }
+	json.Unmarshal(receipt, &stored)
+	return n.confirm(log, i, stored.ID)
 }
 
-func (n notices) confirm(log *noticeLog, i int) error {
+func (n notices) confirm(log *noticeLog, i int, id int64) error {
 	at := time.Now().UTC()
-	log.Notices[i].PostedAt = &at
+	log.Notices[i].PostedAt, log.Notices[i].CommentID = &at, id
 	return n.save(*log)
 }
 
-// alreadyPosted looks for this exact fixed text among the issue's comments.
-// The words are the controller's own, so an exact match identifies the notice
-// without decoding anyone's prose.
-func (n notices) alreadyPosted(ctx context.Context, text string) (bool, error) {
+// postedAfter is the id of a comment newer than after in exactly this fixed
+// text, or zero when there is none. The words are the controller's own, so
+// an exact match identifies the notice without decoding anyone's prose.
+func (n notices) postedAfter(ctx context.Context, text string, after int64) (int64, error) {
 	rows, err := n.backlog.Comments(ctx, n.issue.Key, 0)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
+	found := int64(0)
 	for _, raw := range rows {
 		var comment struct {
 			ID      int64
 			Content string
 		}
 		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 {
-			return false, errors.New("issue comments could not be read before repeating a notice")
+			return 0, errors.New("issue comments could not be read before repeating a notice")
 		}
-		if comment.Content == text {
-			return true, nil
+		if comment.ID > after && comment.Content == text {
+			found = comment.ID
 		}
 	}
-	return false, nil
+	return found, nil
 }
 
 // The shared model key running out is the one failure no role can recover: no

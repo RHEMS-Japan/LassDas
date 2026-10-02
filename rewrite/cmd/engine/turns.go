@@ -342,7 +342,8 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 	// A stage said, settled or on its way belongs to the record, and only a
 	// stage without one goes further, so a watcher that looks every few
 	// seconds reads its own files and nothing else until there is news. A
-	// submission left unconfirmed is retried on the tracker's own ticks.
+	// submission left unconfirmed is retried on the tracker's own ticks, or
+	// first thing when news is posted.
 	notice := requestNotices(cfg, issue, directory)
 	log, err := notice.load()
 	if err != nil {
@@ -451,7 +452,10 @@ const (
 // role's latest launch that the requester has not been told. A launch from an
 // earlier run of the request, before a question, a restart or a hold, is in
 // the history and in the list at delivery, and said now it would be news
-// about the past, so only launches since this run began are declared.
+// about the past, so only launches since this run began are declared. Only
+// the latest launch of each role is looked at: one the next launch of the
+// same role replaced before the next look is not declared, and the list at
+// delivery names it.
 func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory string, began time.Time, observe func(string)) {
 	if cfg.Intake == nil || !cfg.Intake.DeclareModels {
 		return
@@ -470,7 +474,18 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 		observe("the models chosen were not declared: " + err.Error())
 		return
 	}
-	recorded := -1
+	// The saved history, read once and only when needed.
+	var history []chain.Result
+	read := false
+	saved := func() []chain.Result {
+		if !read {
+			read = true
+			if state, err := savedHistory(directory); err == nil {
+				history = state.History
+			}
+		}
+		return history
+	}
 	for _, role := range cfg.Roles {
 		launches := record.Launches[role.Name]
 		if len(launches) == 0 || launches[len(launches)-1].At.Before(began) {
@@ -480,16 +495,8 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 		// The processes of a launch choose in turn, so its models are said
 		// together once all have chosen, or once it has returned, as a launch
 		// whose selection failed for one of them does with fewer.
-		if len(latest.Models) < modelProcesses(cfg, role.Name) {
-			if recorded < 0 {
-				recorded = 0
-				if state, err := savedHistory(directory); err == nil {
-					recorded = len(state.History)
-				}
-			}
-			if recorded <= latest.Launch {
-				continue
-			}
+		if len(latest.Models) < modelProcesses(cfg, role.Name) && len(saved()) <= latest.Launch {
+			continue
 		}
 		sentence := stageSentence(cfg, role.Name)
 		// A stage that announces itself says its first launch in that
@@ -508,8 +515,19 @@ func declareModels(ctx context.Context, cfg config, issue sourceIssue, directory
 		if !known {
 			name = role.Name
 		}
+		// The stage has run before when an earlier launch was kept, or, for
+		// one that ran before launches were kept, when the history holds a
+		// record of it from before this launch began.
+		again := told || len(launches) > 1
+		if !again {
+			before := saved()
+			if latest.Launch < len(before) {
+				before = before[:latest.Launch]
+			}
+			again = slices.ContainsFunc(before, func(result chain.Result) bool { return result.Role == role.Name })
+		}
 		text := name + declaredBegins + models
-		if told || len(launches) > 1 {
+		if again {
 			text = name + declaredAgain + models
 		}
 		due := func(log noticeLog) bool {

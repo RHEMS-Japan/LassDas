@@ -307,9 +307,32 @@ func TestStagesRoleHelper(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A check a test asks to fail once sends the work back to the report
+		// stage, which then runs again with the report already stored.
+		if os.Getenv("EXAMPLE_CONFIRM_FAILS_ONCE") != "" {
+			marker, err := os.OpenFile(".fixture-confirm", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if err == nil {
+				marker.Close()
+				fmt.Print("the stored comment could not be read this time\n")
+				os.Exit(1)
+			}
+		}
+		// A check a test asks to read late reads after the runtime has said
+		// whatever it says at the start of this stage.
+		if os.Getenv("EXAMPLE_CONFIRM_READS_LATE") != "" {
+			time.Sleep(300 * time.Millisecond)
+		}
+		// The runtime's own notices, a declaration of the model a launch
+		// chose, a stage's sentence or a restart notice, can follow the
+		// report, so the stored comments are searched, newest first, for the
+		// reported text; it need not be the last one.
 		stored := storedComments()
-		if len(stored) == 0 || stored[len(stored)-1] != string(reported) {
-			fmt.Print("the stored comment does not match the reported text\n")
+		found := false
+		for i := len(stored) - 1; i >= 0 && !found; i-- {
+			found = stored[i] == string(reported)
+		}
+		if !found {
+			fmt.Print("no stored comment matches the reported text\n")
 			os.Exit(1)
 		}
 	case "stop_report":
@@ -522,6 +545,125 @@ func TestStagesExampleRunsToADeliveredArtifactAndAReadBackComment(t *testing.T) 
 				t.Fatalf("posts=%d catalogs=%d selections=%d routes=%d working=%d", posts, catalogs, selections, routes, workingModels)
 			}
 			t.Logf("%d stage launches recorded, %d model decisions, one delivered artifact and one stored/read-back comment", records, routes)
+		})
+	}
+}
+
+// The runtime's own words can follow the report: a report stage launched
+// again after its report is stored, because the check failed once, is
+// declared again after it, and the check stage's sentence goes out when the
+// check begins, before it reads. The shipped check looks for the report among
+// the stored comments, so the run still ends, with one report on the issue.
+func TestTheRuntimesWordsAfterTheReportDoNotHoldTheShippedCheck(t *testing.T) {
+	for _, shape := range []struct {
+		name     string
+		knob     string
+		sentence string
+		after    string
+	}{
+		{"the report stage is launched again", "EXAMPLE_CONFIRM_FAILS_ONCE", "", "報告をやり直します。選定モデル: "},
+		{"the check's stage says its sentence first", "EXAMPLE_CONFIRM_READS_LATE", "報告を照合します。", "報告を照合します。"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := stagesFixtureConfig(t)
+			cfg.Intake.DeclareModels = true
+			if shape.sentence != "" {
+				cfg.Intake.Announce = true
+				for i := range cfg.Workflow.Stages {
+					if cfg.Workflow.Stages[i].Name == "confirm_report" {
+						cfg.Workflow.Stages[i].Announce = shape.sentence
+					}
+				}
+			}
+			for i := range cfg.Roles {
+				if cfg.Roles[i].Name == "confirm_report" {
+					for j := range cfg.Roles[i].Processes {
+						cfg.Roles[i].Processes[j].Env[shape.knob] = "1"
+					}
+				}
+			}
+			lookEvery(t, 20*time.Millisecond)
+			issue := 63
+			key := fmt.Sprintf("EXAMPLE-%d", issue)
+			root := t.TempDir()
+			var mu sync.Mutex
+			var rows []any
+			var contents []string
+			catalogs := 0
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.URL.Host == "tracker.example.invalid" {
+					switch r.Method + " " + r.URL.Path {
+					case "GET /api/v2/issues":
+						return selectionReply(r, 200, []any{watchedIssue(issue, stagesRequest, "2026-01-03T00:00:00Z")}), nil
+					case "GET /api/v2/issues/" + key + "/comments":
+						return selectionReply(r, 200, append([]any{}, rows...)), nil
+					case "POST /api/v2/issues/" + key + "/comments":
+						if err := r.ParseForm(); err != nil {
+							return nil, err
+						}
+						row := map[string]any{"id": len(rows) + 1, "issueId": issue, "projectId": 17, "content": r.Form.Get("content"), "createdUser": map[string]any{"id": 99}}
+						rows, contents = append(rows, row), append(contents, r.Form.Get("content"))
+						return selectionReply(r, 201, row), nil
+					}
+				}
+				if r.URL.Host == "openrouter.ai" {
+					switch r.URL.Path {
+					case "/api/v1/models":
+						catalogs++
+						return selectionReply(r, 200, map[string]any{"data": []any{selectionModel(fmt.Sprintf("qwen/fixture-%d", catalogs)), selectionModel(fmt.Sprintf("z-ai/fixture-%d", catalogs))}}), nil
+					case "/api/alpha/decisions":
+						var input struct {
+							Questions map[string]struct{ Criteria map[string]string }
+						}
+						if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+							return nil, err
+						}
+						choice := fmt.Sprintf("qwen/fixture-%d", catalogs)
+						if _, ok := input.Questions["next"].Criteria[choice]; !ok {
+							choice = fmt.Sprintf("z-ai/fixture-%d", catalogs)
+						}
+						return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": choice}}}), nil
+					case "/api/v1/chat/completions":
+						return routingSelectionReply(r, chain.Assignment{Role: "work"}), nil
+					}
+				}
+				return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
+			})
+			var log bytes.Buffer
+			finish := startStopQueue(t, cfg, root, 30*time.Millisecond, &log)
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				state, err := loadWatchState(root, issue)
+				if err == nil && state.Done {
+					break
+				}
+				if time.Now().After(deadline) {
+					finish()
+					mu.Lock()
+					defer mu.Unlock()
+					t.Fatalf("the run never ended: step=%s comments=%q\n%s", state.Step, contents, log.String())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			finish()
+			mu.Lock()
+			defer mu.Unlock()
+			report, after := -1, -1
+			for i, content := range contents {
+				switch {
+				case content == stagesReport && report >= 0:
+					t.Fatalf("the report was stored twice: %q", contents)
+				case content == stagesReport:
+					report = i
+				case strings.HasPrefix(content, shape.after) && report >= 0 && after < 0:
+					after = i
+				}
+			}
+			if report < 0 || after < 0 {
+				t.Fatalf("the runtime said nothing after the one report: %q", contents)
+			}
 		})
 	}
 }

@@ -470,9 +470,13 @@ the run to its first stage. After that no routing decision exists at all.
 `examples/operator-stages.json` is the same delivery as `operator.json` written
 this way. Its command stages run operator-supplied programs under
 `/opt/ticket-automation/operator`: a build, a test run, the delivery, a check
-of the delivered target, and a script that reads the stored comment back and
-compares it with the reported text. Those programs are yours to write; the
-engine only observes what they return. The stopped-report role is not part of
+of the delivered target, and a script that reads the stored comments back and
+passes when one of them, looked through newest first, is exactly the reported
+text. It must not require the report to be the last comment: the runtime's own
+notices, a declaration of the model a launch chose, a stage's sentence or a
+restart notice, can follow it, and a check that needs the report to be last
+then fails on every launch, sending the work back for good. Those programs are
+yours to write; the engine only observes what they return. The stopped-report role is not part of
 the run, and a stop from the requester still wins over everything here.
 
 **Known limit**: one worker may carry several stages, because a stage's process
@@ -597,21 +601,30 @@ The first line is said at a stage's first launch that chose a model; a stage
 whose `announce` sentence goes out says that launch in its sentence alone. The
 second is said at a later launch, after a later stage sent the work back or a
 launch did not exit 0, and only when its models differ from those the stage was
-last declared with: the same models again say nothing. A launch whose processes
-choose several models names them together, separated by `、`. A command stage
-and a launch whose selection failed say nothing. The declarations are recorded
-in `notices.json` like the notices, so a restart repeats none, and a launch is
-declared only during the run of the request it belongs to: one from before a
-question, a restart or a budget hold, and one from before the setting was
-turned on, are not declared afterwards; the list at delivery names them.
+last declared with: the same models again say nothing. A stage that ran before
+the setting was turned on is told the second line at its first launch after it,
+since its history shows the earlier one. A launch whose processes choose
+several models names them together, separated by `、`, once all have chosen; a
+launch in which some processes' selection failed is declared when it returns,
+with the models that were chosen. A command stage and a launch whose selection
+failed entirely say nothing. The declarations are recorded in `notices.json`
+like the notices, so a restart repeats none, and a launch is declared only
+during the run of the request it belongs to: one from before a question, a
+restart or a budget hold, and one from before the setting was turned on, are
+not declared afterwards; the list at delivery names them.
 
 With the setting on, the watcher of a running request also looks in the
-request's own files every two seconds, between polls and without reading the
-tracker, and once more when the run is delivered, fails or waits for the
-requester. A declaration, and a stage's `announce` sentence, therefore goes
-out within seconds of the choice, and the launch a run ends or waits on, such
-as the question or the report written last, is not missed. A comment whose
-submission was not confirmed is still retried on the poll.
+request's own files every two seconds, between polls, and once more when the
+run is delivered, fails or waits for the requester. A declaration, and a
+stage's `announce` sentence, therefore goes out within seconds of the choice,
+and the launch a run ends or waits on, such as the question or the report
+written last, is not missed. A look with nothing to say reads nothing from the
+tracker. One that posts goes through the notices, which first settle a notice
+whose submission was not confirmed, with one read of the issue's comments;
+otherwise such a notice is retried on the poll. Only the latest launch of each
+stage is looked at, so a launch that the next launch of the same stage
+replaces within those two seconds is not declared; the list at delivery names
+it.
 
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
