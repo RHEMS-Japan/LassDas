@@ -393,8 +393,11 @@ The next assignment is the first stage that is not yet satisfied.
   exactly as any other result does. When it does not exit 0, the run assigns
   the stage named by `on_failure` with that output already in the record, and
   then runs every stage after it again in order, since what those stages
-  proved was the earlier state of the work. There is no counter and no
-  ending: a command that keeps failing keeps cycling.
+  proved was the earlier state of the work. A command that exited 0 can
+  therefore be launched again later in the same run, so an operator's
+  command, a delivery above all, has to be safe to run twice (the shipped
+  delivery process reuses its commit, branch and pull request). There is
+  no counter and no ending: a command that keeps failing keeps cycling.
 - A **model stage** is satisfied when its processes ran without a process
   error. What the model wrote is never read, decoded or compared, so writing
   "done", "verified" or "delivered" advances nothing. The command stage that
