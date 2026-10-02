@@ -129,6 +129,37 @@ func TestFailingCommandStageCyclesForeverInsteadOfEndingTheRequest(t *testing.T)
 	}
 }
 
+// A command that fails sends the work back, and what came between the work
+// and that command proved the earlier state: it runs again before the
+// command does. A delivery refused once is not retried on unverified work.
+func TestWorkSentBackByACommandIsVerifiedAgainBeforeTheCommandRuns(t *testing.T) {
+	store := &memoryStore{state: State{Request: "Deliver after verifying."}}
+	var ran []string
+	deliveries := 0
+	engine := Chain{Store: store, Workflow: stagesWorkflow(), Router: StageRouter{}, RetryDelay: time.Millisecond,
+		Executor: testExecutor(func(_ context.Context, a Assignment, _ State) []Result {
+			ran = append(ran, a.Role)
+			if a.Role == "deliver" {
+				deliveries++
+				if deliveries == 1 {
+					return []Result{{Role: a.Role, Speaker: "delivery", Error: "exit status 1"}}
+				}
+			}
+			return []Result{{Role: a.Role, Speaker: "worker", Output: "ordinary prose"}}
+		}),
+	}
+	if err := engine.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"elicit", "work", "verify", "deliver", "work", "verify", "deliver", "confirm"}
+	if !reflect.DeepEqual(ran, want) {
+		t.Fatalf("ran=%v want=%v", ran, want)
+	}
+	if !store.state.Done {
+		t.Fatal("the run did not end once every stage was satisfied in order")
+	}
+}
+
 // An interrupted model stage is launched again with the runtime's own note in
 // the record. Nothing decides that the lost work was or was not finished.
 func TestInterruptedModelStageRunsAgainWithTheRuntimeNote(t *testing.T) {

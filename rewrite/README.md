@@ -392,8 +392,9 @@ The next assignment is the first stage that is not yet satisfied.
   satisfied when all of its processes exit 0, and its output joins the history
   exactly as any other result does. When it does not exit 0, the run assigns
   the stage named by `on_failure` with that output already in the record, and
-  then returns to the command stage. There is no counter and no ending: a
-  command that keeps failing keeps cycling.
+  then runs every stage after it again in order, since what those stages
+  proved was the earlier state of the work. There is no counter and no
+  ending: a command that keeps failing keeps cycling.
 - A **model stage** is satisfied when its processes ran without a process
   error. What the model wrote is never read, decoded or compared, so writing
   "done", "verified" or "delivered" advances nothing. The command stage that

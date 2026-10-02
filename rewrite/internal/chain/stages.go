@@ -117,6 +117,14 @@ func (s State) stageActions() []string {
 	satisfied, last := map[string]bool{}, stageRun{}
 	for _, run := range s.stageRuns() {
 		satisfied[run.role] = run.satisfied
+		// A stage that runs again, as the work does after a failed command,
+		// leaves the stages after it with nothing observed about the new
+		// state: what they proved was the earlier state. They run again.
+		if _, index := stageAt(stages, run.role); index >= 0 {
+			for _, later := range stages[index+1:] {
+				satisfied[later.Name] = false
+			}
+		}
 		last = run
 	}
 	next := "done"
