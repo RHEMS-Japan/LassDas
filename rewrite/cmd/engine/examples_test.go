@@ -882,7 +882,7 @@ func TestAnExampleLeftPartlyUneditedIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	environment := edited.Roles[0].Processes[0].Env
-	for _, value := range []string{"ticket-engine@example.invalid", "https://git.example.invalidation-tools.com/owner/project.git", "example.invalid", "see https://repository.example.invalid/ in the example"} {
+	for _, value := range []string{"ticket-engine@example.invalid", "https://git.example.invalidation-tools.example/owner/project.git", "example.invalid", "see https://repository.example.invalid/ in the example"} {
 		environment["OPERATOR_VALUE"] = value
 		edited.Instructions = "The example named repository.example.invalid; ours is elsewhere."
 		if left := examplePlaceholder(edited); left != "" {
