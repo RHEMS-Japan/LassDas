@@ -16,12 +16,18 @@ fi
 if [ -n "$RANGE_BASE" ] && git cat-file -e "$RANGE_BASE" 2>/dev/null; then
   range=("$RANGE_BASE..$RANGE_HEAD")
   echo "reading the messages of $RANGE_BASE..$RANGE_HEAD"
+elif [ "${GITHUB_REF:-}" = "refs/heads/${DEFAULT_BRANCH:?DEFAULT_BRANCH is not set}" ]; then
+  # A push to the default branch itself without a usable base (a force push
+  # of it): it holds every commit it has, so every reachable message is read,
+  # as before.
+  range=("$RANGE_HEAD")
+  echo "no usable base on $DEFAULT_BRANCH itself; reading every reachable message"
 else
   # Without a usable base (the first push of a branch, a force push), the
   # messages read are those of the commits the default branch does not hold
   # yet: every commit of the branch, mid-branch ones included, and none of
   # the history already published, which no change on a branch can reword.
-  default="refs/remotes/origin/${DEFAULT_BRANCH:?DEFAULT_BRANCH is not set}"
+  default="refs/remotes/origin/$DEFAULT_BRANCH"
   if ! git rev-parse --verify --quiet "$default^{commit}" >/dev/null; then
     echo "there is no usable base and $default is not in the checkout, so the new commits cannot be told apart" >&2
     exit 1
