@@ -119,11 +119,12 @@ func (s *githubShared) takeChange(ctx context.Context) (func(), error) {
 	return release, nil
 }
 
-// learn reads what an answer says about asking again: the later of the
-// seconds a refusal gives and the end of a spent hourly allowance, or, for a
-// limit that gives no time still to come (none, one already past, one that
-// cannot be read), a minute that doubles while such limits come in a row.
-// No wait is longer than an hour.
+// learn reads what an answer says about asking again. A limit is waited for
+// until the later of the seconds it gives and the end of a spent hourly
+// allowance, or, when it gives no time still to come (none, one already
+// past, one that cannot be read), for a minute that doubles while such limits
+// come in a row. Any other failure is waited for as long as the seconds it
+// gives, if it gives any. No wait is longer than an hour.
 func (s *githubShared) learn(status int, header http.Header, body []byte, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,25 +134,28 @@ func (s *githubShared) learn(status int, header http.Header, body []byte, now ti
 	text := strings.ToLower(string(body))
 	spent := strings.TrimSpace(header.Get("X-RateLimit-Remaining")) == "0"
 	// The older wording of a secondary limit is an abuse detection mechanism.
-	if !spent && status != http.StatusTooManyRequests &&
-		(status != http.StatusForbidden || !strings.Contains(text, "rate limit") && !strings.Contains(text, "abuse detection")) {
+	limited := spent || status == http.StatusTooManyRequests ||
+		status == http.StatusForbidden && (strings.Contains(text, "rate limit") || strings.Contains(text, "abuse detection"))
+	if !limited && status < 400 {
 		return
 	}
 	var until time.Time
 	if seconds, err := strconv.ParseInt(strings.TrimSpace(header.Get("Retry-After")), 10, 64); err == nil && seconds > 0 {
 		until = now.Add(time.Duration(min(seconds, int64(githubLongestWait/time.Second))) * time.Second)
 	}
-	if epoch, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64); err == nil && spent {
-		if reset := time.Unix(epoch, 0); reset.After(until) {
-			until = reset
+	if limited {
+		if epoch, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64); err == nil && spent {
+			if reset := time.Unix(epoch, 0); reset.After(until) {
+				until = reset
+			}
 		}
-	}
-	if !until.After(now) {
-		s.strikes++
-		until = now.Add(min(time.Minute<<min(s.strikes-1, 6), githubLongestWait))
-	}
-	if longest := now.Add(githubLongestWait); until.After(longest) {
-		until = longest
+		if !until.After(now) {
+			s.strikes++
+			until = now.Add(min(time.Minute<<min(s.strikes-1, 6), githubLongestWait))
+		}
+		if longest := now.Add(githubLongestWait); until.After(longest) {
+			until = longest
+		}
 	}
 	if until.After(s.quiet) {
 		s.quiet = until

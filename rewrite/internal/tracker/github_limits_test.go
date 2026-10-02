@@ -3,14 +3,34 @@ package tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// TestMain fails the package when its tests leave behind anything the
+// process keeps for a GitHub API: a later fake server given the same port
+// would find it.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	githubStates.Lock()
+	var left []string
+	for key := range githubStates.shared {
+		left = append(left, strings.ReplaceAll(key, "\x00", " "))
+	}
+	githubStates.Unlock()
+	if code == 0 && len(left) > 0 {
+		fmt.Fprintf(os.Stderr, "the tests left what GitHub said behind for %q\n", left)
+		code = 1
+	}
+	os.Exit(code)
+}
 
 // githubClock stands in for the clock and the waiting, and gives the time it
 // is, the waits asked for, and a way to move the clock on from another
@@ -249,7 +269,8 @@ func TestGitHubKeepsABoundedAmountOfAnswers(t *testing.T) {
 }
 
 // A limit that gives no time still to come waits a minute as one that gives
-// none does, and no wait is longer than an hour.
+// none does, and no wait is longer than an hour. The end of an hourly
+// allowance that is not spent is no time of a limit's.
 func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *testing.T) {
 	for name, test := range map[string]struct {
 		status int
@@ -263,6 +284,7 @@ func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *tes
 		"retry after unreadable":     {429, map[string]string{"Retry-After": "soon"}, "", time.Minute},
 		"retry after past int64":     {429, map[string]string{"Retry-After": "99999999999999999999"}, "", time.Minute},
 		"older secondary wording":    {403, nil, "You have triggered an abuse detection mechanism.", time.Minute},
+		"allowance not spent":        {403, map[string]string{"X-RateLimit-Remaining": "4000", "X-RateLimit-Reset": "1800002700"}, "You have exceeded a secondary rate limit.", time.Minute},
 		"retry after out of measure": {429, map[string]string{"Retry-After": "9300000000"}, "", time.Hour},
 		"reset a day ahead":          {200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1800086400"}, "", time.Hour},
 	} {
@@ -294,9 +316,53 @@ func TestGitHubWaitsAMinuteForALimitWhoseTimeIsGoneAndNeverMoreThanAnHour(t *tes
 	}
 }
 
+// A failure that is not a limit is waited for as long as its Retry-After
+// says, and no longer than an hour; one without it is not, and neither is a
+// success that carries one.
+func TestGitHubWaitsForTheRetryAfterOfAnyFailure(t *testing.T) {
+	for name, test := range map[string]struct {
+		status int
+		after  string
+		wait   time.Duration
+	}{
+		"unavailable for a minute":     {503, "60", time.Minute},
+		"not found for thirty seconds": {404, "30", 30 * time.Second},
+		"failed out of measure":        {500, "9300000000", time.Hour},
+		"unavailable without a time":   {503, "", 0},
+		"unavailable, unreadable time": {503, "soon", 0},
+		"answered with a time":         {200, "60", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now, _, _ := githubClock(t)
+			github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+				if call == 1 {
+					if test.after != "" {
+						w.Header().Set("Retry-After", test.after)
+					}
+					w.WriteHeader(test.status)
+				}
+				fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`)
+			})
+			ctx := context.Background()
+			github.Myself(ctx)
+			start := *now
+			if test.wait > 0 {
+				*now = start.Add(test.wait - time.Second)
+				if _, err := github.Myself(ctx); err == nil || calls.Load() != 1 {
+					t.Fatalf("asked again before the wait was over: calls=%d (%v)", calls.Load(), err)
+				}
+			}
+			*now = start.Add(test.wait)
+			if _, err := github.Myself(ctx); err != nil || calls.Load() != 2 {
+				t.Fatalf("not asked again once the wait was over: calls=%d (%v)", calls.Load(), err)
+			}
+		})
+	}
+}
+
 // A success ends the doubling: the next limit that gives no time waits a
 // minute again. The later of a refusal's seconds and the end of a spent
-// allowance is the one waited for.
+// allowance is the one waited for, whichever of the two it is.
 func TestGitHubStartsAgainFromAMinuteAndWaitsForTheLaterTime(t *testing.T) {
 	now, _, _ := githubClock(t)
 	start := *now
@@ -315,6 +381,13 @@ func TestGitHubStartsAgainFromAMinuteAndWaitsForTheLaterTime(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 		},
 		func(w http.ResponseWriter) { fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`) },
+		func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "600")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(start.Add(10*time.Minute+30*time.Second).Unix(), 10))
+			w.WriteHeader(http.StatusTooManyRequests)
+		},
+		func(w http.ResponseWriter) { fmt.Fprint(w, `{"id":900,"login":"engine-bot"}`) },
 	}
 	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 		answers[call-1](w)
@@ -324,13 +397,17 @@ func TestGitHubStartsAgainFromAMinuteAndWaitsForTheLaterTime(t *testing.T) {
 		at      time.Duration
 		reaches bool
 	}{
-		{0, true},                               // a limit that gives no time: a minute
-		{time.Minute, true},                     // answered
-		{time.Minute, true},                     // the same limit again: a minute, not two
-		{2*time.Minute - time.Second, false},    //
-		{2 * time.Minute, true},                 // thirty seconds, or until the allowance comes back
-		{2*time.Minute + 31*time.Second, false}, // the later one holds
-		{10 * time.Minute, true},                //
+		{0, true},                                // a limit that gives no time: a minute
+		{time.Minute, true},                      // answered
+		{time.Minute, true},                      // the same limit again: a minute, not two
+		{2*time.Minute - time.Second, false},     //
+		{2 * time.Minute, true},                  // thirty seconds, or until the allowance comes back
+		{2*time.Minute + 31*time.Second, false},  // the later one holds
+		{10 * time.Minute, true},                 // answered
+		{10 * time.Minute, true},                 // ten minutes, or until the allowance comes back in thirty seconds
+		{10*time.Minute + 31*time.Second, false}, // the later one holds again
+		{20*time.Minute - time.Second, false},    //
+		{20 * time.Minute, true},                 //
 	} {
 		*now = start.Add(step.at)
 		before := calls.Load()
@@ -438,6 +515,43 @@ func TestGitHubSendsChangesOneAtATimeASecondAfterTheLastAnswer(t *testing.T) {
 	}
 	if early != 1 || posts != 2 || len(*waits) != 1 || (*waits)[0] != time.Second {
 		t.Fatalf("a change went before the one before was answered, or less than a second after its answer: early=%d posts=%d waits=%v", early, posts, *waits)
+	}
+}
+
+// A change that stops waiting for the second after the last answer is not
+// sent and gives its turn back: the next change goes, a second after that
+// answer.
+func TestGitHubGivesTheTurnBackWhenAChangeStopsWaiting(t *testing.T) {
+	_, waits, _ := githubClock(t)
+	previousWait := githubWait
+	stop := true
+	githubWait = func(ctx context.Context, wait time.Duration) error {
+		if stop {
+			stop = false
+			return context.Canceled
+		}
+		return previousWait(ctx, wait)
+	}
+	github, calls := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":1}`)
+	})
+	address := github.base() + "/repos/octo-org/widgets/issues/12/comments"
+	send := func(ctx context.Context) error {
+		_, _, err := github.call(ctx, http.MethodPost, address, map[string]string{"body": "words"}, http.StatusCreated, githubItemLimit)
+		return err
+	}
+	if err := send(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := send(context.Background()); !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("a change that stopped waiting was sent, or failed otherwise: calls=%d (%v)", calls.Load(), err)
+	}
+	// A turn never given back holds the next change until its deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := send(ctx); err != nil || calls.Load() != 2 || len(*waits) != 1 || (*waits)[0] != time.Second {
+		t.Fatalf("the turn was not given back: calls=%d waits=%v (%v)", calls.Load(), *waits, err)
 	}
 }
 
