@@ -136,7 +136,10 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 	}
 	if cfg.Intake.Announce {
 		notice := requestNotices(cfg, issue, directory)
-		if err := notice.post(ctx, acceptedNotice, acceptedNoticeText(ahead, requestPage(cfg, issue))); err != nil {
+		// The request was accepted when the collector wrote its issue here.
+		if info, err := os.Stat(filepath.Join(directory, "issue.json")); err != nil {
+			observe("acceptance not announced: " + err.Error())
+		} else if err := notice.post(ctx, acceptedNotice, acceptedNoticeText(ahead, requestPage(cfg, issue)), info.ModTime()); err != nil {
 			observe("acceptance not announced: " + err.Error())
 		}
 	}
@@ -294,7 +297,9 @@ func spentText(spent time.Duration) string {
 // modelsTurn posts that list once, when the request is delivered, beside the
 // other turns the runtime takes there. It is recorded like every other notice,
 // so a restart does not post it twice, and a tracker that refuses is asked
-// again on the next tick; it never ends or holds the request.
+// again on the next tick; it never ends or holds the request. The queue walks
+// every delivered request on every tick, so one delivered before the queue's
+// engines posted the list is settled without one.
 func modelsTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, state chain.State, observe func(string)) {
 	if cfg.Intake == nil || !cfg.Intake.Announce {
 		return
@@ -303,7 +308,9 @@ func modelsTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 	if text == "" {
 		return
 	}
-	if err := requestNotices(cfg, issue, directory).post(ctx, modelsNotice, text); err != nil {
+	// The list reports the delivery, which the last record's end marks.
+	delivered := state.History[len(state.History)-1].FinishedAt
+	if err := requestNotices(cfg, issue, directory).post(ctx, modelsNotice, text, delivered); err != nil {
 		observe("the models used were not announced: " + err.Error())
 	}
 }
@@ -313,7 +320,8 @@ func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 	if cfg.Intake == nil || !cfg.Intake.Announce {
 		return
 	}
-	if err := requestNotices(cfg, issue, directory).post(ctx, resumedNotice, resumedNoticeText); err != nil {
+	// The answer was taken on this tick.
+	if err := requestNotices(cfg, issue, directory).post(ctx, resumedNotice, resumedNoticeText, time.Now().UTC()); err != nil {
 		observe("resumption not announced: " + err.Error())
 	}
 }
@@ -323,18 +331,20 @@ func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 // The sentence carries the model the launch that began the stage is working
 // with, so the requester reads what is on their request and not only that
 // something is. A stage that launches no model, and a runtime that chooses
-// none, say the sentence as the operator wrote it.
+// none, say the sentence as the operator wrote it. A stage that began before
+// the queue's engines announced it is settled without its sentence.
 func announceStages(ctx context.Context, cfg config, issue sourceIssue, directory string, observe func(string)) {
 	if cfg.Workflow == nil || cfg.Intake == nil || !cfg.Intake.Announce {
 		return
 	}
-	var live []string
+	var live []os.DirEntry
 	if entries, err := os.ReadDir(filepath.Join(directory, "live")); err == nil {
-		for _, entry := range entries {
-			live = append(live, entry.Name())
-		}
+		live = entries
 	}
-	var roles map[string]bool
+	// first is when each role's earliest recorded launch began. A record
+	// without a time cannot be placed after anything, so it reads as the
+	// earliest of all.
+	var first map[string]time.Time
 	for _, stage := range cfg.Workflow.Stages {
 		if stage.Announce == "" {
 			continue
@@ -344,24 +354,43 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 		// known only from the record has returned, and what it did not name
 		// it never will.
 		running := false
-		for _, name := range live {
-			if strings.HasPrefix(name, stage.Name+"-") {
-				running = true
+		var began time.Time
+		for _, entry := range live {
+			if !strings.HasPrefix(entry.Name(), stage.Name+"-") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				// The launch ended since the listing; its record, once
+				// written, says when it began.
+				continue
+			}
+			running = true
+			if began.IsZero() || info.ModTime().Before(began) {
+				began = info.ModTime()
 			}
 		}
-		begun := running
-		if !begun {
-			if roles == nil {
-				roles = map[string]bool{}
-				if state, err := savedHistory(directory); err == nil {
-					for _, result := range state.History {
-						roles[result.Role] = true
+		if first == nil {
+			first = map[string]time.Time{}
+			if state, err := savedHistory(directory); err == nil {
+				for _, result := range state.History {
+					at := result.StartedAt
+					if at.IsZero() {
+						at = result.FinishedAt
+					}
+					if earliest, seen := first[result.Role]; !seen || at.Before(earliest) {
+						first[result.Role] = at
 					}
 				}
 			}
-			begun = roles[stage.Name]
 		}
-		if !begun {
+		// The stage began with its first launch: the earliest the record
+		// keeps, or, before any has returned, the one running now. A stage
+		// running again after a restart began before it, with the launch
+		// the record keeps.
+		if earliest, returned := first[stage.Name]; returned {
+			began = earliest
+		} else if !running {
 			continue
 		}
 		text := stage.Announce
@@ -383,7 +412,7 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 			// nothing later will name it for this stage. The operator's
 			// sentence still goes out: that the stage began is the news.
 		}
-		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, text); err != nil {
+		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, text, began); err != nil {
 			observe("stage " + stage.Name + " not announced: " + err.Error())
 		}
 	}

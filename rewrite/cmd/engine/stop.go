@@ -193,7 +193,8 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 				outcome := result
 				fmt.Fprintf(log, "starting accepted request %d\n", issue.ID)
 				if cfg.Intake != nil && cfg.Intake.Announce && waited {
-					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText); noticeErr != nil {
+					// The slot was taken just now.
+					if noticeErr := notice.post(ctx, startedNotice, startedNoticeText, time.Now().UTC()); noticeErr != nil {
 						observe("start not announced: " + noticeErr.Error())
 					}
 				}

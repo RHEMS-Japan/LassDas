@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/tracker"
 )
 
 // noticeTracker answers the tracker calls the controller makes for its own
@@ -154,6 +155,46 @@ func readNotices(t *testing.T, directory string) noticeLog {
 	}
 	return log
 }
+
+// queueRanSince leaves the queue's record of notice kinds as an engine with
+// this configuration would have left it, had it run on the queue since then.
+// A test that lays its events down before its queue starts is about what such
+// an engine says of them, not about an engine meeting the queue for the first
+// time.
+func queueRanSince(t *testing.T, root string, cfg config, since time.Time) {
+	t.Helper()
+	if err := startNoticeKinds(root, cfg, since); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deliveredJob lays down a request delivered at the given time whose one
+// launch used a model, so the delivered turns have a list to post for it.
+func deliveredJob(t *testing.T, root string, id int, delivered time.Time) string {
+	t.Helper()
+	directory := filepath.Join(root, "jobs", fmt.Sprint(id))
+	if err := os.MkdirAll(filepath.Join(directory, "run"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(watchedIssue(id, "Original conditions", "2026-01-03T00:00:00Z"))
+	if err := writeRuntimeFile(filepath.Join(directory, "issue.json"), raw); err != nil {
+		t.Fatal(err)
+	}
+	request, err := tracker.RequestText(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(chain.State{Request: request, Done: true, History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Model: "maker/one", StartedAt: delivered.Add(-32 * time.Second), FinishedAt: delivered},
+	}})
+	if err := writeRuntimeFile(filepath.Join(directory, "run", "history.json"), data); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+// deliveredList is the list deliveredJob's request is told.
+const deliveredList = "使ったモデル (工程ごと、起動順):\n- 実装: maker/one (32 秒)"
 
 // creditServer answers the model key endpoint the way the provider does. It is
 // a local fixture; no provider is called.
@@ -361,6 +402,8 @@ func TestNoProgressNoticeSaysTheLastFailureWithoutACredential(t *testing.T) {
 		{Role: "router", Speaker: "runtime", Error: "routing unavailable: an earlier one", StartedAt: start.Add(2 * time.Hour), FinishedAt: start.Add(2 * time.Hour)},
 		{Role: "router", Speaker: "runtime", Error: failure, StartedAt: start.Add(150 * time.Minute), FinishedAt: start.Add(150 * time.Minute)},
 	}})
+	// The queue's engines have said a stall since before this one began.
+	queueRanSince(t, root, cfg, start)
 	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
 	const opening = "自動処理は続いていますが"
 	waitFor(t, func() bool { return len(fixture.withPrefix(opening)) > 0 })
@@ -705,6 +748,8 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 		writeJobHistory(t, directory, chain.State{})
 		directories[id] = directory
 	}
+	// The queue's engines have said a stall since before these were accepted.
+	queueRanSince(t, root, cfg, accepted)
 	// Accepted three hours ago with nothing recorded: the one waiting its
 	// turn says nothing, the one running says it is long but not failing.
 	waiting := sourceIssue{ID: 52, ProjectID: 17, Key: "EXAMPLE-52"}
@@ -722,5 +767,244 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	}
 	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗はなく") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
 		t.Fatalf("the running request was not told, or told wrongly: %q", posted["EXAMPLE-51"])
+	}
+}
+
+// statusesWritten reports that the delivered turns have run for every one of
+// these requests since their status records were last removed.
+func statusesWritten(directories []string) func() bool {
+	return func() bool {
+		for _, directory := range directories {
+			if _, err := os.Stat(filepath.Join(directory, "status.json")); err != nil {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// The first engine that knows the list of models used meets a queue of
+// requests delivered before it. It used to post the list on every one of
+// them at once. None of them hears it now: not on the first tick, not on the
+// ticks after, not after a restart; each keeps one record saying the list
+// predates it, so nothing weighs it again.
+func TestRequestsDeliveredBeforeTheirNoticeExistedNeverHearIt(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.Announce = true
+	cfg.Intake.Statuses = &statusConfig{Delivered: 3}
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root := t.TempDir()
+	delivered := time.Now().UTC().Add(-26 * time.Hour)
+	var directories []string
+	for _, id := range []int{51, 52, 53, 54} {
+		directories = append(directories, deliveredJob(t, root, id, delivered))
+	}
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, func() bool {
+		for _, directory := range directories {
+			if len(readNotices(t, directory).Notices) == 0 {
+				return false
+			}
+		}
+		return true
+	})
+	// The same engine's later ticks.
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if got := fixture.attempts(); got != 0 {
+		t.Fatalf("requests delivered before the list existed were told %d times: %v", got, fixture.all())
+	}
+	kinds, err := loadNoticeKinds(root)
+	if err != nil || !kinds.Since[modelsNotice].After(delivered) {
+		t.Fatalf("the queue does not record the list as begun with this engine: %+v %v", kinds, err)
+	}
+	// A restart meets the same requests and their records.
+	for _, directory := range directories {
+		if err := os.Remove(filepath.Join(directory, "status.json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish = startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, statusesWritten(directories))
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if got := fixture.attempts(); got != 0 {
+		t.Fatalf("a restart told requests delivered before the list existed %d times: %v", got, fixture.all())
+	}
+	for _, directory := range directories {
+		log := readNotices(t, directory).Notices
+		if len(log) != 1 || log[0].Kind != modelsNotice || !log[0].Predates || log[0].PostedAt != nil || log[0].Text != "" {
+			t.Fatalf("the record does not say once that the list predates the request: %+v", log)
+		}
+	}
+}
+
+// A request delivered after the engine started is told which models it used,
+// exactly once, on that engine's first run as on any other: here one that was
+// waiting for its requester at the first tick and was delivered after it.
+// Later ticks and a restart do not post the list again.
+func TestARequestDeliveredAfterTheFirstTickHearsItsListOnce(t *testing.T) {
+	cfg := watchConfiguration(t)
+	cfg.Intake.Announce = true
+	cfg.Intake.Statuses = &statusConfig{Delivered: 3}
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := noticeJob(t, chain.State{Waiting: true, Step: "implement", History: []chain.Result{}})
+	finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	// The first tick met the request waiting and wrote down how far its
+	// conversation had gone.
+	waitFor(t, func() bool { _, err := os.Stat(filepath.Join(directory, "question.json")); return err == nil })
+	delivered := time.Now().UTC()
+	writeJobHistory(t, directory, chain.State{Done: true, History: []chain.Result{
+		{Role: "implement", Speaker: "worker", Model: "maker/one", StartedAt: delivered.Add(-32 * time.Second), FinishedAt: delivered},
+	}})
+	waitFor(t, func() bool { return fixture.count(deliveredList) > 0 })
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if err := os.Remove(filepath.Join(directory, "status.json")); err != nil {
+		t.Fatal(err)
+	}
+	finish = startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+	waitFor(t, statusesWritten([]string{directory}))
+	time.Sleep(100 * time.Millisecond)
+	finish()
+	if got := fixture.all(); len(got) != 1 || got[0] != deliveredList {
+		t.Fatalf("the delivered request was told: %v", got)
+	}
+	if log := readNotices(t, directory).Notices; len(log) != 1 || log[0].Kind != modelsNotice || log[0].Predates || log[0].PostedAt == nil {
+		t.Fatalf("the record does not show one posted list: %+v", log)
+	}
+}
+
+// A kind can also be new to a queue that had it before: taken out of the
+// queue's record between two runs, or not posted by a run in between, as an
+// engine that did not know it or a configuration that switched it off would
+// leave it. Either way it starts again with the engine that posts it again,
+// and a request delivered while it was gone is not told. Kept, the same
+// request is told, as it always was.
+func TestAKindThatCameBackStartsWhenItCameBack(t *testing.T) {
+	for _, shape := range []struct {
+		name      string
+		meanwhile func(t *testing.T, cfg config, root string)
+		told      int
+	}{
+		{"the kind was kept", func(*testing.T, config, string) {}, 1},
+		{"the kind was taken out of the record between two runs", func(t *testing.T, _ config, root string) {
+			kinds, err := loadNoticeKinds(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			delete(kinds.Since, modelsNotice)
+			if err := saveNoticeKinds(root, kinds); err != nil {
+				t.Fatal(err)
+			}
+		}, 0},
+		{"a run in between did not post the kind", func(t *testing.T, cfg config, root string) {
+			silent := *cfg.Intake
+			silent.Announce = false
+			cfg.Intake = &silent
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+			waitFor(t, func() bool {
+				kinds, err := loadNoticeKinds(root)
+				return err == nil && kinds.Since[modelsNotice].IsZero()
+			})
+			finish()
+		}, 0},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			cfg.Intake.Announce = true
+			cfg.Intake.Statuses = &statusConfig{Delivered: 3}
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("done"))
+			root := t.TempDir()
+			now := time.Now().UTC()
+			// Engines that post the list have run on this queue for two hours,
+			// and the request was delivered an hour ago; its list is not out yet.
+			queueRanSince(t, root, cfg, now.Add(-2*time.Hour))
+			directory := deliveredJob(t, root, 51, now.Add(-time.Hour))
+			shape.meanwhile(t, cfg, root)
+			finish := startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
+			waitFor(t, func() bool { return len(readNotices(t, directory).Notices) > 0 })
+			time.Sleep(100 * time.Millisecond)
+			finish()
+			if got := fixture.attempts(); got != shape.told || fixture.count(deliveredList) != shape.told {
+				t.Fatalf("the request was told %d times, expected %d: %v", got, shape.told, fixture.all())
+			}
+			log := readNotices(t, directory).Notices
+			if len(log) != 1 || log[0].Kind != modelsNotice || log[0].Predates != (shape.told == 0) || (log[0].PostedAt != nil) != (shape.told == 1) {
+				t.Fatalf("the record does not say what became of the list: %+v", log)
+			}
+		})
+	}
+}
+
+// Every kind keeps to the same rule, not only the list. The first engine that
+// keeps the queue's record meets a request in flight: a stage announced before
+// stays as it was, a stage that began before and was not announced yet is
+// settled without its sentence though it runs again now, and the request is
+// not told it was accepted two hours ago. A stall that began before is not
+// said and leaves no record, so a later one is said in its own time. A stage
+// that begins under this engine is announced as always.
+func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
+	cfg := announcingStagesConfig(t)
+	cfg.Roles = append(cfg.Roles, chain.Role{Name: "report", Purpose: "say what was done", Processes: []chain.Process{{Name: "writer", Command: []string{"/bin/true"}}}})
+	cfg.Workflow.Stages = append(cfg.Workflow.Stages, chain.Stage{Name: "report", Kind: chain.CommandStage, Announce: "報告を書きます。"})
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	root, directory := noticeJob(t, chain.State{})
+	// Accepted two hours ago. Its first stage began then and an engine of
+	// that time announced it; its second began an hour later, failed, and was
+	// not announced yet. Nothing has completed since the first stage.
+	earlier := time.Now().UTC().Add(-2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(directory, "issue.json"), earlier, earlier); err != nil {
+		t.Fatal(err)
+	}
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{
+		{Role: "work", Speaker: "worker", Model: "maker/first", StartedAt: earlier, FinishedAt: earlier.Add(time.Minute)},
+		{Role: "verify", Speaker: "build", Error: "exit status 1", StartedAt: earlier.Add(time.Hour), FinishedAt: earlier.Add(time.Hour)},
+	}})
+	said := earlier.Add(time.Second)
+	announced, _ := json.Marshal(noticeLog{Notices: []noticeRecord{{Kind: stagePrefix + "work", Text: "作業を始めます。 (モデル: maker/first)", WrittenAt: said, PostedAt: &said}}})
+	if err := writeRuntimeFile(filepath.Join(directory, "notices.json"), announced); err != nil {
+		t.Fatal(err)
+	}
+	// The engine starts as the watch loop starts it, and the second stage
+	// runs again under it.
+	if err := startNoticeKinds(root, cfg, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	beginStage(t, directory, "verify-build")
+	observe := func(string) {}
+	issue := announcedIssue()
+	acceptTurn(context.Background(), cfg, issue, directory, 0, observe)
+	announceStages(context.Background(), cfg, issue, directory, observe)
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, issue, directory), directory, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("the request was told what began before the engine: %v", got)
+	}
+	beginStage(t, directory, "report-writer")
+	announceStages(context.Background(), cfg, issue, directory, observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "報告を書きます。" {
+		t.Fatalf("a stage that began under this engine was announced as %v", got)
+	}
+	records := map[string]noticeRecord{}
+	for _, record := range readNotices(t, directory).Notices {
+		if _, twice := records[record.Kind]; twice {
+			t.Fatalf("the request has two records of %s", record.Kind)
+		}
+		records[record.Kind] = record
+	}
+	if len(records) != 4 {
+		t.Fatalf("the request's records are %+v", records)
+	}
+	for kind, predates := range map[string]bool{stagePrefix + "work": false, acceptedNotice: true, stagePrefix + "verify": true, stagePrefix + "report": false} {
+		record, found := records[kind]
+		if !found || record.Predates != predates || (record.PostedAt != nil) == predates {
+			t.Fatalf("the record of %s does not say what became of it: %+v", kind, records)
+		}
 	}
 }
