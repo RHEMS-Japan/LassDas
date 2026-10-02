@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -226,6 +227,9 @@ type job struct {
 	StageIndex  int
 	StageCount  int
 	Model       string
+	// GitHub says the issue is a GitHub issue, so the page names GitHub
+	// where it says where the requester wrote.
+	GitHub bool
 }
 
 // stageMark is one stage on a card: passed, current or ahead.
@@ -468,6 +472,20 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 		var issue map[string]any
 		if err := json.Unmarshal(raw, &issue); err != nil {
 			note("issue.json could not be decoded: %v", err)
+		} else if _, github := issue["html_url"]; github && stringOf(issue["issueKey"]) == "" {
+			// A GitHub issue is named by its number and opened at the page its
+			// record gives, so it needs no configuration to be shown.
+			j.GitHub = true
+			if number, ok := issue["number"].(float64); ok && number > 0 {
+				j.Key = "#" + strconv.FormatFloat(number, 'f', -1, 64)
+			}
+			j.Title, j.Created = stringOf(issue["title"]), stringOf(issue["created_at"])
+			if user, ok := issue["user"].(map[string]any); ok {
+				j.Requester = stringOf(user["login"])
+			}
+			if page := stringOf(issue["html_url"]); strings.HasPrefix(page, "https://") {
+				j.Link = page
+			}
 		} else {
 			j.Key, j.Title, j.Created = stringOf(issue["issueKey"]), stringOf(issue["summary"]), stringOf(issue["created"])
 			if user, ok := issue["createdUser"].(map[string]any); ok {
@@ -1509,7 +1527,7 @@ var japanese = map[string]string{
 	"returned": "完了", "failed": "失敗", "could not start": "起動できず", "interrupted": "中断", "answer from the requester": "依頼者の返答", "note by the runtime": "本体の記録",
 	"why it ended so": "理由", "what the worker was handed": "担当 (LLM) に渡したもの", "what the worker wrote": "担当がしたこと・書いたこと", "what the runtime observed": "本体が観察したこと",
 	"written by": "書いた者", "the requester": "依頼者", "the runtime": "本体", "the worker": "担当", "the command": "コマンド", "the operator's settings": "運用者の設定",
-	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
+	"your ticket text, as written at the tracker (shown above as the request)": "あなたが Backlog に書いた本文 (上の「依頼の原文」)", "your issue text, as written on GitHub (shown above as the request)": "あなたが GitHub の issue に書いた本文 (上の「依頼の原文」)", "the runtime's own words about this stage and the role": "本体が添えた説明 (工程と役)",
 	"the record up to this launch, as shown on this page": "それまでの記録 (このページの前の起動)", "no output: the process could not start": "出力なし: 起動できず", "the worker's own stderr": "担当の stderr",
 	"the process ended with an error": "プロセスが失敗で終わった",
 	"no output":                       "出力なし", "what the requester wrote": "依頼者が書いたこと",

@@ -1222,3 +1222,61 @@ func TestAnAcceptedRequestNotYetLaunchedIsShownAsQueuedAtTheFirstStage(t *testin
 	response.Body.Close()
 	expectAll(t, string(japanese), "順番待ち <b>3</b>", "順番待ち (実行枠が空くのを待っています)", "開始中 (最初の工程を決めています)")
 }
+
+// A GitHub issue is shown by its number, its title, the account that opened
+// it and its own page, all read from its record, with or without a
+// configuration. A Backlog issue beside it is shown as before, and each page
+// names where its requester wrote.
+func TestAGitHubIssueIsShownByItsNumberTitleOpenerAndPage(t *testing.T) {
+	root := fixtureQueue(t)
+	job := filepath.Join(root, "jobs", "12")
+	if err := os.MkdirAll(filepath.Join(job, "run"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	issue := func(page string) {
+		t.Helper()
+		record := `{"number":12,"title":"Add a docstring on GitHub","body":"BODY","created_at":"2026-01-02T00:00:00Z",` +
+			`"user":{"id":11,"login":"fixture-requester"},"html_url":"` + page + `","repository_url":"https://api.github.example/repos/octo-org/widgets"}`
+		if err := os.WriteFile(filepath.Join(job, "issue.json"), []byte(record), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issue("https://github.example/octo-org/widgets/issues/12")
+	started := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	raw, _ := json.Marshal(chain.State{Request: "Original issue: 12\nTitle: Add a docstring on GitHub\n\nBODY", Step: "implement",
+		History: []chain.Result{{Role: "elicit", Speaker: "elicit-process", Output: "OUTPUT", Instruction: "INSTRUCTION", StartedAt: started, FinishedAt: started.Add(time.Minute)}}})
+	if err := os.WriteFile(filepath.Join(job, "run", "history.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	japanese := func(ts *httptest.Server, path string) string {
+		t.Helper()
+		request, _ := http.NewRequest("GET", ts.URL+path, nil)
+		request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	for _, config := range []string{"", fixtureConfig(t)} {
+		ts := serve(t, root, config, "", "")
+		_, body := get(t, ts, "/")
+		expectAll(t, body, `data-key="#12"`, "Add a docstring on GitHub", "fixture-requester", `data-key="EXAMPLE-7"`)
+		_, body = get(t, ts, "/jobs/12")
+		expectAll(t, body, "<title>#12 status</title>", `<a href="https://github.example/octo-org/widgets/issues/12">`, "fixture-requester · 2026-01-02T00:00:00Z")
+		if body := japanese(ts, "/jobs/12"); !strings.Contains(body, "あなたが GitHub の issue に書いた本文") || strings.Contains(body, "Backlog") {
+			t.Errorf("config %q: the GitHub issue's page does not name GitHub, or names Backlog", config)
+		}
+		if body := japanese(ts, "/jobs/7"); !strings.Contains(body, "あなたが Backlog に書いた本文") {
+			t.Errorf("config %q: the Backlog issue's page changed its words", config)
+		}
+	}
+	// Only a page on https is linked.
+	issue("http://github.example/octo-org/widgets/issues/12")
+	ts := serve(t, root, "", "", "")
+	if _, body := get(t, ts, "/jobs/12"); strings.Contains(body, "github.example/octo-org/widgets/issues/12") {
+		t.Error("a page address that is not https was linked")
+	}
+}
