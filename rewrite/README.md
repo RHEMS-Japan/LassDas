@@ -438,7 +438,8 @@ on, and its receipt records the same (`"unchanged": true` with that commit as
 such an ending is delivered as usual. The post-delivery check
 (`harnesses/verify_merged.py`) then has no merge to look for: it requires the
 recorded commit to be part of the integration branch, runs the configured
-commands with that commit checked out, and says that no merge was made. The
+commands on that branch as it is now, as after a merge, and says that no merge
+was made. The
 run then ends like any finished run: where they are configured, the
 `delivered` status of `intake.statuses` is applied and `intake.assign` hands
 the request back to the requester although nothing was merged, so the report
@@ -1137,6 +1138,23 @@ checkout never starts the role and its reason reaches the existing chain. A
 retry can prepare the still-empty workspace. A killed preparation can leave
 unpublished private staging for operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
+
+Once a checkout is published, a record of it (`.workspace.prepared`) is kept
+beside the workspace, in the job's own directory, which no role's sandbox
+mounts. A workspace found empty although that record exists was lost, by a
+restore or by hand, together with everything the earlier stages did in it. Its
+next launch prepares it again from the repository, prints that the workspace
+was lost and ends non-zero without running its command: a command stage then
+goes back to its `on_failure` stage, after which every later stage runs again,
+and a model stage runs again. A stage that passed on the lost work is never
+taken as passed on the fresh checkout, so an ending with nothing delivered
+cannot follow from it. A workspace prepared before this record existed is
+taken as it is at its next launch and gains the record without a word, so a
+queue already running when this arrives goes on as it was. A workspace
+directory removed while the engine runs is not covered: no process can start
+in it, so each launch fails at once, spaced like any launch that cannot start,
+and nothing passes; restarting the engine creates the directory again, empty,
+and the next launch reports the loss.
 
 The wrapper is **not an isolation boundary**. Its job parent, lock and staging
 must be private to the controller. The command after `--` must establish the

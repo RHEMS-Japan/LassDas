@@ -3,8 +3,19 @@
 This runs BEFORE the role's sandbox, never as a model tool. The command after
 ``--`` must establish the actual role permissions. It is not a source/answer
 approval step: existing work is reused verbatim, never reset or updated.
+
+Once a workspace has been prepared, a record of it stays beside the workspace,
+in the job's own directory, which no role's sandbox mounts. A workspace found
+empty although that record exists was lost, by a restore or by hand: it is
+prepared again, the launch says so and ends non-zero without running its
+command. What earlier stages did there is gone, and a stage that passed on
+that work must not be taken as passed on the fresh checkout. A failed command
+stage goes back to its repair stage, after which every later stage runs again;
+a model stage simply runs again.
 """
+import datetime
 import fcntl
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +23,24 @@ import sys
 import tempfile
 
 
+def record_path(workspace):
+    """The record that the workspace was prepared, beside the preparation lock."""
+    return workspace.parent / ("." + workspace.name + ".prepared")
+
+
+def write_record(workspace, **fields):
+    record = record_path(workspace)
+    fields["recorded_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    temporary = record.with_name(record.name + ".new")
+    descriptor = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(json.dumps(fields, sort_keys=True) + "\n")
+    os.replace(temporary, record)
+
+
 def prepare(workspace, repository, branch=None):
+    """Prepare the workspace when it is empty. Returns False when it had been
+    prepared before and was found empty: whatever was done in it is gone."""
     if not workspace.is_absolute() or workspace.is_symlink() or not workspace.is_dir():
         raise ValueError("TASK_WORKSPACE must name the existing real job directory")
     # The watch owner creates this directory. Other launchers for the same job
@@ -21,10 +49,14 @@ def prepare(workspace, repository, branch=None):
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        prepared_before = os.path.lexists(record_path(workspace))
         if any(workspace.iterdir()):
             # In particular, do not run Git on agent-edited local config outside
             # its sandbox. A different source/ref must not replace ongoing work.
-            return
+            # A workspace prepared before the record existed is taken as it is.
+            if not prepared_before:
+                write_record(workspace, found_in_place=True)
+            return True
         environment = dict(os.environ)
         environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                            GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
@@ -57,6 +89,15 @@ def prepare(workspace, repository, branch=None):
             if any(workspace.iterdir()):
                 raise RuntimeError("Work arrived during preparation; it was not replaced")
             os.replace(staged, workspace)
+        # Only a published checkout is on record: an interrupted or failed
+        # preparation leaves nothing that could later read as a lost workspace.
+        write_record(workspace, prepared_again=prepared_before)
+        return not prepared_before
+
+
+LOST = ("This request's workspace was lost: it had been prepared before and was found empty. It has been "
+        "prepared again from the repository, so nothing an earlier stage did in it remains. This launch ends "
+        "here without running its command, so the stages whose work was lost run again.")
 
 
 def main():
@@ -66,7 +107,9 @@ def main():
     repository = os.environ["TASK_REPOSITORY"]
     if not repository:
         raise ValueError("TASK_REPOSITORY must name the operator-approved source")
-    prepare(workspace, repository, os.environ.get("TASK_BRANCH"))
+    if not prepare(workspace, repository, os.environ.get("TASK_BRANCH")):
+        print(LOST, flush=True)
+        sys.exit(1)
     # The old empty-directory inode may have been replaced, including while a
     # concurrent launcher started there. Enter the newly published directory.
     os.chdir(workspace)

@@ -132,25 +132,30 @@ class VerificationTests(unittest.TestCase):
         record.update(fields)
         (self.workspace / ".git/ticket-engine/delivery.json").write_text(json.dumps(record))
 
-    def test_an_unchanged_delivery_is_checked_on_its_recorded_commit_and_says_no_merge_was_made(self):
-        # The request stood on the branch before the delivery merged above:
-        # the commands run there, not on the branch's newer commit.
+    def test_an_unchanged_delivery_is_checked_on_the_branch_as_it_is_now(self):
+        # The request stood on the branch before the delivery merged above.
+        # What is checked is the branch as the requester finds it now; the
+        # recorded commit only has to be part of it.
         earlier = self.git(self.remote, "rev-parse", "refs/heads/master^1").stdout.strip()
         self.unchanged_receipt(base_sha=earlier, workspace_head=earlier)
-        where = "/bin/sh -c 'if grep -q delivered main.go; then echo at-the-tip; exit 1; fi; echo at-the-recorded-commit'"
-        result = self.verify(where)
+        result = self.verify("/bin/sh -c 'grep -q delivered main.go'")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("No merge was made: the delivery receipt records that no file was changed", result.stdout)
         self.assertIn("The commit the request stands on is contained in master.", result.stdout)
-        self.assertIn("The configured commands ran with commit %s checked out; master has moved on to %s since."
-                      % (earlier, self.merge), result.stdout)
-        self.assertIn("at-the-recorded-commit", result.stdout)
+        self.assertIn("The configured commands ran on master as it is now, at commit %s, as after a merge."
+                      % self.merge, result.stdout)
         self.assertIn("0 of 1 configured verification commands failed.", result.stdout)
-        # On the branch's own tip, a failing command still fails the check.
+        # Someone breaks the behaviour on the branch afterwards: the check
+        # fails, as it would after a merge, instead of passing on the old
+        # commit the request stood on.
+        original = self.git(self.remote, "rev-parse", "refs/heads/master^1^{tree}").stdout.strip()
+        broken = self.git(self.remote, "commit-tree", original, "-p", self.merge,
+                          "-m", "Codex: remove the delivered behaviour").stdout.strip()
+        self.git(self.remote, "update-ref", "refs/heads/master", broken)
         self.unchanged_receipt()
-        failing = self.verify("/bin/sh -c 'echo broken >&2; exit 2'")
+        failing = self.verify("/bin/sh -c 'grep -q delivered main.go'")
         self.assertEqual(failing.returncode, 1, failing.stdout + failing.stderr)
-        self.assertIn("The configured commands ran with commit %s checked out.\n" % self.merge, failing.stdout)
+        self.assertIn("The configured commands ran on master as it is now, at commit %s" % broken, failing.stdout)
         self.assertIn("1 of 1 configured verification commands failed.", failing.stdout)
 
     def test_an_unchanged_delivery_whose_commit_left_the_branch_is_not_verified(self):

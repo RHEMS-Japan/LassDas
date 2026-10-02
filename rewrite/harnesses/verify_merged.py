@@ -10,8 +10,9 @@ branch, not a judgment that the original request is fulfilled.
 A receipt saying that nothing was changed (the delivery's
 DELIVERY_ALLOW_UNCHANGED) has no merge commit to look for. Then the commit the
 request stands on, as the delivery recorded it, has to be contained in the
-fetched branch; the commands run with that commit checked out, and the report
-says that no merge was made.
+fetched branch, and the commands run on that branch as it is now, as they do
+after a merge: a request that needs no change is held to the target as the
+requester will find it. The report says that no merge was made.
 
 A receipt whose merge is left to a person (the delivery's
 DELIVERY_MERGE_METHOD=none) and that records no merge yet has no merged state
@@ -192,10 +193,12 @@ def verify(arguments):
         report.append("The %s is %scontained in %s." % (what, "" if contained else "NOT ", fetched))
     failures = 0
     if contained:
-        if unchanged or pending:
-            # The commit the delivery recorded, not whatever the branch holds
-            # by now: that is what the request was said to stand on, or what a
-            # person was asked to merge.
+        if unchanged:
+            report.append("The configured commands ran on %s as it is now, at commit %s, as after a merge."
+                          % (base, tip.strip()))
+        elif pending:
+            # The commit the delivery pushed, not whatever the branch holds by
+            # now: that is what a person was asked to merge.
             support.run(support.git("-C", str(source), "checkout", "-q", "--detach", merge))
             report.append("The configured commands ran with commit %s checked out%s."
                           % (merge, "" if merge == tip.strip() else

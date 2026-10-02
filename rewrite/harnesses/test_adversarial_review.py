@@ -40,14 +40,18 @@ class ModelStandIn:
                 if reply.get("status", 200) != 200:
                     payload = json.dumps({"error": reply.get("error", "service error")}).encode()
                     self.send_response(reply["status"])
-                elif reply.get("verdict") is None:
+                elif reply.get("verdict") is None and "arguments" not in reply:
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
                     self.send_response(200)
                 else:
-                    blocking, findings = reply["verdict"]
+                    if "arguments" in reply:
+                        arguments = reply["arguments"]
+                    else:
+                        blocking, findings = reply["verdict"]
+                        arguments = {"blocking": blocking, "findings": findings}
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
                         {"id": "call-1", "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
-                            {"blocking": blocking, "findings": findings})}}]}}]}).encode()
+                            arguments)}}]}}]}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -357,6 +361,30 @@ class AdversarialReviewTests(unittest.TestCase):
             finished = self.run_review(service)
             self.assertEqual(finished.returncode, 0, (case, finished.stdout))
             self.assertIn("the work goes on unreviewed this time", finished.stdout, case)
+
+    def test_a_verdict_counts_only_with_true_or_false_for_blocking(self):
+        # REPRO 07: blocking null beside a finding that a needed behaviour is
+        # missing was printed as PASSED. Anything but true or false is no
+        # verdict: with nothing changed the work goes back, with a change it
+        # is NOT REVIEWED as any other missing verdict.
+        for blocking in (None, "false", 0, "MISSING"):
+            reply = {"verdict": (blocking, "REQUIRED_NEW_BEHAVIOR is missing; this change is needed.")}
+            if blocking == "MISSING":
+                reply = {"arguments": {"findings": "REQUIRED_NEW_BEHAVIOR is missing; this change is needed."}}
+            service = ModelStandIn([reply, reply])
+            self.addCleanup(service.close)
+            finished = self.run_review(service)
+            self.assertEqual(finished.returncode, 0, (blocking, finished.stdout))
+            self.assertIn("NOT REVIEWED", finished.stdout, blocking)
+            self.assertIn("neither true nor false for blocking", finished.stdout, blocking)
+            self.assertNotIn("PASSED", finished.stdout, blocking)
+        self.leave_unchanged()
+        service = ModelStandIn([{"verdict": (None, "REQUIRED_NEW_BEHAVIOR is missing")}] * 2)
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 1, finished.stdout)
+        self.assertIn(self.GOES_BACK, finished.stdout)
+        self.assertNotIn("PASSED", finished.stdout)
 
     def test_a_new_file_with_a_japanese_name_reaches_the_reviewer(self):
         self.leave_unchanged()
