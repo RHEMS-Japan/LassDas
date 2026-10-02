@@ -19,8 +19,15 @@ DELIVERY_MERGE_METHOD=none) and that records no merge yet has no merged state
 to verify either. What it checks instead is the pull request's head as the
 delivery pushed it: it fetches the ticket branch, requires the recorded commit
 to be contained in it, runs the commands with that commit checked out, and
-says that nothing was merged. Once the delivery has recorded that a person
-merged the pull request, the integration branch is verified as usual.
+says that this delivery merged nothing; whether a person merged since is not
+looked at here. Once the delivery has recorded that a person merged the pull
+request, the integration branch is verified as usual.
+
+Two endings a person caused end this check at 0 without running anything,
+since there is nothing of this delivery left to verify and failing would only
+send the work round again: a pull request closed without a merge (nothing was
+delivered), and a pull request whose branch a person changed (what would be
+merged is theirs). The report says what was looked at and what was not.
 
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE             checkout holding the delivery receipt
@@ -64,6 +71,8 @@ def receipt_fields(workspace):
             raise DeliveryError("The delivery receipt says nothing was changed but records no commit "
                                 "the request stands on")
         return receipt, stands
+    if receipt.get("closed_unmerged") or receipt.get("changed_by_person"):
+        return receipt, ""
     if receipt.get("merge_left_to_person") and not receipt.get("merge_sha"):
         # Nothing is merged yet: what is verified is the commit the delivery
         # pushed for a person to merge, on the branch it pushed it to.
@@ -141,6 +150,21 @@ def verify(arguments):
     workspace = os.environ.get("TASK_WORKSPACE") or os.getcwd()
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
     receipt, merge = ({}, "") if dry else receipt_fields(workspace)
+    named = "%s (%s)" % (receipt.get("pull_request", "(none recorded)"),
+                         receipt.get("pull_request_url") or "no address recorded")
+    if receipt.get("closed_unmerged"):
+        print("Nothing to check: pull request %s was closed by a person without being merged, so nothing of this "
+              "request was delivered. The configured verification commands were not run." % named)
+        return 0
+    if receipt.get("changed_by_person"):
+        where = ("The delivery's commit %s is not on that branch, so it is not in the pull request."
+                 % receipt["not_pushed"] if receipt.get("not_pushed")
+                 else "The delivery's last commit %s is on that branch." % receipt.get("head"))
+        print("Not checked: a person changed branch %s of pull request %s; it was at %s when the delivery last "
+              "looked. %s What a person merges from there is theirs, so the configured verification commands "
+              "were not run, and the branch was not read again here."
+              % (receipt.get("branch"), named, receipt.get("branch_head"), where))
+        return 0
     unchanged = bool(receipt.get("unchanged"))
     pending = bool(receipt.get("merge_left_to_person")) and not receipt.get("merge_sha")
     owner, name = support.repository()
@@ -170,9 +194,9 @@ def verify(arguments):
                       "is no merge commit to look for. The request stands on %s as it was at commit %s."
                       % (base, merge))
     elif pending:
-        report.append("No merge was made: the delivery left the merge of pull request %s (%s) to a person, so "
-                      "there is no merged state to verify. What is verified is that pull request's head as the "
-                      "delivery pushed it, commit %s on %s, not %s after a merge."
+        report.append("This delivery did not merge pull request %s (%s); the merge was left to a person, and "
+                      "whether they merged it since is not looked at here. What is verified is that pull "
+                      "request's head as the delivery pushed it, commit %s on %s, not %s after a merge."
                       % (receipt.get("pull_request", "(none recorded)"), receipt.get("pull_request_url") or
                          "no address recorded", merge, fetched, base))
     else:

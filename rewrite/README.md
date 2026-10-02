@@ -420,8 +420,11 @@ integration branch changed and the worker left as that branch has them need
 no grant; what the branch already carried is not scanned for forbidden text.
 This happens under the merge method and under `none` (below), not under squash
 or rebase, since a service that squashes or rebases rewrites the delivered
-history. For this the delivery process's sandbox grant must cover the working
-tree as well as `.git`.
+history. Under `none` the person who merges may squash or rebase all the same;
+a further round after that conflicts with the squashed copy of its own earlier
+change, and the conflict is handled like any other (below). For this the
+delivery process's sandbox grant must cover the working tree as well as
+`.git`.
 
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
@@ -461,36 +464,78 @@ request and leave the merge to a person. It commits, catches up with the
 integration branch (a conflict still goes back to the work stage), pushes the
 ticket branch, opens the pull request or reuses the one it opened before, and
 ends 0 without merging. It prints `Pull request N against <base> is open for
-<issue>: <url>. Merging is left to a person; nothing was merged.`, the pull
-request's description says that merging it is left to a person, and the
+<issue>: <url>. Merging is left to a person; nothing was merged.`, and the
 receipt records the pull request's number and address, `"merge_method":
-"none"` and `"merge_left_to_person": true`, with no `merge_sha`. Every later
-delivery of the request first reads what became of that pull request:
+"none"` and `"merge_left_to_person": true`, with no `merge_sha`. A pull request
+this delivery opens under `none` says in its description that merging it is
+left to a person; one it reuses keeps its description, and the sentence stays
+if the operator later switches to merging. Once the pull request is in a
+person's hands, what they do with it decides; this process never undoes it.
+While the merge of a round is left to a person (under `none`, and after a
+switch to merging until the delivery's own merge request succeeds), every later
+delivery reads what became of that pull request before its push and again
+after it:
 
-- open, with nothing new: the same statement again, and nothing is pushed;
+- open, its branch holding the commit on record, nothing new: the same
+  statement again, and nothing is pushed. A commit on record that never
+  reached the branch (a push that was refused or did not go through, a
+  catch-up that failed) is pushed by the next delivery.
 - open, with new reviewed work: the work is pushed to the same branch, so the
-  same pull request carries it;
-- merged by a person: reported as merged by someone else, with the commit
-  they made (recorded as `merge_sha`); work after that is a further round with
-  a pull request of its own, left to a person again;
-- closed without a merge: refused with that fact, so the run goes back to the
-  work stage. The delivery never reopens the pull request or opens another in
-  its place, so the request goes round, running the work and review stages
-  each time, until someone reopens it or the requester stops the request.
+  same pull request carries it.
+- open, with a branch a person pushed to or rewrote: the branch is theirs.
+  Nothing is pushed over it; the delivery ends 0 saying so, names a commit of
+  this delivery that is not on the branch, and records `changed_by_person`
+  with the branch's head. Every later delivery says the same.
+- merged by a person: reported as merged by someone else, with the commit the
+  service reports for their merge (recorded as `merge_sha`: the merge commit,
+  the squashed commit, or for a rebase the commit the integration branch was
+  moved to); work after that is a further round with a pull request of its
+  own, left to a person again. If they squashed or
+  rebased, that round's catch-up conflicts with its own earlier change; the
+  conflict goes to the work stage like any other, and once it is resolved the
+  next delivery opens the new pull request. If the person's merge deleted the
+  branch, that round's push creates it again.
+- merged by a person before this round's commit reached the pull request (they
+  merged between the delivery's read and its push): that merge is recorded as
+  an earlier round, and the pushed commit gets a new pull request. The merged
+  pull request's own head is what tells the two apart.
+- merged by a person, but the service does not report the merge commit yet: the
+  delivery ends 1 saying so, and the next one reads it again.
+- closed without a merge: the request ends. The delivery ends 0 with `Pull
+  request N ... was closed by a person without being merged ... This request
+  ends with nothing delivered`, records `closed_unmerged`, and never reopens
+  the pull request or opens another in its place; continuing needs a new
+  request. A delivery interrupted after opening a pull request but before
+  recording it does not know that one, and opens another if a person closed it
+  meanwhile.
+
+Switching to a merge method takes a round from the person it was left to only
+once the delivery's own merge request succeeds, and only that merge is
+reported as `merged with method ...`. A merge found before then is reported as
+merged by someone else, and work after it is a further round, which the
+delivery merges. Under a merge method alone, a pull request the delivery finds
+already merged when it comes to merge it is reported as merged with the
+method, since that cannot be told apart from the merge of an interrupted
+earlier attempt.
 
 With an open pull request there is no merged state to verify, so the
 post-delivery check (`harnesses/verify_merged.py`) checks the pull request's
 head instead. It fetches the ticket branch, requires the commit the delivery
 pushed to be on it, runs the configured commands with that commit checked out,
-and says that nothing was merged; it ends 0 only when that commit is there
-and every command passed. That is what a person is asked to merge, including
-the catch-up merge, which the verify stage before the review never saw, so
-keep the stage. Once a delivery has recorded a person's merge, the check
-verifies the integration branch as usual. If the person's merge deletes the
-branch before a delivery has recorded it, the check cannot read the branch and
-the run goes round once more, after which the next delivery records the merge.
-Where the target's own checks on pull requests are what the person merging
-relies on, the stage can be left out:
+and says that this delivery merged nothing, without looking at whether a
+person merged since; it ends 0 only when that commit is there and every
+command passed. That is what a person is asked to merge, including the
+catch-up merge, which the verify stage before the review never saw, so keep
+the stage. Once a delivery has recorded a person's merge, the check verifies
+the integration branch as usual. If the person's merge deletes the branch
+before a delivery has recorded it, the check cannot read the branch and the
+run goes round once more, after which the next delivery records the merge;
+anything the work changed in that extra round goes in a further round's pull
+request. After the two endings a person causes, a closed pull request and a
+branch a person changed, the check runs nothing and ends 0, saying what it did
+and did not look at: nothing of this delivery is left to verify, and failing
+would only send the work round again. Where the target's own checks on pull
+requests are what the person merging relies on, the stage can be left out:
 
 ```json
 "workflow": {
@@ -514,7 +559,8 @@ person merges. The operator sees the open pull request at the service, the
 receipt on the status page, and, with `--dry-run`, a line saying that a
 delivery ends at the open pull request. The status page shows such a request
 as done with the pull request open, not as delivered, until a later delivery
-records that a person merged it.
+records that a person merged it, and one whose pull request a person closed as
+done with the pull request closed unmerged.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
@@ -641,9 +687,12 @@ Optional `intake.statuses` moves the issue's status at each turn of the work,
 by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
-`delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. An id left out leaves that turn alone; the runtime never
-reads or names a status. Each change is made once and recorded beside the
+`delivered` once the run is done and the report posted: usually after the
+merge, but also when the run ended at the open pull request of
+`DELIVERY_MERGE_METHOD=none`, with no change, or at a pull request a person
+closed, so the status alone does not say that anything was merged; `stopped`
+after the requester's stop. An id left out leaves that turn alone; the runtime
+never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.
