@@ -337,11 +337,13 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			// still. These are the controller's own fixed words, posted at most
 			// once per condition, and none of them ends the request.
 			notice := requestNotices(cfg, issue, directory)
-			// A stop launches no model, so it does not wait for the budget and
-			// is not told about it: the requester asked for the work to end,
-			// not to hear that it is paused and will carry on. A request held
-			// here has no watcher reading its comments, so the stop is looked
-			// for on its behalf.
+			// Recording a stop launches no model, so it does not wait for the
+			// budget and is not told about it: the requester asked for the
+			// work to end, not to hear that it is paused and will carry on. A
+			// request held here has no watcher reading its comments, so the
+			// stop is looked for on its behalf. A configured stop report then
+			// runs at once and uses the key, as it does after the stop of a
+			// running request.
 			if creditKnown && creditLow && !stopping {
 				stopping = stopWritten(ctx, cfg, issue, interval)
 			}
@@ -378,10 +380,17 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 			}
 			// An interrupted action or an unfinished recovery means the work is
 			// picked up again, not started afresh. Say so before it runs, so
-			// the requester is not left reading a silent gap in the night.
+			// the requester is not left reading a silent gap in the night. A
+			// request with a stop standing at its issue is launched only for
+			// the stop to be recorded, so it is not told that the same request
+			// carries on; the comments are read once here for that, when the
+			// queue has not found the stop already.
 			if state.Pending != nil || state.Recovering {
-				if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
-					observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+				stopping = stopping || stopWritten(ctx, cfg, issue, interval)
+				if !stopping {
+					if err := notice.post(ctx, resumeNotice, resumeNoticeText, time.Now().UTC()); err != nil {
+						observe("request " + entry.Name() + ": restart notice not confirmed: " + err.Error())
+					}
 				}
 			}
 			// No process of this request can be running before it is launched
