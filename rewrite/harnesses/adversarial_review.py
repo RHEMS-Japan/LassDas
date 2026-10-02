@@ -13,11 +13,14 @@ The send-back counter and a log stay in the process's own directory
 (TASK_HOME) and only inform: a verdict stands whether or not they were saved.
 
 No verdict, no pass. The command exits 0 only on a verdict that does not
-object and 1 only on one that does; without a verdict it does neither. A
-verdict's fields are read in any letter case, and its blocking counts when
-its meaning is plain: true or false, "true" or "false" in any case, 1 or 0.
-Anything else is no verdict, and what the reviewer wrote with it is shown in
-the live view and kept in the printed result and the log. Trouble with
+object and 1 only on one that does; without a verdict it does neither.
+Every call of the verdict tool in a reply is read, and in each every field
+named blocking in any letter case, taken as true or false when its meaning
+is plain: true or false, a number equal to 1 or 0, or "true", "yes", "1",
+"false", "no" or "0" in any case. One that reads as true sends the work
+back; with none true, one that reads as false lets it through; anything else
+is no verdict, and what the reviewer wrote with it is shown in the live view
+and kept in the printed result and the log. Trouble with
 the model service (a connection that fails or times out, an HTTP error, a
 reply without a verdict), and anything unexpected, is waited out: the models
 are asked in the operator's order, round after round, the wait between
@@ -344,38 +347,55 @@ def prepare():
 
 
 def truth(value):
-    """A value read as true or false when its meaning is plain: true or false,
-    "true" or "false" in any letter case, 1 or 0. None otherwise."""
+    """A blocking value read as true or false when its meaning is plain: true
+    or false; a number equal to 1 or 0; "true", "yes" or "1", or "false", "no"
+    or "0", in any letter case and without spaces around it. None when it
+    cannot be read."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-        return value.strip().lower() == "true"
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return value == 1
+    if isinstance(value, (int, float)):
+        return True if value == 1 else False if value == 0 else None
+    if isinstance(value, str):
+        word = value.strip().lower()
+        return True if word in ("true", "yes", "1") else False if word in ("false", "no", "0") else None
     return None
 
 
-def read_verdict(arguments):
-    """(blocking, findings, why) from the verdict tool's arguments. Field names
-    are read in any letter case. blocking is True or False when it is plain,
-    or None, with why, when it is not; the findings are kept either way, so
-    the worker and the report writer can read what the reviewer wrote."""
-    verdict = json.loads(arguments)
-    if not isinstance(verdict, dict):
-        return None, "", "the reviewer's verdict was not a set of named fields"
-    given = {}
-    for name, value in verdict.items():
-        given.setdefault(str(name).lower(), []).append(value)
-    findings = "\n".join(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
-                         for text in given.get("findings", []) if text not in (None, ""))
-    values = given.get("blocking", [])
-    read = {truth(value) for value in values}
-    if values and None not in read and len(read) == 1:
-        return read.pop(), findings, None
-    if not values:
-        return None, findings, "the reviewer's verdict gave no blocking"
-    return None, findings, ("the reviewer's verdict gave no plain true or false for blocking (it gave %s)"
+def read_verdict(calls):
+    """(blocking, findings, why) from every call of the verdict tool in one
+    reply. Every field named blocking, in any letter case, is read in every
+    call. One that reads as true sends the work back, so a finding is never
+    let through because the reply also said false somewhere; with none true,
+    one that reads as false lets the work through; with neither there is no
+    verdict, and why says so. The findings of every call are kept whichever
+    way it goes, so the worker and the report writer can read them."""
+    values, findings, unread = [], [], []
+    for call in calls:
+        try:
+            arguments = json.loads(call["function"]["arguments"])
+        except (KeyError, TypeError, ValueError) as error:
+            unread.append(type(error).__name__)
+            continue
+        if not isinstance(arguments, dict):
+            unread.append("not a set of named fields")
+            continue
+        for name, value in arguments.items():
+            if str(name).lower() == "blocking":
+                values.append(value)
+            elif str(name).lower() == "findings" and value not in (None, ""):
+                findings.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+    read = [truth(value) for value in values]
+    text = "\n".join(findings)
+    if True in read:
+        return True, text, None
+    if False in read:
+        return False, text, None
+    if values:
+        return None, text, ("the reviewer's verdict gave no blocking that reads as true or false (it gave %s)"
                             % ", ".join(json.dumps(value, ensure_ascii=False)[:40] for value in values))
+    if unread:
+        return None, text, "the reviewer's verdict could not be read (%s)" % ", ".join(unread)
+    return None, text, "the reviewer's verdict gave no blocking"
 
 
 def ask_once(found, model, prompt, diff, tests, rounds):
@@ -400,7 +420,7 @@ def ask_once(found, model, prompt, diff, tests, rounds):
         calls = ((reply.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
         if not calls:
             return None, "", "the reviewer returned no verdict"
-        return read_verdict(calls[0]["function"]["arguments"])
+        return read_verdict(calls)
     except urllib.error.HTTPError as error:
         return None, "", "HTTP %d from the model service" % error.code
     except Exception as error:  # a model service hiccup is not a defect in the change
