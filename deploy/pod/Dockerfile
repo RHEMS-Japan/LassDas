@@ -27,8 +27,6 @@ FROM golang:1.26-bookworm AS bundle
 WORKDIR /src
 COPY rewrite /src/rewrite
 RUN mkdir -p /out && GOMAXPROCS=2 sh /src/rewrite/package.sh /out/bundle
-# Deliberately broken to see the pull request check fail; reverted next.
-RUN false
 
 # ---- Stage 2: runtime ----------------------------------------------------
 FROM debian:bookworm-slim
