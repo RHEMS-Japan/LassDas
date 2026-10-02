@@ -449,6 +449,72 @@ class DeliveryTests(unittest.TestCase):
         done = self.deliver(DELIVERY_MERGE_METHOD="squash")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(len(self.parents(self.workspace)), 1, "the branch was caught up under the squash method")
+    def remove_on_integration_branch(self, relative, message="Codex: another delivery removes a path"):
+        other = self.root / ("other-remove-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        self.git(other, "rm", "-q", relative)
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def rename_on_integration_branch(self, relative, target, message="Codex: another delivery renames a path"):
+        other = self.root / ("other-rename-" + relative.replace("/", "-"))
+        self.git(self.root, "clone", "--no-local", str(self.remote), str(other))
+        self.git(other, "mv", relative, target)
+        self.git(other, "commit", "-m", message)
+        self.git(other, "push", "origin", "HEAD:master")
+
+    def conflict_then_resolve(self, **extra):
+        """A conflicting integration branch, refused once; main.go resolved."""
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver(**extra).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+
+    def test_a_path_the_integration_branch_removed_is_not_the_worker_s_to_bring_back(self):
+        self.remove_on_integration_branch("notes.md")
+        self.conflict_then_resolve()
+        self.change("notes.md", "smuggled back outside the grant\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the operator's allowed paths were not delivered: notes.md", refused.stdout)
+
+    def test_a_path_the_integration_branch_renamed_needs_no_grant(self):
+        self.rename_on_integration_branch("notes.md", "記録.md")
+        self.conflict_then_resolve()
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("original", self.git(self.remote, "show", "refs/heads/master:記録.md").stdout)
+
+    def test_forbidden_text_next_to_the_resolution_is_not_this_change(self):
+        self.advance_integration_branch("main.go", "package main\n\n// internal-project-codename stays\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        # Keeping the integration branch's line as context: delivered.
+        self.change("main.go", "package main\n\n// internal-project-codename stays\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_removing_a_forbidden_line_the_integration_branch_wrote_is_not_this_change(self):
+        self.advance_integration_branch("main.go", "package main\n\n// internal-project-codename stays\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        forbidden = {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}
+        self.assertNotEqual(self.deliver(**forbidden).returncode, 0)
+        self.change("main.go", "package main\n\n// theirs and ours\n")
+        done = self.deliver(**forbidden)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_resolution_back_to_this_branch_s_own_content_still_concludes_the_merge(self):
+        self.advance_integration_branch("main.go", "package main\n\n// theirs\n")
+        self.change("main.go", "package main\n\n// ours\n")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.change("main.go", "package main\n\n// ours\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.parents(self.workspace)), 2, "the unchanged resolution did not conclude the merge")
+        self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
+        self.assertIn("// ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

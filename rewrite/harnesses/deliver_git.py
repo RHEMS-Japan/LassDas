@@ -70,16 +70,23 @@ def allowed_paths():
     return paths
 
 
+def status_entries(workspace):
+    _, output, _ = support.run(support.git("-C", str(workspace), "status", "--porcelain=v1", "-z",
+                                           "--untracked-files=all", "--no-renames"))
+    return [entry for entry in output.split("\0") if len(entry) > 3]
+
+
 def changed_paths(workspace):
     """Every path Git reports as changed, staged or untracked, including both
     sides of a rename. A path outside the operator's grant stops delivery."""
-    _, output, _ = support.run(support.git("-C", str(workspace), "status", "--porcelain=v1", "-z",
-                                           "--untracked-files=all", "--no-renames"))
-    paths = []
-    for entry in output.split("\0"):
-        if len(entry) > 3:
-            paths.append(entry[3:])
-    return paths
+    return [entry[3:] for entry in status_entries(workspace)]
+
+
+def paths_to_stage(workspace):
+    """The changed paths whose working tree differs from the index. A path a
+    pending merge already staged, such as one the integration branch removed
+    and that no longer exists, has nothing left to add."""
+    return [entry[3:] for entry in status_entries(workspace) if entry[1] != " "]
 
 
 def merge_in_progress(workspace):
@@ -98,9 +105,13 @@ def integration_paths(workspace):
     worker wrote, even one the branch also changed, needs the grant."""
     if not merge_in_progress(workspace):
         return set()
-    _, theirs, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "-z", "HEAD", "MERGE_HEAD"))
-    _, ours, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "-z", "MERGE_HEAD"))
-    return names(theirs) - names(ours)
+    _, theirs, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "-z", "--no-renames",
+                                           "HEAD", "MERGE_HEAD"))
+    _, ours, _ = support.run(support.git("-C", str(workspace), "diff", "--name-only", "-z", "--no-renames", "MERGE_HEAD"))
+    # An untracked path is never the integration branch's own, even where
+    # that branch deleted a path of the same name.
+    _, untracked, _ = support.run(support.git("-C", str(workspace), "ls-files", "--others", "--exclude-standard", "-z"))
+    return names(theirs) - names(ours) - names(untracked)
 
 
 def refuse_paths_outside_grant(paths, allowed, exempt=()):
@@ -117,14 +128,17 @@ def refuse_paths_outside_grant(paths, allowed, exempt=()):
 
 
 def refuse_forbidden_text(diff):
-    """Configured text must not leave the workspace, whoever wrote it."""
-    lowered = diff.lower()
+    """Configured text must not leave the workspace, whoever wrote it. Only
+    the lines this change adds are its text: context and removed lines are
+    what was already there."""
+    added = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    lowered = added.lower()
     found = [entry for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()
              if entry.strip() and entry.strip().lower() in lowered]
     if found:
         raise DeliveryError("Refused: the staged change contains configured forbidden text (%d entr%s)"
                             % (len(found), "y" if len(found) == 1 else "ies"))
-    if support.credential() in diff:
+    if support.credential() in added:
         raise DeliveryError("Refused: the staged change contains the delivery credential")
 
 
@@ -137,8 +151,9 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     """Stage the granted paths, refuse anything else, and commit once."""
     paths = changed_paths(workspace)
     refuse_paths_outside_grant(paths, allowed, integration_paths(workspace))
-    if paths:
-        support.run(support.git("-C", str(workspace), "add", "-A", "--", *paths))
+    staging = paths_to_stage(workspace)
+    if staging:
+        support.run(support.git("-C", str(workspace), "add", "-A", "--", *staging))
     _, check, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--check"), check=False)
     if "conflict marker" in check:
         raise DeliveryError("Refused: the change still carries Git conflict markers in: "
@@ -150,12 +165,22 @@ def stage_and_commit(workspace, issue, allowed, receipt):
                                   check=False, redact=False)
     if staged != 0:
         raise DeliveryError("Git could not read the staged change")
-    if not diff.strip():
+    if not diff.strip() and not merge_in_progress(workspace):
         # Nothing new. A receipt for this commit means an interrupted round
         # continues below; without one there is no reviewed work to deliver.
-        if receipt.get("head") == head(workspace):
-            return head(workspace), False
+        # A recorded commit that is now an ancestor of HEAD is the catch-up
+        # merge commit of a round interrupted before it was written down.
+        current = head(workspace)
+        if receipt.get("head") == current:
+            return current, False
+        if receipt.get("head"):
+            code, _, _ = support.run(support.git("-C", str(workspace), "merge-base", "--is-ancestor",
+                                                 receipt["head"], current), check=False)
+            if code == 0:
+                return current, True
         raise DeliveryError("No change under the allowed paths is ready to deliver")
+    # A pending merge whose result equals this branch's own content is still
+    # concluded by a commit: that is what makes the branch mergeable.
     if merge_in_progress(workspace):
         # What the integration branch already carried is not this change;
         # only what differs from that branch's tip is looked at.
@@ -321,10 +346,14 @@ def summary(receipt, pushed, committed):
 def check_only(workspace, owner, name, base, branch, url, allowed):
     """An operator check: local settings plus read-only calls to the target."""
     paths = changed_paths(workspace)
-    refuse_paths_outside_grant(paths, allowed, integration_paths(workspace))
+    exempt = integration_paths(workspace)
+    refuse_paths_outside_grant(paths, allowed, exempt)
     lines = ["Checked the delivery settings; nothing was committed, pushed, opened or merged.",
              "Target %s/%s, integration branch %s, ticket branch %s." % (owner, name, base, branch),
-             "Changed paths inside the operator's grant: %s." % (", ".join(sorted(paths)) or "none")]
+             "Changed paths inside the operator's grant: %s."
+             % (", ".join(sorted(path for path in paths if path not in exempt)) or "none")]
+    if exempt:
+        lines.append("Paths the integration branch changed, which need no grant: %s." % ", ".join(sorted(exempt)))
     status, payload = support.api("GET", "/repos/%s/%s" % (owner, name))  # no retry: this is a check
     lines.append("Reading the repository answered status %d%s." %
                  (status, "" if status != 200 else "; its default branch is %s" % payload.get("default_branch", "?")))
