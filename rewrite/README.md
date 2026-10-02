@@ -546,6 +546,27 @@ its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
 second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
+That sentence carries the model the launch beginning the stage chose, as
+` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
+model, a runtime that selects none, and a launch that could not choose one at
+all, say it as the operator wrote it. Once the request is delivered, one
+further comment lists every launch that used a model, one line per stage in
+the order the stages first ran and each stage's own launches along it, with
+the time each took and the stage named as the status page names it:
+
+```
+使ったモデル (工程ごと、起動順):
+- 要件確定: maker/one (27 秒)
+- 作業: maker/two (11 分 0 秒) — 再実行: maker/three (5 分 18 秒) (失敗)
+- 報告: maker/four (32 秒)
+```
+
+`再実行` opens every launch after a stage's first, whether a later stage sent
+the work back or the stage's own process did not exit 0, and `(失敗)` marks a
+launch that did not exit 0. A stage the work returned to late keeps its own
+line, so its last launch is printed above launches that ran before that
+return.
+
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
@@ -646,7 +667,9 @@ submitted and marked afterwards, with the same atomic write the other runtime
 files use. A submission that fails is retried on later ticks. Because the
 wording is fixed and the controller's own, a retry first reads the issue's
 comments back and matches that exact text, so an ambiguous answer from the
-tracker cannot turn into two identical comments.
+tracker cannot turn into two identical comments. The stage sentences and the
+delivered request's list of the models it used are recorded there the same way,
+so a restart repeats neither.
 
 **After a restart.** When the queue picks up a request whose history holds an
 interrupted action or an unfinished recovery, it posts:
