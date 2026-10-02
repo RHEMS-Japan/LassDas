@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -195,19 +196,25 @@ func TestCategoryScopeAndAllowlistBothHold(t *testing.T) {
 // nothing.
 func TestConfigurationKeyTheEngineDoesNotTakeIsRefused(t *testing.T) {
 	for _, tc := range []struct{ text, want string }{
-		{`{"intake":{"project_id":17,"category_id":[77]}}`, "unknown key intake.category_id"},
-		{`{"intake":{"project_id":17,"categories":[77]}}`, "unknown key intake.categories"},
-		{`{"intake":{"project_id":17},"category_ids":[77]}`, "unknown key category_ids"},
-		{`{"intake":{"project_id":17,"stop_user_id":[5]}}`, "unknown key intake.stop_user_id"},
-		{`{"roles":[{"name":"a","processes":[{"name":"w"}]},{"name":"b","processes":[{"name":"w"},{"name":"x","tracker_acess":"read"}]}]}`, "unknown key roles[1].processes[1].tracker_acess"},
+		{`{"intake":{"project_id":17,"category_id":[77]}}`, `unknown key "category_id" in intake`},
+		{`{"intake":{"project_id":17,"categories":[77]}}`, `unknown key "categories" in intake`},
+		{`{"intake":{"project_id":17},"category_ids":[77]}`, `unknown key "category_ids" at the top level`},
+		{`{"intake":{"project_id":17,"stop_user_id":[5]}}`, `unknown key "stop_user_id" in intake`},
+		{`{"roles":[{"name":"a","processes":[{"name":"w"}]},{"name":"b","processes":[{"name":"w"},{"name":"x","tracker_acess":"read"}]}]}`, `unknown key "tracker_acess" in roles[1].processes[1]`},
 		// The decoder matches a struct's keys without regard to letter case,
 		// so this would be the same setting twice, the empty one last.
-		{`{"intake":{"project_id":17,"category_ids":[77],"Category_IDs":[]}}`, "unknown key intake.Category_IDs"},
-		{`{"intake":{"project_id":17,"category_ids":[77],"category_ids":[]}}`, "intake.category_ids is written twice"},
-		{`{"intake":{"project_id":17,"created_since":"2026-06-01T00:00:00Z","created_since":"2020-01-01T00:00:00Z"}}`, "intake.created_since is written twice"},
-		{`{"intake":{"project_id":17,"category_ids":[77]},"intake":{"project_id":17}}`, "intake is written twice"},
-		{`{"roles":[{"name":"a","processes":[{"name":"w","env":{"A":"1","A":"2"}}]}]}`, "roles[0].processes[0].env.A is written twice"},
+		{`{"intake":{"project_id":17,"category_ids":[77],"Category_IDs":[]}}`, `unknown key "Category_IDs" in intake`},
+		{`{"intake":{"project_id":17,"category_ids":[77],"category_ids":[]}}`, `the key "category_ids" is written twice in intake; the later one would win without a word`},
+		{`{"intake":{"project_id":17,"created_since":"2026-06-01T00:00:00Z","created_since":"2020-01-01T00:00:00Z"}}`, `the key "created_since" is written twice in intake`},
+		{`{"intake":{"project_id":17,"category_ids":[77]},"intake":{"project_id":17}}`, `the key "intake" is written twice at the top level`},
+		{`{"roles":[{"name":"a","processes":[{"name":"w","env":{"A":"1","A":"2"}}]}]}`, `the key "A" is written twice in roles[0].processes[0].env`},
+		// A setting written flat, as the documents name it, is not that setting.
+		{`{"intake.category_ids":[77]}`, `unknown key "intake.category_ids" at the top level`},
+		{`{"intake":{"":1}}`, `unknown key "" in intake`},
 		{`{"intake":{"project_id":17}} {"intake":{"project_id":18}}`, "text follows the configuration object"},
+		// Deeper than a configuration is read: refused by the decoder's own
+		// limit, without the walk beside it growing with the depth squared.
+		{`{"roles":[{"name":"a","processes":[{"name":"w","env":{"A":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}}]}]}`, "exceeded max depth"},
 		{`{"intake":{"project_id":"17"}}`, "cannot unmarshal string"},
 		{`{"intake":[17]}`, "cannot unmarshal array"},
 		{`{"intake":{"project_id":17}`, "unexpected EOF"},
@@ -236,14 +243,14 @@ func TestConfigurationKeyTheEngineDoesNotTakeIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = run(context.Background(), []string{"--config", path, "--watch", "--run-dir", root, "--log-file", logFile}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "unknown key intake.category_id") {
+	if err == nil || !strings.Contains(err.Error(), `unknown key "category_id" in intake`) {
 		t.Fatalf("the engine started on a misspelled filter: %v", err)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("a refused configuration wrote state")
 	}
 	// The status page shows the log file, so the reason is there too.
-	if said, err := os.ReadFile(logFile); err != nil || string(said) != "the runtime stopped: reading the configuration: unknown key intake.category_id\n" {
+	if said, err := os.ReadFile(logFile); err != nil || string(said) != "the runtime stopped: reading the configuration: unknown key \"category_id\" in intake\n" {
 		t.Fatalf("the log file says %q, %v", said, err)
 	}
 }
@@ -296,6 +303,14 @@ func TestCheckReadsTheConfigurationAndStartsNothing(t *testing.T) {
 	cfg.Intake.CategoryIDs, cfg.Intake.CreatedSince = nil, "yesterday"
 	if err := run(context.Background(), []string{"--config", write(cfg), "--check"}, &output, io.Discard); err == nil || !strings.Contains(err.Error(), "intake.created_since") {
 		t.Fatalf("an invalid starting time passed the check: %v", err)
+	}
+	// The check is of a watch's start, so a configuration the watch would
+	// refuse for having no intake is refused here, not called accepted.
+	cfg = watchConfiguration(t)
+	cfg.Intake = nil
+	output.Reset()
+	if err := run(context.Background(), []string{"--config", write(cfg), "--check"}, &output, io.Discard); err == nil || err.Error() != "watch requires an explicit intake.project_id" || output.Len() != 0 {
+		t.Fatalf("a configuration without intake passed the check: %v %q", err, output.String())
 	}
 	// It is a check, not a way to start: nothing else goes with it.
 	for _, extra := range [][]string{{"--watch"}, {"--run-dir", filepath.Join(directory, "queue")}, {"--log-file", filepath.Join(directory, "engine.log")}, {"--request", "request.txt"}} {
@@ -351,5 +366,39 @@ func TestIntakeScopeIsSaidAtStart(t *testing.T) {
 	}
 	if said() != 1 {
 		t.Fatalf("the scope was said %d times", said())
+	}
+}
+
+// The reader walks the configuration's text beside its types and takes a
+// struct's keys by their names. The decoder also takes the keys of a struct
+// embedded in another as the outer one's own; the walk does not, so an
+// embedded struct would make a correct configuration be refused at start.
+// There is none today; this fails when one is added, before an operator
+// meets it.
+func TestConfigurationTypesEmbedNoStruct(t *testing.T) {
+	seen := map[reflect.Type]bool{}
+	var walk func(reflect.Type, string)
+	walk = func(kind reflect.Type, where string) {
+		for kind.Kind() == reflect.Pointer || kind.Kind() == reflect.Slice || kind.Kind() == reflect.Array || kind.Kind() == reflect.Map {
+			kind = kind.Elem()
+		}
+		if kind.Kind() != reflect.Struct || seen[kind] {
+			return
+		}
+		seen[kind] = true
+		for i := 0; i < kind.NumField(); i++ {
+			field := kind.Field(i)
+			if name, _, _ := strings.Cut(field.Tag.Get("json"), ","); !field.IsExported() || name == "-" {
+				continue
+			}
+			if field.Anonymous {
+				t.Errorf("%s embeds %s; give it a name of its own, or teach checkKeys to take an embedded struct's keys", where, field.Name)
+			}
+			walk(field.Type, where+"."+field.Name)
+		}
+	}
+	walk(reflect.TypeOf(config{}), "config")
+	if len(seen) < 5 {
+		t.Fatalf("the walk saw %d types; it no longer reaches the configuration", len(seen))
 	}
 }

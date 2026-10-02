@@ -220,7 +220,7 @@ a different setting: it marks what the runtime accepted and narrows nothing.
 
 The runtime refuses a configuration it cannot take as written, instead of
 running on something else. A key it does not know is named with its place,
-`unknown key intake.category_id`: `category_id` for `category_ids` would
+`unknown key "category_id" in intake`: `category_id` for `category_ids` would
 otherwise be no filter at all. A key's letter case must be the documented one.
 A key written twice in one object is refused too, since the later one would
 win without a word. A runtime that refuses its configuration does not start,
@@ -233,8 +233,9 @@ what the status page shows.
 go run ./cmd/engine --config operator.json --check
 ```
 
-It runs the checks of a real start, prints which new issues a watch would take
-up, for example `intake: project 17, issues created at or after
+It runs the checks of a `--watch` start, so a configuration the watch would
+refuse is refused here in the same words, and prints which new issues the
+watch would take up, for example `intake: project 17, issues created at or after
 2026-01-02T00:00:00Z; only issues carrying one of the categories [77]` or
 `...; every such issue is accepted`, then `the configuration is accepted;
 nothing was started`, and exits. It creates no queue and no log file and makes

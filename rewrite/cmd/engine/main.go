@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,7 +65,7 @@ func routingRoleDescription(role chain.Role) string {
 func readConfig(data []byte) (config, error) {
 	var cfg config
 	keys := json.NewDecoder(bytes.NewReader(data))
-	if err := checkKeys(keys, reflect.TypeOf(cfg), ""); err != nil {
+	if err := checkKeys(keys, reflect.TypeOf(cfg), &[]string{}); err != nil {
 		// A text that is not JSON at all is described by the decoder below.
 		var refused keyRefusal
 		if errors.As(err, &refused) {
@@ -94,8 +95,10 @@ func (r keyRefusal) Error() string { return string(r) }
 // case, so `Category_IDs` beside `category_ids` would be the same setting
 // twice. In any object a key may be written once. A value whose type is not
 // known here (a map's values, a list's items) is still walked for the keys
-// below it.
-func checkKeys(decoder *json.Decoder, expected reflect.Type, where string) error {
+// below it. The place is kept as its parts and written out only for a
+// refusal; a text nested deeper than the decoder reads is left for the
+// decoder to refuse.
+func checkKeys(decoder *json.Decoder, expected reflect.Type, place *[]string) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -103,6 +106,9 @@ func checkKeys(decoder *json.Decoder, expected reflect.Type, where string) error
 	opening, compound := token.(json.Delim)
 	if !compound {
 		return nil
+	}
+	if len(*place) > 10000 {
+		return errors.New("nested deeper than a configuration is read")
 	}
 	for expected != nil && expected.Kind() == reflect.Pointer {
 		expected = expected.Elem()
@@ -112,17 +118,20 @@ func checkKeys(decoder *json.Decoder, expected reflect.Type, where string) error
 	if expected != nil {
 		switch expected.Kind() {
 		case reflect.Struct:
-			fields = map[string]reflect.Type{}
-			for i := 0; i < expected.NumField(); i++ {
-				field := expected.Field(i)
-				name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-				if !field.IsExported() || name == "-" {
-					continue
+			// A list where an object belongs is for the decoder to describe.
+			if opening == '{' {
+				fields = map[string]reflect.Type{}
+				for i := 0; i < expected.NumField(); i++ {
+					field := expected.Field(i)
+					name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+					if !field.IsExported() || name == "-" {
+						continue
+					}
+					if name == "" {
+						name = field.Name
+					}
+					fields[name] = field.Type
 				}
-				if name == "" {
-					name = field.Name
-				}
-				fields[name] = field.Type
 			}
 		case reflect.Map:
 			if opening == '{' {
@@ -134,34 +143,41 @@ func checkKeys(decoder *json.Decoder, expected reflect.Type, where string) error
 			}
 		}
 	}
-	// A list where an object belongs is for the decoder to describe.
-	if opening != '{' {
-		fields = nil
+	// Said of a key: the object it is in, by the path that leads there.
+	in := func() string {
+		if len(*place) == 0 {
+			return "at the top level"
+		}
+		return "in " + strings.Join(*place, "")
 	}
 	seen := map[string]bool{}
 	for index := 0; decoder.More(); index++ {
-		at, next := fmt.Sprintf("%s[%d]", where, index), item
+		part, next := "["+strconv.Itoa(index)+"]", item
 		if opening == '{' {
 			name, err := decoder.Token()
 			if err != nil {
 				return err
 			}
 			key, _ := name.(string)
-			at = strings.TrimPrefix(where+"."+key, ".")
 			if seen[key] {
-				return keyRefusal(fmt.Sprintf("%s is written twice; the later one would win without a word", at))
+				return keyRefusal(fmt.Sprintf("the key %q is written twice %s; the later one would win without a word", key, in()))
 			}
 			seen[key] = true
 			if fields != nil {
 				known := false
 				if next, known = fields[key]; !known {
-					return keyRefusal(fmt.Sprintf("unknown key %s", at))
+					return keyRefusal(fmt.Sprintf("unknown key %q %s", key, in()))
 				}
 			}
+			if part = key; len(*place) > 0 {
+				part = "." + key
+			}
 		}
-		if err := checkKeys(decoder, next, at); err != nil {
+		*place = append(*place, part)
+		if err := checkKeys(decoder, next, place); err != nil {
 			return err
 		}
+		*place = (*place)[:len(*place)-1]
 	}
 	_, err = decoder.Token()
 	return err
@@ -186,7 +202,7 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 	watch := flags.Bool("watch", false, "poll the explicitly configured intake into separate request directories")
 	directory := flags.String("run-dir", "", "private directory for this request's history")
 	logFile := flags.String("log-file", "", "also append the runtime's own observations to this file (the status page reads it)")
-	check := flags.Bool("check", false, "read and validate the configuration, say which issues a watch would take up, and start nothing")
+	check := flags.Bool("check", false, "read the configuration and run the checks of a --watch start, say which issues the watch would take up, and start nothing")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -325,18 +341,18 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 		return errors.New("choose router.mode jev, llm or stages")
 	}
 	if *check {
-		// Everything above and the watch's own checks ran as they would at a
-		// real start. Nothing was created, read from a service or written.
-		if cfg.Intake != nil {
-			if cfg.AssignedIssue != "" {
-				return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
-			}
-			_, since, _, _, err := watchSettings(&cfg, "queue")
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(output, intakeScope(cfg, since))
+		// The check is of a watch's start: everything above and the watch's
+		// own checks ran as they would there, so what passes here is what
+		// `--watch` starts on. Nothing was created, read from a service or
+		// written.
+		if cfg.AssignedIssue != "" {
+			return errors.New("watch assigns each issue; do not configure assigned_issue for the entire queue")
 		}
+		_, since, _, _, err := watchSettings(&cfg, "queue")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(output, intakeScope(cfg, since))
 		fmt.Fprintln(output, "the configuration is accepted; nothing was started")
 		return nil
 	}
