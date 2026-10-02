@@ -6,12 +6,12 @@
 # and with no network, and read the example. Anything else fails here - a
 # success, another message, or docker unable to start it.
 #
-# Usage: check-packaged-engine.sh IMAGE
+# Usage: bash .github/scripts/check-packaged-engine.sh IMAGE
 # image-check.yml runs it on every pull request; image.yml runs it after the
 # build and before the push, so an image whose engine fails it is not pushed.
 set -uo pipefail
 if [ "$#" -ne 1 ]; then
-  echo "usage: check-packaged-engine.sh IMAGE" >&2
+  echo "usage: bash .github/scripts/check-packaged-engine.sh IMAGE" >&2
   exit 2
 fi
 expected="watch requires an explicit intake.project_id"
