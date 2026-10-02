@@ -13,8 +13,11 @@ The send-back counter and a log stay in the process's own directory
 (TASK_HOME) and only inform: a verdict stands whether or not they were saved.
 
 No verdict, no pass. The command exits 0 only on a verdict that does not
-object and 1 only on one that does; without a verdict it does neither, and a
-verdict whose blocking is anything but true or false is none. Trouble with
+object and 1 only on one that does; without a verdict it does neither. A
+verdict's fields are read in any letter case, and its blocking counts when
+its meaning is plain: true or false, "true" or "false" in any case, 1 or 0.
+Anything else is no verdict, and what the reviewer wrote with it is shown in
+the live view and kept in the printed result and the log. Trouble with
 the model service (a connection that fails or times out, an HTTP error, a
 reply without a verdict), and anything unexpected, is waited out: the models
 are asked in the operator's order, round after round, the wait between
@@ -202,25 +205,39 @@ def cut(text, limit, what):
     return text[:limit] + "\n[%s cut here: %d of %d characters shown]\n" % (what, limit, len(text))
 
 
-def git(workspace, *arguments):
-    # Names as they are, not as octal escapes: a diff header in Japanese is
-    # read by the reviewer as it was written.
+def git(workspace, *arguments, names=False):
+    """Git's output, read without the user's or the system's Git settings, as
+    the delivery reads the checkout: with one of them (an exclude file, say),
+    the two could disagree on whether anything changed. Names come as they
+    are, not as octal escapes, so a diff header in Japanese is read as it was
+    written; a name that is not UTF-8 is kept usable as a path when names is
+    set, and otherwise shows a replacement character."""
+    environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                       GIT_CONFIG_NOSYSTEM="1")
     try:
         finished = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(workspace), *arguments],
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, timeout=60, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReviewError("the change could not be read: git %s: %s" % (arguments[0], error), recheck=True)
     if finished.returncode != 0:
         raise ReviewError("the change could not be read: git %s exited %d: %s"
-                          % (arguments[0], finished.returncode, finished.stderr.strip()[:200]), recheck=True)
-    return finished.stdout
+                          % (arguments[0], finished.returncode,
+                             finished.stderr.decode("utf-8", "replace").strip()[:200]), recheck=True)
+    return finished.stdout.decode("utf-8", "surrogateescape" if names else "replace")
+
+
+def shown(name):
+    """A name as it can be printed and sent: bytes that are not UTF-8 become
+    a replacement character."""
+    return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def changed_entries(workspace, *scope):
     """Every path Git lists as changed, staged or untracked, as "XY path".
     Read separated by NUL, where Git quotes and escapes no name: read from the
     ordinary listing, a name in Japanese or with a quote in it named no file."""
-    output = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *scope)
+    output = git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", *scope,
+                 names=True)
     return [entry for entry in output.split("\0") if len(entry) > 3]
 
 
@@ -243,15 +260,15 @@ def gather(workspace, paths, test_commands, timeout):
     for entry in entries:
         if not entry.startswith("?? "):
             continue
-        name = entry[3:]
-        path = workspace / name
+        path = workspace / entry[3:]
+        name = shown(entry[3:])
         if path.is_symlink():
-            new_files += "--- new symbolic link %s -> %s ---\n" % (name, os.readlink(path))
+            new_files += "--- new symbolic link %s -> %s ---\n" % (name, shown(os.readlink(path)))
         elif path.is_file():
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
             except OSError as error:
-                new_files += "--- new file %s, which could not be read: %s ---\n" % (name, error)
+                new_files += "--- new file %s, which could not be read: %s ---\n" % (name, shown(str(error)))
                 continue
             new_files += "--- new file %s ---\n%s\n" % (name, cut(content, NEW_FILE_LIMIT, "new file"))
         else:
@@ -326,9 +343,44 @@ def prepare():
     return found
 
 
+def truth(value):
+    """A value read as true or false when its meaning is plain: true or false,
+    "true" or "false" in any letter case, 1 or 0. None otherwise."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return value == 1
+    return None
+
+
+def read_verdict(arguments):
+    """(blocking, findings, why) from the verdict tool's arguments. Field names
+    are read in any letter case. blocking is True or False when it is plain,
+    or None, with why, when it is not; the findings are kept either way, so
+    the worker and the report writer can read what the reviewer wrote."""
+    verdict = json.loads(arguments)
+    if not isinstance(verdict, dict):
+        return None, "", "the reviewer's verdict was not a set of named fields"
+    given = {}
+    for name, value in verdict.items():
+        given.setdefault(str(name).lower(), []).append(value)
+    findings = "\n".join(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+                         for text in given.get("findings", []) if text not in (None, ""))
+    values = given.get("blocking", [])
+    read = {truth(value) for value in values}
+    if values and None not in read and len(read) == 1:
+        return read.pop(), findings, None
+    if not values:
+        return None, findings, "the reviewer's verdict gave no blocking"
+    return None, findings, ("the reviewer's verdict gave no plain true or false for blocking (it gave %s)"
+                            % ", ".join(json.dumps(value, ensure_ascii=False)[:40] for value in values))
+
+
 def ask_once(found, model, prompt, diff, tests, rounds):
     """One request to one model: (blocking, findings, None) on a verdict,
-    (None, None, why) otherwise."""
+    (None, what the reviewer wrote, why) otherwise."""
     request = {"model": model, "temperature": 0.2, "tools": [TOOL],
                "tool_choice": {"type": "function", "function": {"name": "verdict"}},
                "messages": [
@@ -347,25 +399,32 @@ def ask_once(found, model, prompt, diff, tests, rounds):
             reply = json.loads(response.read().decode("utf-8", errors="replace"))
         calls = ((reply.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
         if not calls:
-            return None, None, "the reviewer returned no verdict"
-        verdict = json.loads(calls[0]["function"]["arguments"])
-        # The one field read strictly, since it decides whether the work goes
-        # on: anything but true or false is no verdict.
-        if isinstance(verdict, dict) and isinstance(verdict.get("blocking"), bool):
-            return verdict["blocking"], str(verdict.get("findings") or ""), None
-        return None, None, "the reviewer's verdict gave neither true nor false for blocking"
+            return None, "", "the reviewer returned no verdict"
+        return read_verdict(calls[0]["function"]["arguments"])
     except urllib.error.HTTPError as error:
-        return None, None, "HTTP %d from the model service" % error.code
+        return None, "", "HTTP %d from the model service" % error.code
     except Exception as error:  # a model service hiccup is not a defect in the change
-        return None, None, type(error).__name__ + ": " + scrub(str(error), found["key"])[:200]
+        return None, "", type(error).__name__ + ": " + scrub(str(error), found["key"])[:200]
+
+
+def keep_unclear(model, findings, unclear):
+    """What a model wrote without a plain verdict, once per text, for the
+    record the review ends with. Whether it is new."""
+    entry = "%s: %s" % (model, findings)
+    if not findings or entry in unclear:
+        return False
+    unclear.append(entry)
+    return True
 
 
 def verdict_until_given(found, prompt, diff, tests, rounds):
     """Ask until a model gives a verdict. Each round asks the operator's
     models in order; when none answers, the wait before the next round grows
     from REVIEW_RETRY_SECONDS to REVIEW_RETRY_CAP_SECONDS. The live view is
-    told when what goes wrong changes, not on every request."""
-    wait, told, asked = 0, None, 0
+    told when what goes wrong changes, not on every request, and is shown
+    what a model wrote without a plain verdict, since this may go on a while.
+    Returns (model, blocking, findings, what was written without a verdict)."""
+    wait, told, asked, unclear = 0, None, 0, []
     while True:
         failures = []
         for model in found["models"]:
@@ -375,7 +434,9 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
                 if told is not None:
                     say("Review: %s gave a verdict, after %d request%s that got none."
                         % (model, asked - 1, "" if asked == 2 else "s"))
-                return model, blocking, findings
+                return model, blocking, findings, unclear
+            if keep_unclear(model, findings, unclear):
+                say("Review: %s wrote, without a plain verdict: %s" % (model, findings[:2000]))
             failures.append("%s: %s" % (model, why))
         wait = min(max(wait * 2, found["retry"]), found["cap"])
         if failures != told:
@@ -387,17 +448,19 @@ def verdict_until_given(found, prompt, diff, tests, rounds):
 
 def verdict_or_none(found, prompt, diff, tests, rounds):
     """With REVIEW_UNAVAILABLE=pass: REVIEW_ATTEMPTS requests, the models in
-    turn, then (None, None, why) when none gave a verdict."""
-    last = ""
+    turn, then (None, None, why, ...) when none gave a verdict. The last item
+    is what was written without a verdict, as for verdict_until_given."""
+    last, unclear = "", []
     for attempt in range(found["attempts"]):
         model = found["models"][attempt % len(found["models"])]
         blocking, findings, why = ask_once(found, model, prompt, diff, tests, rounds)
         if why is None:
-            return model, blocking, findings
+            return model, blocking, findings, unclear
+        keep_unclear(model, findings, unclear)
         last = why if len(found["models"]) == 1 else "%s: %s" % (model, why)
         if attempt + 1 < found["attempts"]:
             time.sleep(min(5 * (attempt + 1), 20))
-    return None, None, last
+    return None, None, last, unclear
 
 
 def without_verdict(model, reason, unchanged, goes_on):
@@ -429,7 +492,7 @@ def reviewed(stdin_text, unchanged, passing):
     if unchanged:
         diff = NO_CHANGE
     ask = verdict_or_none if passing else verdict_until_given
-    model, blocking, findings = ask(found, stdin_text, diff, test_output, sent_back)
+    model, blocking, findings, unclear = ask(found, stdin_text, diff, test_output, sent_back)
     outcome, status = "PASSED", 0
     if model is None:
         model, outcome = ", ".join(found["models"]), "NOT REVIEWED"
@@ -443,6 +506,9 @@ def reviewed(stdin_text, unchanged, passing):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
+    if unclear:
+        # What the reviewer wrote without a verdict stays in the record.
+        findings = (findings + "\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
     findings = scrub(findings, key)
     print("Review by %s: %s. Send-backs so far: %d.\n%s"
           % (model, outcome, sent_back, (findings or "(no findings)")[:6000]))
@@ -469,9 +535,6 @@ def waits(name, default):
 
 
 def main():
-    # Read before any setting: a setting that keeps the review from running
-    # must not let an unchanged checkout through either.
-    unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
     passing = os.environ.get("REVIEW_UNAVAILABLE", "") == "pass"
     try:
         # Read as bytes and decode leniently: a stray byte in the runtime's
@@ -479,9 +542,12 @@ def main():
         stdin_text = sys.stdin.buffer.read().decode("utf-8", errors="replace") if not sys.stdin.isatty() else ""
     except (OSError, ValueError):
         stdin_text = ""
-    held, told, wait = None, None, 0
+    unchanged, held, told, wait = False, None, None, 0
     while True:
         try:
+            # Read before any setting: a setting that keeps the review from
+            # running must not let an unchanged checkout through either.
+            unchanged = nothing_changed(os.environ.get("TASK_WORKSPACE", ""))
             return reviewed(stdin_text, unchanged, passing)
         except ReviewError as error:
             reason = scrub(str(error), credential())
