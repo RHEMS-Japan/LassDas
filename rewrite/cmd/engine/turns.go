@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"ticket-runner/internal/chain"
+	"ticket-runner/internal/stagename"
 )
 
 // The requester lives on the tracker. At each turn of the work the runtime
@@ -22,6 +25,7 @@ import (
 const (
 	acceptedNotice = "accepted"
 	startedNotice  = "started"
+	modelsNotice   = "models"
 	stagePrefix    = "stage:"
 )
 
@@ -221,6 +225,84 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 	}
 }
 
+// The requester reads one comment per stage saying which model began it. At
+// the end they get the whole list, every launch of every model stage in the
+// order they ran, so a request that was sent back twice shows what each
+// attempt was worked on and for how long. The runtime writes it; no model
+// composes it, and nothing in it grades what any of them wrote.
+const modelsUsedHeading = "使ったモデル (起動順):"
+
+// relaunched opens each launch after the first of the same stage: the work
+// came back to it, from a stage that sent it back or from its own failure.
+const relaunched = " — 差し戻し後:"
+
+// launchFailed marks a launch whose process did not exit 0. It is listed like
+// any other: the time was spent on that model either way.
+const launchFailed = " (失敗)"
+
+// modelsUsedText is that list, or empty when no launch of this request used a
+// model at all. A stage of one of the shipped runs is named in Japanese, as
+// the status page names it; one an operator named otherwise keeps its name.
+func modelsUsedText(state chain.State) string {
+	order, launches := modelLaunches(state)
+	if len(order) == 0 {
+		return ""
+	}
+	var text strings.Builder
+	text.WriteString(modelsUsedHeading)
+	for _, role := range order {
+		name, known := stagename.Japanese(role)
+		if !known {
+			name = role
+		}
+		fmt.Fprintf(&text, "\n- %s:", name)
+		for i, launch := range launches[role] {
+			if i > 0 {
+				text.WriteString(relaunched)
+			}
+			fmt.Fprintf(&text, " %s (%s)", launch.model, launch.duration)
+			if launch.failed {
+				text.WriteString(launchFailed)
+			}
+		}
+	}
+	return text.String()
+}
+
+// spentText is how long one launch ran, in whole seconds, with the minutes
+// and hours only when there were any.
+func spentText(spent time.Duration) string {
+	if spent < 0 {
+		spent = 0
+	}
+	spent = spent.Round(time.Second)
+	hours, minutes, seconds := int(spent/time.Hour), int(spent/time.Minute)%60, int(spent/time.Second)%60
+	switch {
+	case hours > 0:
+		return fmt.Sprintf("%d 時間 %d 分 %d 秒", hours, minutes, seconds)
+	case minutes > 0:
+		return fmt.Sprintf("%d 分 %d 秒", minutes, seconds)
+	}
+	return fmt.Sprintf("%d 秒", seconds)
+}
+
+// modelsTurn posts that list once, when the request is delivered, beside the
+// other turns the runtime takes there. It is recorded like every other notice,
+// so a restart does not post it twice, and a tracker that refuses is asked
+// again on the next tick; it never ends or holds the request.
+func modelsTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, state chain.State, observe func(string)) {
+	if cfg.Intake == nil || !cfg.Intake.Announce {
+		return
+	}
+	text := modelsUsedText(state)
+	if text == "" {
+		return
+	}
+	if err := requestNotices(cfg, issue, directory).post(ctx, modelsNotice, text); err != nil {
+		observe("the models used were not announced: " + err.Error())
+	}
+}
+
 // resumeTurn says that the requester's answer was read and the work goes on.
 func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, observe func(string)) {
 	if cfg.Intake == nil || !cfg.Intake.Announce {
@@ -233,6 +315,10 @@ func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 
 // announceStages posts, once each, the operator's sentence for a stage that
 // has begun: a stage has begun when its live copy exists or its record does.
+// The sentence carries the model the launch that began the stage is working
+// with, so the requester reads what is on their request and not only that
+// something is. A stage that launches no model, and a runtime that chooses
+// none, say the sentence as the operator wrote it.
 func announceStages(ctx context.Context, cfg config, issue sourceIssue, directory string, observe func(string)) {
 	if cfg.Workflow == nil || cfg.Intake == nil || !cfg.Intake.Announce {
 		return
@@ -268,7 +354,20 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 		if !begun {
 			continue
 		}
-		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, stage.Announce); err != nil {
+		text := stage.Announce
+		// Ask the configuration first: a stage that launches no model has no
+		// record to read, on this tick or any other.
+		if awaitsModel(cfg, stage.Name) {
+			model := firstModel(directory, stage.Name)
+			if model == "" {
+				// The launch chooses its model before the child starts, so
+				// the choice is a tick away. Wait for it rather than spend
+				// this stage's one sentence saying nothing about the work.
+				continue
+			}
+			text += " (モデル: " + model + ")"
+		}
+		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, text); err != nil {
 			observe("stage " + stage.Name + " not announced: " + err.Error())
 		}
 	}

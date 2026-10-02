@@ -546,6 +546,12 @@ its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
 second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
+That sentence carries the model the launch beginning the stage chose, as
+` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
+model, and a runtime that selects none, say it as the operator wrote it. Once
+the request is delivered, one further comment lists every launch that used a
+model in the order they ran, with the time each took and its stage named as the
+status page names it, and a launch whose process did not exit 0 marked `(失敗)`.
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
@@ -646,7 +652,9 @@ submitted and marked afterwards, with the same atomic write the other runtime
 files use. A submission that fails is retried on later ticks. Because the
 wording is fixed and the controller's own, a retry first reads the issue's
 comments back and matches that exact text, so an ambiguous answer from the
-tracker cannot turn into two identical comments.
+tracker cannot turn into two identical comments. The stage sentences and the
+delivered request's list of the models it used are recorded there the same way,
+so a restart repeats neither.
 
 **After a restart.** When the queue picks up a request whose history holds an
 interrupted action or an unfinished recovery, it posts:

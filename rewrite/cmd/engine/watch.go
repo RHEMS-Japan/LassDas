@@ -275,6 +275,7 @@ func pollRequests(ctx context.Context, cfg config, jobs string, since time.Time,
 				if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil && len(state.History) > 0 {
 					hoursTurn(ctx, cfg, issue, directory, info.ModTime(), state.History[len(state.History)-1].FinishedAt, say)
 				}
+				modelsTurn(ctx, cfg, issue, directory, state, say)
 				if err := trimFinished(directory); err != nil {
 					reason := err.Error()
 					if reason == "" {

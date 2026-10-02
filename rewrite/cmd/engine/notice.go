@@ -148,7 +148,7 @@ func noticeDue(log noticeLog, kind string, now time.Time) bool {
 	if kind == stallNotice {
 		interval = stallNoticeInterval
 	}
-	once := kind == acceptedNotice || kind == startedNotice || strings.HasPrefix(kind, stagePrefix)
+	once := kind == acceptedNotice || kind == startedNotice || kind == modelsNotice || strings.HasPrefix(kind, stagePrefix)
 	for i := len(log.Notices) - 1; i >= 0; i-- {
 		if log.Notices[i].Kind == kind {
 			return !once && now.Sub(log.Notices[i].WrittenAt) >= interval

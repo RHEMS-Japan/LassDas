@@ -73,6 +73,14 @@ type Processes struct {
 	// Prepare attaches launch-scoped resources. Release runs after the child
 	// returns, including cancellation. It must not evaluate the child's answer.
 	Prepare func(context.Context, Process) (Process, func(), error)
+	// Chosen, when set, is told which model this launch will use: the catalog
+	// id, without the invocation prefix, right after the selection succeeded
+	// and before the child starts. It is how the runtime can say at the start
+	// of a stage which model is working on it, which the history cannot
+	// answer because it is saved only once the launch has returned. It runs
+	// in the launching goroutine, so it must not be slow, and it judges
+	// nothing: a failed selection launches nothing and tells it nothing.
+	Chosen func(role, process, model string)
 }
 
 func (p Processes) Execute(ctx context.Context, assignment Assignment, state State) []Result {
@@ -104,6 +112,9 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				continue
 			}
 			selected = append(selected, model)
+			if p.Chosen != nil {
+				p.Chosen(name, process.Name, model)
+			}
 			prefix = p.ModelPrefix
 			// Do not mutate configured maps shared by this role's next launch.
 			environment := make(map[string]string, len(process.Env)+1)

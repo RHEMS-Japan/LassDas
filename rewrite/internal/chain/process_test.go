@@ -392,3 +392,52 @@ func TestAPromptCollapsesRepeatedFailuresAndCapsTheRecords(t *testing.T) {
 		t.Fatalf("the prompt repeats the failure %d times", strings.Count(prompt, "Traceback: the same"))
 	}
 }
+
+// The runtime tells the person who filed the request which model took their
+// work on, at the moment the stage begins. The history cannot answer that
+// yet, so the choice is handed over before the child runs, and a selection
+// that failed hands over nothing because nothing ran.
+func TestTheChosenModelIsHandedOverBeforeTheChildRuns(t *testing.T) {
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "ran.txt")
+	var told []string
+	childHadRun := false
+	processes := Processes{
+		Roles: map[string]Role{"work": {Name: "work", Processes: []Process{
+			{Name: "worker", Directory: directory, ModelEnv: "MODEL",
+				Command: []string{"/bin/sh", "-c", `printf '%s' "$MODEL" > ran.txt`}},
+		}}},
+		ModelPrefix: "gateway/",
+		SelectModel: func(context.Context, Role, Process, State, []string) (string, error) {
+			return "maker/current", nil
+		},
+		Chosen: func(role, process, model string) {
+			told = append(told, role+" "+process+" "+model)
+			if _, err := os.Stat(marker); err == nil {
+				childHadRun = true
+			}
+		},
+	}
+	result := processes.Execute(context.Background(), Assignment{Role: "work"}, State{})[0]
+	if result.Error != "" || result.Model != "maker/current" || result.ModelPrefix != "gateway/" {
+		t.Fatalf("launch: %#v", result)
+	}
+	if len(told) != 1 || told[0] != "work worker maker/current" {
+		t.Fatalf("the chosen model was handed over as %v", told)
+	}
+	if childHadRun {
+		t.Fatal("the child had already run when the chosen model was handed over")
+	}
+	// The harness is reached through the gateway; what a person is told is the
+	// catalog id, the same id the record keeps.
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "gateway/maker/current" {
+		t.Fatalf("the harness was given %q (%v)", data, err)
+	}
+	processes.SelectModel = func(context.Context, Role, Process, State, []string) (string, error) {
+		return "", errors.New("catalog HTTP 503: actual reason")
+	}
+	told = nil
+	if result := processes.Execute(context.Background(), Assignment{Role: "work"}, State{})[0]; result.Error == "" || len(told) != 0 {
+		t.Fatalf("a failed selection handed over %v: %#v", told, result)
+	}
+}
