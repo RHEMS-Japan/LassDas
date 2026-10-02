@@ -8,7 +8,7 @@
 # They are the workload's own rules. They do not change the cluster's network
 # plugin, they do not restrict which public services may be reached, and an
 # accepted manifest is not evidence of enforcement: check both an allowed and
-# a forbidden destination from the running Pod (README.md, step 6).
+# a forbidden destination from the running Pod (SETUP.md, "Before it accepts work").
 apiVersion: v1
 kind: ConfigMap
 metadata:

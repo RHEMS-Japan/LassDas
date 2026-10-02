@@ -318,7 +318,7 @@ spec:
         # the controller's and the toolchain's. Deliberately without a
         # sizeLimit: exceeding one evicts the Pod in the middle of a request,
         # which is a worse failure than a full filesystem. Watch it instead
-        # (README.md, "Before it accepts work").
+        # (SETUP.md, "Before it accepts work").
         - name: temporary
           emptyDir: {}
   volumeClaimTemplates:

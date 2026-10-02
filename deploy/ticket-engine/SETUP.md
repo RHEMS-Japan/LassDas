@@ -611,7 +611,8 @@ POD=<consumer>-ticket-engine-0
    `kubectl.kubernetes.io/last-applied-configuration`. To change a value
    later, fill a copy again, run `kubectl -n "$NS" replace -f secrets.yaml`,
    delete the copy, and restart the Pod: the containers read the values only
-   when they start.
+   when they start. `replace` makes both Secrets exactly what the copy holds,
+   so write every value of both again; a value left empty becomes empty.
 
 3. **The egress rules.** In your copy of `egress-configmap.yaml.example`,
    `<dns-cluster-ip>` is the address the Pods' `/etc/resolv.conf` names (the
@@ -732,8 +733,8 @@ Pod has it:
 kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
 import json, os
 config = json.load(open("/etc/ticket-automation/operator.json"))
-sources = {p["env"]["TASK_REPOSITORY"] for r in config["roles"] for p in r["processes"] if "TASK_REPOSITORY" in p.get("env", {})}
-for source in sorted(sources):
+sources = {(p.get("env") or {}).get("TASK_REPOSITORY") for r in config["roles"] for p in r["processes"]}
+for source in sorted(s for s in sources if isinstance(s, str)):
     print(source, "found" if os.path.isdir(source) else "NOT FOUND")'
 ```
 
@@ -968,11 +969,20 @@ In your copy (`$CONFIG`), in the same edit:
 1. Narrow what is taken, if the project is not the engine's alone: in a
    project people also use for their own tickets, set `intake.category_ids` to
    the category of section 2. For a single first ticket you can instead file
-   it first, look up its id and creation time (the `ticket-tracker ... issues`
-   command in section 7 prints both), and set `intake.issue_ids` to
-   `[<that id>]`. An `issue_ids` that lists nothing real accepts nothing, and
-   an empty one accepts every new issue in the project; remove it once you
-   are ready for all of them.
+   it first, look up its id and creation time, and set `intake.issue_ids` to
+   `[<that id>]`. The `ticket-tracker ... issues` command in section 7 prints
+   both for the three newest issues; this prints them for one issue key,
+   however many issues came after it:
+
+   ```sh
+   kubectl -n "$NS" exec "$POD" -c engine -- /opt/ticket-automation/bundle/bin/ticket-tracker \
+     --base-url https://<space>.backlog.com/api/v2 --key-env TRACKER_API_KEY --project-id <project-id> issues \
+     | python3 -c 'import json, sys; [print(r["id"], r["issueKey"], r["created"]) for r in json.load(sys.stdin) if r["issueKey"] == sys.argv[1]]' <issue-key>
+   ```
+
+   An `issue_ids` that lists nothing real accepts nothing, and an empty one
+   accepts every new issue in the project; remove it once you are ready for
+   all of them.
 2. Set `intake.created_since`, in UTC (the moment itself counts): use the
    moment you open the intake, for example `2026-10-05T09:00:00Z`, or, for a
    ticket you filed in advance and listed in `issue_ids`, its own creation

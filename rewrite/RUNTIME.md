@@ -234,8 +234,8 @@ example using the actual engine, installed native SDK and fixture model/tracker/
 delivery APIs. The controller was PID 1; a crash after comment storage caused one
 automatic container restart, followed by readback rather than a second post.
 All eleven completed native tool calls succeeded, the accepted original request
-survived, and one delivery/one comment remained. The Job, Pod and dedicated policy
-were removed afterward. This confirms that bounded integration/recovery path,
-not live model judgment, production delivery, or effective egress isolation. It
-still used the diagnostic syscall profile described above, not an approved
-production profile.
+survived, and one delivery/one comment remained. The Job, its Pod and the
+`NetworkPolicy` object made for this run were removed afterward. This confirms
+that bounded integration/recovery path, not live model judgment, production
+delivery, or effective egress isolation. It still used the diagnostic syscall
+profile described above, not an approved production profile.
