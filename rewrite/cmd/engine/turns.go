@@ -13,6 +13,7 @@ import (
 
 	"ticket-runner/internal/chain"
 	"ticket-runner/internal/stagename"
+	"ticket-runner/internal/tracker"
 )
 
 // The requester lives on the tracker. At each turn of the work the runtime
@@ -146,17 +147,11 @@ func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 		}
 	}
 	record := loadTurns(directory)
-	if id := cfg.Intake.CategoryOnAccept; id > 0 && !record.Category {
-		ids := []int64{}
-		for _, c := range issue.Category {
-			if c.ID > 0 && c.ID != id {
-				ids = append(ids, c.ID)
-			}
-		}
+	if source := cfg.source(); source.Target(tracker.Accepted) != nil && !record.Category {
 		if !record.due("category") {
 			return
 		}
-		if err := cfg.Backlog.SetCategories(ctx, issue.Key, append(ids, id)); err != nil {
+		if err := source.Move(ctx, issue, tracker.Accepted); err != nil {
 			if record.refuse("category", err.Error()) {
 				observe("category not set, asked again later: " + err.Error())
 			}
@@ -182,15 +177,15 @@ func assignTurn(ctx context.Context, cfg config, issue sourceIssue, directory, w
 	}
 	user := cfg.runtimeUser
 	if who == "requester" {
-		user = issue.Creator.ID
+		user = issue.Creator
 	}
-	if user <= 0 {
+	if user.ID <= 0 {
 		return
 	}
 	if !record.due("assignee") {
 		return
 	}
-	if err := cfg.Backlog.SetAssignee(ctx, issue.Key, user); err != nil {
+	if err := cfg.source().Assign(ctx, issue, user); err != nil {
 		if record.refuse("assignee", err.Error()) {
 			observe("assignee not handed to the " + who + ", asked again later: " + err.Error())
 		}
@@ -217,7 +212,7 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 	if !record.due("hours") {
 		return
 	}
-	if err := cfg.Backlog.SetActualHours(ctx, issue.Key, hours); err != nil {
+	if err := cfg.source().RecordHours(ctx, issue, hours); err != nil {
 		if record.refuse("hours", err.Error()) {
 			observe("hours not recorded on the issue, asked again later: " + err.Error())
 		}

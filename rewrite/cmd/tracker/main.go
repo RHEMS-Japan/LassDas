@@ -28,7 +28,7 @@ func main() {
 func run(ctx context.Context, args []string, input io.Reader, output, log io.Writer) error {
 	flags := flag.NewFlagSet("tracker", flag.ContinueOnError)
 	flags.SetOutput(log)
-	base := flags.String("base-url", "", "configured Backlog API base URL")
+	base := flags.String("base-url", "", "the assigned issue's local endpoint (TASK_TRACKER_URL), or a Backlog API base URL")
 	key := flags.String("key-env", "", "name of the credential environment variable, never its value")
 	certificate := flags.String("cert-env", "", "optional environment variable containing the assigned local API's public PEM certificate")
 	issue := flags.String("issue", "", "the assigned issue id or key")

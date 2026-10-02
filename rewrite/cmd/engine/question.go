@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ticket-runner/internal/chain"
+	"ticket-runner/internal/tracker"
 )
 
 // Before the work is handed over, a configured role may put a question to the
@@ -41,12 +42,11 @@ type questionBoundary struct {
 	After *int64 `json:"after"`
 }
 
-func latestComment(rows []json.RawMessage, issue sourceIssue) (int64, error) {
+func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue) (int64, error) {
 	highest := int64(0)
 	for _, raw := range rows {
-		var comment struct{ ID, IssueID, ProjectID int64 }
-		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 ||
-			comment.IssueID != issue.ID || comment.ProjectID != issue.ProjectID {
+		comment, err := source.ReadComment(raw, issue)
+		if err != nil || !comment.OnIssue {
 			return 0, errors.New("issue comments could not be read for the assigned issue")
 		}
 		if comment.ID > highest {
@@ -56,8 +56,8 @@ func latestComment(rows []json.RawMessage, issue sourceIssue) (int64, error) {
 	return highest, nil
 }
 
-func recordQuestion(directory string, rows []json.RawMessage, issue sourceIssue) error {
-	highest, err := latestComment(rows, issue)
+func recordQuestion(source tracker.Tracker, directory string, rows []json.RawMessage, issue sourceIssue) error {
+	highest, err := latestComment(source, rows, issue)
 	if err != nil {
 		return err
 	}
@@ -80,28 +80,23 @@ func recordQuestion(directory string, rows []json.RawMessage, issue sourceIssue)
 // runtime's account are not set aside beyond that: an account that is
 // neither the creator nor an operator is already not authorized, and one
 // that is may be the only account the requester has.
-func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int64, after int64) (int64, string, error) {
+func answerToQuestion(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue, operators []int64, after int64) (int64, string, error) {
 	for _, raw := range rows {
-		var comment struct {
-			ID, IssueID, ProjectID int64
-			Content                string
-			CreatedUser            struct{ ID int64 }
-		}
-		if err := json.Unmarshal(raw, &comment); err != nil || comment.ID <= 0 ||
-			comment.IssueID != issue.ID || comment.ProjectID != issue.ProjectID {
+		comment, err := source.ReadComment(raw, issue)
+		if err != nil || !comment.OnIssue {
 			return 0, "", errors.New("issue comments could not be read for the assigned issue")
 		}
 		if comment.ID <= after {
 			continue
 		}
-		authorized := comment.CreatedUser.ID > 0 && comment.CreatedUser.ID == issue.Creator.ID
+		authorized := comment.Author.ID > 0 && comment.Author.ID == issue.Creator.ID
 		for _, id := range operators {
-			authorized = authorized || id > 0 && comment.CreatedUser.ID == id
+			authorized = authorized || id > 0 && comment.Author.ID == id
 		}
-		if !authorized || strings.TrimSpace(comment.Content) == "" || firstInstructionLine(comment.Content) == "停止" {
+		if !authorized || strings.TrimSpace(comment.Body) == "" || firstInstructionLine(comment.Body) == "停止" {
 			continue
 		}
-		return comment.ID, comment.Content, nil
+		return comment.ID, comment.Body, nil
 	}
 	return 0, "", nil
 }
@@ -113,12 +108,13 @@ func answerToQuestion(rows []json.RawMessage, issue sourceIssue, operators []int
 // reply above the recorded boundary resumes it.
 func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, state chain.State, interval time.Duration) (resume, answered bool, err error) {
 	readCtx, release := context.WithTimeout(ctx, interval)
-	rows, err := cfg.Backlog.Comments(readCtx, issue.Key, 0)
+	source := cfg.source()
+	rows, err := source.Comments(readCtx, issue)
 	release()
 	if err != nil {
 		return false, false, err
 	}
-	stop, err := stopInstruction(rows, issue, cfg.Intake.StopUserIDs)
+	stop, err := stopInstruction(source, rows, issue, cfg.Intake.StopUserIDs)
 	if err != nil {
 		return false, false, err
 	}
@@ -131,7 +127,7 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 		// An interrupted hold left no boundary. Record where the conversation
 		// stands now and keep waiting, rather than reading an older comment as
 		// an answer to a question it cannot have replied to.
-		return false, false, recordQuestion(directory, rows, issue)
+		return false, false, recordQuestion(source, directory, rows, issue)
 	}
 	if err != nil {
 		return false, false, err
@@ -140,7 +136,7 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err := json.Unmarshal(raw, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
 		return false, false, errors.New("the recorded question is unreadable; the request keeps waiting for the requester's answer")
 	}
-	id, answer, err := answerToQuestion(rows, issue, cfg.Intake.StopUserIDs, *boundary.After)
+	id, answer, err := answerToQuestion(source, rows, issue, cfg.Intake.StopUserIDs, *boundary.After)
 	if err != nil || id == 0 {
 		return false, false, err
 	}

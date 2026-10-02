@@ -28,10 +28,38 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0 # The commit-message scan reads the pushed range.
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version-file: go.mod
+          # A `uses:` step does not take defaults.run's directory: this names
+          # the module's own go.mod, not the root module's.
+          go-version-file: rewrite/go.mod
           cache: false # This module currently uses only the standard library.
+      # The identifier scans of the test job below, run from this module and
+      # this job so that they do not depend on the root module. They come
+      # first so that a failing test does not keep them from running.
+      - name: State whether the purity scan can run
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+        run: |
+          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
+            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
+          else
+            echo "consumer-identifier scans are armed"
+          fi
+      - name: Scan the tracked files for consumer identifiers
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+        # -v so that the log says PASS or SKIP, not only "ok".
+        run: go test -count=1 -v -run '^TestWorkingTreeContainsNoConsumerIdentifiers$' ./internal/enginepurity
+      - name: Scan commit messages for consumer identifiers
+        working-directory: .
+        env:
+          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+          RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          RANGE_HEAD: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash .github/scripts/scan-commit-messages.sh
       - name: Build the role-chain commands
         run: go build ./...
       - name: Check the role-chain code
@@ -72,39 +100,12 @@ jobs:
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
       # Commit messages travel with the tree, so they are held to the same
-      # standard. On a match the failure names the token only by its position
-      # in the list - printing the token or the message here would republish
-      # the identifier this gate exists to keep out.
+      # standard (.github/scripts/scan-commit-messages.sh, shared with the
+      # role-chain job).
       - name: Scan commit messages for consumer identifiers
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
           RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RANGE_HEAD: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
-            echo "ENGINE_PURITY_TOKENS is not set; the commit-message scan is skipped"
-            exit 0
-          fi
-          # Without a usable base (first push of a branch, force push), every
-          # reachable message is scanned - histories here are short, and a
-          # single-commit fallback measurably let mid-branch commits through.
-          if [ -z "$RANGE_BASE" ] || ! git cat-file -e "$RANGE_BASE" 2>/dev/null; then
-            messages=$(git log --format=%B "$RANGE_HEAD")
-          else
-            messages=$(git log --format=%B "$RANGE_BASE".."$RANGE_HEAD")
-          fi
-          lowered=$(printf '%s' "$messages" | tr '[:upper:]' '[:lower:]')
-          index=0
-          failed=0
-          IFS=',' read -ra tokens <<< "$(printf '%s' "$ENGINE_PURITY_TOKENS" | tr '\n' ',')"
-          for token in "${tokens[@]}"; do
-            index=$((index + 1))
-            token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | xargs)
-            [ -z "$token" ] && continue
-            if printf '%s' "$lowered" | grep -qF "$token"; then
-              echo "a commit message in the pushed range contains forbidden identifier #$index - reword the commit"
-              failed=1
-            fi
-          done
-          exit "$failed"
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash .github/scripts/scan-commit-messages.sh
