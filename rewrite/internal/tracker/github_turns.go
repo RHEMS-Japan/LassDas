@@ -70,10 +70,10 @@ func (g GitHub) Target(turn string) json.RawMessage {
 // Move gives the issue the turn's label. A working turn (processing, awaiting
 // the requester, delivered, stopped) also takes off the label of any other
 // working turn the issue carries, so the issue shows one; the label of
-// acceptance stays, as do the labels people gave the issue. A label is taken
-// off under the name GitHub gave it, and one GitHub answers it cannot find
-// counts as taken off only when the issue's labels, read again, no longer
-// hold it. A move cut short is completed by asking for it again.
+// acceptance stays, as do the labels people gave the issue. A label that
+// cannot be taken off keeps none of the others on: each is tried, and the
+// first failure is the one returned. A move cut short is completed by asking
+// for it again.
 func (g GitHub) Move(ctx context.Context, issue Issue, turn string) error {
 	name := g.Labels.label(turn)
 	if name == "" {
@@ -95,34 +95,45 @@ func (g GitHub) Move(ctx context.Context, issue Issue, turn string) error {
 	if turn == Accepted {
 		return nil
 	}
+	var first error
 	for _, other := range []string{g.Labels.Processing, g.Labels.AwaitingRequester, g.Labels.Delivered, g.Labels.Stopped} {
 		given, found := labelNamed(carried, other)
 		if other == "" || strings.EqualFold(other, name) || !found {
 			continue
 		}
-		_, _, err := g.call(ctx, http.MethodDelete, g.base()+path+"/labels/"+url.PathEscape(given), nil, http.StatusOK, githubItemLimit)
-		var refusal *githubError
-		if err == nil {
-			continue
+		if err := g.takeOff(ctx, path, given); err != nil && first == nil {
+			first = err
 		}
-		if !errors.As(err, &refusal) || refusal.Status != http.StatusNotFound {
-			return err
+	}
+	return first
+}
+
+// takeOff takes a label off the issue under the name GitHub gave it. One
+// GitHub answers it cannot find counts as taken off only when the issue's
+// labels, read again, no longer hold it.
+func (g GitHub) takeOff(ctx context.Context, path, given string) error {
+	_, _, err := g.call(ctx, http.MethodDelete, g.base()+path+"/labels/"+url.PathEscape(given), nil, http.StatusOK, githubItemLimit)
+	var refusal *githubError
+	if err == nil {
+		return nil
+	}
+	if !errors.As(err, &refusal) || refusal.Status != http.StatusNotFound {
+		return err
+	}
+	rows, err := g.pages(ctx, path+"/labels?per_page=100")
+	if err != nil {
+		return fmt.Errorf("the label %q was answered as not found, and the issue's labels could not be read again: %w", given, err)
+	}
+	var now []githubLabel
+	for _, raw := range rows {
+		var label githubLabel
+		if json.Unmarshal(raw, &label) != nil {
+			return errors.New("the issue's labels could not be read again")
 		}
-		rows, err := g.pages(ctx, path+"/labels?per_page=100")
-		if err != nil {
-			return fmt.Errorf("the label %q was answered as not found, and the issue's labels could not be read again: %w", given, err)
-		}
-		var now []githubLabel
-		for _, raw := range rows {
-			var label githubLabel
-			if json.Unmarshal(raw, &label) != nil {
-				return errors.New("the issue's labels could not be read again")
-			}
-			now = append(now, label)
-		}
-		if _, still := labelNamed(now, given); still {
-			return fmt.Errorf("the label %q could not be taken off: GitHub answered that it was not found, and the issue still carries it", given)
-		}
+		now = append(now, label)
+	}
+	if _, still := labelNamed(now, given); still {
+		return fmt.Errorf("the label %q could not be taken off: GitHub answered that it was not found, and the issue still carries it", given)
 	}
 	return nil
 }
@@ -170,7 +181,7 @@ func (g GitHub) Assign(ctx context.Context, issue Issue, to Account) error {
 	}
 	current, err := assignees(data)
 	if err != nil || !hasLogin(current, to.Login) {
-		return fmt.Errorf("tracker did not confirm the assignee change: GitHub did not assign %q to the issue; it assigns an account with access to the repository or one that commented on the issue, by its current login, and no more than ten to one issue", to.Login)
+		return fmt.Errorf("tracker did not confirm the assignee change: GitHub did not assign %q to the issue; the engine's account must have push access to the repository, and GitHub assigns an account with access to the repository or one that commented on the issue, by its current login, and no more than ten to one issue", to.Login)
 	}
 	me, err := g.Myself(ctx)
 	if err != nil {

@@ -149,11 +149,14 @@ func TestGitHubMovesTheIssueByLabelsAndLeavesPeoplesOwn(t *testing.T) {
 	}
 }
 
-// A label is taken off under the name the issue carries it by, a later move
-// takes off the label of a stop too, and a removal GitHub refuses, or answers
-// as not found while the issue still carries the label, fails the move.
+// A label is taken off under the name the issue carries it by, and a later
+// move takes off the label of a stop too. A removal GitHub refuses, or answers
+// as not found while the issue's labels, read again to the last page, still
+// hold the label or cannot be read, fails the move; the other labels are
+// taken off all the same, and the first failure is the one returned.
 func TestGitHubTakesALabelOffOnlyWhenItIsGone(t *testing.T) {
-	for _, answer := range []string{"removed", "not found but still there", "refused"} {
+	for _, answer := range []string{"removed", "not found but still there", "not found, still there on the second page",
+		"not found, not read again", "not found, read again unreadable", "refused"} {
 		t.Run(answer, func(t *testing.T) {
 			githubClock(t)
 			carried := []string{"bug", "Engine:Working", "engine:stopped"}
@@ -161,20 +164,19 @@ func TestGitHubTakesALabelOffOnlyWhenItIsGone(t *testing.T) {
 			github, _ := githubFixture(t, func(base string, call int32, w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				asked = append(asked, strings.TrimSpace(r.Method+" "+r.URL.EscapedPath()+" "+string(body)))
-				if r.Method == http.MethodPost {
+				name := strings.TrimPrefix(r.URL.Path, "/repos/octo-org/widgets/issues/12/labels/")
+				switch {
+				case r.Method == http.MethodPost:
 					carried = append(carried, "engine:delivered")
-				}
-				if r.Method == http.MethodDelete {
-					name := strings.TrimPrefix(r.URL.Path, "/repos/octo-org/widgets/issues/12/labels/")
-					switch answer {
-					case "not found but still there":
-						w.WriteHeader(http.StatusNotFound)
-						fmt.Fprint(w, `{"message":"Label does not exist"}`)
-						return
-					case "refused":
-						w.WriteHeader(http.StatusInternalServerError)
-						return
-					}
+				case r.Method == http.MethodDelete && answer == "refused" && name == "Engine:Working":
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				case r.Method == http.MethodDelete && answer != "removed" && (name == "Engine:Working" || answer == "refused"):
+					// Answered as not found while the issue still carries it.
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprint(w, `{"message":"Label does not exist"}`)
+					return
+				case r.Method == http.MethodDelete:
 					kept := []string{}
 					for _, label := range carried {
 						if label != name {
@@ -182,6 +184,21 @@ func TestGitHubTakesALabelOffOnlyWhenItIsGone(t *testing.T) {
 						}
 					}
 					carried = kept
+				case answer == "not found, not read again":
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				case answer == "not found, read again unreadable":
+					// The label comes back in a row that cannot be read.
+					fmt.Fprint(w, `[{"name":"bug"},{"name":["Engine:Working"]}]`)
+					return
+				case answer == "not found, still there on the second page" && r.URL.Query().Get("page") != "2":
+					w.Header().Set("Link", fmt.Sprintf(`<%s/repositories/1/issues/12/labels?per_page=100&page=2>; rel="next"`, base))
+					others := []map[string]string{}
+					for i := range 100 {
+						others = append(others, map[string]string{"name": fmt.Sprint("area/", i)})
+					}
+					json.NewEncoder(w).Encode(others)
+					return
 				}
 				labels := []map[string]string{}
 				for _, name := range carried {
@@ -191,20 +208,33 @@ func TestGitHubTakesALabelOffOnlyWhenItIsGone(t *testing.T) {
 			})
 			github.Labels = GitHubLabels{Processing: "engine:working", Delivered: "engine:delivered", Stopped: "engine:stopped"}
 			err := github.Move(context.Background(), Issue{ID: 12, Key: "12"}, Delivered)
+			requests := strings.Join(asked, "\n")
 			switch answer {
 			case "removed":
 				if err != nil || strings.Join(carried, ",") != "bug,engine:delivered" ||
-					!strings.Contains(strings.Join(asked, "\n"), "DELETE /repos/octo-org/widgets/issues/12/labels/Engine:Working") {
+					!strings.Contains(requests, "DELETE /repos/octo-org/widgets/issues/12/labels/Engine:Working") {
 					t.Fatalf("carried %q after %q (%v)", carried, asked, err)
 				}
-			case "not found but still there":
+				return
+			case "not found but still there", "not found, still there on the second page":
 				if err == nil || !strings.Contains(err.Error(), `"Engine:Working" could not be taken off`) {
 					t.Fatalf("a label still on the issue was taken as taken off: %v", err)
 				}
-			case "refused":
-				if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
-					t.Fatalf("a refused removal was taken as made: %v", err)
+			case "not found, not read again", "not found, read again unreadable":
+				if err == nil || !strings.Contains(err.Error(), "could not be read again") {
+					t.Fatalf("a label answered as not found was taken as taken off unseen: %v", err)
 				}
+			case "refused":
+				// Both removals fail, the second as not found while still there.
+				if err == nil || !strings.Contains(err.Error(), "HTTP 500") ||
+					!strings.Contains(requests, "DELETE /repos/octo-org/widgets/issues/12/labels/engine:stopped") {
+					t.Fatalf("a refused removal was taken as made, kept the next one from being tried, or was not the failure returned: %v after %q", err, asked)
+				}
+				return
+			}
+			// The label that stayed kept no other on.
+			if strings.Join(carried, ",") != "bug,Engine:Working,engine:delivered" {
+				t.Fatalf("carried %q after %q", carried, asked)
 			}
 		})
 	}
@@ -352,7 +382,8 @@ func TestGitHubKeepsTheEngineOnAnIssueItOpenedAndMatchesLoginsWithoutCase(t *tes
 	}
 	refuse = true
 	err := github.Assign(ctx, Issue{ID: 12, Key: "12", Creator: Account{ID: 55, Login: "requester"}}, Account{ID: 55, Login: "requester"})
-	if err == nil || !strings.Contains(err.Error(), `GitHub did not assign "requester"`) || !strings.Contains(err.Error(), "commented on the issue") || !strings.Contains(err.Error(), "no more than ten") {
+	if err == nil || !strings.Contains(err.Error(), `GitHub did not assign "requester"`) || !strings.Contains(err.Error(), "engine's account must have push access") ||
+		!strings.Contains(err.Error(), "commented on the issue") || !strings.Contains(err.Error(), "no more than ten") {
 		t.Fatalf("a refused assignment does not say whom or why: %v", err)
 	}
 }
