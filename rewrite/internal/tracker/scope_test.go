@@ -409,16 +409,14 @@ func TestIssueScopeKeepsOnlyTheLatestPostOfALaunch(t *testing.T) {
 			if removed := scope.RemoveEarlierPosts(ctx); removed != test.removed {
 				t.Fatalf("removed %d comments, want %d", removed, test.removed)
 			}
-			// Settling twice removes nothing more.
-			if again := scope.RemoveEarlierPosts(ctx); again != 0 && test.removalStatus == 200 {
+			// Settling twice removes nothing more and asks for nothing more: a
+			// removal the tracker refused is not tried again.
+			if again := scope.RemoveEarlierPosts(ctx); again != 0 {
 				t.Fatalf("a second settlement removed %d more", again)
 			}
 			mu.Lock()
 			defer mu.Unlock()
 			after := operations[2:]
-			if test.removalStatus != 200 && len(after) > len(test.removals) {
-				after = after[:len(test.removals)] // a refused removal may be tried again by the second settlement
-			}
 			if strings.Join(after, ", ") != strings.Join(test.removals, ", ") {
 				t.Fatalf("removals %v, want %v", after, test.removals)
 			}

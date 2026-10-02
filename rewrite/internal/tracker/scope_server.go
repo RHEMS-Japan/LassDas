@@ -30,7 +30,9 @@ type IssueAccess struct {
 
 // Close ends the launch's access. A scope that keeps only its latest post
 // removes the earlier ones now, after the endpoint is closed, so nothing a
-// role posted waits on a removal and no post can arrive after the count.
+// role posted waits on a removal. A post still in flight when the endpoint
+// closes may be stored after the count; it then stays as one comment more,
+// and nothing stored at or after the kept one is ever removed.
 func (a *IssueAccess) Close() {
 	a.close()
 	if a.settle != nil {
