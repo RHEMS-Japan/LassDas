@@ -30,6 +30,11 @@ type intakeConfig struct {
 	StopReportRole      string  `json:"stop_report_role,omitempty"`
 	QuestionRole        string  `json:"question_role,omitempty"`
 	IssueIDs            []int64 `json:"issue_ids,omitempty"`
+	// CategoryIDs narrows discovery to issues that carry one of these tracker
+	// categories, so a project shared with people's own tickets hands the
+	// runtime only what a requester marked for it. A category added to an
+	// issue later is accepted then. Absent, every issue in scope is accepted.
+	CategoryIDs []int64 `json:"category_ids,omitempty"`
 	// MinModelCredit is the USD balance below which the shared model key can no
 	// longer carry the work. Absent or zero asks the provider nothing.
 	MinModelCredit float64 `json:"min_model_credit,omitempty"`
@@ -86,38 +91,47 @@ func (w *serialLog) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+// watchSettings checks everything about a watch that can be checked before
+// the queue is touched, and returns what the watch runs on: the queue's
+// directory, the starting time, the seconds between scans and the slots.
+func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
+	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
 	if cfg.Intake == nil || cfg.Intake.ProjectID <= 0 {
-		return errors.New("watch requires an explicit intake.project_id")
+		return fail(errors.New("watch requires an explicit intake.project_id"))
 	}
-	if err := validateStopReporter(cfg); err != nil {
-		return err
+	if err := validateStopReporter(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateQuestionRole(cfg); err != nil {
-		return err
+	if err := validateQuestionRole(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := validateNotices(cfg); err != nil {
-		return err
+	if err := validateNotices(*cfg); err != nil {
+		return fail(err)
 	}
-	if err := prepareStages(&cfg); err != nil {
-		return err
+	if err := prepareStages(cfg); err != nil {
+		return fail(err)
 	}
 	since, err := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
 	if err != nil {
-		return errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp")
+		return fail(errors.New("watch requires intake.created_since as an explicit RFC3339 timestamp"))
 	}
 	delay, capacity := cfg.Intake.PollIntervalSeconds, cfg.Intake.MaxRunning
 	if delay < 0 || time.Duration(delay) > time.Duration(1<<63-1)/time.Second || capacity < 0 {
-		return errors.New("intake interval and capacity must be positive")
+		return fail(errors.New("intake interval and capacity must be positive"))
 	}
 	for _, id := range cfg.Intake.StopUserIDs {
 		if id <= 0 {
-			return errors.New("intake.stop_user_ids must contain positive user ids")
+			return fail(errors.New("intake.stop_user_ids must contain positive user ids"))
 		}
 	}
 	for _, id := range cfg.Intake.IssueIDs {
 		if id <= 0 {
-			return errors.New("intake.issue_ids must contain positive issue ids")
+			return fail(errors.New("intake.issue_ids must contain positive issue ids"))
+		}
+	}
+	for _, id := range cfg.Intake.CategoryIDs {
+		if id <= 0 {
+			return fail(errors.New("intake.category_ids must contain positive category ids"))
 		}
 	}
 	if delay == 0 {
@@ -128,17 +142,25 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 	}
 	root, err = filepath.Abs(root)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	// Validate binding before discovering/accepting any work.
-	if _, err := bindRequestConfig(cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
+		return fail(err)
+	}
+	return root, since, delay, capacity, nil
+}
+
+func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
+	root, since, delay, capacity, err := watchSettings(&cfg, root)
+	if err != nil {
 		return err
 	}
 	w := &serialLog{writer: log}
 	observe := func(message string) { fmt.Fprintln(w, message) }
-	// The queue belongs to one tracker and one project. The intake window
-	// and the issue allowlist are filters an operator changes while the
-	// queue lives on, so they are not part of its identity.
+	// The queue belongs to one tracker and one project. The intake window,
+	// the issue allowlist and the categories are filters an operator changes
+	// while the queue lives on, so they are not part of its identity.
 	identity := fmt.Sprintf("Issue intake: %s\nProject: %d", cfg.Backlog.BaseURL, cfg.Intake.ProjectID)
 	// Reuse the existing exclusive, durable runtime store for ownership of this
 	// queue. Its identity is not a verdict or completion mark for any issue.
@@ -156,7 +178,25 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 		return err
 	}
 	defer owner.Close()
+	observe(intakeScope(cfg, since))
 	return pollRequests(ctx, cfg, jobs, since, time.Duration(delay)*time.Second, capacity, w)
+}
+
+// Said once at start, in the engine's own log: which new issues this queue
+// takes up. An operator who meant to narrow the intake reads here whether the
+// engine understood it that way before the first issue is accepted.
+func intakeScope(cfg config, since time.Time) string {
+	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	ids, categories := cfg.Intake.IssueIDs, cfg.Intake.CategoryIDs
+	switch {
+	case len(ids) > 0 && len(categories) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v, and of those only the ones carrying one of the categories %v", ids, categories)
+	case len(ids) > 0:
+		return scope + fmt.Sprintf("; only issue ids %v", ids)
+	case len(categories) > 0:
+		return scope + fmt.Sprintf("; only issues carrying one of the categories %v", categories)
+	}
+	return scope + "; every such issue is accepted"
 }
 
 // One collector owns the queue. Job histories, not child exit codes or prose,
@@ -420,6 +460,20 @@ func collectIssues(ctx context.Context, cfg config, jobs string, since time.Time
 						allowed = allowed || issue.ID == id
 					}
 					if !allowed {
+						continue
+					}
+				}
+				// The same goes for the categories a requester marks an issue
+				// with: an issue without one of them is left for people, and
+				// is looked at again each tick in case it gains one.
+				if len(cfg.Intake.CategoryIDs) > 0 {
+					marked := false
+					for _, category := range issue.Category {
+						for _, id := range cfg.Intake.CategoryIDs {
+							marked = marked || category.ID == id
+						}
+					}
+					if !marked {
 						continue
 					}
 				}
