@@ -418,9 +418,10 @@ delivery is refused naming the paths, so the role behind the stage's
 the merge, and a change that still carries markers is refused. Paths the
 integration branch changed and the worker left as that branch has them need
 no grant; what the branch already carried is not scanned for forbidden text.
-This happens under the merge method only, since a service that squashes or
-rebases rewrites the delivered history. For this the delivery process's
-sandbox grant must cover the working tree as well as `.git`.
+This happens under the merge method and under `none` (below), not under squash
+or rebase, since a service that squashes or rebases rewrites the delivered
+history. For this the delivery process's sandbox grant must cover the working
+tree as well as `.git`.
 
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
@@ -448,6 +449,64 @@ review that could not be performed (`NOT REVIEWED`) does not object either;
 turn it on only where that review runs. The review command tells its model in
 plain words when no file was changed at all, and that a change that was needed
 but not made is a blocking defect.
+
+`DELIVERY_MERGE_METHOD=none` makes the shipped delivery end at the open pull
+request and leave the merge to a person. It commits, catches up with the
+integration branch (a conflict still goes back to the work stage), pushes the
+ticket branch, opens the pull request or reuses the one it opened before, and
+ends 0 without merging. It prints `Pull request N against <base> is open for
+<issue>: <url>. Merging is left to a person; nothing was merged.`, the pull
+request's description says that merging it is left to a person, and the
+receipt records the pull request's number and address, `"merge_method":
+"none"` and `"merge_left_to_person": true`, with no `merge_sha`. Every later
+delivery of the request first reads what became of that pull request:
+
+- open, with nothing new: the same statement again, and nothing is pushed;
+- open, with new reviewed work: the work is pushed to the same branch, so the
+  same pull request carries it;
+- merged by a person: reported as merged by someone else, with the commit
+  they made (recorded as `merge_sha`); work after that is a further round with
+  a pull request of its own, left to a person again;
+- closed without a merge: refused with that fact, so the run goes back to the
+  work stage. The delivery never reopens the pull request or opens another in
+  its place, so the request goes round, running the work and review stages
+  each time, until someone reopens it or the requester stops the request.
+
+With an open pull request there is no merged state to verify, so the
+post-delivery check (`harnesses/verify_merged.py`) checks the pull request's
+head instead. It fetches the ticket branch, requires the commit the delivery
+pushed to be on it, runs the configured commands with that commit checked out,
+and says that nothing was merged; it ends 0 only when that commit is there
+and every command passed. That is what a person is asked to merge, including
+the catch-up merge, which the verify stage before the review never saw, so
+keep the stage. Once a delivery has recorded a person's merge, the check
+verifies the integration branch as usual. If the person's merge deletes the
+branch before a delivery has recorded it, the check cannot read the branch and
+the run goes round once more, after which the next delivery records the merge.
+Where the target's own checks on pull requests are what the person merging
+relies on, the stage can be left out:
+
+```json
+"workflow": {
+  "stages": [
+    { "name": "elicit", "kind": "model" },
+    { "name": "work", "kind": "model" },
+    { "name": "verify", "kind": "command", "on_failure": "work" },
+    { "name": "review", "kind": "command", "on_failure": "work" },
+    { "name": "deliver", "kind": "command", "on_failure": "work" },
+    { "name": "report", "kind": "model" },
+    { "name": "confirm_report", "kind": "command", "on_failure": "report" }
+  ]
+}
+```
+
+The requester is told what the report stage posts from the record: the pull
+request's address and that merging it is left to a person. The run then ends
+like any finished run, with the `delivered` status and the hand-back where
+they are configured, although nothing reaches the integration branch until a
+person merges. The operator sees the open pull request at the service, the
+receipt on the status page, and, with `--dry-run`, a line saying that a
+delivery ends at the open pull request.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator

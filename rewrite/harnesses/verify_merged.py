@@ -13,6 +13,14 @@ request stands on, as the delivery recorded it, has to be contained in the
 fetched branch; the commands run with that commit checked out, and the report
 says that no merge was made.
 
+A receipt whose merge is left to a person (the delivery's
+DELIVERY_MERGE_METHOD=none) and that records no merge yet has no merged state
+to verify either. What it checks instead is the pull request's head as the
+delivery pushed it: it fetches the ticket branch, requires the recorded commit
+to be contained in it, runs the commands with that commit checked out, and
+says that nothing was merged. Once the delivery has recorded that a person
+merged the pull request, the integration branch is verified as usual.
+
 Environment (all from the operator, never from a role):
   TASK_WORKSPACE             checkout holding the delivery receipt
   TASK_HOME                  private directory the branch is fetched into
@@ -55,20 +63,27 @@ def receipt_fields(workspace):
             raise DeliveryError("The delivery receipt says nothing was changed but records no commit "
                                 "the request stands on")
         return receipt, stands
+    if receipt.get("merge_left_to_person") and not receipt.get("merge_sha"):
+        # Nothing is merged yet: what is verified is the commit the delivery
+        # pushed for a person to merge, on the branch it pushed it to.
+        pushed = str(receipt.get("head", ""))
+        if not COMMIT.match(pushed) or not str(receipt.get("branch", "")).startswith("ticket/"):
+            raise DeliveryError("The delivery receipt leaves the merge to a person but records no pushed "
+                                "commit and ticket branch to verify")
+        return receipt, pushed
     merge = str(receipt.get("merge_sha", ""))
     if not COMMIT.match(merge):
         raise DeliveryError("The delivery receipt records no completed merge commit")
     return receipt, merge
 
 
-def fetch_branch(home, url, base):
+def fetch_branch(home, url, base, describe="fetch the integration branch"):
     """A fresh copy of the actual branch, never the role's own workspace."""
     Path(home).mkdir(parents=True, exist_ok=True)
     clone = tempfile.mkdtemp(prefix="verify-", dir=home)
     target = Path(clone) / "source"
     support.run_git(support.git("clone", "--no-tags", "--branch", base, "--", url, str(target), url=url),
-                    describe="fetch the integration branch",
-                    timeout=support.number("VERIFY_CLONE_TIMEOUT_SECONDS", 900))
+                    describe=describe, timeout=support.number("VERIFY_CLONE_TIMEOUT_SECONDS", 900))
     return target
 
 
@@ -126,22 +141,26 @@ def verify(arguments):
     home = os.environ.get("TASK_HOME") or tempfile.gettempdir()
     receipt, merge = ({}, "") if dry else receipt_fields(workspace)
     unchanged = bool(receipt.get("unchanged"))
+    pending = bool(receipt.get("merge_left_to_person")) and not receipt.get("merge_sha")
     owner, name = support.repository()
     base = support.setting("DELIVERY_BASE_BRANCH")
     url = support.remote_url(owner, name)
     commands = verify_commands()
+    # An unmerged pull request is checked where it is: on its ticket branch.
+    fetched = receipt["branch"] if pending else base
     try:
-        source = fetch_branch(home, url, base)
+        source = (fetch_branch(home, url, fetched, describe="fetch the pull request's branch " + fetched)
+                  if pending else fetch_branch(home, url, fetched))
     except DeliveryError as error:
         # The next role needs this in the report, not only in diagnostics.
         print("\n\n".join([
-            "Could not read %s of %s/%s, so nothing was verified." % (base, owner, name),
+            "Could not read %s of %s/%s, so nothing was verified." % (fetched, owner, name),
             "What stopped it: %s" % error,
             "This says nothing about whether the delivery is correct; it says the branch could not "
             "be read from here."]), flush=True)
         raise
     _, tip, _ = support.run(support.git("-C", str(source), "rev-parse", "HEAD"))
-    report = ["Fetched %s of %s/%s at commit %s." % (base, owner, name, tip.strip())]
+    report = ["Fetched %s of %s/%s at commit %s." % (fetched, owner, name, tip.strip())]
     if dry:
         report.append("This was a check of the configured commands against the branch as it is, "
                       "with no delivery to verify, so it ends non-zero on purpose.")
@@ -149,28 +168,43 @@ def verify(arguments):
         report.append("No merge was made: the delivery receipt records that no file was changed, so there "
                       "is no merge commit to look for. The request stands on %s as it was at commit %s."
                       % (base, merge))
+    elif pending:
+        report.append("No merge was made: the delivery left the merge of pull request %s (%s) to a person, so "
+                      "there is no merged state to verify. What is verified is that pull request's head as the "
+                      "delivery pushed it, commit %s on %s, not %s after a merge."
+                      % (receipt.get("pull_request", "(none recorded)"), receipt.get("pull_request_url") or
+                         "no address recorded", merge, fetched, base))
     else:
-        report.append("The receipt records pull request %s merged as commit %s."
-                      % (receipt.get("pull_request", "(none recorded)"), merge))
+        report.append("The receipt records pull request %s merged as commit %s%s."
+                      % (receipt.get("pull_request", "(none recorded)"), merge,
+                         " by someone else, not by the delivery" if receipt.get("merge_left_to_person") else ""))
+    if unchanged:
+        what = "commit the request stands on"
+        absent = "the commit the request stands on is not part of the integration branch"
+    elif pending:
+        what = "commit the delivery pushed"
+        absent = "the commit the delivery pushed is not part of %s" % fetched
+    else:
+        what = "merge commit"
+        absent = "the delivered merge is not part of the integration branch"
     contained = dry or contains_merge(source, merge)
     if not dry:
-        report.append("The %s is %scontained in %s." % ("commit the request stands on" if unchanged
-                                                         else "merge commit", "" if contained else "NOT ", base))
+        report.append("The %s is %scontained in %s." % (what, "" if contained else "NOT ", fetched))
     failures = 0
     if contained:
-        if unchanged:
+        if unchanged or pending:
             # The commit the delivery recorded, not whatever the branch holds
-            # by now: that is what the request was said to stand on.
+            # by now: that is what the request was said to stand on, or what a
+            # person was asked to merge.
             support.run(support.git("-C", str(source), "checkout", "-q", "--detach", merge))
             report.append("The configured commands ran with commit %s checked out%s."
                           % (merge, "" if merge == tip.strip() else
-                             "; %s has moved on to %s since" % (base, tip.strip())))
+                             "; %s has moved on to %s since" % (fetched, tip.strip())))
         failures = run_verification(source, commands, report)
         report.append("%d of %d configured verification commands failed." % (failures, len(commands)))
     else:
-        report.append("The configured verification commands were not run: the %s is not part of the "
-                      "integration branch, so there is nothing verified to check."
-                      % ("commit the request stands on" if unchanged else "delivered merge"))
+        report.append("The configured verification commands were not run: %s, so there is nothing verified "
+                      "to check." % absent)
     print("\n\n".join(report))
     if dry:
         return 3
