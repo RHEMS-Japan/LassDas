@@ -45,20 +45,24 @@ class ModelStandIn:
                 if reply.get("status", 200) != 200:
                     payload = json.dumps({"error": reply.get("error", "service error")}).encode()
                     self.send_response(reply["status"])
-                elif reply.get("verdict") is None and "arguments" not in reply and "calls" not in reply:
-                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": "I have looked."}}]}).encode()
+                elif reply.get("verdict") is None and not {"arguments", "calls", "raw_calls"} & set(reply):
+                    payload = json.dumps({"choices": [{"message": {"role": "assistant", "content": reply.get(
+                        "content", "I have looked.")}}]}).encode()
                     self.send_response(200)
                 else:
-                    if "calls" in reply:
-                        calls = reply["calls"]
+                    if "raw_calls" in reply:
+                        # Arguments as a service might send them: broken text, or an object.
+                        calls = reply["raw_calls"]
+                    elif "calls" in reply:
+                        calls = [json.dumps(arguments) for arguments in reply["calls"]]
                     elif "arguments" in reply:
-                        calls = [reply["arguments"]]
+                        calls = [json.dumps(reply["arguments"])]
                     else:
                         blocking, findings = reply["verdict"]
-                        calls = [{"blocking": blocking, "findings": findings}]
+                        calls = [json.dumps({"blocking": blocking, "findings": findings})]
                     payload = json.dumps({"choices": [{"message": {"role": "assistant", "tool_calls": [
-                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments": json.dumps(
-                            arguments)}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
+                        {"id": "call-%d" % number, "type": "function", "function": {"name": "verdict", "arguments":
+                            arguments}} for number, arguments in enumerate(calls, 1)]}}]}).encode()
                     self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -460,6 +464,61 @@ class AdversarialReviewTests(unittest.TestCase):
         finished = self.run_review(service, HOME=str(home))
         self.assertEqual(finished.returncode, 1, finished.stdout)
         self.assertIn(self.GOES_BACK, finished.stdout)
+
+    def test_git_is_not_pointed_at_another_index_or_checkout(self):
+        # V2 and V3 of the third review: an operator's GIT_INDEX_FILE, or a
+        # GIT_DIR and GIT_WORK_TREE of a clean checkout elsewhere, in the
+        # review's settings only. The delivery reads the workspace without
+        # them, and so does the review now: an unchanged checkout is still
+        # unchanged, and a new file in the workspace is shown, not hidden.
+        self.leave_unchanged()
+        other = self.home.parent / "other"
+        subprocess.run(["git", "clone", "-q", str(self.workspace), str(other)], check=True, env=git_environment())
+        service = ModelStandIn([{"status": 503}, {"status": 503}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, GIT_INDEX_FILE=str(self.home.parent / "an-index-of-its-own"))
+        self.assertEqual(finished.returncode, 1, finished.stdout)
+        self.assertIn(self.GOES_BACK, finished.stdout)
+        (self.workspace / "src" / "farewell.txt").write_text("a new file the reviewer must see\n")
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("--- new file src/farewell.txt ---\na new file the reviewer must see", text)
+        self.assertNotIn("No file was changed", text)
+
+    def test_a_reply_in_another_shape_is_read_as_far_as_it_can_be_and_kept_as_written(self):
+        # The second point of the third review: arguments given as an object,
+        # a verdict wrapped one level down, arguments that are not JSON, words
+        # instead of a call, and a broken call beside a readable one. The rule
+        # is the same; what the reviewer wrote reaches the output and the log.
+        finding = "REQUIRED_NEW_BEHAVIOR is missing in src/tool.py"
+        broken = '{"blocking": true, "findings": "%s' % finding
+        cases = (("arguments as an object", {"raw_calls": [{"blocking": True, "findings": finding}]}, "SENT BACK", 1, 1),
+                 ("a verdict one level down", {"calls": [{"verdict": {"blocking": True, "findings": finding}}]},
+                  "SENT BACK", 1, 1),
+                 ("arguments that are not JSON", {"raw_calls": [broken]}, "NOT REVIEWED", 0, 1),
+                 ("words instead of a call", {"content": "BLOCKING: " + finding}, "NOT REVIEWED", 0, 1),
+                 ("a broken call beside a false one", {"raw_calls": [broken, json.dumps({"blocking": False})]},
+                  "PASSED", 0, 0))
+        for tree in ("a change", "no change"):
+            if tree == "no change":
+                self.leave_unchanged()
+            for case, reply, outcome, changed, unchanged in cases:
+                service = ModelStandIn([reply])
+                self.addCleanup(service.close)
+                finished = self.run_review(service, REVIEW_ATTEMPTS="1")
+                status = changed if tree == "a change" else unchanged
+                self.assertEqual(finished.returncode, status, (case, tree, finished.stdout, finished.stderr))
+                self.assertIn("Review by fixture/reviewer: %s" % outcome, finished.stdout, (case, tree))
+                self.assertIn(finding, finished.stdout, (case, tree))
+                self.assertIn(finding, self.review_log().split("## Review by")[-1], (case, tree))
+        # Kept as written, but no more than findings are shown.
+        service = ModelStandIn([{"content": "x" * 20000}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service, REVIEW_ATTEMPTS="1")
+        self.assertIn("[reply cut here: 6000 of 20000 characters shown]", self.review_log())
 
     def test_a_name_that_is_not_utf8_is_named_not_a_traceback(self):
         # macOS refuses such a name, so a Git ahead on PATH lists one as Linux

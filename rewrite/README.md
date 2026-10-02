@@ -535,8 +535,11 @@ false when its meaning is plain: true or false, a number equal to 1 or 0, or
 `"true"`, `"yes"`, `"1"`, `"false"`, `"no"` or `"0"` in any case. One that
 reads as true makes the verdict blocking, so a finding is never let through
 because the reply also said false; with none true, one that reads as false
-does not block; anything else is no verdict. What the reviewer wrote is
-printed whichever way it goes. The command exits 1
+does not block; anything else is no verdict. A call's arguments are read as
+JSON text or as an object, and one object inside them, such as
+`{"verdict": {...}}`, is looked into too. What the reviewer wrote is printed
+whichever way it goes: arguments that cannot be read, and words given instead
+of a call, are kept as written, cut where findings are. The command exits 1
 on a blocking verdict, which sends the work back to the `work` stage, and 0
 otherwise; the findings are printed, so they join the history as an
 observation the worker and the report writer read, and the command writes
@@ -562,8 +565,11 @@ reads the checkout on its own and waits longer, so it may still find no
 change. New files are read from Git's own list, so a name in Japanese or a new
 symbolic link reaches the reviewer as it is, and a name that is not UTF-8 with
 a replacement character. Git runs without the user's or the system's Git
-settings, as it does for the delivery, so the two agree on whether anything
-changed. A diff or test output longer than its limit is cut with a visible
+settings and without the variables that point it at another repository,
+index or work tree (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_COMMON_DIR`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), as it does for the
+delivery, so the two agree on whether anything changed. A diff or test output
+longer than its limit is cut with a visible
 marker, never silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
 the command prints or writes.
