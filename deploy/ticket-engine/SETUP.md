@@ -3,9 +3,10 @@
 This guide takes you from nothing to one running instance: a Pod in your
 Kubernetes cluster that watches one Backlog project, takes each new issue
 there as a request, works on a checkout of one GitHub repository, merges the
-result into that repository's integration branch, and reports back on the
-issue. You need this directory, `rewrite/` and `docs/DISTRIBUTION.json`;
-nothing else.
+result into that repository's integration branch (or opens the pull request
+and leaves the merge to a person, [section 4](#leaving-the-merge-to-a-person)),
+and reports back on the issue. You need this directory, `rewrite/` and
+`docs/DISTRIBUTION.json`; nothing else.
 
 Read [README.md](README.md) in this directory first. It separates what has
 been measured from what is only proposed. The engine itself is described in
@@ -17,8 +18,9 @@ names; it cannot be checked from this repository.
 
 **What it does not promise.** A request that reaches "delivered" has had its
 change merged, the configured checks pass on the merged branch, and a report
-posted. That is not proof that the request was understood correctly. Read the
-merged change.
+posted; with the merge left to a person, its pull request is open instead and
+the checks passed on the pull request's head. That is not proof that the
+request was understood correctly. Read the change.
 
 ## Contents
 
@@ -53,8 +55,8 @@ nothing.
 | `work` | model | Investigates, changes the checkout and runs the project's checks. |
 | `verify` | command | Your build and test commands, against the changed checkout. |
 | `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `work`. |
-| `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it. |
-| `verify_merged` | command | Fetches the integration branch after the merge and runs your build and tests on it. |
+| `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it, or leaves the merge to a person ([section 4](#leaving-the-merge-to-a-person)). |
+| `verify_merged` | command | Fetches the integration branch after the merge, or the pull request's branch when the merge is left to a person, and runs your build and tests on it. |
 | `report` | model | Writes the report and posts it on the issue. |
 | `confirm_report` | command | Passes when one comment on the issue is exactly the report. |
 
@@ -215,7 +217,7 @@ means what; a turn you leave out is left alone.
 | --- | --- |
 | `processing` | the request is accepted, and while the engine works on it |
 | `awaiting_requester` | a question waits for the requester's reply |
-| `delivered` | the change is merged and the report is posted |
+| `delivered` | the change is merged and the report is posted; with the merge left to a person, the pull request is open and the report is posted ([section 4](#leaving-the-merge-to-a-person)) |
 | `stopped` | the requester posted a stop |
 
 Backlog's built-in Open and Resolved statuses have the ids 1 and 3
@@ -298,8 +300,9 @@ scripts in `rewrite/harnesses/`:
 
 - the mirror (`mirror_loop.py`) clones and fetches the repository;
 - the delivery (`deliver_git.py`) pushes `ticket/<ISSUE-KEY>`, lists, opens
-  and reads pull requests, merges one, and reads the repository and the
-  integration branch in its check mode;
+  and reads pull requests, merges one (not when the merge is left to a
+  person), and reads the repository and the integration branch in its check
+  mode;
 - the merged check (`verify_merged.py`) clones the integration branch.
 
 That is read and write access to the repository's contents and to its pull
@@ -337,22 +340,34 @@ your plan offers that, and keep the branch one that nothing deploys from by
 itself (section 1). The delivery token often cannot read the protection
 settings itself, so look at them as an administrator.
 
+With the merge left to a person ([section 4](#leaving-the-merge-to-a-person)),
+the delivery never merges, so none of these refuse it: they apply to the
+person who merges, and you can keep them as they are. The token needs the
+same access all the same, to push the ticket branch and open the pull request,
+and a rule that also covers the `ticket/...` branches applies to that push.
+
 ### The branch must pass before you start
 
 The merged check runs your build and tests against the integration branch
-after every merge. A branch that fails them already will fail them for every
-request. The check mode in section 7 runs them once against the branch as it
-is; resolve any failure before the first ticket.
+after every merge (with the merge left to a person, against the pull
+request's head, which carries the integration branch). A branch that fails
+them already will fail them for every request. The check mode in section 7
+runs them once against the branch as it is; resolve any failure before the
+first ticket.
 
 ### Requests running side by side
 
 With `intake.max_running` above 1, two requests can start from the same
 integration branch, and the second to deliver finds the branch moved. Under
-the merge method the delivery first merges the integration branch into the
-ticket branch: a clean merge becomes a merge commit, and a conflict is left in
-the checkout between Git's conflict markers and the delivery is refused naming
-the paths, so the next `work` launch resolves them in place. With `squash` or
-`rebase` there is no such catch-up; keep `max_running` at 1 with those.
+the merge method, and with the merge left to a person, the delivery first
+merges the integration branch into the ticket branch: a clean merge becomes a
+merge commit, and a conflict is left in the checkout between Git's conflict
+markers and the delivery is refused naming the paths, so the next `work`
+launch resolves them in place. With `squash` or `rebase` there is no such
+catch-up; keep `max_running` at 1 with those. With the merge left to a
+person, a new request starts from the integration branch without the pull
+requests that still wait for a person's merge, so two requests that change
+the same lines can conflict when a person merges the second.
 
 ## 4. Writing the operator configuration
 
@@ -452,7 +467,8 @@ chosen, a paid call, on every launch (section 11).
 - `REVIEW_MODEL`: the model that reviews, as the endpoint names it.
 - `DELIVERY_ALLOWED_PATHS` (`.`, the whole tree: which files a change needs is
   not known before the work; the checkout's `.git` stays out of reach of every
-  model role either way) and `DELIVERY_MERGE_METHOD` (`merge`).
+  model role either way) and `DELIVERY_MERGE_METHOD` (`merge`; `none` leaves
+  the merge to a person, [below](#leaving-the-merge-to-a-person)).
 - `NATIVE_MAX_TOKENS`: unset, the bridge allows 32000 output tokens per model
   answer ([section 11](#work-ends-without-a-change-or-a-model-stage-keeps-failing-with-ended-without-a-report)).
 
@@ -461,7 +477,7 @@ Optional in the delivery process's `env`: `DELIVERY_FORBIDDEN_TEXT`
 names) and `DELIVERY_AUTHOR_NAME` / `DELIVERY_AUTHOR_EMAIL` for its commits,
 which are otherwise authored as "ticket engine". The pull request is titled
 `Deliver <ISSUE-KEY>`, comes from the branch `ticket/<ISSUE-KEY>`, and is
-merged as `Deliver <ISSUE-KEY> (#<number>)`.
+merged as `Deliver <ISSUE-KEY> (#<number>)` when the delivery merges it.
 
 Do not remove `model_env` from a model stage's process, and do not put a
 model id into its `env` instead: the engine refuses to start
@@ -536,6 +552,65 @@ A stage can carry a sentence of yours, posted once when it first begins if
 
 Write what is true when the stage begins: the `deliver` sentence is posted
 before anything is merged ([section 11](#the-issue-says-merged-while-the-delivery-is-refused)).
+
+### Leaving the merge to a person
+
+By default the delivery merges the pull request it opens. With
+`DELIVERY_MERGE_METHOD` set to `none`, it commits, brings the ticket branch up
+to date with the integration branch, pushes it, opens the pull request (or
+reuses the one it opened before) and stops there: a person merges. To choose
+this, run the following on your copy after
+[Make your copy with one command](#make-your-copy-with-one-command):
+
+```sh
+sed -e 's#"DELIVERY_MERGE_METHOD": "merge"#"DELIVERY_MERGE_METHOD": "none"#' "$CONFIG" > "$CONFIG.none" \
+  && mv "$CONFIG.none" "$CONFIG"
+grep -n '"DELIVERY_MERGE_METHOD"' "$CONFIG"
+```
+
+The `grep` must print one line, ending in `"DELIVERY_MERGE_METHOD": "none"`.
+The descriptions of the `deliver` and `verify_merged` roles in your copy still
+say that they merge. In this ordered configuration no model is given them;
+they show only on the status page, as what those two stages were handed.
+Everything else is done as the rest of this guide says, with these
+differences:
+
+- **The token and the branch rules**: see
+  [section 3](#3-preparing-the-delivery-repository); the delivery never merges,
+  so rules on the integration branch apply to the person who merges.
+- **The `verify_merged` stage** stays. With nothing merged, it runs your build
+  and tests with the commit the delivery pushed checked out, on the pull
+  request's branch, and says that this delivery merged nothing. That commit
+  includes the catch-up merge, which the `verify` stage never saw.
+- **The issue** gets the comments of section 8 up to the report. The report,
+  written from the run's records, is where the requester learns the pull
+  request's address and that merging it is left to a person: the delivery's
+  output says `Pull request <number> against <integration-branch> is open for
+  <ISSUE-KEY>: <address>.` and `Merging is left to a person; nothing was
+  merged.` The request then ends like a merged one: the `delivered` status and
+  the hand-back to the requester are applied where you configured them,
+  although nothing has reached the integration branch. Give `delivered` a
+  status whose name says that, or leave it out (section 2). A `deliver`
+  sentence (above) must say what happens here, for example
+  `"announce": "納品のプルリクエストを用意しています。マージは担当者が行います。"`.
+- **The status page** shows the request as `done; the pull request is open,
+  its merge left to a person` and counts it under `Done with the pull request
+  open` (`PR を開いて完了`), not under `Delivered`.
+- **The pull request** is `Deliver <ISSUE-KEY>` from `ticket/<ISSUE-KEY>`,
+  and its description says that merging it is left to a person.
+- **Once the request has ended**, the engine runs nothing more for it. A
+  merge, a close or a push to the branch changes neither the issue nor the
+  status page, which keeps showing the pull request open. While the request is
+  still running (a later check sent the work back), the next delivery reads
+  the pull request first: a person's merge is recorded as theirs and later
+  work goes into a new pull request; a close ends the request with nothing
+  delivered, shown as `Done, the pull request closed unmerged`; a push to the
+  branch is left alone, nothing is pushed over it, and the delivery names
+  what it did not put in.
+
+The cases this does not cover, and leaving out the `verify_merged` stage, are
+in rewrite/README.md ("Stages instead of roles", from the paragraph that
+begins "`DELIVERY_MERGE_METHOD=none`").
 
 ### With a gateway in front of the models
 
@@ -762,7 +837,9 @@ kubectl -n "$NS" port-forward "pod/$POD" 9200:9200
 Open <http://127.0.0.1:9200/> in a browser. It asks for the user and password
 from the status Secret; without them it answers 401. Signed in, an empty queue
 shows the counters (Queued, Running, Awaiting answer, Needs attention,
-Delivered, Stopped) at 0, "No request has been accepted into this queue yet.",
+Delivered, Done without a change, Done with the pull request open, Done, the
+pull request closed unmerged, Stopped) at 0, "No request has been accepted
+into this queue yet.",
 and one column per configured stage. <http://127.0.0.1:9200/healthz> answers
 `ok` without signing in. `/config` shows the configuration as the page read
 it, and `/log` the engine's log. The labels switch to Japanese from the link
@@ -887,30 +964,37 @@ kubectl -n "$NS" exec "$POD" -c engine -- \
 
 **The delivery and the merged check, in check mode.** Both end with exit
 status 3 on purpose: `--dry-run` commits, pushes, opens and merges nothing.
+Each reads its standard input to the end, so each is given `/dev/null`
+instead of the rest of this script.
 
 ```sh
 kubectl -n "$NS" exec -i "$POD" -c engine -- /bin/sh -s <<'CHECK'
 export GITHUB_TOKEN="$DELIVERY_GITHUB_TOKEN"
 export DELIVERY_REPOSITORY=<owner>/<repository-name> DELIVERY_BASE_BRANCH=<integration-branch>
+export DELIVERY_MERGE_METHOD="$(python3 -B -c 'import json; c = json.load(open("/etc/ticket-automation/operator.json")); print(*sorted({(p.get("env") or {}).get("DELIVERY_MERGE_METHOD") or "merge" for r in c["roles"] for p in r["processes"] if any(str(a).endswith("/deliver_git.py") for a in p["command"])}))')"
 d=$(mktemp -d /tmp/delivery-check.XXXXXXXX)
 export TASK_WORKSPACE="$d/workspace" TASK_HOME="$d/home"
 git -c core.hooksPath=/dev/null clone --quiet --no-local --branch <integration-branch> \
   /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git "$TASK_WORKSPACE"
 cd "$TASK_WORKSPACE" || exit
 TASK_ISSUE=CHECK-0 DELIVERY_ALLOWED_PATHS=. \
-  python3 -B /opt/ticket-automation/scripts/deliver_git.py --dry-run
+  python3 -B /opt/ticket-automation/scripts/deliver_git.py --dry-run </dev/null
 echo "deliver check exit: $?"
 VERIFY_COMMANDS='/opt/ticket-automation/operator/build
 /opt/ticket-automation/operator/test' \
-  python3 -B /opt/ticket-automation/scripts/verify_merged.py --dry-run
+  python3 -B /opt/ticket-automation/scripts/verify_merged.py --dry-run </dev/null
 echo "verify check exit: $?"
 cd / && rm -rf "$d"
 CHECK
 ```
 
 The delivery check reports that reading the repository and the integration
-branch answered status 200 and that listing the branch over Git exited 0. The
-merged check lists each command with its exit status and ends with
+branch answered status 200 and that listing the branch over Git exited 0, and
+names the merge method your configuration gives the delivery:
+`A delivery merges its pull request with method merge.`, or, with the merge
+left to a person,
+`A delivery ends at the open pull request and leaves the merge to a person (DELIVERY_MERGE_METHOD is none).`
+The merged check lists each command with its exit status and ends with
 `0 of 2 configured verification commands failed.` Anything else there means
 the integration branch fails your own checks today
 ([section 3](#the-branch-must-pass-before-you-start)).
@@ -1074,9 +1158,10 @@ answer.
 
 ### After it is delivered
 
-Look at the pull request on GitHub (`Deliver <ISSUE-KEY>`, merged), at the
-integration branch, and at the report. The report is written by a model from
-the run's records; the status page has the records themselves.
+Look at the pull request on GitHub (`Deliver <ISSUE-KEY>`, merged, or open
+for a person to merge), at the integration branch, and at the report. The
+report is written by a model from the run's records; the status page has the
+records themselves.
 
 ## 9. Stopping a request
 
@@ -1353,7 +1438,7 @@ purpose), so it kept searching until the requester stopped it. Now the
 delivery merges the integration branch into the ticket branch, leaves
 conflicts in the checkout between markers and names the paths, and the next
 `work` launch resolves them. If you still see this: the merge method must be
-`merge`, and the delivery process must keep both `--write .` and
+`merge` or `none`, and the delivery process must keep both `--write .` and
 `--write .git` (the example has both). Otherwise keep `intake.max_running`
 at 1.
 
@@ -1428,7 +1513,11 @@ File requests from a person's account.
 From the delivery script: when the work changes nothing, the delivery refuses
 with `No change under the allowed paths is ready to deliver`, which sends the
 work back like any other failure. Stop such a request (`停止`) and tell the
-requester; the ordered configuration has no ending for "nothing to do".
+requester. The delivery has a setting, `DELIVERY_ALLOW_UNCHANGED`, that lets
+such a request end instead; the shipped configuration leaves it off, and
+rewrite/README.md ("Stages instead of roles", from the paragraph that begins
+"A request whose right outcome is that nothing changes") says what it
+depends on.
 
 ## 12. Where things are
 
