@@ -148,7 +148,7 @@ details{margin:.4em 0}details summary{cursor:pointer;color:var(--accent);font-si
 <dt>{{t $.Lang "Requested by"}}</dt><dd>{{.Requester}} · {{.Created}}</dd>
 {{if .Model}}<dt>{{t $.Lang "model"}}</dt><dd>{{.Model}}</dd>{{end}}
 {{if .State}}{{if .State.Pending}}<dt>{{t $.Lang "pending:"}}</dt><dd>{{sn $.Lang .State.Pending.Role}}</dd>{{end}}{{end}}
-<dt>{{t $.Lang "links"}}</dt><dd>{{if .Link}}<a href="{{.Link}}">{{t $.Lang "open the issue"}}</a> · {{end}}<a href="/files/jobs/{{.ID}}/">{{t $.Lang "every file of this request"}}</a> · <a href="/jobs/{{.ID}}/workspace">{{t $.Lang "workspace changes as text"}}</a></dd>
+<dt>{{t $.Lang "links"}}</dt><dd>{{if .Link}}<a href="{{.Link}}">{{if .GitHub}}{{t $.Lang "open the issue on GitHub"}}{{else}}{{t $.Lang "open the issue"}}{{end}}</a> · {{end}}<a href="/files/jobs/{{.ID}}/">{{t $.Lang "every file of this request"}}</a> · <a href="/jobs/{{.ID}}/workspace">{{t $.Lang "workspace changes as text"}}</a></dd>
 </dl>
 {{if .Trail}}<div class="pipe" style="margin-top:.8em">{{range $i, $s := .Trail}}{{if $i}}<span class="arrow">→</span>{{end}}<span class="chip {{$s.State}}">{{sn $.Lang $s.Name}}<small>{{$s.Name}}</small></span>{{end}}</div>{{end}}
 <p class="meta" style="margin:.8em 0 0">{{t $.Lang "Raw files:"}} <a href="/jobs/{{.ID}}/raw/issue.json">issue.json</a> · <a href="/jobs/{{.ID}}/raw/request.txt">request.txt</a> · <a href="/jobs/{{.ID}}/raw/history.json">history.json</a> · <a href="/jobs/{{.ID}}/raw/engine.json">engine.json</a> · <a href="/jobs/{{.ID}}/raw/notices.json">notices.json</a></p>
