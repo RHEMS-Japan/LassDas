@@ -515,6 +515,43 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
         self.assertIn("// ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
 
+    def test_an_added_line_that_begins_with_plus_signs_is_still_scanned(self):
+        self.change("main.go", "package main\n\n++" + TOKEN + "\n")
+        refused = self.deliver()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("delivery credential", refused.stdout)
+        self.change("main.go", "package main\n\n++internal-project-codename\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_a_forbidden_word_in_a_path_name_is_refused(self):
+        self.change("library/internal-project-codename.go", "package library\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden text", refused.stdout)
+        self.assertEqual(self.state["pulls"], [])
+
+    def test_a_catch_up_merge_made_before_its_receipt_was_written_is_delivered(self):
+        self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
+        self.change("main.go", "package main\n\nfunc main() {}\n")
+        done = self.deliver()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        # The state a kill between the merge commit and the receipt write
+        # leaves: the receipt names the merge's first parent.
+        receipt_path = self.workspace / ".git" / "ticket-engine" / "delivery.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["head"] = self.parents(self.workspace)[0]
+        for key in ("pushed_at", "pull_request", "pull_request_url", "opened_at", "merge_sha", "merged_at"):
+            receipt.pop(key, None)
+        receipt_path.write_text(json.dumps(receipt))
+        self.git(self.remote, "update-ref", "-d", "refs/heads/ticket/TICKET-41")
+        again = self.deliver()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text())["head"],
+                         self.git(self.workspace, "rev-parse", "HEAD").stdout.strip())
+
 
 if __name__ == "__main__":
     unittest.main()

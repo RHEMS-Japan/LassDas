@@ -124,14 +124,16 @@ def refuse_paths_outside_grant(paths, allowed, exempt=()):
             outside.append(path)
     if outside:
         raise DeliveryError("Changes outside the operator's allowed paths were not delivered: "
-                            + ", ".join(sorted(outside)[:20]))
+                            + ", ".join(sorted(set(outside))[:20]))
 
 
-def refuse_forbidden_text(diff):
+def refuse_forbidden_text(diff, paths=()):
     """Configured text must not leave the workspace, whoever wrote it. Only
-    the lines this change adds are its text: context and removed lines are
-    what was already there."""
-    added = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    the lines this change adds, and the names of the paths it touches, are
+    its text: context and removed lines are what was already there. The
+    diff is read with ">" marking added lines, since a line whose own text
+    begins with "+" would otherwise look like a file header."""
+    added = "\n".join([line[1:] for line in diff.splitlines() if line.startswith(">")] + list(paths))
     lowered = added.lower()
     found = [entry for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()
              if entry.strip() and entry.strip().lower() in lowered]
@@ -181,12 +183,14 @@ def stage_and_commit(workspace, issue, allowed, receipt):
         raise DeliveryError("No change under the allowed paths is ready to deliver")
     # A pending merge whose result equals this branch's own content is still
     # concluded by a commit: that is what makes the branch mergeable.
-    if merge_in_progress(workspace):
-        # What the integration branch already carried is not this change;
-        # only what differs from that branch's tip is looked at.
-        _, diff, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--no-color", "MERGE_HEAD"),
-                                 redact=False)
-    refuse_forbidden_text(diff)
+    # What the integration branch already carried is not this change; during
+    # a merge completion only what differs from that branch's tip is looked at.
+    against = ["MERGE_HEAD"] if merge_in_progress(workspace) else []
+    _, marked, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--no-color",
+                                           "--output-indicator-new=>", *against), redact=False)
+    _, named, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--name-only", "-z",
+                                          "--no-renames", *against))
+    refuse_forbidden_text(marked, sorted(names(named)))
     name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
     address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
     # Both halves on purpose. A runtime with no Git identity cannot derive one
