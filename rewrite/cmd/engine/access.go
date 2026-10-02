@@ -39,13 +39,14 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 	if issue == "" {
 		return nil, errors.New("scoped tracker access needs an operator-assigned issue, not an identity inferred from request prose")
 	}
-	if cfg.Backlog.BaseURL == "" || cfg.Backlog.KeyEnv == "" {
+	source := cfg.source()
+	if cfg.Backlog.BaseURL == "" || source.CredentialEnv() == "" {
 		return nil, errors.New("scoped tracker access needs the controller tracker configuration")
 	}
 	for _, role := range cfg.Roles {
 		for _, process := range role.Processes {
-			for _, source := range process.Secrets {
-				if source == cfg.Backlog.KeyEnv {
+			for _, secret := range process.Secrets {
+				if secret == source.CredentialEnv() {
 					return nil, errors.New("do not also pass the controller tracker credential to a role")
 				}
 			}
@@ -63,7 +64,7 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 			options = append(options, tracker.KeepLatestPost)
 		}
 		mayPost := process.TrackerAccess == "comment" || process.TrackerAccess == "every-comment"
-		access, err := tracker.ServeIssue(ctx, cfg.Backlog, issue, mayPost, options...)
+		access, err := tracker.ServeIssue(ctx, source, issue, mayPost, options...)
 		if err != nil {
 			return process, nil, err
 		}

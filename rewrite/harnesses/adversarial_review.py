@@ -13,21 +13,22 @@ The send-back counter and a log stay in the process's own directory
 (TASK_HOME) and only inform: a verdict stands whether or not they were saved.
 
 No verdict, no pass. The command exits 0 only on a verdict that does not
-object and 1 only on one that does; without a verdict it does neither.
-Trouble with the model service (a connection that fails or times out, an
-HTTP error, a reply without a verdict), and anything unexpected, is waited
-out: the models are asked in the operator's order, round after round, the
-wait between rounds growing from REVIEW_RETRY_SECONDS to
-REVIEW_RETRY_CAP_SECONDS, and the printed result names the model that gave
-the verdict. What asking again cannot get past (a setting that is missing or
-mistyped, an endpoint that is not HTTPS, a credential that is not set, test
-commands that cannot be read) holds the review: the reason is said once, then
-a short line every REVIEW_HOLD_SECONDS. A workspace or TASK_HOME that cannot
-be used, or a change that cannot be read, is looked at again at each of
-those, and the review goes on once it can. What the review is doing is said
-on stderr when it changes, for the live view. The runtime's own notice tells
-the requester when a stage runs long; an operator who fixes a setting
-restarts the engine, which launches the stage afresh.
+object and 1 only on one that does; without a verdict it does neither, and a
+verdict whose blocking is anything but true or false is none. Trouble with
+the model service (a connection that fails or times out, an HTTP error, a
+reply without a verdict), and anything unexpected, is waited out: the models
+are asked in the operator's order, round after round, the wait between
+rounds growing from REVIEW_RETRY_SECONDS to REVIEW_RETRY_CAP_SECONDS, and the
+printed result names the model that gave the verdict. What asking again
+cannot get past (a setting that is missing or mistyped, an endpoint that is
+not HTTPS, a credential that is not set, test commands that cannot be read)
+holds the review: the reason is said once, then a short line every
+REVIEW_HOLD_SECONDS. A workspace or TASK_HOME that cannot be used, or a
+change that cannot be read, is looked at again at each of those, and the
+review goes on once it can. What the review is doing is said on stderr when
+it changes, for the live view. The runtime's own notice tells the requester
+when a stage runs long; an operator who fixes a setting restarts the engine,
+which launches the stage afresh.
 
 REVIEW_UNAVAILABLE=pass is the operator's opt-in for the old behaviour, and
 it delivers unreviewed work when no verdict can be obtained: after
@@ -345,10 +346,14 @@ def ask_once(found, model, prompt, diff, tests, rounds):
                                     context=context) as response:
             reply = json.loads(response.read().decode("utf-8", errors="replace"))
         calls = ((reply.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
-        if calls:
-            verdict = json.loads(calls[0]["function"]["arguments"])
-            return bool(verdict.get("blocking")), str(verdict.get("findings") or ""), None
-        return None, None, "the reviewer returned no verdict"
+        if not calls:
+            return None, None, "the reviewer returned no verdict"
+        verdict = json.loads(calls[0]["function"]["arguments"])
+        # The one field read strictly, since it decides whether the work goes
+        # on: anything but true or false is no verdict.
+        if isinstance(verdict, dict) and isinstance(verdict.get("blocking"), bool):
+            return verdict["blocking"], str(verdict.get("findings") or ""), None
+        return None, None, "the reviewer's verdict gave neither true nor false for blocking"
     except urllib.error.HTTPError as error:
         return None, None, "HTTP %d from the model service" % error.code
     except Exception as error:  # a model service hiccup is not a defect in the change

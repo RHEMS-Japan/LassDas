@@ -298,7 +298,7 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.PostForm.Encode())
 		switch {
 		case r.URL.Path == "/api/v2/users/myself":
-			json.NewEncoder(w).Encode(map[string]any{"id": 1797983, "name": "runtime"})
+			json.NewEncoder(w).Encode(map[string]any{"id": 900, "name": "runtime"})
 		case r.PostForm.Get("assigneeId") != "":
 			json.NewEncoder(w).Encode(map[string]any{"id": 1, "assignee": map[string]any{"id": json.Number(r.PostForm.Get("assigneeId"))}})
 		case r.PostForm.Get("actualHours") != "":
@@ -310,7 +310,7 @@ func TestMyselfAssigneeAndActualHoursGoThroughTheSameGuardedCall(t *testing.T) {
 	defer server.Close()
 	b := Backlog{BaseURL: server.URL + "/api/v2", KeyEnv: "TRACKER_TEST_KEY", Client: server.Client()}
 	me, err := b.Myself(context.Background())
-	if err != nil || me != 1797983 {
+	if err != nil || me != 900 {
 		t.Fatalf("myself: %d %v", me, err)
 	}
 	if err := b.SetAssignee(context.Background(), "EXAMPLE-1", 55); err != nil {

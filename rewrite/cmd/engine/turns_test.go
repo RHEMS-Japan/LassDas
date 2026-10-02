@@ -159,7 +159,7 @@ func beginStage(t *testing.T, directory, name string) {
 }
 
 func announcedIssue() sourceIssue {
-	return sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	return sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 }
 
 // A stage's one sentence says which model took the work on. The work can come

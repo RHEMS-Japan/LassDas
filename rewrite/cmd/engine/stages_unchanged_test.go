@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,15 +28,18 @@ const unchangedRequest = "Make src/greeting.txt say Hello 日本語, then post t
 // What this one asks for is not, and the work stage below writes nothing.
 const neededChangeRequest = "Add src/farewell.txt saying Goodbye 日本語, then post the verified outcome."
 
+// What a work stage asked to write writes, for neededChangeRequest.
+const farewell = "Goodbye 日本語\n"
+
 const unchangedReport = "できるようになったこと\n依頼の挙動はすでにあり、変更は要りませんでした。何も納品していません。\n"
 
 // What the review command hands its model in place of an empty diff.
 const noChangeSentence = "No file was changed. Judge whether the request and the settled requirements are satisfied with the repository exactly as it is; if a change is needed and none was made, that is a blocking defect."
 
 // The model stages and the operator's own build and report checks of the runs
-// below, as real child processes. Only the report is written into the
-// checkout, after the delivery: anything else would be a change, and these
-// runs are about a work stage that changes nothing.
+// below, as real child processes. The work stage writes nothing unless a test
+// asks it to write the file the request needs; otherwise only the report is
+// written into the checkout, after the delivery.
 func TestUnchangedStagesRoleHelper(t *testing.T) {
 	action := os.Getenv("UNCHANGED_STAGE_ACTION")
 	if action == "" {
@@ -50,21 +55,33 @@ func TestUnchangedStagesRoleHelper(t *testing.T) {
 	}
 	switch action {
 	case "elicit", "work", "verify":
-		// Whatever the request asks for, nothing is written.
 		if text, err := os.ReadFile("src/greeting.txt"); err != nil || string(text) != stagesArtifact {
 			t.Fatalf("the prepared checkout is not the target's: %q %v", text, err)
+		}
+		if action == "work" && os.Getenv("UNCHANGED_STAGE_WRITES") != "" {
+			if err := os.WriteFile("src/farewell.txt", []byte(farewell), 0600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	case "report":
 		if err := os.MkdirAll("report", 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile("report/result.md", []byte(unchangedReport), 0600); err != nil {
+		// A report carries what the record says happened to the pull request.
+		report := unchangedReport
+		for _, line := range strings.Split(string(prompt), "\n") {
+			if strings.Contains(line, "was closed by a person without being merged") {
+				report += line + "\n"
+				break
+			}
+		}
+		if err := os.WriteFile("report/result.md", []byte(report), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Contains(fixtureComments(t), unchangedReport) {
-			fixturePost(t, unchangedReport)
+		if !slices.Contains(fixtureComments(t), report) {
+			fixturePost(t, report)
 		}
-		fmt.Print(unchangedReport)
+		fmt.Print(report)
 	case "confirm_report":
 		reported, err := os.ReadFile("report/result.md")
 		if err != nil {
@@ -82,10 +99,10 @@ func TestUnchangedStagesRoleHelper(t *testing.T) {
 }
 
 // unchangedRun is the shipped ordered run with a work stage that writes
-// nothing. The review, the delivery and the check after it are the shipped
-// programs, run as real processes on a real checkout against a real Git
-// target and a stand-in delivery service; the operator has allowed an ending
-// without a change for the delivery.
+// nothing unless asked to. The review, the delivery and the check after it
+// are the shipped programs, run as real processes on a real checkout against
+// a real Git target and a stand-in delivery service; the operator has allowed
+// an ending without a change for the delivery.
 type unchangedRun struct {
 	queue, target, tip, key string
 	issue                   int
@@ -97,11 +114,28 @@ type unchangedRun struct {
 	log                     bytes.Buffer
 }
 
+// unchangedOptions changes the run for one test.
+type unchangedOptions struct {
+	// writes asks the work stage to write src/farewell.txt.
+	writes bool
+	// method is the delivery's DELIVERY_MERGE_METHOD; empty leaves it unset.
+	method string
+	// checkFailsOnce makes the check after delivery fail the first time.
+	checkFailsOnce bool
+	// closedByPerson has a person close each pull request right after it opens.
+	closedByPerson bool
+	// review adds to the review command's settings.
+	review map[string]string
+}
+
+func (run *unchangedRun) workspace() string {
+	return filepath.Join(run.queue, "jobs", fmt.Sprint(run.issue), "workspace")
+}
+
 // startUnchangedRun starts that run on the given request. answer is the
-// reviewing model: it is handed the number of the review it is asked for,
-// counted from 1, and writes the model service's reply. review adds to the
-// review command's settings.
-func startUnchangedRun(t *testing.T, issue int, request string, answer func(w http.ResponseWriter, n int), review map[string]string) *unchangedRun {
+// reviewing model: it is handed the run and the number of the review it is
+// asked for, counted from 1, and writes the model service's reply.
+func startUnchangedRun(t *testing.T, issue int, request string, answer func(run *unchangedRun, w http.ResponseWriter, n int), options unchangedOptions) *unchangedRun {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -122,8 +156,9 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(w ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := &unchangedRun{issue: issue, key: fmt.Sprintf("EXAMPLE-%d", issue)}
 	root := t.TempDir()
+	// Everything the stand-ins read is set before they start serving.
+	run := &unchangedRun{issue: issue, key: fmt.Sprintf("EXAMPLE-%d", issue), queue: filepath.Join(root, "queue")}
 	run.git = func(directory string, args ...string) string {
 		t.Helper()
 		arguments := []string{"-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null"}
@@ -150,12 +185,68 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(w ht
 	run.tip = run.git(run.target, "rev-parse", "refs/heads/master")
 
 	// The delivery service: anything asked of it is recorded, and an ending
-	// without a change must not ask it anything.
+	// without a change must not ask it anything. It opens, reads and merges
+	// pull requests against the target for a delivery that has a change.
+	target, branchTip := run.target, func(ref string) (string, error) {
+		out, err := exec.Command(gitPath, "-C", run.target, "rev-parse", ref).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	var pulls []map[string]any
 	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		run.mu.Lock()
+		defer run.mu.Unlock()
 		run.serviceCalls = append(run.serviceCalls, r.Method+" "+r.URL.Path)
-		run.mu.Unlock()
-		http.Error(w, `{"message":"this stand-in opens no pull request"}`, http.StatusNotFound)
+		reply := func(code int, value any) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			json.NewEncoder(w).Encode(value)
+		}
+		number, _ := strconv.Atoi(strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/owner/project/pulls/"), "/")[0])
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/repos/owner/project/pulls":
+			open := []any{}
+			for _, pull := range pulls {
+				if pull["state"] == "open" {
+					open = append(open, pull)
+				}
+			}
+			reply(200, open)
+		case r.Method == "POST" && r.URL.Path == "/repos/owner/project/pulls":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			pull := map[string]any{"number": len(pulls) + 1, "html_url": fmt.Sprintf("http://service.invalid/pulls/%d", len(pulls)+1),
+				"head": body["head"], "base": body["base"], "state": "open", "merged": false}
+			pulls = append(pulls, pull)
+			reply(201, pull)
+			if options.closedByPerson {
+				pull["state"] = "closed"
+			}
+		case number < 1 || number > len(pulls):
+			reply(404, map[string]string{"message": "no such pull request"})
+		case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/merge"):
+			pull := pulls[number-1]
+			base, err1 := branchTip("refs/heads/" + pull["base"].(string))
+			head, err2 := branchTip("refs/heads/" + pull["head"].(string))
+			tree, err3 := branchTip(head + "^{tree}")
+			if err := errors.Join(err1, err2, err3); err != nil {
+				reply(500, map[string]string{"message": err.Error()})
+				return
+			}
+			merge := exec.Command(gitPath, "-C", target, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+				"commit-tree", tree, "-p", base, "-p", head, "-m", "Merge the delivery")
+			out, err := merge.Output()
+			if err == nil {
+				err = exec.Command(gitPath, "-C", target, "update-ref", "refs/heads/"+pull["base"].(string), strings.TrimSpace(string(out))).Run()
+			}
+			if err != nil {
+				reply(500, map[string]string{"message": err.Error()})
+				return
+			}
+			pull["merged"], pull["state"], pull["merge_commit_sha"] = true, "closed", strings.TrimSpace(string(out))
+			reply(200, map[string]any{"merged": true, "sha": pull["merge_commit_sha"]})
+		default:
+			reply(200, pulls[number-1])
+		}
 	}))
 	t.Cleanup(service.Close)
 	// The reviewing model keeps what it was handed and answers as told.
@@ -173,7 +264,7 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(w ht
 		run.reviews = append(run.reviews, body.Messages[1].Content)
 		n := len(run.reviews)
 		run.mu.Unlock()
-		answer(w, n)
+		answer(run, w, n)
 	}))
 	t.Cleanup(model.Close)
 
@@ -198,22 +289,31 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(w ht
 				env["REVIEW_TEST_COMMANDS"], env["REVIEW_ATTEMPTS"] = `/bin/sh -c "grep -q Hello src/greeting.txt"`, "1"
 				// Trouble with the model service is waited out in moments here, not minutes.
 				env["REVIEW_RETRY_SECONDS"], env["REVIEW_RETRY_CAP_SECONDS"] = "0.05", "0.2"
-				maps.Copy(env, review)
+				maps.Copy(env, options.review)
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("adversarial_review.py"))
 			case "deliver":
 				maps.Copy(env, delivery)
 				env["DELIVERY_ALLOWED_PATHS"], env["DELIVERY_API_BASE"] = "src", service.URL
 				// The operator's opt-in. The shipped example leaves it off.
 				env["DELIVERY_ALLOW_UNCHANGED"] = "1"
+				if options.method != "" {
+					env["DELIVERY_MERGE_METHOD"] = options.method
+				}
 				p.Secrets = map[string]string{"GITHUB_TOKEN": "DELIVERY_TEST_TOKEN"}
 				p.Receipt = ".git/ticket-engine/delivery.json"
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("deliver_git.py"))
 			case "verify_merged":
 				maps.Copy(env, delivery)
 				env["VERIFY_COMMANDS"] = `/bin/sh -c "grep -q Hello src/greeting.txt"`
+				if options.checkFailsOnce {
+					env["VERIFY_COMMANDS"] = `/bin/sh -c "test -e $TASK_HOME/checked-once || { touch $TASK_HOME/checked-once; exit 1; }"`
+				}
 				p.Command = append(slices.Clone(prepare), python, "-B", harness("verify_merged.py"))
 			default:
 				env["UNCHANGED_STAGE_ACTION"], env["UNCHANGED_STAGE_REQUEST"] = cfg.Roles[i].Name, request
+				if options.writes {
+					env["UNCHANGED_STAGE_WRITES"] = "1"
+				}
 				p.Command = append(slices.Clone(prepare), binary, "-test.run=^TestUnchangedStagesRoleHelper$")
 			}
 			p.Env = env
@@ -265,7 +365,6 @@ func startUnchangedRun(t *testing.T, issue int, request string, answer func(w ht
 		return nil, fmt.Errorf("unexpected fixture destination %s %s", r.Method, r.URL.Path)
 	})
 
-	run.queue = filepath.Join(root, "queue")
 	run.finish = startStopQueue(t, cfg, run.queue, 30*time.Millisecond, &run.log)
 	return run
 }
@@ -286,13 +385,13 @@ func verdict(w http.ResponseWriter, blocking bool, findings string) {
 func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 	for _, objections := range []int{0, 1} {
 		t.Run(fmt.Sprintf("objections=%d", objections), func(t *testing.T) {
-			run := startUnchangedRun(t, 64+objections, unchangedRequest, func(w http.ResponseWriter, n int) {
+			run := startUnchangedRun(t, 64+objections, unchangedRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
 				if n <= objections {
 					verdict(w, true, "the request also asks for a closing line, and none was written")
 					return
 				}
 				verdict(w, false, "")
-			}, nil)
+			}, unchangedOptions{})
 			deadline := time.Now().Add(120 * time.Second)
 			for {
 				state, err := loadWatchState(run.queue, run.issue)
@@ -411,7 +510,9 @@ func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
 				if passing {
 					review["REVIEW_UNAVAILABLE"] = "pass"
 				}
-				run := startUnchangedRun(t, issue, neededChangeRequest, shape.answer, review)
+				run := startUnchangedRun(t, issue, neededChangeRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
+					shape.answer(w, n)
+				}, unchangedOptions{review: review})
 				deadline := time.Now().Add(120 * time.Second)
 				for {
 					run.mu.Lock()
@@ -463,5 +564,141 @@ func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// REPRO 02 through the engine: the work stage writes the file the request
+// needs and the review passes it, and then the workspace is restored empty
+// before the delivery. The delivery's launch prepares the workspace again,
+// says so and fails, so the run goes back to the work stage, which writes the
+// file again; the request ends with the file delivered, not as an ending
+// with nothing delivered.
+func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.T) {
+	run := startUnchangedRun(t, 80, neededChangeRequest, func(run *unchangedRun, w http.ResponseWriter, n int) {
+		if n == 1 {
+			// The first review passes the work; meanwhile its workspace is
+			// restored empty, as by a restore from an earlier state.
+			if err := os.Rename(run.workspace(), run.workspace()+".lost"); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := os.Mkdir(run.workspace(), 0700); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		verdict(w, false, "")
+	}, unchangedOptions{writes: true})
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		state, err := loadWatchState(run.queue, run.issue)
+		if err == nil && state.Done {
+			break
+		}
+		if time.Now().After(deadline) {
+			run.finish()
+			t.Fatalf("the run did not finish: step=%s error=%v\n%+v\n%s", state.Step, err, state.History, run.log.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	run.finish()
+	state, err := loadWatchState(run.queue, run.issue)
+	if err != nil || state.Step != "confirm_report" {
+		t.Fatalf("the run ended at %s: %v", state.Step, err)
+	}
+	var ran []string
+	lost := 0
+	for _, result := range state.History {
+		switch {
+		case result.Speaker == "runtime":
+			ran = append(ran, result.Role)
+		case result.Role == "deliver" && strings.Contains(result.Output, "This request's workspace was lost"):
+			if result.Error == "" {
+				t.Fatalf("the launch that found the workspace lost went on: %+v", result)
+			}
+			lost++
+		}
+	}
+	want := []string{"elicit", "work", "verify", "review", "deliver", "work", "verify", "review", "deliver", "verify_merged", "report", "confirm_report"}
+	if !slices.Equal(ran, want) || lost != 1 {
+		t.Fatalf("the stages ran as %v (lost workspace said %d times), not %v", ran, lost, want)
+	}
+	var receipt map[string]any
+	data, err := os.ReadFile(filepath.Join(run.workspace(), ".git", "ticket-engine", "delivery.json"))
+	if err != nil || json.Unmarshal(data, &receipt) != nil || receipt["unchanged"] == true || receipt["merge_sha"] == nil {
+		t.Fatalf("the request did not end with a merged delivery: %s %v", data, err)
+	}
+	if delivered := run.git(run.target, "show", "refs/heads/master:src/farewell.txt"); delivered+"\n" != farewell {
+		t.Fatalf("the integration branch holds %q", delivered)
+	}
+}
+
+// A person closes the pull request a delivery left to them. The check after
+// delivery fails once, so the run goes back through the work to the delivery,
+// which finds the pull request closed: the request then ends, with nothing
+// delivered, no pull request reopened or opened in its place, and the report
+// saying what happened, instead of going round for as long as the queue runs.
+func TestARequestWhosePullRequestAPersonClosedEndsAndSaysSo(t *testing.T) {
+	run := startUnchangedRun(t, 90, neededChangeRequest, func(_ *unchangedRun, w http.ResponseWriter, n int) {
+		verdict(w, false, "")
+	}, unchangedOptions{writes: true, method: "none", checkFailsOnce: true, closedByPerson: true})
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		state, err := loadWatchState(run.queue, run.issue)
+		if err == nil && state.Done {
+			break
+		}
+		if time.Now().After(deadline) {
+			run.finish()
+			t.Fatalf("the run did not end: step=%s error=%v\n%+v\n%s", state.Step, err, state.History, run.log.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	run.finish()
+	state, err := loadWatchState(run.queue, run.issue)
+	if err != nil || state.Step != "confirm_report" {
+		t.Fatalf("the run ended at %s: %v", state.Step, err)
+	}
+	var ran []string
+	closed, nothingToCheck := 0, 0
+	for _, result := range state.History {
+		switch {
+		case result.Speaker == "runtime":
+			ran = append(ran, result.Role)
+		case result.Role == "deliver" && strings.Contains(result.Output, "was closed by a person without being merged"):
+			if result.Error != "" {
+				t.Fatalf("the delivery that found the pull request closed failed: %+v", result)
+			}
+			closed++
+		case result.Role == "verify_merged" && strings.HasPrefix(result.Output, "Nothing to check"):
+			nothingToCheck++
+		}
+	}
+	want := []string{"elicit", "work", "verify", "review", "deliver", "verify_merged", "work", "verify", "review", "deliver",
+		"verify_merged", "report", "confirm_report"}
+	if !slices.Equal(ran, want) || closed != 1 || nothingToCheck != 1 {
+		t.Fatalf("the stages ran as %v (closed said %d times, nothing to check %d times), not %v", ran, closed, nothingToCheck, want)
+	}
+	var receipt map[string]any
+	data, err := os.ReadFile(filepath.Join(run.workspace(), ".git", "ticket-engine", "delivery.json"))
+	if err != nil || json.Unmarshal(data, &receipt) != nil || receipt["closed_unmerged"] != true {
+		t.Fatalf("the receipt does not record the closed pull request: %s %v", data, err)
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	opened := 0
+	for _, call := range run.serviceCalls {
+		if call == "POST /repos/owner/project/pulls" {
+			opened++
+		}
+		if strings.HasPrefix(call, "PUT ") {
+			t.Fatalf("something was merged: %v", run.serviceCalls)
+		}
+	}
+	if opened != 1 {
+		t.Fatalf("%d pull requests were opened", opened)
+	}
+	if len(run.stored) != 1 || !strings.Contains(run.stored[0], "was closed by a person without being merged") {
+		t.Fatalf("the report does not say what happened to the pull request: %q", run.stored)
 	}
 }

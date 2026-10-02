@@ -28,7 +28,8 @@ func stopComment(issue, user int64, body string) json.RawMessage {
 }
 
 func TestStopRecognizesOnlyAuthorizedNativeInstructions(t *testing.T) {
-	issue := sourceIssue{ID: 51, ProjectID: 17}
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
 	issue.Creator.ID = 55
 	for _, test := range []struct {
 		name string
@@ -48,14 +49,14 @@ func TestStopRecognizesOnlyAuthorizedNativeInstructions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw := stopComment(51, test.user, test.body)
-			got, err := stopInstruction([]json.RawMessage{raw}, issue, []int64{77})
+			got, err := stopInstruction(source, []json.RawMessage{raw}, issue, []int64{77})
 			if err != nil || (got != nil) != test.want || (test.want && !bytes.Equal(got, raw)) {
 				t.Fatalf("stop=%s error=%v", got, err)
 			}
 		})
 	}
 	for _, raw := range []json.RawMessage{stopComment(52, 55, "停止"), []byte(`{"id":701,"projectId":99,"issueId":51,"content":"停止"}`), []byte(`{"id":"broken"}`)} {
-		if _, err := stopInstruction([]json.RawMessage{raw}, issue, nil); err == nil {
+		if _, err := stopInstruction(source, []json.RawMessage{raw}, issue, nil); err == nil {
 			t.Fatal("unreadable or wrong-issue controls treated as a successful read")
 		}
 	}
@@ -63,7 +64,7 @@ func TestStopRecognizesOnlyAuthorizedNativeInstructions(t *testing.T) {
 	if err := writeRuntimeFile(filepath.Join(directory, "stop-request.json"), stopComment(52, 55, "停止")); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := savedStop(directory, issue, nil); err == nil || stopped {
+	if stopped, err := savedStop(source, directory, issue, nil); err == nil || stopped {
 		t.Fatal("damaged saved instruction did not hold the work")
 	}
 }
@@ -213,14 +214,14 @@ func TestStopQueuedRequestDoesNotNeedAnExecutionSlot(t *testing.T) {
 	})
 	slots := newTurnstile(1)
 	slots.slots <- struct{}{} // A different request owns the only execution slot.
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	issue.Creator.ID = 55
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := runWatchedRequest(ctx, cfg, issue, root, "unused-config", "unused-request", 40*time.Millisecond, slots, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := savedStop(root, issue, nil); err != nil || !stopped || models.Load() != 0 || len(slots.slots) != 1 {
+	if stopped, err := savedStop(cfg.source(), root, issue, nil); err != nil || !stopped || models.Load() != 0 || len(slots.slots) != 1 {
 		t.Fatalf("queued stop consumed a work slot: stopped=%v error=%v models=%d", stopped, err, models.Load())
 	}
 }
@@ -362,7 +363,7 @@ func TestStopKeepsObservedInstructionInMemoryWhenSavingFails(t *testing.T) {
 		}
 		return selectionReply(r, 200, []any{}), nil
 	})
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	issue.Creator.ID = 55
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -399,7 +400,7 @@ func TestStopKeepsObservedInstructionInMemoryWhenSavingFails(t *testing.T) {
 	if reads.Load() != 1 {
 		t.Fatal("re-read replaced the stop already observed")
 	}
-	if stopped, err := savedStop(directory, issue, nil); err != nil || !stopped {
+	if stopped, err := savedStop(cfg.source(), directory, issue, nil); err != nil || !stopped {
 		t.Fatalf("did not retain the original stop: %v %v", stopped, err)
 	}
 }
@@ -418,7 +419,7 @@ func TestStopUnreadableControlNeverLaunchesWork(t *testing.T) {
 				}
 				return catalogReply(r, 200, raw), nil
 			})
-			issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+			issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 			issue.Creator.ID = 55
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 			defer cancel()
@@ -438,7 +439,7 @@ func TestStopMissingRequesterIdentityHoldsWorkUnlessAnOperatorIsConfigured(t *te
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		return selectionReply(r, 200, []json.RawMessage{stopComment(51, 77, "停止")}), nil
 	})
-	issue := sourceIssue{ID: 51, ProjectID: 17, Key: "EXAMPLE-51"}
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 	var log bytes.Buffer
@@ -453,7 +454,35 @@ func TestStopMissingRequesterIdentityHoldsWorkUnlessAnOperatorIsConfigured(t *te
 	if err := runWatchedRequest(context.Background(), cfg, issue, directory, "unused", "unused", 20*time.Millisecond, newTurnstile(1), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := savedStop(directory, issue, []int64{77}); err != nil || !stopped {
+	if stopped, err := savedStop(cfg.source(), directory, issue, []int64{77}); err != nil || !stopped {
 		t.Fatal("explicitly configured operator could not stop work")
+	}
+}
+
+// The queue looks for a stop itself before it holds a request for the budget
+// and before it tells an interrupted one that it carries on. It reads the
+// list as the watcher does: a list holding a comment placed elsewhere gives
+// no stop, even with the requester's stop after it.
+func TestTheQueuesOwnLookForAStopReadsTheListAsTheWatcherDoes(t *testing.T) {
+	cfg := watchConfiguration(t)
+	var rows []json.RawMessage
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		return selectionReply(r, 200, rows), nil
+	})
+	issue := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
+	issue.Creator.ID = 55
+	for _, test := range []struct {
+		name string
+		rows []json.RawMessage
+		stop bool
+	}{
+		{"the requester's stop", []json.RawMessage{stopComment(51, 55, "停止")}, true},
+		{"a stop on another issue", []json.RawMessage{stopComment(52, 55, "停止")}, false},
+		{"a stop after a comment in another project", []json.RawMessage{[]byte(`{"id":700,"issueId":51,"projectId":99,"createdUser":{"id":88},"content":"words"}`), stopComment(51, 55, "停止")}, false},
+	} {
+		rows = test.rows
+		if got := stopWritten(context.Background(), cfg, issue, time.Second); got != test.stop {
+			t.Errorf("%s: a stop was read as %t", test.name, got)
+		}
 	}
 }

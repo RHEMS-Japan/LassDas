@@ -219,6 +219,66 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *sys.argv[1:
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["body"], "original\n")
 
+    def record(self, workspace):
+        return json.loads((workspace.parent / ".workspace.prepared").read_text())
+
+    def test_the_first_preparation_is_recorded_beside_the_workspace_not_in_it(self):
+        workspace = self.workspace("recorded")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        self.assertFalse(self.record(workspace)["prepared_again"])
+        self.assertNotIn(".workspace.prepared", [path.name for path in workspace.iterdir()])
+
+    def test_a_lost_workspace_is_prepared_again_and_its_command_does_not_run(self):
+        # REPRO 02: work was done in the workspace and passed on, then the
+        # workspace was restored empty. Its next launch must not run on the
+        # fresh checkout as though that work were there.
+        workspace = self.workspace("lost")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        (workspace / "entry.txt").write_text("reviewed work\n")
+        shutil.rmtree(workspace)
+        workspace.mkdir()
+        code, out, err = self.run_launcher(workspace)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(out.strip(), "This request's workspace was lost: it had been prepared before and was found "
+                         "empty. It has been prepared again from the repository, so nothing an earlier stage did in "
+                         "it remains. This launch ends here without running its command, so the stages whose work was "
+                         "lost run again.")
+        self.assertEqual((workspace / "entry.txt").read_text(), "original\n")
+        self.assertTrue(self.record(workspace)["prepared_again"])
+        # The launch after it runs on the prepared checkout as usual.
+        code, out, err = self.run_launcher(workspace)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["body"], "original\n")
+
+    def test_an_ordinary_retry_keeps_the_workspace_and_says_nothing(self):
+        # CONTROL 03: a retry finds the work where it was left.
+        workspace = self.workspace("retry")
+        self.assertEqual(self.run_launcher(workspace)[0], 0)
+        (workspace / "entry.txt").write_text("work in progress\n")
+        code, out, err = self.run_launcher(workspace)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["body"], "work in progress\n")
+        self.assertNotIn("was lost", out + err)
+
+    def test_a_workspace_prepared_before_the_record_existed_goes_on_without_a_word(self):
+        # A queue already running when this arrives: its workspaces were
+        # prepared without a record. They go on as they were, gaining one, so
+        # that none of them fails at its next launch.
+        workspace = self.workspace("from-before")
+        self.git(workspace.parent, "clone", "--no-local", str(self.source), str(workspace))
+        (workspace / "entry.txt").write_text("work from before the upgrade\n")
+        code, out, err = self.run_launcher(workspace)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["body"], "work from before the upgrade\n")
+        self.assertNotIn("was lost", out + err)
+        self.assertTrue(self.record(workspace)["found_in_place"])
+        # Lost after that, it is noticed like any other.
+        shutil.rmtree(workspace)
+        workspace.mkdir()
+        code, out, _ = self.run_launcher(workspace)
+        self.assertEqual(code, 1)
+        self.assertIn("This request's workspace was lost", out)
+
     def test_nonempty_work_and_symlinks_are_not_replaced(self):
         workspace = self.workspace("existing")
         (workspace / "entry.txt").write_text("existing nongit work\n")

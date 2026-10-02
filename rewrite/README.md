@@ -32,6 +32,8 @@ go run ./cmd/engine --config operator.json --issue EXAMPLE-1 --run-dir run
 go run ./cmd/engine --config operator.json --watch --run-dir queue
 # Fetch the current model catalog before selecting experiment models:
 go run ./cmd/engine --list-models
+# Have an edited configuration read and checked; nothing is started:
+go run ./cmd/engine --config operator.json --check
 ```
 
 `operator.json` configures `router.mode` (`jev` or `llm`), routing endpoints,
@@ -194,6 +196,69 @@ rollout without starting unrelated tickets; it is not an input format or an
 assessment of a request. Removing an ID does not abandon already accepted work:
 those queue records continue to resume and the existing stop mechanism applies.
 
+Optional `intake.category_ids` narrows new discovery to issues that carry at
+least one of the listed tracker categories. This is how a project shared with
+people's own tickets hands the runtime only what was marked for it: the
+category is set when the issue is filed, or added later, and the issue is
+accepted on the next scan after it carries the category. An issue without one
+is left alone and looked at again on every scan. Like the allowlist, this is
+operator scope, not an input format: nothing about the wording of a request is
+inspected, and removing a category from the setting or from an issue does not
+abandon work that was already accepted. Omitted or empty means no narrowing by
+category. With both settings an issue must be on the allowlist and carry a
+category.
+
+Use a category that exists only for this purpose. The runtime compares the
+category's number and nothing else, so a category people already use for
+something else hands over every issue that carries it and was created at or
+after the starting time, all at once on the first scan. It also does not look
+at who set the category: anyone who may edit the issue's categories hands it
+over, while the requester remains the account that filed the issue. That
+account, and the ones in `intake.stop_user_ids`, are the only ones whose stop
+or answer the runtime follows. `intake.category_on_accept`, described below, is
+a different setting: it marks what the runtime accepted and narrows nothing.
+
+The runtime refuses a configuration it cannot take as written, instead of
+running on something else. A key it does not know is named with its place,
+`unknown key "category_id" in intake`: `category_id` for `category_ids` would
+otherwise be no filter at all. A key's letter case must be the documented one.
+A key written twice in one object is refused too, since the later one would
+win without a word. A runtime that refuses its configuration does not start,
+and says why on standard error and, with `--log-file`, in that file, which is
+what the status page shows.
+
+`--check` has the configuration read and checked without starting anything:
+
+```sh
+go run ./cmd/engine --config operator.json --check
+```
+
+It runs the checks of a `--watch` start, so a configuration the watch would
+refuse is refused here in the same words, and prints which new issues the
+watch would take up, for example `intake: project 17, issues created at or after
+2026-01-02T00:00:00Z; only issues carrying one of the categories [77]` or
+`...; every such issue is accepted`, then `the configuration is accepted;
+nothing was started`, and exits. It creates no queue and no log file and makes
+no request to any service; it takes `--config` and nothing else. Run it on an
+edited configuration before the runtime is restarted with it. The watch prints
+the same line once at start, and its first scan follows at once: when a filter
+is new, set `intake.created_since` to the moment of the change and read the
+line from `--check` first, so that issues people filed earlier are not taken up
+before anyone has read it.
+
+A watch, and so the check, also refuses a configuration that still holds one
+of the shipped examples' placeholders: a URL whose host is under
+`example.invalid`, which cannot exist, or the paragraph the examples'
+`instructions` open with. It names the first one by its place, for example
+`roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
+placeholder host under example.invalid; a watch needs your own value there`.
+Only the host of a URL is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
+configuration with such a host would take up requests and fail each of them
+over and over, launching models every time. The commands an example expects
+the operator to supply are not checked here: a stage whose command is missing
+fails on every round.
+
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
 the original request. Its title and complete description go directly to the
@@ -206,6 +271,9 @@ restart even if discovery is unavailable or the issue disappears remotely.
 
 Execution slots (`intake.max_running`) go to accepted requests in the order they
 were filed: a request runs only when no earlier request is waiting for a slot.
+Filed, not handed over: an older issue that gains its category today goes ahead
+of newer requests already waiting, and those are not told again how many are
+ahead of them.
 Once a request has finished, the caches its roles' agents built in their home
 directories under `queue/jobs/<id>/homes/` are removed, since they are most of a
 request's footprint and nobody reads them; the record, the request, the
@@ -361,7 +429,7 @@ other report. Only the first comment after the recorded point becomes the
 answer; further comments are not appended, and a later question moves the point
 past them. While a request waits, each poll reads that issue's comments inside
 the collector loop, so a slow tracker delays the loop by up to one interval for
-every waiting request. Nothing notifies the requester beyond the posted comment
+every waiting request, and for every request held for the model budget. Nothing notifies the requester beyond the posted comment
 itself, and an unanswered question waits indefinitely unless someone stops it.
 
 ### Stages instead of roles
@@ -420,8 +488,11 @@ integration branch changed and the worker left as that branch has them need
 no grant; what the branch already carried is not scanned for forbidden text.
 This happens under the merge method and under `none` (below), not under squash
 or rebase, since a service that squashes or rebases rewrites the delivered
-history. For this the delivery process's sandbox grant must cover the working
-tree as well as `.git`.
+history. Under `none` the person who merges may squash or rebase all the same;
+a further round after that conflicts with the squashed copy of its own earlier
+change, and the conflict is handled like any other (below). For this the
+delivery process's sandbox grant must cover the working tree as well as
+`.git`.
 
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
@@ -438,7 +509,8 @@ on, and its receipt records the same (`"unchanged": true` with that commit as
 such an ending is delivered as usual. The post-delivery check
 (`harnesses/verify_merged.py`) then has no merge to look for: it requires the
 recorded commit to be part of the integration branch, runs the configured
-commands with that commit checked out, and says that no merge was made. The
+commands on that branch as it is now, as after a merge, and says that no merge
+was made. The
 run then ends like any finished run: where they are configured, the
 `delivered` status of `intake.statuses` is applied and `intake.assign` hands
 the request back to the requester although nothing was merged, so the report
@@ -460,36 +532,78 @@ request and leave the merge to a person. It commits, catches up with the
 integration branch (a conflict still goes back to the work stage), pushes the
 ticket branch, opens the pull request or reuses the one it opened before, and
 ends 0 without merging. It prints `Pull request N against <base> is open for
-<issue>: <url>. Merging is left to a person; nothing was merged.`, the pull
-request's description says that merging it is left to a person, and the
+<issue>: <url>. Merging is left to a person; nothing was merged.`, and the
 receipt records the pull request's number and address, `"merge_method":
-"none"` and `"merge_left_to_person": true`, with no `merge_sha`. Every later
-delivery of the request first reads what became of that pull request:
+"none"` and `"merge_left_to_person": true`, with no `merge_sha`. A pull request
+this delivery opens under `none` says in its description that merging it is
+left to a person; one it reuses keeps its description, and the sentence stays
+if the operator later switches to merging. Once the pull request is in a
+person's hands, what they do with it decides; this process never undoes it.
+While the merge of a round is left to a person (under `none`, and after a
+switch to merging until the delivery's own merge request succeeds), every later
+delivery reads what became of that pull request before its push and again
+after it:
 
-- open, with nothing new: the same statement again, and nothing is pushed;
+- open, its branch holding the commit on record, nothing new: the same
+  statement again, and nothing is pushed. A commit on record that never
+  reached the branch (a push that was refused or did not go through, a
+  catch-up that failed) is pushed by the next delivery.
 - open, with new reviewed work: the work is pushed to the same branch, so the
-  same pull request carries it;
-- merged by a person: reported as merged by someone else, with the commit
-  they made (recorded as `merge_sha`); work after that is a further round with
-  a pull request of its own, left to a person again;
-- closed without a merge: refused with that fact, so the run goes back to the
-  work stage. The delivery never reopens the pull request or opens another in
-  its place, so the request goes round, running the work and review stages
-  each time, until someone reopens it or the requester stops the request.
+  same pull request carries it.
+- open, with a branch a person pushed to or rewrote: the branch is theirs.
+  Nothing is pushed over it; the delivery ends 0 saying so, names a commit of
+  this delivery that is not on the branch, and records `changed_by_person`
+  with the branch's head. Every later delivery says the same.
+- merged by a person: reported as merged by someone else, with the commit the
+  service reports for their merge (recorded as `merge_sha`: the merge commit,
+  the squashed commit, or for a rebase the commit the integration branch was
+  moved to); work after that is a further round with a pull request of its
+  own, left to a person again. If they squashed or
+  rebased, that round's catch-up conflicts with its own earlier change; the
+  conflict goes to the work stage like any other, and once it is resolved the
+  next delivery opens the new pull request. If the person's merge deleted the
+  branch, that round's push creates it again.
+- merged by a person before this round's commit reached the pull request (they
+  merged between the delivery's read and its push): that merge is recorded as
+  an earlier round, and the pushed commit gets a new pull request. The merged
+  pull request's own head is what tells the two apart.
+- merged by a person, but the service does not report the merge commit yet: the
+  delivery ends 1 saying so, and the next one reads it again.
+- closed without a merge: the request ends. The delivery ends 0 with `Pull
+  request N ... was closed by a person without being merged ... This request
+  ends with nothing delivered`, records `closed_unmerged`, and never reopens
+  the pull request or opens another in its place; continuing needs a new
+  request. A delivery interrupted after opening a pull request but before
+  recording it does not know that one, and opens another if a person closed it
+  meanwhile.
+
+Switching to a merge method takes a round from the person it was left to only
+once the delivery's own merge request succeeds, and only that merge is
+reported as `merged with method ...`. A merge found before then is reported as
+merged by someone else, and work after it is a further round, which the
+delivery merges. Under a merge method alone, a pull request the delivery finds
+already merged when it comes to merge it is reported as merged with the
+method, since that cannot be told apart from the merge of an interrupted
+earlier attempt.
 
 With an open pull request there is no merged state to verify, so the
 post-delivery check (`harnesses/verify_merged.py`) checks the pull request's
 head instead. It fetches the ticket branch, requires the commit the delivery
 pushed to be on it, runs the configured commands with that commit checked out,
-and says that nothing was merged; it ends 0 only when that commit is there
-and every command passed. That is what a person is asked to merge, including
-the catch-up merge, which the verify stage before the review never saw, so
-keep the stage. Once a delivery has recorded a person's merge, the check
-verifies the integration branch as usual. If the person's merge deletes the
-branch before a delivery has recorded it, the check cannot read the branch and
-the run goes round once more, after which the next delivery records the merge.
-Where the target's own checks on pull requests are what the person merging
-relies on, the stage can be left out:
+and says that this delivery merged nothing, without looking at whether a
+person merged since; it ends 0 only when that commit is there and every
+command passed. That is what a person is asked to merge, including the
+catch-up merge, which the verify stage before the review never saw, so keep
+the stage. Once a delivery has recorded a person's merge, the check verifies
+the integration branch as usual. If the person's merge deletes the branch
+before a delivery has recorded it, the check cannot read the branch and the
+run goes round once more, after which the next delivery records the merge;
+anything the work changed in that extra round goes in a further round's pull
+request. After the two endings a person causes, a closed pull request and a
+branch a person changed, the check runs nothing and ends 0, saying what it did
+and did not look at: nothing of this delivery is left to verify, and failing
+would only send the work round again. Where the target's own checks on pull
+requests are what the person merging relies on, the stage can be left out:
 
 ```json
 "workflow": {
@@ -513,7 +627,8 @@ person merges. The operator sees the open pull request at the service, the
 receipt on the status page, and, with `--dry-run`, a line saying that a
 delivery ends at the open pull request. The status page shows such a request
 as done with the pull request open, not as delivered, until a later delivery
-records that a person merged it.
+records that a person merged it, and one whose pull request a person closed as
+done with the pull request closed unmerged.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
@@ -535,12 +650,13 @@ No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that
 does not object and 1 only on one that does; without a verdict it does
 neither. Trouble with the model service (a connection that fails or times
-out, an HTTP error, a reply without a verdict), and any unexpected error, is
-waited out: the models named in `REVIEW_MODELS` (newline- or comma-separated,
-in order of preference; `REVIEW_MODEL` alone counts as the only one) are
-asked in turn, round after round, the wait between rounds growing from
-`REVIEW_RETRY_SECONDS` (5) to `REVIEW_RETRY_CAP_SECONDS` (300), and the
-printed result names the model that gave the verdict. What asking again cannot
+out, an HTTP error, a reply without a verdict or with one whose `blocking` is
+neither true nor false), and any unexpected error, is waited out: the models
+named in `REVIEW_MODELS` (newline- or comma-separated, in order of preference;
+`REVIEW_MODEL` alone counts as the only one) are asked in turn, round after
+round, the wait between rounds growing from `REVIEW_RETRY_SECONDS` (5) to
+`REVIEW_RETRY_CAP_SECONDS` (300), and the printed result names the model that
+gave the verdict. What asking again cannot
 get past, a setting that is missing or mistyped, an endpoint that is not
 HTTPS, a credential that is not set, test commands that cannot be read, holds
 the review: the reason is printed once and then a short line every
@@ -664,9 +780,15 @@ Optional `intake.statuses` moves the issue's status at each turn of the work,
 by status id, so a requester can see whose move it is on the tracker board:
 `processing` when the request is accepted and whenever the runtime works on
 it, `awaiting_requester` while a question waits for the requester,
-`delivered` once the result is merged and the report posted, `stopped` after
-the requester's stop. An id left out leaves that turn alone; the runtime never
-reads or names a status. Each change is made once and recorded beside the
+`delivered` once the run is done and the report posted: usually after the
+merge, but also when the run ended at the open pull request of
+`DELIVERY_MERGE_METHOD=none`, with no change, or at a pull request a person
+closed, so the status alone does not say that anything was merged; `stopped` after
+the requester's stop, once the stop is recorded and, where a stop report is
+configured, that report is done. A stop written while a question waits moves
+the issue from `awaiting_requester` to `stopped` without passing through
+`processing` or the runtime's own account. An id left out leaves that turn alone; the
+runtime never reads or names a status. Each change is made once and recorded beside the
 request in `status.json`; a refused change is asked again for as long as the
 request lives, a minute after the first refusal and up to an hour apart after
 repeated ones, never given up, and the same refusal is logged once.
@@ -688,7 +810,8 @@ while 1 and 3 are the tracker's built-in open and resolved statuses.
 With `announce`, the runtime also says, in its own fixed words, when a request is accepted (with
 its place in line and, when `intake.status_page` is set, a link to the request's
 own page), when its work starts after waiting its turn (a request told it starts at once hears no
-second comment), and when it resumes after the requester's answer; a stage whose `announce` sentence the
+second comment), and when it resumes after the requester's answer (a stop written while a question
+waits is not an answer and is not announced as one); a stage whose `announce` sentence the
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
 ` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
@@ -748,7 +871,8 @@ stage is looked at, so a launch that the next launch of the same stage
 replaces within those two seconds is not declared; the list at delivery names
 it.
 
-`category_on_accept` adds that category to an accepted issue. `assign` hands
+`category_on_accept` adds that category to an accepted issue; it does not
+decide which issues are accepted (`intake.category_ids` does). `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
 hours from acceptance to the report in the issue's actual hours.
@@ -893,7 +1017,7 @@ endpoint above and may point at a gateway instead; it must be an HTTPS URL
 without credentials or a query. The answer's `limit_remaining` is read as the
 balance, and a null there means the key has no limit, which never pauses
 anything. Below the floor, the running role is stopped exactly as an authorized
-stop stops it, nothing new is launched, and the requester is told once:
+stop stops it, no work is launched, and the requester is told once:
 
 > 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します（人の操作は不要です）。
 
@@ -901,6 +1025,14 @@ The balance keeps being read each tick. When it is back above the floor the
 request is launched again and says so once:
 
 > モデル利用枠が回復したため、自動処理を再開しました。
+
+An authorized stop does not wait for the balance: recording it launches no
+model. A request held below the floor is still read for a stop on every tick,
+whether its work was running, had not started, or waits on a question, and a
+request stopped while a question waits is told nothing about a pause. Where a
+stop report is configured, that report runs as soon as the stop is recorded,
+below the floor too, and uses the key, exactly as after the stop of a running
+request.
 
 The pause and the recovery alternate, so each episode gets one line of each. An
 endpoint that cannot be read is not evidence of an empty budget: it never
@@ -1161,6 +1293,23 @@ checkout never starts the role and its reason reaches the existing chain. A
 retry can prepare the still-empty workspace. A killed preparation can leave
 unpublished private staging for operator cleanup; it is never treated as work.
 Submodule/LFS setup and remote authentication are not automatically provisioned.
+
+Once a checkout is published, a record of it (`.workspace.prepared`) is kept
+beside the workspace, in the job's own directory, which no role's sandbox
+mounts. A workspace found empty although that record exists was lost, by a
+restore or by hand, together with everything the earlier stages did in it. Its
+next launch prepares it again from the repository, prints that the workspace
+was lost and ends non-zero without running its command: a command stage then
+goes back to its `on_failure` stage, after which every later stage runs again,
+and a model stage runs again. A stage that passed on the lost work is never
+taken as passed on the fresh checkout, so an ending with nothing delivered
+cannot follow from it. A workspace prepared before this record existed is
+taken as it is at its next launch and gains the record without a word, so a
+queue already running when this arrives goes on as it was. A workspace
+directory removed while the engine runs is not covered: no process can start
+in it, so each launch fails at once, spaced like any launch that cannot start,
+and nothing passes; restarting the engine creates the directory again, empty,
+and the next launch reports the loss.
 
 The wrapper is **not an isolation boundary**. Its job parent, lock and staging
 must be private to the controller. The command after `--` must establish the

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"time"
+
+	"ticket-runner/internal/tracker"
 )
 
 // statusConfig names, by tracker status id, where the runtime moves an
@@ -22,28 +25,11 @@ type statusConfig struct {
 }
 
 const (
-	processingStatus = "processing"
-	awaitingStatus   = "awaiting_requester"
-	deliveredStatus  = "delivered"
-	stoppedStatus    = "stopped"
+	processingStatus = tracker.Processing
+	awaitingStatus   = tracker.AwaitingRequester
+	deliveredStatus  = tracker.Delivered
+	stoppedStatus    = tracker.Stopped
 )
-
-func (s *statusConfig) id(kind string) int64 {
-	if s == nil {
-		return 0
-	}
-	switch kind {
-	case processingStatus:
-		return s.Processing
-	case awaitingStatus:
-		return s.AwaitingRequester
-	case deliveredStatus:
-		return s.Delivered
-	case stoppedStatus:
-		return s.Stopped
-	}
-	return 0
-}
 
 func (s *statusConfig) validate() error {
 	if s == nil {
@@ -59,11 +45,12 @@ func (s *statusConfig) validate() error {
 
 // statusRecord is what the runtime last set on the issue, kept beside the
 // request so a restart does not set it again and a failed call is retried.
+// The target is kept under "id", where the status id always was.
 type statusRecord struct {
-	Kind    string `json:"kind"`
-	ID      int64  `json:"id"`
-	Refused int    `json:"refused,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	Kind    string          `json:"kind"`
+	Target  json.RawMessage `json:"id"`
+	Refused int             `json:"refused,omitempty"`
+	Reason  string          `json:"reason,omitempty"`
 	// Next is when the refused move is asked again; see turnRecord.Next.
 	Next time.Time `json:"next,omitempty"`
 }
@@ -73,25 +60,26 @@ type statusRecord struct {
 // tracker that refuses is asked again on every tick for as long as the
 // request lives; the same refusal is logged once.
 func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, kind string, observe func(string)) {
-	id := cfg.Intake.Statuses.id(kind)
-	if id == 0 {
+	source := cfg.source()
+	target := source.Target(kind)
+	if target == nil {
 		return
 	}
 	path := filepath.Join(directory, "status.json")
 	var last statusRecord
 	if raw, err := os.ReadFile(path); err == nil {
-		if json.Unmarshal(raw, &last) == nil && last.Kind == kind && last.ID == id && last.Refused == 0 {
+		if json.Unmarshal(raw, &last) == nil && last.Kind == kind && bytes.Equal(last.Target, target) && last.Refused == 0 {
 			return
 		}
 	}
 	// Refusals are counted per turn: a new turn starts from zero.
-	if last.Kind != kind || last.ID != id {
-		last = statusRecord{Kind: kind, ID: id}
+	if last.Kind != kind || !bytes.Equal(last.Target, target) {
+		last = statusRecord{Kind: kind, Target: target}
 	}
 	if last.Refused > 0 && turnClock().Before(last.Next) {
 		return
 	}
-	if err := cfg.Backlog.SetStatus(ctx, issue.Key, id); err != nil {
+	if err := source.Move(ctx, issue, kind); err != nil {
 		if last.Reason != err.Error() {
 			observe("status not set to " + kind + ", asked again later: " + err.Error())
 		}
@@ -103,7 +91,7 @@ func applyStatus(ctx context.Context, cfg config, issue sourceIssue, directory, 
 		}
 		return
 	}
-	data, _ := json.Marshal(statusRecord{Kind: kind, ID: id})
+	data, _ := json.Marshal(statusRecord{Kind: kind, Target: target})
 	if err := writeRuntimeFile(path, data); err != nil {
 		observe("status set to " + kind + " but not recorded: " + err.Error())
 	}

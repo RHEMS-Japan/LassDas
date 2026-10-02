@@ -869,6 +869,7 @@ func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
 	for id, receipt := range map[string]string{
 		"25": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 5, "pull_request_url": "http://service.invalid/pulls/5"}`,
 		"26": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 6, "merge_sha": "MERGED-BY-A-PERSON"}`,
+		"27": `{"merge_left_to_person": true, "merge_method": "none", "pull_request": 7, "closed_unmerged": true}`,
 	} {
 		writeJob(t, root, id, done)
 		path := filepath.Join(root, "jobs", id, "workspace", ".git", "ticket-engine", "delivery.json")
@@ -882,7 +883,9 @@ func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
 	ts := serve(t, root, "", "", "")
 	_, body := get(t, ts, "/")
 	expectAll(t, body, `<article class="card unmerged" data-key="EXAMPLE-25">`, `<article class="card delivered" data-key="EXAMPLE-26">`,
-		`Done with the pull request open <b>1</b>`, `Delivered <b>1</b>`, "done; the pull request is open, its merge left to a person")
+		`<article class="card closed" data-key="EXAMPLE-27">`, `Done with the pull request open <b>1</b>`, `Delivered <b>1</b>`,
+		`Done, the pull request closed unmerged <b>1</b>`, "done; the pull request is open, its merge left to a person",
+		"done; the pull request was closed without being merged, so nothing was delivered")
 	request, _ := http.NewRequest("GET", ts.URL+"/", nil)
 	request.AddCookie(&http.Cookie{Name: "lang", Value: "ja"})
 	response, err := http.DefaultClient.Do(request)
@@ -891,7 +894,8 @@ func TestARequestEndedAtAnOpenPullRequestIsNotShownAsDelivered(t *testing.T) {
 	}
 	japanese, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	expectAll(t, string(japanese), "PR を開いて完了 <b>1</b>", "完了 (PR は開いたまま。merge は人に任せています)")
+	expectAll(t, string(japanese), "PR を開いて完了 <b>1</b>", "完了 (PR は開いたまま。merge は人に任せています)",
+		"PR が閉じられて終了 <b>1</b>", "完了 (PR はマージされずに閉じられたので、何も納品していません)")
 }
 
 func TestASideRoleWithNoStageBehindItStaysInTheOtherColumn(t *testing.T) {

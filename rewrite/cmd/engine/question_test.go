@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -223,6 +224,136 @@ func TestAStopDuringAQuestionIsNotAnAnswer(t *testing.T) {
 	}
 }
 
+// A requester who writes the stop instruction while the runtime waits for
+// their answer is told nothing about an answer, and the issue does not pass
+// through the working status or the runtime's hands on its way to stopped.
+// Before this, the queue treated the stop like an answer on the way to the
+// stop machinery: it posted that the reply was received and the work went on,
+// moved the issue back to processing and assigned it to the runtime, a moment
+// before stopping it. The stop also does not wait for the model budget: it
+// launches no model, and before this a short budget held it, told the
+// requester the work was paused and would carry on, and repeated the moves
+// above on every tick until the budget returned.
+func TestAStopWhileWaitingIsNotAnnouncedAsAnAnswer(t *testing.T) {
+	for name, shortBudget := range map[string]bool{"budget not limited": false, "budget below its floor": true} {
+		t.Run(name, func(t *testing.T) { stopWhileWaiting(t, shortBudget) })
+	}
+}
+
+func stopWhileWaiting(t *testing.T, shortBudget bool) {
+	cfg := questionConfiguration(t)
+	cfg.Intake.Announce = true
+	cfg.Intake.Assign = true
+	cfg.Intake.Statuses = &statusConfig{Processing: 1001, AwaitingRequester: 1002, Delivered: 3, Stopped: 1}
+	var mu sync.Mutex
+	remaining, shortReadings := "20", 0
+	if shortBudget {
+		cfg.Intake.MinModelCredit = 5
+		server := creditServer(t, func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			if remaining == "3" {
+				shortReadings++
+			}
+			return `{"data":{"limit":50,"usage":30,"limit_remaining":` + remaining + `,"limit_reset":"2026-10-01"}}`
+		})
+		cfg.Intake.ModelCreditURL, cfg.Intake.Client = server.URL, server.Client()
+	}
+	root := t.TempDir()
+	comments := []json.RawMessage{}
+	var posted, moves []string
+	// The tracker lists comments by id, so every new one gets the next id.
+	next := int64(800)
+	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Host != "watch-tracker.example" {
+			return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "ask_requester"}}}), nil
+		}
+		switch {
+		case r.URL.Path == "/api/v2/users/myself":
+			// The runtime's own account is neither the requester nor an operator.
+			return selectionReply(r, 200, map[string]any{"id": 900}), nil
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments"):
+			return selectionReply(r, 200, append([]json.RawMessage{}, comments...)), nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			posted = append(posted, r.PostForm.Get("content"))
+			next++
+			comments = append(comments, issueComment(next, 900, r.PostForm.Get("content")))
+			return selectionReply(r, 201, map[string]any{"id": next, "content": r.PostForm.Get("content")}), nil
+		case r.Method == http.MethodPatch:
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			reply := map[string]any{"id": 51}
+			if id := r.PostForm.Get("statusId"); id != "" {
+				moves = append(moves, "status:"+id)
+				n, _ := strconv.Atoi(id)
+				reply["status"] = map[string]any{"id": n}
+			}
+			if id := r.PostForm.Get("assigneeId"); id != "" {
+				moves = append(moves, "assignee:"+id)
+				n, _ := strconv.Atoi(id)
+				reply["assignee"] = map[string]any{"id": n}
+			}
+			return selectionReply(r, 200, reply), nil
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues"):
+			return selectionReply(r, 200, []any{watchedIssue(51, "Original conditions", "2026-01-03T00:00:00Z")}), nil
+		}
+		return nil, http.ErrNotSupported
+	})
+	log := &lockedLog{}
+	finish := startStopQueue(t, cfg, root, 20*time.Millisecond, log)
+	moved := func(move string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(moves) > 0 && moves[len(moves)-1] == move
+	}
+	// The question was put, and the issue is in the requester's hands.
+	waitFor(t, func() bool {
+		state, err := loadWatchState(root, 51)
+		_, recorded := questionBoundaryAt(t, root)
+		return err == nil && state.Waiting && recorded && moved("assignee:55")
+	})
+	if shortBudget {
+		// The budget is short before the stop is written, and the queue
+		// has read it so on ticks of its own.
+		mu.Lock()
+		remaining = "3"
+		mu.Unlock()
+		waitFor(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return shortReadings >= 2
+		})
+	}
+	mu.Lock()
+	next++
+	comments = append(comments, issueComment(next, 55, "停止"))
+	mu.Unlock()
+	waitFor(t, func() bool { return moved("status:1") })
+	// The budget returns: a stopped request is not told its work resumed.
+	mu.Lock()
+	remaining = "20"
+	mu.Unlock()
+	time.Sleep(100 * time.Millisecond) // several more ticks
+	finish()
+	mu.Lock()
+	if got := strings.Join(posted, " | "); got != "受け付けました。すぐに自動処理を始めます。" {
+		t.Fatalf("the requester was told: %s", got)
+	}
+	if got := strings.Join(moves, ","); got != "status:1001,assignee:900,status:1002,assignee:55,status:1" {
+		t.Fatalf("the issue moved %s; a stop while waiting goes from awaiting straight to stopped and stays with the requester", got)
+	}
+	mu.Unlock()
+	if asked := askedTimes(t, root); asked != 1 {
+		t.Fatalf("questions asked=%d", asked)
+	}
+}
+
 // The setting names an existing role that can actually reach the requester.
 // A missing or read-only role is refused before any work is accepted.
 func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
@@ -256,7 +387,8 @@ func TestQuestionRoleIsRefusedBeforeIntakeUnlessItCanComment(t *testing.T) {
 // and the runtime makes such changes itself while it waits. Words from the
 // creator or an operator are the answer; a stop line is not.
 func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
-	issue := sourceIssue{ID: 51, ProjectID: 17}
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
 	issue.Creator.ID = 55
 	rows := []json.RawMessage{
 		issueComment(700, 55, "below the boundary"),
@@ -265,14 +397,35 @@ func TestAnswerToQuestionTakesOnlyWords(t *testing.T) {
 		issueComment(703, 88, "someone else's words"),
 		issueComment(704, 55, "停止\nnot an answer"),
 	}
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 700); err != nil || id != 0 || answer != "" {
 		t.Fatalf("a comment without words, a stranger's or a stop line was read as an answer: id=%d %q err=%v", id, answer, err)
 	}
 	rows = append(rows, issueComment(705, 90, "an operator's reply"), issueComment(706, 55, requesterAnswer))
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 700); err != nil || id != 705 || answer != "an operator's reply" {
 		t.Fatalf("operator's reply: id=%d %q err=%v", id, answer, err)
 	}
-	if id, answer, err := answerToQuestion(rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
+	if id, answer, err := answerToQuestion(source, rows, issue, []int64{90}, 705); err != nil || id != 706 || answer != requesterAnswer {
 		t.Fatalf("creator's reply: id=%d %q err=%v", id, answer, err)
+	}
+}
+
+// A list holding a comment whose record places it on another issue or in
+// another project is not read for a question's boundary or its answer at
+// all, as it is not read for a stop.
+func TestAListWithACommentPlacedElsewhereIsNotReadForTheQuestion(t *testing.T) {
+	source := watchConfiguration(t).source()
+	issue := sourceIssue{ID: 51}
+	issue.Creator.ID = 55
+	for name, elsewhere := range map[string]json.RawMessage{
+		"another issue":   []byte(`{"id":702,"issueId":52,"projectId":17,"createdUser":{"id":55},"content":"words for another issue"}`),
+		"another project": []byte(`{"id":702,"issueId":51,"projectId":99,"createdUser":{"id":55},"content":"words in another project"}`),
+	} {
+		rows := []json.RawMessage{issueComment(701, 88, "someone else's words"), elsewhere, issueComment(703, 55, requesterAnswer)}
+		if highest, err := latestComment(source, rows, issue); err == nil {
+			t.Errorf("%s: the question's boundary was read as %d", name, highest)
+		}
+		if id, answer, err := answerToQuestion(source, rows, issue, nil, 0); err == nil {
+			t.Errorf("%s: an answer was read: id=%d %q", name, id, answer)
+		}
 	}
 }
