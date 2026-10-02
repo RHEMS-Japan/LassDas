@@ -565,7 +565,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Nothing was delivered for TICKET-41: no file was changed.", result.stdout)
         self.assertIn("The request stands on master of owner/project as it is at %s;" % tip, result.stdout)
-        self.assertIn("what the review before this stage looked at", result.stdout)
+        self.assertIn("what the review before this stage judged", result.stdout)
         self.assertEqual(self.receipt(), {"unchanged": True, "issue": "TICKET-41", "repository": "owner/project",
                                           "base_branch": "master", "base_sha": tip, "workspace_head": started})
         self.assertEqual(self.git(self.workspace, "rev-parse", "HEAD").stdout.strip(), started)

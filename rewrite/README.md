@@ -441,13 +441,18 @@ commands with that commit checked out, and says that no merge was made. The
 run then ends like any finished run: where they are configured, the
 `delivered` status of `intake.statuses` is applied and `intake.assign` hands
 the request back to the requester although nothing was merged, so the report
-is what tells them that nothing was delivered. The setting is off by default
-and the shipped example leaves it off. With it on, a run finishes with nothing
-delivered whenever the review before the delivery does not object, and a
-review that could not be performed (`NOT REVIEWED`) does not object either;
-turn it on only where that review runs. The review command tells its model in
-plain words when no file was changed at all, and that a change that was needed
-but not made is a blocking defect.
+is what tells them that nothing was delivered; the status page shows such a
+request as done without a change, not as delivered. The setting is off by
+default and the shipped example leaves it off. An ending with nothing
+delivered needs a reviewer's verdict: when Git lists no changed path and no
+earlier delivery round committed one, the shipped review command lets the work
+through only on a verdict that does not object, and when none can be obtained
+(the model service is down or answers without one, a setting keeps the review
+from running, an unexpected error) it ends 1, so the work goes back to the
+work stage. The delivery itself does not look at the review, so turn the
+setting on only where that review runs before it. The review command tells its
+model in plain words when no file was changed at all, and that a change that
+was needed but not made is a blocking defect.
 
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
@@ -470,8 +475,13 @@ paths that match no change, a model service that is down or returns none,
 ends 0 and prints `NOT REVIEWED` with the reason, which joins the history for
 the worker and the report writer. A review that could not be performed is not
 a defect in the change, and an ordered run would otherwise send the work
-round for ever. A diff or test output longer than its limit is cut with a
-visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
+round for ever. The one exception is a checkout in which Git lists no changed
+path and no earlier delivery round committed one: work let through from there
+can end with nothing delivered, so it is let through only on a verdict that
+does not object, and anything less ends 1 with `NOT REVIEWED` and the reason.
+New files are read from Git's own list, so a name in Japanese or a new
+symbolic link reaches the reviewer as it is. A diff or test output longer than
+its limit is cut with a visible marker, never silently. The credential named by `REVIEW_KEY_ENV` is
 sent only to `REVIEW_MODEL_URL`, over HTTPS, and is scrubbed from everything
 the command prints or writes.
 

@@ -24,8 +24,9 @@ receipt of an earlier round, and the commit the work started from is part of
 the integration branch as fetched at that moment: nothing is committed,
 pushed or opened, the process ends 0 and its receipt says that nothing was
 delivered and which commit of the integration branch the request stands on.
-Whether that satisfies the request is not judged here; the review before
-this stage is what looked at it.
+Whether that satisfies the request is not judged here: the shipped review
+before this stage lets a checkout with no change through only on a reviewer's
+verdict that does not object.
 
 Environment (all from the operator, never from a role):
   TASK_ISSUE                 assigned ticket; names the branch and the message
@@ -382,7 +383,7 @@ def unchanged_summary(receipt):
         % (receipt["base_branch"], receipt["repository"], receipt["base_sha"], receipt["workspace_head"]),
         "Nothing was committed, pushed, opened or merged, because DELIVERY_ALLOW_UNCHANGED is set; "
         "the receipt at %s records this." % support.RECEIPT,
-        "Whether that satisfies the request is what the review before this stage looked at; this process "
+        "Whether that satisfies the request is what the review before this stage judged; this process "
         "does not judge it."])
 
 
