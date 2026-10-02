@@ -792,8 +792,29 @@ func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *tes
 	if quiet := quietFor(chain.State{}, time.Time{}, now); quiet != 0 {
 		t.Fatalf("a request with nothing to measure from was measured: %v", quiet)
 	}
-	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗はなく") || strings.Contains(text, "直近の失敗") {
+	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗は記録されていません") || strings.Contains(text, "直近の失敗") {
 		t.Fatalf("the notice without a failure names one: %q", text)
+	}
+}
+
+// A launch held for a setting only its operator can correct is, to the
+// engine, a launch that runs long. The notice it posts then must not tell the
+// requester that nothing failed and that no person is needed.
+func TestNoNoticePromisesThatNoPersonIsNeeded(t *testing.T) {
+	for name, text := range map[string]string{
+		"a long launch":      stallNoticeText(95, ""),
+		"a repeated failure": stallNoticeText(95, "exit status 1: the review model answers HTTP 404"),
+		"a spent budget":     pausedNoticeText,
+	} {
+		if strings.Contains(text, "人の操作は不要") || strings.Contains(text, "失敗はなく") {
+			t.Errorf("%s is said as something the engine cannot know: %q", name, text)
+		}
+		if !strings.Contains(text, "この通知への返信は不要です") {
+			t.Errorf("%s does not say that the notice waits for no answer: %q", name, text)
+		}
+	}
+	if text := stallNoticeText(95, ""); !strings.Contains(text, "運用者の対応を待っています") {
+		t.Errorf("a long launch is not said as possibly waiting for its operator: %q", text)
 	}
 }
 
@@ -857,7 +878,7 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	if len(posted["EXAMPLE-52"]) != 0 {
 		t.Fatalf("a request waiting its turn was told its work is long: %q", posted["EXAMPLE-52"])
 	}
-	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗はなく") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
+	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗は記録されていません") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
 		t.Fatalf("the running request was not told, or told wrongly: %q", posted["EXAMPLE-51"])
 	}
 }
