@@ -246,6 +246,19 @@ is new, set `intake.created_since` to the moment of the change and read the
 line from `--check` first, so that issues people filed earlier are not taken up
 before anyone has read it.
 
+A watch, and so the check, also refuses a configuration that still holds one
+of the shipped examples' placeholders: a URL whose host is under
+`example.invalid`, which cannot exist, or the paragraph the examples'
+`instructions` open with. It names the first one by its place, for example
+`roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
+placeholder host under example.invalid; a watch needs your own value there`.
+Only the host of a URL is looked at, so an author's address under that name or
+a sentence that mentions it is yours to write. A runtime started on a
+configuration with such a host would take up requests and fail each of them
+over and over, launching models every time. The commands an example expects
+the operator to supply are not checked here: a stage whose command is missing
+fails on every round.
+
 Each scan uses fresh tracker pages. The first accepted native issue record is
 saved unchanged in `queue/jobs/<id>/issue.json`; later remote edits do not replace
 the original request. Its title and complete description go directly to the

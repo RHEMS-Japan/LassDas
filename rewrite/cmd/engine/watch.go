@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -148,7 +149,65 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
 		return fail(err)
 	}
+	if left := examplePlaceholder(*cfg); left != "" {
+		return fail(errors.New(left))
+	}
 	return root, since, delay, capacity, nil
+}
+
+// The shipped examples name hosts that cannot exist, under example.invalid,
+// and open their instructions by saying the setup is incomplete. A watch on a
+// configuration that still holds one of those would start, take up requests
+// and fail each of them over and over at the model's price, so it is refused
+// here with the place of the first one found. Only a value that is a URL is
+// looked at, and only its host: an author's address under example.invalid, a
+// sentence that mentions the name and a real host that merely begins like it
+// are the operator's own. This reads the operator's own file for the
+// examples' own words; it is not a check of anything a role or a model wrote.
+func examplePlaceholder(cfg config) string {
+	if strings.HasPrefix(strings.TrimSpace(cfg.Instructions), "Operator setup is incomplete") {
+		return "instructions still holds the example's paragraph (\"Operator setup is incomplete\"); a watch needs the project's own guidance there"
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	var text any
+	if err := json.Unmarshal(data, &text); err != nil {
+		return ""
+	}
+	var find func(value any, place string) string
+	find = func(value any, place string) string {
+		switch value := value.(type) {
+		case string:
+			address, err := url.Parse(strings.TrimSpace(value))
+			if err != nil || address.Scheme == "" || address.Host == "" {
+				return ""
+			}
+			if host := strings.ToLower(address.Hostname()); host == "example.invalid" || strings.HasSuffix(host, ".example.invalid") {
+				return place + " still holds the example's placeholder host under example.invalid; a watch needs your own value there"
+			}
+		case []any:
+			for index, item := range value {
+				if left := find(item, fmt.Sprintf("%s[%d]", place, index)); left != "" {
+					return left
+				}
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(value))
+			for key := range value {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				if left := find(value[key], strings.TrimPrefix(place+"."+key, ".")); left != "" {
+					return left
+				}
+			}
+		}
+		return ""
+	}
+	return find(text, "")
 }
 
 func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) error {
