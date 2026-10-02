@@ -1,27 +1,34 @@
 # The permanent runtime for one consumer's role chain (rewrite/START.md).
 # Copy this file, replace every <placeholder>, and apply it after the two
-# ConfigMaps. One replica: the controller owns its queue directory, and a
-# second copy of it would accept the same ticket twice.
+# Secrets and the three ConfigMaps, in the order SETUP.md gives. One replica:
+# the controller owns its queue directory, and a second copy of it would
+# accept the same ticket twice.
 #
 # What is measured and what is not is listed in README.md next to this file.
 # Read it before applying: some fields here are requirements found by running
 # the actual launcher in this cluster, and others are proposals.
 #
-# Secrets are referenced by name only. Never write a key value into this file,
-# into the ConfigMaps, or into any log; create them with the operator's own
-# secret path and let the Pod read them through secretKeyRef.
+# Secrets are referenced by name only (secrets.yaml.example). Never write a key
+# value into this file, into the ConfigMaps, or into any log; create them with
+# the operator's own secret path and let the Pod read them through secretKeyRef.
 #
-# <image> must be pullable on a node that has never run it: the Pod moves when
-# its node is replaced, and a registry that needs a credential needs an
-# imagePullSecret named in this spec. An image that only exists in one node's
-# cache strands this workload the first time it is rescheduled.
+# <image>@sha256:<digest>: the published image and the digest built from a
+# commit of the default branch are the "image" field of docs/DISTRIBUTION.json.
+# Use the same reference in all six places below. The image must be pullable
+# on a node that has never run it: the Pod moves when its node is replaced,
+# and a registry that needs a credential needs an imagePullSecret named in
+# this spec. An image that only exists in one node's cache strands this
+# workload the first time it is rescheduled. The published image is checked
+# for anonymous pulls before the note in docs/DISTRIBUTION.json is written.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: <consumer>-ticket-engine
   namespace: <namespace>
 spec:
-  serviceName: <consumer>-ticket-engine   # no Service object is created; the runtime takes no request
+  # The governing Service this names is not created: the engine takes no
+  # request. The status page has a Service of its own (status-service.yaml.example).
+  serviceName: <consumer>-ticket-engine
   replicas: 1
   selector:
     matchLabels: { app: <consumer>-ticket-engine }
@@ -31,6 +38,8 @@ spec:
       annotations:
         # Work in progress survives a restart, but an eviction in the middle
         # of a delivery leaves the external half of it to be reconciled.
+        # Karpenter's annotation; a cluster with another autoscaler needs that
+        # autoscaler's own way of saying the same.
         karpenter.sh/do-not-disrupt: "true"
     spec:
       terminationGracePeriodSeconds: 120
@@ -42,7 +51,10 @@ spec:
       enableServiceLinks: false
       nodeSelector:
         kubernetes.io/arch: arm64          # the image is built for arm64 only
-        <node-pool-label>: "<value>"       # the operator's own node pool, if any
+        # The operator's own node pool, if any. Without one, delete this line
+        # and the tolerations below: a label no node carries leaves the Pod
+        # Pending.
+        <node-pool-label>: "<value>"
       tolerations:
         - key: <node-pool-taint>
           operator: Equal
@@ -57,13 +69,13 @@ spec:
         # 1-2. This Pod's own egress rules, in this Pod's own network
         # namespace. NET_ADMIN is confined to these two containers; no host
         # network, no node mount, and no change to the cluster's plugin.
-        # <network-tool-image>: exactly the reference the cluster's own network
-        # DaemonSet uses, read from that DaemonSet's container image field, not
-        # the digest a node happens to have cached. With imagePullPolicy Never
-        # this works until the Pod lands on a replacement node, and then the
-        # init container fails with no image to pull.
+        # Both run the image's own iptables (the nf_tables backend,
+        # /usr/sbin/xtables-nft-multi). An image built from a commit before
+        # f71872f (2026-10-02) has no such program. The measured installation
+        # wrote the same rules with the same program from its network
+        # plugin's image (README.md).
         - name: network-v4
-          image: <network-tool-image>:<tag>
+          image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
           command: ["/usr/sbin/xtables-nft-multi", "iptables-restore", "--noflush", "--wait", "5", "/policy/ipv4.rules"]
           securityContext:
@@ -81,7 +93,7 @@ spec:
             - { name: network-policy, mountPath: /policy, readOnly: true }
             - { name: network-run, mountPath: /run }
         - name: network-v6
-          image: <network-tool-image>:<tag>
+          image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
           command: ["/usr/sbin/xtables-nft-multi", "ip6tables-restore", "--noflush", "--wait", "5", "/policy/ipv6.rules"]
           securityContext:
@@ -132,26 +144,39 @@ spec:
         # exists. If this API server refuses restartPolicy on an init
         # container, move this entry to containers: below and expect the
         # first workspace preparation to fail until the mirror appears.
+        # Every TASK_REPOSITORY in the operator configuration names MIRROR_PATH.
+        # A refused credential (an expired token, a repository it cannot
+        # read) ends this container, so it shows as restarts, not as a copy
+        # that quietly goes stale.
         - name: mirror
           image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
           restartPolicy: Always
           command: ["/usr/bin/python3", "-B", "/opt/ticket-automation/scripts/mirror_loop.py"]
           env:
-            - { name: MIRROR_PATH, value: /var/lib/ticket-automation/mirror/<repository-name>.git }
+            - { name: MIRROR_PATH, value: /var/lib/ticket-automation/mirror/<owner>/<repository-name>.git }
             - { name: DELIVERY_REPOSITORY, value: <owner>/<repository-name> }
             - { name: MIRROR_INTERVAL_SECONDS, value: "60" }
+            # Only read here. A separate read-only token under another key
+            # works as well.
             - name: GITHUB_TOKEN
               valueFrom:
-                secretKeyRef: { name: <delivery-secret>, key: <delivery-token-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine, key: DELIVERY_GITHUB_TOKEN }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
             seccompProfile: { type: RuntimeDefault }
+          # Passes once the copy holds a branch. The mirror's directory exists
+          # from the moment the first clone starts, before any branch is in
+          # it, and a role cloning from it then would start from an empty
+          # repository. A repository with no commit at all never passes. It
+          # gives up after 5 s x 120 = 10 minutes and the container is
+          # restarted in the middle of its first copy: raise failureThreshold
+          # for a repository whose first copy takes longer.
           startupProbe:
             exec:
-              command: ["/bin/sh", "-c", "test -d /var/lib/ticket-automation/mirror/<repository-name>.git"]
+              command: ["/bin/sh", "-c", "test -n \"$(git --git-dir=/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git for-each-ref --count=1 --format=x refs/heads)\""]
             periodSeconds: 5
             failureThreshold: 120
           resources:
@@ -196,16 +221,24 @@ spec:
             - { name: GOMAXPROCS, value: "2" }
             # Credentials by name only. The controller passes each role just
             # the names its configuration grants; the parent environment is
-            # not inherited by a role process.
+            # not inherited by a role process. These are the names
+            # rewrite/examples/operator-stages.json refers to.
             - name: MODEL_API_KEY
               valueFrom:
-                secretKeyRef: { name: <model-secret>, key: <model-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine, key: MODEL_API_KEY }
             - name: TRACKER_API_KEY
               valueFrom:
-                secretKeyRef: { name: <tracker-secret>, key: <tracker-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine, key: TRACKER_API_KEY }
             - name: DELIVERY_GITHUB_TOKEN
               valueFrom:
-                secretKeyRef: { name: <delivery-secret>, key: <delivery-token-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine, key: DELIVERY_GITHUB_TOKEN }
+            # With a gateway in front of the model provider (rewrite/README.md,
+            # "Invoking through a gateway"), the name the gateway example
+            # uses. A key named here that the Secret lacks keeps the Pod from
+            # starting, so uncomment it together with the Secret's entry.
+            # - name: GATEWAY_API_KEY
+            #   valueFrom:
+            #     secretKeyRef: { name: <consumer>-ticket-engine, key: GATEWAY_API_KEY }
           resources:
             requests: { cpu: "1", memory: 3Gi }
             limits: { memory: 6Gi }
@@ -215,12 +248,16 @@ spec:
             - { name: state, mountPath: /var/lib/ticket-automation }
             - { name: temporary, mountPath: /tmp }
             - { name: config, mountPath: /etc/ticket-automation, readOnly: true }
+            # The operator's own programs (operator-scripts-configmap.yaml.example).
+            # A role sees them only through --runtime /opt/ticket-automation/operator.
+            - { name: operator-scripts, mountPath: /opt/ticket-automation/operator, readOnly: true }
             - { name: runtime-policy, mountPath: /runtime-policy, readOnly: true }
-        # Optional: the read-only status page (rewrite/README.md, "A read-only
-        # status page"). Same image, no credential, the state volume read-only,
-        # no sandbox needed. Expose it with a Service and whatever network
-        # restriction the operator already uses; the page can also require HTTP
-        # basic authentication itself, from a secret named here.
+        # The read-only status page (rewrite/README.md, "A read-only status
+        # page"). Same image, no credential of the engine's, the state volume
+        # read-only, no sandbox needed. It refuses to start when either basic
+        # authentication value is empty. It is reached through
+        # status-service.yaml.example by port-forward or, if the operator
+        # chooses to expose it, status-ingress.yaml.example.
         - name: status
           image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent
@@ -237,13 +274,14 @@ spec:
             - --auth-password-env
             - STATUS_PASSWORD
           env:
+            # The time zone the page shows times in, such as Etc/UTC.
             - { name: TZ, value: <timezone-shown-on-the-page> }
             - name: STATUS_USER
               valueFrom:
-                secretKeyRef: { name: <status-secret>, key: <status-user-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine-status, key: STATUS_USER }
             - name: STATUS_PASSWORD
               valueFrom:
-                secretKeyRef: { name: <status-secret>, key: <status-password-key> }
+                secretKeyRef: { name: <consumer>-ticket-engine-status, key: STATUS_PASSWORD }
           ports:
             - { name: http, containerPort: 9200 }
           securityContext:
@@ -259,8 +297,17 @@ spec:
             - { name: config, mountPath: /etc/ticket-automation, readOnly: true }
             - { name: temporary, mountPath: /tmp }
       volumes:
+        # operator.json, created from the operator's configuration file
+        # (SETUP.md, "Writing the operator configuration"). The engine reads it
+        # when it starts: a change takes effect at the next restart.
         - name: config
           configMap: { name: <consumer>-ticket-engine-operator }
+        # Executable, because the operator configuration runs these files
+        # directly.
+        - name: operator-scripts
+          configMap:
+            name: <consumer>-ticket-engine-operator-scripts
+            defaultMode: 0555
         - name: network-policy
           configMap: { name: <consumer>-ticket-engine-egress }
         - name: network-run
@@ -271,12 +318,15 @@ spec:
         # the controller's and the toolchain's. Deliberately without a
         # sizeLimit: exceeding one evicts the Pod in the middle of a request,
         # which is a worse failure than a full filesystem. Watch it instead
-        # (README.md, "Before it accepts work").
+        # (SETUP.md, "Before it accepts work").
         - name: temporary
           emptyDir: {}
   volumeClaimTemplates:
     # The queue holds unfinished histories. Deleting it does not clean up:
     # it loses the record of what has already been done outside this cluster.
+    # The volume also holds the mirror and belongs to one tracker and one
+    # project: pointing the same volume at another project leaves the engine
+    # waiting with "the run directory belongs to a different request".
     - metadata:
         name: state
       spec:
