@@ -226,6 +226,62 @@ func TestAStageWithoutAChosenModelIsAnnouncedAsTheOperatorWroteIt(t *testing.T) 
 	}
 }
 
+// A launch that could not choose a model at all names none, and no later
+// launch names one for a stage that has already had its sentence. The stage
+// still began, which is the news, so the operator's sentence goes out as
+// written rather than the stage passing in silence.
+func TestAStageWhoseSelectionFailedIsAnnouncedWithoutAModel(t *testing.T) {
+	cfg := announcingStagesConfig(t)
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	_, directory := noticeJob(t, chain.State{})
+	observe := func(string) {}
+	// Nothing ran, so there is no live copy: the record of the launch that
+	// could not choose is all there is of the stage.
+	writeJobHistory(t, directory, chain.State{History: []chain.Result{
+		{Role: "work", Speaker: "worker", Error: "Selecting a current model: catalog HTTP 503: actual reason"},
+	}})
+	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。" {
+		t.Fatalf("the stage was announced as %v", got)
+	}
+	// A later launch of it does choose one. The stage has had its sentence.
+	if err := recordChosen(filepath.Join(directory, "run"), "work", "maker/late"); err != nil {
+		t.Fatal(err)
+	}
+	beginStage(t, directory, "work-worker")
+	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。" {
+		t.Fatalf("the stage was announced a second time or renamed: %v", got)
+	}
+}
+
+// While a process of the stage is running, a model it has not written down
+// yet is at most a tick away, so the sentence waits for it instead of
+// spending the stage's one comment on a launch it cannot name.
+func TestAStageStillChoosingWaitsForItsModel(t *testing.T) {
+	cfg := announcingStagesConfig(t)
+	cfg.Roles[0].Processes = append(cfg.Roles[0].Processes, chain.Process{Name: "peer", Command: []string{"/bin/true"}})
+	fixture := &noticeTracker{}
+	fixture.install(t, alwaysChoose("done"))
+	_, directory := noticeJob(t, chain.State{})
+	observe := func(string) {}
+	// The stage's model-less process is already running; its peer has not
+	// come back from the selection yet.
+	beginStage(t, directory, "work-peer")
+	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+	if got := fixture.all(); len(got) != 0 {
+		t.Fatalf("the stage was announced before its model was known: %v", got)
+	}
+	if err := recordChosen(filepath.Join(directory, "run"), "work", "maker/chosen"); err != nil {
+		t.Fatal(err)
+	}
+	announceStages(context.Background(), cfg, announcedIssue(), directory, observe)
+	if got := fixture.all(); len(got) != 1 || got[0] != "作業を始めます。 (モデル: maker/chosen)" {
+		t.Fatalf("the stage was announced as %v", got)
+	}
+}
+
 // At the end the requester reads every launch that used a model, in the order
 // they ran: the stage, the model and how long it took, with a stage the work
 // came back to on one line and a launch that failed marked as one.
@@ -249,9 +305,12 @@ func TestTheDeliveredRequestListsEveryLaunchThatUsedAModel(t *testing.T) {
 		launch("work", "worker", "maker/four", "", 21*time.Minute, 81*time.Minute+5*time.Second),
 		launch("shout", "crier", "maker/five", "", 82*time.Minute, 82*time.Minute),
 	}}
-	const want = "使ったモデル (起動順):\n" +
+	// The stage the work came back to keeps its own line, so its last launch
+	// is printed above the launch of another stage that ran before that
+	// return; the heading says the list is read that way.
+	const want = "使ったモデル (工程ごと、起動順):\n" +
 		"- 要件確定: maker/one (27 秒)\n" +
-		"- 作業: maker/two (11 分 0 秒) — 差し戻し後: maker/three (5 分 18 秒) (失敗) — 差し戻し後: maker/four (1 時間 0 分 5 秒)\n" +
+		"- 作業: maker/two (11 分 0 秒) — 再実行: maker/three (5 分 18 秒) (失敗) — 再実行: maker/four (1 時間 0 分 5 秒)\n" +
 		"- shout: maker/five (0 秒)"
 	if got := modelsUsedText(state); got != want {
 		t.Fatalf("the list reads:\n%s\nwanted:\n%s", got, want)
@@ -274,7 +333,7 @@ func TestTheModelsUsedArePostedOnceAcrossARestart(t *testing.T) {
 		{Role: "implement", Speaker: "worker", Model: "maker/one", StartedAt: base, FinishedAt: base.Add(32 * time.Second)},
 	}})
 	since, _ := time.Parse(time.RFC3339, cfg.Intake.CreatedSince)
-	const want = "使ったモデル (起動順):\n- 実装: maker/one (32 秒)"
+	const want = "使ったモデル (工程ごと、起動順):\n- 実装: maker/one (32 秒)"
 	status := filepath.Join(directory, "status.json")
 	tick := func() {
 		ctx, cancel := context.WithCancel(context.Background())

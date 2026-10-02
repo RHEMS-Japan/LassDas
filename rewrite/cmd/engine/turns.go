@@ -230,19 +230,24 @@ func hoursTurn(ctx context.Context, cfg config, issue sourceIssue, directory str
 // order they ran, so a request that was sent back twice shows what each
 // attempt was worked on and for how long. The runtime writes it; no model
 // composes it, and nothing in it grades what any of them wrote.
-const modelsUsedHeading = "使ったモデル (起動順):"
+const modelsUsedHeading = "使ったモデル (工程ごと、起動順):"
 
-// relaunched opens each launch after the first of the same stage: the work
-// came back to it, from a stage that sent it back or from its own failure.
-const relaunched = " — 差し戻し後:"
+// relaunched opens each launch after the first of the same stage. The work
+// comes back to a stage either because a later stage sent it back or because
+// the stage's own process did not exit 0, so the word covers both.
+const relaunched = " — 再実行:"
 
 // launchFailed marks a launch whose process did not exit 0. It is listed like
 // any other: the time was spent on that model either way.
 const launchFailed = " (失敗)"
 
 // modelsUsedText is that list, or empty when no launch of this request used a
-// model at all. A stage of one of the shipped runs is named in Japanese, as
-// the status page names it; one an operator named otherwise keeps its name.
+// model at all. One line per stage, in the order the stages first ran, and on
+// it that stage's launches in the order they ran: a stage the work came back
+// to late therefore sits on its own line above launches that ran before that
+// return, which is what the heading says. A stage of one of the shipped runs
+// is named in Japanese, as the status page names it; one an operator named
+// otherwise keeps its name.
 func modelsUsedText(state chain.State) string {
 	order, launches := modelLaunches(state)
 	if len(order) == 0 {
@@ -334,12 +339,17 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 		if stage.Announce == "" {
 			continue
 		}
-		begun := false
+		// A live copy means a process of this stage is running now, so a
+		// model it is still choosing can arrive on a later tick; a stage
+		// known only from the record has returned, and what it did not name
+		// it never will.
+		running := false
 		for _, name := range live {
 			if strings.HasPrefix(name, stage.Name+"-") {
-				begun = true
+				running = true
 			}
 		}
+		begun := running
 		if !begun {
 			if roles == nil {
 				roles = map[string]bool{}
@@ -359,13 +369,19 @@ func announceStages(ctx context.Context, cfg config, issue sourceIssue, director
 		// record to read, on this tick or any other.
 		if awaitsModel(cfg, stage.Name) {
 			model := firstModel(directory, stage.Name)
-			if model == "" {
-				// The launch chooses its model before the child starts, so
-				// the choice is a tick away. Wait for it rather than spend
-				// this stage's one sentence saying nothing about the work.
+			if model == "" && running {
+				// A launch writes its choice down before starting its child,
+				// so for a stage whose processes are running the choice is at
+				// most a tick away. Wait for it rather than spend this
+				// stage's one sentence saying nothing about the work.
 				continue
 			}
-			text += " (モデル: " + model + ")"
+			if model != "" {
+				text += " (モデル: " + model + ")"
+			}
+			// A launch that could not choose a model at all named none, and
+			// nothing later will name it for this stage. The operator's
+			// sentence still goes out: that the stage began is the news.
 		}
 		if err := requestNotices(cfg, issue, directory).post(ctx, stagePrefix+stage.Name, text); err != nil {
 			observe("stage " + stage.Name + " not announced: " + err.Error())

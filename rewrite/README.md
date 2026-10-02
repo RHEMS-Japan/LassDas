@@ -548,10 +548,25 @@ second comment), and when it resumes after the requester's answer; a stage whose
 operator wrote in `workflow.stages` is announced once when it first begins.
 That sentence carries the model the launch beginning the stage chose, as
 ` (モデル: <catalog id>)` without any gateway prefix; a stage that launches no
-model, and a runtime that selects none, say it as the operator wrote it. Once
-the request is delivered, one further comment lists every launch that used a
-model in the order they ran, with the time each took and its stage named as the
-status page names it, and a launch whose process did not exit 0 marked `(失敗)`.
+model, a runtime that selects none, and a launch that could not choose one at
+all, say it as the operator wrote it. Once the request is delivered, one
+further comment lists every launch that used a model, one line per stage in
+the order the stages first ran and each stage's own launches along it, with
+the time each took and the stage named as the status page names it:
+
+```
+使ったモデル (工程ごと、起動順):
+- 要件確定: maker/one (27 秒)
+- 作業: maker/two (11 分 0 秒) — 再実行: maker/three (5 分 18 秒) (失敗)
+- 報告: maker/four (32 秒)
+```
+
+`再実行` opens every launch after a stage's first, whether a later stage sent
+the work back or the stage's own process did not exit 0, and `(失敗)` marks a
+launch that did not exit 0. A stage the work returned to late keeps its own
+line, so its last launch is printed above launches that ran before that
+return.
+
 `category_on_accept` adds that category to an accepted issue. `assign` hands
 the issue to the requester while a question or the delivered result waits for
 them, and back to the runtime's own account while it works, and records the
