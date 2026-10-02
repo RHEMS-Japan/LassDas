@@ -86,6 +86,7 @@ func TestAScopeForwardsToAnyUpstreamOnlyWhatItGrants(t *testing.T) {
 		{"duplicate page", "GET", "/issues/EXAMPLE-1/comments", "&count=1&count=2", "", scope.Key(), scope},
 		{"huge page", "GET", "/issues/EXAMPLE-1/comments", "&count=101", "", scope.Key(), scope},
 		{"bad cursor", "GET", "/issues/EXAMPLE-1/comments", "&minId=-1", "", scope.Key(), scope},
+		{"descending page", "GET", "/issues/EXAMPLE-1/comments", "&order=desc", "", scope.Key(), scope},
 		{"additional form", "POST", "/issues/EXAMPLE-1/comments", "", "content=hello&statusId=4", scope.Key(), scope},
 		{"notification", "POST", "/issues/EXAMPLE-1/comments", "", "content=hello&notifiedUserId[]=12", scope.Key(), scope},
 		{"duplicate content", "POST", "/issues/EXAMPLE-1/comments", "", "content=hello&content=bye", scope.Key(), scope},
@@ -95,6 +96,14 @@ func TestAScopeForwardsToAnyUpstreamOnlyWhatItGrants(t *testing.T) {
 		if w := ask(refused.target, refused.method, refused.path, refused.query, refused.body, refused.key); w.Code < 400 || w.Code >= 500 {
 			t.Errorf("%s: answered %d %s", refused.name, w.Code, w.Body.String())
 		}
+	}
+	// A post whose form is sent as something other than a form.
+	notForm := httptest.NewRequest("POST", "/issues/EXAMPLE-1/comments?apiKey="+url.QueryEscape(scope.Key()), strings.NewReader("content=hello"))
+	notForm.Header.Set("Content-Type", "text/plain")
+	answer := httptest.NewRecorder()
+	scope.ServeHTTP(answer, notForm)
+	if answer.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("post that is not a form: answered %d %s", answer.Code, answer.Body.String())
 	}
 	if seen := upstream.seen(); len(seen) != 0 {
 		t.Fatalf("refused requests reached the upstream: %q", seen)
