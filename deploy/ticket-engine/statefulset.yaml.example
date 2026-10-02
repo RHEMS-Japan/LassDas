@@ -71,9 +71,8 @@ spec:
         # network, no node mount, and no change to the cluster's plugin.
         # Both run the image's own iptables (the nf_tables backend,
         # /usr/sbin/xtables-nft-multi). An image built from a commit before
-        # f71872f (2026-10-02) has no such program. The measured installation
-        # wrote the same rules with the same program from its network
-        # plugin's image (README.md).
+        # f71872f (2026-10-02) has no such program. An installation of the
+        # kind SETUP.md section 1 names ran both from this image.
         - name: network-v4
           image: <image>@sha256:<digest>
           imagePullPolicy: IfNotPresent

@@ -98,9 +98,15 @@ requester posts a stop ([section 9](#9-stopping-a-request)).
 - **An image built from commit f71872f (2026-10-02) or a later one.** The two
   network init containers write the egress rules with the image's own
   iptables (`/usr/sbin/xtables-nft-multi`), which older images do not carry.
-  The image `docs/DISTRIBUTION.json` names is such an image. The installation
-  named above wrote the same rules with the same program from its network
-  plugin's own image; running it from this image has not been measured.
+  The image `docs/DISTRIBUTION.json` names is such an image. On 2026-10-03 an
+  installation of the kind named above (with `hostUsers: false`) ran both
+  from the image built from commit 2ccff5e, with this directory's rules (its
+  own DNS address in place of the placeholder): both exited 0 with no restart
+  and no log line, the egress check of section 7 gave the same results both
+  ways as with its network plugin's image before, and the confinement,
+  launcher and configuration checks passed. For the IPv6 rules that shows
+  only that they were written, and no other cluster or network plugin was
+  tried.
 - **A storage class** that provides a 20Gi ReadWriteOnce volume.
 - **Room for the Pod.** The engine requests 1 CPU and 3Gi of memory (limit
   6Gi); the other containers are small. These figures are a starting point,
@@ -612,7 +618,9 @@ POD=<consumer>-ticket-engine-0
    later, fill a copy again, run `kubectl -n "$NS" replace -f secrets.yaml`,
    delete the copy, and restart the Pod: the containers read the values only
    when they start. `replace` makes both Secrets exactly what the copy holds,
-   so write every value of both again; a value left empty becomes empty.
+   so write every value of both again; a value left empty becomes empty. With
+   a gateway, uncomment `GATEWAY_API_KEY` in the new copy too: a key the copy
+   lacks is removed from the Secret.
 
 3. **The egress rules.** In your copy of `egress-configmap.yaml.example`,
    `<dns-cluster-ip>` is the address the Pods' `/etc/resolv.conf` names (the
@@ -733,15 +741,18 @@ Pod has it:
 kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
 import json, os
 config = json.load(open("/etc/ticket-automation/operator.json"))
-sources = {(p.get("env") or {}).get("TASK_REPOSITORY") for r in config["roles"] for p in r["processes"]}
-for source in sorted(s for s in sources if isinstance(s, str)):
-    print(source, "found" if os.path.isdir(source) else "NOT FOUND")'
+envs = [p.get("env") or {} for r in config["roles"] for p in r["processes"]]
+sources = {e["TASK_REPOSITORY"] or "" for e in envs if "TASK_REPOSITORY" in e}
+for source in sorted(sources):
+    print(source or "(empty)", "found" if source and os.path.isdir(source) else "NOT FOUND")'
 ```
 
 It must print one line,
 `/var/lib/ticket-automation/mirror/<owner>/<repository-name>.git found`. Another
 path, or `NOT FOUND`, means the configuration and the StatefulSet's
-`MIRROR_PATH` disagree, and every request would fail at its first checkout.
+`MIRROR_PATH` disagree, and every request would fail at its first checkout;
+`(empty) NOT FOUND` means a `TASK_REPOSITORY` written empty or `null`, which
+fails the same way.
 
 ### The status page
 
@@ -980,9 +991,10 @@ In your copy (`$CONFIG`), in the same edit:
      | python3 -c 'import json, sys; [print(r["id"], r["issueKey"], r["created"]) for r in json.load(sys.stdin) if r["issueKey"] == sys.argv[1]]' <issue-key>
    ```
 
-   An `issue_ids` that lists nothing real accepts nothing, and an empty one
-   accepts every new issue in the project; remove it once you are ready for
-   all of them.
+   It prints nothing for a key the project does not have, a mistyped one
+   included. An `issue_ids` that lists nothing real accepts nothing, and an
+   empty one accepts every new issue in the project; remove it once you are
+   ready for all of them.
 2. Set `intake.created_since`, in UTC (the moment itself counts): use the
    moment you open the intake, for example `2026-10-05T09:00:00Z`, or, for a
    ticket you filed in advance and listed in `issue_ids`, its own creation
@@ -1203,6 +1215,12 @@ It has not been run as written against a real queue.
 3. Check as in section 7: the configuration check inside the Pod, the Pod
    ready with no restarts, the status page, the engine's log (it opens with
    the intake line), and the issues of any request that was running.
+
+If the new Pod never becomes Ready, applying your previous `statefulset.yaml`
+again is not enough, because the StatefulSet keeps waiting for that Pod:
+delete the Pod as well, and it is created again from the restored definition
+([Forced rollback](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#forced-rollback)
+in the Kubernetes documentation).
 
 ## 11. Troubleshooting
 
