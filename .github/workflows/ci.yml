@@ -87,14 +87,39 @@ jobs:
           cache: false
       - name: Say which Go the scans use
         run: go version
+      # Without the list the scans have nothing to look for, and this job would
+      # pass having checked nothing. A repository that keeps the list sets the
+      # variable IDENTIFIER_SCANS_REQUIRED to true, and there a missing list
+      # fails the job. Elsewhere (a copy of this repository by any means) the
+      # scans are skipped and said to be. A pull request from another
+      # repository receives no secrets, so it is skipped even where the
+      # variable is set. The list is read as the two scans read it: blank is
+      # missing, and only separators is a list without entries, which fails.
       - name: State whether the purity scan can run
         env:
           ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
+          REQUIRED: ${{ vars.IDENTIFIER_SCANS_REQUIRED }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
-            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
+          list="${ENGINE_PURITY_TOKENS:-}"
+          if [ "$REQUIRED" = "true" ]; then
+            echo "this repository requires the list (vars.IDENTIFIER_SCANS_REQUIRED is true)"
           else
+            echo "this repository does not require the list (vars.IDENTIFIER_SCANS_REQUIRED is not true)"
+          fi
+          if [ -n "${list//[[:space:]]/}" ]; then
+            if [ -z "$(printf '%s' "$list" | tr -d ',[:space:]')" ]; then
+              echo "::error::ENGINE_PURITY_TOKENS is set but holds no entries - the consumer-identifier scans would fail on it"
+              exit 1
+            fi
             echo "consumer-identifier scans are armed"
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run (a pull request from another repository receives no secrets)"
+          elif [ "$REQUIRED" = "true" ]; then
+            echo "::error::ENGINE_PURITY_TOKENS is not set where the list is required - the consumer-identifier scans cannot run, so this job fails instead of passing with nothing checked"
+            exit 1
+          else
+            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
           fi
       - name: Scan the tracked files for consumer identifiers
         env:
