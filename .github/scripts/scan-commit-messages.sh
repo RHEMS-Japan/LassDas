@@ -30,10 +30,7 @@ for token in "${tokens[@]}"; do
   index=$((index + 1))
   token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | xargs)
   [ -z "$token" ] && continue
-  # Not `printf | grep -q`: grep stops at the first match, the printf still
-  # writing a long text dies of SIGPIPE, and pipefail turns the match into a
-  # miss. A here-string leaves nothing to cut short.
-  if grep -qF -e "$token" <<< "$lowered"; then
+  if printf '%s' "$lowered" | grep -qF "$token"; then
     echo "a commit message in the pushed range contains forbidden identifier #$index - reword the commit"
     failed=1
   fi
