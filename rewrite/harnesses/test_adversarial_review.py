@@ -346,7 +346,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("new file tests/test_tool.py", text)
 
     def test_the_notes_on_the_diff_paths_say_what_was_shown(self):
-        # F9: the whole change shown in place of the paths is cut like any
+        # The whole change shown in place of the paths is cut like any
         # other, and the note says so; and when the paths match part of the
         # change, the rest is said not to be shown instead of left out quietly.
         (self.workspace / "src" / "tool.py").write_text("def run():\n    return 2  # changed\n" + "".join(
@@ -722,8 +722,7 @@ class AdversarialReviewTests(unittest.TestCase):
                  ("words instead of a call", {"content": "BLOCKING: " + finding}, "NOT REVIEWED", 0, 1),
                  ("a broken call beside a false one", {"raw_calls": [broken, json.dumps({"blocking": False})]},
                   "PASSED", 0, 0),
-                 # N1, N2 and N8 of the last review: one object down stands in
-                 # only for a call that names no blocking itself.
+                 # One object down stands in only for a call that names no blocking itself.
                  ("a blocking that cannot be read beside a false one level down",
                   {"calls": [{"blocking": "Yes, because the needed file is missing", "findings": finding,
                               "issues": {"blocking": False}}]}, "NOT REVIEWED", 0, 1),
@@ -838,7 +837,7 @@ class AdversarialReviewTests(unittest.TestCase):
                    " verdict, so the work goes back this time.")
 
     def test_while_asking_again_the_log_tells_what_the_model_last_said(self):
-        # F1: a reply without a plain verdict is written to review.md as it
+        # A reply without a plain verdict is written to review.md as it
         # comes, so whoever looks while the review asks again can read it.
         finding = "REQUIRED_NEW_BEHAVIOR is missing; the model said so without a verdict"
         service = ModelStandIn({"fixture/reviewer": {"arguments": {"blocking": None, "findings": finding}}})
@@ -850,7 +849,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertEqual(self.review_log().count(finding), 1, "logged once, not at every request")
 
     def test_output_that_is_not_utf8_is_read_and_the_review_happens(self):
-        # F2: a change and a test command's output in Shift_JIS reach the
+        # A change and a test command's output in Shift_JIS reach the
         # reviewer with replacement characters, instead of an error the review
         # would start again from without ever asking.
         (self.workspace / "src" / "tool.py").write_bytes("def run():\n    return '設定'\n".encode("shift_jis"))
@@ -865,7 +864,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertNotIn("Unexpected", finished.stderr)
 
     def test_an_unexpected_error_is_waited_out_said_again_and_the_tests_are_not_run_again(self):
-        # F2: the review starts again at the growing waits, says so again at
+        # The review starts again at the growing waits, says so again at
         # the hold interval, and does not run the operator's test commands at
         # every start.
         service = ModelStandIn([{"verdict": (False, "")}])
@@ -895,7 +894,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("Review still starting again at", said)
 
     def test_an_answer_the_operator_has_to_fix_is_said_with_the_services_words_and_again_while_waiting(self):
-        # F3: a 404 for a mistyped model id, with what the service said (the
+        # A 404 for a mistyped model id, with what the service said (the
         # credential scrubbed), named as the operator's to fix, and said again
         # at the hold interval; another model in REVIEW_MODELS is still asked.
         service = ModelStandIn({"fixture/reviewer": {"status": 404, "error": "not a valid model ID; key " + KEY}})
@@ -914,7 +913,7 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("Review by maker-b/second: SENT BACK", finished.stdout)
 
     def test_the_opt_in_is_read_as_written_and_another_value_holds(self):
-        # F7: "pass" in any letter case and with spaces around it is the
+        # "pass" in any letter case and with spaces around it is the
         # opt-in; another value is named and holds, never quietly the default.
         service = ModelStandIn([{"status": 503}, {"status": 503}])
         self.addCleanup(service.close)
@@ -927,7 +926,8 @@ class AdversarialReviewTests(unittest.TestCase):
         self.assertIn("fix the setting and restart the engine", stderr)
 
     def test_a_model_named_twice_is_asked_once_a_round(self):
-        # F8
+        # A model named twice is asked once a round: a repeat in the list
+        # would only send it more requests, not give the review another chance.
         service = ModelStandIn({"maker-a/first": {"status": 503},
                                 "maker-b/second": [{"verdict": None}, {"verdict": (False, "")}]})
         self.addCleanup(service.close)
