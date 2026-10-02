@@ -40,7 +40,7 @@ func (a *IssueAccess) Close() {
 	}
 }
 
-func ServeIssue(ctx context.Context, source Backlog, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
+func ServeIssue(ctx context.Context, source Upstream, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueAccess, error) {
 	scope, err := NewIssueScope(source, issue, mayPost, options...)
 	if err != nil {
 		return nil, err
