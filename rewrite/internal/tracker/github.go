@@ -403,6 +403,18 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if token == "" || strings.ContainsAny(token, "\r\n") {
 		return nil, nil, errors.New("tracker credential is unavailable")
 	}
+	// GitHub asks a client it limited to send nothing until the time it gave;
+	// one that goes on may be banned.
+	shared := g.shared()
+	if until := shared.closedUntil(githubNow()); !until.IsZero() {
+		return nil, nil, fmt.Errorf("tracker asked to be sent nothing until %s; nothing was sent", until.UTC().Format(time.RFC3339))
+	}
+	read := method == http.MethodGet
+	if !read {
+		if err := shared.spaceChange(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -424,6 +436,13 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	// A read asked again with the validator of the answer kept costs nothing
+	// of the hourly allowance when GitHub answers that nothing changed.
+	kept, conditional := shared.recall(address)
+	conditional = conditional && read
+	if conditional {
+		request.Header.Set("If-None-Match", kept.etag)
+	}
 	client := http.Client{}
 	if g.Client != nil {
 		client = *g.Client
@@ -439,11 +458,20 @@ func (g GitHub) call(ctx context.Context, method, address string, body any, expe
 	if err != nil {
 		return nil, nil, errors.New(redact(err.Error()))
 	}
+	shared.learn(response.StatusCode, response.Header, data, githubNow())
+	if conditional && response.StatusCode == http.StatusNotModified {
+		// The answer kept, with its own headers: its next page is the one
+		// it named.
+		return kept.data, kept.header, nil
+	}
 	if len(data) > limit {
 		return nil, nil, fmt.Errorf("tracker returned HTTP %d; response exceeds %d MiB; no truncated response returned", response.StatusCode, limit>>20)
 	}
 	if response.StatusCode != expected {
 		return nil, nil, &githubError{Status: response.StatusCode, Body: redact(string(data))}
+	}
+	if read {
+		shared.keep(address, githubKept{etag: response.Header.Get("ETag"), data: data, header: response.Header.Clone()})
 	}
 	return data, response.Header, nil
 }
