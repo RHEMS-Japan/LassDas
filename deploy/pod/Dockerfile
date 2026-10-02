@@ -31,7 +31,8 @@ RUN test -n "$ENGINE_SHA" && \
 FROM golang:1.26-bookworm AS bundle
 WORKDIR /src
 COPY rewrite /src/rewrite
-RUN mkdir -p /out && GOMAXPROCS=2 sh /src/rewrite/package.sh /out/bundle
+# Deliberately built with another Go to see the image check fail; reverted next.
+RUN mkdir -p /out && GOTOOLCHAIN=go1.27.1 GOMAXPROCS=2 sh /src/rewrite/package.sh /out/bundle
 
 # ---- Stage 2: runtime ----------------------------------------------------
 FROM debian:bookworm-slim
