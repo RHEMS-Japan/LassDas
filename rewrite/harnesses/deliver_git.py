@@ -182,25 +182,57 @@ def refuse_paths_outside_grant(paths, allowed, exempt=()):
                             + ", ".join(sorted(set(outside))[:20]))
 
 
-def refuse_forbidden_text(diff, paths=()):
+def added_lines(workspace, against):
+    """The lines the staged change adds. The diff marks them with ">", since
+    a line whose own text begins with "+" would otherwise look like a file
+    header. A file Git takes as binary, by its own judgement or by an
+    attribute, is shown as text, and no diff program or text conversion
+    stands in for it. A line ends only where Git ends it, at LF: a CR, a
+    form feed or a line separator inside it is part of it."""
+    for line in support.output_lines(support.git(
+            "-C", str(workspace), "diff", "--cached", "--no-color", "--text", "--no-ext-diff", "--no-textconv",
+            "--output-indicator-new=>", *against)):
+        if line.startswith(b">"):
+            yield line[1:].decode("utf-8", "surrogateescape")
+
+
+def staged_texts(workspace, against):
+    """The staged change's text: the lines it adds, then the names of the
+    paths it touches."""
+    yield from added_lines(workspace, against)
+    _, named, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--name-only", "-z",
+                                          "--no-renames", *against))
+    yield from sorted(names(named))
+
+
+def refuse_forbidden_text(texts):
     """Configured text must not leave the workspace, whoever wrote it. Only
     the lines this change adds, and the names of the paths it touches, are
-    its text: context and removed lines are what was already there. The
-    diff is read with ">" marking added lines, since a line whose own text
-    begins with "+" would otherwise look like a file header."""
-    added = "\n".join([line[1:] for line in diff.splitlines() if line.startswith(">")] + list(paths))
-    lowered = added.lower()
-    found = [entry for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()
-             if entry.strip() and entry.strip().lower() in lowered]
+    its text: context and removed lines are what was already there. They
+    are looked at one by one, so a large change is never held whole. Text in
+    UTF-16 has a NUL beside each ASCII character, so each is also looked at
+    with its NULs taken out."""
+    entries = [entry.strip() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()]
+    wanted = {entry.lower() for entry in entries if entry}
+    token = os.environ.get("GITHUB_TOKEN", "")
+    matched, carried, not_utf8 = set(), False, False
+    for text in texts:
+        seen = (text, text.replace("\0", "")) if "\0" in text else (text,)
+        lowered = [each.lower() for each in seen]
+        matched.update(entry for entry in wanted if any(entry in each for each in lowered))
+        carried = carried or bool(token) and any(token in each for each in seen)
+        not_utf8 = not_utf8 or re.search("[\udc80-\udcff]", text) is not None
+    found = [entry for entry in entries if entry and entry.lower() in matched]
     if found:
         raise DeliveryError("Refused: the staged change contains configured forbidden text (%d entr%s)"
                             % (len(found), "y" if len(found) == 1 else "ies"))
-    if support.credential() in added:
+    # A process given no credential is refused at this point, as before.
+    support.credential()
+    if carried:
         raise DeliveryError("Refused: the staged change contains the delivery credential")
     # Bytes that are not UTF-8 are read as surrogate escapes. ASCII is found
     # in them as written; other text is not, so it cannot pass unlooked-for.
-    if re.search("[\udc80-\udcff]", added) and not all(
-            entry.isascii() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()):
+    if not_utf8 and not all(entry.isascii() for entry in entries):
         raise DeliveryError("Refused: the staged change carries text that is not UTF-8, in which configured "
                             "forbidden text that is not ASCII cannot be looked for")
 
@@ -247,11 +279,7 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     # What the integration branch already carried is not this change; during
     # a merge completion only what differs from that branch's tip is looked at.
     against = ["MERGE_HEAD"] if merge_in_progress(workspace) else []
-    _, marked, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--no-color",
-                                           "--output-indicator-new=>", *against), redact=False)
-    _, named, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--name-only", "-z",
-                                          "--no-renames", *against))
-    refuse_forbidden_text(marked, sorted(names(named)))
+    refuse_forbidden_text(staged_texts(workspace, against))
     name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
     address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
     # Both halves on purpose. A runtime with no Git identity cannot derive one

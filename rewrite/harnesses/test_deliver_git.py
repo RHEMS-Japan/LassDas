@@ -544,6 +544,61 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("forbidden text", refused.stdout)
         self.assertEqual(self.state["pulls"], [])
 
+    def refused_as_written(self, relative, data, expected, **settings):
+        """One file written as these bytes, and a delivery that refuses it."""
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        refused = self.deliver(**settings)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(expected, refused.stdout)
+        self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+
+    def forbidden_text_and_credential_refused_in(self, relative, encode):
+        self.refused_as_written(relative, encode("package main // internal-project-codename\n"),
+                                "contains configured forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.refused_as_written(relative, encode("package main // %s\n" % TOKEN), "contains the delivery credential")
+
+    def test_text_after_a_break_inside_a_line_is_still_looked_at(self):
+        # Git ends a line at LF only. Read as text, a CR in a line became a
+        # line end, and splitting the text split a line at a form feed, a
+        # vertical tab or a line separator as well: what followed was not
+        # taken as added, and was delivered.
+        for mark in ("\r", "\x0b", "\x0c", " "):
+            self.forbidden_text_and_credential_refused_in(
+                "main.go", lambda text: text.replace("// ", "//" + mark).encode())
+
+    def test_text_in_a_file_with_a_nul_byte_is_still_looked_at(self):
+        # Git takes such a file as binary and shows no line of it.
+        self.forbidden_text_and_credential_refused_in("library/data.bin", lambda text: b"\x00" + text.encode())
+
+    def test_text_in_a_file_an_attribute_keeps_from_the_diff_is_still_looked_at(self):
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / ".gitattributes").write_text("*.txt -diff\n")
+        self.forbidden_text_and_credential_refused_in("library/notes.txt", str.encode)
+
+    def test_text_in_utf16_is_still_looked_at(self):
+        # Git takes it as binary for its NULs: in UTF-16 each ASCII character
+        # has one beside it.
+        self.forbidden_text_and_credential_refused_in("library/notes.txt",
+                                                      lambda text: ("﻿" + text).encode("utf-16-le"))
+
+    def test_a_diff_program_does_not_stand_in_for_the_lines(self):
+        # One that prints its own format, in the delivery's environment.
+        self.refused_as_written("main.go", b"package main // internal-project-codename\n",
+                                "contains configured forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename",
+                                GIT_EXTERNAL_DIFF="printf 'changed: %s\\n'")
+
+    def test_a_text_conversion_does_not_stand_in_for_the_lines(self):
+        # One that the checkout's configuration defines and an attribute names.
+        self.git(self.workspace, "config", "diff.plain.textconv", "true")
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / ".gitattributes").write_text("*.txt diff=plain\n")
+        self.forbidden_text_and_credential_refused_in("library/notes.txt", str.encode)
+
     def test_a_catch_up_merge_made_before_its_receipt_was_written_is_delivered(self):
         self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
         self.change("main.go", "package main\n\nfunc main() {}\n")
@@ -1339,6 +1394,15 @@ class DeliveryTests(unittest.TestCase):
         self.change("main.go", "package main // 日本語の説明\n")
         done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_an_entry_is_told_to_be_ascii_as_it_is_looked_for(self):
+        # An entry is looked for without the blanks around it, so a full-width
+        # space after an ASCII entry does not make it one that cannot be looked
+        # for in a change that is not UTF-8.
+        self.shift_jis("main.go", "package main // 日本語の説明\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename\N{IDEOGRAPHIC SPACE}")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
 
     def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")

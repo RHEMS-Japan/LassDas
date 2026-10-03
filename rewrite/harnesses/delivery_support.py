@@ -14,6 +14,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -186,6 +187,31 @@ def run(command, *, cwd=None, check=True, timeout=None, environment=None,
         raise DeliveryError("Command failed (exit %d): %s\n%s%s"
                             % (result.returncode, shlex.join(command), output, diagnostics))
     return result.returncode, output, diagnostics
+
+
+def output_lines(command, *, environment=None):
+    """A command's output a line at a time, as it comes: for output that is
+    looked at, never printed, and may be too large to hold whole. Lines end
+    at LF only, and every other byte is kept as given; a text read would
+    have turned a CR into a line end. A failure is raised once the output
+    has been read."""
+    with tempfile.TemporaryFile() as diagnostics:
+        with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=diagnostics) as process:
+            pending = bytearray()
+            for chunk in iter(lambda: process.stdout.read(1 << 20), b""):
+                pending += chunk
+                end = pending.rfind(b"\n")
+                if end >= 0:
+                    yield from bytes(pending[:end]).split(b"\n")
+                    del pending[:end + 1]
+            if pending:
+                yield bytes(pending)
+        if process.returncode != 0:
+            diagnostics.seek(0)
+            raise DeliveryError("Command failed (exit %d): %s\n%s" % (
+                process.returncode, shlex.join(command),
+                scrub(diagnostics.read().decode("utf-8", "replace"))))
 
 
 def api(method, path, *, payload=None, timeout=None):
