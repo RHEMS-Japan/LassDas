@@ -1,0 +1,228 @@
+"""Full explanation transport through real Git and the local service fixture."""
+import unittest
+
+import test_deliver_git as delivery_fixture
+
+
+class DescriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = delivery_fixture.DeliveryTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.change("main.go", "package main\n// requested change\n")
+
+    def deliver(self, **extra):
+        return self.fixture.deliver(DELIVERY_PR_BODY_FILE="notes.md", DELIVERY_ALLOWED_PATHS="main.go:notes.md",
+                                    DELIVERY_MERGE_METHOD="none", **extra)
+
+    def explain(self, text):
+        self.fixture.change("notes.md", text)
+
+    def test_long_explanation_settings_and_last_finding_reach_the_pull_request(self):
+        text = "実装と調査の結果\n" + "\n".join("所見 %d: " % n + "確認した根拠。" * 35 for n in range(1, 21))
+        text += '\n設定例: {"enabled":true}\n確認: curl -I https://service.example.invalid/\n'
+        self.explain(text)
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
+        self.assertEqual(self.fixture.git(self.fixture.remote, "show", "refs/heads/ticket/TICKET-41:notes.md").stdout, text)
+        again = self.deliver()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertFalse(any(method == "PATCH" for method, _ in self.fixture.state["requests"]))
+
+    def test_next_round_updates_the_same_pull_request_without_shortening(self):
+        self.explain("First explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        text = "Second round: " + "日本語の確認結果\n" * 300 + "Last required verification example\n"
+        self.explain(text)
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
+        self.assertEqual(self.fixture.receipt()["pull_request_body"], self.fixture.state["pulls"][0]["body"])
+        self.assertEqual(sum(method == "PATCH" for method, _ in self.fixture.state["requests"]), 1)
+
+    def test_uncertain_update_and_another_work_round_keep_the_full_explanation(self):
+        self.explain("First explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        self.explain("Second explanation\n")
+        self.fixture.state["description_uncertain"] = True
+        failed = self.deliver(DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("have not been undone", failed.stdout)
+        self.assertNotIn("Nothing was delivered", failed.stdout)
+        self.assertIn("pending_pull_request_body", self.fixture.receipt())
+        self.assertTrue(self.fixture.receipt()["pending_pull_request_body"].endswith("Second explanation\n"))
+        self.explain("Third explanation after the uncertain reply\n")
+        retried = self.deliver()
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Third explanation after the uncertain reply\n"))
+        self.assertNotIn("pending_pull_request_body", self.fixture.receipt())
+
+    def test_a_persons_different_description_is_not_replaced_or_merged(self):
+        self.explain("First explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        self.fixture.state["pulls"][0]["body"] = "A person's explanation; do not replace it."
+        self.explain("Another explanation\n")
+        result = self.deliver()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("it was not replaced", result.stdout)
+        self.assertEqual(self.fixture.state["pulls"][0]["body"], "A person's explanation; do not replace it.")
+        self.assertFalse(any(method in {"PATCH", "PUT"} for method, _ in self.fixture.state["requests"]))
+
+    def test_an_uncertain_first_creation_is_reused_after_another_work_round(self):
+        self.explain("First explanation\n")
+        self.fixture.state["description_post_uncertain"] = True
+        first = self.deliver(DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertNotEqual(first.returncode, 0)
+        self.assertNotIn("Nothing was delivered", first.stdout)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertIn("pending_pull_request_body", self.fixture.receipt())
+        self.assertTrue(self.fixture.receipt()["pending_pull_request_body"].endswith("First explanation\n"))
+        self.explain("Second explanation after an uncertain first creation\n")
+        second = self.deliver()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Second explanation after an uncertain first creation\n"))
+
+    def test_each_actual_creation_attempt_keeps_its_own_uncertain_text(self):
+        self.explain("First attempted explanation\n")
+        self.fixture.state["post_failures"] = 1
+        first = self.deliver(DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(self.fixture.state["pulls"], [])
+        self.explain("Second attempted explanation\n")
+        self.fixture.state["description_post_uncertain"] = True
+        second = self.deliver(DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Second attempted explanation\n"))
+        self.explain("Third explanation after the lost reply\n")
+        third = self.deliver()
+        self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 1)
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith("Third explanation after the lost reply\n"))
+
+    def test_uncertain_creation_after_a_persons_merge_keeps_the_new_round(self):
+        self.explain("Earlier round explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        self.fixture.merge_right_after_the_next_read(1)
+        self.explain("Next round explanation\n")
+        self.fixture.state["description_post_uncertain"] = True
+        uncertain = self.deliver(DELIVERY_RETRY_ATTEMPTS="1")
+        self.assertNotEqual(uncertain.returncode, 0)
+        self.assertNotIn("Nothing was delivered", uncertain.stdout)
+        self.assertNotIn("Nothing was merged", uncertain.stdout)
+        self.assertEqual(len(self.fixture.state["pulls"]), 2)
+        self.assertTrue(self.fixture.state["pulls"][0]["merged"])
+        self.assertIn("pending_pull_request_body", self.fixture.receipt())
+        self.assertTrue(self.fixture.receipt()["pending_pull_request_body"].endswith("Next round explanation\n"))
+        self.explain("New explanation after the lost second creation\n")
+        retried = self.deliver()
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertEqual(len(self.fixture.state["pulls"]), 2)
+        self.assertEqual(self.fixture.receipt()["previous"][0]["pull_request"], 1)
+        self.assertEqual(self.fixture.receipt()["pull_request"], 2)
+        self.assertTrue(self.fixture.state["pulls"][1]["body"].endswith("New explanation after the lost second creation\n"))
+
+    def test_a_failed_or_unconfirmed_description_update_does_not_merge(self):
+        self.explain("First explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        for failure in ("description_refusal", "description_readback_mismatch"):
+            with self.subTest(failure=failure):
+                self.fixture.state[failure] = True
+                self.explain("Next explanation for " + failure + "\n")
+                result = self.fixture.deliver(DELIVERY_PR_BODY_FILE="notes.md",
+                                              DELIVERY_ALLOWED_PATHS="main.go:notes.md", DELIVERY_MERGE_METHOD="merge")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("have not been undone", result.stdout)
+                self.assertFalse(self.fixture.state["pulls"][0]["merged"])
+                self.assertFalse(any(method == "PUT" for method, _ in self.fixture.state["requests"]))
+                self.fixture.state[failure] = False
+
+    def test_a_full_explanation_is_present_before_automatic_merge(self):
+        text = "Explanation with verification at the end.\n" * 200
+        self.explain(text)
+        result = self.fixture.deliver(DELIVERY_PR_BODY_FILE="notes.md", DELIVERY_ALLOWED_PATHS="main.go:notes.md")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.state["pulls"][0]["merged"])
+        self.assertTrue(self.fixture.state["pulls"][0]["body"].endswith(text))
+
+    def test_bad_description_is_not_shortened_or_pushed(self):
+        for shape, text, message in [
+            ("large", b"x" * 60_001, "60000-byte"),
+            ("large Unicode", ("界" * 30_000).encode(), "60000-byte"),
+            ("invalid UTF-8", b"prefix\xffsuffix", "not UTF-8"),
+        ]:
+            with self.subTest(shape=shape):
+                (self.fixture.workspace / "notes.md").write_bytes(text)
+                result = self.deliver()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.fixture.state["pulls"], [])
+                self.assertNotIn("refs/heads/ticket/TICKET-41", self.fixture.remote_branches())
+
+    def test_description_links_and_outside_paths_are_not_read(self):
+        path = self.fixture.workspace / "notes.md"
+        path.unlink()
+        path.symlink_to("main.go")
+        result = self.deliver()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a link or directory", result.stderr)
+        self.assertEqual(self.fixture.state["pulls"], [])
+        for configured in ("../private-note", "/private-note", ".git/config", "missing.md"):
+            with self.subTest(path=configured):
+                result = self.fixture.deliver(DELIVERY_PR_BODY_FILE=configured, DELIVERY_ALLOWED_PATHS="main.go:notes.md")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.fixture.state["pulls"], [])
+
+    def test_unchanged_existing_document_is_still_checked_for_forbidden_text(self):
+        # The file need not be in the new diff, so test its whole committed body.
+        self.explain("approved document with a forbidden-label\n")
+        first = self.deliver()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        result = self.deliver(DELIVERY_FORBIDDEN_TEXT="forbidden-label")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("configured forbidden text", result.stderr)
+        self.assertNotIn("forbidden-label", result.stderr)
+        self.assertNotIn("Nothing was delivered", result.stdout)
+
+    def test_an_unchanged_document_does_not_publish_the_delivery_credential(self):
+        self.explain("Ordinary explanation\n")
+        self.assertEqual(self.deliver().returncode, 0)
+        result = self.deliver(GITHUB_TOKEN="Ordinary explanation")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Ordinary explanation", result.stdout + result.stderr)
+        self.assertEqual(sum(method == "PATCH" for method, _ in self.fixture.state["requests"]), 0)
+
+    def test_the_committed_document_not_a_later_worktree_edit_is_read(self):
+        from unittest.mock import patch
+        import deliver_git
+        self.explain("Committed explanation\n")
+        self.fixture.git(self.fixture.workspace, "add", "notes.md")
+        self.fixture.git(self.fixture.workspace, "commit", "-m", "Codex: fixture explanation")
+        commit = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout.strip()
+        self.explain("Unreviewed later worktree text\n")
+        with patch.dict("os.environ", self.fixture.environment(DELIVERY_PR_BODY_FILE="notes.md"), clear=True):
+            body = deliver_git.pull_request_body(self.fixture.workspace, commit, "TICKET-41", "none")
+        self.assertTrue(body.endswith("Committed explanation\n"))
+        self.assertNotIn("Unreviewed", body)
+
+    def test_the_committed_document_has_its_own_encoding_and_size_checks(self):
+        from unittest.mock import patch
+        import deliver_git
+        for raw, reason in ((b"unchanged invalid \xff", "not UTF-8"), (b"x" * 60_000, "60000-byte")):
+            with self.subTest(reason=reason):
+                (self.fixture.workspace / "notes.md").write_bytes(raw)
+                self.fixture.git(self.fixture.workspace, "add", "notes.md")
+                self.fixture.git(self.fixture.workspace, "commit", "-m", "Codex: fixture document")
+                commit = self.fixture.git(self.fixture.workspace, "rev-parse", "HEAD").stdout.strip()
+                with patch.dict("os.environ", self.fixture.environment(DELIVERY_PR_BODY_FILE="notes.md"), clear=True):
+                    with self.assertRaisesRegex(deliver_git.DeliveryError, reason):
+                        deliver_git.pull_request_body(self.fixture.workspace, commit, "TICKET-41", "none")
+
+
+if __name__ == "__main__":
+    unittest.main()
