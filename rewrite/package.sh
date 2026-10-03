@@ -22,7 +22,7 @@ done
 for guide in START RUNTIME README OPERATING; do
   cp "$source_dir/$guide.md" "$output_dir/$guide.md"
 done
-for example in operator operator-gateway operator-stages operator-github; do
+for example in operator operator-gateway operator-stages operator-github operator-github-stages; do
   cp "$source_dir/examples/$example.json" "$output_dir/examples/$example.json"
 done
 printf '%s\n' "$output_dir"
