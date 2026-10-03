@@ -84,7 +84,7 @@ func TestGitHubNoticeQuotesAfterScrubbingAndCuttingOnlyNonemptyDetails(t *testin
 	// quoting; no partial credential or unbounded delimiter reaches the post.
 	t.Setenv("WATCH_TEST_KEY", "synthetic-"+strings.Repeat("`", 230)+"-key")
 	failure := "synthetic-" + strings.Repeat("`", 230) + "-key " + strings.Repeat("a", 300) + " @outside"
-	want := "` [credential] " + strings.Repeat("a", 187) + " `"
+	want := "` [credential] " + strings.Repeat("a", 187) + "… `"
 	if got := noticeDetail(cfg, failure); got != want {
 		t.Fatalf("scrub/cut/quote order changed: %q", got)
 	}
