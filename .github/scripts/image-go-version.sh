@@ -16,6 +16,10 @@
 # bodies of heredocs (RUN <<EOF ... EOF) left unread. A Dockerfile that sets
 # its own escape character (# escape=) is refused: this script reads only the
 # default backslash.
+# Heredoc words are read outside ordinary quoted strings, retaining their
+# quotes and escapes. Delimiters are identifiers, bare or wholly single/double
+# quoted, optionally with a numeric file descriptor and <<-. Other delimiter
+# forms and unfinished quoting fail explicitly instead of hiding later FROMs.
 #
 # Usage: bash .github/scripts/image-go-version.sh [DOCKERFILE]
 set -euo pipefail
@@ -56,13 +60,58 @@ read_from() {  # one FROM instruction, continuation lines joined
   fi
 }
 heredocs() {  # the heredoc terminators a RUN, COPY or ADD instruction opens, one per line
-  local rest="$1" marker
+  local rest="$1" word="" quote="" char escaped=no index marker first
+  local -a words=()
   [[ "$rest" =~ ^[[:space:]]*([Rr][Uu][Nn]|[Cc][Oo][Pp][Yy]|[Aa][Dd][Dd])[[:space:]] ]] || return 0
-  marker='<<(-?)["'"'"']?([A-Za-z_][A-Za-z0-9_]*)'
-  while [[ "$rest" =~ $marker ]]; do
-    printf '%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  [[ "$rest" == *'<<'* ]] || return 0
+  # Tokenize without evaluating shell text or removing its quotes. A quoted
+  # "<<WORD" is an ordinary word; <<"WORD" starts a heredoc. Substring searches
+  # confuse those and can skip a real FROM until an unrelated terminator.
+  for ((index=0; index<${#rest}; index++)); do
+    char="${rest:index:1}"
+    if [ "$escaped" = yes ]; then
+      word+="$char"; escaped=no; continue
+    fi
+    if [ "$char" = '\' ] && [ "$quote" != "'" ]; then
+      word+="$char"; escaped=yes; continue
+    fi
+    if [ -n "$quote" ]; then
+      word+="$char"
+      [ "$char" != "$quote" ] || quote=""
+      continue
+    fi
+    case "$char" in
+      "'"|'"') quote="$char"; word+="$char" ;;
+      [[:space:]])
+        if [ -n "$word" ]; then words+=("$word"); word=""; fi ;;
+      *) word+="$char" ;;
+    esac
   done
+  if [ -n "$quote" ] || [ "$escaped" = yes ]; then
+    echo "unfinished quoting in an instruction containing <<; cannot read heredocs safely" >&2
+    return 1
+  fi
+  if [ -n "$word" ]; then words+=("$word"); fi
+  for word in "${words[@]}"; do
+    [[ "$word" =~ ^[0-9]*'<<' ]] || continue
+    rest="${word#*<<}"
+    marker=""
+    if [ "${rest:0:1}" = '-' ]; then marker='-'; rest="${rest:1}"; fi
+    first="${rest:0:1}"
+    if [ "$first" = "'" ] || [ "$first" = '"' ]; then
+      if [ "${#rest}" -lt 2 ] || [ "${rest: -1}" != "$first" ]; then
+        echo "heredoc delimiter must be wholly quoted or unquoted: $word" >&2
+        return 1
+      fi
+      rest="${rest:1:${#rest}-2}"
+    fi
+    if ! [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "unsupported heredoc delimiter (use an identifier, wholly quoted or unquoted): $word" >&2
+      return 1
+    fi
+    printf '%s%s\n' "$marker" "$rest"
+  done
+  return 0
 }
 instruction=""
 pending=()  # heredoc terminators still to be met, in order; "-" marks <<-
@@ -102,9 +151,14 @@ while IFS= read -r line || [ -n "$line" ]; do
   if [[ "$instruction" =~ ^[Ff][Rr][Oo][Mm][[:space:]] ]]; then
     read_from "$instruction"
   else
-    while IFS= read -r word; do
-      pending+=("$word")
-    done < <(heredocs "$instruction")
+    if ! markers="$(heredocs "$instruction")"; then
+      exit 1
+    fi
+    if [ -n "$markers" ]; then
+      while IFS= read -r word; do
+        pending+=("$word")
+      done <<< "$markers"
+    fi
   fi
   instruction=""
 done < "$dockerfile"

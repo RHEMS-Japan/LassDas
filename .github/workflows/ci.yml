@@ -105,7 +105,7 @@ jobs:
           if [ "$REQUIRED" = "true" ]; then
             echo "this repository requires the list (vars.IDENTIFIER_SCANS_REQUIRED is true)"
           else
-            echo "this repository does not require the list (vars.IDENTIFIER_SCANS_REQUIRED is not true)"
+            printf 'this repository does not require the list (vars.IDENTIFIER_SCANS_REQUIRED is not true; actual value: %q)\n' "$REQUIRED"
           fi
           if [ -n "${list//[[:space:]]/}" ]; then
             if [ -z "$(printf '%s' "$list" | tr -d ',[:space:]')" ]; then
