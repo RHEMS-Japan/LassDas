@@ -39,7 +39,7 @@ func githubScopeComment(base string, id int64, body string) map[string]any {
 }
 
 func TestGitHubScopeReadsPostsAndReadsBackUnmodifiedProse(t *testing.T) {
-	const prose = "\r\n日本語 😀 @example #17\r\n{\"unknown\":null} $(literal) `text` & + %\n"
+	const prose = "\r\n日本語 😀 \ufffd @example #17\r\n{\"unknown\":null} $(literal) `text` & + %\n"
 	var posts atomic.Int32
 	_, worker, _, _ := githubScopeFixture(t, func(base string, _ int32, w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -85,6 +85,57 @@ func TestGitHubScopeReadsPostsAndReadsBackUnmodifiedProse(t *testing.T) {
 	if err != nil || !bytes.Equal(posted, read) || json.Unmarshal(read, &normalized) != nil || normalized.ID != 41 || normalized.Content != prose ||
 		normalized.Created != "2026-01-03T00:00:00Z" || normalized.CreatedUser.ID != 55 || normalized.CreatedUser.UserID != "requester" || normalized.CreatedUser.Name != "requester" || !normalized.Future || posts.Load() != 1 {
 		t.Fatalf("readback: %s (%v), posts=%d", read, err, posts.Load())
+	}
+}
+
+func TestGitHubCommentsRejectInvalidUTF8WithoutSendingOrQuotingIt(t *testing.T) {
+	for _, broken := range []string{string([]byte{0xff}), string([]byte{0xe3, 0x81}), string([]byte{0xc0, 0xaf}), string([]byte{0xed, 0xa0, 0x80})} {
+		for _, route := range []string{"role", "controller"} {
+			t.Run(fmt.Sprintf("%s/%x", route, broken), func(t *testing.T) {
+				g, worker, _, calls := githubScopeFixture(t, func(base string, _ int32, w http.ResponseWriter, r *http.Request) {
+					var body map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(githubScopeComment(base, 41, body["body"]))
+				}, true)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				text := "private-fixture-text" + broken
+				var err error
+				if route == "role" {
+					_, err = worker.AddComment(ctx, "7", text)
+				} else {
+					_, err = g.AddComment(ctx, Issue{Key: "7"}, text)
+				}
+				if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") || !strings.Contains(err.Error(), "not sent") || calls.Load() != 0 {
+					t.Fatalf("invalid bytes were silently posted: error=%v upstream calls=%d", err, calls.Load())
+				}
+				if strings.Contains(err.Error(), "private-fixture-text") || route == "controller" && strings.Contains(err.Error(), "may already be posted") {
+					t.Fatalf("input leaked or a pre-send refusal was called ambiguous: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubControllerCommentKeepsValidUnicodeUnchanged(t *testing.T) {
+	const text = "日本語 😀 \ufffd\r\n`ordinary prose` @example {\"future\":null}\n"
+	g, calls := githubFixture(t, func(_ string, _ int32, w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&body) != nil || body["body"] != text {
+			t.Error("valid Unicode changed before posting")
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]int64{"id": 41})
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if id, err := g.AddComment(ctx, Issue{Key: "7"}, text); err != nil || id != 41 || calls.Load() != 1 {
+		t.Fatalf("valid comment refused: id=%d error=%v calls=%d", id, err, calls.Load())
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var _ Tracker = GitHub{}
@@ -91,6 +92,9 @@ func (g GitHub) Forward(ctx context.Context, method, path string, query, form ur
 		}
 		return json.Marshal(page)
 	case method == http.MethodPost && len(parts) == 3 && parts[2] == "comments" && len(query) == 0 && len(form) == 1 && len(form["content"]) == 1 && expected == http.StatusCreated:
+		if !utf8.ValidString(form.Get("content")) {
+			return nil, errors.New("comment contains invalid UTF-8; it was not sent")
+		}
 		data, _, err := g.call(ctx, method, g.base()+upstream+"/comments", map[string]string{"body": form.Get("content")}, http.StatusCreated, githubItemLimit)
 		if err != nil {
 			return nil, err
