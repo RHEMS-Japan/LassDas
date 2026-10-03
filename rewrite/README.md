@@ -515,14 +515,16 @@ operator's grant like any other, and forbidden text written in ASCII is found
 in it as written. Forbidden text that is not ASCII cannot be looked for in
 such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
 them is refused, saying so, rather than delivered unchecked. A file whose
-added lines hold a NUL byte, as those of an image or of text in UTF-16 do, is
-not refused for its bytes: in it, an entry that is not ASCII is found only
-where it is written in UTF-8, while ASCII entries and the credential are found
-as in any other file. That holds for a file in Shift_JIS with a NUL byte among
-its added lines as well. Only those lines decide it, not whether Git takes the
-file as binary: text in Shift_JIS is refused under a `binary` or `-diff`
-attribute and in place of a file that held a NUL, and so is a file changed in
-place when none of the lines the change adds to it holds one. Where such a name
+staged version Git takes as binary for its content, for a NUL byte in its
+first 8000 bytes as an image or text in UTF-16 has, is not refused for its
+bytes: in it, an entry that is not ASCII is found only where it is written in
+UTF-8, while ASCII entries and the credential are found as in any other file.
+That holds for a file in Shift_JIS with a NUL byte that early as well.
+Neither an attribute nor the version a change replaces decides it, though
+either makes Git take a file as binary: text in Shift_JIS is refused under a
+`binary` or `-diff` attribute and in place of a file that held a NUL. Those
+first 8000 bytes are read only for a file the change would otherwise be
+refused for. Where such a name
 or text is printed or recorded, each byte that is not UTF-8 shows as a
 replacement character (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a

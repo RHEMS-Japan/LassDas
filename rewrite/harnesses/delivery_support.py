@@ -263,6 +263,30 @@ def output_lines(command, *, environment=None, overlap=0, check=True):
                 scrub(diagnostics.read().decode("utf-8", "replace"))))
 
 
+def output_head(command, size, *, environment=None):
+    """The first size bytes of a command's output, or all of it when it is
+    shorter. No more is read: once size bytes have come, the command is
+    stopped. A failure before then is raised."""
+    with tempfile.TemporaryFile() as diagnostics:
+        with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=diagnostics, bufsize=0) as process:
+            head = b""
+            while len(head) < size:
+                chunk = process.stdout.read(size - len(head))
+                if not chunk:
+                    break
+                head += chunk
+            stopped = len(head) == size and process.poll() is None
+            if stopped:
+                process.kill()
+        if not stopped and process.returncode != 0:
+            diagnostics.seek(0)
+            raise DeliveryError("Command failed (exit %d): %s\n%s" % (
+                process.returncode, shlex.join(command),
+                scrub(diagnostics.read().decode("utf-8", "replace"))))
+        return head
+
+
 def api(method, path, *, payload=None, timeout=None):
     """One GitHub REST call. The credential travels in a header, not a URL."""
     url = path if path.startswith("http") else api_base() + path

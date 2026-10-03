@@ -191,7 +191,7 @@ def looked_for_bytes():
     return 4 * max(len(text) for text in texts + [os.environ.get("GITHUB_TOKEN", "")])
 
 
-def added_lines(workspace, against):
+def added_lines(workspace, against, blobs):
     """The lines the staged change adds. The diff marks them with ">", since
     a line whose own text begins with "+" would otherwise look like a file
     header. A file Git takes as binary, by its own judgement or by an
@@ -200,7 +200,8 @@ def added_lines(workspace, against):
     form feed or a line separator inside it is part of it. A long line comes
     in parts, each repeating enough of the one before it that no text the
     check looks for is cut in two. Each comes with the place of its file in
-    the diff, which tells the lines of one file from those of another."""
+    the diff, which tells the lines of one file from those of another, and
+    blobs is given the staged version of each file as the diff names it."""
     adding, place = False, -1
     for part, first in support.output_lines(support.git(
             "-C", str(workspace), "diff", "--cached", "--no-color", "--text", "--no-ext-diff", "--no-textconv",
@@ -208,32 +209,46 @@ def added_lines(workspace, against):
         if first:
             if part.startswith(b"diff --git "):
                 place += 1
+            elif part.startswith(b"index "):
+                # "index <before>..<staged>", maybe with a mode: the object
+                # the file's staged version is, as the diff abbreviates it.
+                blobs.setdefault(place, part.split(b" ")[1].rpartition(b"..")[2].decode("ascii", "replace"))
             adding, part = part.startswith(b">"), part[1:]
         if adding:
             yield place, part.decode("utf-8", "surrogateescape")
 
 
-def staged_texts(workspace, against):
+def staged_head_holds_nul(workspace, blob):
+    """Whether the staged version of a file holds a NUL byte in its first 8000
+    bytes, which is what makes Git take content as binary. No more of it is
+    read."""
+    return bool(blob) and b"\0" in support.output_head(
+        support.git("-C", str(workspace), "cat-file", "blob", blob), 8000)
+
+
+def staged_texts(workspace, against, blobs):
     """The staged change's text: the lines it adds, then the names of the
     paths it touches, which belong to no file's content."""
-    yield from added_lines(workspace, against)
+    yield from added_lines(workspace, against, blobs)
     _, named, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--name-only", "-z",
                                           "--no-renames", *against))
     yield from ((None, name) for name in sorted(names(named)))
 
 
-def refuse_forbidden_text(texts):
+def refuse_forbidden_text(texts, binary=lambda place: False):
     """Configured text must not leave the workspace, whoever wrote it. Only
     the lines this change adds, and the names of the paths it touches, are
     its text: context and removed lines are what was already there. They
     are looked at one by one, a long line in parts, so a large change is
     never held whole. Text in UTF-16 has a NUL beside each ASCII character,
     so each is also looked at with its NULs taken out. texts gives each with
-    the place of its file in the diff, or None for a name."""
+    the place of its file in the diff, or None for a name; binary(place),
+    asked only where it decides a refusal, tells whether Git takes that
+    file's staged version as binary for its content."""
     entries = [entry.strip() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()]
     wanted = {entry.lower() for entry in entries if entry}
     token = os.environ.get("GITHUB_TOKEN", "")
-    matched, carried, not_utf8, with_nul = set(), False, set(), set()
+    matched, carried, not_utf8 = set(), False, set()
     for place, text in texts:
         seen = (text, text.replace("\0", "")) if "\0" in text else (text,)
         lowered = [each.lower() for each in seen]
@@ -241,8 +256,6 @@ def refuse_forbidden_text(texts):
         carried = carried or bool(token) and any(token in each for each in seen)
         if re.search("[\udc80-\udcff]", text):
             not_utf8.add(place)
-        if "\0" in text and place is not None:
-            with_nul.add(place)
     found = [entry for entry in entries if entry and entry.lower() in matched]
     if found:
         raise DeliveryError("Refused: the staged change contains configured forbidden text (%d entr%s)"
@@ -253,11 +266,14 @@ def refuse_forbidden_text(texts):
         raise DeliveryError("Refused: the staged change contains the delivery credential")
     # Bytes that are not UTF-8 are read as surrogate escapes. ASCII is found
     # in them as written; other text is not, so it cannot pass unlooked-for.
-    # A file whose added lines hold a NUL byte, as those of an image do, is
-    # the exception: in it, other text is found where written in UTF-8. What
-    # Git takes as binary does not decide this, since an attribute or a NUL
-    # in the version a change replaces makes Git take text so as well.
-    if not_utf8 - with_nul and not all(entry.isascii() for entry in entries):
+    # A file whose staged version Git takes as binary for its content, for a
+    # NUL in its first 8000 bytes as in an image, is the exception: other
+    # text is found in it where written in UTF-8. It is asked file by file,
+    # and only here. Attributes and the version a change replaces are not
+    # asked, since either makes Git take text as binary as well, and a name
+    # is never such a file.
+    if not_utf8 and not all(entry.isascii() for entry in entries) and (
+            None in not_utf8 or not all(binary(place) for place in sorted(not_utf8))):
         raise DeliveryError("Refused: the staged change carries text that is not UTF-8, in which configured "
                             "forbidden text that is not ASCII cannot be looked for")
 
@@ -310,7 +326,9 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     # What the integration branch already carried is not this change; during
     # a merge completion only what differs from that branch's tip is looked at.
     against = ["MERGE_HEAD"] if merge_in_progress(workspace) else []
-    refuse_forbidden_text(staged_texts(workspace, against))
+    blobs = {}
+    refuse_forbidden_text(staged_texts(workspace, against, blobs),
+                          lambda place: staged_head_holds_nul(workspace, blobs.get(place)))
     name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
     address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
     # Both halves on purpose. A runtime with no Git identity cannot derive one
