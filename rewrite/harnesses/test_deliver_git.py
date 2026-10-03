@@ -1263,6 +1263,117 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.methods().count("POST"), 1)
         self.assertNotIn("PUT", self.methods())
 
+    def observe_persons_push_and_merge(self, rewritten=False, squash=False, deleted=False):
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        original = self.receipt()["head"]
+        theirs = (self.person_rewrites() if rewritten else
+                  self.person_pushes("notes.md", "A person's change outside the automation grant.\n"))
+        merge = self.person_squash_merges(1) if squash else self.person_merges(1)
+        if deleted:
+            self.git(self.remote, "update-ref", "-d", "refs/heads/ticket/TICKET-41")
+        self.change("main.go", "package main // unfinished local changes remain\n")
+        local = self.git(self.workspace, "rev-parse", "HEAD").stdout.strip()
+        pushes, methods = self.pushes(), self.methods()
+        observed = self.leave_merge()
+        self.assertEqual(observed.returncode, 0, observed.stdout + observed.stderr)
+        self.assertIn("merged pull request 1", observed.stdout)
+        self.assertIn(merge, observed.stdout)
+        self.assertIn(theirs, observed.stdout)
+        self.assertIn("not committed (main.go)", observed.stdout)
+        self.assertNotIn("Nothing was merged", observed.stdout)
+        self.assertNotIn("is open", observed.stdout)
+        receipt = self.receipt()
+        self.assertTrue(receipt["changed_by_person"])
+        self.assertEqual((receipt["head"], receipt["branch_head"], receipt["merge_sha"]), (original, theirs, merge))
+        self.assertEqual(receipt["not_pushed"], original if rewritten else None)
+        self.assertEqual(len(self.state["pulls"]), 1)
+        self.assertEqual(self.pushes(), pushes)
+        self.assertEqual([method for method in self.methods()[len(methods):] if method != "GET"], [])
+        self.assertEqual(self.git(self.workspace, "rev-parse", "HEAD").stdout.strip(), local)
+        calls = list(self.state["requests"])
+        again = self.leave_merge()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn(merge, again.stdout)
+        self.assertNotIn("is open", again.stdout)
+        self.assertEqual(self.state["requests"], calls)
+
+    def test_person_push_and_merge_before_the_next_observation_keeps_their_changes(self):
+        self.observe_persons_push_and_merge()
+
+    def test_person_push_squash_and_branch_deletion_are_not_called_an_open_pull_request(self):
+        self.observe_persons_push_and_merge(squash=True, deleted=True)
+
+    def test_person_rewrite_and_merge_do_not_publish_the_displaced_commit_again(self):
+        self.observe_persons_push_and_merge(rewritten=True)
+
+    def test_person_push_and_merge_after_this_rounds_push_is_not_another_round(self):
+        self.change("main.go", "package main // first reviewed round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        self.change("main.go", "package main // second reviewed round\n")
+        original, test = self.server.RequestHandlerClass, self
+        observations = []
+
+        class Racing(original):
+            def do_GET(self):
+                if urllib.parse.urlsplit(self.path).path == "/repos/owner/project/pulls/1":
+                    observations.append(self.path)
+                    if len(observations) == 2:
+                        test.state["person_head"] = test.person_pushes("notes.md", "Human change after the push.\n")
+                        test.state["person_merge"] = test.person_merges(1)
+                return super().do_GET()
+
+        self.server.RequestHandlerClass = Racing
+        observed = self.leave_merge()
+        self.assertEqual(observed.returncode, 0, observed.stdout + observed.stderr)
+        self.assertEqual(len(observations), 2)
+        self.assertEqual(len(self.state["pulls"]), 1)
+        self.assertIn("merged pull request 1", observed.stdout)
+        self.assertIn(self.state["person_merge"], observed.stdout)
+        self.assertEqual(self.receipt()["branch_head"], self.state["person_head"])
+        self.assertTrue(self.receipt()["changed_by_person"])
+        self.assertIsNone(self.receipt()["not_pushed"])
+        self.assertNotIn("PUT", self.methods())
+
+    def test_persons_known_merge_is_not_denied_when_its_head_cannot_be_read(self):
+        self.change("main.go", "package main // first reviewed round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        theirs = self.person_pushes("notes.md", "The person's extra change.\n")
+        merge = self.person_merges(1)
+        pushes = self.pushes()
+        for unavailable in ("f" * 40, "--unexpected-option"):
+            with self.subTest(head=unavailable):
+                self.state["pulls"][0]["head"]["sha"] = unavailable
+                refused = self.leave_merge()
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("was merged by someone else as commit " + merge, refused.stdout)
+                self.assertNotIn("Nothing was merged", refused.stdout)
+                self.assertNotIn("Nothing was delivered", refused.stdout)
+                self.assertEqual(len(self.state["pulls"]), 1)
+                self.assertEqual(self.pushes(), pushes)
+        self.state["pulls"][0]["head"]["sha"] = theirs
+        recovered = self.leave_merge()
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("merged pull request 1", recovered.stdout)
+
+    def test_a_genuine_unpublished_next_commit_survives_the_persons_earlier_merge(self):
+        self.change("main.go", "package main // first round\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        marker = self.refuse_pushes()
+        self.change("main.go", "package main // next reviewed round\n")
+        self.assertEqual(self.leave_merge().returncode, 1)
+        pending = self.receipt()["head"]
+        marker.unlink()
+        merged = self.person_merges(1)
+        continued = self.leave_merge()
+        self.assertEqual(continued.returncode, 0, continued.stdout + continued.stderr)
+        self.assertIn("Pull request 2 against master is open", continued.stdout)
+        self.assertEqual(self.git(self.workspace, "merge-base", "--is-ancestor", pending, self.published()).returncode, 0)
+        self.assertEqual(self.published(), self.receipt()["head"])
+        self.assertIn("next reviewed round", self.git(self.remote, "show", self.published() + ":main.go").stdout)
+        self.assertEqual(self.receipt()["previous"][0]["merge_sha"], merged)
+        self.assertNotIn("changed_by_person", self.receipt())
+
     def test_a_person_who_rewrote_the_branch_keeps_it(self):
         # s03: the commit on record is no longer on the branch.
         self.change("main.go", "package main // left for a person\n")
