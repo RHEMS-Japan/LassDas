@@ -161,12 +161,16 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 		// recover from. Hold the work while it lasts, say so once, and carry
 		// on by itself when the budget returns.
 		hold := false
+		creditKnown := false
 		if instruction == nil && err == nil && !waiting {
 			low, known := modelCreditHold(ctx, cfg, observe)
+			creditKnown = known
 			if known {
 				hold = low
-				if noticeErr := applyBudgetNotice(ctx, notice, low); noticeErr != nil {
-					observe("budget notice not confirmed: " + noticeErr.Error())
+				if low || result != nil {
+					if noticeErr := applyBudgetNotice(ctx, notice, low); noticeErr != nil {
+						observe("budget notice not confirmed: " + noticeErr.Error())
+					}
 				}
 			}
 			// Nothing here changes routing; it only tells the requester that a
@@ -229,6 +233,13 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 					defer releaseWork()
 					outcome <- run(workCtx, []string{"--config", configPath, "--request", requestPath, "--run-dir", filepath.Join(directory, "run")}, io.Discard, log)
 				}()
+				// Credit returning alone does not start work: a slot must also
+				// be available. Announce recovery only once the run is launched.
+				if creditKnown {
+					if noticeErr := applyBudgetNotice(ctx, notice, false); noticeErr != nil {
+						observe("budget notice not confirmed: " + noticeErr.Error())
+					}
+				}
 			} else {
 				waited = true
 			}
