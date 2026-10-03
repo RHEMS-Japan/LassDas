@@ -636,8 +636,10 @@ process's `env`. The example sets the first four:
 | `REVIEW_MODELS` | several models in place of `REVIEW_MODEL`, one per line or separated by commas, asked in that order; whichever answers first reviews, so each should come from a publisher outside `model_selection.authors` |
 | `REVIEW_DIFF_PATHS` | the paths whose changes the reviewer is shown, separated by spaces; unset, the whole change |
 | `REVIEW_RETRY_SECONDS`, `REVIEW_RETRY_CAP_SECONDS` | the first and the longest wait between two rounds of asking: 5 and 300 seconds unless set |
-| `REVIEW_HOLD_SECONDS` | how often a waiting review says again why it waits: 900 seconds unless set |
+| `REVIEW_HOLD_SECONDS` | how often a waiting review says again that it waits: 900 seconds unless set |
+| `REVIEW_TIMEOUT_SECONDS` | the limit of one request to a model and of each test command: 300 seconds unless set. A test command cut there reaches the reviewer as `(timed out after 300 seconds)` instead of its output; the `verify` stage has no such limit |
 | `REVIEW_UNAVAILABLE` | `pass` lets the work through unreviewed when no verdict comes (below); unset, the review waits, and any other value is a mistyped setting |
+| `REVIEW_ATTEMPTS` | with `REVIEW_UNAVAILABLE=pass` only, the requests made before the work is let through unreviewed: 3 unless set |
 
 A blocking verdict sends the work back to `work`, and a verdict that does not
 object lets it through to the delivery. Without a verdict the review does
@@ -647,21 +649,24 @@ neither; it waits:
   a reply without a plain verdict) is waited out: the models are asked again
   in their order, round after round, with the wait between rounds growing
   from `REVIEW_RETRY_SECONDS` to `REVIEW_RETRY_CAP_SECONDS`. An HTTP 400,
-  401, 403, 404, 413 or 422 is named as yours to fix (a key or a model id the
-  endpoint refuses), and asking goes on.
+  401, 403, 404, 413 or 422 is named as yours to fix (a key, a model id, or a
+  request the endpoint refuses, such as one too large), and asking goes on.
 - A setting that cannot work (one that is missing or mistyped, an endpoint
   that is not HTTPS, a key that is not set, test commands that cannot be
   read) holds the review until you fix it.
 
 While the review waits, the request stays in the `review` stage and keeps its
 run slot: with `intake.max_running` at 1, every later request waits its turn
-behind it. On the status page, the `review` record's live output says why,
-and says it again every `REVIEW_HOLD_SECONDS`: lines such as
+behind it. On the status page, the `review` record's live output says why:
 `Review: no verdict yet (<model>: <reason>). Asking again in ...` while it
-asks, or `Review by <model>: held, with no verdict: <reason>. ...` while a
-setting holds it. The requester hears only the engine's notice that no stage
-has completed, after `intake.stall_notice_minutes` (90) and then at most every
-six hours (section 8). The wait ends in one of three ways:
+asks, repeated every `REVIEW_HOLD_SECONDS` as
+`Review still without a verdict at <time>, <n> requests so far: <reason>.`;
+or `Review by <model>: held, with no verdict: <reason>. ...` while a setting
+holds it, followed every `REVIEW_HOLD_SECONDS` by
+`Review still held at <time>; the reason is above.` The requester hears only
+the engine's notice that no stage has completed, after
+`intake.stall_notice_minutes` (90) and then at most every six hours
+(section 8). The wait ends in one of three ways:
 
 1. The model service answers again. The review goes on, and its result names
    the model that gave the verdict.
@@ -669,11 +674,14 @@ six hours (section 8). The wait ends in one of three ways:
 3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
    and restart the Pod. The runtime records the stopped review as a failure
    and goes on at the review's `on_failure` stage, which is `work` here: the
-   worker runs again, and the review after it.
+   worker runs again, and the review after it. The requester is told that the
+   request carries on after the restart.
 
 Each request to a model carries the change and the test output. Once the
-waits reach `REVIEW_RETRY_CAP_SECONDS`, each model is asked once every 300
-seconds: about 100 rounds in eight hours. Whether to name more models in
+waits reach `REVIEW_RETRY_CAP_SECONDS`, each model is asked at most once every
+300 seconds: up to about 100 rounds in eight hours, fewer when requests run
+into `REVIEW_TIMEOUT_SECONDS`, since each of those waits out that limit first.
+Whether to name more models in
 `REVIEW_MODELS`, so that one model being down does not hold every request, is
 your decision: each one is another company the change and the test output go
 to (section 1).
@@ -1472,12 +1480,14 @@ or a conflict (below). Stop the request (`停止`) while you fix the cause.
 
 The review has no verdict and waits
 ([section 4](#when-the-review-gets-no-verdict)); the `review` record's live
-output on the status page says why. Usually a key or a model id the endpoint
-refuses (an HTTP 400, 401, 403, 404, 413 or 422, named as yours to fix), a key
-that is not set, or the model service being down. Fix the setting or the
-Secret and restart the Pod, or wait for the service. Meanwhile later requests
-wait their turn behind this one, and the requester gets the notice that no
-stage has completed.
+output on the status page says why. Usually a key, a model id, or a request
+the endpoint refuses, such as one too large (an HTTP 400, 401, 403, 404, 413
+or 422, named as yours to fix), a key that is not set, or the model service
+being down. Fix the setting or the Secret and restart the Pod, or wait for
+the service; for a request too large (413), show the reviewer less with
+`REVIEW_DIFF_PATHS`, or use a model or gateway that takes more. Meanwhile
+later requests wait their turn behind this one, and the requester gets the
+notice that no stage has completed.
 
 ### Work ends without a change, or a model stage keeps failing with "ended without a report"
 
@@ -1614,12 +1624,12 @@ it is, the delivery commits, pushes and opens nothing, the status page counts
 the request under `Done without a change`, and the `delivered` status and the
 hand-back are applied all the same, so the report is what tells the requester
 that nothing was delivered. It is off unless set, and the shipped
-configuration leaves it off. If you turn it on, do so only after pull request
-#357 is merged: until then, Git settings given in only the review's or only
-the delivery's environment can make the two disagree on whether anything
-changed. What it depends on and where it stops are in rewrite/README.md
-("Stages instead of roles", from the paragraph that begins "A request whose
-right outcome is that nothing changes").
+configuration leaves it off. In the build this guide is for, the review and
+the delivery read the checkout the same way, so a Git setting given in only
+one of their environments does not make them disagree on whether anything
+changed. Whether to turn it on, what it depends on and where it stops are in
+rewrite/README.md ("Stages instead of roles", from the paragraph that begins
+"A request whose right outcome is that nothing changes").
 
 ## 12. Where things are
 
