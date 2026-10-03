@@ -163,7 +163,12 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// redirects. It sends a POST once; a missing receipt stays ambiguous.
 	data, err := s.source.Forward(r.Context(), r.Method, requested, query, form, expected)
 	if err != nil {
-		s.reject(w, http.StatusBadGateway, "scoped tracker request: "+err.Error())
+		status := http.StatusBadGateway
+		var missing *githubError
+		if errors.As(err, &missing) && missing.Status == http.StatusNotFound {
+			status = http.StatusNotFound
+		}
+		s.reject(w, status, "scoped tracker request: "+err.Error())
 		return
 	}
 	if r.Method == http.MethodPost && s.latest {

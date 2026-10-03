@@ -10,12 +10,8 @@ import (
 	"testing"
 )
 
-// GitHub answers everything the engine asks of its tracker but Forward, which
-// waits for how a role is to see a GitHub issue.
-var _ Tracker = struct {
-	GitHub
-	Upstream
-}{}
+// GitHub now supplies both the engine's operations and the role's scoped API.
+var _ Tracker = GitHub{}
 
 func TestGitHubPostsACommentOnceAndNeverAgain(t *testing.T) {
 	githubClock(t)
