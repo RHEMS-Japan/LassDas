@@ -936,7 +936,7 @@ them. This ordered configuration needs them and the review's as well:
 
 - `model_selection.gateway` with the gateway's `models_url`, `key_env` and
   `prefix`;
-- **every** process's `env.OPENROUTER_BASE_URL` and
+- **every model** process's `env.OPENROUTER_BASE_URL` and
   `secrets.OPENROUTER_API_KEY`, `stop_report` included, and `router.llm`'s
   `url` and `key_env`;
 - the review's `REVIEW_MODEL_URL` (the gateway's chat completions URL),
@@ -949,8 +949,106 @@ them. This ordered configuration needs them and the review's as well:
   `model_selection.fallback`, and remove `intake.min_model_credit`. Every
   choice is then made by that chat model.
 
-Then put `GATEWAY_API_KEY` in the Secret and uncomment it in the StatefulSet,
-and use the gateway's variants of the checks in section 7. This ordered
+Choose the selector route before filling keys:
+
+| Choice | Selection and entrance routing | Credentials still needed |
+| --- | --- | --- |
+| a. Direct provider | Keep the shipped decisions and chat endpoints | `MODEL_API_KEY` |
+| b. Gateway work, direct decisions | Keep `model_selection.judge` and any `router.decision` at the provider; send working models, review and `router.llm` through the gateway | Both provider and gateway keys |
+| c. Gateway only | Remove `model_selection.judge` and `router.decision`; set `model_selection.fallback` to the gateway chat URL, a full prefixed model id, and `GATEWAY_API_KEY`; put `router.llm` there too | Only `GATEWAY_API_KEY` for models |
+
+The public catalogue remains a credential-free provider request in all three
+choices. A model appearing in a catalogue does **not** prove the gateway
+implements the decisions API: ask its operator or read its API specification.
+A 404/405 response alone does not distinguish an unsupported API from the
+wrong path or method. If support is unknown, choose c, not a guessed decisions
+URL. A trial inference can incur charges; agree that trial separately.
+
+In the shipped ordered example, the model processes are in `elicit`,
+`ask_requester`, `work`, `report`, and `stop_report` (the processes with
+`model_env`). The separate `review` command uses `REVIEW_MODEL_URL` and
+`REVIEW_API_KEY`, not `OPENROUTER_BASE_URL`. Build, test, delivery,
+verification and comment-confirmation commands need neither model variable.
+Do not add model credentials to those commands. Adapt this list if you add
+your own model processes. A base such as `https://gateway.example.invalid/v1`
+is for Hermes; the router, selector fallback and reviewer need the full
+`https://gateway.example.invalid/v1/chat/completions` endpoint. Use the
+gateway's actual API prefix; `/v1` is an example, not a suffix to append twice.
+
+For choice c also remove an unused `intake.model_credit_url` together with
+`min_model_credit`, and remove the StatefulSet's `MODEL_API_KEY` reference.
+Do not remove either key for choice b. The credential check in section 7
+reads names from the final configuration instead of requiring an unused key.
+
+### Check the gateway catalogue without starting work
+
+First finish the settings and run the engine's `--check` (section 4). Then
+the following read-only GET checks can be run in the prepared runtime. They
+make no inference or tracker writes; the gateway may have its own policy for
+catalogue access. They compare current tool/text models from configured
+publishers with the gateway's **exact prefixed ids**. They do not prove that a
+model can actually answer, that the account has credit, or that enough
+independent publishers are available for all your simultaneous roles.
+
+```sh
+kubectl -n "$NS" exec -i "$POD" -c engine -- python3 -B - /etc/ticket-automation/operator.json <<'PY'
+# setup-gateway-catalogue
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+with open(sys.argv[1]) as source:
+    selection = json.load(source)["model_selection"]
+gateway = selection["gateway"]
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+client = urllib.request.build_opener(NoRedirect)
+def get(address, key=""):
+    url = urllib.parse.urlsplit(address)
+    if url.scheme != "https" or not url.netloc or url.username is not None:
+        sys.exit("catalogue URL must be HTTPS without embedded credentials")
+    headers = {"Accept": "application/json", "Cache-Control": "no-cache"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    try:
+        with client.open(urllib.request.Request(address, headers=headers), timeout=30) as response:
+            body = response.read((16 << 20) + 1)
+        if len(body) > 16 << 20:
+            sys.exit("catalogue is too large; no partial result accepted")
+        rows = json.loads(body)["data"]
+        if not isinstance(rows, list) or not rows or any(not isinstance(row.get("id"), str) or not row["id"] for row in rows):
+            raise ValueError("invalid catalogue")
+        return rows
+    except urllib.error.HTTPError as error:
+        sys.exit("catalogue GET returned HTTP %d; no response body printed" % error.code)
+    except (urllib.error.URLError, ValueError, KeyError, TypeError, AttributeError):
+        sys.exit("catalogue check failed; inspect the configured endpoint and connectivity")
+key = os.environ.get(gateway["key_env"], "")
+if not key or "\r" in key or "\n" in key:
+    sys.exit("gateway credential is unavailable")
+served = {row["id"] for row in get(gateway["models_url"], key)}
+public = get("https://openrouter.ai/api/v1/models?output_modalities=all")
+prefix = gateway["prefix"]
+matches = sorted(prefix + row["id"] for row in public
+                 if row["id"].split("/", 1)[0] in selection["authors"]
+                 and "tools" in row.get("supported_parameters", [])
+                 and "text" in row.get("architecture", {}).get("output_modalities", [])
+                 and prefix + row["id"] in served)
+print(json.dumps({"served": len(served), "tool_text_matches": len(matches), "first_20_matches": matches[:20]}))
+if not matches:
+    sys.exit("no current matching models; check the prefix and eligible publishers")
+PY
+```
+
+Select the fallback chat model and the independent review model from the
+gateway's current list, with their exact prefixed ids. The reviewer must be
+outside `model_selection.authors`; it will therefore **not** be in the
+matching working-model sample above. Confirm the review model's availability
+with the gateway operator as well. Finally, run an explicitly authorized
+small request before unattended intake; a successful catalogue check is not
+an end-to-end model test.
+
+When preparing sections 5 and 6, put `GATEWAY_API_KEY` in the Secret and
+uncomment it in the StatefulSet. Run the checks above only after that runtime
+is prepared, and use the matching checks in section 7. This ordered
 configuration with every change above was accepted by the engine from the
 same commit, which began polling. A process left pointing at the provider
 directly fails at its first model call
@@ -1265,13 +1363,35 @@ The first four (and the gateway) must be `connected`, `metadata` and
 `cluster-api` `ConnectionRefusedError`. An applied manifest is not evidence
 that anything is refused; this is.
 
-**The credentials, by name only** (with a gateway, add `GATEWAY_API_KEY`):
+**The credentials, by name only.** Read the names the final configuration
+actually references, plus the mirror's delivery credential. For gateway-only
+settings this does not require `MODEL_API_KEY` after all its references have
+been removed. This checks presence, not validity or permissions:
 
 ```sh
-kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
-import json, os
-print(json.dumps({name: "set" if os.environ.get(name) else "unset"
-                  for name in ("MODEL_API_KEY", "TRACKER_API_KEY", "DELIVERY_GITHUB_TOKEN")}))'
+kubectl -n "$NS" exec -i "$POD" -c engine -- python3 -B - /etc/ticket-automation/operator.json <<'PY'
+# setup-credential-names
+import json, os, re, sys
+with open(sys.argv[1]) as source:
+    config = json.load(source)
+names = {"DELIVERY_GITHUB_TOKEN"}
+def visit(value):
+    if isinstance(value, dict):
+        if value.get("key_env"):
+            names.add(value["key_env"])
+        names.update(value.get("secrets", {}).values())
+        for child in value.values():
+            visit(child)
+    elif isinstance(value, list):
+        for child in value:
+            visit(child)
+visit(config)
+if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+    sys.exit("a credential reference is not an environment variable name; run --check")
+result = {name: "set" if os.environ.get(name) else "unset" for name in sorted(names)}
+print(json.dumps(result))
+sys.exit(0 if all(state == "set" for state in result.values()) else 1)
+PY
 ```
 
 All `set`. Never `printenv`, `echo` a variable or print a Secret.
