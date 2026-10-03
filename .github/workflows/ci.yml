@@ -14,7 +14,7 @@ permissions:
 jobs:
   # The role chain is a separate Go module: the root ./... does not include it.
   # These are local process/fixture tests, not live-model or deployment trials.
-  role-chain:
+  role-chain-go:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
@@ -52,8 +52,59 @@ jobs:
         run: go test -count=1 ./...
       - name: Check concurrent execution
         run: go test -race -count=1 ./...
-      - name: Test native bridge and Git preparation
-        run: python3 -B -m unittest discover -s harnesses -p 'test_*.py'
+
+  role-chain-python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [adversarial, remaining]
+    defaults:
+      run:
+        working-directory: rewrite
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: "-p=1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          persist-credentials: false
+      - name: Read the Go the shipped image builds with
+        id: image-go
+        working-directory: .
+        run: |
+          version="$(bash .github/scripts/image-go-version.sh)"
+          echo "deploy/pod/Dockerfile builds the engine with Go $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: ${{ steps.image-go.outputs.version }}
+          check-latest: true
+          cache: false
+      - name: Say which Go the Python harnesses use
+        run: go version
+      - name: Test the selected Python harness group
+        env:
+          HARNESS_GROUP: ${{ matrix.group }}
+        run: bash ../.github/scripts/test-harness-group.sh "$HARNESS_GROUP"
+
+  # Preserve the existing required result: Go and both Python groups must pass.
+  # A failed, canceled or skipped dependency must not silently skip this check.
+  role-chain:
+    needs: [role-chain-go, role-chain-python]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require both complete test results
+        env:
+          GO_RESULT: ${{ needs['role-chain-go'].result }}
+          PYTHON_RESULT: ${{ needs['role-chain-python'].result }}
+        run: |
+          test "$GO_RESULT" = success
+          test "$PYTHON_RESULT" = success
 
   # The consumer-identifier scans, run from the role chain's module so that
   # they do not depend on the root one, in a job of their own: a failing scan
