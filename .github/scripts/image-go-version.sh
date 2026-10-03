@@ -59,59 +59,63 @@ read_from() {  # one FROM instruction, continuation lines joined
     problems+=("a golang stage names no Go version that can be read: $1")
   fi
 }
-heredocs() {  # the heredoc terminators a RUN, COPY or ADD instruction opens, one per line
-  local rest="$1" word="" quote="" char escaped=no index marker first
-  local -a words=()
+heredocs() {  # RUN/COPY/ADD, including their ONBUILD forms
+  local rest="$1"
+  if [[ "$rest" =~ ^[[:space:]]*[Oo][Nn][Bb][Uu][Ii][Ll][Dd][[:space:]]+ ]]; then
+    rest="${rest:${#BASH_REMATCH[0]}}"
+  fi
   [[ "$rest" =~ ^[[:space:]]*([Rr][Uu][Nn]|[Cc][Oo][Pp][Yy]|[Aa][Dd][Dd])[[:space:]] ]] || return 0
   [[ "$rest" == *'<<'* ]] || return 0
-  # Tokenize without evaluating shell text or removing its quotes. A quoted
-  # "<<WORD" is an ordinary word; <<"WORD" starts a heredoc. Substring searches
-  # confuse those and can skip a real FROM until an unrelated terminator.
-  for ((index=0; index<${#rest}; index++)); do
-    char="${rest:index:1}"
-    if [ "$escaped" = yes ]; then
-      word+="$char"; escaped=no; continue
-    fi
-    if [ "$char" = '\' ] && [ "$quote" != "'" ]; then
-      word+="$char"; escaped=yes; continue
-    fi
-    if [ -n "$quote" ]; then
-      word+="$char"
-      [ "$char" != "$quote" ] || quote=""
-      continue
-    fi
-    case "$char" in
-      "'"|'"') quote="$char"; word+="$char" ;;
-      [[:space:]])
-        if [ -n "$word" ]; then words+=("$word"); word=""; fi ;;
-      *) word+="$char" ;;
-    esac
-  done
-  if [ -n "$quote" ] || [ "$escaped" = yes ]; then
-    echo "unfinished quoting in an instruction containing <<; cannot read heredocs safely" >&2
-    return 1
-  fi
-  if [ -n "$word" ]; then words+=("$word"); fi
-  for word in "${words[@]}"; do
-    [[ "$word" =~ ^[0-9]*'<<' ]] || continue
-    rest="${word#*<<}"
-    marker=""
-    if [ "${rest:0:1}" = '-' ]; then marker='-'; rest="${rest:1}"; fi
-    first="${rest:0:1}"
-    if [ "$first" = "'" ] || [ "$first" = '"' ]; then
-      if [ "${#rest}" -lt 2 ] || [ "${rest: -1}" != "$first" ]; then
-        echo "heredoc delimiter must be wholly quoted or unquoted: $word" >&2
-        return 1
-      fi
-      rest="${rest:1:${#rest}-2}"
-    fi
-    if ! [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-      echo "unsupported heredoc delimiter (use an identifier, wholly quoted or unquoted): $word" >&2
-      return 1
-    fi
-    printf '%s%s\n' "$marker" "$rest"
-  done
-  return 0
+  # A native string scanner avoids Bash substring expansion at every character
+  # of a long instruction. Keep raw quotes/escapes; never evaluate shell text.
+  printf '%s\n' "$rest" | LC_ALL=C awk '
+    function fail(message) { print message > "/dev/stderr"; exit 1 }
+    function save() { if (word != "") { words[++n] = word; word = "" } }
+    BEGIN { single = sprintf("%c", 39); double = "\""; slash = "\\" }
+    {
+      for (i = 1; i <= length($0); i++) {
+        char = substr($0, i, 1)
+        if (escaped) { word = word char; escaped = 0; continue }
+        if (char == slash && quote != single) {
+          word = word char; escaped = 1; continue
+        }
+        if (quote != "") {
+          word = word char
+          if (char == quote) quote = ""
+          continue
+        }
+        if (char == single || char == double) {
+          quote = char; word = word char
+        } else if (char ~ /[[:space:]]/) {
+          save()
+        } else {
+          word = word char
+        }
+      }
+    }
+    END {
+      if (quote != "" || escaped)
+        fail("unfinished quoting in an instruction containing <<; cannot read heredocs safely")
+      save()
+      for (j = 1; j <= n; j++) {
+        word = words[j]
+        if (word !~ /^[0-9]*<</) continue
+        rest = word
+        sub(/^[0-9]*<</, "", rest)
+        marker = ""
+        if (substr(rest, 1, 1) == "-") { marker = "-"; rest = substr(rest, 2) }
+        first = substr(rest, 1, 1)
+        if (first == single || first == double) {
+          if (length(rest) < 2 || substr(rest, length(rest), 1) != first)
+            fail("heredoc delimiter must be wholly quoted or unquoted: " word)
+          rest = substr(rest, 2, length(rest)-2)
+        }
+        if (rest !~ /^[A-Za-z_][A-Za-z0-9_]*$/)
+          fail("unsupported heredoc delimiter (use an identifier, wholly quoted or unquoted): " word)
+        print marker rest
+      }
+    }
+  '
 }
 instruction=""
 pending=()  # heredoc terminators still to be met, in order; "-" marks <<-
