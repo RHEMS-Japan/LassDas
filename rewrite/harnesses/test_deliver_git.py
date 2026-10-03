@@ -139,6 +139,23 @@ def service_handler(state):
     return Handler
 
 
+class DeliveryPathDisplayTests(unittest.TestCase):
+    def test_display_distinguishes_byte_names_literal_escapes_and_controls(self):
+        from delivery_support import readable
+        raw = [b"folder/\x82.txt", b"folder/\x83.txt", b"folder/\\x82.txt",
+               b"b'folder/\\x82.txt'", b"folder/\n.txt", b"folder/\\n.txt"]
+        displays = [readable(name.decode("utf-8", "surrogateescape")) for name in raw]
+        self.assertEqual(len(set(displays)), len(raw))
+        self.assertEqual(displays[0], "b'folder/\\x82.txt'")
+        self.assertEqual(displays[2], "'folder/\\\\x82.txt'")
+        self.assertTrue(all("\n" not in shown for shown in displays))
+        self.assertTrue(all(shown.encode("utf-8") for shown in displays))
+        self.assertEqual(readable("資料/記録.md"), "資料/記録.md")
+        self.assertEqual(readable("notes.md"), "notes.md")
+        for path in ("folder/\t.txt", "folder/\r.txt", "folder/\x7f.txt"):
+            self.assertEqual(readable(path), repr(path))
+
+
 @unittest.skipUnless(shutil.which("git"), "requires Git")
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
@@ -1550,16 +1567,24 @@ class DeliveryTests(unittest.TestCase):
         """A Git on PATH that does what Linux Git does for a file whose name is
         not UTF-8, which macOS will not create: the file is on disk as real,
         and every argument and every output carries the bytes shown instead."""
+        self.git_names_in_bytes([(real, shown)])
+
+    def git_names_in_bytes(self, translations):
         directory = self.root / "bytes-bin"
         directory.mkdir()
         shim = directory / "git"
         shim.write_text("#!%s\nimport os, subprocess, sys\n"
-                        "arguments = [os.fsencode(argument).replace(%r, %r) for argument in sys.argv[1:]]\n"
+                        "translations = %r\n"
+                        "def translate(data, backward=False):\n"
+                        " for real, shown in translations:\n"
+                        "  data = data.replace(shown, real) if backward else data.replace(real, shown)\n"
+                        " return data\n"
+                        "arguments = [translate(os.fsencode(argument), True) for argument in sys.argv[1:]]\n"
                         "done = subprocess.run([%r] + arguments, capture_output=True)\n"
-                        "sys.stdout.buffer.write(done.stdout.replace(%r, %r))\n"
-                        "sys.stderr.buffer.write(done.stderr.replace(%r, %r))\n"
+                        "sys.stdout.buffer.write(translate(done.stdout))\n"
+                        "sys.stderr.buffer.write(translate(done.stderr))\n"
                         "sys.exit(done.returncode)\n"
-                        % (sys.executable, shown, real, str(self.root / "bin" / "git"), real, shown, real, shown))
+                        % (sys.executable, translations, str(self.root / "bin" / "git")))
         shim.chmod(0o755)
         self.path = str(directory) + os.pathsep + self.path
 
@@ -1767,12 +1792,12 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
             self.assertEqual(len(reads.read_text().splitlines()), number, "Git was not asked for the file")
 
-    def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
+    def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_distinct_bytes(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")
         self.git_naming_in_bytes(b"library/plain.go", b"library/\x82\xa0.go")
         checked = self.deliver("--dry-run")
         self.assertEqual(checked.returncode, 3, checked.stdout + checked.stderr)
-        self.assertIn("Changed paths inside the operator's grant: library/��.go.", checked.stdout)
+        self.assertIn("Changed paths inside the operator's grant: b'library/\\x82\\xa0.go'.", checked.stdout)
         done = self.deliver()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("a name Git gives in bytes", self.git(self.remote, "show", "refs/heads/master:library/plain.go").stdout)
@@ -1782,9 +1807,9 @@ class DeliveryTests(unittest.TestCase):
         self.git_naming_in_bytes(b"notes.md", b"notes-\x82\xa0.md")
         refused = self.deliver()
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn("Changes outside the operator's allowed paths were not delivered: notes-��.md",
+        self.assertIn("Changes outside the operator's allowed paths were not delivered: b'notes-\\x82\\xa0.md'",
                       refused.stdout)
-        self.assertIn("notes-��.md", refused.stderr)
+        self.assertIn("b'notes-\\x82\\xa0.md'", refused.stderr)
         self.assertEqual(self.methods(), [])
 
     def test_forbidden_text_is_found_in_a_name_that_is_not_utf8(self):
@@ -1798,7 +1823,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("carries text that is not UTF-8", refused.stdout)
         self.assertEqual(self.methods(), [])
 
-    def test_a_name_that_is_not_utf8_is_recorded_with_replacement_characters(self):
+    def test_a_name_that_is_not_utf8_is_recorded_with_distinct_bytes(self):
         self.change("main.go", "package main // left for a person\n")
         self.assertEqual(self.leave_merge().returncode, 0)
         self.person_pushes("library/run.go", "package library // a person's fix\n")
@@ -1806,8 +1831,41 @@ class DeliveryTests(unittest.TestCase):
         self.git_naming_in_bytes(b"library/plain.go", b"library/\x82\xa0.go")
         ended = self.leave_merge()
         self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
-        self.assertIn(self.NOT_COMMITTED % "library/��.go", ended.stdout)
-        self.assertEqual(self.receipt()["not_committed"], ["library/��.go"])
+        self.assertIn(self.NOT_COMMITTED % "b'library/\\x82\\xa0.go'", ended.stdout)
+        self.assertEqual(self.receipt()["not_committed"], ["b'library/\\x82\\xa0.go'"])
+
+    def test_different_invalid_name_bytes_and_literal_escapes_have_distinct_refusals(self):
+        translations = [(b"outside-one.md", b"outside-\x82.md"),
+                        (b"outside-two.md", b"outside-\x83.md"),
+                        (b"outside-three.md", b"outside-\\x82.md")]
+        for real, _ in translations:
+            self.change(real.decode(), "outside the grant\n")
+        self.git_names_in_bytes(translations)
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        for displayed in ("b'outside-\\x82.md'", "b'outside-\\x83.md'", "'outside-\\\\x82.md'"):
+            self.assertIn(displayed, refused.stdout)
+            self.assertIn(displayed, refused.stderr)
+        self.assertEqual(self.methods(), [])
+        self.assertEqual(self.receipt(), {})
+        self.assertEqual(self.remote_branches(), ["refs/heads/master"])
+
+    def test_different_invalid_name_bytes_have_distinct_receipt_entries(self):
+        self.change("main.go", "package main // left for a person\n")
+        self.assertEqual(self.leave_merge().returncode, 0)
+        self.person_pushes("library/run.go", "package library // a person's fix\n")
+        translations = [(b"library/one.go", b"library/\x82.go"),
+                        (b"library/two.go", b"library/\x83.go")]
+        for real, _ in translations:
+            self.change(real.decode(), "package library\n")
+        self.git_names_in_bytes(translations)
+        ended = self.leave_merge()
+        self.assertEqual(ended.returncode, 0, ended.stdout + ended.stderr)
+        expected = ["b'library/\\x82.go'", "b'library/\\x83.go'"]
+        self.assertEqual(self.receipt()["not_committed"], expected)
+        self.assertEqual(self.receipt()["not_committed_count"], 2)
+        for displayed in expected:
+            self.assertIn(displayed, ended.stdout)
 
     def test_what_git_says_in_bytes_that_are_not_utf8_is_printed_with_replacement_characters(self):
         hook = self.remote / "hooks" / "pre-receive"
