@@ -338,7 +338,7 @@
             "-B",
             "/opt/ticket-automation/scripts/deliver_git.py"
           ],
-          "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, opens or reuses one pull request and merges it, and writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it. A request that changed no file is refused and goes back to the work stage, unless the operator sets DELIVERY_ALLOW_UNCHANGED=1 for it, which this example does not: it is off by default, and with it on such a request ends with nothing delivered once the review before this stage has given a verdict that does not object; the shipped review lets a checkout with no change through on nothing less.",
+          "instructions": "Run the image's fixed delivery process. It commits the reviewed change, brings the ticket branch up to date with the integration branch, pushes it, and opens or reuses one pull request. With DELIVERY_MERGE_METHOD=none it leaves that pull request to a person and nothing is merged; otherwise it uses the configured merge method. It writes its own receipt, which the runtime reads back and records. Its exit status is the observation; a refusal says what stopped it. A request that changed no file is refused and goes back to the work stage, unless the operator sets DELIVERY_ALLOW_UNCHANGED=1 for it, which this example does not: it is off by default, and with it on such a request ends with nothing delivered once the review before this stage has given a verdict that does not object; the shipped review lets a checkout with no change through on nothing less.",
           "env": {
             "PYTHONDONTWRITEBYTECODE": "1",
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
@@ -382,7 +382,7 @@
             "-B",
             "/opt/ticket-automation/scripts/verify_merged.py"
           ],
-          "instructions": "Run the image's fixed post-delivery check. It fetches the integration branch from the delivery service, confirms the recorded merge is in it, and runs the operator's build and tests against it. Its exit status is the observation.",
+          "instructions": "Run the image's fixed post-delivery check. After a merge it fetches the integration branch, confirms the recorded merge is in it, and runs the operator's build and tests against it. With DELIVERY_MERGE_METHOD=none it checks the delivered pull request's head instead and does not claim a merge. The receipt determines the actual ending, including a person's later changes or an ending without a new delivery. Its exit status is the observation.",
           "env": {
             "PYTHONDONTWRITEBYTECODE": "1",
             "TASK_REPOSITORY": "https://repository.example.invalid/example-owner/example-repository.git",
