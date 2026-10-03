@@ -50,6 +50,31 @@ func TestStageDescriptionsDoNotPromiseAMergeForPullRequestOnlyDelivery(t *testin
 	}
 }
 
+func TestStageProcessInstructionsDescribeBothDeliveryDepths(t *testing.T) {
+	want := map[string][]string{
+		"deliver":       {"DELIVERY_MERGE_METHOD=none", "nothing is merged", "configured merge method"},
+		"verify_merged": {"DELIVERY_MERGE_METHOD=none", "pull request's head", "integration branch", "build and tests"},
+	}
+	for _, role := range stagesExample(t).Roles {
+		phrases, checked := want[role.Name]
+		if !checked {
+			continue
+		}
+		if len(role.Processes) != 1 {
+			t.Fatalf("%s: expected the fixed command's one instruction", role.Name)
+		}
+		for _, phrase := range phrases {
+			if !strings.Contains(role.Processes[0].Instructions, phrase) {
+				t.Errorf("%s process instruction omits %q", role.Name, phrase)
+			}
+		}
+		delete(want, role.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing process instructions: %v", want)
+	}
+}
+
 // The shipped ordered run: every stage that decides whether the work carries on
 // is a command the runtime observes, the run ends on one, and the requester is
 // reachable only from the entrance.
