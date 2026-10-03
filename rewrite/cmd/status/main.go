@@ -154,6 +154,41 @@ func githubIssue(issue map[string]any) (string, string, bool) {
 	return number, page, true
 }
 
+// When an operator selected GitHub, a stored record cannot supply a browser
+// link to another host or port. Public GitHub separates its API and web hosts;
+// an Enterprise Server serves both on the configured host. Without a GitHub
+// configuration, keep the existing standalone view of historical records.
+func (s *server) githubPageAllowed(page string) bool {
+	selected, present := s.config["github"]
+	if !present {
+		return true
+	}
+	settings, ok := selected.(map[string]any)
+	if !ok {
+		return false
+	}
+	base := "https://api.github.com"
+	if configured, exists := settings["api_url"]; exists {
+		text, ok := configured.(string)
+		if !ok {
+			return false
+		}
+		if text != "" {
+			base = text
+		}
+	}
+	api, err := url.Parse(base)
+	if err != nil || api.Scheme != "https" || api.Hostname() == "" || api.User != nil || api.RawQuery != "" || api.ForceQuery || api.Fragment != "" {
+		return false
+	}
+	host := api.Host
+	if strings.EqualFold(host, "api.github.com") {
+		host = "github.com"
+	}
+	address, err := url.Parse(page)
+	return err == nil && address.Scheme == "https" && address.User == nil && strings.EqualFold(address.Host, host)
+}
+
 // issueLinkBase turns a tracker API base such as https://space.example/api/v2
 // into the prefix of a browser link for one issue key.
 func issueLinkBase(base string) string {
@@ -502,7 +537,9 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 			if user, ok := issue["user"].(map[string]any); ok {
 				j.Requester = stringOf(user["login"])
 			}
-			j.Link = page
+			if s.githubPageAllowed(page) {
+				j.Link = page
+			}
 		} else {
 			j.Key, j.Title, j.Created = stringOf(issue["issueKey"]), stringOf(issue["summary"]), stringOf(issue["created"])
 			if user, ok := issue["createdUser"].(map[string]any); ok {
