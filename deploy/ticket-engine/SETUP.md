@@ -1309,7 +1309,8 @@ nothing here can start a request.
 
 From a checkout of this repository, use the source-shipped helper below.
 It needs Python 3 on the workstation and in the selected container, and
-kubectl on the workstation. Keep all three files in `operations/` together;
+kubectl on the workstation. Keep `idle-check.sh`, `copy-queue.sh` and
+`queue_helper.py` in `operations/` together;
 they are not part of the host bundle. Set `CONTEXT`, `NS`, `POD`, `CONTAINER`
 and the absolute `QUEUE` path to the intended installation first. No context
 or workload is selected implicitly.
@@ -1341,6 +1342,91 @@ tracker, prove delivery, stop a request, or authorize deployment. Records can
 change immediately after the check. It sends no credential value as an
 argument and does not print request text or remote command diagnostics.
 Use `--timeout SECONDS` to bound the remote read (default 300).
+
+### Reading Backlog issues without exposing credentials
+
+The source-shipped `operations/read-issues.sh` and `file-ticket.sh` require
+their adjacent `tracker_helper.py`, Python 3 on both sides and local kubectl.
+They are not in the host bundle. These commands support **Backlog only**;
+they reject GitHub or mixed configurations. They read the selected Pod's
+configuration and refer to its existing credential environment by name.
+Neither the credential value nor the issue text is put in a command argument
+or printed to the workstation's terminal. Do not enable shell tracing.
+
+Set the explicit cluster target variables above, `CONFIG` to the absolute
+Pod configuration path, `PROJECT_ID` to its intake project, `TRACKER_BIN` to
+the installed absolute tracker CLI path (normally
+`/opt/ticket-automation/bundle/bin/ticket-tracker`), and `READ_OUTPUT` to a
+new absolute workstation directory whose parent exists:
+
+```sh
+sh deploy/ticket-engine/operations/read-issues.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --source backlog --config "$CONFIG" \
+  --project-id "$PROJECT_ID" --tracker-bin "$TRACKER_BIN" \
+  --output "$READ_OUTPUT"
+```
+
+The installed CLI reads all issue pages; the helper preserves the complete
+successful list and refuses duplicate or out-of-project identities. Add
+`--issue-id NUMBER` for each issue whose complete comment list is needed;
+each must belong to the returned project. No issue or comment is posted by
+this command. A missing CLI, failed later page, invalid response or nonzero
+remote exit is failure, not a successful partial list.
+
+New directories are private (0700), files 0600. `intent.json` records the
+selection and start time; `received.jsonl` retains received evidence;
+`result.json` exists only after successful completion. Default issue data
+contains IDs, keys, status/category/assignee IDs, hours and update times;
+comments contain IDs only. Add `--native` only when native issue/comment
+bodies are needed in these private files. Console output contains counts
+only. Keep all output outside a public checkout and do not paste it into
+logs or PRs. Even full pagination is not an atomic snapshot of a changing
+tracker, and this aggregate list is **not** the URL-per-page offline GET
+fixture required by section 10.
+
+### Explicitly creating one Backlog issue
+
+Use `file-ticket.sh` only after deciding to create a new request. It does not
+run automatically after a read or a failed request. Supply the intended
+`TYPE_ID` and `PRIORITY_ID`; the helper verifies they are present in the
+project's issue-type list and priority list and never selects the first
+entry. `PROJECT_ID` must equal the selected configuration's intake project.
+The first version accepts summary/description only: projects with mandatory
+custom fields are not supported, and no field value is guessed.
+
+Prepare ordinary single-link UTF-8 `SUMMARY_FILE` and `DESCRIPTION_FILE` on
+the workstation. The summary must be nonempty; an empty description is
+allowed. The file contents travel as JSON data over stdin, not shell code,
+environment assignments or command arguments. Set `CREATE_OUTPUT` to a new
+absolute private-output directory under an existing real parent:
+
+```sh
+sh deploy/ticket-engine/operations/file-ticket.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" \
+  --container "$CONTAINER" --source backlog --config "$CONFIG" \
+  --project-id "$PROJECT_ID" --type-id "$TYPE_ID" --priority-id "$PRIORITY_ID" \
+  --summary-file "$SUMMARY_FILE" --description-file "$DESCRIPTION_FILE" \
+  --output "$CREATE_OUTPUT"
+```
+
+There is one POST at most, no automatic retry and no HTTP redirect following.
+After a valid creation receipt, its minimal identity is streamed into the
+private evidence before one readback GET. Success means that identity was
+created and read back; it does not mean the engine accepted or delivered the
+request. The command does not change intake configuration or deployment.
+
+Both commands reserve their output before remote execution and retain it
+on failure. Existing outputs, linked local inputs/ancestors, hardlinks and
+special input files are refused; nothing is deleted or overwritten. Even
+if no remote callback arrives, the same output cannot be reused. A nonzero
+create result **does not prove that no issue was created**: timeout, broken
+receipt, failed readback or local disk failure can follow a successful POST.
+Check the selected project and retained evidence before deciding what to do;
+using a fresh output is not proof that resubmission is safe. There is no
+automatic transaction recovery or duplicate repair. The remote mounted
+configuration may use platform symlinks; it is only read inside the Pod.
+`--timeout SECONDS` bounds the local wait (default 300); it does not guarantee cancellation of remote processing.
 
 ### The configuration, as the engine reads it
 
@@ -1825,6 +1911,11 @@ report is written by a model from the run's records; the status page has the
 records themselves.
 
 ## 9. Stopping a request
+
+The read-only Backlog helper in section 7 can retain issue/comment evidence
+before investigating a stop. It does not stop or resume work. The separate
+creation helper is an explicit new request, never an automatic retry of the
+stopped one; follow the authorization and new-request procedure below.
 
 The issue's creator, or a user in `intake.stop_user_ids`, posts a comment
 whose first non-blank line is exactly `停止`. A reason can follow on later
