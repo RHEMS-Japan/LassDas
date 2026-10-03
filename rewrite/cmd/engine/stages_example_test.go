@@ -32,6 +32,24 @@ func stagesExample(t *testing.T) config {
 	return cfg
 }
 
+func TestStageDescriptionsDoNotPromiseAMergeForPullRequestOnlyDelivery(t *testing.T) {
+	want := map[string]string{
+		"deliver":       "Carry the reviewed change to the operator-approved repository with the image's fixed delivery process: open a pull request, and merge it only when the configured DELIVERY_MERGE_METHOD permits it.",
+		"verify_merged": "Check the delivered commit with the image's fixed process: the integration branch after a merge, or the pull request's commit when DELIVERY_MERGE_METHOD=none; not the local working tree.",
+	}
+	for _, role := range stagesExample(t).Roles {
+		if description, checked := want[role.Name]; checked {
+			if role.Purpose != description {
+				t.Errorf("%s description does not cover the selected delivery depth: %q", role.Name, role.Purpose)
+			}
+			delete(want, role.Name)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing described roles: %v", want)
+	}
+}
+
 // The shipped ordered run: every stage that decides whether the work carries on
 // is a command the runtime observes, the run ends on one, and the requester is
 // reachable only from the entrance.
