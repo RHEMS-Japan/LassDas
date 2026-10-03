@@ -227,7 +227,8 @@ def character_start(buffer, position):
 
 def output_lines(command, *, environment=None, overlap=0, check=True):
     """A command's output a line at a time, as it comes: for output that is
-    looked at, never printed, and may be too large to hold whole. Lines end
+    looked at rather than kept, and may be too large to hold whole. Nothing
+    in it is scrubbed: a caller that prints any of it scrubs that. Lines end
     at LF only, and every other byte is kept as given; a text read would
     have turned a CR into a line end. Each line comes as (bytes, True). Of a
     line whose end has not come yet, no more than PART is held besides the

@@ -406,6 +406,34 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("theirs and ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
         self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
 
+    def test_a_refusal_for_conflict_markers_shows_no_credential(self):
+        # Git's whitespace check prints a line with a whitespace error whole,
+        # and one that mentions a conflict marker is taken for one, as on main.
+        self.change("main.go", "package main // a conflict marker %s \n" % TOKEN)
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("conflict markers in: +package main // a conflict marker [credential] ", refused.stdout)
+        self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+
+    def test_a_refusal_for_conflict_markers_shows_no_piece_of_a_credential_a_cut_goes_through(self):
+        # Git's check prints a long line whole, and it is read in parts: here
+        # the credential lies across the first cut, 20 of its bytes before it,
+        # and the line mentions a conflict marker before the cut or after it.
+        # A cut leaves the credential's start in one part and its end in the
+        # next, so neither may be shown.
+        pieces = ([TOKEN[:end] for end in range(10, len(TOKEN) + 1)]
+                  + [TOKEN[start:] for start in range(1, len(TOKEN) - 9)])
+        cut = self.first_cut()
+        for before, after in (("a conflict marker ", ""), ("", " a conflict marker")):
+            (self.workspace / "main.go").write_text(
+                before + "a" * (cut - len(before) - 20) + TOKEN + "a" * (2 << 20) + after + " \n")
+            refused = self.deliver()
+            self.assertEqual(refused.returncode, 1, refused.stderr[-2000:])
+            self.assertIn("conflict markers in: ", refused.stdout)
+            output = refused.stdout + refused.stderr
+            self.assertEqual([piece for piece in pieces if piece in output], [])
+
     def test_the_integration_branch_s_own_paths_need_no_grant(self):
         # notes.md and a non-ASCII name are outside the grant; the integration
         # branch changing them is not the worker's change and must not stop
@@ -1718,6 +1746,26 @@ class DeliveryTests(unittest.TestCase):
         blob = self.git(self.workspace, "rev-parse", "HEAD:library/logo.png").stdout.strip()
         self.assertEqual(len(reads()), 1, reads())
         self.assertTrue(blob.startswith(reads()[0].rsplit(" ", 1)[1]), reads())
+
+    def test_a_staged_file_git_could_not_read_is_not_left_out(self):
+        # The file is taken as text, and the change refused, whether Git's read
+        # fails with nothing written, writes nothing and ends well, or writes a
+        # NUL and then fails.
+        behaviour, reads = self.root / "cat-file-behaviour", self.root / "cat-file-reads"
+        directory = self.root / "failing-cat-file-bin"
+        directory.mkdir()
+        shim = directory / "git"
+        shim.write_text('#!/bin/sh\ncase " $* " in *" cat-file "*) echo >> "%s"; . "%s";; esac\nexec "%s" "$@"\n'
+                        % (reads, behaviour, self.root / "bin" / "git"))
+        shim.chmod(0o755)
+        self.path = str(directory) + os.pathsep + self.path
+        for number, script in enumerate(("exit 128\n", "exit 0\n", "printf '\\000'\nexit 1\n"), 1):
+            behaviour.write_text(script)
+            self.shift_jis("library/legacy.txt", "社外秘の一覧\n")
+            refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+            self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+            self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+            self.assertEqual(len(reads.read_text().splitlines()), number, "Git was not asked for the file")
 
     def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")

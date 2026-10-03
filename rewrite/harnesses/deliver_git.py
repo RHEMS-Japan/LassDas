@@ -90,6 +90,9 @@ from delivery_support import DeliveryError
 
 ISSUE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 METHODS = ("merge", "squash", "rebase", "none")
+# The most of one name the refusal for conflict markers quotes. No path is
+# longer, and a line it quotes is cut there.
+QUOTED = 4096
 
 
 def issue_name():
@@ -291,13 +294,18 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     if staging:
         support.run(support.git("-C", str(workspace), "add", "-A", "--", *staging))
     # Git's whitespace check is read for its conflict markers only, a line at
-    # a time: it also prints each line that has a whitespace error.
+    # a time: it also prints each line that has a whitespace error, so what
+    # the refusal names from it is scrubbed first. A long line comes in parts
+    # that overlap by at least the credential's length, so a credential a cut
+    # goes through is whole in the next part, and the piece the cut leaves at
+    # the end of a part lies far past what is quoted of it.
     marked = set()
+    reach = max(len("conflict marker"), len(os.environ.get("GITHUB_TOKEN", "").encode()))
     for part, _ in support.output_lines(support.git("-C", str(workspace), "diff", "--cached", "--check"),
-                                        overlap=len("conflict marker"), check=False):
+                                        overlap=reach, check=False):
         line = part.decode("utf-8", "surrogateescape")
         if "conflict marker" in line:
-            marked.add(line.rsplit(":", 2)[0])
+            marked.add(support.scrub(line.rsplit(":", 2)[0])[:QUOTED])
     if marked:
         raise DeliveryError("Refused: the change still carries Git conflict markers in: "
                             + ", ".join(sorted(marked)[:20]))
