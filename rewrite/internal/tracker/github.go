@@ -411,7 +411,8 @@ type githubError struct {
 }
 
 func (e *githubError) Error() string {
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
+	// The response was redacted before being stored; truncate only its display.
+	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
 }
 
 // clip is text cut to its first limit characters, marked where it was cut.

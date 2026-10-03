@@ -298,7 +298,9 @@ type trackerError struct {
 }
 
 func (e *trackerError) Error() string {
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, e.Body)
+	// Body is already redacted. Keep it whole for refusal handling below, but
+	// do not put the entire service response into logs or requester notices.
+	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
 }
 
 // patchIssue changes fields of one issue and has confirm read the answer.
