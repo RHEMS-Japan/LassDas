@@ -27,9 +27,12 @@ type Result struct {
 	// process, read back by the runtime after the process returned. It reaches
 	// the stage's runtime record; it is not a field of the saved history and
 	// nothing here interprets what it says.
-	Receipt     string    `json:"-"`
-	Diagnostics string    `json:"diagnostics,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	Receipt     string `json:"-"`
+	Diagnostics string `json:"diagnostics,omitempty"`
+	Error       string `json:"error,omitempty"`
+	// Interrupted is the controller stopping this invocation, not a process
+	// failure or a successful result. Partial output and the reason stay intact.
+	Interrupted bool      `json:"interrupted,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	FinishedAt  time.Time `json:"finished_at"`
 }
@@ -133,8 +136,9 @@ func (c Chain) Run(ctx context.Context) error {
 		state.Step, state.Recovering = state.Pending.Role, true
 		state.History = append(state.History, Result{
 			Role: state.Pending.Role, Instruction: state.Pending.Instruction, Speaker: "runtime",
-			Error:     "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
-			StartedAt: state.PendingSince, FinishedAt: time.Now().UTC(),
+			Interrupted: true,
+			Error:       "The process stopped while this action was pending. Available reports may be partial, and the action may have taken effect. Inspect the working tree and external state before repeating it.",
+			StartedAt:   state.PendingSince, FinishedAt: time.Now().UTC(),
 		})
 		state.Pending, state.PendingSince = nil, time.Time{}
 		if err := c.save(ctx, state); err != nil {

@@ -820,6 +820,49 @@ func writeJob(t *testing.T, root, id string, state chain.State) {
 	}
 }
 
+func TestInterruptedExecutionIsNotShownOrCountedAsAProcessFailure(t *testing.T) {
+	for _, realFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("real failure=%t", realFailure), func(t *testing.T) {
+			root := t.TempDir()
+			now := time.Now().UTC()
+			state := chain.State{Request: "original", Recovering: true, Step: "work", Pending: &chain.Assignment{Role: "work"},
+				Workflow: &chain.Workflow{Stages: []chain.Stage{{Name: "work", Kind: "model"}}},
+				History:  []chain.Result{{Role: "work", Speaker: "worker", Interrupted: true, Error: "context canceled", Output: "partial work", StartedAt: now.Add(-time.Minute), FinishedAt: now}}}
+			if realFailure {
+				state.History = append([]chain.Result{{Role: "work", Speaker: "check", Error: "exit status 7", StartedAt: now.Add(-time.Minute), FinishedAt: now}}, state.History...)
+			}
+			writeJob(t, root, "7", state)
+			s, err := newServer(root, "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			view := s.loadJob("7", now, true)
+			wantOutcome, wantFailures := interrupted, 0
+			if realFailure {
+				wantOutcome, wantFailures = failed, 1
+				if view.Failure != "exit status 7" {
+					t.Fatalf("real failure hidden by interruption: %+v", view)
+				}
+			} else if view.Failure != "" || !strings.Contains(view.Status, "taking up an interrupted step") {
+				t.Fatalf("interruption shown as failed: status=%q failure=%q", view.Status, view.Failure)
+			}
+			if len(view.Launches) != 1 || view.Launches[0].Outcome != wantOutcome || len(view.Stages) != 1 || view.Stages[0].Failures != wantFailures {
+				t.Fatalf("wrong result or count: launches=%+v stages=%+v", view.Launches, view.Stages)
+			}
+			if view.State.Done || view.State.History[len(view.State.History)-1].Output != "partial work" {
+				t.Fatal("view completed the work or erased its observation")
+			}
+			if !realFailure {
+				ts := serve(t, root, "", "", "")
+				response, body := get(t, ts, "/jobs/7")
+				if response.StatusCode != http.StatusOK || strings.Contains(body, "<b>Error</b>") || strings.Contains(body, "the process ended with an error") || !strings.Contains(body, "<b>interrupted</b>") {
+					t.Fatalf("interruption rendered with the failure label: %s", body)
+				}
+			}
+		})
+	}
+}
+
 // A request that ended with no change delivered nothing, and the page says
 // so: the delivery's own receipt is what tells it apart, not anything a role
 // wrote. A delivered request beside it is still shown as delivered.

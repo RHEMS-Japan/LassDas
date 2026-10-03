@@ -497,6 +497,11 @@ func TestNoProgressNoticeSaysTheLastFailureWithoutACredential(t *testing.T) {
 	}})
 	// The queue's engines have said a stall since before this one began.
 	queueRanSince(t, root, cfg, start)
+	// Observe a failure in the same ongoing execution window. Restarting the
+	// watcher below starts a new window and must not repeat the old failure.
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, announcedIssue(), directory), directory, true, start); err != nil {
+		t.Fatal(err)
+	}
 	startStopQueue(t, cfg, root, 10*time.Millisecond, io.Discard)
 	const opening = "依頼はまだ終わっていませんが"
 	waitFor(t, func() bool { return len(fixture.withPrefix(opening)) > 0 })
@@ -780,15 +785,93 @@ func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T
 	}
 }
 
+func TestRestartMeasuresStallOnlyFromTheCurrentLaunch(t *testing.T) {
+	for _, shape := range []struct {
+		name, oldFailure, currentFailure string
+		age                              time.Duration
+		launched, wantNotice             bool
+	}{
+		{name: "not launched", oldFailure: "context canceled"},
+		{name: "fresh restart", oldFailure: "context canceled", launched: true},
+		{name: "old genuine failure", oldFailure: "exit status 7", launched: true},
+		{name: "new silence", oldFailure: "context canceled", launched: true, age: 2 * time.Minute, wantNotice: true},
+		{name: "new genuine failure", oldFailure: "context canceled", currentFailure: "exit status 7", launched: true, age: 2 * time.Minute, wantNotice: true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			minutes := 1
+			cfg.Intake.StallNoticeMinutes = &minutes
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("implement"))
+			now := time.Now().UTC()
+			old := now.Add(-3 * time.Hour)
+			began := time.Time{}
+			if shape.launched {
+				began = now.Add(-shape.age)
+			}
+			state := chain.State{History: []chain.Result{
+				{Role: "work", Speaker: "worker", StartedAt: old, FinishedAt: old.Add(time.Minute)},
+				{Role: "work", Speaker: "worker", Error: shape.oldFailure, StartedAt: old.Add(time.Hour), FinishedAt: old.Add(time.Hour)},
+			}}
+			if shape.currentFailure != "" {
+				state.History = append(state.History, chain.Result{Role: "work", Speaker: "worker", Error: shape.currentFailure, StartedAt: began, FinishedAt: began})
+			}
+			root, directory := noticeJob(t, state)
+			queueRanSince(t, root, cfg, old)
+			if err := noteStall(context.Background(), cfg, requestNotices(cfg, announcedIssue(), directory), directory, shape.launched, began); err != nil {
+				t.Fatal(err)
+			}
+			posts := fixture.all()
+			if (len(posts) == 1) != shape.wantNotice || len(posts) > 1 {
+				t.Fatalf("notices=%v want notice=%t", posts, shape.wantNotice)
+			}
+			if len(posts) == 1 {
+				if !strings.Contains(posts[0], "過去 2 分間") || strings.Contains(posts[0], "context canceled") {
+					t.Fatalf("previous execution leaked into the current window: %q", posts[0])
+				}
+				if (strings.Contains(posts[0], "直近の失敗")) != (shape.currentFailure != "") {
+					t.Fatalf("failure classification changed: %q", posts[0])
+				}
+			}
+		})
+	}
+}
+
+func TestInterruptionIsNeitherAStallFailureNorACompletedStep(t *testing.T) {
+	now := time.Now().UTC()
+	interruption := chain.Result{Role: "work", Speaker: "worker", Interrupted: true, Error: "context canceled", StartedAt: now.Add(-10 * time.Minute), FinishedAt: now.Add(-time.Minute)}
+	if _, failure, stalled := stalledFor(chain.State{History: []chain.Result{interruption}}, now); failure != "" || stalled {
+		t.Fatalf("interruption became a failure: %q %t", failure, stalled)
+	}
+	state := chain.State{History: []chain.Result{
+		{Role: "work", Speaker: "worker", Error: "exit status 7", StartedAt: now.Add(-30 * time.Minute), FinishedAt: now.Add(-29 * time.Minute)}, interruption,
+	}}
+	elapsed, failure, stalled := stalledFor(state, now)
+	if !stalled || failure != "exit status 7" || elapsed != 30*time.Minute {
+		t.Fatalf("interruption hid a real failure or looked like completion: %v %q %t", elapsed, failure, stalled)
+	}
+	state.History = []chain.Result{{Role: "work", Speaker: "runtime", Interrupted: true, Error: "The process stopped while this action was pending.", StartedAt: now.Add(-time.Hour), FinishedAt: now}}
+	if _, failure, stalled := stalledFor(state, now); failure != "" || stalled {
+		t.Fatalf("restart's own note became a failure: %q %t", failure, stalled)
+	}
+}
+
 func TestARecentlyStartedLaunchDoesNotReportItsEarlierQueueTimeAsSilence(t *testing.T) {
-	for _, resumed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("resumed=%t", resumed), func(t *testing.T) {
+	for _, resumed := range []string{"new", "completed", "interrupted"} {
+		t.Run(resumed, func(t *testing.T) {
 			cfg := watchConfiguration(t)
 			cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `cat > received.txt; printf '%s' "$$" > child-pid; exec sleep 60`}
 			earlier := time.Now().Add(-3 * time.Hour)
 			state := chain.State{}
-			if resumed {
+			if resumed != "new" {
 				state.History = []chain.Result{{Role: "implement", Speaker: "worker", Output: "earlier work", StartedAt: earlier, FinishedAt: earlier.Add(time.Hour)}}
+			}
+			if resumed == "interrupted" {
+				// A legacy saved run has the cancellation reason but no new
+				// interruption field. Its pending action is taken up again.
+				state.History[0].Error = "context canceled"
+				state.Pending = &chain.Assignment{Role: "implement"}
+				state.PendingSince = earlier
 			}
 			root, directory := noticeJob(t, state)
 			if err := os.Chtimes(filepath.Join(directory, "issue.json"), earlier, earlier); err != nil {

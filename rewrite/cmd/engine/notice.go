@@ -609,8 +609,10 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 	for i > 0 {
 		end := i
 		launchFailed := false
+		launchInterrupted := false
 		for i > 0 && history[i-1].Speaker == "runtime" {
-			if history[i-1].Error != "" {
+			launchInterrupted = launchInterrupted || history[i-1].Interrupted
+			if history[i-1].Error != "" && !history[i-1].Interrupted {
 				launchFailed = true
 				if failure == "" {
 					failure = history[i-1].Error
@@ -621,7 +623,8 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 		processes := 0
 		for role := ""; i > 0 && history[i-1].Speaker != "runtime" && (processes == 0 || (delimited && history[i-1].Role == role)); processes++ {
 			role = history[i-1].Role
-			if history[i-1].Error != "" {
+			launchInterrupted = launchInterrupted || history[i-1].Interrupted
+			if history[i-1].Error != "" && !history[i-1].Interrupted {
 				launchFailed = true
 				if failure == "" {
 					failure = history[i-1].Error
@@ -629,7 +632,7 @@ func stalledFor(state chain.State, now time.Time) (time.Duration, string, bool) 
 			}
 			i--
 		}
-		if processes > 0 && !launchFailed {
+		if processes > 0 && !launchFailed && !launchInterrupted {
 			if failure == "" {
 				return 0, "", false
 			}
@@ -665,7 +668,7 @@ func stallWindow(cfg config) time.Duration {
 // routing and ends nothing: the request keeps trying to recover.
 func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool, began time.Time) error {
 	window := stallWindow(cfg)
-	if window <= 0 {
+	if window <= 0 || began.IsZero() {
 		return nil
 	}
 	state, err := savedHistory(directory)
@@ -673,9 +676,22 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 		return err
 	}
 	now := time.Now().UTC()
+	// The watcher has a new execution window after each restart/relaunch.
+	// Keep the full saved history for the roles, but do not call an old
+	// interruption or failure the latest failure of this new window.
+	current := make([]chain.Result, 0, len(state.History))
+	for _, record := range state.History {
+		if !record.FinishedAt.Before(began) {
+			current = append(current, record)
+		}
+	}
+	state.History = current
 	// Each silence began where it is measured from: a stall at the last
 	// completed step, a quiet launch at its last record or its own start.
 	elapsed, failure, stalled := stalledFor(state, now)
+	if sinceLaunch := now.Sub(began); elapsed > sinceLaunch {
+		elapsed = sinceLaunch
+	}
 	if stalled && elapsed > window {
 		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)), now.Add(-elapsed))
 	}

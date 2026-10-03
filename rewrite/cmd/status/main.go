@@ -461,6 +461,7 @@ type record struct {
 	Instruction string
 	Error       string
 	Runtime     bool
+	Interrupted bool
 	Person      bool
 	Gap         string
 }
@@ -574,7 +575,7 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 					Model: result.ModelPrefix + result.Model, Started: result.StartedAt, Finished: result.FinishedAt,
 					Duration: humanDuration(result.FinishedAt.Sub(result.StartedAt)), Output: result.Output,
 					Diagnostics: result.Diagnostics, Instruction: result.Instruction, Error: result.Error,
-					Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
+					Interrupted: result.Interrupted, Runtime: result.Speaker == "runtime", Person: result.Speaker == "requester"}
 				if !previous.IsZero() && result.StartedAt.Sub(previous) >= time.Second {
 					entry.Gap = humanDuration(result.StartedAt.Sub(previous))
 				}
@@ -869,6 +870,7 @@ func (j *job) derive(now time.Time) {
 				// The latest launch is one role's process records behind the
 				// runtime's notes; any of them may be the one that failed.
 				role := ""
+				wasInterrupted := false
 				for i := len(state.History) - 1; i >= 0; i-- {
 					record := state.History[i]
 					if record.Speaker == "runtime" {
@@ -881,9 +883,13 @@ func (j *job) derive(now time.Time) {
 						break
 					}
 					role = record.Role
-					if record.Error != "" && j.Failure == "" {
+					wasInterrupted = wasInterrupted || record.Interrupted
+					if record.Error != "" && !record.Interrupted && j.Failure == "" {
 						j.Failure = firstLine(record.Error)
 					}
+				}
+				if wasInterrupted && j.Failure == "" {
+					prefix = "taking up an interrupted step; "
 				}
 			}
 			j.Status = prefix + j.Status
@@ -995,7 +1001,7 @@ func (j *job) derive(now time.Time) {
 			// The runtime's own failure (a router it could not reach) needs a
 			// person; its note that a stopped action is being taken up again
 			// after a restart is the run going on, not a call for attention.
-			if record.Speaker == "runtime" && record.Error != "" && len(j.Live) == 0 &&
+			if record.Speaker == "runtime" && record.Error != "" && !record.Interrupted && len(j.Live) == 0 &&
 				!strings.HasPrefix(record.Error, "The process stopped while this action was pending") {
 				j.Lane, j.Attention = "attention", record.Error
 			}
@@ -1096,7 +1102,7 @@ func (j *job) derive(now time.Time) {
 				order = append(order, result.Role)
 			}
 			entry.Launches++
-			if result.Error != "" {
+			if result.Error != "" && !result.Interrupted {
 				entry.Failures++
 			}
 			durations[result.Role] += result.FinishedAt.Sub(result.StartedAt)

@@ -111,7 +111,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 			}
 			if err != nil {
 				results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
-					Error: "Selecting a current model: " + err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}
+					Error: "Selecting a current model: " + err.Error(), Interrupted: ctx.Err() != nil, StartedAt: started, FinishedAt: time.Now().UTC()}
 				continue
 			}
 			selected = append(selected, model)
@@ -139,7 +139,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				if err != nil {
 					results[index] = Result{Role: name, Speaker: process.Name, Model: model, ModelPrefix: prefix,
 						Instruction: assignment.Instruction, Error: "Preparing role access: " + err.Error(),
-						StartedAt: started, FinishedAt: time.Now().UTC()}
+						Interrupted: ctx.Err() != nil, StartedAt: started, FinishedAt: time.Now().UTC()}
 					return
 				}
 				process = prepared
@@ -256,6 +256,7 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	for _, name := range names {
 		environment = append(environment, name+"="+env[name])
 	}
+	controller := ctx
 	ctx, cancel := p.launchContext(ctx)
 	defer cancel()
 	prompt := processPrompt(role, p, assignment, state)
@@ -330,6 +331,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	}
 	if ctx.Err() != nil {
 		result.Error = ctx.Err().Error()
+		// An operator-configured timeout belongs to this process. Only its
+		// parent's cancellation is an interruption by the controller.
+		result.Interrupted = controller.Err() != nil
 	}
 	if stopError != nil {
 		result.Error += "\n" + stopError.Error()
