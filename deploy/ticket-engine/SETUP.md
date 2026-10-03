@@ -639,6 +639,22 @@ project's own knowledge is written (a path in the repository such as
 must not touch. Keep the rest of the paragraph; it tells every role how
 progress is decided.
 
+Also state where reusable answers may be **written**, for example "Read
+project guidance in CONTRIBUTING.md; record newly answered project questions
+in docs/decisions.md." Those are examples, not required filenames. A reading
+location alone does not authorize edits. Include the chosen path in both
+the work role's writable scope and `DELIVERY_ALLOWED_PATHS`; do not broaden
+either permission just to fit this example.
+
+When an answer is needed but no write destination is supplied, the shipped
+roles offer concrete repository-appropriate file choices once in the entrance
+question, alongside the substantive question. They retain that answer across
+retries. No question is needed just to create notes for work that needed no
+answer. The work role integrates reusable answers, without secrets or
+invented facts; review compares the note with the actual exchange. Knowledge
+and code use the same reviewed delivery PR. This is work assigned to the
+existing models, not a controller that appends arbitrary comment text.
+
 For long guidance, edit a UTF-8 text file rather than escaping quotes and
 newlines inside JSON by hand. This command replaces the example's first
 sentence and preserves its shared instructions, writing a **new** file:
