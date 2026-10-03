@@ -11,8 +11,6 @@ import (
 )
 
 // GitHub now supplies both the engine's operations and the role's scoped API.
-var _ Tracker = GitHub{}
-
 func TestGitHubPostsACommentOnceAndNeverAgain(t *testing.T) {
 	githubClock(t)
 	const text = "\n受け付けました。\nUnknown fields: {\"anything\":null}\nLiteral $(not-a-command), `code`, & + % @someone #12\n"

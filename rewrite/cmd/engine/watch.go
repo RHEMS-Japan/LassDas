@@ -91,9 +91,6 @@ func (w *serialLog) Write(p []byte) (int, error) {
 // directory, the starting time, the seconds between scans and the slots.
 func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
 	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
-	if err := validateGitHubConfig(*cfg, nil); err != nil {
-		return fail(err)
-	}
 	if cfg.GitHub == nil && (cfg.Intake == nil || cfg.Intake.ProjectID <= 0) {
 		return fail(errors.New("watch requires an explicit intake.project_id"))
 	}
@@ -145,7 +142,8 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 	if err != nil {
 		return fail(err)
 	}
-	// Validate binding before discovering/accepting any work.
+	// Validate binding (including tracker configuration through roleAccess)
+	// before discovering/accepting any work. No queue or request exists yet.
 	if _, err := bindRequestConfig(*cfg, filepath.Join(root, "jobs", "0"), "example"); err != nil {
 		return fail(err)
 	}
