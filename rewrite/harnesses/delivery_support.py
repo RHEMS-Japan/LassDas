@@ -189,7 +189,10 @@ def git(*arguments, url=None):
         if host.scheme == "https":
             helper = "!" + " ".join(shlex.quote(part) for part in
                                     (sys.executable, "-B", str(SUPPORT), "--credential-helper"))
-            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.hostname or ""
+            # Git includes an explicit port in the credential's host field.
+            # Keep that authority exactly, excluding any URL user information;
+            # stripping the port both breaks this target and permits another.
+            os.environ["DELIVERY_CREDENTIAL_HOST"] = host.netloc.rsplit("@", 1)[-1]
             command += ["-c", "credential.helper=", "-c", "credential.helper=" + helper]
     elif workspace_as_reviewed:
         command += WORKSPACE_FILES
