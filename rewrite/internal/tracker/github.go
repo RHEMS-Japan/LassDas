@@ -404,28 +404,9 @@ func samePage(address string) string {
 	return strings.ToLower(given.Host) + given.EscapedPath() + "?" + given.Query().Encode()
 }
 
-// githubError is an answer with a status other than the one expected.
-type githubError struct {
-	Status int
-	Body   string
-}
-
-func (e *githubError) Error() string {
-	// The response was redacted before being stored; truncate only its display.
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
-}
-
-// clip is text cut to its first limit characters, marked where it was cut.
-func clip(text string, limit int) string {
-	count := 0
-	for index := range text {
-		if count == limit {
-			return text[:index] + "…"
-		}
-		count++
-	}
-	return text
-}
+// Both adapters carry refusals in the common representation. Adapter-local
+// callers may use this name; the scoped server need not know the adapter.
+type githubError = trackerError
 
 // call sends one request with the token in its header, never in its address,
 // follows no redirect, and reads no more of the answer than limit. A moved

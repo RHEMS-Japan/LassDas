@@ -290,19 +290,6 @@ func (b Backlog) call(ctx context.Context, method, path string, query, form url.
 	return data, nil
 }
 
-// trackerError is an answer with a status other than the one expected, kept
-// whole so a caller can tell one refusal from another.
-type trackerError struct {
-	Status int
-	Body   string
-}
-
-func (e *trackerError) Error() string {
-	// Body is already redacted. Keep it whole for refusal handling below, but
-	// do not put the entire service response into logs or requester notices.
-	return fmt.Sprintf("tracker returned HTTP %d: %s", e.Status, clip(e.Body, 200))
-}
-
 // patchIssue changes fields of one issue and has confirm read the answer.
 // Asked to set a field to what the issue already holds, the tracker refuses
 // the whole request as though nothing in it could be changed ("No comment
