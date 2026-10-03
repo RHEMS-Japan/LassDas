@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -779,17 +780,57 @@ func TestNoticeDetailKeepsOneScrubbedLineWithinTwoHundredCharacters(t *testing.T
 	}
 }
 
+func TestARecentlyStartedLaunchDoesNotReportItsEarlierQueueTimeAsSilence(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resumed=%t", resumed), func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `cat > received.txt; printf '%s' "$$" > child-pid; exec sleep 60`}
+			earlier := time.Now().Add(-3 * time.Hour)
+			state := chain.State{}
+			if resumed {
+				state.History = []chain.Result{{Role: "implement", Speaker: "worker", Output: "earlier work", StartedAt: earlier, FinishedAt: earlier.Add(time.Hour)}}
+			}
+			root, directory := noticeJob(t, state)
+			if err := os.Chtimes(filepath.Join(directory, "issue.json"), earlier, earlier); err != nil {
+				t.Fatal(err)
+			}
+			queueRanSince(t, root, cfg, earlier.Add(-time.Hour))
+			fixture := &noticeTracker{}
+			fixture.install(t, alwaysChoose("implement"))
+			transport := http.DefaultTransport
+			var controls atomic.Int64
+			useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/comments") {
+					controls.Add(1)
+				}
+				return transport.RoundTrip(r)
+			})
+			finish := startStopQueue(t, cfg, root, 30*time.Millisecond, io.Discard)
+			waitTestPID(t, filepath.Join(directory, "workspace", "child-pid"))
+			afterStart := controls.Load()
+			waitFor(t, func() bool { return controls.Load() >= afterStart+3 })
+			finish()
+			if got := fixture.withPrefix("依頼はまだ終わっていませんが"); len(got) != 0 {
+				t.Fatalf("a fresh launch was reported as stalled because of earlier waiting: %v", got)
+			}
+		})
+	}
+}
+
 func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *testing.T) {
 	now := time.Now().UTC()
-	accepted := now.Add(-100 * time.Minute)
-	if quiet := quietFor(chain.State{}, accepted, now); quiet != 100*time.Minute {
-		t.Fatalf("a request with no record is measured from its acceptance: %v", quiet)
+	began := now.Add(-100 * time.Minute)
+	if quiet := quietFor(chain.State{}, began, now); quiet != 100*time.Minute {
+		t.Fatalf("a request with no record is measured from its current launch: %v", quiet)
 	}
 	state := chain.State{History: []chain.Result{{Role: "implement", Speaker: "implement-process", StartedAt: now.Add(-90 * time.Minute), FinishedAt: now.Add(-30 * time.Minute)}}}
-	if quiet := quietFor(state, accepted, now); quiet != 30*time.Minute {
+	if quiet := quietFor(state, began, now); quiet != 30*time.Minute {
 		t.Fatalf("a request with a record is measured from that record: %v", quiet)
 	}
-	if quiet := quietFor(chain.State{}, time.Time{}, now); quiet != 0 {
+	if quiet := quietFor(state, now.Add(-5*time.Minute), now); quiet != 5*time.Minute {
+		t.Fatalf("records from an earlier run aged the new launch: %v", quiet)
+	}
+	if quiet := quietFor(state, time.Time{}, now); quiet != 0 {
 		t.Fatalf("a request with nothing to measure from was measured: %v", quiet)
 	}
 	if text := stallNoticeText(95, ""); !strings.Contains(text, "95 分") || !strings.Contains(text, "失敗は記録されていません") || strings.Contains(text, "直近の失敗") {
@@ -799,9 +840,8 @@ func TestARunningLaunchThatWritesNothingForTheWindowIsSaidWithoutAFailure(t *tes
 
 // A launch held for a setting only its operator can correct is, to the
 // engine, a launch that runs long; a stall is also said while the engine
-// itself holds the work for the budget; and the quiet time of a request that
-// has just started can be all waiting before its first launch. So these
-// three are fixed word for word: what was recorded, with no cause given and
+// itself holds the work for the budget. These three are fixed word for word:
+// what was recorded, with no cause given and
 // nothing about who has to act. A wording that says nobody is needed, that
 // the work goes on, why nothing completed, or that no answer is awaited (a
 // question may stand right above the notice) fails here.
@@ -865,14 +905,14 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	}
 	// The queue's engines have said a stall since before these were accepted.
 	queueRanSince(t, root, cfg, accepted)
-	// Accepted three hours ago with nothing recorded: the one waiting its
-	// turn says nothing, the one running says it is long but not failing.
+	// Both were accepted three hours ago. Waiting says nothing; a launch
+	// running for 95 minutes reports those 95, not its earlier queue time.
 	waiting := sourceIssue{ID: 52, Key: "EXAMPLE-52"}
-	if err := noteStall(context.Background(), cfg, requestNotices(cfg, waiting, directories[52]), directories[52], false); err != nil {
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, waiting, directories[52]), directories[52], false, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	running := sourceIssue{ID: 51, Key: "EXAMPLE-51"}
-	if err := noteStall(context.Background(), cfg, requestNotices(cfg, running, directories[51]), directories[51], true); err != nil {
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, running, directories[51]), directories[51], true, time.Now().Add(-95*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -880,7 +920,7 @@ func TestALongQuietLaunchIsSaidOnlyWhileTheWorkRuns(t *testing.T) {
 	if len(posted["EXAMPLE-52"]) != 0 {
 		t.Fatalf("a request waiting its turn was told its work is long: %q", posted["EXAMPLE-52"])
 	}
-	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗は記録されていません") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 1") {
+	if len(posted["EXAMPLE-51"]) != 1 || !strings.Contains(posted["EXAMPLE-51"][0], "失敗は記録されていません") || !strings.Contains(posted["EXAMPLE-51"][0], "過去 95 分") {
 		t.Fatalf("the running request was not told, or told wrongly: %q", posted["EXAMPLE-51"])
 	}
 }
@@ -1095,7 +1135,7 @@ func TestARequestInFlightIsNotToldWhatBeganBeforeTheEngine(t *testing.T) {
 	issue := announcedIssue()
 	acceptTurn(context.Background(), cfg, issue, directory, 0, observe)
 	announceStages(context.Background(), cfg, issue, directory, observe)
-	if err := noteStall(context.Background(), cfg, requestNotices(cfg, issue, directory), directory, true); err != nil {
+	if err := noteStall(context.Background(), cfg, requestNotices(cfg, issue, directory), directory, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.all(); len(got) != 0 {

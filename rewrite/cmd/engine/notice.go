@@ -49,9 +49,8 @@ const (
 // runs long may be working or may be waiting for its operator to correct a
 // setting, a failure that repeats may need a person, and a spent budget may
 // need someone to add to it. A stall is also said while the engine itself
-// holds the work for the budget, when nothing is being tried, and the quiet
-// time of a request with no record yet counts from its acceptance, so it can
-// be all waiting before a first launch. So a notice says what was recorded
+// holds the work for the budget, when nothing is being tried. Quiet time is
+// measured only within the current launch. A notice says what was recorded
 // and gives no cause and no word on who has to act: not that nobody does, and
 // not that no answer is awaited, since a question may be standing above it.
 func stallNoticeText(minutes int, detail string) string {
@@ -62,11 +61,14 @@ func stallNoticeText(minutes int, detail string) string {
 }
 
 // quietFor is how long the request has gone without any record being
-// written: since its last record, or since it was accepted when there is
-// none. A launch has no time limit, so this is the only word the requester
+// written within the current launch: since its last record, or since the
+// launch began when there is none. A launch has no time limit, so this is the only word the requester
 // gets about one that runs long without failing.
-func quietFor(state chain.State, accepted, now time.Time) time.Duration {
-	last := accepted
+func quietFor(state chain.State, began, now time.Time) time.Duration {
+	if began.IsZero() {
+		return 0
+	}
+	last := began
 	for _, record := range state.History {
 		for _, at := range []time.Time{record.StartedAt, record.FinishedAt} {
 			if at.After(last) {
@@ -74,7 +76,7 @@ func quietFor(state chain.State, accepted, now time.Time) time.Duration {
 			}
 		}
 	}
-	if last.IsZero() {
+	if last.After(now) {
 		return 0
 	}
 	return now.Sub(last)
@@ -651,7 +653,7 @@ func stallWindow(cfg config) time.Duration {
 
 // noteStall says once that nothing has completed for a while. It changes no
 // routing and ends nothing: the request keeps trying to recover.
-func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool) error {
+func noteStall(ctx context.Context, cfg config, n notices, directory string, running bool, began time.Time) error {
 	window := stallWindow(cfg)
 	if window <= 0 {
 		return nil
@@ -662,7 +664,7 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 	}
 	now := time.Now().UTC()
 	// Each silence began where it is measured from: a stall at the last
-	// completed step, a quiet launch at the last record or the acceptance.
+	// completed step, a quiet launch at its last record or its own start.
 	elapsed, failure, stalled := stalledFor(state, now)
 	if stalled && elapsed > window {
 		return n.post(ctx, stallNotice, stallNoticeText(int(elapsed.Minutes()), noticeDetail(cfg, failure)), now.Add(-elapsed))
@@ -673,11 +675,7 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 	if !running {
 		return nil
 	}
-	var accepted time.Time
-	if info, err := os.Stat(filepath.Join(directory, "issue.json")); err == nil {
-		accepted = info.ModTime().UTC()
-	}
-	if quiet := quietFor(state, accepted, now); quiet > window {
+	if quiet := quietFor(state, began, now); quiet > window {
 		return n.post(ctx, stallNotice, stallNoticeText(int(quiet.Minutes()), ""), now.Add(-quiet))
 	}
 	return nil

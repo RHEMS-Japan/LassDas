@@ -171,7 +171,7 @@ func runWatchedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 			}
 			// Nothing here changes routing; it only tells the requester that a
 			// long silence is retrying, not finished and not abandoned.
-			if noticeErr := noteStall(ctx, cfg, notice, directory, result != nil && !hold); noticeErr != nil {
+			if noticeErr := noteStall(ctx, cfg, notice, directory, result != nil && !hold, began); noticeErr != nil {
 				observe("no-progress notice not confirmed: " + noticeErr.Error())
 			}
 		}
