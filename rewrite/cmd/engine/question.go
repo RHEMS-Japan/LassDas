@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ticket-runner/internal/chain"
@@ -35,11 +36,65 @@ func validateQuestionRole(cfg config) error {
 	return errors.New("intake.question_role must name a configured role with a comment-capable process")
 }
 
-// questionBoundary is how far the assigned issue's comments had gone when the
-// question was asked. Everything at or below it was already available to the
-// asking role, so only a later comment can be an answer to that question.
+// questionBoundary records the asking role's last successfully stored comment.
+// Later controller notices and requester replies must not advance it.
 type questionBoundary struct {
 	After *int64 `json:"after"`
+}
+
+type questionProcesses struct {
+	processes  chain.Processes
+	role, path string
+	prepare    func(context.Context, chain.Process) (chain.Process, func(), error)
+}
+
+func questionExecutor(cfg config, issue, runDirectory string, processes chain.Processes) (chain.Executor, error) {
+	if cfg.Intake == nil || cfg.Intake.QuestionRole == "" {
+		return processes, nil
+	}
+	path := filepath.Join(runDirectory, "question-post.json")
+	var mu sync.Mutex
+	prepare, err := roleAccess(cfg, issue, tracker.ObserveStoredPost(func(id int64) error {
+		mu.Lock()
+		defer mu.Unlock()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var boundary questionBoundary
+		if err := json.Unmarshal(data, &boundary); err != nil {
+			return err
+		}
+		if boundary.After != nil && *boundary.After >= id {
+			return nil
+		}
+		data, err = json.Marshal(questionBoundary{After: &id})
+		if err != nil {
+			return err
+		}
+		return writeRuntimeFile(path, data)
+	}))
+	if err != nil {
+		return nil, err
+	}
+	return questionProcesses{processes: processes, role: cfg.Intake.QuestionRole, path: path, prepare: prepare}, nil
+}
+
+func (q questionProcesses) Execute(ctx context.Context, assignment chain.Assignment, state chain.State) []chain.Result {
+	processes := q.processes
+	if assignment.Role == q.role {
+		// Keep a receipt across retries of this question. Starting the record
+		// before the child also distinguishes a missing receipt from old runs.
+		_, err := os.Stat(q.path)
+		if errors.Is(err, os.ErrNotExist) {
+			err = writeRuntimeFile(q.path, []byte(`{"after":null}`))
+		}
+		if err != nil {
+			return []chain.Result{{Role: assignment.Role, Speaker: "runtime", Error: "Recording question submission: " + err.Error(), FinishedAt: time.Now().UTC()}}
+		}
+		processes.Prepare = q.prepare
+	}
+	return processes.Execute(ctx, assignment, state)
 }
 
 func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue) (int64, error) {
@@ -57,13 +112,22 @@ func latestComment(source tracker.Tracker, rows []json.RawMessage, issue sourceI
 }
 
 func recordQuestion(source tracker.Tracker, directory string, rows []json.RawMessage, issue sourceIssue) error {
-	highest, err := latestComment(source, rows, issue)
+	data, err := os.ReadFile(filepath.Join(directory, "run", "question-post.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		// Older runs did not retain POST receipts. Their existing conservative
+		// boundary cannot be reconstructed from arbitrary comment prose.
+		highest, readErr := latestComment(source, rows, issue)
+		if readErr != nil {
+			return readErr
+		}
+		data, err = json.Marshal(questionBoundary{After: &highest})
+	}
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(questionBoundary{After: &highest})
-	if err != nil {
-		return err
+	var boundary questionBoundary
+	if err := json.Unmarshal(data, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
+		return errors.New("the question's comment receipt is unavailable; keeping the request waiting without discarding later replies")
 	}
 	return writeRuntimeFile(filepath.Join(directory, "question.json"), data)
 }
@@ -80,13 +144,20 @@ func recordQuestion(source tracker.Tracker, directory string, rows []json.RawMes
 // runtime's account are not set aside beyond that: an account that is
 // neither the creator nor an operator is already not authorized, and one
 // that is may be the only account the requester has.
-func answerToQuestion(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue, operators []int64, after int64) (int64, string, error) {
+func answerToQuestion(source tracker.Tracker, rows []json.RawMessage, issue sourceIssue, operators []int64, after int64, notices ...int64) (int64, string, error) {
 	for _, raw := range rows {
 		comment, err := source.ReadComment(raw, issue)
 		if err != nil || !comment.OnIssue {
 			return 0, "", errors.New("issue comments could not be read for the assigned issue")
 		}
 		if comment.ID <= after {
+			continue
+		}
+		ownNotice := false
+		for _, id := range notices {
+			ownNotice = ownNotice || comment.ID == id
+		}
+		if ownNotice {
 			continue
 		}
 		authorized := comment.Author.ID > 0 && comment.Author.ID == issue.Creator.ID
@@ -121,13 +192,25 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if stop != nil {
 		return true, false, nil
 	}
+	n := requestNotices(cfg, issue, directory)
+	if err := n.flush(ctx); err != nil {
+		return false, false, err
+	}
+	log, err := n.load()
+	if err != nil {
+		return false, false, err
+	}
+	var notices []int64
+	for _, record := range log.Notices {
+		notices = append(notices, record.CommentID)
+	}
 	path := filepath.Join(directory, "question.json")
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// An interrupted hold left no boundary. Record where the conversation
-		// stands now and keep waiting, rather than reading an older comment as
-		// an answer to a question it cannot have replied to.
-		return false, false, recordQuestion(source, directory, rows, issue)
+		if err := recordQuestion(source, directory, rows, issue); err != nil {
+			return false, false, err
+		}
+		raw, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return false, false, err
@@ -136,8 +219,13 @@ func resumeWaitingRequest(ctx context.Context, cfg config, issue sourceIssue, di
 	if err := json.Unmarshal(raw, &boundary); err != nil || boundary.After == nil || *boundary.After < 0 {
 		return false, false, errors.New("the recorded question is unreadable; the request keeps waiting for the requester's answer")
 	}
-	id, answer, err := answerToQuestion(source, rows, issue, cfg.Intake.StopUserIDs, *boundary.After)
+	id, answer, err := answerToQuestion(source, rows, issue, cfg.Intake.StopUserIDs, *boundary.After, notices...)
 	if err != nil || id == 0 {
+		return false, false, err
+	}
+	// The durable question.json still identifies this answered question. A
+	// later asking role must collect its own receipt instead of reusing it.
+	if err := os.Remove(filepath.Join(directory, "run", "question-post.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, false, err
 	}
 	if err := appendAnswer(directory, request, state.Step, answer); err != nil {

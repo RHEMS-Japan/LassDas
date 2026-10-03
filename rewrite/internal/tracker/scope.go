@@ -42,6 +42,7 @@ type IssueScope struct {
 	latest bool
 	mu     sync.Mutex
 	posts  []int64
+	stored func(int64) error
 }
 
 // KeepLatestPost makes a scope leave one comment. The scope lives for one
@@ -53,6 +54,12 @@ type IssueScope struct {
 // were answered, never in their path, and is best effort: a comment the
 // tracker will not remove stays, which is what there was before this option.
 func KeepLatestPost(s *IssueScope) { s.latest = true }
+
+// ObserveStoredPost records a successful POST's native comment id before its
+// receipt reaches the worker. It observes transport, not the comment's words.
+func ObserveStoredPost(record func(int64) error) func(*IssueScope) {
+	return func(s *IssueScope) { s.stored = record }
+}
 
 func NewIssueScope(source Upstream, issue string, mayPost bool, options ...func(*IssueScope)) (*IssueScope, error) {
 	if issue == "" || issue == "." || issue == ".." || strings.ContainsAny(issue, "/\\?#\r\n\x00") {
@@ -171,8 +178,11 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, status, "scoped tracker request: "+err.Error())
 		return
 	}
-	if r.Method == http.MethodPost && s.latest {
-		s.remember(data)
+	if r.Method == http.MethodPost && (s.latest || s.stored != nil) {
+		if err := s.remember(data); err != nil {
+			s.reject(w, http.StatusBadGateway, "comment was submitted but its receipt could not be recorded: "+err.Error())
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(expected)
@@ -181,16 +191,23 @@ func (s *IssueScope) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // remember notes the comment the tracker has just stored for this scope. The
 // id comes from the tracker's own receipt, never from the worker's request.
-func (s *IssueScope) remember(receipt []byte) {
+func (s *IssueScope) remember(receipt []byte) error {
 	var stored struct {
 		ID int64 `json:"id"`
 	}
 	if json.Unmarshal(receipt, &stored) != nil || stored.ID <= 0 {
-		return
+		if s.stored != nil {
+			return errors.New("tracker receipt has no positive comment id")
+		}
+		return nil
 	}
 	s.mu.Lock()
 	s.posts = append(s.posts, stored.ID)
 	s.mu.Unlock()
+	if s.stored != nil {
+		return s.stored(stored.ID)
+	}
+	return nil
 }
 
 // RemoveEarlierPosts removes every comment this scope stored except the one

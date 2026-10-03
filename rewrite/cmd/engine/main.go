@@ -411,9 +411,13 @@ func run(ctx context.Context, args []string, output, log io.Writer) (failure err
 			}
 		}
 	}
+	questionAware, err := questionExecutor(cfg, assigned, *directory, executor)
+	if err != nil {
+		return err
+	}
 	engine := chain.Chain{
 		Router:   router,
-		Executor: executor, Store: store,
+		Executor: questionAware, Store: store,
 		Workflow: cfg.Workflow,
 		Observe:  observe,
 	}
