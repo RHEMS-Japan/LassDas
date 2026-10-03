@@ -13,6 +13,9 @@ var trackerEnvironment = []string{"TASK_TRACKER_URL", "TASK_TRACKER_KEY", "TASK_
 
 // Validate operator configuration, never the wording of a model report.
 func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) (chain.Process, func(), error), error) {
+	if err := validateGitHubConfig(cfg, nil); err != nil {
+		return nil, err
+	}
 	enabled := false
 	for _, role := range cfg.Roles {
 		for _, process := range role.Processes {
@@ -40,7 +43,7 @@ func roleAccess(cfg config, issue string) (func(context.Context, chain.Process) 
 		return nil, errors.New("scoped tracker access needs an operator-assigned issue, not an identity inferred from request prose")
 	}
 	source := cfg.source()
-	if cfg.Backlog.BaseURL == "" || source.CredentialEnv() == "" {
+	if (cfg.GitHub == nil && cfg.Backlog.BaseURL == "") || source.CredentialEnv() == "" {
 		return nil, errors.New("scoped tracker access needs the controller tracker configuration")
 	}
 	for _, role := range cfg.Roles {

@@ -7,6 +7,9 @@ import "ticket-runner/internal/tracker"
 // kept beside it, so every copy of a configuration, and every change made to
 // one, reaches it.
 func (cfg config) source() tracker.Tracker {
+	if cfg.GitHub != nil {
+		return *cfg.GitHub
+	}
 	project := tracker.BacklogProject{Client: cfg.Backlog}
 	if cfg.Intake == nil {
 		return project
