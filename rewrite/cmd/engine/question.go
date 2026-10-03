@@ -15,9 +15,9 @@ import (
 	"ticket-runner/internal/tracker"
 )
 
-// Before the work is handed over, a configured role may put a question to the
-// person who filed the request. Which role that is, is operator configuration
-// naming an existing role; nothing here reads, decodes or grades what any role
+// Where the workflow offers it, a configured role may put a question to the
+// person who filed the request, initially or during recovery. The operator
+// names an existing role; nothing here reads, decodes or grades what any role
 // or requester wrote. The reply is carried into the history exactly as posted.
 func validateQuestionRole(cfg config) error {
 	if cfg.Intake == nil || cfg.Intake.QuestionRole == "" {
