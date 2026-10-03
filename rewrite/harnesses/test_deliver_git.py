@@ -5,6 +5,7 @@ process asked for, so a refusal is checked by what was NOT sent, and a rerun
 is checked by the absence of a second push, pull request or merge.
 """
 import http.server
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -587,6 +588,62 @@ class DeliveryTests(unittest.TestCase):
         # has one beside it.
         self.forbidden_text_and_credential_refused_in("library/notes.txt",
                                                       lambda text: ("\N{BYTE ORDER MARK}" + text).encode("utf-16-le"))
+
+    def first_cut(self):
+        """Where, in a file that is one added line, the first part the check
+        holds of that line ends: the diff puts one byte before the line. The
+        line has to go on past the next read of Git's output for the part to
+        be cut there, so these lines go on 2 MiB further."""
+        spec = importlib.util.spec_from_file_location("delivery_support_parts", SUPPORT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.PART - 1
+
+    def test_text_across_the_parts_of_a_long_line_is_still_looked_at(self):
+        # A line longer than a part is looked at in parts that overlap by more
+        # than any text the check looks for takes.
+        cut, more = self.first_cut(), b"a" * (2 << 20)
+        word = b"internal-project-codename"
+        for found, expected, settings in ((word, "forbidden text (1 entry)",
+                                           {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}),
+                                          (TOKEN.encode(), "the delivery credential", {})):
+            self.refused_as_written("library/long.txt", b"a" * (cut - len(found) + 1) + found + more + b"\n",
+                                    expected, **settings)
+        # In UTF-16, the word with a NUL beside each character, 50 bytes, 41 of
+        # them before the cut: neither part holds all of it unless the overlap
+        # counts the NULs as well.
+        self.refused_as_written("library/long.txt", "\N{BYTE ORDER MARK}".encode("utf-16-le")
+                                + ("a" * ((cut - 43) // 2) + "internal-project-codename" + "a" * len(more) + "\n")
+                                .encode("utf-16-le"), "forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        # A word that is not ASCII, across the cut, in characters of three bytes.
+        self.refused_as_written("library/long.txt", ("x" + "あ" * ((cut - 7) // 3) + "社外秘" + "あ" * len(more) + "\n")
+                                .encode(), "forbidden text (1 entry)", DELIVERY_FORBIDDEN_TEXT="社外秘")
+
+    def test_a_long_line_without_forbidden_text_is_delivered_as_it_is(self):
+        # The cut falls inside a character of three bytes; read as two halves,
+        # each would be bytes that are not UTF-8, which an entry that is not
+        # ASCII makes a refusal.
+        cut = self.first_cut()
+        content = ("x" + "あ" * (cut // 3 + (2 << 20)) + "\n").encode()
+        self.assertTrue(0x80 <= content[cut] < 0xC0, "the cut is not inside a character")
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "long.txt").write_bytes(content)
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.stored("refs/heads/master:library/long.txt"), content)
+
+    def test_a_large_file_of_random_bytes_is_delivered(self):
+        # 200 MB, whose lines the check looks at one by one.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        path = self.workspace / "library" / "random.bin"
+        with open(path, "wb") as written:
+            for _ in range(200):
+                written.write(os.urandom(1 << 20))
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.git(self.remote, "rev-parse", "refs/heads/master:library/random.bin").stdout,
+                         self.git(self.workspace, "hash-object", str(path)).stdout)
 
     def test_a_diff_program_does_not_stand_in_for_the_lines(self):
         # One that prints its own format, named in the checkout's configuration.

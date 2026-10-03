@@ -213,24 +213,48 @@ def run(command, *, cwd=None, check=True, timeout=None, environment=None,
     return result.returncode, output, diagnostics
 
 
-def output_lines(command, *, environment=None):
+# The most of one line output_lines holds at once; a longer line comes in parts.
+PART = 1 << 22
+
+
+def character_start(buffer, position):
+    """The position, or else the start of the UTF-8 character it falls in."""
+    for _ in range(3):
+        if 0x80 <= buffer[position] < 0xC0:
+            position -= 1
+    return position
+
+
+def output_lines(command, *, environment=None, overlap=0):
     """A command's output a line at a time, as it comes: for output that is
     looked at, never printed, and may be too large to hold whole. Lines end
     at LF only, and every other byte is kept as given; a text read would
-    have turned a CR into a line end. A failure is raised once the output
-    has been read."""
+    have turned a CR into a line end. Each line comes as (bytes, True). Of a
+    line whose end has not come yet, no more than PART is held besides the
+    last read: such a line comes in parts, each after the first as (bytes,
+    False) and beginning with at least the last `overlap` bytes of the one
+    before, so that nothing that long is cut in two; no part is cut inside
+    a UTF-8 character. A failure is raised once the output has been read."""
+    part = max(PART, 2 * overlap)
     with tempfile.TemporaryFile() as diagnostics:
         with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=diagnostics) as process:
-            pending = bytearray()
+            pending, first = bytearray(), True
             for chunk in iter(lambda: process.stdout.read(1 << 20), b""):
                 pending += chunk
                 end = pending.rfind(b"\n")
                 if end >= 0:
-                    yield from bytes(pending[:end]).split(b"\n")
+                    for line in bytes(pending[:end]).split(b"\n"):
+                        yield line, first
+                        first = True
                     del pending[:end + 1]
+                while len(pending) > part:
+                    cut = character_start(pending, part)
+                    yield bytes(pending[:cut]), first
+                    first = False
+                    del pending[:character_start(pending, cut - overlap)]
             if pending:
-                yield bytes(pending)
+                yield bytes(pending), first
         if process.returncode != 0:
             diagnostics.seek(0)
             raise DeliveryError("Command failed (exit %d): %s\n%s" % (

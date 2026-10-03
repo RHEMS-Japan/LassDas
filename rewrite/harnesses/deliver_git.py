@@ -182,18 +182,32 @@ def refuse_paths_outside_grant(paths, allowed, exempt=()):
                             + ", ".join(sorted(set(outside))[:20]))
 
 
+def looked_for_bytes():
+    """The most bytes a text the check looks for can take in a change: four
+    for each character of the longest forbidden entry or of the credential.
+    No character takes more in UTF-8, and text in UTF-16 takes two for each
+    ASCII character, the character and the NUL beside it."""
+    texts = [entry.strip().lower() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()]
+    return 4 * max(len(text) for text in texts + [os.environ.get("GITHUB_TOKEN", "")])
+
+
 def added_lines(workspace, against):
     """The lines the staged change adds. The diff marks them with ">", since
     a line whose own text begins with "+" would otherwise look like a file
     header. A file Git takes as binary, by its own judgement or by an
     attribute, is shown as text, and no diff program or text conversion
     stands in for it. A line ends only where Git ends it, at LF: a CR, a
-    form feed or a line separator inside it is part of it."""
-    for line in support.output_lines(support.git(
+    form feed or a line separator inside it is part of it. A long line comes
+    in parts, each repeating enough of the one before it that no text the
+    check looks for is cut in two."""
+    adding = False
+    for part, first in support.output_lines(support.git(
             "-C", str(workspace), "diff", "--cached", "--no-color", "--text", "--no-ext-diff", "--no-textconv",
-            "--output-indicator-new=>", *against)):
-        if line.startswith(b">"):
-            yield line[1:].decode("utf-8", "surrogateescape")
+            "--output-indicator-new=>", *against), overlap=looked_for_bytes()):
+        if first:
+            adding, part = part.startswith(b">"), part[1:]
+        if adding:
+            yield part.decode("utf-8", "surrogateescape")
 
 
 def staged_texts(workspace, against):
@@ -209,9 +223,9 @@ def refuse_forbidden_text(texts):
     """Configured text must not leave the workspace, whoever wrote it. Only
     the lines this change adds, and the names of the paths it touches, are
     its text: context and removed lines are what was already there. They
-    are looked at one by one, so a large change is never held whole. Text in
-    UTF-16 has a NUL beside each ASCII character, so each is also looked at
-    with its NULs taken out."""
+    are looked at one by one, a long line in parts, so a large change is
+    never held whole. Text in UTF-16 has a NUL beside each ASCII character,
+    so each is also looked at with its NULs taken out."""
     entries = [entry.strip() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()]
     wanted = {entry.lower() for entry in entries if entry}
     token = os.environ.get("GITHUB_TOKEN", "")

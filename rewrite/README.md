@@ -502,8 +502,10 @@ a CR, a form feed or a line separator inside it hides nothing after it. A file
 Git takes as binary, for a NUL byte in it or for an attribute, is looked at
 as text all the same, no diff program or text conversion stands in for the
 lines, and text in UTF-16, which has a NUL beside each ASCII character, is
-also looked at with its NULs taken out. Lines are read one at a time, so a
-large change is not held in memory whole.
+also looked at with its NULs taken out. Lines are read one at a time, and a
+long line in parts of about 4 MiB that overlap by more than any text looked
+for can take, so neither a large change nor a long line is held in memory
+whole.
 
 A change that is not UTF-8, such as a file kept in Shift_JIS or a name Git
 gives in such bytes, is delivered byte for byte. Its names are held to the
