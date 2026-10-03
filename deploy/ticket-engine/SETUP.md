@@ -65,8 +65,9 @@ grant of the permissions each path requires.
 
 ## How a request moves
 
-The shipped ordered configuration, `rewrite/examples/operator-stages.json`,
-runs every request through these stages. A stage that runs a command is
+The shipped ordered configurations, `rewrite/examples/operator-stages.json`
+for Backlog and `rewrite/examples/operator-github-stages.json` for GitHub Issues,
+run every request through the same stages. A stage that runs a command is
 finished only when the command exits 0; a stage that runs a model is finished
 when its model process returns without an error. Two decisions are a model's:
 after requirements, whether to ask the requester (initially or after a failure),
@@ -544,14 +545,17 @@ the same lines can conflict when a person merges the second.
 
 ## 4. Writing the operator configuration
 
-`rewrite/examples/operator-stages.json` is complete for the runtime of this
-directory: its delivery and merged check are the image's fixed processes
-under `/opt/ticket-automation/scripts`, its build, tests and report check are
+`rewrite/examples/operator-stages.json` (Backlog) and
+`rewrite/examples/operator-github-stages.json` (GitHub Issues) are complete for
+the runtime of this directory: their delivery and merged check are the image's
+fixed processes under `/opt/ticket-automation/scripts`; their build, tests and report check are
 the operator scripts of section 6, and every checkout comes from the Pod's
 mirror once you name it in place of the example's placeholder URL. Every value
 you must change is one distinct string in it.
 
-Use one of the two copy procedures below. Both keep the ordered stages. The
+Use one of the two copy procedures below. Both examples keep identical ordered
+stages, roles, permissions, question handling and knowledge-writing instructions;
+only the tracker settings differ. Neither unedited example can start intake. The
 separate `rewrite/examples/operator-github.json` ships the model-routed
 workflow, so do not substitute that whole file for the ordered configuration.
 
@@ -599,7 +603,7 @@ python3 - "$CONFIG" '<intake-owner>/<intake-repository>' '<delivery-owner>/<deli
 import json, sys
 from pathlib import Path
 target, intake_repo, delivery_repo, branch = sys.argv[1:]
-cfg = json.loads(Path('rewrite/examples/operator-stages.json').read_text())
+cfg = json.loads(Path('rewrite/examples/operator-github-stages.json').read_text())
 replacements = [
     ('https://repository.example.invalid/example-owner/example-repository.git',
      '/var/lib/ticket-automation/mirror/' + delivery_repo + '.git'),
@@ -617,16 +621,8 @@ def replace(value):
         return {key: replace(item) for key, item in value.items()}
     return value
 cfg = replace(cfg)
-cfg.pop('backlog')
-cfg['github'] = {
-    'repository': intake_repo, 'key_env': 'TRACKER_API_KEY',
-    'intake_label': 'automation',
-    'labels': {'accepted': 'automation-accepted', 'processing': 'automation-working',
-               'awaiting_requester': 'automation-awaiting-requester',
-               'delivered': 'automation-delivered', 'stopped': 'automation-stopped'},
-}
-for name in ('project_id', 'category_ids', 'category_on_accept', 'statuses'):
-    cfg['intake'].pop(name, None)
+cfg['github']['repository'] = intake_repo
+cfg['github'].pop('api_url')  # github.com uses the default API base.
 cfg['intake']['created_since'] = '2100-01-01T00:00:00Z'
 with Path(target).open('x') as output:
     json.dump(cfg, output, ensure_ascii=False, indent=2)
@@ -890,8 +886,9 @@ grep -n '"DELIVERY_MERGE_METHOD"' "$CONFIG"
 
 The `grep` must print one line, ending in `"DELIVERY_MERGE_METHOD": "none"`.
 This applies only to the copy section 4 makes from
-`rewrite/examples/operator-stages.json`: `operator.json` and
-`operator-gateway.json` have no such setting, and for a copy of either the
+`rewrite/examples/operator-stages.json` or `operator-github-stages.json`:
+the connected examples (`operator.json`, `operator-gateway.json` and
+`operator-github.json`) have no such setting, and for a copy of one of them the
 `grep` prints nothing.
 The descriptions of the `deliver` and `verify_merged` roles in your copy state
 both settings, so they need no edit. In this ordered configuration no model is
