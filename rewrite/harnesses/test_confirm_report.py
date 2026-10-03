@@ -88,6 +88,15 @@ class ConfirmReportTests(unittest.TestCase):
                 result, _ = self.run_check([], status=status, body=body)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
+    def test_empty_report_is_not_confirmed_by_an_empty_or_contentless_comment(self):
+        for report in ("", " \n\t", "\u3000\n"):
+            for content in (None, "", " \n\t"):
+                with self.subTest(report=report, content=content):
+                    result, calls = self.run_check([{"content": content}], report=report)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("report/result.md is empty", result.stdout)
+                    self.assertIsNone(calls, "an empty local report needs no tracker request")
+
 
 if __name__ == "__main__":
     unittest.main()
