@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // GitHubLabels names, per turn of the work, the label an issue is given. A
@@ -40,6 +41,9 @@ func (l GitHubLabels) label(turn string) string {
 // AddComment posts the text once. A failure may still have posted it, so
 // nothing here posts it again: read the comments before trying again.
 func (g GitHub) AddComment(ctx context.Context, issue Issue, text string) (int64, error) {
+	if !utf8.ValidString(text) {
+		return 0, errors.New("comment contains invalid UTF-8; it was not sent")
+	}
 	path, err := g.issuePath(issue.Key)
 	if err != nil {
 		return 0, err
