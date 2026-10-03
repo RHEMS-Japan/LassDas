@@ -15,6 +15,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -210,6 +211,81 @@ def run(command, *, cwd=None, check=True, timeout=None, environment=None,
         raise DeliveryError("Command failed (exit %d): %s\n%s%s"
                             % (result.returncode, shlex.join(command), output, diagnostics))
     return result.returncode, output, diagnostics
+
+
+# The most of one line output_lines holds at once; a longer line comes in parts.
+PART = 1 << 22
+
+
+def character_start(buffer, position):
+    """The position, or else the start of the UTF-8 character it falls in."""
+    for _ in range(3):
+        if 0x80 <= buffer[position] < 0xC0:
+            position -= 1
+    return position
+
+
+def output_lines(command, *, environment=None, overlap=0, check=True):
+    """A command's output a line at a time, as it comes: for output that is
+    looked at rather than kept, and may be too large to hold whole. Nothing
+    in it is scrubbed: a caller that prints any of it scrubs that. Lines end
+    at LF only, and every other byte is kept as given; a text read would
+    have turned a CR into a line end. Each line comes as (bytes, True). Of a
+    line whose end has not come yet, no more than PART is held besides the
+    last read: such a line comes in parts, each after the first as (bytes,
+    False) and beginning with at least the last `overlap` bytes of the one
+    before, so that nothing that long is cut in two; no part is cut inside
+    a UTF-8 character. A failure is raised once the output has been read,
+    unless check is False."""
+    part = max(PART, 2 * overlap)
+    with tempfile.TemporaryFile() as diagnostics:
+        with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=diagnostics) as process:
+            pending, first = bytearray(), True
+            for chunk in iter(lambda: process.stdout.read(1 << 20), b""):
+                pending += chunk
+                end = pending.rfind(b"\n")
+                if end >= 0:
+                    for line in bytes(pending[:end]).split(b"\n"):
+                        yield line, first
+                        first = True
+                    del pending[:end + 1]
+                while len(pending) > part:
+                    cut = character_start(pending, part)
+                    yield bytes(pending[:cut]), first
+                    first = False
+                    del pending[:character_start(pending, cut - overlap)]
+            if pending:
+                yield bytes(pending), first
+        if check and process.returncode != 0:
+            diagnostics.seek(0)
+            raise DeliveryError("Command failed (exit %d): %s\n%s" % (
+                process.returncode, shlex.join(command),
+                scrub(diagnostics.read().decode("utf-8", "replace"))))
+
+
+def output_head(command, size, *, environment=None):
+    """The first size bytes of a command's output, or all of it when it is
+    shorter. No more is read: once size bytes have come, the command is
+    stopped. A failure before then is raised."""
+    with tempfile.TemporaryFile() as diagnostics:
+        with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=diagnostics, bufsize=0) as process:
+            head = b""
+            while len(head) < size:
+                chunk = process.stdout.read(size - len(head))
+                if not chunk:
+                    break
+                head += chunk
+            stopped = len(head) == size and process.poll() is None
+            if stopped:
+                process.kill()
+        if not stopped and process.returncode != 0:
+            diagnostics.seek(0)
+            raise DeliveryError("Command failed (exit %d): %s\n%s" % (
+                process.returncode, shlex.join(command),
+                scrub(diagnostics.read().decode("utf-8", "replace"))))
+        return head
 
 
 def api(method, path, *, payload=None, timeout=None):

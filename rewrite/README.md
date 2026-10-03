@@ -494,14 +494,45 @@ change, and the conflict is handled like any other (below). For this the
 delivery process's sandbox grant must cover the working tree as well as
 `.git`.
 
+The delivery refuses a change that carries the delivery credential, or text
+listed in `DELIVERY_FORBIDDEN_TEXT` (in any letter case, each entry without
+the blanks around it), in a line it adds or in the name of a path it touches.
+Every added line is looked at whole: a line ends where Git ends it, at LF, so
+a CR, a form feed or a line separator inside it hides nothing after it. A file
+Git takes as binary, for a NUL byte or for an attribute, is looked at
+as text all the same, no diff program or text conversion stands in for the
+lines, and text in UTF-16, which has a NUL beside each ASCII character, is
+also looked at with its NULs taken out. Lines are read one at a time, and a
+long line in parts of about 4 MiB that overlap by more than any text looked
+for can take written in UTF-8, UTF-16 or UTF-32. Git's other reads of the
+change before the commit, whether anything is staged and its check for
+conflict markers, hold no more of it either, so neither a large change nor a
+long line is held in memory whole.
+
 A change that is not UTF-8, such as a file kept in Shift_JIS or a name Git
 gives in such bytes, is delivered byte for byte. Its names are held to the
 operator's grant like any other, and forbidden text written in ASCII is found
 in it as written. Forbidden text that is not ASCII cannot be looked for in
 such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
-them is refused, saying so, rather than delivered unchecked. Where such a name
+them is refused, saying so, rather than delivered unchecked. A file whose
+staged version Git takes as binary for its content, for a NUL byte in its
+first 8000 bytes as an image or text in UTF-16 has, is not refused for its
+bytes: in it, an entry that is not ASCII is found only where it is written in
+UTF-8, while ASCII entries and the credential are found as in any other file.
+That holds for a file in Shift_JIS with a NUL byte that early as well.
+Neither an attribute nor the version a change replaces decides it, though
+either makes Git take a file as binary: text in Shift_JIS is refused under a
+`binary` or `-diff` attribute and in place of a file that held a NUL. Those
+first 8000 bytes are read only for a file the change would otherwise be
+refused for. Where such a name
 or text is printed or recorded, each byte that is not UTF-8 shows as a
-replacement character (U+FFFD).
+replacement character (U+FFFD). Two limits follow from looking at bytes. An
+ASCII entry can be found where none was written: the second byte of a
+Shift_JIS character can be an ASCII letter, so `ツode` (bytes 83 63 6F 64 65)
+holds `code`, and such a change is refused although it carries no forbidden
+text. And Japanese in a 7-bit encoding such as ISO-2022-JP is all ASCII bytes,
+so the rule for entries that are not ASCII does not apply to it, and an entry
+such as `社外秘` is not found in it.
 
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the

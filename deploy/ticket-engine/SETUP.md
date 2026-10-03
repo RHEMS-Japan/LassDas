@@ -482,6 +482,13 @@ names) and `DELIVERY_AUTHOR_NAME` / `DELIVERY_AUTHOR_EMAIL` for its commits,
 which are otherwise authored as "ticket engine". The pull request is titled
 `Deliver <ISSUE-KEY>`, comes from the branch `ticket/<ISSUE-KEY>`, and is
 merged as `Deliver <ISSUE-KEY> (#<number>)` when the delivery merges it.
+While `DELIVERY_FORBIDDEN_TEXT` lists text that is not ASCII, such as a name
+in Japanese, a change with a text file that is not UTF-8 (one kept in
+Shift_JIS, say) is refused, since such text cannot be looked for in it, and
+an attribute such as `binary` or `-diff` on the file does not change that. A
+file with a NUL byte in its first 8000 bytes, which Git takes as binary, such
+as an image, is delivered, and the text is found in it only where written in
+UTF-8, even where the rest of the file is text in Shift_JIS.
 
 Git settings (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_n` and
 `GIT_CONFIG_VALUE_n`, or `GIT_CONFIG_PARAMETERS`) put in a process's `env`, or

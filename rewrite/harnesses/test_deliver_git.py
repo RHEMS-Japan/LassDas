@@ -5,15 +5,18 @@ process asked for, so a refusal is checked by what was NOT sent, and a rerun
 is checked by the absence of a second push, pull request or merge.
 """
 import http.server
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import threading
 import unittest
 import urllib.parse
+import zlib
 
 SCRIPT = Path(__file__).with_name("deliver_git.py").resolve()
 SUPPORT = Path(__file__).with_name("delivery_support.py").resolve()
@@ -403,6 +406,34 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("theirs and ours", self.git(self.remote, "show", "refs/heads/master:main.go").stdout)
         self.assertFalse((self.workspace / ".git" / "MERGE_HEAD").exists())
 
+    def test_a_refusal_for_conflict_markers_shows_no_credential(self):
+        # Git's whitespace check prints a line with a whitespace error whole,
+        # and one that mentions a conflict marker is taken for one, as on main.
+        self.change("main.go", "package main // a conflict marker %s \n" % TOKEN)
+        refused = self.deliver()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("conflict markers in: +package main // a conflict marker [credential] ", refused.stdout)
+        self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+
+    def test_a_refusal_for_conflict_markers_shows_no_piece_of_a_credential_a_cut_goes_through(self):
+        # Git's check prints a long line whole, and it is read in parts: here
+        # the credential lies across the first cut, 20 of its bytes before it,
+        # and the line mentions a conflict marker before the cut or after it.
+        # A cut leaves the credential's start in one part and its end in the
+        # next, so neither may be shown.
+        pieces = ([TOKEN[:end] for end in range(10, len(TOKEN) + 1)]
+                  + [TOKEN[start:] for start in range(1, len(TOKEN) - 9)])
+        cut = self.first_cut()
+        for before, after in (("a conflict marker ", ""), ("", " a conflict marker")):
+            (self.workspace / "main.go").write_text(
+                before + "a" * (cut - len(before) - 20) + TOKEN + "a" * (2 << 20) + after + " \n")
+            refused = self.deliver()
+            self.assertEqual(refused.returncode, 1, refused.stderr[-2000:])
+            self.assertIn("conflict markers in: ", refused.stdout)
+            output = refused.stdout + refused.stderr
+            self.assertEqual([piece for piece in pieces if piece in output], [])
+
     def test_the_integration_branch_s_own_paths_need_no_grant(self):
         # notes.md and a non-ASCII name are outside the grant; the integration
         # branch changing them is not the worker's change and must not stop
@@ -546,6 +577,117 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("forbidden text", refused.stdout)
         self.assertEqual(self.state["pulls"], [])
+
+    def refused_as_written(self, relative, data, expected, **settings):
+        """One file written as these bytes, and a delivery that refuses it."""
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        refused = self.deliver(**settings)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(expected, refused.stdout)
+        self.assertNotIn(TOKEN, refused.stdout + refused.stderr)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+
+    def forbidden_text_and_credential_refused_in(self, relative, encode):
+        self.refused_as_written(relative, encode("package main // internal-project-codename\n"),
+                                "contains configured forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.refused_as_written(relative, encode("package main // %s\n" % TOKEN), "contains the delivery credential")
+
+    def test_text_after_a_break_inside_a_line_is_still_looked_at(self):
+        # Git ends a line at LF only. Read as text, a CR in a line became a
+        # line end, and splitting the text split a line at a form feed, a
+        # vertical tab or a line separator as well: what followed was not
+        # taken as added, and was delivered.
+        for mark in ("\r", "\x0b", "\x0c", "\N{LINE SEPARATOR}"):
+            self.forbidden_text_and_credential_refused_in(
+                "main.go", lambda text: text.replace("// ", "//" + mark).encode())
+
+    def test_text_in_a_file_with_a_nul_byte_is_still_looked_at(self):
+        # Git takes such a file as binary and shows no line of it.
+        self.forbidden_text_and_credential_refused_in("library/data.bin", lambda text: b"\x00" + text.encode())
+
+    def test_text_in_a_file_an_attribute_keeps_from_the_diff_is_still_looked_at(self):
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / ".gitattributes").write_text("*.txt -diff\n")
+        self.forbidden_text_and_credential_refused_in("library/notes.txt", str.encode)
+
+    def test_text_in_utf16_is_still_looked_at(self):
+        # Git takes it as binary for its NULs: in UTF-16 each ASCII character
+        # has one beside it.
+        self.forbidden_text_and_credential_refused_in("library/notes.txt",
+                                                      lambda text: ("\N{BYTE ORDER MARK}" + text).encode("utf-16-le"))
+
+    def first_cut(self):
+        """Where, in a file that is one added line, the first part the check
+        holds of that line ends: the diff puts one byte before the line. The
+        line has to go on past the next read of Git's output for the part to
+        be cut there, so these lines go on 2 MiB further."""
+        spec = importlib.util.spec_from_file_location("delivery_support_parts", SUPPORT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.PART - 1
+
+    def test_text_across_the_parts_of_a_long_line_is_still_looked_at(self):
+        # A line longer than a part is looked at in parts that overlap by more
+        # than any text the check looks for takes.
+        cut, more = self.first_cut(), b"a" * (2 << 20)
+        word = b"internal-project-codename"
+        for found, expected, settings in ((word, "forbidden text (1 entry)",
+                                           {"DELIVERY_FORBIDDEN_TEXT": "internal-project-codename"}),
+                                          (TOKEN.encode(), "the delivery credential", {})):
+            self.refused_as_written("library/long.txt", b"a" * (cut - len(found) + 1) + found + more + b"\n",
+                                    expected, **settings)
+        # In UTF-16, the word with a NUL beside each character, 50 bytes, 41 of
+        # them before the cut: neither part holds all of it unless the overlap
+        # counts the NULs as well.
+        self.refused_as_written("library/long.txt", "\N{BYTE ORDER MARK}".encode("utf-16-le")
+                                + ("a" * ((cut - 43) // 2) + "internal-project-codename" + "a" * len(more) + "\n")
+                                .encode("utf-16-le"), "forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        # A word that is not ASCII, across the cut, in characters of three bytes.
+        self.refused_as_written("library/long.txt", ("x" + "あ" * ((cut - 7) // 3) + "社外秘" + "あ" * len(more) + "\n")
+                                .encode(), "forbidden text (1 entry)", DELIVERY_FORBIDDEN_TEXT="社外秘")
+
+    def test_a_long_line_without_forbidden_text_is_delivered_as_it_is(self):
+        # The cut falls inside a character of three bytes; read as two halves,
+        # each would be bytes that are not UTF-8, which an entry that is not
+        # ASCII makes a refusal.
+        cut = self.first_cut()
+        content = ("x" + "あ" * (cut // 3 + (2 << 20)) + "\n").encode()
+        self.assertTrue(0x80 <= content[cut] < 0xC0, "the cut is not inside a character")
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "long.txt").write_bytes(content)
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.stored("refs/heads/master:library/long.txt"), content)
+
+    def test_a_large_file_of_random_bytes_is_delivered(self):
+        # 200 MB, whose lines the check looks at one by one.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        path = self.workspace / "library" / "random.bin"
+        with open(path, "wb") as written:
+            for _ in range(200):
+                written.write(os.urandom(1 << 20))
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.git(self.remote, "rev-parse", "refs/heads/master:library/random.bin").stdout,
+                         self.git(self.workspace, "hash-object", str(path)).stdout)
+
+    def test_a_diff_program_does_not_stand_in_for_the_lines(self):
+        # One that prints its own format, named in the checkout's configuration.
+        self.git(self.workspace, "config", "diff.external", "printf 'changed: %s\\n'")
+        self.refused_as_written("main.go", b"package main // internal-project-codename\n",
+                                "contains configured forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+
+    def test_a_text_conversion_does_not_stand_in_for_the_lines(self):
+        # One that the checkout's configuration defines and an attribute names.
+        self.git(self.workspace, "config", "diff.plain.textconv", "true")
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / ".gitattributes").write_text("*.txt diff=plain\n")
+        self.forbidden_text_and_credential_refused_in("library/notes.txt", str.encode)
 
     def test_a_catch_up_merge_made_before_its_receipt_was_written_is_delivered(self):
         self.advance_integration_branch("library/run.go", "package library\n\nfunc Other() {}\n")
@@ -1455,6 +1597,175 @@ class DeliveryTests(unittest.TestCase):
         self.change("main.go", "package main // 日本語の説明\n")
         done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_an_entry_is_told_to_be_ascii_as_it_is_looked_for(self):
+        # An entry is looked for without the blanks around it, so a full-width
+        # space after an ASCII entry does not make it one that cannot be looked
+        # for in a change that is not UTF-8.
+        self.shift_jis("main.go", "package main // 日本語の説明\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename\N{IDEOGRAPHIC SPACE}")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Delivered TICKET-41", done.stdout)
+
+    @staticmethod
+    def image():
+        """A 64x64 PNG: a NUL in its first 8000 bytes makes Git take it as binary,
+        and most of its bytes are not UTF-8.
+        Its pixels are kept in stored zlib blocks, as a PNG may keep them."""
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        rows = b"".join(b"\0" + bytes((x * 7 + y * 13) % 256 for x in range(64 * 3)) for y in range(64))
+        stored = b"\x78\x01" + b"".join(
+            bytes([start + 65535 >= len(rows)]) + struct.pack("<HH", len(block), 0xFFFF - len(block)) + block
+            for start in range(0, len(rows), 65535) for block in [rows[start:start + 65535]])
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", stored + struct.pack(">I", zlib.adler32(rows))) + chunk(b"IEND", b""))
+
+    def test_an_image_is_delivered_while_an_entry_that_is_not_ascii_is_configured(self):
+        # The refusal of bytes that are not UTF-8 is for text, in which such an
+        # entry could be written another way; a file Git takes as binary for a
+        # NUL in its first 8000 bytes is looked through for it as written in
+        # UTF-8 instead.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "logo.png").write_bytes(self.image())
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.stored("refs/heads/master:library/logo.png"), self.image())
+
+    def test_an_entry_that_is_not_ascii_is_found_in_an_image_where_written_in_utf8(self):
+        self.refused_as_written("library/logo.png", self.image() + "社外秘".encode(), "forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="社外秘")
+
+    def text_beside_an_image_is_refused(self, image):
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / image).write_bytes(self.image())
+        self.shift_jis("library/legacy.txt", "表示とソース\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("carries text that is not UTF-8", refused.stdout)
+        self.assertEqual(self.methods(), [])
+
+    def test_text_that_is_not_utf8_beside_an_image_is_still_refused(self):
+        self.text_beside_an_image_is_refused("logo.png")
+
+    def test_text_that_is_not_utf8_after_an_image_in_the_diff_is_still_refused(self):
+        # Each file is asked about for itself: here the image comes first.
+        self.text_beside_an_image_is_refused("art.png")
+
+    def refused_though_git_takes_it_as_binary(self, relative):
+        """社外秘 in Shift_JIS written to relative, a change Git takes as
+        binary: refused for its bytes all the same, as other such text is."""
+        self.shift_jis(relative, "社外秘の一覧\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("carries text that is not UTF-8", refused.stdout)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+        counts = self.git(self.workspace, "diff", "--cached", "--numstat", "--", relative).stdout
+        self.assertTrue(counts.startswith("-\t-\t"), "Git does not take the change as binary: " + counts)
+
+    def test_text_that_is_not_utf8_is_refused_under_an_attribute_that_makes_it_binary(self):
+        # An attribute decides what Git takes as binary, and a change may carry
+        # one. Text is told from an image by its staged version's first bytes.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        for attribute in ("-diff", "binary"):
+            (self.workspace / "library" / ".gitattributes").write_text("*.txt %s\n" % attribute)
+            self.refused_though_git_takes_it_as_binary("library/legacy.txt")
+
+    def test_text_that_is_not_utf8_is_refused_in_place_of_a_file_with_a_nul_byte(self):
+        # Git takes the change as binary for the NUL in the version it replaces.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "legacy.txt").write_bytes(b"\0 a table kept in bytes\n")
+        self.git(self.workspace, "add", "library/legacy.txt")
+        self.git(self.workspace, "commit", "-m", "Codex: a file with a NUL byte")
+        self.git(self.workspace, "push", "origin", "HEAD:master")
+        self.refused_though_git_takes_it_as_binary("library/legacy.txt")
+
+    @staticmethod
+    def shift_jis_with_a_nul(at):
+        """社外秘 in Shift_JIS, some 10,000 bytes in all, with a NUL byte at `at`."""
+        text = ("社外秘の一覧\n" + "表示とソースの説明です。\n" * 400).encode("shift_jis")
+        return text[:at] + b"\0" + text[at:]
+
+    @staticmethod
+    def pdf(nul_at):
+        """A small PDF whose stream holds bytes that are not UTF-8, with NULs at nul_at."""
+        data = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Length 12240 >>\nstream\n" + bytes(range(1, 256)) * 48
+        return data[:nul_at] + b"\0" * 4 + data[nul_at:] + b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
+
+    def test_a_file_git_takes_as_binary_for_a_nul_in_its_first_8000_bytes_is_delivered(self):
+        # As on main, where such a file was not looked at: other text is found
+        # in it where written in UTF-8, and Shift_JIS with a NUL that early
+        # goes through like an image.
+        for relative, data in (("library/early.txt", self.shift_jis_with_a_nul(20)),
+                               ("library/edge.txt", self.shift_jis_with_a_nul(7999)),
+                               ("library/early.pdf", self.pdf(100))):
+            (self.workspace / relative).write_bytes(data)
+            done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(self.stored("refs/heads/master:" + relative), data)
+            counts = self.git(self.remote, "diff", "--numstat", "refs/heads/master^1", "refs/heads/master", "--",
+                              relative).stdout
+            self.assertTrue(counts.startswith("-\t-\t"), "Git does not take the change as binary: " + counts)
+
+    def test_text_with_a_nul_past_its_first_8000_bytes_is_still_refused(self):
+        # Git looks for a NUL in the first 8000 bytes only, and takes the rest
+        # of such a file as text, as main refused it.
+        for data in (self.shift_jis_with_a_nul(8000), self.shift_jis_with_a_nul(10000), self.pdf(9000)):
+            self.refused_as_written("library/late.txt", data, "carries text that is not UTF-8",
+                                    DELIVERY_FORBIDDEN_TEXT="社外秘")
+            counts = self.git(self.workspace, "diff", "--cached", "--numstat", "--", "library/late.txt").stdout
+            self.assertFalse(counts.startswith("-\t"), "Git takes the change as binary: " + counts)
+
+    def test_a_file_changed_in_place_is_judged_by_its_staged_version(self):
+        # The line the change adds holds no NUL, but the file still begins with
+        # one, so Git takes it as binary as before, and it is delivered.
+        (self.workspace / "library" / "data.bin").write_bytes(b"\0header\n\x89\x90\x91 body\n")
+        self.git(self.workspace, "add", "library/data.bin")
+        self.git(self.workspace, "commit", "-m", "Codex: a file with a NUL byte")
+        self.git(self.workspace, "push", "origin", "HEAD:master")
+        (self.workspace / "library" / "data.bin").write_bytes(b"\0header\n\x89\x90\x92 body\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.stored("refs/heads/master:library/data.bin"), b"\0header\n\x89\x90\x92 body\n")
+
+    def test_a_staged_file_is_read_only_where_it_decides_a_refusal(self):
+        def reads():
+            return [line for line in self.git_log.read_text().splitlines() if " cat-file " in line]
+        # Nothing is read for a change in UTF-8, nor where every entry is ASCII.
+        self.change("main.go", "package main // 日本語の説明\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.shift_jis("main.go", "package main // 表示とソース\n")
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(reads(), [])
+        # An image is read once.
+        (self.workspace / "library" / "logo.png").write_bytes(self.image())
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        blob = self.git(self.workspace, "rev-parse", "HEAD:library/logo.png").stdout.strip()
+        self.assertEqual(len(reads()), 1, reads())
+        self.assertTrue(blob.startswith(reads()[0].rsplit(" ", 1)[1]), reads())
+
+    def test_a_staged_file_git_could_not_read_is_not_left_out(self):
+        # The file is taken as text, and the change refused, whether Git's read
+        # fails with nothing written, writes nothing and ends well, or writes a
+        # NUL and then fails.
+        behaviour, reads = self.root / "cat-file-behaviour", self.root / "cat-file-reads"
+        directory = self.root / "failing-cat-file-bin"
+        directory.mkdir()
+        shim = directory / "git"
+        shim.write_text('#!/bin/sh\ncase " $* " in *" cat-file "*) echo >> "%s"; . "%s";; esac\nexec "%s" "$@"\n'
+                        % (reads, behaviour, self.root / "bin" / "git"))
+        shim.chmod(0o755)
+        self.path = str(directory) + os.pathsep + self.path
+        for number, script in enumerate(("exit 128\n", "exit 0\n", "printf '\\000'\nexit 1\n"), 1):
+            behaviour.write_text(script)
+            self.shift_jis("library/legacy.txt", "社外秘の一覧\n")
+            refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+            self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+            self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+            self.assertEqual(len(reads.read_text().splitlines()), number, "Git was not asked for the file")
 
     def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")
