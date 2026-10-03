@@ -19,6 +19,21 @@ import (
 	"ticket-runner/internal/tracker"
 )
 
+// A regression must fail locally, not wait for go test's package timeout.
+func exampleCheckContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func TestExampleChecksHaveAShortDeadline(t *testing.T) {
+	deadline, ok := exampleCheckContext(t).Deadline()
+	if left := time.Until(deadline); !ok || left <= 0 || left > 2*time.Second {
+		t.Fatalf("example checks are not bounded to two seconds: deadline=%v set=%v", deadline, ok)
+	}
+}
+
 func loadExample(t *testing.T, path string) config {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -153,7 +168,7 @@ func exampleBoundaries(t *testing.T, path, workerKey string, gateway bool) {
 	})
 	root := filepath.Join(t.TempDir(), "must-not-be-created")
 	var log bytes.Buffer
-	err := watchRequests(context.Background(), cfg, root, &log)
+	err := watchRequests(exampleCheckContext(t), cfg, root, &log)
 	if err == nil || !strings.Contains(err.Error(), "explicit intake.project_id") {
 		t.Fatalf("unset scope did not stop intake: %v", err)
 	}
@@ -833,12 +848,12 @@ func TestAnExampleLeftPartlyUneditedIsRefused(t *testing.T) {
 		cfg.Backlog.BaseURL = "https://tracker.example.com/api/v2"
 		cfg.Intake.ProjectID, cfg.Intake.CreatedSince = 17, "2026-01-02T00:00:00Z"
 		root := filepath.Join(t.TempDir(), "must-not-be-created")
-		err := watchRequests(context.Background(), cfg, root, io.Discard)
+		err := watchRequests(exampleCheckContext(t), cfg, root, io.Discard)
 		if err == nil || !strings.HasPrefix(err.Error(), "instructions still holds the example's paragraph") {
 			t.Fatalf("%s with the example's instructions: %v", path, err)
 		}
 		cfg.Instructions = "Deliver to the project's repository."
-		err = watchRequests(context.Background(), cfg, root, io.Discard)
+		err = watchRequests(exampleCheckContext(t), cfg, root, io.Discard)
 		if err == nil || !strings.HasSuffix(err.Error(), " still holds the example's placeholder host under example.invalid; a watch needs your own value there") ||
 			!strings.Contains(err.Error()[:strings.Index(err.Error(), " still holds")], ".") {
 			t.Fatalf("%s with the example's hosts: %v", path, err)
