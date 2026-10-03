@@ -784,6 +784,38 @@ class AdversarialReviewTests(unittest.TestCase):
     def test_git_uses_no_diff_program_from_the_environment(self):
         self.reviewed_as_it_is({"GIT_EXTERNAL_DIFF": "true"}, "+    return 2  # changed")
 
+    def test_git_carriage_returns_in_diffs_and_names_reach_the_reviewer_unchanged(self):
+        self.end_lines_only()
+        name = "src/notes\rname.txt"
+        (self.workspace / name).write_text("contents of the file whose name contains CR\n")
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        finished = self.run_review(service)
+        self.assertEqual(finished.returncode, 0, (finished.stdout, finished.stderr))
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("+def run():\r\n+    return 1\r\n", text)
+        self.assertIn("--- new file %s ---\ncontents of the file whose name contains CR" % name, text)
+        self.assertNotIn("src/notes\nname.txt", text)
+
+    def test_only_git_gets_the_fixed_diagnostic_locale(self):
+        shim = self.home.parent / "git-locale"
+        shim.mkdir()
+        (shim / "git").write_text(
+            "#!/bin/sh\n"
+            "if [ \"$LC_ALL\" != C ]; then echo 'unexpected git locale' >&2; exit 91; fi\n"
+            "exec %s \"$@\"\n" % shutil.which("git"))
+        (shim / "git").chmod(0o755)
+        service = ModelStandIn([{"verdict": (False, "")}])
+        self.addCleanup(service.close)
+        command = sys.executable + " -c \"import os; print('test locale: ' + os.environ['LC_ALL'])\""
+        # The command's locale is an operator choice. Git alone needs English
+        # diagnostics; there is no dependency on installed translated locales.
+        finished = self.run_review(service, **self.PASS, LC_ALL="C.UTF-8",
+                                   PATH=str(shim) + os.pathsep + os.environ["PATH"], REVIEW_TEST_COMMANDS=command)
+        self.assertEqual(finished.returncode, 0, (finished.stdout, finished.stderr))
+        text = service.requests[0]["body"]["messages"][1]["content"]
+        self.assertIn("test locale: C.UTF-8", text)
+
     def test_the_review_drops_what_the_delivery_drops_on_the_workspace(self):
         # The review's bundle carries no delivery_support, so each keeps its
         # own list of what it drops from Git's environment. Lists that drift

@@ -249,7 +249,9 @@ def git_environment():
     environment = {name: value for name, value in os.environ.items() if name not in (
         "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_ATTR_SOURCE", "GIT_EXTERNAL_DIFF") and not GIT_SETTINGS.fullmatch(name)}
-    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    # Error excerpts below recognize Git's fatal/error prefixes. Keep Git's
+    # diagnostics in that language without changing the role's test commands.
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
     return environment
 
 
