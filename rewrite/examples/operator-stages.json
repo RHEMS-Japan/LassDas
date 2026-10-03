@@ -31,7 +31,7 @@
     "stop_report_role": "stop_report",
     "question_role": "ask_requester"
   },
-  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, the delivery target, and what each configured command in this run actually builds, tests, delivers and reads back, before accepting work. Progress in this run is decided by the configured commands, not by anything a role writes: a stage that runs a command is carried on only when that command exits 0, and a stage that runs a model is carried on by the command that follows it. Writing that the work is finished, verified or delivered changes nothing. Keep the original request and its boundaries throughout recovery. Only the configured question role asks the requester anything, and only at the entrance, before the work is handed over; after that, resolve uncertainty with the existing roles. Work reports are observations, not permission to expand scope. The runtime adds its own record of what each stage's processes returned; read it rather than assuming an earlier claim was true. A failing command has no ending: it is handed back for repair and run again.",
+  "instructions": "Operator setup is incomplete: replace this paragraph with the approved project guidance, the delivery target, and what each configured command in this run actually builds, tests, delivers and reads back, before accepting work. Progress in this run is decided by the configured commands, not by anything a role writes: a stage that runs a command is carried on only when that command exits 0, and a stage that runs a model is carried on by the command that follows it. Writing that the work is finished, verified or delivered changes nothing. Keep the original request and its boundaries throughout recovery. Only the configured question role asks the requester anything, and only at the entrance, before the work is handed over; after that, resolve uncertainty with the existing roles. Work reports are observations, not permission to expand scope. The runtime adds its own record of what each stage's processes returned; read it rather than assuming an earlier claim was true. A failing command has no ending: it is handed back for repair and run again. Knowledge from requester answers: when a requester answer is needed, settle the approved in-repository write destination during elicitation. The operator supplies it in these instructions; a knowledge reading location alone is not permission to write there. If no write destination is provided, the question role offers repository-appropriate file choices once, together with the necessary question, and keeps the answered choice. This is permission to persist knowledge, not a style question. With no requester answer, do not ask for a destination just to create an empty note. The work role integrates reusable answers with their question context into that agreed file alongside the requested change; preserve existing knowledge, avoid duplicates on retries, and do not record credentials, unnecessary private information or guesses as answers. Keep the original request and write permissions; an answer does not grant wider code changes. The review role checks the written knowledge against the actual question and answer, including omissions or contradictions, as part of reviewing the whole change. Deliver these knowledge changes through the same reviewed pull request, never a separate unreviewed push.",
   "workflow": {
     "stages": [
       {
@@ -209,7 +209,8 @@
           "model_env": "NATIVE_MODEL",
           "secrets": {
             "OPENROUTER_API_KEY": "MODEL_API_KEY"
-          }
+          },
+          "tracker_access": "read"
         }
       ]
     },
