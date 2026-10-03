@@ -1180,9 +1180,17 @@ stop stops it, no work is launched, and the requester is told once:
 > 自動処理を一時停止しました。モデル利用枠の残りが設定の下限を下回ったためです。枠が戻り次第、自動で再開します。
 
 The balance keeps being read each tick. When it is back above the floor the
-request is launched again and says so once:
+request waits for an execution slot, is launched again and says so once:
 
-> モデル利用枠が回復したため、自動処理を再開しました。
+> モデル利用枠が回復し、自動処理を開始しました。
+
+With `intake.announce`, a request first accepted while the balance is low gets
+one receipt saying it is waiting for the model allowance, not a promise to
+start immediately followed by a pause. An answer received while it is low
+likewise gets one acknowledgement saying it is waiting. Those receipts replace
+the separate pause comment for that episode, including after a restart. The
+recovery comment is sent when execution starts, not merely when credit returns
+while another request still occupies the slot.
 
 An authorized stop does not wait for the balance: recording it launches no
 model. A request held below the floor is still read for a stop on every tick,
