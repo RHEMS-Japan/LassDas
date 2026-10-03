@@ -10,11 +10,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import threading
 import unittest
 import urllib.parse
+import zlib
 
 SCRIPT = Path(__file__).with_name("deliver_git.py").resolve()
 SUPPORT = Path(__file__).with_name("delivery_support.py").resolve()
@@ -1576,6 +1578,42 @@ class DeliveryTests(unittest.TestCase):
         done = self.deliver(DELIVERY_FORBIDDEN_TEXT="internal-project-codename\N{IDEOGRAPHIC SPACE}")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("Delivered TICKET-41", done.stdout)
+
+    @staticmethod
+    def image():
+        """A 64x64 PNG: Git takes it as binary, and most of its bytes are not UTF-8.
+        Its pixels are kept in stored zlib blocks, as a PNG may keep them."""
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        rows = b"".join(b"\0" + bytes((x * 7 + y * 13) % 256 for x in range(64 * 3)) for y in range(64))
+        stored = b"\x78\x01" + b"".join(
+            bytes([start + 65535 >= len(rows)]) + struct.pack("<HH", len(block), 0xFFFF - len(block)) + block
+            for start in range(0, len(rows), 65535) for block in [rows[start:start + 65535]])
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", stored + struct.pack(">I", zlib.adler32(rows))) + chunk(b"IEND", b""))
+
+    def test_an_image_is_delivered_while_an_entry_that_is_not_ascii_is_configured(self):
+        # The refusal of bytes that are not UTF-8 is for text, in which such an
+        # entry could be written another way; a file Git takes as binary is
+        # looked through for it as written in UTF-8 instead.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "logo.png").write_bytes(self.image())
+        done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.stored("refs/heads/master:library/logo.png"), self.image())
+
+    def test_an_entry_that_is_not_ascii_is_found_in_an_image_where_written_in_utf8(self):
+        self.refused_as_written("library/logo.png", self.image() + "社外秘".encode(), "forbidden text (1 entry)",
+                                DELIVERY_FORBIDDEN_TEXT="社外秘")
+
+    def test_text_that_is_not_utf8_beside_an_image_is_still_refused(self):
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "logo.png").write_bytes(self.image())
+        self.shift_jis("library/legacy.txt", "表示とソース\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("carries text that is not UTF-8", refused.stdout)
+        self.assertEqual(self.methods(), [])
 
     def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")

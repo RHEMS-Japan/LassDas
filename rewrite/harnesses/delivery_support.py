@@ -225,7 +225,7 @@ def character_start(buffer, position):
     return position
 
 
-def output_lines(command, *, environment=None, overlap=0):
+def output_lines(command, *, environment=None, overlap=0, check=True):
     """A command's output a line at a time, as it comes: for output that is
     looked at, never printed, and may be too large to hold whole. Lines end
     at LF only, and every other byte is kept as given; a text read would
@@ -234,7 +234,8 @@ def output_lines(command, *, environment=None, overlap=0):
     last read: such a line comes in parts, each after the first as (bytes,
     False) and beginning with at least the last `overlap` bytes of the one
     before, so that nothing that long is cut in two; no part is cut inside
-    a UTF-8 character. A failure is raised once the output has been read."""
+    a UTF-8 character. A failure is raised once the output has been read,
+    unless check is False."""
     part = max(PART, 2 * overlap)
     with tempfile.TemporaryFile() as diagnostics:
         with subprocess.Popen(command, env=environment or git_environment(), stdin=subprocess.DEVNULL,
@@ -255,7 +256,7 @@ def output_lines(command, *, environment=None, overlap=0):
                     del pending[:character_start(pending, cut - overlap)]
             if pending:
                 yield bytes(pending), first
-        if process.returncode != 0:
+        if check and process.returncode != 0:
             diagnostics.seek(0)
             raise DeliveryError("Command failed (exit %d): %s\n%s" % (
                 process.returncode, shlex.join(command),

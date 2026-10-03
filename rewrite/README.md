@@ -504,15 +504,20 @@ as text all the same, no diff program or text conversion stands in for the
 lines, and text in UTF-16, which has a NUL beside each ASCII character, is
 also looked at with its NULs taken out. Lines are read one at a time, and a
 long line in parts of about 4 MiB that overlap by more than any text looked
-for can take, so neither a large change nor a long line is held in memory
-whole.
+for can take written in UTF-8, UTF-16 or UTF-32. Git's other reads of the
+change before the commit, whether anything is staged and its check for
+conflict markers, hold no more of it either, so neither a large change nor a
+long line is held in memory whole.
 
 A change that is not UTF-8, such as a file kept in Shift_JIS or a name Git
 gives in such bytes, is delivered byte for byte. Its names are held to the
 operator's grant like any other, and forbidden text written in ASCII is found
 in it as written. Forbidden text that is not ASCII cannot be looked for in
 such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
-them is refused, saying so, rather than delivered unchecked. Where such a name
+them is refused, saying so, rather than delivered unchecked. A file Git takes
+as binary, such as an image, is not refused for its bytes: in it, an entry
+that is not ASCII is found only where it is written in UTF-8, while ASCII
+entries and the credential are found as in any other file. Where such a name
 or text is printed or recorded, each byte that is not UTF-8 shows as a
 replacement character (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a
