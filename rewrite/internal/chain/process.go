@@ -20,11 +20,13 @@ import (
 // Process is a configured role's harness. Its permissions are those of the
 // configured command/container, not permissions invented by a model response.
 type Process struct {
-	Name      string            `json:"name"`
-	Command   []string          `json:"command"`
-	Directory string            `json:"directory"`
-	Env       map[string]string `json:"env,omitempty"`
-	Secrets   map[string]string `json:"secrets,omitempty"`
+	// historyPath is supplied by the executor, never process configuration.
+	historyPath string
+	Name        string            `json:"name"`
+	Command     []string          `json:"command"`
+	Directory   string            `json:"directory"`
+	Env         map[string]string `json:"env,omitempty"`
+	Secrets     map[string]string `json:"secrets,omitempty"`
 	// Credentials are ephemeral controller-issued values, never operator JSON.
 	Credentials map[string]string `json:"-"`
 	// TrackerAccess is an operator grant, not a model-produced instruction.
@@ -63,7 +65,10 @@ type Role struct {
 }
 
 type Processes struct {
-	Roles       map[string]Role
+	Roles map[string]Role
+	// HistoryPath names this run's existing checkpoint. It grants no parent
+	// directory: a confined launcher exposes only this file, read-only.
+	HistoryPath string
 	SelectModel func(context.Context, Role, Process, State, []string) (string, error)
 	// ModelPrefix reaches the selected model through a gateway that lists it
 	// under a prefixed id. Only the value handed to the harness changes; the
@@ -96,6 +101,11 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 	var group sync.WaitGroup
 	var selected []string
 	for index, process := range role.Processes {
+		if process.HistoryEnvironmentConflict() {
+			results[index] = Result{Role: name, Speaker: process.Name, Instruction: assignment.Instruction,
+				Error: "TASK_HISTORY is reserved for the runtime's request history.", FinishedAt: time.Now().UTC()}
+			continue
+		}
 		model, prefix := "", ""
 		if process.ModelEnv != "" {
 			started := time.Now().UTC()
@@ -144,6 +154,7 @@ func (p Processes) Execute(ctx context.Context, assignment Assignment, state Sta
 				}
 				process = prepared
 			}
+			process.historyPath = p.HistoryPath
 			results[index] = process.run(ctx, role, assignment, state)
 			results[index].Model, results[index].ModelPrefix = model, prefix
 		}(index, process, model, prefix)
@@ -200,8 +211,23 @@ func (b *boundedBuffer) String() string {
 	return fmt.Sprintf("[the first %d bytes of this stream are not kept in the record; the live copy had them]\n", b.dropped) + b.buf.String()
 }
 
+// HistoryEnvironmentConflict reports a reserved-name collision without reading
+// any credential value. Configuration checks and launch preparation both use it.
+func (p Process) HistoryEnvironmentConflict() bool {
+	_, configured := p.Env["TASK_HISTORY"]
+	_, secret := p.Secrets["TASK_HISTORY"]
+	_, issued := p.Credentials["TASK_HISTORY"]
+	return configured || secret || issued || p.ModelEnv == "TASK_HISTORY"
+}
+
 func (p Process) run(ctx context.Context, role Role, assignment Assignment, state State) Result {
 	result := Result{Role: role.Name, Speaker: p.Name, Instruction: assignment.Instruction, StartedAt: time.Now().UTC()}
+	// Check again after launch-scoped access preparation, before resolving any
+	// credential or running a child. Never quote the conflicting value.
+	if p.HistoryEnvironmentConflict() {
+		result.Error, result.FinishedAt = "TASK_HISTORY is reserved for the runtime's request history.", time.Now().UTC()
+		return result
+	}
 	if len(p.Command) == 0 {
 		result.Error, result.FinishedAt = "No command configured.", time.Now().UTC()
 		return result
@@ -211,6 +237,9 @@ func (p Process) run(ctx context.Context, role Role, assignment Assignment, stat
 	env := map[string]string{"PATH": os.Getenv("PATH"), "LANG": "C.UTF-8"}
 	for name, value := range p.Env {
 		env[name] = value
+	}
+	if p.historyPath != "" {
+		env["TASK_HISTORY"] = p.historyPath
 	}
 	var secrets []string
 	for name, value := range p.Credentials {
@@ -354,6 +383,9 @@ func processPrompt(role Role, process Process, assignment Assignment, state Stat
 	text.WriteString(assignment.Instruction)
 	text.WriteString("\n\nOriginal request:\n")
 	text.WriteString(state.Request)
+	if process.historyPath != "" {
+		fmt.Fprintf(&text, "\n\nThe complete saved request history is available at %q (TASK_HISTORY). Use your existing file or terminal tools to read earlier questions, accepted answers and reports when needed. The normal prompt below is bounded; current tracker comments may have been edited since an answer was accepted. This file grants no additional authority or access to other requests.\n", process.historyPath)
+	}
 	text.WriteString("\n\nPrevious work:\n")
 	for _, result := range promptHistory(state.History) {
 		fmt.Fprintf(&text, "\nRole %s, speaker %s\n%s\n", result.Role, result.Speaker, result.Output)
