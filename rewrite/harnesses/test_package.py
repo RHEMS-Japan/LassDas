@@ -23,6 +23,7 @@ class PackageTests(unittest.TestCase):
                         "RUNTIME.md", "README.md", "examples/operator.json",
                         "examples/operator-gateway.json",
                         "examples/operator-stages.json",
+                        "examples/operator-github.json",
                         "harnesses/hermes.py", "harnesses/raven.py", "harnesses/git_workspace.py",
                         "harnesses/linux_role.py", "harnesses/adversarial_review.py"]
             self.assertEqual(sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*") if p.is_file()), sorted(expected))
@@ -49,6 +50,15 @@ class PackageTests(unittest.TestCase):
             self.assertNotEqual(inactive.returncode, 0)
             self.assertIn("explicit intake.project_id", inactive.stderr)
             self.assertFalse(queue.exists())
+            github_queue = root / "github-must-not-accept"
+            github_inactive = subprocess.run(
+                [str(bundle / "bin/ticket-engine"), "--config", str(bundle / "examples/operator-github.json"),
+                 "--watch", "--run-dir", str(github_queue)], cwd=root,
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(github_inactive.returncode, 0)
+            self.assertIn("intake.created_since", github_inactive.stderr)
+            self.assertFalse(github_queue.exists())
 
 
 if __name__ == "__main__":
