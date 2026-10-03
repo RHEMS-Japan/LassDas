@@ -695,7 +695,8 @@ func noteStall(ctx context.Context, cfg config, n notices, directory string, run
 // first nonblank line, with every configured credential value removed, cut to
 // 200 characters. Scrubbing happens before the cut so no partial key survives.
 // A process that died says only "exit status N" first; its last line, where a
-// harness puts its reason, is added so the comment says why.
+// harness puts its reason, is added so the comment says why. GitHub receives
+// only this detail as inline code, so diagnostic mentions cannot notify users.
 func noticeDetail(cfg config, text string) string {
 	line := firstInstructionLine(text)
 	if strings.HasPrefix(line, "exit status ") || strings.HasPrefix(line, "signal: ") {
@@ -707,7 +708,25 @@ func noticeDetail(cfg config, text string) string {
 		line = strings.ReplaceAll(line, value, "[credential]")
 		line = strings.ReplaceAll(line, url.QueryEscape(value), "[credential]")
 	}
-	return limitRunes(line, 200)
+	line = limitRunes(line, 200)
+	if cfg.GitHub == nil || line == "" {
+		return line
+	}
+	// A delimiter longer than any run inside the detail cannot be closed by
+	// diagnostics. Spaces separate it from leading/trailing backticks; Markdown
+	// removes that padding from the rendered code span. Quote after scrubbing
+	// and truncation so neither operation can cut the closing delimiter away.
+	longest, run := 0, 0
+	for _, ch := range line {
+		if ch == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	delimiter := strings.Repeat("`", longest+1)
+	return delimiter + " " + line + " " + delimiter
 }
 
 // lastInstructionLine is the last nonblank line of a text.
