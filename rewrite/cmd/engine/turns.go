@@ -47,6 +47,7 @@ const (
 	startedNoticeText = "自動処理を開始しました。"
 	resumedNotice     = "resumed"
 	resumedNoticeText = "返答を受け取りました。自動処理を再開しました。"
+	budgetWaitingText = "モデル利用枠の残りが設定の下限を下回っているため、待機中です。枠が戻り次第、自動で処理を始めます。"
 )
 
 // turnRecord is what the runtime has already done on the tracker for this
@@ -133,16 +134,23 @@ func requestPage(cfg config, issue sourceIssue) string {
 
 // acceptTurn is the runtime's first word on a newly accepted request: the
 // comment, the category, and the runtime as assignee while it works.
-func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, ahead int, observe func(string)) {
+func acceptTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, ahead int, creditLow bool, observe func(string)) {
 	if cfg.Intake == nil {
 		return
 	}
 	if cfg.Intake.Announce {
 		notice := requestNotices(cfg, issue, directory)
+		text := acceptedNoticeText(ahead, requestPage(cfg, issue))
+		if creditLow {
+			text = "受け付けました。" + budgetWaitingText
+			if page := requestPage(cfg, issue); page != "" {
+				text += "\n進み具合はこちらで見られます: " + page
+			}
+		}
 		// The request was accepted when the collector wrote its issue here.
 		if info, err := os.Stat(filepath.Join(directory, "issue.json")); err != nil {
 			observe("acceptance not announced: " + err.Error())
-		} else if err := notice.post(ctx, acceptedNotice, acceptedNoticeText(ahead, requestPage(cfg, issue)), info.ModTime()); err != nil {
+		} else if err := notice.post(ctx, acceptedNotice, text, info.ModTime()); err != nil {
 			observe("acceptance not announced: " + err.Error())
 		}
 	}
@@ -313,12 +321,16 @@ func modelsTurn(ctx context.Context, cfg config, issue sourceIssue, directory st
 }
 
 // resumeTurn says that the requester's answer was read and the work goes on.
-func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, observe func(string)) {
+func resumeTurn(ctx context.Context, cfg config, issue sourceIssue, directory string, creditLow bool, observe func(string)) {
 	if cfg.Intake == nil || !cfg.Intake.Announce {
 		return
 	}
 	// The answer was taken on this tick.
-	if err := requestNotices(cfg, issue, directory).post(ctx, resumedNotice, resumedNoticeText, time.Now().UTC()); err != nil {
+	text := resumedNoticeText
+	if creditLow {
+		text = "返答を受け取りました。" + budgetWaitingText
+	}
+	if err := requestNotices(cfg, issue, directory).post(ctx, resumedNotice, text, time.Now().UTC()); err != nil {
 		observe("resumption not announced: " + err.Error())
 	}
 }
