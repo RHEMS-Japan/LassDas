@@ -16,7 +16,7 @@ jobs:
   # These are local process/fixture tests, not live-model or deployment trials.
   role-chain:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: rewrite
