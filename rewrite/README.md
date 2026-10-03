@@ -1202,14 +1202,17 @@ window, a request whose steps keep failing is told:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません（直近の失敗: <直近の失敗の1行目>）。
 
-The quoted failure is the first nonblank line of the most recent error, with
-every configured credential value replaced by `[credential]` and the result cut
-to 200 characters. A request whose work is running, with no failure recorded,
-is told once nothing has been recorded for that long. The time counts only
-within the current launch: from its last record or, when there is none yet,
-from the moment the launch began, so a wait before it (for its turn, for the
-budget, for a stopped engine) does not count. No time limit ends a launch, so
-this is the requester's only word about a long one:
+The quoted failure is the first nonblank line of the most recent error (when
+that line is only an exit status or a signal, the error's last line, where a
+harness puts its reason, follows it), with every configured credential value
+replaced by `[credential]` and the result cut to 200 characters. A request
+whose work is running, with no failure recorded, is told once nothing has been
+recorded for that long. The time counts only within the current launch: from
+its last record or, when there is none yet, from the moment the launch began,
+so a wait before it (for its turn, for the budget, for a stopped engine) does
+not count; a stop that cut a stage short is recorded as a failure and counted
+in the form above. No time limit ends a launch, so this is the requester's
+only word about a long one:
 
 > 依頼はまだ終わっていませんが、過去 <n> 分間は工程が完了していません。この間に工程の失敗は記録されていません。
 
