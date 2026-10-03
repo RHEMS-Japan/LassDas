@@ -11,6 +11,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -143,9 +144,30 @@ def api_base():
     return os.environ.get("DELIVERY_API_BASE", "").rstrip("/") or "https://api.github.com"
 
 
-def git_environment(*, with_credential=True):
-    """Git's own configuration only: no personal, repository or system file."""
-    environment = dict(os.environ)
+# Settings Git takes from the environment: a count of numbered keys and values,
+# and the -c settings a Git passes to the Gits it starts.
+GIT_SETTINGS = re.compile(r"GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)")
+# The delivery's Git on the workspace reads it as the review's Git does: it
+# drops those settings and the variables that pick Git's attributes or its diff
+# program, and reads no default exclude or attributes file. In one stage's
+# environment only, any of them would make the two disagree on whether anything
+# changed. adversarial_review.py keeps the same lists; a test keeps them the
+# same. deliver_git.py turns this on for its own process. A Git that talks to
+# the service (given a url) keeps the environment as it is, which may carry what
+# the operator's network needs; so does everything the check after delivery and
+# the mirror run.
+WORKSPACE_DROPS = ("GIT_ATTR_SOURCE", "GIT_EXTERNAL_DIFF")
+WORKSPACE_FILES = ["-c", "core.excludesFile=" + os.devnull, "-c", "core.attributesFile=" + os.devnull]
+workspace_as_reviewed = False
+
+
+def git_environment(*, with_credential=True, service=False):
+    """Git's own configuration only: no personal, repository or system file.
+    In the delivery, a Git that does not talk to the service also drops what
+    the review's Git drops."""
+    environment = {name: value for name, value in os.environ.items()
+                   if service or not workspace_as_reviewed
+                   or not (GIT_SETTINGS.fullmatch(name) or name in WORKSPACE_DROPS)}
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ASKPASS", "SSH_ASKPASS"):
         environment.pop(name, None)
@@ -169,6 +191,8 @@ def git(*arguments, url=None):
                                     (sys.executable, "-B", str(SUPPORT), "--credential-helper"))
             os.environ["DELIVERY_CREDENTIAL_HOST"] = host.hostname or ""
             command += ["-c", "credential.helper=", "-c", "credential.helper=" + helper]
+    elif workspace_as_reviewed:
+        command += WORKSPACE_FILES
     return command + list(arguments)
 
 
@@ -263,7 +287,8 @@ def run_git(command, *, describe, timeout=None, retry=True, cwd=None):
     """One Git command, separating a failure that may pass from a refusal."""
     def attempt():
         try:
-            status, output, diagnostics = run(command, check=False, timeout=timeout, cwd=cwd)
+            status, output, diagnostics = run(command, check=False, timeout=timeout, cwd=cwd,
+                                              environment=git_environment(service=True))
         except subprocess.TimeoutExpired:
             raise TransientError("it did not finish within the configured time")
         if status != 0:

@@ -54,7 +54,7 @@ nothing.
 | (`ask_requester`) | model | Only when such points are left: posts one comment with them, and the request waits for the requester's reply. |
 | `work` | model | Investigates, changes the checkout and runs the project's checks. |
 | `verify` | command | Your build and test commands, against the changed checkout. |
-| `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `work`. |
+| `review` | command | A second model reviews the diff and the test output; a blocking verdict sends the work back to `work`. Without a verdict it neither lets the work through nor sends it back: it waits and asks again ([section 4](#when-the-review-gets-no-verdict)). |
 | `deliver` | command | Commits, brings the ticket branch up to date with the integration branch, pushes `ticket/<ISSUE-KEY>`, opens or reuses one pull request and merges it, or leaves the merge to a person ([section 4](#leaving-the-merge-to-a-person)). |
 | `verify_merged` | command | Fetches the integration branch after the merge, or the pull request's branch when the merge is left to a person, and runs your build and tests on it. |
 | `report` | model | Writes the report and posts it on the issue. |
@@ -171,8 +171,10 @@ With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
 in `model_selection.authors` (deepseek, minimax, qwen and z-ai), read the
 checkout and receive the request and the run's records; the review model
-(`REVIEW_MODEL`, `moonshotai/kimi-k3`, from a publisher outside that list)
-receives the request, the diff and the test output; the decision model that picks each launch's model
+(`REVIEW_MODEL`, `moonshotai/kimi-k3`, from a publisher outside that list),
+and each model you add in `REVIEW_MODELS`
+([section 4](#when-the-review-gets-no-verdict)), receives the request, the
+diff and the test output; the decision model that picks each launch's model
 (`typesafe/jev-1.13`) receives the request; and the chat model that decides at
 the entrance receives the request and the earlier reports.
 `model_selection.authors` narrows the publishers, and `model_selection.fixed`
@@ -465,7 +467,8 @@ chosen, a paid call, on every launch (section 11).
   `intake.stop_report_role`, `intake.question_role`.
 - The roles' commands, their `model_env` (`NATIVE_MODEL`), their `secrets`
   mappings and their `tracker_access` values.
-- `REVIEW_MODEL`: the model that reviews, as the endpoint names it.
+- `REVIEW_MODEL`: the model that reviews, as the endpoint names it; the
+  review's other settings are [below](#when-the-review-gets-no-verdict).
 - `DELIVERY_ALLOWED_PATHS` (`.`, the whole tree: which files a change needs is
   not known before the work; the checkout's `.git` stays out of reach of every
   model role either way) and `DELIVERY_MERGE_METHOD` (`merge`; `none` leaves
@@ -479,6 +482,16 @@ names) and `DELIVERY_AUTHOR_NAME` / `DELIVERY_AUTHOR_EMAIL` for its commits,
 which are otherwise authored as "ticket engine". The pull request is titled
 `Deliver <ISSUE-KEY>`, comes from the branch `ticket/<ISSUE-KEY>`, and is
 merged as `Deliver <ISSUE-KEY> (#<number>)` when the delivery merges it.
+
+Git settings (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_n` and
+`GIT_CONFIG_VALUE_n`, or `GIT_CONFIG_PARAMETERS`) put in a process's `env`, or
+for the mirror in the `env` of the StatefulSet's `mirror` container, reach the
+Git that talks to the service in the delivery, in the merged check (whose
+commands see them too) and in the mirror, so a proxy or a certificate can be
+given that way. They do not reach the delivery's and the review's Git on the
+workspace, which read it without them so that the two agree on whether
+anything changed; a setting that Git would need there, such as
+`safe.directory`, cannot be passed.
 
 Do not remove `model_env` from a model stage's process, and do not put a
 model id into its `env` instead: the engine refuses to start
@@ -619,6 +632,79 @@ The cases this does not cover, and leaving out the `verify_merged` stage, are
 in rewrite/README.md ("Stages instead of roles", from the paragraph that
 begins "`DELIVERY_MERGE_METHOD=none`").
 
+### When the review gets no verdict
+
+The `review` stage runs `adversarial_review.py` with the settings in its
+process's `env`. The example sets the first four:
+
+| Setting | What it does |
+| --- | --- |
+| `REVIEW_MODEL_URL` | the chat-completions endpoint the review asks, over HTTPS |
+| `REVIEW_MODEL` | the model asked, as that endpoint names it (`moonshotai/kimi-k3`) |
+| `REVIEW_KEY_ENV` | the variable that holds the endpoint's key (`REVIEW_API_KEY`, which the process's `secrets` fill from `MODEL_API_KEY`) |
+| `REVIEW_TEST_COMMANDS` | your test commands, one per line, run without a shell; the reviewer reads their output |
+| `REVIEW_MODELS` | several models in place of `REVIEW_MODEL`, one per line or separated by commas, asked in that order; whichever answers first reviews, so each should come from a publisher outside `model_selection.authors` |
+| `REVIEW_DIFF_PATHS` | the paths whose changes the reviewer is shown, separated by spaces; unset, the whole change |
+| `REVIEW_RETRY_SECONDS`, `REVIEW_RETRY_CAP_SECONDS` | the first and the longest wait between two rounds of asking: 5 and 300 seconds unless set |
+| `REVIEW_HOLD_SECONDS` | how often a waiting review says again that it waits: 900 seconds unless set |
+| `REVIEW_TIMEOUT_SECONDS` | the limit of one request to a model and of each test command: 300 seconds unless set. A test command cut there reaches the reviewer as `(timed out after 300 seconds)` instead of its output; the `verify` stage has no such limit |
+| `REVIEW_UNAVAILABLE` | `pass` lets the work through unreviewed when no verdict comes (below); unset, the review waits, and any other value is a mistyped setting |
+| `REVIEW_ATTEMPTS` | with `REVIEW_UNAVAILABLE=pass` only, the requests made before the work is let through unreviewed: 3 unless set |
+
+A blocking verdict sends the work back to `work`, and a verdict that does not
+object lets it through to the delivery. Without a verdict the review does
+neither; it waits:
+
+- Trouble with the model service (no connection, a time-out, an HTTP error,
+  a reply without a plain verdict) is waited out: the models are asked again
+  in their order, round after round, with the wait between rounds growing
+  from `REVIEW_RETRY_SECONDS` to `REVIEW_RETRY_CAP_SECONDS`. An HTTP 400,
+  401, 403, 404, 413 or 422 is named as yours to fix (a key, a model id, or a
+  request the endpoint refuses, such as one too large), and asking goes on.
+- A setting that cannot work (one that is missing or mistyped, an endpoint
+  that is not HTTPS, a key that is not set, test commands that cannot be
+  read) holds the review until you fix it.
+
+While the review waits, the request stays in the `review` stage and keeps its
+run slot: with `intake.max_running` at 1, every later request waits its turn
+behind it. On the status page, the `review` record's live output says why:
+`Review: no verdict yet (<model>: <reason>). Asking again in ...` while it
+asks, repeated every `REVIEW_HOLD_SECONDS` as
+`Review still without a verdict at <time>, <n> requests so far: <reason>.`;
+or `Review by <model>: held, with no verdict: <reason>. ...` while a setting
+holds it, followed every `REVIEW_HOLD_SECONDS` by
+`Review still held at <time>; the reason is above.` The requester hears only
+the engine's notice that no stage has completed, after
+`intake.stall_notice_minutes` (90) and then at most every six hours
+(section 8). The wait ends in one of three ways:
+
+1. The model service answers again. The review goes on, and its result names
+   the model that gave the verdict.
+2. The requester stops the request (`停止`, [section 9](#9-stopping-a-request)).
+3. You fix the cause (the configuration's ConfigMap or the Secret, section 6)
+   and restart the Pod. The runtime records the stopped review as a failure
+   and goes on at the review's `on_failure` stage, which is `work` here: the
+   worker runs again, and the review after it. The requester is told that the
+   request carries on after the restart.
+
+Each request to a model carries the change and the test output. Once the
+waits reach `REVIEW_RETRY_CAP_SECONDS`, each model is asked at most once every
+300 seconds: up to about 100 rounds in eight hours, fewer when requests run
+into `REVIEW_TIMEOUT_SECONDS`, since each of those waits out that limit first.
+Whether to name more models in
+`REVIEW_MODELS`, so that one model being down does not hold every request, is
+your decision: each one is another company the change and the test output go
+to (section 1).
+
+`REVIEW_UNAVAILABLE=pass` makes the review let the work through unreviewed
+instead: after `REVIEW_ATTEMPTS` requests (3) without a verdict, or at once
+where it would hold, its result says `NOT REVIEWED` with the reason, and the
+work goes on to the delivery. This guide leaves it unset, because the review is
+what justifies delivering without a person. Its details, and the one case it
+still sends back (a checkout with no change), are in rewrite/README.md
+("Stages instead of roles", from the paragraph that begins "No verdict, no
+pass").
+
 ### With a gateway in front of the models
 
 `rewrite/examples/operator-gateway.json` shows the gateway settings for the
@@ -631,7 +717,8 @@ them. This ordered configuration needs them and the review's as well:
   `secrets.OPENROUTER_API_KEY`, `stop_report` included, and `router.llm`'s
   `url` and `key_env`;
 - the review's `REVIEW_MODEL_URL` (the gateway's chat completions URL),
-  `REVIEW_MODEL` (with the gateway's prefix) and its `secrets` mapping;
+  `REVIEW_MODEL`, or each model in `REVIEW_MODELS` (with the gateway's
+  prefix), and its `secrets` mapping;
 - if the gateway does not serve OpenRouter's decisions API (the one measured
   for rewrite/README.md answered 405), remove `model_selection.judge` (and
   `router.decision`, if you added it), name the gateway's chat endpoint and a
@@ -1148,12 +1235,15 @@ the requester is told at night") has their exact words.
 
 ### Check that the review actually reviewed
 
-On the status page, open the first request's `review` record. Its output
+On the status page, open the first request's `review` record. Its result
 begins `Review by <model>: PASSED.` or `Review by <model>: SENT BACK to the
-worker.`. If it begins `Review by <model>: NOT REVIEWED.`, the review could
-not be performed (a wrong model id, the endpoint down, a missing key) and the
-work went on without one. The line says why; fix that before you rely on the
-review.
+worker.`, naming the model that gave the verdict. A review whose live output
+says `Review: no verdict yet (...)` or `Review by <model>: held, with no
+verdict: ...` is waiting for one
+([section 4](#when-the-review-gets-no-verdict)); fix what it names before you
+rely on the review. A result that begins `Review by <model>: NOT REVIEWED.`
+comes only with `REVIEW_UNAVAILABLE=pass`: the review got no verdict, and the
+work went on without one.
 
 ### Answering a question
 
@@ -1396,6 +1486,19 @@ causes: a value still from the example (section 4), a missing credential
 `build` or `test` failing in the read-only checkout (section 7), a branch rule
 or a conflict (below). Stop the request (`停止`) while you fix the cause.
 
+### A request stays in the `review` stage
+
+The review has no verdict and waits
+([section 4](#when-the-review-gets-no-verdict)); the `review` record's live
+output on the status page says why. Usually a key, a model id, or a request
+the endpoint refuses, such as one too large (an HTTP 400, 401, 403, 404, 413
+or 422, named as yours to fix), a key that is not set, or the model service
+being down. Fix the setting or the Secret and restart the Pod, or wait for
+the service; for a request too large (413), show the reviewer less with
+`REVIEW_DIFF_PATHS`, or use a model or gateway that takes more. Meanwhile
+later requests wait their turn behind this one, and the requester gets the
+notice that no stage has completed.
+
 ### Work ends without a change, or a model stage keeps failing with "ended without a report"
 
 A model answer is cut off at the bridge's output limit, `NATIVE_MAX_TOKENS`.
@@ -1522,11 +1625,21 @@ File requests from a person's account.
 From the delivery script: when the work changes nothing, the delivery refuses
 with `No change under the allowed paths is ready to deliver`, which sends the
 work back like any other failure. Stop such a request (`停止`) and tell the
-requester. The delivery has a setting, `DELIVERY_ALLOW_UNCHANGED`, that lets
-such a request end instead; the shipped configuration leaves it off, and
+requester.
+
+The delivery has a setting, `DELIVERY_ALLOW_UNCHANGED=1` in the delivery
+process's `env`, with which such a request ends as done without a change:
+once the review has given a verdict that does not object to the checkout as
+it is, the delivery commits, pushes and opens nothing, the status page counts
+the request under `Done without a change`, and the `delivered` status and the
+hand-back are applied all the same, so the report is what tells the requester
+that nothing was delivered. It is off unless set, and the shipped
+configuration leaves it off. In the build this guide is for, the review and
+the delivery read the checkout the same way, so a Git setting given in only
+one of their environments does not make them disagree on whether anything
+changed. Whether to turn it on, what it depends on and where it stops are in
 rewrite/README.md ("Stages instead of roles", from the paragraph that begins
-"A request whose right outcome is that nothing changes") says what it
-depends on.
+"A request whose right outcome is that nothing changes").
 
 ## 12. Where things are
 
