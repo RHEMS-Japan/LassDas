@@ -666,7 +666,7 @@ after it:
   number of them in all, whatever it is. A later delivery does not read the
   pull request or its branch again: it says what was read and when, and names
   the changes the workspace holds uncommitted then.
-- merged by a person: reported as merged by someone else, with the commit the
+- merged by a person without changing this delivery's head: reported as merged by someone else, with the commit the
   service reports for their merge (recorded as `merge_sha`: the merge commit,
   the squashed commit, or for a rebase the commit the integration branch was
   moved to); work after that is a further round with a pull request of its
@@ -681,12 +681,20 @@ after it:
   pull request's own head is what tells the two apart. If a round stopped
   after its commit and before its push, the earlier round's record carries the
   stopped round's commit time as `committed_at`.
-- not handled: a person pushes to the pull request's branch and merges it
-  before any delivery has seen their push, and the next delivery has no new
-  work. That delivery takes their merge for an earlier round and pushes its
-  own older commit again; while their branch exists the push is refused, and
-  the delivery ends 1 saying that nothing was merged, which is not so, so the
-  work goes round again.
+- a person changes the branch and merges it before the next delivery observes
+  either action: the delivery reads the head the service says was merged and
+  compares its Git ancestry with the recorded delivery head. A merged head
+  that precedes this process's genuinely new commit is an earlier round,
+  as above. Otherwise the person's changes take over, as with an open branch
+  they changed: nothing is pushed over them and no replacement pull request
+  is opened. The report names their merge, any delivery commit not included,
+  and work still uncommitted locally. Continuing that leftover work needs a
+  new request. The record retains both `changed_by_person` and `merge_sha`;
+  later reports explicitly describe the last observation, not a new read.
+  This also handles a squash and a deleted branch when the server allows the
+  exact merged head to be fetched. If that head cannot be read, the delivery
+  retains the known merge in its error and retries; it does not claim that
+  nothing was merged. Server availability of that exact head still matters.
 - merged by a person, but the service does not report the merge commit yet: the
   delivery ends 1 saying so, and the next one reads it again.
 - closed without a merge: the request ends. The delivery ends 0 with `Pull
@@ -717,16 +725,20 @@ and says that this delivery merged nothing, without looking at whether a
 person merged since; it ends 0 only when that commit is there and every
 command passed. That is what a person is asked to merge, including the
 catch-up merge, which the verify stage before the review never saw, so keep
-the stage. Once a delivery has recorded a person's merge, the check verifies
-the integration branch as usual. If the person's merge deletes the branch
+the stage. Once a delivery has recorded a person's merge of its unchanged
+head, the check verifies the integration branch as usual. If the person's merge deletes the branch
 before a delivery has recorded it, the check cannot read the branch and the
 run goes round once more, after which the next delivery records the merge;
 anything the work changed in that extra round goes in a further round's pull
 request. After the two endings a person causes, a closed pull request and a
-branch a person changed, the check runs nothing and ends 0, saying what it did
+branch a person changed (including a later merge of that changed head), the
+check runs nothing and ends 0, saying what it did
 and did not look at: nothing of this delivery is left to verify, and failing
 would only send the work round again. An earlier round of the request that was
-merged is named there and not checked. Where the target's own checks on pull
+merged is named there and not checked. A person's changed-and-merged head is
+reported as `Not checked`, with its actual merge commit: neither the merged
+result nor the configured verification commands were checked by this process.
+Where the target's own checks on pull
 requests are what the person merging relies on, the stage can be left out:
 
 ```json
