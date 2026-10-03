@@ -382,7 +382,7 @@ func verdict(w http.ResponseWriter, blocking bool, findings string) {
 // ordered run: the work stage changes nothing, the review is told so in plain
 // words and does not object, the delivery opens no pull request, and the run
 // ends on the read-back report. When the review objects once, the work goes
-// back to the work stage and nothing is delivered until it passes.
+// back through requirements and work; nothing is delivered until it passes.
 func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 	for _, objections := range []int{0, 1} {
 		t.Run(fmt.Sprintf("objections=%d", objections), func(t *testing.T) {
@@ -415,7 +415,7 @@ func TestAnOrderedRunFinishesARequestThatNeedsNoChange(t *testing.T) {
 			// are the order the stages ran in.
 			want := []string{"elicit", "work", "verify", "review"}
 			for range objections {
-				want = append(want, "work", "verify", "review")
+				want = append(want, "elicit", "work", "verify", "review")
 			}
 			want = append(want, "deliver", "verify_merged", "report", "confirm_report")
 			var ran, reviewed []string
@@ -571,7 +571,7 @@ func TestAnOrderedRunDoesNotEndUnchangedWithoutAVerdict(t *testing.T) {
 // REPRO 02 through the engine: the work stage writes the file the request
 // needs and the review passes it, and then the workspace is restored empty
 // before the delivery. The delivery's launch prepares the workspace again,
-// says so and fails, so the run goes back to the work stage, which writes the
+// says so and fails, so the run reconsiders requirements before work writes the
 // file again; the request ends with the file delivered, not as an ending
 // with nothing delivered.
 func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.T) {
@@ -620,7 +620,7 @@ func TestALostWorkspaceSendsTheRunBackToWorkInsteadOfEndingUnchanged(t *testing.
 			lost++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "deliver", "work", "verify", "review", "deliver", "verify_merged", "report", "confirm_report"}
+	want := []string{"elicit", "work", "verify", "review", "deliver", "elicit", "work", "verify", "review", "deliver", "verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || lost != 1 {
 		t.Fatalf("the stages ran as %v (lost workspace said %d times), not %v", ran, lost, want)
 	}
@@ -675,7 +675,7 @@ func TestARequestWhosePullRequestAPersonClosedEndsAndSaysSo(t *testing.T) {
 			nothingToCheck++
 		}
 	}
-	want := []string{"elicit", "work", "verify", "review", "deliver", "verify_merged", "work", "verify", "review", "deliver",
+	want := []string{"elicit", "work", "verify", "review", "deliver", "verify_merged", "elicit", "work", "verify", "review", "deliver",
 		"verify_merged", "report", "confirm_report"}
 	if !slices.Equal(ran, want) || closed != 1 || nothingToCheck != 1 {
 		t.Fatalf("the stages ran as %v (closed said %d times, nothing to check %d times), not %v", ran, closed, nothingToCheck, want)
