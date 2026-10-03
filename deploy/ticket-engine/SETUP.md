@@ -594,9 +594,10 @@ This applies only to the copy section 4 makes from
 `rewrite/examples/operator-stages.json`: `operator.json` and
 `operator-gateway.json` have no such setting, and for a copy of either the
 `grep` prints nothing.
-The descriptions of the `deliver` and `verify_merged` roles in your copy still
-say that they merge. In this ordered configuration no model is given them;
-they show only on the status page, as what those two stages were handed.
+The descriptions of the `deliver` and `verify_merged` roles in your copy state
+both settings, so they need no edit. In this ordered configuration no model is
+given them; they show only on the status page, as what those two stages were
+handed.
 Everything else is done as the rest of this guide says, with these
 differences:
 
