@@ -508,10 +508,10 @@ runtime, not a model, decides what runs next.
   "stages": [
     { "name": "elicit", "kind": "model" },
     { "name": "work", "kind": "model" },
-    { "name": "verify", "kind": "command", "on_failure": "work" },
-    { "name": "review", "kind": "command", "on_failure": "work" },
-    { "name": "deliver", "kind": "command", "on_failure": "work" },
-    { "name": "verify_merged", "kind": "command", "on_failure": "work" },
+    { "name": "verify", "kind": "command", "on_failure": "elicit" },
+    { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "deliver", "kind": "command", "on_failure": "elicit" },
+    { "name": "verify_merged", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
     { "name": "confirm_report", "kind": "command", "on_failure": "report" }
   ]
@@ -601,7 +601,7 @@ such as `社外秘` is not found in it.
 A request whose right outcome is that nothing changes, because what it asks
 for already exists, leaves the delivery nothing to commit. By default the
 shipped delivery refuses it ("No change under the allowed paths is ready to
-deliver"), so an ordered run sends it back to the work stage for as long as it
+deliver"), so an ordered run sends it back to requirements before repair for as long as it
 runs. `DELIVERY_ALLOW_UNCHANGED=1` in the delivery process's environment lets
 such a request end instead. When the workspace has no changed path, no merge in
 progress and no receipt of an earlier delivery round, and the commit the work
@@ -626,14 +626,14 @@ earlier delivery round committed one, the shipped review command lets the work
 through only on a verdict that does not object. When none can be obtained it
 keeps asking or holds, as it does for any change (below), and even with its
 opt-in for passing work through unreviewed it ends 1 here, so the work goes
-back to the work stage. The delivery itself does not look at the review, so turn the
+back to requirements before repair. The delivery itself does not look at the review, so turn the
 setting on only where that review runs before it. The review command tells its
 model in plain words when no file was changed at all, and that a change that
 was needed but not made is a blocking defect.
 
 `DELIVERY_MERGE_METHOD=none` makes the shipped delivery end at the open pull
 request and leave the merge to a person. It commits, catches up with the
-integration branch (a conflict still goes back to the work stage), pushes the
+integration branch (a conflict still goes back to requirements before repair), pushes the
 ticket branch, opens the pull request or reuses the one it opened before, and
 ends 0 without merging. It prints `Pull request N against <base> is open for
 <issue>: <url>. Merging is left to a person; nothing was merged.`, and the
@@ -672,7 +672,7 @@ after it:
   moved to); work after that is a further round with a pull request of its
   own, left to a person again. If they squashed or
   rebased, that round's catch-up conflicts with its own earlier change; the
-  conflict goes to the work stage like any other, and once it is resolved the
+  conflict goes to requirements before repair like any other, and once it is resolved the
   next delivery opens the new pull request. If the person's merge deleted the
   branch, that round's push creates it again.
 - merged by a person before this round's commit reached the pull request (they
@@ -734,9 +734,9 @@ requests are what the person merging relies on, the stage can be left out:
   "stages": [
     { "name": "elicit", "kind": "model" },
     { "name": "work", "kind": "model" },
-    { "name": "verify", "kind": "command", "on_failure": "work" },
-    { "name": "review", "kind": "command", "on_failure": "work" },
-    { "name": "deliver", "kind": "command", "on_failure": "work" },
+    { "name": "verify", "kind": "command", "on_failure": "elicit" },
+    { "name": "review", "kind": "command", "on_failure": "elicit" },
+    { "name": "deliver", "kind": "command", "on_failure": "elicit" },
     { "name": "report", "kind": "model" },
     { "name": "confirm_report", "kind": "command", "on_failure": "report" }
   ]
@@ -781,7 +781,7 @@ there counts only in a call that names no blocking itself. What is kept
 whichever way it goes is the findings of each call at those two levels,
 arguments that cannot be read, and words given instead of a call, cut where
 findings are; findings further in, or inside a list, are not read. The command
-exits 1 on a blocking verdict, which sends the work back to the `work` stage,
+exits 1 on a blocking verdict, which sends the work back to the configured repair stage,
 and 0 on a verdict that does not object; without a verdict it does neither
 (below). The findings are printed, so they join the history as an
 observation the worker and the report writer read, and the command writes
@@ -866,7 +866,7 @@ Once the change has been read, what Git listed while reading it decides,
 whatever that first look found. With the opt-in, not being able to tell is not
 limited to requests with no change: while Git cannot read the checkout in
 the review's environment, a request that did change files also goes back to
-the work stage, round after round, with the reason written in the record
+the configured repair stage, round after round, with the reason written in the record
 each time, instead of going on unreviewed; by default the review holds there
 instead, as for any change that cannot be read.
 New files are read from Git's own list, so a name in Japanese or a new
@@ -900,14 +900,30 @@ one; a launch that reaches that limit is stopped and recorded like any failure.
 
 **What no model decides here**: which stage runs next, whether a stage is
 satisfied, whether a failure is recoverable, and when the request is complete.
-The only judgment left is at the entrance. If `intake.question_role` is set,
-then after the first stage the configured decision service (the decision API
-when `router.decision` names a model, the chat API otherwise) is consulted once
+The routing judgment is after the first stage. If `intake.question_role` is set,
+then each time that stage finishes the configured decision service (the decision API
+when `router.decision` names a model, the chat API otherwise) is consulted
 with exactly two choices: the question role, or the next stage. It is never
 offered `done`, so the entrance still cannot end a request at a person, and the
 question role cannot be a stage, so it satisfies nothing. A question holds the
 request and the reply resumes it exactly as described above; the reply returns
-the run to its first stage. After that no routing decision exists at all.
+the run to its first stage. Other stage transitions use the configured order.
+
+The shipped example sends failed verification, review and delivery commands to
+`elicit`, not straight to `work`. Requirements are reconsidered using the actual
+failure and earlier answers. A repair inside the agreed scope continues to work;
+a new choice only the requester can make can go through the existing question
+role, with concrete alternatives. This also covers a worker reporting that the
+allowed paths cannot satisfy the request, followed by a failed check. Nothing
+parses that report to decide progression. A process error in a model stage still
+retries that stage; it is not this command-failure path.
+
+A reply does not widen filesystem, delivery or credential permissions. A wider
+choice needs the operator to update the relevant configuration; an in-scope
+alternative can proceed without that. Do not silently reduce the request. Each
+failed command now costs another requirements launch and routing decision, even
+for a simple repair. Existing configurations retain their selected `on_failure`
+targets until the operator edits them. `confirm_report` still returns to `report`.
 
 `examples/operator-stages.json` is the same chain as `operator.json` written
 this way, for the runtime image of `deploy/ticket-engine`. Its delivery and its
