@@ -1210,7 +1210,7 @@ whose work is running, with no failure recorded, is told once nothing has been
 recorded for that long. The time counts only within the current launch: from
 its last record or, when there is none yet, from the moment the launch began,
 so a wait before it (for its turn, for the budget, for a stopped engine) does
-not count; a stop that cut a stage short is recorded as a failure and counted
+not count; a stop that cut a step short is recorded as a failure and counted
 in the form above. No time limit ends a launch, so this is the requester's
 only word about a long one:
 
