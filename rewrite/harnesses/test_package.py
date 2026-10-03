@@ -20,7 +20,7 @@ class PackageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             expected = ["bin/ticket-engine", "bin/ticket-tracker", "bin/ticket-status", "START.md",
-                        "RUNTIME.md", "README.md", "examples/operator.json",
+                        "RUNTIME.md", "README.md", "OPERATING.md", "examples/operator.json",
                         "examples/operator-gateway.json",
                         "examples/operator-stages.json",
                         "examples/operator-github.json",
