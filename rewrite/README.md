@@ -169,9 +169,72 @@ exercise skipped dispatch, error recovery, persisted interruption, unchanged
 prose, both API protocols and actual child processes; these are not live-model
 or production acceptance results.
 
+### Choosing the issue tracker
+
+Choose one top-level tracker: `backlog` or `github`, never both. This selects
+where requests and comments live; it does not select the source repository,
+delivery credentials, working models or workflow.
+`examples/operator-github.json` has the same roles and connections as
+`examples/operator.json`, with GitHub Issues in place of Backlog. For the
+ordered Kubernetes configuration, keep `operator-stages.json` and change only
+its tracker settings as shown in the [setup guide](../deploy/ticket-engine/SETUP.md#github-issues).
+
+```json
+"github": {
+  "repository": "REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY",
+  "key_env": "TRACKER_API_KEY",
+  "intake_label": "automation",
+  "labels": {
+    "accepted": "automation-accepted",
+    "processing": "automation-working",
+    "awaiting_requester": "automation-awaiting-requester",
+    "delivered": "automation-delivered",
+    "stopped": "automation-stopped"
+  }
+}
+```
+
+For github.com, omit `github.api_url`: it defaults to `https://api.github.com`.
+For Enterprise Server use its HTTPS API base, such as
+`https://tracker.example/api/v3`, not the web page address. Do not keep
+`/api/v3` when switching to api.github.com. Replace both repository components;
+`key_env` is an environment variable name, never the token value. Use a
+dedicated account's PAT, restricted to the intake repository with Issues read
+and write; delivery uses its own credential and may target a different repo.
+The [setup guide](../deploy/ticket-engine/SETUP.md#github-issues) links the
+official permission references and describes labels and access checks.
+
+Delete `backlog` and these Backlog-only `intake` fields when selecting GitHub:
+`project_id`, `category_ids`, `category_on_accept`, `statuses`. Even a zero,
+null or empty value is still a conflicting setting. Keep the common settings,
+including `created_since`, `question_role`, `stop_report_role` and `announce`.
+Create the intake and configured stage labels first. Before using `automation`,
+check whether existing issues already use it for something else; choose a new
+label if so. Anyone who can add that label can hand an issue to the engine.
+
+GitHub discovery takes only open issues with that label, created at or after
+`intake.created_since`. Pull requests are excluded. Optional `intake.issue_ids`
+contains issue **numbers**, not GitHub's database IDs, and further narrows the
+same scope. Adding the label later does not bypass the creation-time boundary.
+Stage labels replace the configured earlier stage labels, without removing
+unrelated labels. The engine does not close issues or record actual hours.
+An issue's creator and `stop_user_ids` are identified by numeric account IDs;
+comments are used for questions, answers and stops on either tracker.
+
+Use a new queue when changing tracker or intake repository. Ordinary restarts
+of the same instance reuse the same queue. Removing a label or closing an issue
+does not cancel work already accepted; use the authorized `停止` comment.
+When GitHub asks the client to wait, the client sends nothing until that wait
+ends (up to one hour). Three consecutive failed stop reads pause the running
+role process; when reads work again, the same queued request is launched again.
+That is process interruption and recovery, not preservation of a running model
+call. The role-facing tracker command still uses the assigned local endpoint;
+its direct `issues` command is Backlog-only, not a GitHub administration CLI.
+
 ### Automatic intake experiment
 
-`--watch` uses the configured tracker and requires an explicit intake scope:
+`--watch` uses the configured tracker and requires an explicit intake scope.
+For Backlog:
 
 ```json
 "intake": {
@@ -253,7 +316,8 @@ of the shipped examples' placeholders: a URL whose host is under
 `roles[0].processes[0].env.TASK_REPOSITORY still holds the example's
 placeholder host under example.invalid; a watch needs your own value there`.
 Only the host of a URL is looked at, so an author's address under that name or
-a sentence that mentions it is yours to write. A runtime started on a
+a sentence that mentions it is yours to write. A GitHub repository component
+still beginning with `REPLACE_WITH_` is also refused. A runtime started on a
 configuration with such a host would take up requests and fail each of them
 over and over, launching models every time. The commands an example expects
 the operator to supply are not checked here: a stage whose command is missing
