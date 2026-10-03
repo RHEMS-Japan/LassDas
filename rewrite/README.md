@@ -499,7 +499,7 @@ listed in `DELIVERY_FORBIDDEN_TEXT` (in any letter case, each entry without
 the blanks around it), in a line it adds or in the name of a path it touches.
 Every added line is looked at whole: a line ends where Git ends it, at LF, so
 a CR, a form feed or a line separator inside it hides nothing after it. A file
-Git takes as binary, for a NUL byte in it or for an attribute, is looked at
+Git takes as binary, for a NUL byte or for an attribute, is looked at
 as text all the same, no diff program or text conversion stands in for the
 lines, and text in UTF-16, which has a NUL beside each ASCII character, is
 also looked at with its NULs taken out. Lines are read one at a time, and a
@@ -514,10 +514,15 @@ gives in such bytes, is delivered byte for byte. Its names are held to the
 operator's grant like any other, and forbidden text written in ASCII is found
 in it as written. Forbidden text that is not ASCII cannot be looked for in
 such bytes, so while `DELIVERY_FORBIDDEN_TEXT` lists any, a change carrying
-them is refused, saying so, rather than delivered unchecked. A file Git takes
-as binary, such as an image, is not refused for its bytes: in it, an entry
-that is not ASCII is found only where it is written in UTF-8, while ASCII
-entries and the credential are found as in any other file. Where such a name
+them is refused, saying so, rather than delivered unchecked. A file whose
+added lines hold a NUL byte, as those of an image or of text in UTF-16 do, is
+not refused for its bytes: in it, an entry that is not ASCII is found only
+where it is written in UTF-8, while ASCII entries and the credential are found
+as in any other file. That holds for a file in Shift_JIS with a NUL byte among
+its added lines as well. Only those lines decide it, not whether Git takes the
+file as binary: text in Shift_JIS is refused under a `binary` or `-diff`
+attribute and in place of a file that held a NUL, and so is a file changed in
+place when none of the lines the change adds to it holds one. Where such a name
 or text is printed or recorded, each byte that is not UTF-8 shows as a
 replacement character (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a

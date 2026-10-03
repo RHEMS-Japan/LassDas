@@ -1581,7 +1581,7 @@ class DeliveryTests(unittest.TestCase):
 
     @staticmethod
     def image():
-        """A 64x64 PNG: Git takes it as binary, and most of its bytes are not UTF-8.
+        """A 64x64 PNG: it holds NUL bytes, and most of its bytes are not UTF-8.
         Its pixels are kept in stored zlib blocks, as a PNG may keep them."""
         def chunk(kind, data):
             return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -1594,8 +1594,8 @@ class DeliveryTests(unittest.TestCase):
 
     def test_an_image_is_delivered_while_an_entry_that_is_not_ascii_is_configured(self):
         # The refusal of bytes that are not UTF-8 is for text, in which such an
-        # entry could be written another way; a file Git takes as binary is
-        # looked through for it as written in UTF-8 instead.
+        # entry could be written another way; a file whose added lines hold a
+        # NUL byte is looked through for it as written in UTF-8 instead.
         (self.workspace / "library").mkdir(exist_ok=True)
         (self.workspace / "library" / "logo.png").write_bytes(self.image())
         done = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
@@ -1614,6 +1614,34 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn("carries text that is not UTF-8", refused.stdout)
         self.assertEqual(self.methods(), [])
+
+    def refused_though_git_takes_it_as_binary(self, relative):
+        """社外秘 in Shift_JIS written to relative, a change Git takes as
+        binary: refused for its bytes all the same, as other such text is."""
+        self.shift_jis(relative, "社外秘の一覧\n")
+        refused = self.deliver(DELIVERY_FORBIDDEN_TEXT="社外秘")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("carries text that is not UTF-8", refused.stdout)
+        self.assertEqual((self.remote_branches(), self.methods()), (["refs/heads/master"], []))
+        counts = self.git(self.workspace, "diff", "--cached", "--numstat", "--", relative).stdout
+        self.assertTrue(counts.startswith("-\t-\t"), "Git does not take the change as binary: " + counts)
+
+    def test_text_that_is_not_utf8_is_refused_under_an_attribute_that_makes_it_binary(self):
+        # An attribute decides what Git takes as binary, and a change may carry
+        # one. Text is told from an image by the NULs of its own added lines.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        for attribute in ("-diff", "binary"):
+            (self.workspace / "library" / ".gitattributes").write_text("*.txt %s\n" % attribute)
+            self.refused_though_git_takes_it_as_binary("library/legacy.txt")
+
+    def test_text_that_is_not_utf8_is_refused_in_place_of_a_file_with_a_nul_byte(self):
+        # Git takes the change as binary for the NUL in the version it replaces.
+        (self.workspace / "library").mkdir(exist_ok=True)
+        (self.workspace / "library" / "legacy.txt").write_bytes(b"\0 a table kept in bytes\n")
+        self.git(self.workspace, "add", "library/legacy.txt")
+        self.git(self.workspace, "commit", "-m", "Codex: a file with a NUL byte")
+        self.git(self.workspace, "push", "origin", "HEAD:master")
+        self.refused_though_git_takes_it_as_binary("library/legacy.txt")
 
     def test_a_name_that_is_not_utf8_is_delivered_and_printed_with_replacement_characters(self):
         self.change("library/plain.go", "package library // a name Git gives in bytes\n")

@@ -200,7 +200,7 @@ def added_lines(workspace, against):
     form feed or a line separator inside it is part of it. A long line comes
     in parts, each repeating enough of the one before it that no text the
     check looks for is cut in two. Each comes with the place of its file in
-    the diff, counted from 0 as binary_files() counts them."""
+    the diff, which tells the lines of one file from those of another."""
     adding, place = False, -1
     for part, first in support.output_lines(support.git(
             "-C", str(workspace), "diff", "--cached", "--no-color", "--text", "--no-ext-diff", "--no-textconv",
@@ -213,23 +213,6 @@ def added_lines(workspace, against):
             yield place, part.decode("utf-8", "surrogateescape")
 
 
-def binary_files(workspace, against):
-    """The places, in the diff added_lines() reads, of the files Git takes as
-    binary, by its own judgement or by an attribute: their counts of lines
-    are "-". The listing has the same files in the same order."""
-    _, listed, _ = support.run(support.git("-C", str(workspace), "diff", "--cached", "--numstat", "-z",
-                                           "--no-ext-diff", "--no-textconv", *against))
-    # A record is "added<TAB>removed<TAB>path", or for a rename
-    # "added<TAB>removed<TAB>" followed by the two paths, each ended by NUL.
-    fields, binary, place, at = listed.split("\0"), set(), 0, 0
-    while at < len(fields) and fields[at]:
-        added, _, path = fields[at].split("\t", 2)
-        if added == "-":
-            binary.add(place)
-        place, at = place + 1, at + (1 if path else 3)
-    return binary
-
-
 def staged_texts(workspace, against):
     """The staged change's text: the lines it adds, then the names of the
     paths it touches, which belong to no file's content."""
@@ -239,19 +222,18 @@ def staged_texts(workspace, against):
     yield from ((None, name) for name in sorted(names(named)))
 
 
-def refuse_forbidden_text(texts, binary=set):
+def refuse_forbidden_text(texts):
     """Configured text must not leave the workspace, whoever wrote it. Only
     the lines this change adds, and the names of the paths it touches, are
     its text: context and removed lines are what was already there. They
     are looked at one by one, a long line in parts, so a large change is
     never held whole. Text in UTF-16 has a NUL beside each ASCII character,
     so each is also looked at with its NULs taken out. texts gives each with
-    the place of its file, or None for a name; binary(), asked only when it
-    matters, gives the places of the files Git takes as binary."""
+    the place of its file in the diff, or None for a name."""
     entries = [entry.strip() for entry in os.environ.get("DELIVERY_FORBIDDEN_TEXT", "").splitlines()]
     wanted = {entry.lower() for entry in entries if entry}
     token = os.environ.get("GITHUB_TOKEN", "")
-    matched, carried, not_utf8 = set(), False, set()
+    matched, carried, not_utf8, with_nul = set(), False, set(), set()
     for place, text in texts:
         seen = (text, text.replace("\0", "")) if "\0" in text else (text,)
         lowered = [each.lower() for each in seen]
@@ -259,6 +241,8 @@ def refuse_forbidden_text(texts, binary=set):
         carried = carried or bool(token) and any(token in each for each in seen)
         if re.search("[\udc80-\udcff]", text):
             not_utf8.add(place)
+        if "\0" in text and place is not None:
+            with_nul.add(place)
     found = [entry for entry in entries if entry and entry.lower() in matched]
     if found:
         raise DeliveryError("Refused: the staged change contains configured forbidden text (%d entr%s)"
@@ -269,9 +253,11 @@ def refuse_forbidden_text(texts, binary=set):
         raise DeliveryError("Refused: the staged change contains the delivery credential")
     # Bytes that are not UTF-8 are read as surrogate escapes. ASCII is found
     # in them as written; other text is not, so it cannot pass unlooked-for.
-    # A file Git takes as binary, such as an image, is the exception: it is
-    # rarely text, and other text is found in it where written in UTF-8.
-    if not_utf8 and not all(entry.isascii() for entry in entries) and not not_utf8 <= binary():
+    # A file whose added lines hold a NUL byte, as those of an image do, is
+    # the exception: in it, other text is found where written in UTF-8. What
+    # Git takes as binary does not decide this, since an attribute or a NUL
+    # in the version a change replaces makes Git take text so as well.
+    if not_utf8 - with_nul and not all(entry.isascii() for entry in entries):
         raise DeliveryError("Refused: the staged change carries text that is not UTF-8, in which configured "
                             "forbidden text that is not ASCII cannot be looked for")
 
@@ -324,7 +310,7 @@ def stage_and_commit(workspace, issue, allowed, receipt):
     # What the integration branch already carried is not this change; during
     # a merge completion only what differs from that branch's tip is looked at.
     against = ["MERGE_HEAD"] if merge_in_progress(workspace) else []
-    refuse_forbidden_text(staged_texts(workspace, against), lambda: binary_files(workspace, against))
+    refuse_forbidden_text(staged_texts(workspace, against))
     name = os.environ.get("DELIVERY_AUTHOR_NAME", "") or "ticket engine"
     address = os.environ.get("DELIVERY_AUTHOR_EMAIL", "") or "ticket-engine@invalid"
     # Both halves on purpose. A runtime with no Git identity cannot derive one
