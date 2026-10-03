@@ -566,7 +566,7 @@ class DeliveryTests(unittest.TestCase):
         # line end, and splitting the text split a line at a form feed, a
         # vertical tab or a line separator as well: what followed was not
         # taken as added, and was delivered.
-        for mark in ("\r", "\x0b", "\x0c", " "):
+        for mark in ("\r", "\x0b", "\x0c", "\N{LINE SEPARATOR}"):
             self.forbidden_text_and_credential_refused_in(
                 "main.go", lambda text: text.replace("// ", "//" + mark).encode())
 
@@ -583,14 +583,14 @@ class DeliveryTests(unittest.TestCase):
         # Git takes it as binary for its NULs: in UTF-16 each ASCII character
         # has one beside it.
         self.forbidden_text_and_credential_refused_in("library/notes.txt",
-                                                      lambda text: ("﻿" + text).encode("utf-16-le"))
+                                                      lambda text: ("\N{BYTE ORDER MARK}" + text).encode("utf-16-le"))
 
     def test_a_diff_program_does_not_stand_in_for_the_lines(self):
-        # One that prints its own format, in the delivery's environment.
+        # One that prints its own format, named in the checkout's configuration.
+        self.git(self.workspace, "config", "diff.external", "printf 'changed: %s\\n'")
         self.refused_as_written("main.go", b"package main // internal-project-codename\n",
                                 "contains configured forbidden text (1 entry)",
-                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename",
-                                GIT_EXTERNAL_DIFF="printf 'changed: %s\\n'")
+                                DELIVERY_FORBIDDEN_TEXT="internal-project-codename")
 
     def test_a_text_conversion_does_not_stand_in_for_the_lines(self):
         # One that the checkout's configuration defines and an attribute names.
