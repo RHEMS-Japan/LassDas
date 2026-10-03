@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// GitHub is one repository's issues as the engine's tracker. Nothing in the
-// configuration chooses it yet; this is the side that reads.
+// GitHub is one repository's issues as the engine's configured tracker.
+// The engine and scoped role access use the same account and API adapter.
 type GitHub struct {
 	// APIURL is the REST API's base: https://api.github.com when empty, or a
 	// GitHub Enterprise Server's https://HOST/api/v3.
@@ -25,8 +25,8 @@ type GitHub struct {
 	// Repository is owner/name; the issues are this repository's.
 	Repository string `json:"repository"`
 	KeyEnv     string `json:"key_env"`
-	// IntakeLabel narrows the intake to the open issues carrying it. Empty
-	// takes up every open issue.
+	// IntakeLabel narrows intake to open issues carrying it. The engine's
+	// watcher requires an explicit, nonempty label before intake begins.
 	IntakeLabel string `json:"intake_label,omitempty"`
 	// Labels names the label set on an issue at each turn of the work.
 	Labels GitHubLabels `json:"labels"`
