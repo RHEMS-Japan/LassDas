@@ -28,6 +28,7 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 	var stopped atomic.Int64
 	var mu sync.Mutex
 	var comments []string
+	reads := map[string]int{}
 	useCatalogTransport(t, func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host != "watch-tracker.example" {
 			return selectionReply(r, 200, map[string]any{"answers": map[string]any{"next": map[string]string{"choice": "implement"}}}), nil
@@ -44,6 +45,9 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 			mu.Unlock()
 			return selectionReply(r, 201, map[string]any{"id": 700 + n, "content": r.PostForm.Get("content")}), nil
 		case strings.HasSuffix(r.URL.Path, "/comments"):
+			mu.Lock()
+			reads[key]++
+			mu.Unlock()
 			if id := stopped.Load(); id > 0 && key == fmt.Sprintf("EXAMPLE-%d", id) {
 				return selectionReply(r, 200, []json.RawMessage{stopComment(id, 55, "停止")}), nil
 			}
@@ -69,10 +73,16 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 		return false
 	})
 	waiting := 51 + 52 - working
-	// Give the other request a few ticks to ask for the slot and be refused;
-	// stopped too early, it would find the slot free at its first attempt
-	// and, rightly, have nothing to announce.
-	time.Sleep(300 * time.Millisecond)
+	readCount := func(id int) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads[fmt.Sprintf("EXAMPLE-%d", id)]
+	}
+	// This fixture confirms each notice with its POST receipt, so only the
+	// watcher reads the comment list. Its second read means the first tick
+	// already tried the occupied slot and recorded that it had to wait. Do
+	// not release the working request based on elapsed scheduler time.
+	waitFor(t, func() bool { return readCount(waiting) >= 2 })
 	// The working request is stopped; the waiting one takes the slot.
 	stopped.Store(int64(working))
 	waitFor(t, func() bool { return started(waiting) })
@@ -81,7 +91,10 @@ func TestTheStartIsAnnouncedOnlyToARequestThatWaitedForASlot(t *testing.T) {
 		defer mu.Unlock()
 		return strings.Contains(strings.Join(comments, "\n"), fmt.Sprintf("EXAMPLE-%d: %s", waiting, startedNoticeText))
 	})
-	time.Sleep(150 * time.Millisecond)
+	// Observe later ticks after the launch as well: the start must not be
+	// announced a second time while this same child remains running.
+	afterStart := readCount(waiting)
+	waitFor(t, func() bool { return readCount(waiting) >= afterStart+2 })
 	finish()
 	mu.Lock()
 	defer mu.Unlock()
