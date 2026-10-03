@@ -182,7 +182,7 @@ def refuse_paths_outside_grant(paths, allowed, exempt=()):
             outside.append(path)
     if outside:
         raise DeliveryError("Changes outside the operator's allowed paths were not delivered: "
-                            + ", ".join(sorted(set(outside))[:20]))
+                            + ", ".join(support.readable(path) for path in sorted(set(outside))[:20]))
 
 
 def looked_for_bytes():
@@ -656,7 +656,7 @@ def check_only(workspace, owner, name, base, branch, method, url, allowed, uncha
              "A delivery ends at the open pull request and leaves the merge to a person (DELIVERY_MERGE_METHOD "
              "is none)." if method == "none" else "A delivery merges its pull request with method %s." % method,
              "Changed paths inside the operator's grant: %s."
-             % (", ".join(sorted(path for path in paths if path not in exempt)) or "none"),
+             % (", ".join(support.readable(path) for path in sorted(paths) if path not in exempt) or "none"),
              "A request that changes no file %s."
              % ("ends without a delivery when the commit it started from is part of the integration branch "
                 "(DELIVERY_ALLOW_UNCHANGED is 1)" if unchanged else
