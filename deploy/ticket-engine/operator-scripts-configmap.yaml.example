@@ -19,6 +19,10 @@
 # grant the verify process write access to those paths. The image carries Git,
 # Python 3, Go, and Node.js 22 with npm and pnpm (deploy/pod/Dockerfile); a
 # toolchain it lacks is not there for these scripts either.
+# These roles do not inherit the delivery token or your workstation's package
+# credentials. Prepare private dependencies before opening intake; see
+# SETUP.md, "Dependencies and read-only builds". Do not solve a failed fetch by
+# granting a model the delivery token. Build caches belong under $HOME or /tmp.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -27,7 +31,7 @@ metadata:
 data:
   # Until it is replaced this fails on purpose, so an unconfigured build shows
   # up as a failing verify stage on the status page rather than as a pass.
-  # For a Go module the body can be as short as: go build ./...
+  # For a Go module the body can be as short as: go build -o /dev/null ./...
   # A build that installs dependencies into the checkout (node_modules, a
   # virtual environment) needs that path granted to the verify process.
   build: |

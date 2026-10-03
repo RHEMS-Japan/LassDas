@@ -38,6 +38,23 @@ request was understood correctly. Read the change.
 11. [Troubleshooting](#11-troubleshooting)
 12. [Where things are](#12-where-things-are)
 
+## Choose the setup path before copying values
+
+Use these choices with the person who owns the installation. Record the chosen
+letters and actual names in your private setup notes; do not guess missing
+permissions or open intake to discover whether the choice works.
+
+| Decision | (a) | (b) | (c) |
+| --- | --- | --- | --- |
+| Tracker | Dedicated Backlog project/account, section 2 | GitHub Issues in one repository, section 2 | Shared Backlog account: verify the project identity as described below before opening intake |
+| Namespace | New dedicated namespace, section 6 | Existing dedicated namespace, with its owner's approval | Shared namespace: arrange a suitable dedicated one; do not relax admission for unrelated workloads |
+| Delivery | Leave merge to a person, section 4 | Automatic merge to an integration branch, after checking its rules and CI | Another completion point: define and test that project workflow first; neither PR nor merge proves production delivery |
+| Build dependencies | Public dependencies with approved network access | Dependencies already in the checkout or pre-provisioned without credentials | Private dependencies: choose an approved preparation/proxy path below before accepting tickets |
+
+Model endpoint choices are in [the gateway section](#with-a-gateway-in-front-of-the-models).
+These are guide branches, not a new configuration language or an automatic
+grant of the permissions each path requires.
+
 ## How a request moves
 
 The shipped ordered configuration, `rewrite/examples/operator-stages.json`,
@@ -175,6 +192,22 @@ addresses. So:
    so a mistyped setting cannot point it at another one.
 4. Give the delivery token no permission over the repository's workflows.
 
+A shared Backlog account weakens the protection in item 3. If the owner chooses
+one, compare the project key and numeric id from section 2 with both the local
+`--check` intake line and the running Pod's `--check` intake line before opening
+intake. Confirm that the chosen reply/stop operators belong to that project.
+Do not reuse another instance's queue; the identity checks are not a substitute
+for limiting the account's access where possible.
+
+Item 4 protects GitHub Actions workflow changes only. Other CI systems may run
+configuration taken from a pushed branch with their own credentials. Inspect
+all CI triggers and which branches receive secrets, including ticket branches,
+before granting push access. For example, CircleCI's configuration is not
+protected by a GitHub token lacking Workflows permission. Keep such paths out
+of `DELIVERY_ALLOWED_PATHS` when they must not change, or have the owner isolate
+that CI's credentials and approve the intended access. An instruction to a
+model not to edit a path is not a permission boundary.
+
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
 in `model_selection.authors` (deepseek, minimax, qwen and z-ai), read the
@@ -194,6 +227,13 @@ of selecting").
 `kubectl` for the cluster, `python3`, and `sed`. Go 1.25 or later to check
 your configuration before it goes in (section 4) and to try each new image
 (section 10); without Go, the configuration check runs inside the Pod.
+
+With an installed Go 1.21 or later and `GOTOOLCHAIN=auto`, Go can select and
+download the version required by `go.mod` or `go.work`. That needs the download
+to be permitted; it is not proof that the installed toolchain already meets
+the requirement. `GOTOOLCHAIN=local` prevents that download and refuses a newer
+requirement. Check `go version` in the relevant module and use a provisioned
+toolchain for an offline runtime instead of silently weakening its requirement.
 
 ## 2. Preparing the tracker
 
@@ -419,6 +459,50 @@ request's head, which carries the integration branch). A branch that fails
 them already will fail them for every request. The check mode in section 7
 runs them once against the branch as it is; resolve any failure before the
 first ticket.
+
+### Dependencies and read-only builds
+
+Check this before configuring the instance, not at its first failed ticket.
+The shipped verification roles do not receive the delivery token or your
+workstation's private package credentials. Their private HOME starts empty;
+a successful build using your account's module cache is not the same test.
+The post-merge checker also removes the delivery token before running your
+commands. A private Go module or npm package will not become accessible just
+because the repository itself can be cloned.
+
+Choose one preparation with the owner:
+
+- **Dependencies in the checkout.** For Go, prepare and review `vendor/` in
+  the delivery repository through its normal PR process. In each module use
+  `GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS='-mod=vendor -p=1' GOPROXY=off go build -o /dev/null ./...`
+  and the same environment with `go test ./...`. Explicit `-mod=vendor` is
+  needed when that module's Go version does not select vendor automatically.
+  A multi-module repository needs this preparation and command in each module;
+  do not assume one root command covers it.
+- **Pre-provisioned packages or an approved proxy.** Follow the project's
+  existing mechanism, with cache/output paths writable outside the checkout.
+  A private proxy still needs an explicit access arrangement; it is not
+  automatically covered by the model or delivery credential.
+- **New credential access is necessary.** Stop this setup choice and ask the
+  owner to approve the precise access and isolation. Do not pass the delivery
+  token to a model, remove dependency checks, or rewrite dependency versions
+  just to make this test pass.
+
+For a single Go `main` package, plain `go build ./...` writes a binary into the
+current directory. The template's `go build -o /dev/null ./...` compiles without
+that output and works in a read-only checkout. Other tools may still write
+lockfiles, generated source or installed packages: place outputs under HOME
+or `/tmp`, or explicitly grant only the required output paths. Use the exact
+commands in verification, review and post-merge checking, and run section 7's
+check inside a role before opening intake. A local build alone is insufficient.
+
+Public dependency downloads need their own approved network destinations
+(for Go these may include proxy.golang.org and sum.golang.org, or your chosen
+proxy). The model/tracker egress check does not test those downloads. Inspect
+the actual commands and DNS resolution from the runtime. A gateway that
+resolves to a private address there will be refused by the shipped public-only
+egress rules even if it resolves publicly on your workstation. Have the network
+owner resolve the intended access; do not disable the rules as a test shortcut.
 
 ### Requests running side by side
 
@@ -905,6 +989,14 @@ POD=<consumer>-ticket-engine-0
 ```
 
 1. **The namespace**, admitting this Pod (section 1):
+
+   The commands below are for a **new dedicated namespace**. For an existing
+   one, first read its labels and check with its owner which workloads use it;
+   do not run the label overwrite on a shared namespace. Missing labels do
+   not mean that admission permits this Pod: cluster defaults still apply.
+   Keep an already suitable dedicated namespace as it is. Otherwise have its
+   owner approve the change or allocate a dedicated namespace, then use the
+   server-side dry run and Pod events to check actual admission.
 
    ```sh
    kubectl create namespace "$NS"
