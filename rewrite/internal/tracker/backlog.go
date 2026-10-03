@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Backlog struct {
@@ -52,6 +53,9 @@ func RequestText(data []byte) (string, error) {
 // AddComment sends ordinary prose once. An ambiguous transport result is not
 // permission to repeat a visible post: inspect Comments before deciding.
 func (b Backlog) AddComment(ctx context.Context, issue, content string) (json.RawMessage, error) {
+	if !utf8.ValidString(content) {
+		return nil, errors.New("comment contains invalid UTF-8; it was not sent")
+	}
 	data, err := b.call(ctx, http.MethodPost, "/issues/"+url.PathEscape(issue)+"/comments", nil,
 		url.Values{"content": {content}}, http.StatusCreated)
 	if err != nil {
