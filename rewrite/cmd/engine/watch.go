@@ -23,7 +23,7 @@ import (
 // Intake settings are operator scope, not a format required of requesters.
 // The explicit timestamp prevents quietly starting every historical issue.
 type intakeConfig struct {
-	ProjectID           int64   `json:"project_id"`
+	ProjectID           int64   `json:"project_id,omitempty"`
 	CreatedSince        string  `json:"created_since"`
 	PollIntervalSeconds int     `json:"poll_interval_seconds,omitempty"`
 	MaxRunning          int     `json:"max_running,omitempty"`
@@ -91,8 +91,14 @@ func (w *serialLog) Write(p []byte) (int, error) {
 // directory, the starting time, the seconds between scans and the slots.
 func watchSettings(cfg *config, root string) (string, time.Time, int, int, error) {
 	fail := func(err error) (string, time.Time, int, int, error) { return "", time.Time{}, 0, 0, err }
-	if cfg.Intake == nil || cfg.Intake.ProjectID <= 0 {
+	if err := validateGitHubConfig(*cfg, nil); err != nil {
+		return fail(err)
+	}
+	if cfg.GitHub == nil && (cfg.Intake == nil || cfg.Intake.ProjectID <= 0) {
 		return fail(errors.New("watch requires an explicit intake.project_id"))
+	}
+	if cfg.Intake == nil {
+		return fail(errors.New("watch requires an explicit intake configuration"))
 	}
 	if err := validateStopReporter(*cfg); err != nil {
 		return fail(err)
@@ -240,6 +246,14 @@ func watchRequests(ctx context.Context, cfg config, root string, log io.Writer) 
 // engine understood it that way before the first issue is accepted.
 func intakeScope(cfg config, since time.Time) string {
 	scope := fmt.Sprintf("intake: project %d, issues created at or after %s", cfg.Intake.ProjectID, since.Format(time.RFC3339Nano))
+	if cfg.GitHub != nil {
+		scope = fmt.Sprintf("intake: repository %s, open issues created at or after %s carrying label %q; pull requests are excluded",
+			cfg.GitHub.Repository, since.Format(time.RFC3339Nano), cfg.GitHub.IntakeLabel)
+		if len(cfg.Intake.IssueIDs) > 0 {
+			scope += fmt.Sprintf("; only issue numbers %v", cfg.Intake.IssueIDs)
+		}
+		return scope
+	}
 	ids, categories := cfg.Intake.IssueIDs, cfg.Intake.CategoryIDs
 	switch {
 	case len(ids) > 0 && len(categories) > 0:
