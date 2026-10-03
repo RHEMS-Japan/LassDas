@@ -159,14 +159,22 @@ func watchSettings(cfg *config, root string) (string, time.Time, int, int, error
 // and open their instructions by saying the setup is incomplete. A watch on a
 // configuration that still holds one of those would start, take up requests
 // and fail each of them over and over at the model's price, so it is refused
-// here with the place of the first one found. Only a value that is a URL is
-// looked at, and only its host: an author's address under example.invalid, a
+// here with the place of the first one found. The GitHub repository's explicit
+// REPLACE_WITH_ components are also placeholders. Other values are inspected
+// only when they are URLs, and only their host: an author's address under example.invalid, a
 // sentence that mentions the name and a real host that merely begins like it
 // are the operator's own. This reads the operator's own file for the
 // examples' own words; it is not a check of anything a role or a model wrote.
 func examplePlaceholder(cfg config) string {
 	if strings.HasPrefix(strings.TrimSpace(cfg.Instructions), "Operator setup is incomplete") {
 		return "instructions still holds the example's paragraph (\"Operator setup is incomplete\"); a watch needs the project's own guidance there"
+	}
+	if cfg.GitHub != nil {
+		for _, part := range strings.Split(cfg.GitHub.Repository, "/") {
+			if strings.HasPrefix(part, "REPLACE_WITH_") {
+				return "github.repository still holds a REPLACE_WITH_ placeholder; set your own owner/repository before starting intake"
+			}
+		}
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {

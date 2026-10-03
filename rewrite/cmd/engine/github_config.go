@@ -63,6 +63,11 @@ func validateGitHubConfig(cfg config, data []byte) error {
 	if g.KeyEnv == "" {
 		return fmt.Errorf("github.key_env must name the environment variable containing the PAT")
 	}
+	for _, prefix := range []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"} {
+		if strings.HasPrefix(g.KeyEnv, prefix) {
+			return fmt.Errorf("github.key_env looks like a credential value; put only its environment variable name here")
+		}
+	}
 	for n, c := range g.KeyEnv {
 		if !(c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || n > 0 && c >= '0' && c <= '9') {
 			return fmt.Errorf("github.key_env must be an environment variable name, not a credential value")
