@@ -7,9 +7,9 @@ GOOS=linux GOARCH=arm64 sh package.sh /path/to/new-bundle
 ```
 
 Choose `GOARCH` for the target host; omit `GOOS`/`GOARCH` for the build host.
-The script builds `bin/ticket-engine` and `bin/ticket-tracker`, copies the three
-configured-command bridges into `harnesses/`, and includes `START.md`, this
-document, `README.md` and `examples/operator.json`. Begin with `START.md`; the
+The script builds `bin/ticket-engine`, `bin/ticket-tracker` and `bin/ticket-status`,
+copies the configured-command harnesses, operator examples and third-party notices,
+and includes `START.md`, this document and `README.md`. Begin with `START.md`; the
 example leaves the intake scope unset and must be adapted before accepting work.
 It refuses an existing output path and retains partial output on build failure.
 It does not install an SDK, fetch an image, start a daemon, activate intake,
