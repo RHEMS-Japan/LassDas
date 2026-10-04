@@ -1580,27 +1580,84 @@ Expect `Seccomp` 2, `Seccomp_filters` 1, `CapEff` and `CapPrm` all zeros,
 `request_file` `probe-original`, `workspace_write` an error number (1, 13 or
 30; `ALLOWED` fails the check), and `unshare_return` -1.
 
-**Egress, both ways.** `<kubernetes-service-ip>` is
-`kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}'`;
-with a gateway, add its host to the targets:
+### Observing connections from the selected Pod
 
-```sh
-kubectl -n "$NS" exec "$POD" -c engine -- python3 -B -c '
-import json, socket
-targets = {"tracker": ("<space>.backlog.com", 443), "models": ("openrouter.ai", 443),
-           "delivery": ("github.com", 443), "delivery-api": ("api.github.com", 443),
-           "metadata": ("169.254.169.254", 80), "cluster-api": ("<kubernetes-service-ip>", 443)}
-result = {}
-for name, address in targets.items():
-    try:
-        with socket.create_connection(address, timeout=3): result[name] = "connected"
-    except OSError as error: result[name] = type(error).__name__
-print(json.dumps(result))'
+Use the source-shipped `operations/egress-check.sh` with its adjacent
+`network_probe.py` and `tracker_helper.py`. Prepare a private JSON file of
+the endpoints your installation should reach and refuse, for example:
+
+```json
+[
+  {"name": "model", "url": "https://allowed.example:8443", "expect": "connected"},
+  {"name": "restricted", "url": "https://denied.example", "expect": "refused"}
+]
 ```
 
-The first four (and the gateway) must be `connected`, `metadata` and
-`cluster-api` `ConnectionRefusedError`. An applied manifest is not evidence
-that anything is refused; this is.
+Replace these example endpoints. Include the tracker, model/gateway and delivery
+endpoints actually used, and destinations your network operator expects to be
+refused. Both expectations must be present; URLs must contain no credentials,
+query or fragment. URL paths are not tested. No target is inferred from prose
+inside the configuration. Explicit ports and IPv6 URLs are supported.
+
+```sh
+sh deploy/ticket-engine/operations/egress-check.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" --container "$CONTAINER" \
+  --targets "$TARGETS" --output "$BEFORE_NETWORK"
+```
+
+`TARGETS` and the new output directory are absolute local paths. The helper
+resolves and tests each returned address inside that container. It saves
+addresses and results privately in `result.json`; console output contains only
+the overall result. Exit 0 requires every target to match its expectation.
+`connected` requires at least one successful address; `refused` requires refusal
+at every resolved address. DNS failures, timeouts and incomplete observations
+are never treated as refusals.
+A refusal proves neither which component refused it nor that a firewall rule
+caused it. A connection proves neither TLS, authentication nor application health.
+The observation is limited to the selected endpoints at that time.
+
+### Read checks after an independently performed deployment
+
+Before an authorized deployment, retain a successful network result as above
+and a successful metadata-only `read-issues.sh` result from section 7. After
+the deployment, use `operations/after-deploy.sh` (Backlog only):
+
+```sh
+sh deploy/ticket-engine/operations/after-deploy.sh \
+  --context "$CONTEXT" --namespace "$NS" --pod "$POD" --container "$CONTAINER" \
+  --targets "$TARGETS" --output "$AFTER_CHECKS" \
+  --config "$CONFIG" --engine-bin "$ENGINE_BIN" --tracker-bin "$TRACKER_BIN" \
+  --queue "$QUEUE" --project-id "$PROJECT_ID" \
+  --egress-baseline "$BEFORE_NETWORK/result.json" \
+  --issues-baseline "$BEFORE_ISSUES/result.json" \
+  --status-url "$STATUS_HEALTH_URL" 200 --status-url "$STATUS_ROOT_URL" 401
+```
+
+Set the absolute installed binary/configuration/queue paths explicitly.
+Status URLs are credential-free HTTPS URLs observed from the workstation;
+TCP observations are from the Pod. Supply the HTTP codes expected for your
+configuration (an expected 401 does not prove authenticated page health).
+The helper does not follow redirects, supply credentials or read response bodies.
+
+It runs the network check, the engine's existing `--check`, the status reads,
+the existing issue-read helper and the existing conservative idle check. It
+also compares network targets/outcomes and issue metadata with the two explicit
+successful baselines. DNS address rotation alone is not a mismatch. Baseline
+equality does not prove the same account, immutable source or atomic snapshot;
+use baselines from the intended installation. Changed issue metadata may be
+normal activity and is not automatically blamed on deployment.
+
+Every required check must pass for exit 0. An earlier failure is retained even
+if later checks pass. The new private output keeps `result.json`, `network.json`
+and successful issue-read evidence; no existing output or baseline is overwritten.
+Missing or failed baselines are not replaced with the current observation.
+Use `--timeout SECONDS` (default 60) per child command/HTTP read; this bounds
+local waits, not the lifetime of a remote process after disconnection.
+
+Neither helper deploys, repairs, changes intake, posts a ticket nor authorizes a
+deployment. An idle check can become stale immediately. Configuration acceptance
+and baseline equality do not establish end-to-end delivery; still run the
+separately authorized acceptance request described below.
 
 **The credentials, by name only.** Read the names the final configuration
 actually references, plus the mirror's delivery credential. For gateway-only
@@ -1944,6 +2001,10 @@ The [queue inspection helper](#inspecting-the-queue-without-starting-work)
 also distinguishes unfinished stop reporting from a stopped original run.
 An `idle` result does not verify the stop comment's authority or its report's
 content; retain the original stop and both histories for inspection.
+
+The read checks in section 7 can collect observations after a separately
+authorized repair or deployment. They neither resume stopped work nor prove
+that its report or delivery is correct.
 
 ## 10. Upgrading to a new image
 
