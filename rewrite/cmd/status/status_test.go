@@ -158,6 +158,65 @@ func TestOverviewListsEveryRequestWithItsPosition(t *testing.T) {
 	}
 }
 
+func TestWorkLimitStatusSeparatesMeasuredTimeFromAnOpenInterval(t *testing.T) {
+	for _, variant := range []string{"running", "active-limit", "unmeasured-active", "new interval", "damaged"} {
+		t.Run(variant, func(t *testing.T) {
+			root := fixtureQueue(t)
+			directory := filepath.Join(root, "jobs", "7")
+			clock := map[string]any{"max_minutes": 3, "elapsed_ns": 45 * time.Second}
+			record := map[string]any{"version": 1, "clock": clock}
+			if variant == "running" || variant == "unmeasured-active" {
+				clock["active_since"] = "2026-01-02T00:00:00Z"
+			}
+			if variant == "active-limit" || variant == "unmeasured-active" {
+				record["pauses"] = []any{map[string]any{"reason": variant, "at": "2026-01-02T00:00:00Z", "elapsed_ns": 45 * time.Second}}
+			}
+			if variant == "new interval" {
+				clock["elapsed_ns"] = 0
+			}
+			if variant == "damaged" {
+				clock["elapsed_ns"] = -1
+			}
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "work-limit.json"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			s := &server{runDir: root, location: time.UTC}
+			j := s.loadJob("7", time.Now(), true)
+			if variant == "damaged" {
+				if !j.PauseBroken || j.WorkTime != "" || j.Lane != "attention" {
+					t.Fatalf("damaged clock: %+v", j)
+				}
+				return
+			}
+			want := "45s"
+			if variant == "new interval" {
+				want = "0s"
+			}
+			if !strings.Contains(j.Attention, "Saved active-work cap: 3 min; measured: "+want) || !strings.Contains(translate("ja", j.Attention), "確定済み: "+want) {
+				t.Fatalf("metrics missing: %s", j.Attention)
+			}
+			open := variant == "running" || variant == "unmeasured-active"
+			if strings.Contains(j.WorkTime, "open interval") != open {
+				t.Fatal("open interval was counted or hidden")
+			}
+			if variant == "unmeasured-active" && (!strings.Contains(j.Attention, "reaching the limit was not confirmed") || !strings.Contains(translate("ja", j.Attention), "確認したわけではありません")) {
+				t.Fatal("uncertainty became a measured limit")
+			}
+			if variant == "running" && j.Lane != "running" {
+				t.Fatal("an open live clock alone became a hold")
+			}
+			response, body := get(t, serve(t, root, fixtureConfig(t), "", ""), "/jobs/7")
+			if response.StatusCode != http.StatusOK || !strings.Contains(body, "Saved active-work cap: 3 min; measured: "+want) {
+				t.Fatalf("metrics not rendered: %d", response.StatusCode)
+			}
+		})
+	}
+}
+
 func TestPausedRequestsShowTheReasonWithoutBecomingDoneOrRunning(t *testing.T) {
 	for _, variant := range []string{"active-limit", "unmeasured-active", "resume intent", "resume saved", "released", "damaged", "unreadable", "history missing", "stopped", "delivered"} {
 		t.Run(variant, func(t *testing.T) {

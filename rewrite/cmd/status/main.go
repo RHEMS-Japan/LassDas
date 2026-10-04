@@ -280,6 +280,7 @@ type job struct {
 	WorkPause   string
 	PauseStatus string
 	PauseBroken bool
+	WorkTime    string
 	NoRecord    bool
 	StageIndex  int
 	StageCount  int
@@ -405,10 +406,16 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	}
 	var record struct {
 		Version int `json:"version"`
-		Pauses  []struct {
-			Reason   string    `json:"reason"`
-			At       time.Time `json:"at"`
-			NoticeID int64     `json:"notice_id"`
+		Clock   *struct {
+			MaxMinutes int           `json:"max_minutes"`
+			Elapsed    time.Duration `json:"elapsed_ns"`
+			Active     *time.Time    `json:"active_since"`
+		} `json:"clock"`
+		Pauses []struct {
+			Reason   string        `json:"reason"`
+			At       time.Time     `json:"at"`
+			NoticeID int64         `json:"notice_id"`
+			Elapsed  time.Duration `json:"elapsed_ns"`
 			Resume   *struct {
 				Comment      json.RawMessage `json:"comment"`
 				HistoryIndex int             `json:"history_index"`
@@ -420,8 +427,11 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 	if err != nil || json.Unmarshal(raw, &record) != nil || record.Version != 1 {
 		return "", "", true
 	}
+	if c := record.Clock; c != nil && (c.MaxMinutes <= 0 || uint64(c.MaxMinutes) > uint64(time.Duration(1<<63-1)/time.Minute) || c.Elapsed < 0 || (c.Active != nil && c.Active.IsZero())) {
+		return "", "", true
+	}
 	for i, pause := range record.Pauses {
-		if pause.At.IsZero() || pause.NoticeID < 0 || (pause.Reason != "active-limit" && pause.Reason != "unmeasured-active") ||
+		if pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 || (pause.Reason != "active-limit" && pause.Reason != "unmeasured-active") ||
 			(i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied)) {
 			return "", "", true
 		}
@@ -486,6 +496,27 @@ func pauseState(dir string, state *chain.State) (reason, status string, broken b
 		reason = "Active time could not be established after an interrupted run; reaching the limit was not confirmed. " + pauseResumeHelp
 	}
 	return reason, "paused; waiting for an authorized resume instruction", false
+}
+
+// The saved total excludes an open interval. The status reader cannot know
+// whether that child still runs, so it never invents elapsed wall-clock time.
+func workTimeState(dir string) string {
+	raw, err := os.ReadFile(filepath.Join(dir, "work-limit.json"))
+	var record struct {
+		Clock *struct {
+			MaxMinutes int           `json:"max_minutes"`
+			Elapsed    time.Duration `json:"elapsed_ns"`
+			Active     *time.Time    `json:"active_since"`
+		} `json:"clock"`
+	}
+	if err != nil || json.Unmarshal(raw, &record) != nil || record.Clock == nil {
+		return ""
+	}
+	text := fmt.Sprintf("Saved active-work cap: %d min; measured: %s.", record.Clock.MaxMinutes, record.Clock.Elapsed.Round(time.Second))
+	if record.Clock.Active != nil {
+		text += "\nThe open interval is not included in the measured time."
+	}
+	return text
 }
 
 // cssClass turns an outcome's words into one class name.
@@ -710,6 +741,9 @@ func (s *server) loadJob(id string, now time.Time, detail bool) *job {
 	}
 	j.Stopped, j.Reported, j.StopBroken = stopState(dir)
 	j.WorkPause, j.PauseStatus, j.PauseBroken = pauseState(dir, j.State)
+	if !j.PauseBroken {
+		j.WorkTime = workTimeState(dir)
+	}
 	touch(filepath.Join(dir, "work-limit.json"))
 	if !detail {
 		if raw, err := os.ReadFile(filepath.Join(dir, "notices.json")); err == nil {
@@ -1168,6 +1202,9 @@ func (j *job) derive(now time.Time) {
 		if j.Reported {
 			j.Status = "stopped by the requester; report posted"
 		}
+	}
+	if j.WorkTime != "" && !j.PauseBroken && !j.Stopped && !j.StopBroken {
+		j.Attention = strings.TrimSpace(j.Attention + "\n" + j.WorkTime)
 	}
 	// The trail of stages on the card: passed, current and ahead; a finished
 	// request has passed them all, a waiting one is still at its stage.
@@ -1863,6 +1900,23 @@ func stageName(lang, name string) string {
 
 func translate(lang, text string) string {
 	if lang == "ja" {
+		if strings.Contains(text, "\n") {
+			lines := strings.Split(text, "\n")
+			for i := range lines {
+				lines[i] = translate(lang, lines[i])
+			}
+			return strings.Join(lines, "\n")
+		}
+		if strings.HasPrefix(text, "Saved active-work cap: ") {
+			var minutes int
+			var measured string
+			if _, err := fmt.Sscanf(text, "Saved active-work cap: %d min; measured: %s", &minutes, &measured); err == nil {
+				return fmt.Sprintf("保存された実稼働上限: %d 分。確定済み: %s。", minutes, strings.TrimSuffix(measured, "."))
+			}
+		}
+		if text == "The open interval is not included in the measured time." {
+			return "未終了の区間は、確定済み時間に含まれていません。"
+		}
 		if ja, known := japanese[text]; known {
 			return ja
 		}

@@ -224,7 +224,7 @@ func TestWorkPauseKeepsItsReasonAndEarlierControlReceipts(t *testing.T) {
 	if err != nil || len(got.Pauses) != 2 || !got.held() || got.Pauses[1].Reason != unmeasuredPause {
 		t.Fatalf("the next episode was lost: %+v %v", got, err)
 	}
-	if text := pausedWorkText(got.Pauses[1]); !strings.Contains(text, "上限に達したと確認したわけではありません") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
+	if text := pausedWorkText(got.Pauses[1], got.Clock); !strings.Contains(text, "上限に達したと確認したわけではありません") || !strings.Contains(text, "再開") || !strings.Contains(text, "停止") {
 		t.Fatalf("the uncertain clock was presented as a reached limit: %s", text)
 	}
 }
@@ -273,7 +273,7 @@ func TestPauseUsesTheActualPostedNoticeAndKeepsALaterResume(t *testing.T) {
 	if len(state.History) != 1 || state.History[0].Output != "再開\nnew words" || state.Pending == nil || state.Done {
 		t.Fatalf("release changed the pending action or repeated its words: %+v", state)
 	}
-	if remote.count(pausedWorkText(record.Pauses[0])) != 1 || remote.count(workResumeText) != 1 {
+	if remote.count(pausedWorkText(record.Pauses[0], record.Clock)) != 1 || remote.count(workResumeText) != 1 {
 		t.Fatalf("the restart repeated a control notice: %v", remote.all())
 	}
 }

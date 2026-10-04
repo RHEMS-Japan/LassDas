@@ -1192,6 +1192,78 @@ while reporting finished. Recorded child PIDs and scoped access disappeared.
 Model answers and the tracker were synthetic; this validates wiring and the
 observed access boundary, not real-model judgment or production isolation.
 
+### Active-work limits and recovery
+
+A failed attempt is not a completed request. The configured workflow decides
+the next work; the watch controller can also enforce an operator's explicit
+active-time limit. One-shot `--request` runs do not acquire an intake limit.
+
+#### Select the limit
+
+Set `intake.max_active_minutes` to a positive integer in the existing operator
+configuration. Omission or zero disables this optional feature. Negative,
+fractional and overflowing values are invalid. Check the complete configuration
+with `--check` before changing a running installation.
+
+A positive cap is saved at acceptance. Configuration changes do not silently
+change an accepted request's cap. Do not delete or edit runtime records to change
+the policy. No migration or backward-format support is provided.
+
+Time accumulates while the request runtime is active, across successful stages,
+failures and routing retries. Success does not reset it. Waiting for a slot,
+waiting after a question has returned, waiting after a credit hold has stopped
+the child and controller downtime are excluded. A running command polling a
+service is still active. This is neither CPU time nor a token or billing budget.
+
+#### At the limit
+
+The timer cancels the child independently of tracker calls and storage of its
+final record. The controller waits for the child to finish, records its actual
+elapsed time and returns the slot. The request remains unfinished, retaining its
+workflow position, question, history and workspace. No push, comment or deployment
+that already happened is undone. Cancellation is not a hard real-time guarantee
+for a hung kernel or processes outside the configured supervisor's ownership.
+
+After the pause notice, the issue creator or an account in `intake.stop_user_ids`
+can post a new comment whose first nonblank line is exactly `再開`, with further
+instructions on later lines. This grants another interval with the same saved
+cap. The acknowledgment means the resume was recorded, not that work started or
+finished. Slots and credit may still be unavailable. Answer an outstanding
+question separately; repeated resumes do not become answers or grant more time.
+
+To wait, do nothing. Pauses do not expire into success. To abandon the request,
+an authorized user posts a new comment beginning with `停止`. Native stop takes
+priority and uses its separate configured reporting role. Neither a stopped nor
+a delivered request is reopened by `再開`. Recovery never weakens the agreed
+delivery destination or authorizes repeating an external operation blindly.
+
+#### Restart and operator action
+
+Normal shutdown waits for the child and saves elapsed time; restart uses the
+remaining allowance. A forced exit or failed final save can leave an interval
+whose end is unknown. That request is held with an unconfirmed-time explanation,
+without charging downtime or resetting the total. The status page shows the cap
+and confirmed time; an unfinished interval is not included in that total.
+
+After inspecting prior external effects, use the authorized resume for a readable
+pause. Damaged records need operator inspection and a reviewed repair procedure,
+not invented replacement history. Authorized native stop remains available.
+Rollback to a binary without these limits is not supported or authorized here.
+
+Process/model failures use the configured retry or repair work. Fix an operator
+setting, permission or service when that is the actual cause. Billing and keys
+use the operator's authorized procedure, never a value pasted into a ticket.
+Check both original stopped work and its report before calling the queue idle.
+
+Question waits have no expiry added here. Pauses retain the workspace. Existing
+home-cache cleanup after stop reporting is not permission to lose source data.
+Removing source after an authorized stop requires the separate, explicit
+stopped-workspace retention policy.
+Tests use local children, controlled clocks and synthetic services. Real tracker
+permissions, model judgment, production cancellation and external-operation
+idempotence remain installation checks. Reports, branches, PRs, merges and working
+environments remain different observations.
+
 ### What the requester is told at night
 
 A request filed at eleven and stopped at two by an outage used to say nothing

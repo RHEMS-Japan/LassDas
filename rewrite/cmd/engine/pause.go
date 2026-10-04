@@ -29,17 +29,19 @@ const workResumeText = "再開の指示を受け取り、一時停止の解除�
 
 // workLimitRecord belongs to one accepted request. Keeping earlier episodes
 // also keeps their consumed control comments out of ordinary question answers.
-// A missing file is an older request, not an instruction to pause it.
+// With no configured limit or recorded pause, this optional record is absent.
 type workLimitRecord struct {
 	Version int            `json:"version"`
 	Pauses  []pauseEpisode `json:"pauses,omitempty"`
+	Clock   *workClock     `json:"clock,omitempty"`
 }
 
 type pauseEpisode struct {
-	Reason   string       `json:"reason"`
-	At       time.Time    `json:"at"`
-	NoticeID int64        `json:"notice_id,omitempty"`
-	Resume   *pauseResume `json:"resume,omitempty"`
+	Reason   string        `json:"reason"`
+	At       time.Time     `json:"at"`
+	NoticeID int64         `json:"notice_id,omitempty"`
+	Resume   *pauseResume  `json:"resume,omitempty"`
+	Elapsed  time.Duration `json:"elapsed_ns,omitempty"`
 }
 
 // The native instruction and the history position are saved before its words
@@ -63,11 +65,11 @@ func readWorkLimit(directory string) (workLimitRecord, error) {
 		return workLimitRecord{}, err
 	}
 	var record workLimitRecord
-	if json.Unmarshal(raw, &record) != nil || record.Version != 1 {
+	if json.Unmarshal(raw, &record) != nil || record.Version != 1 || !record.Clock.valid() {
 		return workLimitRecord{}, errPauseRecord
 	}
 	for i, pause := range record.Pauses {
-		if (pause.Reason != activeLimitPause && pause.Reason != unmeasuredPause) || pause.At.IsZero() || pause.NoticeID < 0 {
+		if (pause.Reason != activeLimitPause && pause.Reason != unmeasuredPause) || pause.At.IsZero() || pause.NoticeID < 0 || pause.Elapsed < 0 {
 			return workLimitRecord{}, errPauseRecord
 		}
 		if i+1 < len(record.Pauses) && (pause.Resume == nil || !pause.Resume.Applied) {
@@ -96,8 +98,8 @@ func (r workLimitRecord) held() bool {
 	return resume == nil || !resume.Applied
 }
 
-// A pause is not a native stop. Save it before asking a running child to exit;
-// its caller still owns cancellation and release of the execution slot.
+// A pause is not a native stop. Its caller owns cancellation and waits for the
+// child before recording its measured end or recovering an unconfirmed interval.
 func recordWorkPause(directory, reason string, at time.Time) error {
 	if (reason != activeLimitPause && reason != unmeasuredPause) || at.IsZero() {
 		return errors.New("a work pause needs its controller reason and time")
@@ -106,7 +108,7 @@ func recordWorkPause(directory, reason string, at time.Time) error {
 	if err != nil || record.held() {
 		return err
 	}
-	record.Pauses = append(record.Pauses, pauseEpisode{Reason: reason, At: at.UTC()})
+	record.addPause(reason, at)
 	return saveWorkLimit(directory, record)
 }
 
@@ -117,8 +119,8 @@ func pauseReason(reason string) string {
 	return "前回の実行が途中で終了し、その区間の実稼働時間を確定できないためです。上限に達したと確認したわけではありません。"
 }
 
-func pausedWorkText(pause pauseEpisode) string {
-	return "この依頼の自動処理を一時停止しています。" + pauseReason(pause.Reason) +
+func pausedWorkText(pause pauseEpisode, clock *workClock) string {
+	return "この依頼の自動処理を一時停止しています。" + pauseReason(pause.Reason) + workPauseMeasured(clock, pause.Elapsed) +
 		"依頼は未完了です。中断前の操作が既に反映されている場合があり、取り消してはいません。\n" +
 		"続ける場合は、最初の空でない行を「再開」として新しいコメントを投稿してください。必要な補足は次の行に書けます。保存した条件で、外部の状態を確かめてから続けます。" +
 		"対応を待つ場合は、このまま待てます。依頼を取りやめる場合は、最初の空でない行を「停止」としてください。"
@@ -235,7 +237,11 @@ func (n notices) sayPauseEvent(ctx context.Context, kind, event, words string) (
 // when the pause record is damaged; a disappearing remote stop cannot turn
 // this poll's stop-only decision into permission to run work on the next one.
 func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, directory, request string, interval time.Duration, observe func(string)) (bool, error) {
+	recoveryErr := recoverWorkClock(directory)
 	record, recordErr := readWorkLimit(directory)
+	if recoveryErr != nil {
+		recordErr = recoveryErr
+	}
 	if recordErr == nil && len(record.Pauses) == 0 {
 		return false, nil
 	}
@@ -265,7 +271,7 @@ func holdPausedRequest(ctx context.Context, cfg config, issue sourceIssue, direc
 	if record.held() {
 		applyStatus(ctx, cfg, issue, directory, awaitingStatus, observe)
 		assignTurn(ctx, cfg, issue, directory, "requester", observe)
-		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, pausedWorkText(*pause))
+		id, err := n.sayPauseEvent(ctx, workPauseNotice, event, pausedWorkText(*pause, record.Clock))
 		if err != nil {
 			return true, err
 		}
@@ -388,5 +394,9 @@ func applyPauseResume(ctx context.Context, cfg config, issue sourceIssue, direct
 		return errors.New("the history changed before the pause could be released; work remains held")
 	}
 	resume.Applied = true
+	if record.Clock != nil {
+		record.Clock.Elapsed = 0
+		record.Clock.Active = nil
+	}
 	return saveWorkLimit(directory, *record)
 }
