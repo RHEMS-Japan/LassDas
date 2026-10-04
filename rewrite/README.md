@@ -785,6 +785,12 @@ delivered. That too is the receipt's reading: a pull request a person reopens
 and merges after the run ended is still shown closed unmerged, and the check
 after delivery says what the delivery last read and when.
 
+When the agreed endpoint includes an environment, consult
+`rewrite/ENVIRONMENT-DELIVERY.md` in a source checkout for composing
+operator-owned commands before reporting. That guide is not included in the
+host bundle. A PR, merge, or verifier's zero status alone is not proof of an
+authorized, verified environment deployment.
+
 The shipped example's `review` stage is an adversarial review run as the
 operator's own command, `harnesses/adversarial_review.py`. A model the operator
 names, normally from a different publisher than the worker, is handed the
