@@ -127,3 +127,107 @@ func TestIssueReachesProcessUnchangedAndResumesWithoutRepeatingWork(t *testing.T
 		t.Fatalf("state=%#v error=%v", state, err)
 	}
 }
+
+func TestHistoryBindingUsesTheAcquiredRunAndKeepsEarlierRecordsReadable(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("TASK_HISTORY", filepath.Join(directory, "another-request", "history.json"))
+	for _, label := range []string{"first", "second"} {
+		t.Run(label, func(t *testing.T) {
+			root := filepath.Join(directory, label)
+			request := "Original request " + label
+			store, err := chain.Open(filepath.Join(root, "run"), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := chain.State{Request: request, History: []chain.Result{
+				{Role: "clarify", Speaker: "question-author", Output: "Which existing destination?"},
+				{Role: "clarify", Speaker: "requester", Output: "Accepted answer " + label},
+			}}
+			for i := 0; i < 65; i++ {
+				state.History = append(state.History, chain.Result{Role: "earlier-stage", Speaker: "p", Output: fmt.Sprintf("Observation %d", i)})
+			}
+			if err := store.Save(state); err != nil {
+				t.Fatal(err)
+			}
+			store.Close()
+			requestPath := filepath.Join(root, "request.txt")
+			if err := os.WriteFile(requestPath, []byte(request), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var cfg config
+			cfg.Router.Mode = "single"
+			cfg.Roles = []chain.Role{{Name: "reader", Processes: []chain.Process{{Name: "native", Directory: root,
+				Command: []string{"/bin/sh", "-c", `cat "$TASK_HISTORY" > "$1"; cat > "$2"`, "reader",
+					filepath.Join(root, "history-read.json"), filepath.Join(root, "prompt.txt")},
+			}}}}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration := filepath.Join(root, "configuration.json")
+			if err := os.WriteFile(configuration, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := run(ctx, []string{"--config", configuration, "--request", requestPath, "--run-dir", store.Dir}, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			copied, err := os.ReadFile(filepath.Join(root, "history-read.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var observed chain.State
+			if err := json.Unmarshal(copied, &observed); err != nil {
+				t.Fatal(err)
+			}
+			if observed.Request != request || len(observed.History) != 67 || observed.History[1].Output != "Accepted answer "+label || observed.Pending == nil || observed.Pending.Role != "reader" {
+				t.Fatalf("child did not read its own current checkpoint: %#v", observed)
+			}
+			prompt, err := os.ReadFile(filepath.Join(root, "prompt.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(prompt), "Observation 0\n") || !strings.Contains(string(prompt), "7 earlier records") || !strings.Contains(string(prompt), filepath.Join(store.Dir, "history.json")) {
+				t.Fatalf("bounded prompt or usable source reference missing: %s", prompt)
+			}
+		})
+	}
+}
+
+func TestHistoryBindingRejectsConfiguredSourcesBeforeStarting(t *testing.T) {
+	for _, source := range []string{"env", "secrets", "model_env"} {
+		t.Run(source, func(t *testing.T) {
+			process := chain.Process{Name: "p", Command: []string{"/bin/false"}}
+			switch source {
+			case "env":
+				process.Env = map[string]string{"TASK_HISTORY": "not-to-be-quoted"}
+			case "secrets":
+				process.Secrets = map[string]string{"TASK_HISTORY": "not-to-be-quoted"}
+			case "model_env":
+				process.ModelEnv = "TASK_HISTORY"
+			}
+			var cfg config
+			cfg.Router.Mode = "single"
+			cfg.Roles = []chain.Role{{Name: "reader", Processes: []chain.Process{process}}}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := t.TempDir()
+			path := filepath.Join(directory, "configuration.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = run(ctx, []string{"--config", path, "--request", filepath.Join(directory, "absent"), "--run-dir", filepath.Join(directory, "run")}, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "TASK_HISTORY is reserved") || strings.Contains(err.Error(), "not-to-be-quoted") {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(directory, "run")); !os.IsNotExist(err) {
+				t.Fatalf("run started before refusal: %v", err)
+			}
+		})
+	}
+}

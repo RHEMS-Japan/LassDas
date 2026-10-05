@@ -361,6 +361,18 @@ also be credential/model-selection destinations. The Hermes bridge uses
 `TASK_HOME` instead of a global `HERMES_HOME`. Commands and referenced bridge
 paths must be available from the per-job directory. Repository preparation and
 actual delivery permissions still have to be supplied by the configured roles.
+Each run also supplies `TASK_HISTORY`, pointing to that run's existing
+`history.json`, for both watched and single runs. It is a reserved runtime
+name, not a process `env`, credential destination or `model_env` setting.
+The launcher exposes only that regular file read-only, with its descriptor
+pinned for the launch; it does not expose the run directory, queue or other
+roles' homes. A later atomic checkpoint replacement is seen on the next
+launch. The ordinary prompt still keeps its most recent 60 records after
+repeated-failure collapsing. Native file/terminal tools can read the omitted
+questions, accepted answers and reports through this reference as needed.
+This is the saved answer the runtime accepted, not a later edit fetched from
+the tracker. The reference grants no additional authority and does not mean
+that a model actually read or understood every older record.
 The bridge also seeds the native terminal's existing working-directory setting
 from `TASK_WORKSPACE` unless explicitly supplied. The tested SDK otherwise began
 terminal commands in its private home despite the correct process directory;
@@ -817,6 +829,51 @@ nothing else. There is no cap on send-backs: the review sends the work back
 for as long as it finds a blocking defect, the count so far is printed with
 each verdict, and a run that will not converge is ended by the requester's
 stop comment, not by a limit.
+
+The fixed reviewer reads saved material itself: its model has the verdict
+tool, not a file-reading tool. With `TASK_HISTORY`, it adds the canonical
+original request, the latest report from each process of each model stage,
+the latest reports of its own review role, and the latest accepted requester
+answer with the preceding question-role reports. The latest requester control
+supplement with an empty recorded role is carried separately; it does not
+replace a question answer with a recorded role. Selection uses recorded
+role/process identities and configured stage kinds, not words such as
+"fixed" or "approved". For connected workflows without stage kinds, the
+latest report of each role process is included instead. These selected
+reports are carried separately from the normal 12,000-character
+head and 6,000-character tail of stdin. Older reports remain available to
+native roles; the fixed review does not automatically receive every old
+answer or determine which old answer is semantically relevant.
+
+`REVIEW_MEMORY_CHARACTERS` sets a positive character budget for the selected
+original request and report bodies (default 48000, excluding headings and
+omission notices). Within it, all selected bodies are carried in full. Above
+it, each body receives an equal share; longer bodies retain their beginning
+and end with the omitted character range explicitly named. Short bodies stay
+unchanged. The review still asks the model: size alone neither holds the run
+nor produces NOT REVIEWED. This is not a claim that omitted material was
+reviewed; increase the budget for models able to accept more context. A brief
+omission notice also accompanies the final review result and its saved log.
+
+The checkpoint read has a separate 64 MiB limit. Missing, malformed or larger
+checkpoint files do not prevent a review: the model receives the reason the
+saved context could not be read, the runtime's normal 12,000-character head
+and 6,000-character tail, and the available review log below. The live
+diagnostic and final review result (stdout and `review.md`) name that limitation.
+Missing context is not represented as
+remembered or as a verdict; the model still reviews the current change and
+test output. This cannot restore output the runtime did not retain.
+
+The existing `TASK_HOME/review.md` also supplies its last 12,000 characters,
+with a notice when older text was omitted. Its headings are ordinary prose,
+not a record or resolution format: a quoted heading cannot hide preceding
+findings inside that retained range. A preceding finding longer than this
+range is not guaranteed to reach the model in full. An absent first log is
+normal; an unreadable log is reported as unavailable, not silently treated
+as remembered. The counter is still only a count. Neither the log nor a
+worker's response proves that an objection was resolved: the reviewer must
+judge the current change and tests. Local context-transport tests do not
+establish the model's ability to remember or judge correctly.
 
 No verdict, no pass. The adversarial review is what justifies delivering
 without a person, so by default the command exits 0 only on a verdict that

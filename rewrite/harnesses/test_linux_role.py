@@ -3,6 +3,8 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,6 +43,55 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     launcher.command(args, {"TASK_WORKSPACE":"/work", "TASK_HOME":"/home/role"})
 
+    def test_history_cannot_be_broadened_by_another_mount(self):
+        args = argparse.Namespace(program=["--", "/bin/true"], write=["."], create=[], runtime=[], network="none")
+        with patch.object(sys, "platform", "linux"), patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                patch.object(launcher, "open_path", side_effect=AssertionError("overlap must be refused before opening any mount")):
+            for history in ("/work/history.json", "/home/role/history.json", "/", "relative", "/work/../history"):
+                with self.subTest(history=history), self.assertRaises(ValueError):
+                    launcher.command(args, {"TASK_WORKSPACE": "/work", "TASK_HOME": "/home/role", "TASK_HISTORY": history})
+            for runtime in ("/request", "/request/history.json", "/request/history.json/child"):
+                args.runtime = [runtime]
+                with self.subTest(runtime=runtime), self.assertRaisesRegex(ValueError, "separate read-only file"):
+                    launcher.command(args, {"TASK_WORKSPACE": "/work", "TASK_HOME": "/home/role", "TASK_HISTORY": "/request/history.json"})
+
+    def test_history_mount_uses_only_a_regular_file_descriptor_and_closes_on_refusal(self):
+        # Portable command-construction check, not a claim about Linux mounts.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            work, home, history = root / "work", root / "home", root / "run" / "history.json"
+            for directory in (work, home, history.parent):
+                directory.mkdir()
+            history.write_text("saved request", encoding="utf-8")
+            args = argparse.Namespace(program=["--", "/bin/true"], write=[], create=[], runtime=[], network="none")
+            opened = []
+
+            def portable_open(path, **_):
+                descriptor = os.open(path, os.O_RDONLY)
+                opened.append(descriptor)
+                return descriptor
+
+            with patch.object(sys, "platform", "linux"), patch.object(launcher.shutil, "which", return_value="/usr/bin/bwrap"), \
+                    patch.object(launcher, "open_path", side_effect=portable_open), patch.object(os, "O_PATH", 0, create=True):
+                argv, env, descriptors = launcher.command(args, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "TASK_HISTORY": str(history)})
+                try:
+                    mounts = [(argv[i], int(argv[i + 1]), argv[i + 2]) for i, item in enumerate(argv) if item in ("--bind-fd", "--ro-bind-fd")]
+                    matching = [entry for entry in mounts if entry[2] == str(history)]
+                    self.assertEqual(len(matching), 1)
+                    self.assertEqual(matching[0][0], "--ro-bind-fd")
+                    self.assertEqual(os.read(matching[0][1], 100), b"saved request")
+                    self.assertEqual(env["TASK_HISTORY"], str(history))
+                    self.assertNotIn(str(history.parent), [entry[2] for entry in mounts])
+                finally:
+                    for descriptor in descriptors:
+                        os.close(descriptor)
+                opened.clear()
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    launcher.command(args, {"TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "TASK_HISTORY": str(history.parent)})
+                for descriptor in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
 
 class CreatePathTests(unittest.TestCase):
     def test_a_created_directory_never_follows_a_link_in_any_component(self):
@@ -62,6 +113,21 @@ class CreatePathTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux O_PATH directory handles")
 class DescriptorTests(unittest.TestCase):
+    def test_history_file_is_pinned_across_checkpoint_replacement(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            path = root / "history.json"
+            path.write_text("older accepted answer", encoding="utf-8")
+            descriptor = launcher.open_path(path)
+            try:
+                replacement = root / "replacement.json"
+                replacement.write_text("next saved state", encoding="utf-8")
+                replacement.replace(path)
+                self.assertEqual(Path("/proc/self/fd/%d" % descriptor).read_text(), "older accepted answer")
+                self.assertEqual(path.read_text(), "next saved state")
+            finally:
+                os.close(descriptor)
+
     def test_private_mounts_do_not_hide_explicit_temporary_paths(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as root:
             base = Path(root)
@@ -151,6 +217,34 @@ class DescriptorTests(unittest.TestCase):
                 self.assertNotEqual(os.stat(path).st_ino, identity)
             finally:
                 os.close(descriptor)
+
+
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap"), "requires real Linux bubblewrap isolation")
+class HistoryIsolationTests(unittest.TestCase):
+    def test_history_is_readable_but_its_neighbors_and_writes_are_not_granted(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            work, home, history = root / "workspace", root / "home", root / "run" / "history.json"
+            for directory in (work, home, history.parent, root / "other-request"):
+                directory.mkdir()
+            history.write_text("canonical accepted answer", encoding="utf-8")
+            neighbor = root / "other-request" / "history.json"
+            neighbor.write_text("not granted", encoding="utf-8")
+            program = ['--', '/bin/sh', '-c',
+                       'test "$(cat "$1")" = "canonical accepted answer" && '
+                       'test ! -e "$2" && ! (printf changed > "$1") && ! rm "$1" && '
+                       '! mv "$1" "$1.moved"', 'reader', str(history), str(neighbor)]
+            args = argparse.Namespace(program=program, write=["."], create=[], runtime=[], network="none")
+            argv, environment, descriptors = launcher.command(args, {
+                "TASK_WORKSPACE": str(work), "TASK_HOME": str(home), "TASK_HISTORY": str(history), "PATH": os.environ["PATH"]})
+            try:
+                result = subprocess.run(argv, env=environment, pass_fds=descriptors, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+            self.assertEqual(history.read_text(), "canonical accepted answer")
+            self.assertEqual(neighbor.read_text(), "not granted")
 
 
 if __name__ == "__main__":

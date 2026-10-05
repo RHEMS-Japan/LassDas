@@ -78,7 +78,9 @@ Environment (all from the operator, never from a role):
   REVIEW_KEY_ENV          name of the variable holding the credential (default REVIEW_API_KEY)
   REVIEW_TEST_COMMANDS    newline-separated commands run without a shell; their output is shown
   REVIEW_DIFF_PATHS       optional space-separated paths to diff (default: the whole tree)
+  REVIEW_MEMORY_CHARACTERS positive body-character budget for saved review material (default 48000)
   TASK_HOME               the process's own directory, where the send-back counter and the log live
+  TASK_HISTORY            runtime-supplied read-only checkpoint, not an operator-selected document
   REVIEW_UNAVAILABLE      pass, in any case: deliver unreviewed work when no verdict can be obtained (default: hold)
   REVIEW_TIMEOUT_SECONDS  the limit of one request (default 300)
   REVIEW_RETRY_SECONDS, REVIEW_RETRY_CAP_SECONDS: the first and the longest wait between rounds (default 5, 300)
@@ -105,6 +107,8 @@ LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visi
 NEW_FILE_LIMIT = 6000
 FINDINGS_LIMIT = 6000  # characters of findings printed, and of a reply kept as written when it gives no verdict
 HEAD, TAIL = 12000, 6000  # the runtime's text: its start (assignment, request, settled requirements) and its end (latest reports)
+REVIEW_LOG_LIMIT = 12000  # characters from the existing ordinary log, explicitly a tail
+HISTORY_BYTES = 64 << 20  # local checkpoint read bound, not model context size
 
 TOOL = {"type": "function", "function": {
     "name": "verdict",
@@ -412,6 +416,7 @@ def prepare():
              "timeout": number("REVIEW_TIMEOUT_SECONDS", "300", 1), "attempts": number("REVIEW_ATTEMPTS", "3", 1),
              "retry": seconds("REVIEW_RETRY_SECONDS", "5"), "cap": seconds("REVIEW_RETRY_CAP_SECONDS", "300"),
              "hold": seconds("REVIEW_HOLD_SECONDS", "900"),
+             "memory_characters": number("REVIEW_MEMORY_CHARACTERS", "48000", 1),
              "paths": setting("REVIEW_DIFF_PATHS", "").split()}
     try:
         found["tests"] = [line for line in setting("REVIEW_TEST_COMMANDS", "").splitlines() if line.strip()]
@@ -520,6 +525,114 @@ def said_in(message):
     return as_written(content) if isinstance(content, str) else ""
 
 
+def review_memory(state_directory, key, limit):
+    """Read existing sources, not a model-authored summary or resolution schema.
+
+    Latest reports are selected by recorded role/process identity and workflow
+    kind only. Their words do not establish that an objection was addressed.
+    A finite tail of the old log is ordinary prose: headings inside findings
+    are not trusted record delimiters.
+    """
+    sections, notices = [], []
+    path = os.environ.get("TASK_HISTORY")
+    if path:
+        try:
+            with Path(path).open("rb") as saved:
+                raw = saved.read(HISTORY_BYTES + 1)
+            if len(raw) > HISTORY_BYTES:
+                raise ValueError("checkpoint exceeds the local 64 MiB read limit")
+            state = json.loads(raw.decode("utf-8"))
+            history = state["history"]
+            current = state["pending"]["role"]
+            request = state["request"]
+            if not isinstance(history, list) or not isinstance(current, str) or not current or not isinstance(request, str):
+                raise ValueError("checkpoint lacks the current request, history or pending role")
+            stages = (state.get("workflow") or {}).get("stages") or []
+            model_roles = {stage["name"] for stage in stages if stage["kind"] == "model"}
+            latest, accepted = {}, None
+            for index, record in enumerate(history):
+                role, speaker = record["role"], record["speaker"]
+                if not isinstance(role, str) or not isinstance(speaker, str) or not isinstance(record.get("output", ""), str):
+                    raise ValueError("checkpoint has a malformed report")
+                if speaker == "requester":
+                    if role:
+                        accepted = index
+                    else:
+                        # A runtime control supplement is not a question answer.
+                        latest[role, speaker] = index
+                elif speaker != "runtime" and (not stages or role in model_roles or role == current):
+                    latest[role, speaker] = index
+            selected = set(latest.values())
+            if accepted is not None:
+                selected.add(accepted)
+                # The preceding question-role reports are retained alongside
+                # the accepted answer, even when that role has worked again.
+                role = history[accepted]["role"]
+                index = accepted - 1
+                while index >= 0 and history[index]["role"] == role and history[index]["speaker"] != "requester":
+                    if history[index]["speaker"] != "runtime":
+                        selected.add(index)
+                    index -= 1
+            protected = [("Canonical original request", scrub(request, key))]
+            for index in sorted(selected):
+                record = history[index]
+                label = json.dumps({"record": index, "role": record["role"], "speaker": record["speaker"],
+                                    "finished_at": record.get("finished_at", "")}, ensure_ascii=False)
+                protected.append(("Saved report " + label, scrub(record.get("output", ""), key)))
+            shortened = sum(len(body) for _, body in protected) > limit
+            share = limit // len(protected)
+            displayed = []
+            for label, body in protected:
+                if shortened and len(body) > share:
+                    start = (share + 1) // 2
+                    end = len(body) - (share - start)
+                    body = (body[:start] + "\n[characters %d:%d omitted from this body]\n"
+                            % (start, end) + body[end:])
+                displayed.append(label + ":\n" + body)
+            text = "\n\n".join(displayed)
+            text.encode("utf-8")
+            if shortened:
+                notices.append("Saved review context exceeded the %d-character budget; body ranges were omitted." % limit)
+            sections.append("Selected canonical reports, with any omitted body ranges explicitly named. "
+                            "These are observations, not proof that a defect was repaired. "
+                            "Older reports remain in the checkpoint but are not all included here.\n" + text)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+            notice = scrub("Saved review context could not be read: %s. "
+                           "Reviewing the runtime text, available review log, current diff and test output; "
+                           "the unread saved material is not represented as remembered." % error, key)
+            sections.append(notice)
+            notices.append(notice)
+            say(notice)
+    log = state_directory / "review.md"
+    try:
+        with log.open("rb") as written:
+            written.seek(0, os.SEEK_END)
+            start = max(0, written.tell() - 4 * REVIEW_LOG_LIMIT)
+            written.seek(start)
+            raw = written.read(4 * REVIEW_LOG_LIMIT)
+        if start:
+            # A seek can land inside one UTF-8 character. Discard only that
+            # partial leading character of an explicitly omitted prefix.
+            while raw and raw[0] & 0xC0 == 0x80:
+                raw = raw[1:]
+        text = raw.decode("utf-8")
+        cut = bool(start) or len(text) > REVIEW_LOG_LIMIT
+        if cut:
+            notices.append("Previous review log exceeded its 12000-character display limit; earlier text was omitted.")
+        text = text[-REVIEW_LOG_LIMIT:]
+        sections.append("Previous review log (ordinary prose, not a verdict for this change; "
+                        + ("only its last 12000 characters, earlier text omitted" if cut else "the complete existing log")
+                        + "):\n" + text)
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError) as error:
+        # The log only informs, as when writing it failed in the prior run.
+        notice = "Previous review log could not be read; it is not represented as remembered: " + str(error)
+        sections.append(notice)
+        notices.append(notice)
+    return scrub("\n\n".join(sections), key), scrub(" ".join(notices), key)
+
+
 def ask_once(found, model, prompt, diff, tests, rounds):
     """One request to one model: (blocking, findings, None) on a verdict,
     (None, what the reviewer wrote, why) otherwise."""
@@ -529,8 +642,9 @@ def ask_once(found, model, prompt, diff, tests, rounds):
                    {"role": "system", "content": SYSTEM % rounds},
                    {"role": "user", "content": (
                        "Where this stage sits, the original request and the settled requirements (from the runtime):\n%s"
-                       "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
+                       "\n\n[...]\n\nThe most recent reports:\n%s\n\nSaved review context:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
                        % (prompt[:HEAD], prompt[-TAIL:] if len(prompt) > HEAD else "",
+                          found.get("memory") or "(no additional saved context available)",
                           diff or "(no change)", tests or "(no test command configured)"))}]}
     body = json.dumps(request, ensure_ascii=False).encode()
     headers = {"Authorization": "Bearer " + found["key"], "Content-Type": "application/json"}
@@ -666,6 +780,7 @@ def reviewed(stdin_text, unchanged, passing, ran):
     commands printed, for a review that starts again."""
     found = prepare()
     key, state = found["key"], found["state"]
+    found["memory"], memory_notice = review_memory(state, key, found["memory_characters"])
     counter = state / "review-send-backs"
     try:
         sent_back = int(counter.read_text().strip() or "0") if counter.is_file() else 0
@@ -694,7 +809,7 @@ def reviewed(stdin_text, unchanged, passing, ran):
     elif blocking:
         outcome, status = "SENT BACK to the worker", 1
         sent_back += 1
-    findings = scrub(findings, key)
+    findings = scrub((memory_notice + "\n" if memory_notice else "") + findings, key)
     # What the reviewer wrote without a verdict stays in the record: in the
     # result printed here, and in review.md, where it was logged as written.
     printed = findings + (("\n\n" if findings else "") + "Written without a plain verdict:\n" + "\n".join(unclear)
