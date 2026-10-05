@@ -42,6 +42,8 @@ GOMAXPROCS=2 GOFLAGS=-p=1 python3 -B -m unittest discover -s harnesses -p 'test_
 GOMAXPROCS=2 GOFLAGS=-p=1 python3 -B -m unittest discover -s harnesses -p 'test_[!a-d]*.py'
 ```
 
+For shorter foreground runs, split the Python patterns into `test_a*.py`, `test_[b-d]*.py`, `test_[e-v]*.py` and `test_[w-z]*.py`, run them serially and check every exit status; the last group includes the full-suite check without personal settings and must not be omitted.
+
 The [runtime Dockerfile](deploy/pod/Dockerfile) packages this module and its
 configured-command tools. Pull requests build and start the packaged engine
 without a service connection. The main image workflow publishes an image and,
