@@ -1,6 +1,6 @@
 """Shared pieces of the fixed delivery processes; never a model tool.
 
-These programs run configured operations only. Every value comes from the
+These programs run configured operations only. Authority comes from the
 operator's environment, not from a role's answer, and the credential never
 reaches a command line, a remote URL or the printed report: Git asks for it
 through the credential helper below, which answers one configured host.
@@ -49,6 +49,54 @@ def readable(text):
 
 class DeliveryError(RuntimeError):
     """A refusal or a failed operation. The process exits non-zero."""
+
+
+def description_size(text):
+    """One operator limit shared by review and publication, without truncation."""
+    try:
+        limit = int(setting("PR_DESCRIPTION_MAX_BYTES", "60000"))
+        if limit <= 0:
+            raise ValueError()
+    except ValueError as error:
+        raise DeliveryError("PR_DESCRIPTION_MAX_BYTES must be a positive integer") from error
+    if len(text.encode("utf-8")) > limit:
+        raise DeliveryError("The pull request description exceeds the configured %d-byte limit; nothing was shortened" % limit)
+
+
+def description_report():
+    """The chosen role's latest reports, from this run's existing checkpoint."""
+    role = os.environ.get("PR_DESCRIPTION_ROLE", "")
+    if not role:
+        return ""
+    try:
+        with Path(setting("TASK_HISTORY")).open("rb") as saved:
+            raw = saved.read(64 * 1024 * 1024 + 1)
+        if len(raw) > 64 * 1024 * 1024:
+            raise ValueError("checkpoint exceeds the local 64 MiB read limit")
+        history = json.loads(raw.decode("utf-8"))["history"]
+        if not isinstance(history, list):
+            raise ValueError("checkpoint history is not a list")
+        selected = []
+        for record in reversed(history):
+            name, speaker = record["role"], record["speaker"]
+            if not isinstance(name, str) or not isinstance(speaker, str):
+                raise ValueError("checkpoint has a malformed report identity")
+            if speaker in {"requester", "runtime"}:
+                continue
+            if name == role:
+                text = record.get("output", "")
+                if not isinstance(text, str):
+                    raise ValueError("checkpoint has a malformed report body")
+                selected.append(text)
+            elif selected:
+                break
+        text = "\n\n".join(reversed(selected))
+        if not text.strip():
+            raise ValueError("the selected role has no latest report to publish")
+        description_size(text)
+        return text
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        raise DeliveryError("The saved pull request explanation cannot be read: " + str(error)) from error
 
 
 class TransientError(DeliveryError):

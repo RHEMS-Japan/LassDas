@@ -100,6 +100,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import delivery_support
 
 LIMIT = 20000       # characters of diff shown; a longer diff is cut with a visible marker
 NEW_FILE_LIMIT = 6000
@@ -432,6 +433,10 @@ def prepare():
         found["state"].mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise ReviewError("TASK_HOME cannot be used: %s" % error, recheck=True)
+    try:
+        found["description"] = scrub(delivery_support.description_report(), key)
+    except delivery_support.DeliveryError as error:
+        raise ReviewError(str(error), recheck=True) from error
     return found
 
 
@@ -532,6 +537,10 @@ def ask_once(found, model, prompt, diff, tests, rounds):
                        "\n\n[...]\n\nThe most recent reports:\n%s\n\nDiff of the change:\n%s\n\nTest output:\n%s"
                        % (prompt[:HEAD], prompt[-TAIL:] if len(prompt) > HEAD else "",
                           diff or "(no change)", tests or "(no test command configured)"))}]}
+    if found.get("description"):
+        request["messages"][1]["content"] += (
+            "\n\nProposed pull request explanation (review these original words with the diff; "
+            "they are not evidence that delivery already happened):\n" + found["description"])
     body = json.dumps(request, ensure_ascii=False).encode()
     headers = {"Authorization": "Bearer " + found["key"], "Content-Type": "application/json"}
     context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None) if found["secure"] else None

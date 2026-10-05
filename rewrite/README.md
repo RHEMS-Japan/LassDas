@@ -878,6 +878,52 @@ long repair loop will eventually exceed a model's context. No session sharing
 or summarizing is implemented here on purpose: measure it first. Nothing in
 this mode has run with a live model or a real tracker.
 
+### A pull request description from the run's reports
+
+An operator can give the fixed review and delivery commands the same
+`PR_DESCRIPTION_ROLE`, naming the role whose final report should explain the
+change to a person reviewing the pull request. Tell that existing role to
+write its findings, implementation explanation, settings and verification
+commands in its final ordinary report. No special headings or model answer
+schema are required. With no role selected, the fixed delivery description
+is unchanged.
+
+This uses the runtime's read-only `TASK_HISTORY` reference, not a document in
+the consumer's repository. Configure this option only with a runtime that
+supplies that reference to both commands. The latest contiguous set of reports
+from the selected role is used, with each process's original words. Requester
+and runtime control messages are not substitutes for that role's report. The
+review receives exactly this selected text alongside the diff. It must check
+the explanation too; its presence is not proof that the change is correct.
+
+The delivery adds the selected text to its ordinary introduction and checks
+the whole description for `DELIVERY_FORBIDDEN_TEXT` and its credential before
+any publication. `PR_DESCRIPTION_MAX_BYTES` is a positive UTF-8 byte limit
+(default 60000) for that complete body. Oversized or unreadable material is
+reported, not silently shortened. This limit is not a claim about a hosting
+service's exact limit. The old repository-document option
+`DELIVERY_PR_BODY_FILE` is removed; there is no compatibility path or migration.
+
+The generated body is retained in the delivery process's
+`TASK_HOME/pull-request-description.md`, outside the checkout. The delivery
+record identifies that location and the commit the description accompanies.
+The explanation itself is never committed into the consumer repository.
+Ordinary run retention still applies to this file; it is not permanent storage.
+
+While an open pull request still contains a body previously submitted by the
+automation, later reviewed work can update it. If the service returns a
+different body, keep it as the person's version and continue the configured
+push and merge. The result says it was retained and where the latest generated
+description is kept. A service that normalizes the submitted text receives the
+same treatment. Communication failures remain distinct from different text;
+an unknown write result is not a confirmed update.
+
+There is no atomic comparison-and-update. A person's edit between the last
+read and an update can race with that update. Coordinate direct edits with
+automation rather than treating its saved body as a lock. This option does
+not change ticket comments or establish production delivery. The report role
+must still describe what actually reached the requested destination.
+
 ### A read-only status page
 
 `bin/ticket-status` serves what the queue directory holds, as it is, over

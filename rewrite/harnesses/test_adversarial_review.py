@@ -136,6 +136,29 @@ class AdversarialReviewTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(SCRIPT)], input=stdin_text, capture_output=True,
                               text=True, env=self.environment(service, **extra), timeout=120)
 
+    def test_selected_latest_role_reports_reach_review_whole_alongside_diff(self):
+        service = ModelStandIn([{"verdict": (False, "checked")}])
+        self.addCleanup(service.close)
+        explanation = "First finding\n" + "設計と実装の説明。\n" * 700 + "Last finding and its verification\n"
+        history = [
+            {"role": "work", "speaker": "writer", "output": "Superseded explanation"},
+            {"role": "review", "speaker": "reviewer", "output": "Earlier objection"},
+            {"role": "work", "speaker": "writer", "output": explanation},
+            {"role": "work", "speaker": "auditor", "output": "Independent work observations"},
+            {"role": "review", "speaker": "runtime", "output": "Not explanation material"},
+        ]
+        path = self.home / "history.json"
+        path.write_text(json.dumps({"request": "Make the requested change", "pending": {"role": "review"},
+                                    "history": history}), encoding="utf-8")
+        result = self.run_review(service, TASK_HISTORY=str(path), PR_DESCRIPTION_ROLE="work")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sent = service.requests[0]["body"]["messages"][1]["content"]
+        selected = sent.split("Proposed pull request explanation", 1)[-1]
+        self.assertIn(explanation + "\n\nIndependent work observations", selected)
+        self.assertNotIn("Superseded explanation", selected)
+        self.assertNotIn("Not explanation material", selected)
+        self.assertIn("+    return 2", sent)
+
     def start_review(self, service, **extra):
         """A review running in the background: its runtime text read from a
         file, and what it prints written to files the test can look at while
