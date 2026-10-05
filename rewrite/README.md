@@ -524,9 +524,11 @@ Neither an attribute nor the version a change replaces decides it, though
 either makes Git take a file as binary: text in Shift_JIS is refused under a
 `binary` or `-diff` attribute and in place of a file that held a NUL. Those
 first 8000 bytes are read only for a file the change would otherwise be
-refused for. Where such a name
-or text is printed or recorded, each byte that is not UTF-8 shows as a
-replacement character (U+FFFD). Two limits follow from looking at bytes. An
+refused for. Individual path names in refusals and checks preserve bytes that
+are not UTF-8 as byte escapes, so different names remain distinguishable.
+This includes unresolved conflict markers, merge conflicts and paths changed
+by the integration branch. Raw diagnostic text still uses replacement
+characters (U+FFFD). Two limits follow from looking at bytes. An
 ASCII entry can be found where none was written: the second byte of a
 Shift_JIS character can be an ASCII letter, so `ツode` (bytes 83 63 6F 64 65)
 holds `code`, and such a change is refused although it carries no forbidden
