@@ -42,7 +42,7 @@ class OperationsRehearsalTests(unittest.TestCase):
         self.source = self.root / "source"
         support = self.source / "rewrite/cmd/engine/rehearsal_test.go"
         support.parent.mkdir(parents=True)
-        support.write_text("func TestRehearsalOfflineTerminalQueue(t *testing.T) {}")
+        support.write_text("func TestRehearsalOfflineQueue(t *testing.T) {}")
         self.queue = self.root / "queue"
         self.queue.mkdir()
         self.config = self.root / "config.json"
@@ -75,7 +75,7 @@ class OperationsRehearsalTests(unittest.TestCase):
         self.assertIn("not full job/tick coverage or deployment approval", result.stdout)
         self.assertNotIn("private fixture", result.stdout + result.stderr)
         call = json.loads((self.root / "go-called").read_text())
-        self.assertEqual(call["args"][-2:], ["-run", "^TestRehearsalOfflineTerminalQueue$"])
+        self.assertEqual(call["args"][-2:], ["-run", "^TestRehearsalOfflineQueue$"])
         self.assertIn("-mod=readonly", call["args"])
         environment = call["env"]
         self.assertNotIn("FIXTURE_PRIVATE_KEY", environment)

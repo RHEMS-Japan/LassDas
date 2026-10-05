@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -33,11 +34,38 @@ type rehearsalRead struct {
 }
 
 type rehearsalTransport struct {
-	mu      sync.Mutex
-	reads   map[string]rehearsalRead
-	counts  map[string]int
-	writes  int
-	unknown int
+	mu       sync.Mutex
+	reads    map[string]rehearsalRead
+	counts   map[string]int
+	writes   int
+	unknown  int
+	attempts []rehearsalAttempt
+}
+
+type rehearsalAttempt struct {
+	Kind   string `json:"kind"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+}
+
+// Only URLs are retained, never request bodies or headers. The configured
+// trackers use apiKey or Authorization; userinfo and other credential-shaped
+// query values are removed as well before diagnostics are written.
+func rehearsalURL(address *url.URL) string {
+	clean := *address
+	clean.User, clean.Fragment = nil, ""
+	query := clean.Query()
+	for name := range query {
+		lower := strings.ToLower(name)
+		for _, part := range []string{"key", "token", "password", "secret", "credential", "authorization", "signature"} {
+			if strings.Contains(lower, part) {
+				query.Del(name)
+				break
+			}
+		}
+	}
+	clean.RawQuery = query.Encode()
+	return clean.String()
 }
 
 func newRehearsalTransport(data []byte) (*rehearsalTransport, error) {
@@ -77,6 +105,7 @@ func (transport *rehearsalTransport) RoundTrip(request *http.Request) (*http.Res
 	defer transport.mu.Unlock()
 	if request.Method != http.MethodGet {
 		transport.writes++
+		transport.attempts = append(transport.attempts, rehearsalAttempt{"write", request.Method, rehearsalURL(request.URL)})
 		return nil, errors.New("offline rehearsal refused a write attempt")
 	}
 	address := *request.URL
@@ -87,6 +116,7 @@ func (transport *rehearsalTransport) RoundTrip(request *http.Request) (*http.Res
 	read, exists := transport.reads[key]
 	if !exists {
 		transport.unknown++
+		transport.attempts = append(transport.attempts, rehearsalAttempt{"missing_read", request.Method, rehearsalURL(request.URL)})
 		return nil, errors.New("offline rehearsal has no supplied read for this request")
 	}
 	transport.counts[key]++
@@ -115,7 +145,7 @@ func (transport *rehearsalTransport) verifiedReads() (int, error) {
 	return total, nil
 }
 
-// Remove commands independently of terminal-state admission. If a regression
+// Remove commands independently of recorded work state. If a regression
 // reaches a role anyway, Process.run refuses an empty command before exec.
 func disarmRehearsal(cfg config) config {
 	cfg.Roles = append([]chain.Role(nil), cfg.Roles...)
@@ -152,7 +182,7 @@ func rehearsalState(path string) (chain.State, error) {
 	return state, nil
 }
 
-func rehearsalTerminal(cfg config, root string) (map[string][32]byte, error) {
+func rehearsalRecords(cfg config, root string) (map[string][32]byte, error) {
 	entries, err := os.ReadDir(filepath.Join(root, "jobs"))
 	if err != nil {
 		return nil, errors.New("the copied queue has no readable jobs")
@@ -167,9 +197,6 @@ func rehearsalTerminal(cfg config, root string) (map[string][32]byte, error) {
 			return nil, errors.New("the copied queue has an unknown job entry")
 		}
 		directory := filepath.Join(root, "jobs", entry.Name())
-		if live, err := os.ReadDir(filepath.Join(directory, "live")); err != nil && !errors.Is(err, os.ErrNotExist) || len(live) != 0 {
-			return nil, errors.New("the copied queue has live or unreadable activity")
-		}
 		raw, err := os.ReadFile(filepath.Join(directory, "issue.json"))
 		issue, issueErr := cfg.source().ReadIssue(raw)
 		if err != nil || issueErr != nil || issue.ID != id {
@@ -179,22 +206,24 @@ func rehearsalTerminal(cfg config, root string) (map[string][32]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		stopped, err := savedStop(cfg.source(), directory, issue, cfg.Intake.StopUserIDs)
+		_, err = savedStop(cfg.source(), directory, issue, cfg.Intake.StopUserIDs)
 		if err != nil {
 			return nil, errors.New("a saved stop cannot be verified")
 		}
 		reportPath := filepath.Join(directory, "stop-report", "history.json")
 		_, reportErr := os.Stat(reportPath)
-		if reportErr == nil || !errors.Is(reportErr, os.ErrNotExist) || stopped && cfg.Intake.StopReportRole != "" {
+		reportDone := false
+		if reportErr == nil || !errors.Is(reportErr, os.ErrNotExist) {
 			report, err := rehearsalState(reportPath)
-			if err != nil || !report.Done {
-				return nil, errors.New("stopped reporting is unfinished or unreadable")
+			if err != nil {
+				return nil, errors.New("stopped reporting is unreadable")
 			}
-		}
-		if !stopped && !state.Done {
-			return nil, errors.New("only terminal records can be rehearsed offline")
+			reportDone = report.Done
 		}
 		for _, relative := range []string{"issue.json", "run/history.json", "stop-request.json", "stop-report/history.json"} {
+			if relative == "run/history.json" && !state.Done || relative == "stop-report/history.json" && !reportDone {
+				continue
+			}
 			data, err := os.ReadFile(filepath.Join(directory, relative))
 			if errors.Is(err, os.ErrNotExist) && (relative == "stop-request.json" || relative == "stop-report/history.json") {
 				continue
@@ -279,6 +308,7 @@ type rehearsalResult struct {
 	ObservedMS       int64 `json:"observed_ms"`
 	NormalExit       bool  `json:"normal_exit"`
 	FullTickCoverage bool  `json:"full_tick_coverage"`
+	log              string
 }
 
 func observeRehearsalLoop(duration time.Duration, run func(context.Context) error) (int64, error) {
@@ -303,8 +333,9 @@ func observeRehearsalLoop(duration time.Duration, run func(context.Context) erro
 	return time.Since(started).Milliseconds(), nil
 }
 
-func observeRehearsal(cfg config, root string, transport *rehearsalTransport, duration time.Duration) (rehearsalResult, error) {
-	var result rehearsalResult
+func observeRehearsal(cfg config, root string, transport *rehearsalTransport, duration time.Duration) (result rehearsalResult, observedErr error) {
+	var log bytes.Buffer
+	defer func() { result.log = log.String() }()
 	if !rehearsalDisarmed(cfg) {
 		return result, errors.New("rehearsal commands were not all removed")
 	}
@@ -312,14 +343,13 @@ func observeRehearsal(cfg config, root string, transport *rehearsalTransport, du
 	if err != nil {
 		return result, errors.New("rehearsal configuration is not accepted")
 	}
-	before, err := rehearsalTerminal(cfg, root)
+	before, err := rehearsalRecords(cfg, root)
 	if err != nil {
 		return result, err
 	}
 	previous := http.DefaultTransport
 	http.DefaultTransport = transport
 	defer func() { http.DefaultTransport = previous }()
-	var log bytes.Buffer
 	result.ObservedMS, err = observeRehearsalLoop(duration, func(ctx context.Context) error {
 		return pollRequests(ctx, cfg, filepath.Join(root, "jobs"), since, 25*time.Millisecond, capacity, &serialLog{writer: &log})
 	})
@@ -331,11 +361,8 @@ func observeRehearsal(cfg config, root string, transport *rehearsalTransport, du
 	if err != nil {
 		return result, err
 	}
-	if log.Len() != 0 {
-		return result, errors.New("queue observation recorded diagnostics; no successful rehearsal")
-	}
-	after, err := rehearsalTerminal(cfg, root)
-	if err != nil || len(before) != len(after) {
+	after, err := rehearsalRecords(cfg, root)
+	if err != nil {
 		return result, errors.New("terminal records changed during observation")
 	}
 	for path, digest := range before {
@@ -347,7 +374,35 @@ func observeRehearsal(cfg config, root string, transport *rehearsalTransport, du
 	return result, nil
 }
 
-func TestRehearsalOfflineTerminalQueue(t *testing.T) {
+func retainRehearsalObservation(directory string, transport *rehearsalTransport, result rehearsalResult) error {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	missing := map[string]int{}
+	for key, read := range transport.reads {
+		if count := transport.counts[key]; count < read.MinReads {
+			address, _ := url.Parse(key)
+			missing[rehearsalURL(address)] = read.MinReads - count
+		}
+	}
+	data, err := json.Marshal(map[string]any{"attempts": transport.attempts, "unmet_reads": missing})
+	if err != nil {
+		return err
+	}
+	for name, body := range map[string][]byte{"observations.json": append(data, '\n'), "collector.log": []byte(result.log)} {
+		file, err := os.OpenFile(filepath.Join(directory, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		_, writeErr := file.Write(body)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return errors.New("could not retain the private rehearsal observations")
+		}
+	}
+	return nil
+}
+
+func TestRehearsalOfflineQueue(t *testing.T) {
 	queue, configPath, snapshotPath, output := os.Getenv("REHEARSAL_QUEUE"), os.Getenv("REHEARSAL_CONFIG"), os.Getenv("REHEARSAL_READS"), os.Getenv("REHEARSAL_RESULT")
 	if queue == "" && configPath == "" && snapshotPath == "" && output == "" {
 		t.Skip("opt-in offline operational check; use the rehearsal helper")
@@ -402,6 +457,9 @@ func TestRehearsalOfflineTerminalQueue(t *testing.T) {
 		t.Fatal("cannot make a new private queue copy")
 	}
 	result, err := observeRehearsal(disarmRehearsal(cfg), copied, transport, time.Duration(duration)*time.Millisecond)
+	if writeErr := retainRehearsalObservation(filepath.Dir(output), transport, result); writeErr != nil {
+		t.Fatal("cannot retain private observation details")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +608,7 @@ func TestRehearsalDetectsCommentStatusAndAssignmentWrites(t *testing.T) {
 	}
 }
 
-func TestRehearsalDisarmingIsIndependentOfTerminalAdmission(t *testing.T) {
+func TestRehearsalDisarmingIsIndependentOfRecordedState(t *testing.T) {
 	cfg := watchConfiguration(t)
 	marker := filepath.Join(t.TempDir(), "role-ran")
 	cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `printf 'fixture' > "$1"`, "fixture", marker}
@@ -580,7 +638,7 @@ func TestRehearsalDisarmingIsIndependentOfTerminalAdmission(t *testing.T) {
 	}
 }
 
-func TestRehearsalRejectsUnfinishedUnknownAndPendingStoppedRecords(t *testing.T) {
+func TestRehearsalAdmitsReadableWorkAndRejectsUnreadableRecords(t *testing.T) {
 	for _, kind := range []string{"unfinished", "waiting", "missing", "broken", "live", "missing-report", "pending-report", "bad-stop", "empty"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := watchConfiguration(t)
@@ -628,14 +686,16 @@ func TestRehearsalRejectsUnfinishedUnknownAndPendingStoppedRecords(t *testing.T)
 					t.Fatal(err)
 				}
 			}
-			if _, err := rehearsalTerminal(cfg, root); err == nil {
-				t.Fatal("nonterminal or unreadable queue accepted")
+			_, err := rehearsalRecords(cfg, root)
+			unreadable := kind == "missing" || kind == "broken" || kind == "bad-stop" || kind == "empty"
+			if (err != nil) != unreadable {
+				t.Fatalf("readable=%t error=%v", !unreadable, err)
 			}
 		})
 	}
 }
 
-func TestRehearsalAcceptsStoppedWorkOnlyWithFinishedRequiredReporting(t *testing.T) {
+func TestRehearsalKeepsFinishedStopReportingUnchanged(t *testing.T) {
 	cfg := watchConfiguration(t)
 	cfg.Intake.StopReportRole = "implement"
 	root, job := noticeJob(t, chain.State{Pending: &chain.Assignment{Role: "implement"}})
@@ -655,48 +715,108 @@ func TestRehearsalAcceptsStoppedWorkOnlyWithFinishedRequiredReporting(t *testing
 }
 
 func TestRehearsalOptInEntryUsesOnlySyntheticInputsAndKeepsSource(t *testing.T) {
-	cfg := watchConfiguration(t)
-	root, _ := noticeJob(t, chain.State{Done: true})
-	root, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	history := filepath.Join(root, "jobs", "51", "run", "history.json")
-	before, err := os.ReadFile(history)
-	if err != nil {
-		t.Fatal(err)
-	}
-	private := t.TempDir()
-	configPath, readsPath, resultPath := filepath.Join(private, "config.json"), filepath.Join(private, "reads.json"), filepath.Join(private, "result.json")
-	if err := os.WriteFile(configPath, configurationJSON(t, cfg), 0600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(map[string]any{"reads": []rehearsalRead{{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 2}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(readsPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, "-test.run=^TestRehearsalOfflineTerminalQueue$", "-test.timeout=5s")
-	command.Env = []string{"REHEARSAL_QUEUE=" + root, "REHEARSAL_CONFIG=" + configPath, "REHEARSAL_READS=" + readsPath, "REHEARSAL_RESULT=" + resultPath, "REHEARSAL_MS=100", "TMPDIR=" + private}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("synthetic entry failed: %v: %s", err, output)
-	}
-	data, err = os.ReadFile(resultPath)
-	var result rehearsalResult
-	if err != nil || json.Unmarshal(data, &result) != nil || result.Records != 2 || !result.NormalExit || result.FullTickCoverage {
-		t.Fatal("missing scoped result")
-	}
-	after, err := os.ReadFile(history)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("original queue changed")
+	for _, kind := range []string{"done", "status-write", "missing-read", "waiting", "active"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := watchConfiguration(t)
+			state := chain.State{Done: true}
+			if kind == "status-write" {
+				cfg.Intake.Statuses = &statusConfig{Delivered: 3}
+			}
+			if kind == "waiting" {
+				state = chain.State{Waiting: true, Pending: &chain.Assignment{Role: "implement"}}
+			}
+			if kind == "active" {
+				state = chain.State{Pending: &chain.Assignment{Role: "implement"}}
+			}
+			root, _ := noticeJob(t, state)
+			root, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			history := filepath.Join(root, "jobs", "51", "run", "history.json")
+			before, err := os.ReadFile(history)
+			if err != nil {
+				t.Fatal(err)
+			}
+			private := t.TempDir()
+			marker := filepath.Join(private, "role-command-ran")
+			cfg.Roles[0].Processes[0].Command = []string{"/bin/sh", "-c", `printf 'fixture' > "$1"`, "fixture", marker}
+			configPath, readsPath, resultPath := filepath.Join(private, "config.json"), filepath.Join(private, "reads.json"), filepath.Join(private, "result.json")
+			if err := os.WriteFile(configPath, configurationJSON(t, cfg), 0600); err != nil {
+				t.Fatal(err)
+			}
+			reads := []rehearsalRead{{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 2}}
+			if kind == "missing-read" {
+				reads[0].URL += "&missing=1"
+			}
+			if kind == "waiting" || kind == "active" {
+				reads = append(reads, rehearsalRead{URL: cfg.Backlog.BaseURL + "/issues/EXAMPLE-51/comments?count=100&minId=0&order=asc", Body: json.RawMessage(`[]`), MinReads: 1})
+			}
+			data, err := json.Marshal(map[string]any{"reads": reads})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(readsPath, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			binary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, binary, "-test.run=^TestRehearsalOfflineQueue$", "-test.timeout=5s")
+			command.Env = []string{"REHEARSAL_QUEUE=" + root, "REHEARSAL_CONFIG=" + configPath, "REHEARSAL_READS=" + readsPath, "REHEARSAL_RESULT=" + resultPath, "REHEARSAL_MS=100", "TMPDIR=" + private}
+			output, runErr := command.CombinedOutput()
+			failed := kind == "status-write" || kind == "missing-read" || kind == "active"
+			observed, err := os.ReadFile(filepath.Join(private, "observations.json"))
+			if err != nil {
+				t.Fatalf("observation details were discarded: %v: %s", err, output)
+			}
+			log, err := os.ReadFile(filepath.Join(private, "collector.log"))
+			if err != nil {
+				t.Fatal("collector diagnostics were discarded")
+			}
+			if (runErr != nil) != failed {
+				t.Fatalf("synthetic entry result: %v: %s\nobservations: %s\ncollector: %s", runErr, output, observed, log)
+			}
+			for _, name := range []string{"observations.json", "collector.log"} {
+				info, err := os.Stat(filepath.Join(private, name))
+				if err != nil || info.Mode().Perm() != 0600 {
+					t.Fatal("observation file is not private")
+				}
+			}
+			if strings.Contains(string(observed)+string(log), "synthetic-rehearsal-credential") || strings.Contains(string(observed), "apiKey=") {
+				t.Fatal("credential appeared in private diagnostics")
+			}
+			if kind == "status-write" && (!strings.Contains(string(observed), `"method":"PATCH"`) || !strings.Contains(string(observed), "/issues/EXAMPLE-51") || !strings.Contains(string(log), "status")) {
+				t.Fatalf("actual collector write is not named: %s %s", observed, log)
+			}
+			if kind == "missing-read" && (!strings.Contains(string(observed), `"kind":"missing_read"`) || !strings.Contains(string(observed), "/api/v2/issues?")) {
+				t.Fatalf("missing GET is not distinguished: %s", observed)
+			}
+			if kind == "active" && !strings.Contains(string(log), "starting accepted request 51") {
+				t.Fatalf("unfinished work was not observed: %s", log)
+			}
+			if kind == "active" && (!strings.Contains(string(observed), `"method":"POST"`) || !strings.Contains(string(observed), "/issues/EXAMPLE-51/comments")) {
+				t.Fatalf("unfinished work's attempted restart notice was not retained: %s", observed)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("a configured role command ran during observation")
+			}
+			if !failed {
+				data, err = os.ReadFile(resultPath)
+				var result rehearsalResult
+				if err != nil || json.Unmarshal(data, &result) != nil || result.Records < 1 || !result.NormalExit || result.FullTickCoverage {
+					t.Fatal("missing scoped result")
+				}
+			}
+			after, err := os.ReadFile(history)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("original queue changed")
+			}
+			t.Logf("kind=%s nonzero=%t private_observations=true collector_log=true original_unchanged=true role_commands_ran=false", kind, runErr != nil)
+		})
 	}
 }
 

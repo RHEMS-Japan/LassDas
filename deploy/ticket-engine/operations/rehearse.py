@@ -1,4 +1,4 @@
-"""Observe terminal queue records offline; not full job/tick coverage or a sandbox."""
+"""Observe copied queue records offline; not full job/tick coverage or a sandbox."""
 import argparse
 import json
 import os
@@ -64,7 +64,7 @@ def main():
             raise QueueError("output already exists or does not name a new directory")
     config, reads = read_file(args.config), read_file(args.reads)
     support = Path(args.source) / "rewrite/cmd/engine/rehearsal_test.go"
-    if b"func TestRehearsalOfflineTerminalQueue(" not in read_file(str(support)):
+    if b"func TestRehearsalOfflineQueue(" not in read_file(str(support)):
         raise QueueError("candidate does not ship the required offline rehearsal support")
     # Do not inherit credentials, Go flags, proxy commands or personal Git settings.
     environment = dict(PATH=os.environ.get("PATH", ""), LANG="C.UTF-8", GIT_CONFIG_NOSYSTEM="1",
@@ -94,7 +94,7 @@ def main():
     with os.fdopen(fd, "wb") as log:
         process = subprocess.Popen([args.go, "test", "-mod=readonly", "-p", "1", "-count=1",
                                     "-timeout", str(args.seconds + 30) + "s", "./cmd/engine",
-                                    "-run", "^TestRehearsalOfflineTerminalQueue$"],
+                                    "-run", "^TestRehearsalOfflineQueue$"],
                                    cwd=str(Path(args.source) / "rewrite"), env=environment,
                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:

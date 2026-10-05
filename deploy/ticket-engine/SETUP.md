@@ -1953,8 +1953,8 @@ what it tried to do.
    ```
 
    It must end with `the configuration is accepted; nothing was started`.
-   For a queue containing only terminal records, the source-shipped offline
-   helper can observe the candidate without executing configured role commands:
+   The source-shipped offline helper observes the candidate without executing
+   configured role commands, including queues with waiting or unfinished work:
 
    ```sh
    python3 -B deploy/ticket-engine/operations/rehearse.py \
@@ -2003,10 +2003,9 @@ what it tried to do.
    invented empty responses. This applies to the configured tracker using its
    native response shapes; it does not translate a Backlog snapshot to GitHub.
 
-   Only normally readable done records or authorized saved stops are admitted.
-   A configured stop report must also be done; any existing unfinished or
-   unreadable report fails. Empty queues, waiting/unfinished work, live records
-   and missing/conflicting histories are not successful rehearsals. The helper
+   Normally readable done, waiting and unfinished records are admitted, as are
+   authorized saved stops. Missing/conflicting histories and unreadable saved
+   stop reports fail. Empty queues are not rehearsal coverage. The helper
    copies the input again into a private temporary directory, retains file
    times and leaves the input unchanged. Links, hardlinks and special files
    are rejected. Every configured role command is independently removed from
@@ -2014,6 +2013,12 @@ what it tried to do.
    attempt is blocked and fails the rehearsal, including comments, status and
    assignment changes. A required read count, the requested observation time,
    normal cancellation and unchanged terminal records are separate checks.
+   Unfinished work can record failed or interrupted attempts because its role
+   commands are deliberately absent; this does not test the roles' execution.
+   A stopped request with a required but unfinished report is observed too.
+   Every HTTP write attempt still fails the rehearsal, even if it would be an
+   expected next action of unfinished work; inspect the details before deciding
+   whether it is a regression. A copied live record is not a live process here.
 
    Exit 0 means no write was observed under the supplied offline assumptions;
    a failure is nonzero. The JSON summary contains counts and elapsed time,
@@ -2026,7 +2031,13 @@ what it tried to do.
    Go check; configuration-named API credentials use synthetic values.
 
    The new output retains private configuration/read copies, a result on
-   success, a log and toolchain scratch data. Keep it out of public logs and
+   success, a log and toolchain scratch data. After observation, including a
+   failed one, `observations.json` names every blocked request's method and URL
+   without credentials, distinguishing writes from missing GET responses and
+   listing unmet read counts. `collector.log` retains the controller's own
+   diagnostics. Request bodies and headers are not recorded. These private
+   files identify the affected issue; do not paste them into public logs.
+   Keep all output out of public logs and
    commits. The observation's temporary queue is removed by the test; the
    original input and any new partial output are never deleted by the helper.
    A failed run must not be treated as a successful queue-copy or deployment
