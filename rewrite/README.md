@@ -467,9 +467,13 @@ a person. It must name an existing role with a comment-capable process, which
 is checked before any work is accepted. Without the setting nothing waits.
 
 A successful run of that role holds the request. The run history records that
-it is waiting, and the collector records in `queue/jobs/<id>/question.json` how
-far that issue's comments had gone at the moment of the question. The request
-is then skipped until the issue's creator, or an operator listed in
+it is waiting, and the collector records the asking role's stored comment ID
+in `queue/jobs/<id>/question.json`. Replies arriving before the next poll are
+still read; recorded controller notices are not answers. If no submission
+receipt was saved, the collector instead records the latest comment ID at that
+read and waits for a later reply. It cannot reconstruct an earlier question's
+position without a receipt, but it does not hold the request forever waiting
+for one. The request is then skipped until the issue's creator, or an operator listed in
 `intake.stop_user_ids`, posts a comment with words after that point. A status
 or field change, which the tracker records as a comment without words, is not
 an answer; the collector makes such changes itself while it waits. That
