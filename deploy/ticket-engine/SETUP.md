@@ -203,10 +203,9 @@ Item 4 protects GitHub Actions workflow changes only. Other CI systems may run
 configuration taken from a pushed branch with their own credentials. Inspect
 all CI triggers and which branches receive secrets, including ticket branches,
 before granting push access. For example, CircleCI's configuration is not
-protected by a GitHub token lacking Workflows permission. Keep such paths out
-of `DELIVERY_ALLOWED_PATHS` when they must not change, or have the owner isolate
-that CI's credentials and approve the intended access. An instruction to a
-model not to edit a path is not a permission boundary.
+protected by a GitHub token lacking Workflows permission. Have that CI's owner
+isolate its credentials from ticket-branch builds and approve the intended
+access. An instruction to a model not to edit a path is not a permission boundary.
 
 With the shipped configuration, everything goes to OpenRouter and the models
 it serves: the working models, chosen for each launch among the publishers
@@ -377,7 +376,9 @@ script was syntax-checked but not run against Backlog for this guide.
    [Enterprise API guide](https://docs.github.com/en/enterprise-server@3.21/rest/using-the-rest-api/getting-started-with-the-rest-api).
    Do not change only the hostname of the Enterprise example: github.com
    does not use `/api/v3`. Authentication, trust and reachability of your
-   server must be checked separately.
+   server must be checked separately. The shipped egress policy refuses
+   private addresses; check that boundary first if an internal Enterprise
+   server fails the read check.
 
 Only open issues with the intake label and created at or after
 `intake.created_since` are discovered. PRs are excluded. `intake.issue_ids`
@@ -565,6 +566,8 @@ Run from the repository root, replacing the arguments below. The first repo
 receives requests; the second receives delivered code. This changes the
 tracker, source path and delivery values but preserves the stages and roles.
 The intake remains closed. `CONFIG` must be a new file outside any repository.
+The repository's setup test executes this conversion and the configuration
+check together; it does not test access to a live server.
 
 ```sh
 CONFIG='<absolute path outside the repository>/operator.json'
@@ -629,9 +632,10 @@ The engine reads the configuration strictly and, before it does anything,
 refuses what it can tell is wrong, saying where: a key it does not know, in
 the wrong letter case or written twice; a stage whose kind does not match its
 role; a missing project or start time; the example's paragraph still in
-`instructions`; a URL whose host is still under `example.invalid`; a GitHub
-repository component still beginning with `REPLACE_WITH_`; a recognizable
-token value in `github.key_env`. The latter is never echoed. `--check`
+`instructions`; a URL whose host is still under `example.invalid`; a
+`REPLACE_WITH_` component of `github.repository`; a token prefix
+(`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) in
+`github.key_env`, which must name an environment variable, not its value. `--check`
 runs those same checks without starting anything, contacting anything or
 creating any file. Run it from the repository's root, on a checkout of the
 commit your image was built from (`engine_sha` in `docs/DISTRIBUTION.json`),
