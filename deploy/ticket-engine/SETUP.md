@@ -337,7 +337,9 @@ script was syntax-checked but not run against Backlog for this guide.
    [Enterprise API guide](https://docs.github.com/en/enterprise-server@3.21/rest/using-the-rest-api/getting-started-with-the-rest-api).
    Do not change only the hostname of the Enterprise example: github.com
    does not use `/api/v3`. Authentication, trust and reachability of your
-   server must be checked separately.
+   server must be checked separately. The shipped egress policy refuses
+   private addresses; check that boundary first if an internal Enterprise
+   server fails the read check.
 
 Only open issues with the intake label and created at or after
 `intake.created_since` are discovered. PRs are excluded. `intake.issue_ids`
@@ -481,6 +483,8 @@ Run from the repository root, replacing the arguments below. The first repo
 receives requests; the second receives delivered code. This changes the
 tracker, source path and delivery values but preserves the stages and roles.
 The intake remains closed. `CONFIG` must be a new file outside any repository.
+The repository's setup test executes this conversion and the configuration
+check together; it does not test access to a live server.
 
 ```sh
 CONFIG='<absolute path outside the repository>/operator.json'
