@@ -206,7 +206,7 @@ func rehearsalRecords(cfg config, root string) (map[string][32]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, err = savedStop(cfg.source(), directory, issue, cfg.Intake.StopUserIDs)
+		stopped, err := savedStop(cfg.source(), directory, issue, cfg.Intake.StopUserIDs)
 		if err != nil {
 			return nil, errors.New("a saved stop cannot be verified")
 		}
@@ -221,7 +221,7 @@ func rehearsalRecords(cfg config, root string) (map[string][32]byte, error) {
 			reportDone = report.Done
 		}
 		for _, relative := range []string{"issue.json", "run/history.json", "stop-request.json", "stop-report/history.json"} {
-			if relative == "run/history.json" && !state.Done || relative == "stop-report/history.json" && !reportDone {
+			if relative == "run/history.json" && !state.Done && !stopped || relative == "stop-report/history.json" && !reportDone {
 				continue
 			}
 			data, err := os.ReadFile(filepath.Join(directory, relative))
@@ -707,6 +707,10 @@ func TestRehearsalKeepsFinishedStopReportingUnchanged(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(job, "stop-report", "history.json"), []byte(`{"request":"fixture stop report","done":true}`), 0600); err != nil {
 		t.Fatal(err)
+	}
+	protected, err := rehearsalRecords(cfg, root)
+	if _, exists := protected["51/run/history.json"]; err != nil || !exists {
+		t.Fatal("the stopped request's unfinished run lost its unchanged-record check")
 	}
 	transport := rehearsalFixtureReads(t, rehearsalRead{URL: rehearsalDiscovery, Body: json.RawMessage(`[]`), MinReads: 2})
 	if _, err := observeRehearsal(disarmRehearsal(cfg), root, transport, 100*time.Millisecond); err != nil {
