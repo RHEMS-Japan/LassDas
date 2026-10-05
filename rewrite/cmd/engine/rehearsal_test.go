@@ -384,7 +384,7 @@ func retainRehearsalObservation(directory string, transport *rehearsalTransport,
 			missing[rehearsalURL(address)] = read.MinReads - count
 		}
 	}
-	data, err := json.Marshal(map[string]any{"attempts": transport.attempts, "unmet_reads": missing})
+	data, err := json.Marshal(map[string]any{"attempts": append([]rehearsalAttempt{}, transport.attempts...), "unmet_reads": missing})
 	if err != nil {
 		return err
 	}
@@ -783,6 +783,9 @@ func TestRehearsalOptInEntryUsesOnlySyntheticInputsAndKeepsSource(t *testing.T) 
 			}
 			if (runErr != nil) != failed {
 				t.Fatalf("synthetic entry result: %v: %s\nobservations: %s\ncollector: %s", runErr, output, observed, log)
+			}
+			if !failed && !strings.Contains(string(observed), `"attempts":[]`) {
+				t.Fatalf("successful observation needs an empty attempt list: %s", observed)
 			}
 			for _, name := range []string{"observations.json", "collector.log"} {
 				info, err := os.Stat(filepath.Join(private, name))

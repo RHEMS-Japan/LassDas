@@ -2035,7 +2035,10 @@ what it tried to do.
    failed one, `observations.json` names every blocked request's method and URL
    without credentials, distinguishing writes from missing GET responses and
    listing unmet read counts. `collector.log` retains the controller's own
-   diagnostics. Request bodies and headers are not recorded. These private
+   diagnostics. An unconfirmed notification is retried every 25 ms tick here,
+   so one restart notice can appear as dozens of POST attempts; the log
+   distinguishes its initial "restart notice" from retries of an "earlier notice".
+   Request bodies and headers are not recorded. These private
    files identify the affected issue; do not paste them into public logs.
    Keep all output out of public logs and
    commits. The observation's temporary queue is removed by the test; the
