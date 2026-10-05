@@ -89,15 +89,16 @@
 
 ## 名前について
 
-**`LassDas` は本フレームワークの公開名（2026-08-17 確定）。** 公開前はコードネームとして非公開だった経緯があり、「顧客向けの表面に基盤の名前を出さない」規律は目的を変えずに継続する:
+**`LassDas` は本フレームワークの公開名。改名や名前の秘匿は不要。**
 
-- 消費側リポジトリ・Lambda・IAM・ログ・バイナリの静的情報・トラッカーへ投稿するコメントに出さない（顧客表面は `ticket-automation` 系の中立名）
-- 生成物への混入は `config/m1-consumer.json` の `forbidden_candidate_text` が機械拒否する（大小無視）
+- 公開 repo のコード・コメント・試験・文書・commit 文・PR 本文に、対象プロジェクト名・顧客名・内部ホスト・実在の課題番号・鍵の値を書かない。例には架空の値を使う。
+- `ticket-engine` / `ticket-automation` など既存の実行ファイル名・パスはそのまま使う。公開名の決定を理由に利用者の設定を書き換えない。
+- 新本体の `DELIVERY_FORBIDDEN_TEXT` は導入先が決める納品先への禁止語であり、この公開名の方針とは別。導入先の設定や CI の秘密の識別子一覧を、名前の変更と称して読み出したり変更したりしない。
 
 ---
 
 ## 詳細
 
-- 設計の正本: [README.md](README.md)。いま動いている契約は同ファイルの「いまの契約（実装済みの動き）」
+- 本体の動きと設定: [rewrite/README.md](rewrite/README.md)。導入の入口は [README.md](README.md)
 - 現在地・残っていること・最初に確かめること: [docs/HANDOVER.md](docs/HANDOVER.md)
 - Codex 向けの同内容: [AGENTS.md](AGENTS.md)

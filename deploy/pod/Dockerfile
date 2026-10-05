@@ -1,33 +1,6 @@
-# The single-pod runtime image (docs/RUNTIME_POD.md).
-# Build for linux/arm64 (the cluster's node architecture).
-#
-# The Go version in the two golang stages below is the one place that version
-# is set: the engine's CI jobs test on it (.github/scripts/image-go-version.sh
-# reads these lines and fails if the two differ), and the image check holds
-# the packaged engine to it. Change both lines together.
-
-# ---- Stage 1: engine binaries -------------------------------------------
-FROM golang:1.26-bookworm AS engine
-ARG ENGINE_SHA
-WORKDIR /src
-COPY . .
-RUN test -n "$ENGINE_SHA" && \
-    CGO_ENABLED=0 go build -trimpath -o /out/attendant ./cmd/attendant && \
-    CGO_ENABLED=0 go build -trimpath -o /out/runner ./cmd/runner && \
-    CGO_ENABLED=0 go build -trimpath -o /out/worker ./cmd/worker && \
-    CGO_ENABLED=0 go build -trimpath -o /out/controller ./cmd/controller && \
-    CGO_ENABLED=0 go build -trimpath -o /out/browsercheck ./cmd/browsercheck && \
-    CGO_ENABLED=0 go build -trimpath -o /out/statusboard ./cmd/statusboard && \
-    CGO_ENABLED=0 go build -trimpath -o /out/agentexec ./cmd/agentexec && \
-    (cd /out && sha256sum worker controller browsercheck > tool-pins.txt)
-
-# ---- Stage 1b: the role-chain bundle -------------------------------------
-# The same image serves both engines. This stage builds the standalone
-# rewrite/ module with that module's own packaging script, natively for the
-# image's architecture (the release script and the workflow both build
-# linux/arm64), so the engine, the tracker helper, the harnesses and the
-# guides an operator reads ship together. Nothing here fetches an SDK, a
-# model catalogue or a credential.
+# Runtime image for the standalone engine and configured role tools.
+# The golang stage is the Go version read by the CI image-version check.
+# Build natively for linux/arm64; package.sh builds the three engine commands.
 FROM golang:1.26-bookworm AS bundle
 WORKDIR /src
 COPY rewrite /src/rewrite
@@ -76,14 +49,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
        @openai/codex@${CODEX_VERSION}
 
-# Read-only observation tools for the investigating designer's exec probes
-# (docs/INVESTIGATING_DESIGNER.md §3.2): kubectl and the AWS CLI, pinned by
-# version and checksum (about 310 MB together). The image is linux/arm64
-# (the release script builds that platform); the guard makes any other
-# architecture fail here rather than at the first probe. Neither tool holds
-# a credential: the identities reach them through the kubeconfig and the
-# role pointers the kernel passes to exec probes (internal/probe
-# ExecEnvironmentNames).
+# Operator-selected observation tools, pinned for linux/arm64. They carry
+# no credentials. A role receives only its explicitly configured access.
 RUN { test "$(uname -m)" = "aarch64" || { echo "deploy/pod/Dockerfile builds linux/arm64 only (kubectl and the AWS CLI are pinned for arm64)" >&2; exit 1; }; } \
     && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/arm64/kubectl" \
     && echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - \
@@ -118,11 +85,8 @@ RUN cd /opt/hermes-src/web && npm ci --no-audit --no-fund \
     && npm run build \
     && rm -rf /opt/hermes-src/node_modules /opt/hermes-src/web/node_modules
 
-# The Go toolchain rides along for consumers whose deterministic validation
-# builds Go (the gateway repo's checks run `go` inside the validation
-# sandbox; a missing toolchain kills validation before it can record
-# anything).
-COPY --from=engine /usr/local/go /usr/local/go
+# The same Go toolchain is available to configured validation commands.
+COPY --from=bundle /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
 # The role-chain bundle, its fixed delivery processes and the role syscall
@@ -148,33 +112,9 @@ RUN curl -fsSL -o /opt/ticket-automation/runtime-policy/moby-seccomp.json \
     && chmod 0755 /opt/ticket-automation/runtime-policy/role_bwrap_policy.py \
     && /opt/ticket-automation/bundle/bin/ticket-engine --help 2>&1 | grep -q 'run-dir'
 
-COPY --from=engine /out/attendant /out/runner /out/worker /out/controller /out/browsercheck /out/statusboard /out/agentexec /usr/local/bin/
-COPY --from=engine /out/tool-pins.txt /etc/lassdas/tool-pins.txt
-COPY deploy/pod/entrypoint.sh /usr/local/bin/lassdas-entrypoint
-RUN chmod 0755 /usr/local/bin/lassdas-entrypoint
-
-# Non-root. UID separation for agents (docs/RUNTIME_POD.md Phase-3 gate)
-# is layered on top: agents run as 'agent', the engine as 'lassdas'.
-# The agent users are a pool: agent (2000) and agent1 … agent63 (2001 to
-# 2063), all in the agent group. Each launch of an agent takes one for its
-# life (internal/worker, acquireAgentUser), so two agents running at once
-# are different users and cannot read each other's processes.
-RUN useradd --create-home --uid 1000 lassdas \
-    && useradd --create-home --uid 2000 agent \
-    && for i in $(seq 1 63); do useradd --no-create-home --uid $((2000 + i)) --gid agent --shell /usr/sbin/nologin "agent$i"; done
-# Agents run as the agent user (docs/RUNTIME_POD.md, "Agents under their
-# own user"): the launcher is the one program with file capabilities, and
-# only the engine's user may execute it. The pod must not set
-# allowPrivilegeEscalation: false on the container, or the capabilities are
-# dropped at exec and the launcher fails closed (agents do not start).
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libcap2-bin \
-    && rm -rf /var/lib/apt/lists/* \
-    && chown root:lassdas /usr/local/bin/agentexec \
-    && chmod 0750 /usr/local/bin/agentexec \
-    && setcap cap_setuid,cap_setgid,cap_chown,cap_kill+ep /usr/local/bin/agentexec \
-    && getcap /usr/local/bin/agentexec | grep -q cap_setuid \
-    && getcap /usr/local/bin/agentexec | grep -q cap_kill
+# Non-root default; installation manifests choose their explicit runtime policy.
+RUN useradd --create-home --uid 1000 lassdas
 USER lassdas
 WORKDIR /home/lassdas
 
-ENTRYPOINT ["/usr/local/bin/lassdas-entrypoint"]
+ENTRYPOINT ["/opt/ticket-automation/bundle/bin/ticket-engine"]

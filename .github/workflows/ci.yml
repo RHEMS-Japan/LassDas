@@ -1,7 +1,7 @@
 name: ci
 
 # Runs the full Go suite on every push and pull request. This includes
-# internal/enginepurity, the gate that fails the build if a consumer
+# rewrite/internal/enginepurity, the check that fails the build if a consumer
 # identifier ever lands in the engine's working tree.
 
 on:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  # The role chain is a separate Go module: the root ./... does not include it.
+  # The standalone Go module lives in rewrite/.
   # These are local process/fixture tests, not live-model or deployment trials.
   role-chain-go:
     runs-on: ubuntu-24.04
@@ -106,10 +106,8 @@ jobs:
           test "$GO_RESULT" = success
           test "$PYTHON_RESULT" = success
 
-  # The consumer-identifier scans, run from the role chain's module so that
-  # they do not depend on the root one, in a job of their own: a failing scan
-  # fails this job without keeping the role chain's tests from running. The
-  # test job below runs the root module's copies until that module goes.
+  # Consumer-identifier scans are separate from execution tests so that
+  # both report their results even when one fails.
   identifier-scans:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -208,54 +206,12 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
           # A `uses:` step does not take defaults.run's directory: this names
-          # the module's own go.mod, not the root module's.
+          # the module's go.mod relative to the checkout root.
           go-version-file: rewrite/go.mod
           cache: false
-      # setup-go ends with `go env` at the repository root, where the root
-      # module's go.mod has the go command fetch and report that module's
-      # version. This is the Go the steps below run in rewrite/.
       - name: Say which Go this job uses
         run: go version
       - name: Build the role-chain commands
         run: go build ./...
       - name: Check the role-chain code
         run: go vet ./...
-
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
-        with:
-          go-version-file: go.mod
-      - run: go build ./...
-      - run: go vet ./...
-      # The identifier list is itself a consumer's identifiers, so it lives in
-      # a repository secret, never in this tree. Without the secret the purity
-      # scan is skipped - said out loud here, because the test runner's quiet
-      # output would otherwise let a skipped gate read as a passing one.
-      - name: State whether the purity scan can run
-        env:
-          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
-        run: |
-          if [ -z "${ENGINE_PURITY_TOKENS:-}" ]; then
-            echo "::warning::ENGINE_PURITY_TOKENS is not set - the consumer-identifier scans are SKIPPED in this run"
-          else
-            echo "consumer-identifier scans are armed"
-          fi
-      - run: go test ./...
-        env:
-          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
-      # Commit messages travel with the tree, so they are held to the same
-      # standard (.github/scripts/scan-commit-messages.sh, shared with the
-      # identifier-scans job).
-      - name: Scan commit messages for consumer identifiers
-        env:
-          ENGINE_PURITY_TOKENS: ${{ secrets.ENGINE_PURITY_TOKENS }}
-          RANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          RANGE_HEAD: ${{ github.sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: bash .github/scripts/scan-commit-messages.sh

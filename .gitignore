@@ -1,19 +1,4 @@
 .DS_Store
-/controller
-/worker
-
-# the CLI built by the README's setup steps
-/lassdas
-
-# setup wizard resumable state (per-operator, never committed)
-lassdas-setup.state.json
-
-# setup wizard local build output
-/setup
-
-# console: the local binary and the frontend toolchain stay out of the tree
-/console
-cmd/console/web/node_modules/
 
 # Python bytecode from the harness suites
 __pycache__/

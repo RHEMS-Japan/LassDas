@@ -4,10 +4,6 @@
 // belong to instance repositories; when one leaks back into the engine it
 // couples every future instance to the first customer and poisons an OSS
 // release. This test is the CI gate that makes the promise mechanical.
-//
-// It is this module's copy of the root module's internal/enginepurity, so
-// that the engine's own job runs the scan without the root module. Both read
-// the same list from the same environment variable and scan the same files.
 package enginepurity
 
 import (

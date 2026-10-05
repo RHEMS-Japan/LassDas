@@ -1,13 +1,14 @@
-# Role-chain experiment
+# Role-chain engine
 
 Start with [the handoff and startup guide](START.md) and the complete
 [editable operator example](examples/operator.json). Both ship in the local
 bundle. The example's intake scope is intentionally unset; it does not activate
 an existing project or provision delivery/network permissions.
 
-This is a standalone, undeployed prototype, not the production entry point.
-It does not import the previous worker or runner. It is not a claim that an
-arbitrary request will finish unattended or reach a live delivery target.
+This is the current engine and the only runtime built from this source tree.
+It is a standalone Go module. This does not claim that an arbitrary request
+will finish unattended or reach a live delivery target; each installation
+must verify its configured workflow and delivery path.
 
 The original request and ordinary prose reports go to a routing model. The
 router invokes a configured role; the role runs an existing agent harness and
@@ -18,9 +19,9 @@ working role's answer passes a certificate check.
 
 ## Current executable
 
-A local build bundle and a Linux role launcher are now available. See
-[runtime setup and remaining prerequisites](RUNTIME.md). These do not activate
-intake or change the existing production entry point.
+A local build bundle and a Linux role launcher are available. See
+[runtime setup and remaining prerequisites](RUNTIME.md). Building a bundle
+does not activate intake or change an existing installation.
 
 From this directory:
 
